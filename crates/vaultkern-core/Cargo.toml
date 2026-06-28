@@ -1,0 +1,14 @@
+[package]
+name = "vaultkern-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+external-fixtures = []
+
+[dependencies]
+vaultkern-crypto = { path = "../vaultkern-crypto" }
+vaultkern-kdbx = { path = "../vaultkern-kdbx" }
+vaultkern-model = { path = "../vaultkern-model" }
+uuid.workspace = true

@@ -1,0 +1,2093 @@
+import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
+
+import type {
+  DatabaseSettings,
+  DatabaseSettingsUpdate,
+  EntryAttachmentContent,
+  EntryAttachmentContentUpdate,
+  EntryAttachmentInput,
+  EntryAttachmentMetadataUpdate,
+  EntryDetail,
+  EntryDraft,
+  EntryHistoryDetail,
+  EntryHistoryItem,
+  EntrySummary,
+  GroupNode,
+  GroupTree,
+  OneDriveAuthSession,
+  OneDriveAuthStatus,
+  OneDriveItem,
+  SaveVaultResult,
+  SessionState,
+  VaultSourceStatus,
+  UnlockCredentials,
+  VaultHandle,
+  VaultReference
+} from "@vaultkern/runtime-web-client";
+
+import { archiveTheme } from "./designTokens";
+import { errorMessage } from "./error";
+import {
+  DEFAULT_EXTENSION_SETTINGS,
+  createMemoryExtensionSettingsStore,
+  normalizeExtensionSettings
+} from "./extensionSettings";
+import type { ExtensionSettings, ExtensionSettingsStore } from "./extensionSettings";
+import { I18nProvider, deleteEntryDescription, translate } from "./i18n";
+import { DatabaseSettingsPage } from "./screens/DatabaseSettingsPage";
+import { BrowserSettingsPanel } from "./screens/BrowserSettingsPanel";
+import { EntryDetailPane } from "./layout/EntryDetailPane";
+import { GroupTreePane } from "./layout/GroupTreePane";
+import { ManagerSecondaryPage } from "./layout/ManagerSecondaryPage";
+import { ManagerShell } from "./layout/ManagerShell";
+import { ManagerTopBar } from "./layout/ManagerTopBar";
+import type {
+  GroupTreeNode,
+  EntryEditorMode,
+  ManagerSelection,
+  ManagerViewMode,
+  StackedManagerStage
+} from "./types";
+import { FillCandidatesPanel } from "./screens/FillCandidatesPanel";
+import { RecentVaultUnlockScreen } from "./screens/RecentVaultUnlockScreen";
+import { VaultSetupScreen } from "./screens/VaultSetupScreen";
+import { VaultScreen } from "./screens/VaultScreen";
+
+export interface RuntimeClientLike {
+  getSessionState(): Promise<SessionStateLike>;
+  listRecentVaults(): Promise<VaultReference[]>;
+  addLocalVaultReference(path?: string): Promise<VaultReference>;
+  beginOneDriveLogin(): Promise<OneDriveAuthSession>;
+  completeOneDriveLogin(input: {
+    code: string;
+    redirectUri: string;
+    codeVerifier: string;
+  }): Promise<OneDriveAuthStatus>;
+  completePendingOneDriveLogin(): Promise<OneDriveAuthStatus>;
+  listOneDriveChildren(parentItemId?: string | null): Promise<OneDriveItem[]>;
+  addOneDriveVaultReference(driveId: string, itemId: string): Promise<VaultReference>;
+  setCurrentVault(vaultRefId: string): Promise<SessionStateLike>;
+  retryVaultSourceSync(vaultId: string): Promise<VaultSourceStatus>;
+  deleteRecentVault(vaultRefId: string): Promise<VaultReference[]>;
+  openLocalVault(path: string): Promise<VaultHandle>;
+  unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
+  unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
+  unlockWithPassword(vaultId: string, password: string): Promise<SessionStateLike>;
+  unlockVault(vaultId: string, credentials: UnlockCredentials): Promise<SessionStateLike>;
+  lockSession?(): Promise<SessionStateLike>;
+  listGroups(vaultId: string): Promise<GroupTree>;
+  listEntries(vaultId: string): Promise<EntrySummary[]>;
+  getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
+  createEntry(vaultId: string, input: EntryDraft & { parentGroupId: string }): Promise<EntryDetail>;
+  updateEntryFields(vaultId: string, entryId: string, input: EntryDraft): Promise<EntryDetail>;
+  deleteEntry(vaultId: string, entryId: string): Promise<void>;
+  saveVault(vaultId: string): Promise<SaveVaultResult | void>;
+  getDatabaseSettings(vaultId: string): Promise<DatabaseSettings>;
+  updateDatabaseSettings(
+    vaultId: string,
+    update: DatabaseSettingsUpdate
+  ): Promise<DatabaseSettings>;
+  getEntryAttachmentContent(
+    vaultId: string,
+    entryId: string,
+    name: string
+  ): Promise<EntryAttachmentContent>;
+  addEntryAttachment(
+    vaultId: string,
+    entryId: string,
+    input: EntryAttachmentInput
+  ): Promise<EntryDetail>;
+  updateEntryAttachmentMetadata(
+    vaultId: string,
+    entryId: string,
+    input: EntryAttachmentMetadataUpdate
+  ): Promise<EntryDetail>;
+  replaceEntryAttachmentContent(
+    vaultId: string,
+    entryId: string,
+    input: EntryAttachmentContentUpdate
+  ): Promise<EntryDetail>;
+  deleteEntryAttachment(
+    vaultId: string,
+    entryId: string,
+    name: string
+  ): Promise<EntryDetail>;
+  listEntryHistory(vaultId: string, entryId: string): Promise<EntryHistoryItem[]>;
+  getEntryHistoryDetail(
+    vaultId: string,
+    entryId: string,
+    historyIndex: number
+  ): Promise<EntryHistoryDetail>;
+}
+
+export interface OneDrivePathSegment {
+  itemId: string;
+  name: string;
+}
+
+function browsableOneDriveItems(items: OneDriveItem[]) {
+  return items
+    .filter((item) => item.folder || item.name.toLowerCase().endsWith(".kdbx"))
+    .sort((left, right) =>
+      Number(right.folder) - Number(left.folder) || left.name.localeCompare(right.name)
+    );
+}
+
+type SessionStateLike = Pick<
+  SessionState,
+  "unlocked" | "activeVaultId" | "currentVaultRefId" | "sourceStatus"
+>;
+
+interface FillHooks {
+  findCandidates(vaultId: string): Promise<EntrySummary[]>;
+  fillEntry(vaultId: string, entryId: string): Promise<void>;
+}
+
+type PendingAction =
+  | { type: "select-entry"; entryId: string }
+  | { type: "select-group"; groupId: string }
+  | { type: "back-to-entries" }
+  | { type: "new-entry" }
+  | { type: "search"; value: string }
+  | { type: "open-stats" }
+  | { type: "open-settings" };
+
+type DialogState =
+  | { type: "unsaved"; action: PendingAction }
+  | { type: "delete-entry"; entryId: string; title: string };
+
+const COMPACT_BREAKPOINT = 1180;
+const STACKED_BREAKPOINT = 760;
+
+function getViewMode(width: number): ManagerViewMode {
+  if (width < STACKED_BREAKPOINT) {
+    return "stacked";
+  }
+
+  if (width < COMPACT_BREAKPOINT) {
+    return "split";
+  }
+
+  return "expanded";
+}
+
+function flattenGroups(root: GroupNode): GroupTreeNode[] {
+  const groups: GroupTreeNode[] = [];
+
+  function visit(node: GroupNode, depth: number) {
+    groups.push({
+      id: node.id,
+      title: node.title,
+      depth,
+      childCount: node.childCount,
+      entryCount: node.entryCount
+    });
+
+    for (const child of node.children) {
+      visit(child, depth + 1);
+    }
+  }
+
+  visit(root, 0);
+  return groups;
+}
+
+function buildDescendantIndex(root: GroupNode): Map<string, Set<string>> {
+  const index = new Map<string, Set<string>>();
+
+  function visit(node: GroupNode): Set<string> {
+    const descendants = new Set<string>([node.id]);
+
+    for (const child of node.children) {
+      for (const groupId of visit(child)) {
+        descendants.add(groupId);
+      }
+    }
+
+    index.set(node.id, descendants);
+    return descendants;
+  }
+
+  visit(root);
+  return index;
+}
+
+function filterEntries(
+  entries: EntrySummary[],
+  searchValue: string,
+  selectedGroupId: string | null,
+  descendantIndex: Map<string, Set<string>>
+): EntrySummary[] {
+  const normalizedQuery = searchValue.trim().toLowerCase();
+  const scopedEntries =
+    normalizedQuery || !selectedGroupId
+      ? entries
+      : entries.filter((entry) =>
+          descendantIndex.get(selectedGroupId)?.has(entry.groupId ?? "") ?? false
+        );
+
+  if (!normalizedQuery) {
+    return scopedEntries;
+  }
+
+  return scopedEntries.filter((entry) =>
+    [entry.title, entry.username, entry.url].some((field) =>
+      field.toLowerCase().includes(normalizedQuery)
+    )
+  );
+}
+
+const APP_LABELS = {
+  en: {
+    topBar: {
+      subtitle: "Private Archive",
+      globalSearch: "Global Search",
+      searchPlaceholder: "Search the archive",
+      settings: "Settings",
+      statistics: "Statistics"
+    },
+    unlock: {
+      eyebrow: "Private Archive",
+      title: "Unlock your vault",
+      subtitle: "Choose a recent vault, then unlock the current selection.",
+      masterPassword: "Master Password",
+      keyFilePath: "Key File Path",
+      unlock: "Unlock Vault",
+      unlocking: "Unlocking...",
+      manageVaults: "Manage vaults",
+      noRecentVaults: "No recent vaults",
+      addFirstVault: "Open manager setup to add your first local vault.",
+      local: "Local",
+      needsRepair: "Needs repair in manager"
+    }
+  },
+  "zh-CN": {
+    topBar: {
+      subtitle: "私人档案",
+      globalSearch: "全局搜索",
+      searchPlaceholder: "搜索数据库",
+      settings: "设置",
+      statistics: "统计"
+    },
+    unlock: {
+      eyebrow: "私人档案",
+      title: "解锁数据库",
+      subtitle: "选择最近数据库，然后解锁当前选择。",
+      masterPassword: "主密码",
+      keyFilePath: "密钥文件路径",
+      unlock: "解锁数据库",
+      unlocking: "解锁中...",
+      manageVaults: "管理数据库",
+      noRecentVaults: "没有最近数据库",
+      addFirstVault: "打开管理器设置并添加第一个本地数据库。",
+      local: "本地",
+      needsRepair: "需要在管理器中修复"
+    }
+  }
+};
+
+export function App({
+  client,
+  fillHooks,
+  extensionSettingsStore,
+  renderRuntimeErrorHelp
+}: {
+  client: RuntimeClientLike;
+  fillHooks?: FillHooks;
+  extensionSettingsStore?: ExtensionSettingsStore;
+  renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
+}) {
+  const [localExtensionSettingsStore] = useState(() =>
+    extensionSettingsStore ?? createMemoryExtensionSettingsStore()
+  );
+  const [session, setSession] = useState<SessionStateLike | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [sessionErrorCause, setSessionErrorCause] = useState<unknown>(null);
+  const [viewMode, setViewMode] = useState<ManagerViewMode>(() =>
+    typeof window === "undefined" ? "expanded" : getViewMode(window.innerWidth)
+  );
+  const [stackedStage, setStackedStage] = useState<StackedManagerStage>("groups");
+  const [searchValue, setSearchValue] = useState("");
+  const [showStatsPage, setShowStatsPage] = useState(false);
+  const [showSettingsPage, setShowSettingsPage] = useState(false);
+  const [databaseSettings, setDatabaseSettings] = useState<DatabaseSettings | null>(null);
+  const [databaseSettingsError, setDatabaseSettingsError] = useState<string | null>(null);
+  const [databaseSettingsBusy, setDatabaseSettingsBusy] = useState(false);
+  const [databaseName, setDatabaseName] = useState<string | null>(null);
+  const [groupTree, setGroupTree] = useState<GroupTree | null>(null);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
+  const [entries, setEntries] = useState<EntrySummary[]>([]);
+  const [entriesLoading, setEntriesLoading] = useState(false);
+  const [entriesError, setEntriesError] = useState<string | null>(null);
+  const [entryDetail, setEntryDetail] = useState<EntryDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [historyItems, setHistoryItems] = useState<EntryHistoryItem[]>([]);
+  const [historyDetail, setHistoryDetail] = useState<EntryHistoryDetail | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [editorMode, setEditorMode] = useState<EntryEditorMode>("view");
+  const [draft, setDraft] = useState<EntryDraft | null>(null);
+  const [entryActionError, setEntryActionError] = useState<string | null>(null);
+  const [dialogState, setDialogState] = useState<DialogState | null>(null);
+  const [entryActionBusy, setEntryActionBusy] = useState(false);
+  const [showEntryListWithDetail, setShowEntryListWithDetail] = useState(false);
+  const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
+  const [fillCandidates, setFillCandidates] = useState<EntrySummary[]>([]);
+  const [fillError, setFillError] = useState<string | null>(null);
+  const [recentVaults, setRecentVaults] = useState<VaultReference[]>([]);
+  const [showSetup, setShowSetup] = useState(false);
+  const [setupAddError, setSetupAddError] = useState<string | null>(null);
+  const [setupAddErrorCause, setSetupAddErrorCause] = useState<unknown>(null);
+  const [setupAddBusy, setSetupAddBusy] = useState(false);
+  const [oneDriveVaultChoices, setOneDriveVaultChoices] = useState<OneDriveItem[]>([]);
+  const [oneDriveBrowserActive, setOneDriveBrowserActive] = useState(false);
+  const [oneDriveBrowserPath, setOneDriveBrowserPath] = useState<OneDrivePathSegment[]>([]);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+  const [unlockErrorCause, setUnlockErrorCause] = useState<unknown>(null);
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const [saveTip, setSaveTip] = useState<string | null>(null);
+  const [sourceSyncBusy, setSourceSyncBusy] = useState(false);
+  const [sourceSyncError, setSourceSyncError] = useState<string | null>(null);
+  const [extensionSettings, setExtensionSettings] =
+    useState<ExtensionSettings>(DEFAULT_EXTENSION_SETTINGS);
+  const [extensionSettingsError, setExtensionSettingsError] = useState<string | null>(
+    null
+  );
+  const [extensionSettingsSaving, setExtensionSettingsSaving] = useState(false);
+
+  async function reloadLockedState() {
+    const [nextSession, nextRecentVaults] = await Promise.all([
+      client.getSessionState(),
+      client.listRecentVaults()
+    ]);
+    setSession(nextSession);
+    await applyRecentVaultLimit(nextRecentVaults, extensionSettings);
+  }
+
+  async function applyRecentVaultLimit(
+    vaults: VaultReference[],
+    settings: ExtensionSettings
+  ) {
+    const limit = settings.recentVaultLimit;
+    const sortedVaults = [...vaults].sort(
+      (left, right) => (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0)
+    );
+    const overflowVaults = sortedVaults.slice(limit);
+
+    if (overflowVaults.length > 0) {
+      await Promise.all(
+        overflowVaults.map((vault) => client.deleteRecentVault(vault.vaultRefId))
+      );
+      setRecentVaults(sortedVaults.slice(0, limit));
+      return;
+    }
+
+    setRecentVaults(sortedVaults);
+  }
+
+  async function saveExtensionSettings(nextSettings: ExtensionSettings) {
+    setExtensionSettingsSaving(true);
+    setExtensionSettingsError(null);
+
+    try {
+      const normalizedSettings = normalizeExtensionSettings(nextSettings);
+      await localExtensionSettingsStore.save(normalizedSettings);
+      setExtensionSettings(normalizedSettings);
+      await applyRecentVaultLimit(await client.listRecentVaults(), normalizedSettings);
+    } catch (saveFailure) {
+      setExtensionSettingsError(
+        errorMessage(
+          saveFailure,
+          translate(extensionSettings.language, "Failed to save browser settings")
+        )
+      );
+    } finally {
+      setExtensionSettingsSaving(false);
+    }
+  }
+
+  function resetEditorState(nextMode: EntryEditorMode = "view") {
+    setEditorMode(nextMode);
+    setDraft(null);
+    setEntryActionError(null);
+    setDialogState(null);
+  }
+
+  function clearDetailSelection() {
+    setEntryDetail(null);
+    setDetailError(null);
+    setHistoryItems([]);
+    setHistoryDetail(null);
+    setHistoryError(null);
+    setSelectedEntryId(null);
+    setShowEntryListWithDetail(false);
+    resetEditorState();
+  }
+
+  function handleSaveResult(result: SaveVaultResult | void) {
+    if (result?.status === "merged") {
+      setSaveTip(
+        translate(extensionSettings.language, "Vault changed on disk. Merged and saved.")
+      );
+    } else if (result?.status === "saved_to_cache") {
+      setSaveTip(
+        translate(extensionSettings.language, "Saved to local cache. Remote sync pending.")
+      );
+      setSession((current) =>
+        current
+          ? {
+              ...current,
+              sourceStatus: {
+                sourceKind: current.sourceStatus?.sourceKind ?? "remote",
+                remoteState: "pending_sync",
+                lastSyncAt: current.sourceStatus?.lastSyncAt ?? null,
+                cachedAt: current.sourceStatus?.cachedAt ?? null,
+                lastError: current.sourceStatus?.lastError ?? null
+              }
+            }
+          : current
+      );
+    }
+  }
+
+  async function handleRetrySourceSync() {
+    if (!session?.activeVaultId) {
+      return;
+    }
+
+    setSourceSyncBusy(true);
+    setSourceSyncError(null);
+
+    try {
+      const sourceStatus = await client.retryVaultSourceSync(session.activeVaultId);
+      setSession((current) => (current ? { ...current, sourceStatus } : current));
+      if (sourceStatus.remoteState === "online") {
+        setSaveTip(translate(extensionSettings.language, "Remote sync restored."));
+      } else if (sourceStatus.lastError) {
+        setSourceSyncError(sourceStatus.lastError);
+      }
+    } catch (syncFailure) {
+      setSourceSyncError(
+        errorMessage(
+          syncFailure,
+          translate(extensionSettings.language, "Failed to retry remote sync")
+        )
+      );
+    } finally {
+      setSourceSyncBusy(false);
+    }
+  }
+
+  async function handleAddLocalVault() {
+    setSetupAddBusy(true);
+    setSetupAddError(null);
+    setSetupAddErrorCause(null);
+
+    try {
+      await client.addLocalVaultReference();
+      setShowSetup(false);
+      await reloadLockedState();
+    } catch (addFailure) {
+      setSetupAddError(
+        errorMessage(
+          addFailure,
+          translate(extensionSettings.language, "Failed to add local vault")
+        )
+      );
+      setSetupAddErrorCause(addFailure);
+    } finally {
+      setSetupAddBusy(false);
+    }
+  }
+
+  async function handleAddOneDriveVault() {
+    setSetupAddBusy(true);
+    setSetupAddError(null);
+    setSetupAddErrorCause(null);
+    setOneDriveVaultChoices([]);
+    setOneDriveBrowserActive(false);
+    setOneDriveBrowserPath([]);
+
+    try {
+      const auth = await client.beginOneDriveLogin();
+      window.open(auth.authUrl, "_blank", "noopener,noreferrer");
+      await client.completePendingOneDriveLogin();
+      const items = await client.listOneDriveChildren(null);
+      setOneDriveVaultChoices(browsableOneDriveItems(items));
+      setOneDriveBrowserActive(true);
+    } catch (addFailure) {
+      setSetupAddError(
+        errorMessage(
+          addFailure,
+          translate(extensionSettings.language, "Failed to add OneDrive vault")
+        )
+      );
+      setSetupAddErrorCause(addFailure);
+    } finally {
+      setSetupAddBusy(false);
+    }
+  }
+
+  async function handleOpenOneDriveFolder(folder: OneDriveItem) {
+    setSetupAddBusy(true);
+    setSetupAddError(null);
+    setSetupAddErrorCause(null);
+
+    try {
+      const items = await client.listOneDriveChildren(folder.itemId);
+      setOneDriveVaultChoices(browsableOneDriveItems(items));
+      setOneDriveBrowserPath((current) => [
+        ...current,
+        { itemId: folder.itemId, name: folder.name }
+      ]);
+      setOneDriveBrowserActive(true);
+    } catch (addFailure) {
+      setSetupAddError(
+        errorMessage(
+          addFailure,
+          translate(extensionSettings.language, "Failed to add OneDrive vault")
+        )
+      );
+      setSetupAddErrorCause(addFailure);
+    } finally {
+      setSetupAddBusy(false);
+    }
+  }
+
+  async function handleOpenOneDrivePath(index: number) {
+    setSetupAddBusy(true);
+    setSetupAddError(null);
+    setSetupAddErrorCause(null);
+
+    try {
+      const target = index >= 0 ? oneDriveBrowserPath[index] : null;
+      const items = await client.listOneDriveChildren(target?.itemId ?? null);
+      setOneDriveVaultChoices(browsableOneDriveItems(items));
+      setOneDriveBrowserPath((current) => current.slice(0, index + 1));
+      setOneDriveBrowserActive(true);
+    } catch (addFailure) {
+      setSetupAddError(
+        errorMessage(
+          addFailure,
+          translate(extensionSettings.language, "Failed to add OneDrive vault")
+        )
+      );
+      setSetupAddErrorCause(addFailure);
+    } finally {
+      setSetupAddBusy(false);
+    }
+  }
+
+  async function handleSelectOneDriveVault(vault: OneDriveItem) {
+    setSetupAddBusy(true);
+    setSetupAddError(null);
+    setSetupAddErrorCause(null);
+
+    try {
+      await client.addOneDriveVaultReference(vault.driveId, vault.itemId);
+      setOneDriveVaultChoices([]);
+      setOneDriveBrowserActive(false);
+      setOneDriveBrowserPath([]);
+      setShowSetup(false);
+      await reloadLockedState();
+    } catch (addFailure) {
+      setSetupAddError(
+        errorMessage(
+          addFailure,
+          translate(extensionSettings.language, "Failed to add OneDrive vault")
+        )
+      );
+      setSetupAddErrorCause(addFailure);
+    } finally {
+      setSetupAddBusy(false);
+    }
+  }
+
+  function handleSearchChangeImmediate(value: string) {
+    setSearchValue(value);
+    setShowStatsPage(false);
+
+    if (viewMode !== "expanded") {
+      clearDetailSelection();
+    }
+
+    if (viewMode === "stacked" && value.trim()) {
+      setStackedStage("entries");
+    }
+  }
+
+  const dirty =
+    editorMode === "create-pending"
+      ? hasDraftChangesFromEmpty(draft)
+      : editorMode === "edit" && entryDetail && draft
+        ? !draftMatchesEntry(draft, entryDetail)
+        : false;
+
+  function performAction(action: PendingAction) {
+    switch (action.type) {
+      case "select-entry":
+        setEntryDetail(null);
+        setDetailError(null);
+        setSelectedEntryId(action.entryId);
+        setShowStatsPage(false);
+        setShowEntryListWithDetail(false);
+        resetEditorState();
+
+        if (viewMode === "stacked") {
+          setStackedStage("detail");
+        }
+        break;
+      case "select-group":
+        setSelectedGroupId(action.groupId);
+        setShowStatsPage(false);
+        clearDetailSelection();
+
+        if (viewMode === "stacked") {
+          setStackedStage("entries");
+        }
+        break;
+      case "back-to-entries":
+        clearDetailSelection();
+
+        if (viewMode === "stacked") {
+          setStackedStage("entries");
+        }
+        break;
+      case "new-entry":
+        setShowStatsPage(false);
+        setSelectedEntryId(null);
+        setEntryDetail(null);
+        setDetailError(null);
+        setEntryActionError(null);
+        setShowEntryListWithDetail(true);
+        setDraft(createEmptyDraft());
+        setEditorMode("create-pending");
+
+        if (viewMode === "stacked") {
+          setStackedStage("detail");
+        }
+        break;
+      case "search":
+        setShowEntryListWithDetail(false);
+        resetEditorState();
+        handleSearchChangeImmediate(action.value);
+        break;
+      case "open-stats":
+        setShowEntryListWithDetail(false);
+        resetEditorState();
+        setShowSettingsPage(false);
+        setShowStatsPage(true);
+        break;
+      case "open-settings":
+        setShowEntryListWithDetail(false);
+        resetEditorState();
+        setShowStatsPage(false);
+        setShowSettingsPage(true);
+        break;
+    }
+  }
+
+  function requestAction(action: PendingAction) {
+    if (dirty) {
+      setDialogState({ type: "unsaved", action });
+      return;
+    }
+
+    performAction(action);
+  }
+
+  function handleSelectEntry(entryId: string) {
+    requestAction({ type: "select-entry", entryId });
+  }
+
+  function handleBackToEntries() {
+    requestAction({ type: "back-to-entries" });
+  }
+
+  function handleSearchChange(value: string) {
+    requestAction({ type: "search", value });
+  }
+
+  async function saveDraft() {
+    if (!session?.activeVaultId || !draft) {
+      return false;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      if (editorMode === "create-pending") {
+        const detail = await client.createEntry(session.activeVaultId, {
+          parentGroupId: selectedGroupId ?? groupTree?.root.id ?? "",
+          ...draft
+        });
+        handleSaveResult(await client.saveVault(session.activeVaultId));
+        setEntryDetail(detail);
+        setSelectedEntryId(detail.id);
+        setShowEntryListWithDetail(true);
+      } else if (editorMode === "edit" && selectedEntryId) {
+        const detail = await client.updateEntryFields(
+          session.activeVaultId,
+          selectedEntryId,
+          draft
+        );
+        handleSaveResult(await client.saveVault(session.activeVaultId));
+        setEntryDetail(detail);
+        setShowEntryListWithDetail(false);
+      } else {
+        return false;
+      }
+
+      resetEditorState();
+      setWorkspaceReloadKey((current) => current + 1);
+      return true;
+    } catch (mutationError) {
+      setEntryActionError(
+        errorMessage(
+          mutationError,
+          translate(extensionSettings.language, "Failed to save entry changes")
+        )
+      );
+      return false;
+    } finally {
+      setEntryActionBusy(false);
+    }
+  }
+
+  async function handleSaveAndContinue(action: PendingAction) {
+    const saved = await saveDraft();
+
+    if (saved) {
+      performAction(action);
+    }
+  }
+
+  async function handleDeleteEntry(entryId: string) {
+    if (!session?.activeVaultId) {
+      return;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      await client.deleteEntry(session.activeVaultId, entryId);
+      handleSaveResult(await client.saveVault(session.activeVaultId));
+      clearDetailSelection();
+      setWorkspaceReloadKey((current) => current + 1);
+    } catch (deleteError) {
+      setEntryActionError(
+        errorMessage(
+          deleteError,
+          translate(extensionSettings.language, "Failed to delete entry")
+        )
+      );
+    } finally {
+      setEntryActionBusy(false);
+      setDialogState(null);
+    }
+  }
+
+  async function handleDownloadAttachment(name: string) {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      return;
+    }
+
+    setEntryActionError(null);
+
+    try {
+      const content = await client.getEntryAttachmentContent(
+        session.activeVaultId,
+        selectedEntryId,
+        name
+      );
+      triggerAttachmentDownload(content);
+    } catch (downloadError) {
+      setEntryActionError(
+        errorMessage(
+          downloadError,
+          translate(extensionSettings.language, "Failed to download attachment")
+        )
+      );
+    }
+  }
+
+  async function updateAttachment(
+    operation: () => Promise<EntryDetail>,
+    fallbackMessage: string
+  ) {
+    if (!session?.activeVaultId) {
+      return;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      const detail = await operation();
+      handleSaveResult(await client.saveVault(session.activeVaultId));
+      setEntryDetail(detail);
+      setWorkspaceReloadKey((current) => current + 1);
+    } catch (attachmentError) {
+      setEntryActionError(errorMessage(attachmentError, fallbackMessage));
+    } finally {
+      setEntryActionBusy(false);
+    }
+  }
+
+  async function handleAddAttachment(file: File, protectInMemory: boolean) {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      return;
+    }
+
+    const dataBase64 = await fileToBase64(file);
+    await updateAttachment(
+      () =>
+        client.addEntryAttachment(session.activeVaultId!, selectedEntryId, {
+          name: file.name,
+          dataBase64,
+          protectInMemory
+        }),
+      translate(extensionSettings.language, "Failed to add attachment")
+    );
+  }
+
+  async function handleRenameAttachment(
+    oldName: string,
+    newName: string,
+    protectInMemory: boolean
+  ) {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      return;
+    }
+
+    await updateAttachment(
+      () =>
+        client.updateEntryAttachmentMetadata(session.activeVaultId!, selectedEntryId, {
+          oldName,
+          newName,
+          protectInMemory
+        }),
+      translate(extensionSettings.language, "Failed to update attachment")
+    );
+  }
+
+  async function handleReplaceAttachment(name: string, file: File) {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      return;
+    }
+
+    const dataBase64 = await fileToBase64(file);
+    await updateAttachment(
+      () =>
+        client.replaceEntryAttachmentContent(session.activeVaultId!, selectedEntryId, {
+          name,
+          dataBase64
+        }),
+      translate(extensionSettings.language, "Failed to replace attachment")
+    );
+  }
+
+  async function handleDeleteAttachment(name: string) {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      return;
+    }
+
+    await updateAttachment(
+      () => client.deleteEntryAttachment(session.activeVaultId!, selectedEntryId, name),
+      translate(extensionSettings.language, "Failed to delete attachment")
+    );
+  }
+
+  async function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
+    if (!session?.activeVaultId) {
+      return;
+    }
+
+    setDatabaseSettingsBusy(true);
+    setDatabaseSettingsError(null);
+
+    try {
+      const settings = await client.updateDatabaseSettings(session.activeVaultId, update);
+      setDatabaseSettings(settings);
+      setDatabaseName(settings.metadata.name);
+      handleSaveResult(await client.saveVault(session.activeVaultId));
+      setWorkspaceReloadKey((current) => current + 1);
+      setSaveTip(translate(extensionSettings.language, "Database settings saved."));
+    } catch (settingsError) {
+      setDatabaseSettingsError(
+        errorMessage(
+          settingsError,
+          translate(extensionSettings.language, "Failed to save database settings")
+        )
+      );
+    } finally {
+      setDatabaseSettingsBusy(false);
+    }
+  }
+
+  async function handleSelectHistoryItem(historyIndex: number) {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      return;
+    }
+
+    setHistoryError(null);
+
+    try {
+      const detail = await client.getEntryHistoryDetail(
+        session.activeVaultId,
+        selectedEntryId,
+        historyIndex
+      );
+      setHistoryDetail(detail);
+    } catch (loadError) {
+      setHistoryDetail(null);
+      setHistoryError(
+        errorMessage(
+          loadError,
+          translate(extensionSettings.language, "Failed to load entry history")
+        )
+      );
+    }
+  }
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    function handleResize() {
+      setViewMode(getViewMode(window.innerWidth));
+    }
+
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      window.removeEventListener("resize", handleResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!saveTip || typeof window === "undefined") {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => setSaveTip(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [saveTip]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    setSessionError(null);
+    setSessionErrorCause(null);
+
+    localExtensionSettingsStore
+      .load()
+      .then(async (loadedSettings) => {
+        const normalizedSettings = normalizeExtensionSettings(loadedSettings);
+        if (!cancelled) {
+          setExtensionSettings(normalizedSettings);
+        }
+        const vaults = await client.listRecentVaults();
+        if (!cancelled) {
+          await applyRecentVaultLimit(vaults, normalizedSettings);
+        }
+        return client.getSessionState();
+      })
+      .then((state) => {
+        if (!cancelled) {
+          setSession(state);
+          setSessionErrorCause(null);
+        }
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setSession(null);
+          setSessionErrorCause(loadError);
+          setSessionError(
+            errorMessage(
+              loadError,
+              translate(extensionSettings.language, "Failed to load session state")
+            )
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, localExtensionSettingsStore]);
+
+  useEffect(() => {
+    if (
+      typeof window === "undefined" ||
+      !session?.unlocked ||
+      !client.lockSession ||
+      extensionSettings.idleLockMinutes <= 0
+    ) {
+      return undefined;
+    }
+
+    let timer = window.setTimeout(handleTimeout, extensionSettings.idleLockMinutes * 60_000);
+
+    function resetTimer() {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(handleTimeout, extensionSettings.idleLockMinutes * 60_000);
+    }
+
+    function handleTimeout() {
+      void client.lockSession?.().then((nextSession) => {
+        setSession(nextSession);
+      });
+    }
+
+    const events = ["pointerdown", "keydown", "wheel", "scroll"];
+    for (const eventName of events) {
+      window.addEventListener(eventName, resetTimer, { passive: true });
+    }
+
+    return () => {
+      window.clearTimeout(timer);
+      for (const eventName of events) {
+        window.removeEventListener(eventName, resetTimer);
+      }
+    };
+  }, [client, extensionSettings.idleLockMinutes, session?.unlocked]);
+
+  useEffect(() => {
+    setSearchValue("");
+    setShowStatsPage(false);
+    setShowSettingsPage(false);
+    setDatabaseSettings(null);
+    setDatabaseSettingsError(null);
+    setDatabaseSettingsBusy(false);
+    setDatabaseName(null);
+    setGroupTree(null);
+    setGroupsError(null);
+    setSelectedGroupId(null);
+    clearDetailSelection();
+    setEntries([]);
+    setEntriesLoading(false);
+    setEntriesError(null);
+    setShowEntryListWithDetail(false);
+    resetEditorState();
+    setFillCandidates([]);
+    setFillError(null);
+    setStackedStage("groups");
+    setUnlockError(null);
+    setUnlockErrorCause(null);
+  }, [session?.activeVaultId, session?.unlocked]);
+
+  useEffect(() => {
+    if (!session?.activeVaultId) {
+      setGroupTree(null);
+      setGroupsError(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    setGroupsError(null);
+
+    client
+      .listGroups(session.activeVaultId)
+      .then((loadedGroupTree) => {
+        if (!cancelled) {
+          setGroupTree(loadedGroupTree);
+          setSelectedGroupId((current) => current ?? loadedGroupTree.root.id);
+        }
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setGroupTree(null);
+          setGroupsError(
+            errorMessage(
+              loadError,
+              translate(extensionSettings.language, "Failed to load groups")
+            )
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, session?.activeVaultId, workspaceReloadKey]);
+
+  useEffect(() => {
+    if (!session?.activeVaultId) {
+      setEntries([]);
+      setEntriesLoading(false);
+      setEntriesError(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    setEntriesLoading(true);
+    setEntriesError(null);
+
+    client
+      .listEntries(session.activeVaultId)
+      .then((loadedEntries) => {
+        if (!cancelled) {
+          setEntries(loadedEntries);
+          setEntriesLoading(false);
+        }
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setEntries([]);
+          setEntriesLoading(false);
+          setEntriesError(
+            errorMessage(
+              loadError,
+              translate(extensionSettings.language, "Failed to load entries")
+            )
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, session?.activeVaultId, workspaceReloadKey]);
+
+  useEffect(() => {
+    if (!session?.activeVaultId || !fillHooks) {
+      setFillCandidates([]);
+      setFillError(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    setFillError(null);
+
+    fillHooks
+      .findCandidates(session.activeVaultId)
+      .then((nextEntries) => {
+        if (!cancelled) {
+          setFillCandidates(nextEntries);
+        }
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setFillCandidates([]);
+          setFillError(
+            errorMessage(
+              loadError,
+              translate(extensionSettings.language, "Failed to load fill candidates")
+            )
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fillHooks, session?.activeVaultId]);
+
+  useEffect(() => {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      setEntryDetail(null);
+      setDetailError(null);
+      setHistoryItems([]);
+      setHistoryDetail(null);
+      setHistoryError(null);
+      return;
+    }
+
+    if (entryDetail?.id === selectedEntryId) {
+      setDetailError(null);
+      return;
+    }
+
+    setEntryDetail(null);
+    setDetailError(null);
+
+    let cancelled = false;
+
+    client
+      .getEntryDetail(session.activeVaultId, selectedEntryId)
+      .then((detail) => {
+        if (!cancelled) {
+          setEntryDetail(detail);
+        }
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setEntryDetail(null);
+          setDetailError(
+            errorMessage(
+              loadError,
+              translate(extensionSettings.language, "Failed to load entry detail")
+            )
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, entryDetail?.id, selectedEntryId, session?.activeVaultId]);
+
+  useEffect(() => {
+    if (!session?.activeVaultId) {
+      setDatabaseName(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    client
+      .getDatabaseSettings(session.activeVaultId)
+      .then((settings) => {
+        if (!cancelled) {
+          setDatabaseName(settings.metadata.name);
+          setDatabaseSettings((current) => current ?? settings);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDatabaseName(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, session?.activeVaultId, workspaceReloadKey]);
+
+  useEffect(() => {
+    if (!session?.activeVaultId || !showSettingsPage) {
+      return;
+    }
+
+    let cancelled = false;
+
+    setDatabaseSettingsError(null);
+    setDatabaseSettingsBusy(true);
+
+    client
+      .getDatabaseSettings(session.activeVaultId)
+      .then((settings) => {
+        if (!cancelled) {
+          setDatabaseSettings(settings);
+          setDatabaseName(settings.metadata.name);
+          setDatabaseSettingsBusy(false);
+        }
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setDatabaseSettings(null);
+          setDatabaseSettingsBusy(false);
+          setDatabaseSettingsError(
+            errorMessage(
+              loadError,
+              translate(extensionSettings.language, "Failed to load database settings")
+            )
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, session?.activeVaultId, showSettingsPage]);
+
+  useEffect(() => {
+    if (!entryDetail || !session?.activeVaultId || !selectedEntryId) {
+      setHistoryItems([]);
+      setHistoryDetail(null);
+      setHistoryError(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    setHistoryItems([]);
+    setHistoryDetail(null);
+    setHistoryError(null);
+
+    client
+      .listEntryHistory(session.activeVaultId, selectedEntryId)
+      .then((items) => {
+        if (!cancelled) {
+          setHistoryItems(items);
+        }
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setHistoryError(
+            errorMessage(
+              loadError,
+              translate(extensionSettings.language, "Failed to load entry history")
+            )
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, entryDetail?.id, selectedEntryId, session?.activeVaultId]);
+
+  if (!session) {
+    if (sessionError) {
+      return (
+        <div style={messageShellStyle}>
+          <div role="alert" style={messagePanelStyle}>
+            {sessionError}
+          </div>
+          {renderRuntimeErrorHelp?.(sessionErrorCause)}
+        </div>
+      );
+    }
+
+    return (
+      <div style={messageShellStyle}>
+        <div style={messagePanelStyle}>Loading...</div>
+      </div>
+    );
+  }
+
+  if (!session.unlocked) {
+    const labels = APP_LABELS[extensionSettings.language];
+
+    if (showSetup) {
+      return (
+        <I18nProvider language={extensionSettings.language}>
+          <VaultSetupScreen
+            recentVaults={recentVaults}
+            oneDriveBrowserActive={oneDriveBrowserActive}
+            oneDriveBrowserPath={oneDriveBrowserPath}
+            oneDriveVaultChoices={oneDriveVaultChoices}
+            onAddLocalVault={handleAddLocalVault}
+            onAddOneDriveVault={handleAddOneDriveVault}
+            onOpenOneDriveFolder={handleOpenOneDriveFolder}
+            onOpenOneDrivePath={handleOpenOneDrivePath}
+            onSelectOneDriveVault={handleSelectOneDriveVault}
+            onDeleteVault={async (vaultRefId) => {
+              const nextVaults = await client.deleteRecentVault(vaultRefId);
+              await applyRecentVaultLimit(nextVaults, extensionSettings);
+              setSession((current) =>
+                current?.currentVaultRefId === vaultRefId
+                  ? { ...current, currentVaultRefId: null }
+                  : current
+              );
+            }}
+            onBack={() => {
+              setSetupAddError(null);
+              setSetupAddErrorCause(null);
+              setOneDriveVaultChoices([]);
+              setOneDriveBrowserActive(false);
+              setOneDriveBrowserPath([]);
+              setShowSetup(false);
+            }}
+            addLocalVaultBusy={setupAddBusy}
+            addLocalVaultError={setupAddError}
+            addLocalVaultErrorCause={setupAddErrorCause}
+            renderRuntimeErrorHelp={renderRuntimeErrorHelp}
+          />
+        </I18nProvider>
+      );
+    }
+
+    return (
+      <RecentVaultUnlockScreen
+        recentVaults={recentVaults}
+        currentVaultRefId={session.currentVaultRefId}
+        labels={labels.unlock}
+        onSelectVault={async (vaultRefId) => {
+          setUnlockError(null);
+          setUnlockErrorCause(null);
+          const nextSession = await client.setCurrentVault(vaultRefId);
+          setSession(nextSession);
+          await applyRecentVaultLimit(await client.listRecentVaults(), extensionSettings);
+        }}
+        onUnlock={async ({ password, keyFilePath }) => {
+          setUnlockBusy(true);
+          setUnlockError(null);
+          setUnlockErrorCause(null);
+          try {
+            const nextSession = await client.unlockCurrentVault({
+              password,
+              keyFilePath
+            });
+            setSession(nextSession);
+          } catch (unlockFailure) {
+            setUnlockError(
+              errorMessage(
+                unlockFailure,
+                translate(extensionSettings.language, "Failed to unlock vault")
+              )
+            );
+            setUnlockErrorCause(unlockFailure);
+          } finally {
+            setUnlockBusy(false);
+          }
+        }}
+        onOpenSetup={() => setShowSetup(true)}
+        error={unlockError}
+        errorCause={unlockErrorCause}
+        busy={unlockBusy}
+        renderRuntimeErrorHelp={renderRuntimeErrorHelp}
+      />
+    );
+  }
+
+  const groups = groupTree ? flattenGroups(groupTree.root) : [];
+  const descendantIndex = groupTree ? buildDescendantIndex(groupTree.root) : new Map();
+  const visibleEntries = filterEntries(
+    entries,
+    searchValue,
+    selectedGroupId,
+    descendantIndex
+  );
+  const selection: ManagerSelection = {
+    selectedGroupId,
+    selectedEntryId,
+    selectedEntry: entryDetail,
+    entries: visibleEntries
+  };
+  const showEntryDetail =
+    viewMode === "expanded" ||
+    selection.selectedEntryId !== null ||
+    editorMode === "create-pending";
+  const labels = APP_LABELS[extensionSettings.language];
+  const sourceStatus = session.sourceStatus;
+  const sourceSyncMessage = sourceSyncError ?? sourceStatus?.lastError ?? null;
+  const sourceSyncTitle =
+    sourceStatus?.remoteState === "pending_sync"
+      ? "Saved to local cache. Remote sync pending."
+      : sourceSyncMessage
+        ? "Using local cache. Remote sync failed."
+        : "Using local cache.";
+  const remoteCacheWarning =
+    sourceStatus?.remoteState === "cache" || sourceStatus?.remoteState === "pending_sync" ? (
+      <div role="alert" style={sourceSyncBannerStyle}>
+        <div style={{ display: "grid", gap: archiveTheme.spacing.xs, minWidth: 0 }}>
+          <strong>{translate(extensionSettings.language, sourceSyncTitle)}</strong>
+          {sourceSyncMessage ? (
+            <small style={sourceSyncDetailStyle}>{sourceSyncMessage}</small>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            void handleRetrySourceSync();
+          }}
+          disabled={sourceSyncBusy || !session.activeVaultId}
+          style={{
+            ...sourceSyncButtonStyle,
+            opacity: sourceSyncBusy || !session.activeVaultId ? 0.68 : 1,
+            cursor: sourceSyncBusy || !session.activeVaultId ? "not-allowed" : "pointer"
+          }}
+        >
+          {sourceSyncBusy
+            ? translate(extensionSettings.language, "Retrying...")
+            : translate(extensionSettings.language, "Retry sync")}
+        </button>
+      </div>
+    ) : null;
+
+  const entryListPane = (
+    <div style={{ display: "grid", gap: archiveTheme.spacing.md }}>
+      {viewMode === "stacked" && stackedStage === "entries" ? (
+        <button
+          type="button"
+          onClick={() => {
+            clearDetailSelection();
+            setStackedStage("groups");
+          }}
+          style={backButtonStyle}
+        >
+          Back to groups
+        </button>
+      ) : null}
+      {fillHooks ? (
+        <>
+          {fillError ? <div role="alert">{fillError}</div> : null}
+          {fillError ? null : (
+            <FillCandidatesPanel
+              candidates={fillCandidates}
+              onFill={(entryId) =>
+                fillHooks.fillEntry(session.activeVaultId ?? "", entryId)
+              }
+            />
+          )}
+        </>
+      ) : null}
+      <VaultScreen
+        entries={selection.entries}
+        loading={entriesLoading}
+        hasActiveVault={Boolean(session.activeVaultId)}
+        searchValue={searchValue}
+        error={entriesError}
+        selectedEntryId={selection.selectedEntryId}
+        onSelectEntry={handleSelectEntry}
+        onCreateEntry={() => requestAction({ type: "new-entry" })}
+      />
+    </div>
+  );
+
+  return (
+    <I18nProvider language={extensionSettings.language}>
+      <div aria-hidden={dialogState !== null}>
+        {remoteCacheWarning}
+        <ManagerShell
+          viewMode={viewMode}
+          showEntryDetail={showEntryDetail}
+          stackedStage={stackedStage}
+          topBar={
+            <ManagerTopBar
+              title={databaseName || translate(extensionSettings.language, "Private Archive")}
+              labels={labels.topBar}
+              searchValue={searchValue}
+              onSearchChange={handleSearchChange}
+              onOpenStats={() => requestAction({ type: "open-stats" })}
+              onOpenSettings={() => requestAction({ type: "open-settings" })}
+            />
+          }
+          groupTree={
+            groupsError ? (
+              <div role="alert">{groupsError}</div>
+            ) : (
+              <GroupTreePane
+                groups={groups}
+                selectedGroupId={selection.selectedGroupId}
+                onSelectGroup={(groupId) => requestAction({ type: "select-group", groupId })}
+              />
+            )
+          }
+          entryList={entryListPane}
+          entryDetail={
+            <EntryDetailPane
+              entry={selection.selectedEntry}
+              mode={editorMode}
+              draft={draft}
+              dirty={dirty}
+              busy={entryActionBusy}
+              error={entryActionError ?? detailError}
+              historyItems={historyItems}
+              historyDetail={historyDetail}
+              historyError={historyError}
+              onBack={viewMode === "expanded" ? undefined : handleBackToEntries}
+              onStartEdit={() => {
+                if (!entryDetail) {
+                  return;
+                }
+
+                setDraft(entryToDraft(entryDetail));
+                setShowEntryListWithDetail(true);
+                setEditorMode("edit");
+                setEntryActionError(null);
+              }}
+              onChangeDraft={(field, value) => {
+                setDraft((current) => {
+                  const base = current ?? createEmptyDraft();
+                  return {
+                    ...base,
+                    [field]: field === "totpUri" ? normalizeDraftTotpUri(value) : value
+                  };
+                });
+              }}
+              onChangeCustomField={(index, field, value) => {
+                setDraft((current) => {
+                  const base = current ?? createEmptyDraft();
+                  return {
+                    ...base,
+                    customFields: base.customFields.map((customField, fieldIndex) =>
+                      fieldIndex === index
+                        ? { ...customField, [field]: value }
+                        : customField
+                    )
+                  };
+                });
+              }}
+              onAddCustomField={() => {
+                setDraft((current) => {
+                  const base = current ?? createEmptyDraft();
+                  return {
+                    ...base,
+                    customFields: [
+                      ...base.customFields,
+                      { key: "", value: "", protected: false }
+                    ]
+                  };
+                });
+              }}
+              onDeleteCustomField={(index) => {
+                setDraft((current) => {
+                  const base = current ?? createEmptyDraft();
+                  return {
+                    ...base,
+                    customFields: base.customFields.filter(
+                      (_field, fieldIndex) => fieldIndex !== index
+                    )
+                  };
+                });
+              }}
+              onDownloadAttachment={(name) => {
+                void handleDownloadAttachment(name);
+              }}
+              onAddAttachment={(file, protectInMemory) => {
+                void handleAddAttachment(file, protectInMemory);
+              }}
+              onRenameAttachment={(oldName, newName, protectInMemory) => {
+                void handleRenameAttachment(oldName, newName, protectInMemory);
+              }}
+              onReplaceAttachment={(name, file) => {
+                void handleReplaceAttachment(name, file);
+              }}
+              onDeleteAttachment={(name) => {
+                void handleDeleteAttachment(name);
+              }}
+              onSelectHistoryItem={(historyIndex) => {
+                void handleSelectHistoryItem(historyIndex);
+              }}
+              onSave={() => {
+                void saveDraft();
+              }}
+              onCancel={() => {
+                if (editorMode === "create-pending") {
+                  requestAction({ type: "back-to-entries" });
+                  return;
+                }
+
+                if (dirty && selectedEntryId) {
+                  requestAction({ type: "select-entry", entryId: selectedEntryId });
+                  return;
+                }
+
+                setShowEntryListWithDetail(false);
+                resetEditorState();
+              }}
+              onDelete={
+                entryDetail
+                  ? () =>
+                      setDialogState({
+                        type: "delete-entry",
+                        entryId: entryDetail.id,
+                        title: entryDetail.title
+                      })
+                  : undefined
+              }
+            />
+          }
+          secondaryPage={
+            showStatsPage ? (
+              <ManagerSecondaryPage
+                title={translate(extensionSettings.language, "Statistics")}
+                description={translate(extensionSettings.language, "Statistics description")}
+                onBack={() => setShowStatsPage(false)}
+              />
+            ) : showSettingsPage ? (
+              <div style={{ display: "grid", gap: archiveTheme.spacing.lg }}>
+                <button
+                  type="button"
+                  onClick={() => setShowSettingsPage(false)}
+                  style={{
+                    justifySelf: "start",
+                    border: `1px solid ${archiveTheme.colors.line}`,
+                    borderRadius: archiveTheme.radius.pill,
+                    padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
+                    background: archiveTheme.colors.surfaceMuted,
+                    color: archiveTheme.colors.text,
+                    fontFamily: archiveTheme.font.body,
+                    cursor: "pointer"
+                  }}
+                >
+                  {translate(extensionSettings.language, "Back to archive")}
+                </button>
+                <BrowserSettingsPanel
+                  settings={extensionSettings}
+                  saving={extensionSettingsSaving}
+                  error={extensionSettingsError}
+                  onSave={(settings) => {
+                    void saveExtensionSettings(settings);
+                  }}
+                />
+                <DatabaseSettingsPage
+                  settings={databaseSettings}
+                  loading={databaseSettingsBusy && !databaseSettings}
+                  saving={databaseSettingsBusy && Boolean(databaseSettings)}
+                  error={databaseSettingsError}
+                  onSave={(update) => {
+                    void handleSaveDatabaseSettings(update);
+                  }}
+                />
+              </div>
+            ) : undefined
+          }
+          showEntryListWithDetail={showEntryListWithDetail || editorMode !== "view"}
+        />
+      </div>
+      {dialogState?.type === "unsaved" ? (
+        <ConfirmationDialog
+          title={translate(extensionSettings.language, "You have unsaved changes")}
+          description={translate(
+            extensionSettings.language,
+            "Save before leaving this entry, discard your edits, or continue editing."
+          )}
+          actions={[
+            {
+              label: translate(extensionSettings.language, "Save changes"),
+              variant: "primary",
+              onClick: () => {
+                void handleSaveAndContinue(dialogState.action);
+              }
+            },
+            {
+              label: translate(extensionSettings.language, "Discard changes"),
+              onClick: () => {
+                resetEditorState();
+                performAction(dialogState.action);
+              }
+            },
+            {
+              label: translate(extensionSettings.language, "Continue editing"),
+              onClick: () => setDialogState(null)
+            }
+          ]}
+        />
+      ) : null}
+      {dialogState?.type === "delete-entry" ? (
+        <ConfirmationDialog
+          title={translate(extensionSettings.language, "Delete this entry permanently?")}
+          description={
+            dialogState.title
+              ? deleteEntryDescription(extensionSettings.language, dialogState.title)
+              : translate(
+                  extensionSettings.language,
+                  "This will remove the selected entry from the current vault."
+                )
+          }
+          actions={[
+            {
+              label: translate(extensionSettings.language, "Delete permanently"),
+              variant: "danger",
+              onClick: () => {
+                void handleDeleteEntry(dialogState.entryId);
+              }
+            },
+            {
+              label: translate(extensionSettings.language, "Cancel"),
+              onClick: () => setDialogState(null)
+            }
+          ]}
+        />
+      ) : null}
+      {saveTip ? (
+        <div role="status" style={saveTipStyle}>
+          {saveTip}
+        </div>
+      ) : null}
+    </I18nProvider>
+  );
+}
+
+const messageShellStyle = {
+  minHeight: "100vh",
+  display: "grid",
+  placeItems: "center",
+  padding: archiveTheme.spacing.xl,
+  background: `radial-gradient(circle at top left, ${archiveTheme.colors.page} 0%, ${archiveTheme.colors.pageShade} 65%, #dbc29f 100%)`
+};
+
+const messagePanelStyle = {
+  border: `1px solid ${archiveTheme.colors.line}`,
+  borderRadius: archiveTheme.radius.panel,
+  padding: archiveTheme.spacing.lg,
+  background: archiveTheme.colors.surface,
+  color: archiveTheme.colors.text,
+  fontFamily: archiveTheme.font.body,
+  boxShadow: archiveTheme.shadow.panel
+};
+
+const saveTipStyle = {
+  position: "fixed" as const,
+  right: archiveTheme.spacing.lg,
+  bottom: archiveTheme.spacing.lg,
+  zIndex: 20,
+  border: `1px solid ${archiveTheme.colors.line}`,
+  borderRadius: archiveTheme.radius.field,
+  padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
+  background: archiveTheme.colors.surface,
+  color: archiveTheme.colors.text,
+  boxShadow: archiveTheme.shadow.panel,
+  fontFamily: archiveTheme.font.body
+};
+
+const sourceSyncBannerStyle = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  alignItems: "center",
+  gap: archiveTheme.spacing.md,
+  borderBottom: `1px solid ${archiveTheme.colors.line}`,
+  padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.lg}`,
+  background: archiveTheme.colors.surfaceMuted,
+  color: archiveTheme.colors.text,
+  fontFamily: archiveTheme.font.body
+};
+
+const sourceSyncDetailStyle = {
+  color: archiveTheme.colors.textMuted,
+  overflowWrap: "anywhere" as const
+};
+
+const sourceSyncButtonStyle = {
+  border: `1px solid ${archiveTheme.colors.accentStrong}`,
+  borderRadius: archiveTheme.radius.field,
+  padding: `${archiveTheme.spacing.xs} ${archiveTheme.spacing.md}`,
+  background: archiveTheme.colors.surface,
+  color: archiveTheme.colors.accentStrong,
+  fontFamily: archiveTheme.font.body,
+  fontWeight: 700
+};
+
+const backButtonStyle = {
+  justifySelf: "start",
+  border: `1px solid ${archiveTheme.colors.line}`,
+  borderRadius: archiveTheme.radius.pill,
+  padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
+  background: archiveTheme.colors.surfaceMuted,
+  color: archiveTheme.colors.text,
+  fontFamily: archiveTheme.font.body,
+  cursor: "pointer"
+};
+
+function triggerAttachmentDownload(content: EntryAttachmentContent) {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.userAgent.toLowerCase().includes("jsdom")
+  ) {
+    return;
+  }
+
+  const link = document.createElement("a");
+  link.href = `data:application/octet-stream;base64,${content.dataBase64}`;
+  link.download = content.name;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("failed to read file"));
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const marker = "base64,";
+      const markerIndex = result.indexOf(marker);
+      resolve(markerIndex >= 0 ? result.slice(markerIndex + marker.length) : "");
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function createEmptyDraft(): EntryDraft {
+  return {
+    title: "",
+    username: "",
+    password: "",
+    url: "",
+    notes: "",
+    totpUri: null,
+    customFields: []
+  };
+}
+
+function entryToDraft(entry: EntryDetail): EntryDraft {
+  return {
+    title: entry.title,
+    username: entry.username,
+    password: entry.password,
+    url: entry.url,
+    notes: entry.notes,
+    totpUri: entry.totpUri ?? null,
+    customFields: entry.customFields?.map((field) => ({ ...field })) ?? []
+  };
+}
+
+function draftMatchesEntry(draft: EntryDraft, entry: EntryDetail): boolean {
+  return (
+    draft.title === entry.title &&
+    draft.username === entry.username &&
+    draft.password === entry.password &&
+    draft.url === entry.url &&
+    draft.notes === entry.notes &&
+    (draft.totpUri ?? null) === (entry.totpUri ?? null) &&
+    customFieldsMatch(draft.customFields, entry.customFields ?? [])
+  );
+}
+
+function hasDraftChangesFromEmpty(draft: EntryDraft | null): boolean {
+  if (!draft) {
+    return false;
+  }
+
+  return (
+    Object.values({
+      ...draft,
+      totpUri: draft.totpUri ?? "",
+      customFields: ""
+    }).some((value) => value !== "") || draft.customFields.length > 0
+  );
+}
+
+function customFieldsMatch(
+  left: EntryDraft["customFields"],
+  right: EntryDraft["customFields"]
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((field, index) => {
+    const other = right[index];
+    return (
+      other &&
+      field.key === other.key &&
+      field.value === other.value &&
+      field.protected === other.protected
+    );
+  });
+}
+
+function normalizeDraftTotpUri(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function ConfirmationDialog({
+  title,
+  description,
+  actions
+}: {
+  title: string;
+  description: string;
+  actions: Array<{
+    label: string;
+    onClick: () => void;
+    variant?: "primary" | "danger" | "secondary";
+  }>;
+}) {
+  return (
+    <div style={dialogOverlayStyle}>
+      <div role="alertdialog" aria-modal="true" style={dialogPanelStyle}>
+        <div
+          style={{
+            display: "grid",
+            gap: archiveTheme.spacing.sm
+          }}
+        >
+          <strong
+            style={{
+              fontFamily: archiveTheme.font.display,
+              fontSize: "1.4rem",
+              fontWeight: 600
+            }}
+          >
+            {title}
+          </strong>
+          <div
+            style={{
+              color: archiveTheme.colors.textMuted,
+              fontFamily: archiveTheme.font.body,
+              lineHeight: 1.5
+            }}
+          >
+            {description}
+          </div>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: archiveTheme.spacing.sm,
+            justifyContent: "flex-end"
+          }}
+        >
+          {actions.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              onClick={action.onClick}
+              style={dialogActionStyle(action.variant ?? "secondary")}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const dialogOverlayStyle = {
+  position: "fixed" as const,
+  inset: 0,
+  display: "grid",
+  placeItems: "center",
+  padding: archiveTheme.spacing.lg,
+  background: "rgba(38, 25, 16, 0.36)"
+};
+
+const dialogPanelStyle = {
+  width: "min(460px, 100%)",
+  display: "grid",
+  gap: archiveTheme.spacing.lg,
+  border: `1px solid ${archiveTheme.colors.line}`,
+  borderRadius: archiveTheme.radius.panel,
+  padding: archiveTheme.spacing.lg,
+  background: archiveTheme.colors.surface,
+  boxShadow: archiveTheme.shadow.shell
+};
+
+function dialogActionStyle(variant: "primary" | "danger" | "secondary") {
+  if (variant === "primary") {
+    return {
+      border: `1px solid ${archiveTheme.colors.accentStrong}`,
+      borderRadius: archiveTheme.radius.pill,
+      padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
+      background: archiveTheme.colors.accentStrong,
+      color: "#fffaf2",
+      fontFamily: archiveTheme.font.body,
+      cursor: "pointer"
+    };
+  }
+
+  if (variant === "danger") {
+    return {
+      border: `1px solid ${archiveTheme.colors.danger}`,
+      borderRadius: archiveTheme.radius.pill,
+      padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
+      background: "rgba(139, 61, 42, 0.12)",
+      color: archiveTheme.colors.danger,
+      fontFamily: archiveTheme.font.body,
+      cursor: "pointer"
+    };
+  }
+
+  return {
+    border: `1px solid ${archiveTheme.colors.line}`,
+    borderRadius: archiveTheme.radius.pill,
+    padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
+    background: archiveTheme.colors.surfaceMuted,
+    color: archiveTheme.colors.text,
+    fontFamily: archiveTheme.font.body,
+    cursor: "pointer"
+  };
+}

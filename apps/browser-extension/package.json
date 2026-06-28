@@ -1,0 +1,12 @@
+{
+  "name": "@vaultkern/browser-extension",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@vaultkern/shared-web-ui": "file:../../packages/shared-web-ui"
+  },
+  "scripts": {
+    "build": "vite build && cp manifest.json dist/manifest.json",
+    "test": "vitest run"
+  }
+}

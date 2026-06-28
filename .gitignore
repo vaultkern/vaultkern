@@ -1,0 +1,15 @@
+/target
+.codex
+.worktrees
+.superpowers/
+AGENTS.md
+CLAUDE.md
+docs/
+spec/
+fixtures/
+tools/deploy_windows_edge.sh
+node_modules/
+dist/
+.vite/
+
+.idea/

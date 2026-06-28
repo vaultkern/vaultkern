@@ -1,0 +1,1565 @@
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+use vaultkern_runtime_protocol::{
+    OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto, OneDriveItemListDto,
+};
+
+use crate::providers::local_file::VaultSourceFingerprint;
+
+const MICROSOFT_AUTH_URL: &str =
+    "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
+const MICROSOFT_TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+const MICROSOFT_GRAPH_ROOT: &str = "https://graph.microsoft.com/v1.0";
+const ONEDRIVE_SCOPES: &str = "Files.ReadWrite offline_access User.Read";
+const DEFAULT_ONEDRIVE_CLIENT_ID: &str = "fb99473a-0151-4033-a862-a7030c10dadc";
+const LOOPBACK_CALLBACK_ADDR: &str = "127.0.0.1:53121";
+const CALLBACK_WAIT_SECONDS: u64 = 600;
+const GRAPH_CHILDREN_SELECT: &str = "id,name,size,eTag,parentReference,folder,file";
+const GRAPH_ITEM_SELECT: &str = "id,name,size,eTag,parentReference,@microsoft.graph.downloadUrl";
+const GRAPH_CHILDREN_PAGE_SIZE: &str = "200";
+const ACCESS_TOKEN_EXPIRY_SKEW: Duration = Duration::from_secs(120);
+const MAX_AUTHORIZED_GET_ATTEMPTS: usize = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OneDriveSnapshot {
+    pub bytes: Vec<u8>,
+    pub fingerprint: VaultSourceFingerprint,
+    pub name: String,
+    pub account_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OneDriveMetadata {
+    pub drive_id: String,
+    pub item_id: String,
+    pub name: String,
+    pub account_label: String,
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OneDriveRemoteState {
+    pub name: String,
+    pub size: Option<u64>,
+    pub e_tag: Option<String>,
+    pub download_url: Option<String>,
+    memory_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OneDriveMemoryAccessCounts {
+    pub remote_state_reads: usize,
+    pub snapshot_reads: usize,
+    pub snapshot_from_state_reads: usize,
+}
+
+impl OneDriveRemoteState {
+    pub fn matches_fingerprint(&self, fingerprint: &VaultSourceFingerprint) -> bool {
+        if self.size != Some(fingerprint.size_bytes) {
+            return false;
+        }
+        if let Some(revision) = self.memory_revision {
+            return fingerprint.modified_at == Some(revision);
+        }
+        self.e_tag
+            .as_deref()
+            .map(stable_u64_for_text)
+            .is_some_and(|etag| fingerprint.modified_at == Some(etag))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MemoryOneDriveItem {
+    drive_id: String,
+    item_id: String,
+    name: String,
+    account_label: String,
+    bytes: Vec<u8>,
+    revision: u64,
+}
+
+pub struct OneDriveVaultSourceProvider {
+    client_id: Option<String>,
+    auth_url: String,
+    token_url: String,
+    graph_root: String,
+    callback_addr: String,
+    token_cache_path: Option<PathBuf>,
+    token_state: RefCell<Option<OneDriveTokenState>>,
+    pending_login: Option<PendingOneDriveLogin>,
+    test_code_verifier: Option<String>,
+    memory_items: BTreeMap<(String, String), MemoryOneDriveItem>,
+    memory_remote_state_reads: Cell<usize>,
+    memory_snapshot_reads: Cell<usize>,
+    memory_snapshot_from_state_reads: Cell<usize>,
+}
+
+struct PendingOneDriveLogin {
+    redirect_uri: String,
+    code_verifier: String,
+    code_receiver: Receiver<Result<String, String>>,
+}
+
+#[derive(Debug, Clone)]
+struct OneDriveTokenState {
+    access_token: Option<String>,
+    access_expires_at: Option<Instant>,
+    refresh_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphMeResponse {
+    #[serde(default)]
+    user_principal_name: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphChildrenResponse {
+    value: Vec<GraphDriveItem>,
+    #[serde(default, rename = "@odata.nextLink")]
+    next_link: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphDriveItem {
+    id: String,
+    name: String,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    e_tag: Option<String>,
+    #[serde(default)]
+    parent_reference: Option<GraphParentReference>,
+    #[serde(default)]
+    folder: Option<serde_json::Value>,
+    #[serde(default, rename = "@microsoft.graph.downloadUrl")]
+    download_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphWriteResponse {
+    #[serde(default)]
+    e_tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphParentReference {
+    #[serde(default)]
+    drive_id: Option<String>,
+}
+
+impl OneDriveVaultSourceProvider {
+    pub fn new_from_env() -> Self {
+        let token_cache_path = token_cache_path_from_env();
+        let refresh_token = std::env::var("KEEPASS_ONEDRIVE_REFRESH_TOKEN")
+            .ok()
+            .or_else(|| {
+                token_cache_path
+                    .as_deref()
+                    .and_then(|path| load_cached_refresh_token(path).ok().flatten())
+            });
+        let token_state = refresh_token.map(|refresh_token| OneDriveTokenState {
+            access_token: None,
+            access_expires_at: None,
+            refresh_token,
+        });
+        Self {
+            client_id: Some(
+                std::env::var("KEEPASS_ONEDRIVE_CLIENT_ID")
+                    .unwrap_or_else(|_| DEFAULT_ONEDRIVE_CLIENT_ID.into()),
+            ),
+            auth_url: std::env::var("KEEPASS_ONEDRIVE_AUTH_URL")
+                .unwrap_or_else(|_| MICROSOFT_AUTH_URL.into()),
+            token_url: std::env::var("KEEPASS_ONEDRIVE_TOKEN_URL")
+                .unwrap_or_else(|_| MICROSOFT_TOKEN_URL.into()),
+            graph_root: std::env::var("KEEPASS_ONEDRIVE_GRAPH_ROOT")
+                .unwrap_or_else(|_| MICROSOFT_GRAPH_ROOT.into()),
+            callback_addr: LOOPBACK_CALLBACK_ADDR.into(),
+            token_cache_path,
+            token_state: RefCell::new(token_state),
+            pending_login: None,
+            test_code_verifier: None,
+            memory_items: BTreeMap::new(),
+            memory_remote_state_reads: Cell::new(0),
+            memory_snapshot_reads: Cell::new(0),
+            memory_snapshot_from_state_reads: Cell::new(0),
+        }
+    }
+
+    pub fn new_in_memory() -> Self {
+        Self {
+            client_id: Some("test-client-id".into()),
+            auth_url: MICROSOFT_AUTH_URL.into(),
+            token_url: MICROSOFT_TOKEN_URL.into(),
+            graph_root: MICROSOFT_GRAPH_ROOT.into(),
+            callback_addr: LOOPBACK_CALLBACK_ADDR.into(),
+            token_cache_path: None,
+            token_state: RefCell::new(None),
+            pending_login: None,
+            test_code_verifier: None,
+            memory_items: BTreeMap::new(),
+            memory_remote_state_reads: Cell::new(0),
+            memory_snapshot_reads: Cell::new(0),
+            memory_snapshot_from_state_reads: Cell::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_graph_tests(
+        client_id: &str,
+        auth_url: &str,
+        token_url: &str,
+        graph_root: &str,
+    ) -> Self {
+        Self {
+            client_id: Some(client_id.into()),
+            auth_url: auth_url.into(),
+            token_url: token_url.into(),
+            graph_root: graph_root.trim_end_matches('/').into(),
+            callback_addr: "127.0.0.1:0".into(),
+            token_cache_path: None,
+            token_state: RefCell::new(None),
+            pending_login: None,
+            test_code_verifier: None,
+            memory_items: BTreeMap::new(),
+            memory_remote_state_reads: Cell::new(0),
+            memory_snapshot_reads: Cell::new(0),
+            memory_snapshot_from_state_reads: Cell::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    fn set_test_tokens(&mut self, access_token: &str, refresh_token: &str) {
+        self.token_state.replace(Some(OneDriveTokenState {
+            access_token: Some(access_token.into()),
+            access_expires_at: Some(Instant::now() + Duration::from_secs(3600)),
+            refresh_token: refresh_token.into(),
+        }));
+    }
+
+    #[cfg(test)]
+    fn set_expired_test_tokens(&mut self, access_token: &str, refresh_token: &str) {
+        self.token_state.replace(Some(OneDriveTokenState {
+            access_token: Some(access_token.into()),
+            access_expires_at: Some(Instant::now() - Duration::from_secs(1)),
+            refresh_token: refresh_token.into(),
+        }));
+    }
+
+    #[cfg(test)]
+    fn set_test_code_verifier(&mut self, code_verifier: &str) {
+        self.test_code_verifier = Some(code_verifier.into());
+    }
+
+    #[cfg(test)]
+    fn set_test_token_cache_path(&mut self, path: PathBuf) {
+        let refresh_token = load_cached_refresh_token(&path).ok().flatten();
+        self.token_cache_path = Some(path);
+        if let Some(refresh_token) = refresh_token {
+            self.token_state.replace(Some(OneDriveTokenState {
+                access_token: None,
+                access_expires_at: None,
+                refresh_token,
+            }));
+        }
+    }
+
+    pub fn insert_memory_item(
+        &mut self,
+        drive_id: &str,
+        item_id: &str,
+        name: &str,
+        account_label: &str,
+        bytes: Vec<u8>,
+    ) {
+        self.memory_items.insert(
+            (drive_id.to_owned(), item_id.to_owned()),
+            MemoryOneDriveItem {
+                drive_id: drive_id.to_owned(),
+                item_id: item_id.to_owned(),
+                name: name.to_owned(),
+                account_label: account_label.to_owned(),
+                bytes,
+                revision: 1,
+            },
+        );
+    }
+
+    pub fn replace_memory_item(&mut self, drive_id: &str, item_id: &str, bytes: Vec<u8>) {
+        if let Some(item) = self
+            .memory_items
+            .get_mut(&(drive_id.to_owned(), item_id.to_owned()))
+        {
+            item.bytes = bytes;
+            item.revision += 1;
+        }
+    }
+
+    pub fn remove_memory_item(&mut self, drive_id: &str, item_id: &str) {
+        self.memory_items
+            .remove(&(drive_id.to_owned(), item_id.to_owned()));
+    }
+
+    pub fn read_memory_item_bytes(&self, drive_id: &str, item_id: &str) -> Result<Vec<u8>> {
+        Ok(self.item(drive_id, item_id)?.bytes.clone())
+    }
+
+    pub fn reset_memory_access_counts(&self) {
+        self.memory_remote_state_reads.set(0);
+        self.memory_snapshot_reads.set(0);
+        self.memory_snapshot_from_state_reads.set(0);
+    }
+
+    pub fn memory_access_counts(&self) -> OneDriveMemoryAccessCounts {
+        OneDriveMemoryAccessCounts {
+            remote_state_reads: self.memory_remote_state_reads.get(),
+            snapshot_reads: self.memory_snapshot_reads.get(),
+            snapshot_from_state_reads: self.memory_snapshot_from_state_reads.get(),
+        }
+    }
+
+    pub fn begin_login(&mut self) -> Result<OneDriveAuthSessionDto> {
+        let client_id = self
+            .client_id
+            .as_deref()
+            .context("KEEPASS_ONEDRIVE_CLIENT_ID is not configured")?;
+        let (code_receiver, redirect_uri) = start_loopback_callback_listener(&self.callback_addr)?;
+        let code_verifier = self
+            .test_code_verifier
+            .clone()
+            .unwrap_or_else(new_code_verifier);
+        let challenge = code_challenge(&code_verifier);
+        let auth_url = format!(
+            "{auth_url}?client_id={client_id}&response_type=code&redirect_uri={redirect_uri}&scope={scope}&code_challenge={challenge}&code_challenge_method=S256",
+            auth_url = self.auth_url,
+            client_id = encode_component(client_id),
+            redirect_uri = encode_component(&redirect_uri),
+            scope = encode_component(ONEDRIVE_SCOPES),
+            challenge = encode_component(&challenge),
+        );
+
+        self.pending_login = Some(PendingOneDriveLogin {
+            redirect_uri: redirect_uri.clone(),
+            code_verifier: code_verifier.clone(),
+            code_receiver,
+        });
+
+        Ok(OneDriveAuthSessionDto {
+            auth_url,
+            redirect_uri,
+            code_verifier,
+            expires_in_seconds: 600,
+        })
+    }
+
+    pub fn complete_pending_login(&mut self) -> Result<OneDriveAuthStatusDto> {
+        let pending = self
+            .pending_login
+            .take()
+            .context("OneDrive login has not been started")?;
+        let code = pending
+            .code_receiver
+            .recv_timeout(Duration::from_secs(CALLBACK_WAIT_SECONDS))
+            .context("timed out waiting for OneDrive callback")?
+            .map_err(anyhow::Error::msg)?;
+        self.complete_login(&code, &pending.redirect_uri, &pending.code_verifier)
+    }
+
+    pub fn complete_login(
+        &mut self,
+        code: &str,
+        redirect_uri: &str,
+        code_verifier: &str,
+    ) -> Result<OneDriveAuthStatusDto> {
+        if !self.memory_items.is_empty() {
+            let account_label = self
+                .memory_items
+                .values()
+                .next()
+                .map(|item| item.account_label.clone());
+            return Ok(OneDriveAuthStatusDto {
+                status: "authorized".into(),
+                account_label,
+            });
+        }
+
+        let client_id = self
+            .client_id
+            .as_deref()
+            .context("KEEPASS_ONEDRIVE_CLIENT_ID is not configured")?;
+        let token = ureq::post(&self.token_url)
+            .send_form(&[
+                ("client_id", client_id),
+                ("scope", ONEDRIVE_SCOPES),
+                ("code", code),
+                ("redirect_uri", redirect_uri),
+                ("grant_type", "authorization_code"),
+                ("code_verifier", code_verifier),
+            ])
+            .context("failed to exchange OneDrive authorization code")?
+            .into_json::<TokenResponse>()
+            .context("failed to decode OneDrive token response")?;
+        let refresh_token = token
+            .refresh_token
+            .clone()
+            .context("OneDrive token response did not include refresh_token")?;
+        let expires_at = access_expires_at(&token);
+        self.token_state.replace(Some(OneDriveTokenState {
+            access_token: Some(token.access_token),
+            access_expires_at: expires_at,
+            refresh_token: refresh_token.clone(),
+        }));
+        self.store_refresh_token(&refresh_token)?;
+
+        Ok(OneDriveAuthStatusDto {
+            status: "authorized".into(),
+            account_label: Some(self.account_label()?),
+        })
+    }
+
+    pub fn list_children(&self, parent_item_id: Option<&str>) -> Result<OneDriveItemListDto> {
+        if !self.memory_items.is_empty() {
+            return Ok(OneDriveItemListDto {
+                items: self
+                    .memory_items
+                    .values()
+                    .map(|item| OneDriveItemDto {
+                        drive_id: item.drive_id.clone(),
+                        item_id: item.item_id.clone(),
+                        name: item.name.clone(),
+                        folder: false,
+                        size: Some(item.bytes.len() as u64),
+                    })
+                    .collect(),
+            });
+        }
+
+        let path = if let Some(parent_item_id) = parent_item_id {
+            format!(
+                "/me/drive/items/{}/children",
+                encode_component(parent_item_id)
+            )
+        } else {
+            "/me/drive/root/children".into()
+        };
+        let mut url = self.graph_url_with_query(
+            &path,
+            &[
+                ("$select", GRAPH_CHILDREN_SELECT),
+                ("$top", GRAPH_CHILDREN_PAGE_SIZE),
+            ],
+        );
+        let mut items = Vec::new();
+
+        loop {
+            let response = self
+                .authorized_get(&url)?
+                .into_json::<GraphChildrenResponse>()
+                .context("failed to decode OneDrive children response")?;
+            items.extend(response.value.into_iter().filter_map(|item| {
+                let drive_id = item.parent_reference?.drive_id?;
+                Some(OneDriveItemDto {
+                    drive_id,
+                    item_id: item.id,
+                    name: item.name,
+                    folder: item.folder.is_some(),
+                    size: item.size,
+                })
+            }));
+
+            let Some(next_link) = response.next_link else {
+                break;
+            };
+            url = next_link;
+        }
+
+        Ok(OneDriveItemListDto { items })
+    }
+
+    pub fn metadata(&self, drive_id: &str, item_id: &str) -> Result<OneDriveMetadata> {
+        if self.memory_items.is_empty() {
+            let item = self.graph_item(drive_id, item_id)?;
+            return Ok(OneDriveMetadata {
+                drive_id: drive_id.to_owned(),
+                item_id: item.id,
+                name: item.name,
+                account_label: "OneDrive".into(),
+                size: item.size,
+            });
+        }
+
+        let item = self.item(drive_id, item_id)?;
+        Ok(OneDriveMetadata {
+            drive_id: item.drive_id.clone(),
+            item_id: item.item_id.clone(),
+            name: item.name.clone(),
+            account_label: item.account_label.clone(),
+            size: Some(item.bytes.len() as u64),
+        })
+    }
+
+    pub fn read_snapshot(&self, drive_id: &str, item_id: &str) -> Result<OneDriveSnapshot> {
+        if self.memory_items.is_empty() {
+            let item = self.graph_item(drive_id, item_id)?;
+            return self.read_snapshot_from_state(drive_id, item_id, &remote_state_for_item(item));
+        }
+
+        self.memory_snapshot_reads
+            .set(self.memory_snapshot_reads.get() + 1);
+        let item = self.item(drive_id, item_id)?;
+        Ok(OneDriveSnapshot {
+            bytes: item.bytes.clone(),
+            fingerprint: fingerprint_for_memory_item(item),
+            name: item.name.clone(),
+            account_label: item.account_label.clone(),
+        })
+    }
+
+    pub fn remote_state(&self, drive_id: &str, item_id: &str) -> Result<OneDriveRemoteState> {
+        if self.memory_items.is_empty() {
+            return self
+                .graph_item(drive_id, item_id)
+                .map(remote_state_for_item);
+        }
+
+        self.memory_remote_state_reads
+            .set(self.memory_remote_state_reads.get() + 1);
+        let item = self.item(drive_id, item_id)?;
+        Ok(OneDriveRemoteState {
+            name: item.name.clone(),
+            size: Some(item.bytes.len() as u64),
+            e_tag: None,
+            download_url: None,
+            memory_revision: Some(item.revision),
+        })
+    }
+
+    pub fn read_snapshot_from_state(
+        &self,
+        drive_id: &str,
+        item_id: &str,
+        state: &OneDriveRemoteState,
+    ) -> Result<OneDriveSnapshot> {
+        if !self.memory_items.is_empty() {
+            self.memory_snapshot_from_state_reads
+                .set(self.memory_snapshot_from_state_reads.get() + 1);
+            return self.read_snapshot(drive_id, item_id);
+        }
+
+        let bytes = self.download_item_bytes(drive_id, item_id, state.download_url.as_deref())?;
+        Ok(OneDriveSnapshot {
+            fingerprint: fingerprint_for_graph_item(&bytes, state.e_tag.as_deref()),
+            bytes,
+            name: state.name.clone(),
+            account_label: "OneDrive".into(),
+        })
+    }
+
+    pub fn write_with_known_etag(
+        &mut self,
+        drive_id: &str,
+        item_id: &str,
+        bytes: &[u8],
+        if_match: Option<&str>,
+    ) -> Result<VaultSourceFingerprint> {
+        if !self.memory_items.is_empty() {
+            let item = self
+                .memory_items
+                .get_mut(&(drive_id.to_owned(), item_id.to_owned()))
+                .with_context(|| format!("OneDrive item not found: {drive_id}/{item_id}"))?;
+            item.bytes = bytes.to_vec();
+            item.revision += 1;
+            return Ok(fingerprint_for_memory_item(item));
+        }
+
+        let mut request = self.authorized_request(
+            "PUT",
+            &self.graph_url(&format!(
+                "/drives/{}/items/{}/content",
+                encode_component(drive_id),
+                encode_component(item_id)
+            )),
+        )?;
+        if let Some(etag) = if_match {
+            request = request.set("If-Match", etag);
+        }
+        let response = request
+            .send_bytes(bytes)
+            .context("failed to upload OneDrive item content")?;
+        let response_etag = response
+            .into_json::<GraphWriteResponse>()
+            .ok()
+            .and_then(|body| body.e_tag);
+        Ok(fingerprint_for_graph_item(
+            bytes,
+            response_etag.as_deref().or(if_match),
+        ))
+    }
+
+    fn item(&self, drive_id: &str, item_id: &str) -> Result<&MemoryOneDriveItem> {
+        self.memory_items
+            .get(&(drive_id.to_owned(), item_id.to_owned()))
+            .with_context(|| format!("OneDrive item not found: {drive_id}/{item_id}"))
+    }
+
+    fn account_label(&self) -> Result<String> {
+        let me = self
+            .authorized_get(&self.graph_url("/me"))?
+            .into_json::<GraphMeResponse>()
+            .context("failed to decode OneDrive account response")?;
+        Ok(me
+            .user_principal_name
+            .or(me.display_name)
+            .unwrap_or_else(|| "OneDrive".into()))
+    }
+
+    fn graph_item(&self, drive_id: &str, item_id: &str) -> Result<GraphDriveItem> {
+        let url = self.graph_url_with_query(
+            &format!(
+                "/drives/{}/items/{}",
+                encode_component(drive_id),
+                encode_component(item_id)
+            ),
+            &[("$select", GRAPH_ITEM_SELECT)],
+        );
+        self.authorized_get(&url)?
+            .into_json::<GraphDriveItem>()
+            .context("failed to decode OneDrive item metadata")
+    }
+
+    fn graph_url(&self, path: &str) -> String {
+        format!("{}{}", self.graph_root.trim_end_matches('/'), path)
+    }
+
+    fn graph_url_with_query(&self, path: &str, query: &[(&str, &str)]) -> String {
+        let mut url = self.graph_url(path);
+        let encoded = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(query.iter().copied())
+            .finish();
+        url.push('?');
+        url.push_str(&encoded);
+        url
+    }
+
+    fn download_item_bytes(
+        &self,
+        drive_id: &str,
+        item_id: &str,
+        download_url: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let response = if let Some(download_url) = download_url {
+            ureq::get(download_url)
+                .call()
+                .map_err(anyhow::Error::from)?
+        } else {
+            self.authorized_get(&self.graph_url(&format!(
+                "/drives/{}/items/{}/content",
+                encode_component(drive_id),
+                encode_component(item_id)
+            )))?
+        };
+
+        let mut reader = response.into_reader();
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .context("failed to read OneDrive item content")?;
+        Ok(bytes)
+    }
+
+    fn authorized_get(&self, url: &str) -> Result<ureq::Response> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.authorized_request("GET", url)?.call() {
+                Ok(response) => return Ok(response),
+                Err(ureq::Error::Status(401, _)) if attempt == 1 => {
+                    self.clear_access_token();
+                    continue;
+                }
+                Err(ureq::Error::Status(status, response))
+                    if is_retryable_graph_status(status)
+                        && attempt < MAX_AUTHORIZED_GET_ATTEMPTS =>
+                {
+                    wait_for_retry_after(&response);
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn authorized_request(&self, method: &str, url: &str) -> Result<ureq::Request> {
+        let access_token = self.access_token()?;
+        Ok(ureq::request(method, url).set("Authorization", &format!("Bearer {access_token}")))
+    }
+
+    fn access_token(&self) -> Result<String> {
+        if let Some(state) = self.token_state.borrow().as_ref() {
+            if let Some(access_token) = state.access_token.clone() {
+                let token_is_fresh = state.access_expires_at.is_some_and(|expires_at| {
+                    expires_at > Instant::now() + ACCESS_TOKEN_EXPIRY_SKEW
+                });
+                if token_is_fresh {
+                    return Ok(access_token);
+                }
+            }
+        }
+        self.refresh_access_token()
+    }
+
+    fn clear_access_token(&self) {
+        if let Some(state) = self.token_state.borrow_mut().as_mut() {
+            state.access_token = None;
+            state.access_expires_at = None;
+        }
+    }
+
+    fn refresh_access_token(&self) -> Result<String> {
+        let client_id = self
+            .client_id
+            .as_deref()
+            .context("KEEPASS_ONEDRIVE_CLIENT_ID is not configured")?;
+        let refresh_token = self
+            .token_state
+            .borrow()
+            .as_ref()
+            .map(|state| state.refresh_token.clone())
+            .or_else(|| std::env::var("KEEPASS_ONEDRIVE_REFRESH_TOKEN").ok())
+            .context("OneDrive account is not connected")?;
+        let token = ureq::post(&self.token_url)
+            .send_form(&[
+                ("client_id", client_id),
+                ("scope", ONEDRIVE_SCOPES),
+                ("refresh_token", &refresh_token),
+                ("grant_type", "refresh_token"),
+            ])
+            .context("failed to refresh OneDrive access token")?
+            .into_json::<TokenResponse>()
+            .context("failed to decode OneDrive refresh response")?;
+        let expires_at = access_expires_at(&token);
+        let next_refresh = token.refresh_token.unwrap_or(refresh_token);
+        self.token_state.replace(Some(OneDriveTokenState {
+            access_token: Some(token.access_token.clone()),
+            access_expires_at: expires_at,
+            refresh_token: next_refresh.clone(),
+        }));
+        self.store_refresh_token(&next_refresh)?;
+        Ok(token.access_token)
+    }
+
+    fn store_refresh_token(&self, refresh_token: &str) -> Result<()> {
+        let Some(path) = &self.token_cache_path else {
+            return Ok(());
+        };
+        store_cached_refresh_token(path, refresh_token)
+    }
+}
+
+fn fingerprint_for_memory_item(item: &MemoryOneDriveItem) -> VaultSourceFingerprint {
+    let mut hasher = Sha256::new();
+    hasher.update(&item.bytes);
+    let content_sha256 = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    VaultSourceFingerprint {
+        content_sha256,
+        size_bytes: item.bytes.len() as u64,
+        modified_at: Some(item.revision),
+    }
+}
+
+fn remote_state_for_item(item: GraphDriveItem) -> OneDriveRemoteState {
+    OneDriveRemoteState {
+        name: item.name,
+        size: item.size,
+        e_tag: item.e_tag,
+        download_url: item.download_url,
+        memory_revision: None,
+    }
+}
+
+fn access_expires_at(token: &TokenResponse) -> Option<Instant> {
+    token
+        .expires_in
+        .map(|seconds| Instant::now() + Duration::from_secs(seconds))
+}
+
+fn is_retryable_graph_status(status: u16) -> bool {
+    matches!(status, 429 | 503)
+}
+
+fn wait_for_retry_after(response: &ureq::Response) {
+    let Some(seconds) = response
+        .header("Retry-After")
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return;
+    };
+    std::thread::sleep(Duration::from_secs(seconds.min(5)));
+}
+
+fn start_loopback_callback_listener(
+    callback_addr: &str,
+) -> Result<(Receiver<Result<String, String>>, String)> {
+    let listener = TcpListener::bind(callback_addr)
+        .with_context(|| format!("failed to listen for OneDrive callback on {callback_addr}"))?;
+    let local_addr = listener
+        .local_addr()
+        .context("failed to resolve OneDrive callback listener address")?;
+    let redirect_uri = format!("http://{local_addr}/callback");
+    let (sender, receiver) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let result = match listener.accept() {
+            Ok((mut stream, _)) => {
+                let mut buffer = [0_u8; 8192];
+                match stream.read(&mut buffer) {
+                    Ok(len) => {
+                        let request = String::from_utf8_lossy(&buffer[..len]);
+                        let code_result = parse_callback_code(&request);
+                        let response = if code_result.is_ok() {
+                            callback_response(
+                                "200 OK",
+                                "OneDrive authorization complete. You can return to VaultKern.",
+                            )
+                        } else {
+                            callback_response(
+                                "400 Bad Request",
+                                "OneDrive authorization failed. You can close this tab.",
+                            )
+                        };
+                        let _ = stream.write_all(response.as_bytes());
+                        code_result
+                    }
+                    Err(error) => Err(format!("failed to read OneDrive callback: {error}")),
+                }
+            }
+            Err(error) => Err(format!("failed to accept OneDrive callback: {error}")),
+        };
+        let _ = sender.send(result);
+    });
+
+    Ok((receiver, redirect_uri))
+}
+
+fn parse_callback_code(request: &str) -> Result<String, String> {
+    let first_line = request
+        .lines()
+        .next()
+        .ok_or_else(|| "empty OneDrive callback request".to_owned())?;
+    let mut parts = first_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| "missing OneDrive callback method".to_owned())?;
+    let path = parts
+        .next()
+        .ok_or_else(|| "missing OneDrive callback path".to_owned())?;
+    if method != "GET" {
+        return Err("OneDrive callback used an unsupported HTTP method".into());
+    }
+
+    let url = url::Url::parse(&format!("http://127.0.0.1{path}"))
+        .map_err(|error| format!("invalid OneDrive callback URL: {error}"))?;
+    if let Some(error) = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "error").then(|| value.into_owned()))
+    {
+        return Err(format!("OneDrive authorization failed: {error}"));
+    }
+    url.query_pairs()
+        .find_map(|(key, value)| (key == "code").then(|| value.into_owned()))
+        .filter(|code| !code.trim().is_empty())
+        .ok_or_else(|| "OneDrive callback did not include an authorization code".to_owned())
+}
+
+fn callback_response(status: &str, body: &str) -> String {
+    let html = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>VaultKern OneDrive</title><body>{body}</body>"
+    );
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+        html.len()
+    )
+}
+
+fn token_cache_path_from_env() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("KEEPASS_ONEDRIVE_TOKEN_CACHE") {
+        return Some(PathBuf::from(path));
+    }
+
+    if cfg!(windows) {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            return Some(
+                PathBuf::from(local_app_data)
+                    .join("vaultkern-runtime")
+                    .join("onedrive-refresh-token"),
+            );
+        }
+    }
+
+    if let Ok(state_home) = std::env::var("XDG_STATE_HOME") {
+        return Some(
+            PathBuf::from(state_home)
+                .join("vaultkern-runtime")
+                .join("onedrive-refresh-token"),
+        );
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(
+            PathBuf::from(home)
+                .join(".local")
+                .join("state")
+                .join("vaultkern-runtime")
+                .join("onedrive-refresh-token"),
+        );
+    }
+
+    None
+}
+
+fn load_cached_refresh_token(path: &Path) -> Result<Option<String>> {
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(None);
+    };
+    let token = String::from_utf8(bytes)
+        .with_context(|| format!("failed to decode OneDrive token cache: {}", path.display()))?;
+    let trimmed = token.trim().to_owned();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed))
+}
+
+fn store_cached_refresh_token(path: &Path, refresh_token: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create OneDrive token cache dir: {}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(path, refresh_token.as_bytes())
+        .with_context(|| format!("failed to write OneDrive token cache: {}", path.display()))
+}
+
+fn fingerprint_for_graph_item(bytes: &[u8], etag: Option<&str>) -> VaultSourceFingerprint {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let content_sha256 = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    VaultSourceFingerprint {
+        content_sha256,
+        size_bytes: bytes.len() as u64,
+        modified_at: etag.map(stable_u64_for_text),
+    }
+}
+
+fn stable_u64_for_text(value: &str) -> u64 {
+    let digest = Sha256::digest(value.as_bytes());
+    u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ])
+}
+
+fn new_code_verifier() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn code_challenge(verifier: &str) -> String {
+    let digest = Sha256::digest(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn encode_component(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OneDriveVaultSourceProvider, stable_u64_for_text};
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    #[test]
+    fn provider_uses_bundled_public_client_id_when_env_is_missing() {
+        let previous = std::env::var_os("KEEPASS_ONEDRIVE_CLIENT_ID");
+        unsafe {
+            std::env::remove_var("KEEPASS_ONEDRIVE_CLIENT_ID");
+        }
+
+        let result = OneDriveVaultSourceProvider::new_from_env().begin_login();
+
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("KEEPASS_ONEDRIVE_CLIENT_ID", value);
+            },
+            None => unsafe {
+                std::env::remove_var("KEEPASS_ONEDRIVE_CLIENT_ID");
+            },
+        }
+
+        let session = result.expect("begin login with bundled public client id");
+        assert!(
+            session
+                .auth_url
+                .contains("client_id=fb99473a-0151-4033-a862-a7030c10dadc")
+        );
+        let port = callback_port(&session.redirect_uri);
+        let _ = send_callback(port, "code=ignored");
+    }
+
+    #[test]
+    fn provider_receives_authorization_code_from_loopback_callback() {
+        let mut server = mockito::Server::new();
+        let token = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("client_id".into(), "client-1".into()),
+                mockito::Matcher::UrlEncoded("code".into(), "auth-code".into()),
+                mockito::Matcher::UrlEncoded("code_verifier".into(), "verifier".into()),
+                mockito::Matcher::UrlEncoded("grant_type".into(), "authorization_code".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"access-1","refresh_token":"refresh-1","expires_in":3600}"#,
+            )
+            .create();
+        let me = server
+            .mock("GET", "/v1.0/me")
+            .match_header("authorization", "Bearer access-1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"userPrincipalName":"alice@example.com"}"#)
+            .create();
+
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_test_code_verifier("verifier");
+        let auth = provider.begin_login().unwrap();
+        let port = callback_port(&auth.redirect_uri);
+        let callback = std::thread::spawn(move || send_callback(port, "code=auth-code"));
+
+        let status = provider.complete_pending_login().unwrap();
+
+        assert_eq!(status.account_label.as_deref(), Some("alice@example.com"));
+        assert!(
+            callback
+                .join()
+                .unwrap()
+                .contains("OneDrive authorization complete")
+        );
+        token.assert();
+        me.assert();
+    }
+
+    #[test]
+    fn graph_provider_completes_login_and_lists_children() {
+        let mut server = mockito::Server::new();
+        let token = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("client_id".into(), "client-1".into()),
+                mockito::Matcher::UrlEncoded("code".into(), "auth-code".into()),
+                mockito::Matcher::UrlEncoded("code_verifier".into(), "verifier".into()),
+                mockito::Matcher::UrlEncoded("grant_type".into(), "authorization_code".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"access-1","refresh_token":"refresh-1","expires_in":3600}"#,
+            )
+            .create();
+        let me = server
+            .mock("GET", "/v1.0/me")
+            .match_header("authorization", "Bearer access-1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"userPrincipalName":"alice@example.com"}"#)
+            .create();
+        let children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "$select".into(),
+                    "id,name,size,eTag,parentReference,folder,file".into(),
+                ),
+                mockito::Matcher::UrlEncoded("$top".into(), "200".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"value":[{"id":"item-1","name":"Vault.kdbx","size":42,"parentReference":{"driveId":"drive-1"},"file":{}}]}"#,
+            )
+            .create();
+
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+
+        let status = provider
+            .complete_login("auth-code", "http://127.0.0.1/callback", "verifier")
+            .unwrap();
+        let items = provider.list_children(None).unwrap();
+
+        assert_eq!(status.status, "authorized");
+        assert_eq!(status.account_label.as_deref(), Some("alice@example.com"));
+        assert_eq!(items.items.len(), 1);
+        assert_eq!(items.items[0].drive_id, "drive-1");
+        assert_eq!(items.items[0].item_id, "item-1");
+        token.assert();
+        me.assert();
+        children.assert();
+    }
+
+    #[test]
+    fn graph_provider_lists_children_with_minimal_fields_and_follows_next_link() {
+        let mut server = mockito::Server::new();
+        let first_page = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "$select".into(),
+                    "id,name,size,eTag,parentReference,folder,file".into(),
+                ),
+                mockito::Matcher::UrlEncoded("$top".into(), "200".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"value":[{{"id":"item-1","name":"First.kdbx","size":42,"parentReference":{{"driveId":"drive-1"}},"file":{{}}}}],"@odata.nextLink":"{}/v1.0/me/drive/root/children?$skiptoken=page-2"}}"#,
+                server.url()
+            ))
+            .create();
+        let second_page = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "$skiptoken".into(),
+                "page-2".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"value":[{"id":"item-2","name":"Second.kdbx","size":64,"parentReference":{"driveId":"drive-1"},"file":{}}]}"#,
+            )
+            .create();
+
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_test_tokens("access-1", "refresh-1");
+
+        let items = provider.list_children(None).unwrap();
+
+        assert_eq!(
+            items
+                .items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["First.kdbx", "Second.kdbx"]
+        );
+        first_page.assert();
+        second_page.assert();
+    }
+
+    #[test]
+    fn graph_provider_reads_metadata_content_and_writes_with_etag() {
+        let mut server = mockito::Server::new();
+        let metadata = server
+            .mock("GET", "/v1.0/drives/drive-1/items/item-1")
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "$select".into(),
+                "id,name,size,eTag,parentReference,@microsoft.graph.downloadUrl".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"item-1","name":"Vault.kdbx","size":4,"eTag":"etag-1","parentReference":{"driveId":"drive-1"}}"#,
+            )
+            .expect(3)
+            .create();
+        let content = server
+            .mock("GET", "/v1.0/drives/drive-1/items/item-1/content")
+            .match_header("authorization", "Bearer access-1")
+            .with_status(200)
+            .with_body("kdbx")
+            .create();
+        let write = server
+            .mock("PUT", "/v1.0/drives/drive-1/items/item-1/content")
+            .match_header("authorization", "Bearer access-1")
+            .match_header("if-match", "etag-1")
+            .match_body("next")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":"item-1"}"#)
+            .create();
+
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_test_tokens("access-1", "refresh-1");
+
+        let item_metadata = provider.metadata("drive-1", "item-1").unwrap();
+        let state = provider.remote_state("drive-1", "item-1").unwrap();
+        let snapshot = provider.read_snapshot("drive-1", "item-1").unwrap();
+        provider
+            .write_with_known_etag("drive-1", "item-1", b"next", state.e_tag.as_deref())
+            .unwrap();
+
+        assert_eq!(item_metadata.account_label, "OneDrive");
+        assert_eq!(snapshot.bytes, b"kdbx");
+        metadata.assert();
+        content.assert();
+        write.assert();
+    }
+
+    #[test]
+    fn graph_provider_refreshes_before_using_expired_cached_access_token() {
+        let mut server = mockito::Server::new();
+        let refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("client_id".into(), "client-1".into()),
+                mockito::Matcher::UrlEncoded("refresh_token".into(), "refresh-1".into()),
+                mockito::Matcher::UrlEncoded("grant_type".into(), "refresh_token".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"fresh-access","refresh_token":"refresh-2","expires_in":3600}"#,
+            )
+            .create();
+        let children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer fresh-access")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "$select".into(),
+                    "id,name,size,eTag,parentReference,folder,file".into(),
+                ),
+                mockito::Matcher::UrlEncoded("$top".into(), "200".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"value":[{"id":"item-1","name":"Vault.kdbx","size":42,"parentReference":{"driveId":"drive-1"},"file":{}}]}"#,
+            )
+            .create();
+
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_expired_test_tokens("expired-access", "refresh-1");
+
+        let items = provider.list_children(None).unwrap();
+
+        assert_eq!(items.items[0].name, "Vault.kdbx");
+        refresh.assert();
+        children.assert();
+    }
+
+    #[test]
+    fn graph_provider_retries_get_after_retry_after_throttle() {
+        let mut server = mockito::Server::new();
+        let throttled_children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "$select".into(),
+                    "id,name,size,eTag,parentReference,folder,file".into(),
+                ),
+                mockito::Matcher::UrlEncoded("$top".into(), "200".into()),
+            ]))
+            .with_status(429)
+            .with_header("retry-after", "0")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"code":"tooManyRequests"}}"#)
+            .create();
+        let fresh_children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "$select".into(),
+                    "id,name,size,eTag,parentReference,folder,file".into(),
+                ),
+                mockito::Matcher::UrlEncoded("$top".into(), "200".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"value":[{"id":"item-1","name":"Vault.kdbx","size":42,"parentReference":{"driveId":"drive-1"},"file":{}}]}"#,
+            )
+            .create();
+
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_test_tokens("access-1", "refresh-1");
+
+        let items = provider.list_children(None).unwrap();
+
+        assert_eq!(items.items[0].name, "Vault.kdbx");
+        throttled_children.assert();
+        fresh_children.assert();
+    }
+
+    #[test]
+    fn graph_provider_writes_with_known_etag_without_fetching_metadata() {
+        let mut server = mockito::Server::new();
+        let write = server
+            .mock("PUT", "/v1.0/drives/drive-1/items/item-1/content")
+            .match_header("authorization", "Bearer access-1")
+            .match_header("if-match", "etag-1")
+            .match_body("next")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"eTag":"etag-2"}"#)
+            .create();
+
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_test_tokens("access-1", "refresh-1");
+
+        let fingerprint = provider
+            .write_with_known_etag("drive-1", "item-1", b"next", Some("etag-1"))
+            .unwrap();
+
+        assert_eq!(fingerprint.size_bytes, 4);
+        assert_eq!(fingerprint.modified_at, Some(stable_u64_for_text("etag-2")));
+        write.assert();
+    }
+
+    #[test]
+    fn graph_provider_refreshes_access_token_after_unauthorized_response() {
+        let mut server = mockito::Server::new();
+        let stale_children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer stale-access")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "$select".into(),
+                    "id,name,size,eTag,parentReference,folder,file".into(),
+                ),
+                mockito::Matcher::UrlEncoded("$top".into(), "200".into()),
+            ]))
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"code":"InvalidAuthenticationToken"}}"#)
+            .create();
+        let refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("client_id".into(), "client-1".into()),
+                mockito::Matcher::UrlEncoded("refresh_token".into(), "refresh-1".into()),
+                mockito::Matcher::UrlEncoded("grant_type".into(), "refresh_token".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"fresh-access","refresh_token":"refresh-2","expires_in":3600}"#,
+            )
+            .create();
+        let fresh_children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer fresh-access")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "$select".into(),
+                    "id,name,size,eTag,parentReference,folder,file".into(),
+                ),
+                mockito::Matcher::UrlEncoded("$top".into(), "200".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"value":[{"id":"item-1","name":"Vault.kdbx","size":42,"parentReference":{"driveId":"drive-1"},"file":{}}]}"#,
+            )
+            .create();
+
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_test_tokens("stale-access", "refresh-1");
+
+        let items = provider.list_children(None).unwrap();
+
+        assert_eq!(items.items.len(), 1);
+        assert_eq!(items.items[0].name, "Vault.kdbx");
+        stale_children.assert();
+        refresh.assert();
+        fresh_children.assert();
+    }
+
+    #[test]
+    fn graph_provider_restores_refresh_token_from_cache_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_cache = dir.path().join("onedrive-refresh-token");
+        let mut server = mockito::Server::new();
+        let login_token = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("client_id".into(), "client-1".into()),
+                mockito::Matcher::UrlEncoded("code".into(), "auth-code".into()),
+                mockito::Matcher::UrlEncoded("grant_type".into(), "authorization_code".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"access-1","refresh_token":"refresh-1","expires_in":3600}"#,
+            )
+            .create();
+        let me = server
+            .mock("GET", "/v1.0/me")
+            .match_header("authorization", "Bearer access-1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"userPrincipalName":"alice@example.com"}"#)
+            .create();
+        let refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("client_id".into(), "client-1".into()),
+                mockito::Matcher::UrlEncoded("refresh_token".into(), "refresh-1".into()),
+                mockito::Matcher::UrlEncoded("grant_type".into(), "refresh_token".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"access-2","refresh_token":"refresh-2","expires_in":3600}"#,
+            )
+            .create();
+        let children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-2")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "$select".into(),
+                    "id,name,size,eTag,parentReference,folder,file".into(),
+                ),
+                mockito::Matcher::UrlEncoded("$top".into(), "200".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"value":[{"id":"item-1","name":"Vault.kdbx","size":42,"parentReference":{"driveId":"drive-1"},"file":{}}]}"#,
+            )
+            .create();
+
+        let mut first = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        first.set_test_token_cache_path(token_cache.clone());
+        first
+            .complete_login("auth-code", "http://127.0.0.1:53121/callback", "verifier")
+            .unwrap();
+
+        let mut second = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        second.set_test_token_cache_path(token_cache);
+        let items = second.list_children(None).unwrap();
+
+        assert_eq!(items.items[0].name, "Vault.kdbx");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("onedrive-refresh-token")).unwrap(),
+            "refresh-2"
+        );
+        login_token.assert();
+        me.assert();
+        refresh.assert();
+        children.assert();
+    }
+
+    fn callback_port(redirect_uri: &str) -> u16 {
+        url::Url::parse(redirect_uri)
+            .unwrap()
+            .port()
+            .expect("redirect uri should include port")
+    }
+
+    fn send_callback(port: u16, query: &str) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(
+                format!("GET /callback?{query} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes(),
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+}

@@ -1,0 +1,8 @@
+[package]
+name = "vkdbx"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+vaultkern-core = { path = "../../crates/vaultkern-core" }

@@ -1,0 +1,13 @@
+{
+  "name": "@vaultkern/shared-web-ui",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@vaultkern/runtime-web-client": "file:../runtime-web-client"
+  },
+  "scripts": {
+    "build": "vite build",
+    "test": "vitest run"
+  }
+}

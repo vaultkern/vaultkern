@@ -1,0 +1,24 @@
+[package]
+name = "vaultkern-runtime"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+external-fixtures = []
+
+[dependencies]
+anyhow = "1.0"
+base64.workspace = true
+vaultkern-core = { path = "../../crates/vaultkern-core" }
+vaultkern-runtime-protocol = { path = "../../crates/vaultkern-runtime-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq = { version = "2.10", features = ["json"] }
+url = "2.5"
+uuid.workspace = true
+
+[dev-dependencies]
+mockito = "1.5"
+tempfile = "3.10"

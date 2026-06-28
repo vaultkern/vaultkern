@@ -1,0 +1,11 @@
+[package]
+name = "vaultkern-model"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+data-encoding.workspace = true
+vaultkern-crypto = { path = "../vaultkern-crypto" }
+thiserror.workspace = true
+uuid.workspace = true
