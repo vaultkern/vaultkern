@@ -23,7 +23,6 @@ const MICROSOFT_AUTH_URL: &str =
 const MICROSOFT_TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const MICROSOFT_GRAPH_ROOT: &str = "https://graph.microsoft.com/v1.0";
 const ONEDRIVE_SCOPES: &str = "Files.ReadWrite offline_access User.Read";
-const DEFAULT_ONEDRIVE_CLIENT_ID: &str = "fb99473a-0151-4033-a862-a7030c10dadc";
 const LOOPBACK_CALLBACK_ADDR: &str = "127.0.0.1:53121";
 const CALLBACK_WAIT_SECONDS: u64 = 600;
 const GRAPH_CHILDREN_SELECT: &str = "id,name,size,eTag,parentReference,folder,file";
@@ -178,7 +177,7 @@ struct GraphParentReference {
 impl OneDriveVaultSourceProvider {
     pub fn new_from_env() -> Self {
         let token_cache_path = token_cache_path_from_env();
-        let refresh_token = std::env::var("KEEPASS_ONEDRIVE_REFRESH_TOKEN")
+        let refresh_token = std::env::var("VAULTKERN_ONEDRIVE_REFRESH_TOKEN")
             .ok()
             .or_else(|| {
                 token_cache_path
@@ -191,15 +190,12 @@ impl OneDriveVaultSourceProvider {
             refresh_token,
         });
         Self {
-            client_id: Some(
-                std::env::var("KEEPASS_ONEDRIVE_CLIENT_ID")
-                    .unwrap_or_else(|_| DEFAULT_ONEDRIVE_CLIENT_ID.into()),
-            ),
-            auth_url: std::env::var("KEEPASS_ONEDRIVE_AUTH_URL")
+            client_id: option_env!("VAULTKERN_ONEDRIVE_CLIENT_ID").map(str::to_owned),
+            auth_url: std::env::var("VAULTKERN_ONEDRIVE_AUTH_URL")
                 .unwrap_or_else(|_| MICROSOFT_AUTH_URL.into()),
-            token_url: std::env::var("KEEPASS_ONEDRIVE_TOKEN_URL")
+            token_url: std::env::var("VAULTKERN_ONEDRIVE_TOKEN_URL")
                 .unwrap_or_else(|_| MICROSOFT_TOKEN_URL.into()),
-            graph_root: std::env::var("KEEPASS_ONEDRIVE_GRAPH_ROOT")
+            graph_root: std::env::var("VAULTKERN_ONEDRIVE_GRAPH_ROOT")
                 .unwrap_or_else(|_| MICROSOFT_GRAPH_ROOT.into()),
             callback_addr: LOOPBACK_CALLBACK_ADDR.into(),
             token_cache_path,
@@ -349,7 +345,7 @@ impl OneDriveVaultSourceProvider {
         let client_id = self
             .client_id
             .as_deref()
-            .context("KEEPASS_ONEDRIVE_CLIENT_ID is not configured")?;
+            .context("VAULTKERN_ONEDRIVE_CLIENT_ID is not configured")?;
         let (code_receiver, redirect_uri) = start_loopback_callback_listener(&self.callback_addr)?;
         let code_verifier = self
             .test_code_verifier
@@ -413,7 +409,7 @@ impl OneDriveVaultSourceProvider {
         let client_id = self
             .client_id
             .as_deref()
-            .context("KEEPASS_ONEDRIVE_CLIENT_ID is not configured")?;
+            .context("VAULTKERN_ONEDRIVE_CLIENT_ID is not configured")?;
         let token = ureq::post(&self.token_url)
             .send_form(&[
                 ("client_id", client_id),
@@ -746,13 +742,13 @@ impl OneDriveVaultSourceProvider {
         let client_id = self
             .client_id
             .as_deref()
-            .context("KEEPASS_ONEDRIVE_CLIENT_ID is not configured")?;
+            .context("VAULTKERN_ONEDRIVE_CLIENT_ID is not configured")?;
         let refresh_token = self
             .token_state
             .borrow()
             .as_ref()
             .map(|state| state.refresh_token.clone())
-            .or_else(|| std::env::var("KEEPASS_ONEDRIVE_REFRESH_TOKEN").ok())
+            .or_else(|| std::env::var("VAULTKERN_ONEDRIVE_REFRESH_TOKEN").ok())
             .context("OneDrive account is not connected")?;
         let token = ureq::post(&self.token_url)
             .send_form(&[
@@ -913,7 +909,7 @@ fn callback_response(status: &str, body: &str) -> String {
 }
 
 fn token_cache_path_from_env() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("KEEPASS_ONEDRIVE_TOKEN_CACHE") {
+    if let Ok(path) = std::env::var("VAULTKERN_ONEDRIVE_TOKEN_CACHE") {
         return Some(PathBuf::from(path));
     }
 
@@ -1016,29 +1012,35 @@ mod tests {
     use std::net::TcpStream;
 
     #[test]
-    fn provider_uses_bundled_public_client_id_when_env_is_missing() {
-        let previous = std::env::var_os("KEEPASS_ONEDRIVE_CLIENT_ID");
-        unsafe {
-            std::env::remove_var("KEEPASS_ONEDRIVE_CLIENT_ID");
-        }
-
+    fn provider_uses_compile_time_public_client_id_for_pkce_login_when_configured() {
         let result = OneDriveVaultSourceProvider::new_from_env().begin_login();
 
-        match previous {
-            Some(value) => unsafe {
-                std::env::set_var("KEEPASS_ONEDRIVE_CLIENT_ID", value);
-            },
-            None => unsafe {
-                std::env::remove_var("KEEPASS_ONEDRIVE_CLIENT_ID");
-            },
+        match option_env!("VAULTKERN_ONEDRIVE_CLIENT_ID") {
+            Some(client_id) => {
+                let session = result.expect("begin login with compiled public client id");
+                assert!(session.auth_url.contains(&format!("client_id={client_id}")));
+                let port = callback_port(&session.redirect_uri);
+                let _ = send_callback(port, "code=ignored");
+            }
+            None => {
+                let error = result.expect_err("missing compiled client id should fail");
+                assert!(format!("{error:#}").contains("VAULTKERN_ONEDRIVE_CLIENT_ID"));
+            }
         }
+    }
 
-        let session = result.expect("begin login with bundled public client id");
-        assert!(
-            session
-                .auth_url
-                .contains("client_id=fb99473a-0151-4033-a862-a7030c10dadc")
-        );
+    #[test]
+    fn provider_uses_explicit_test_client_id_for_pkce_login() {
+        let result = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-from-test",
+            "https://login.example.test/authorize",
+            "https://login.example.test/token",
+            "https://graph.example.test",
+        )
+        .begin_login();
+
+        let session = result.expect("begin login with explicit test client id");
+        assert!(session.auth_url.contains("client_id=client-from-test"));
         let port = callback_port(&session.redirect_uri);
         let _ = send_callback(port, "code=ignored");
     }
