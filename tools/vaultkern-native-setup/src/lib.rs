@@ -237,6 +237,43 @@ pub fn runtime_install_path(local_app_data: &Path) -> PathBuf {
         .join(RUNTIME_FILE_NAME)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
+fn browser_install_candidates_for_roots(
+    browser: BrowserKind,
+    program_files: Option<&Path>,
+    program_files_x86: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    match browser {
+        BrowserKind::Chrome => {
+            if let Some(root) = program_files {
+                candidates.push(root.join("Google/Chrome/Application/chrome.exe"));
+            }
+            if let Some(root) = program_files_x86 {
+                candidates.push(root.join("Google/Chrome/Application/chrome.exe"));
+            }
+            if let Some(root) = local_app_data {
+                candidates.push(root.join("Google/Chrome/Application/chrome.exe"));
+            }
+        }
+        BrowserKind::Edge => {
+            if let Some(root) = program_files {
+                candidates.push(root.join("Microsoft/Edge/Application/msedge.exe"));
+            }
+            if let Some(root) = program_files_x86 {
+                candidates.push(root.join("Microsoft/Edge/Application/msedge.exe"));
+            }
+            if let Some(root) = local_app_data {
+                candidates.push(root.join("Microsoft/Edge/Application/msedge.exe"));
+            }
+        }
+    }
+
+    candidates
+}
+
 pub fn install_runtime_payload(local_app_data: &Path, payload: &[u8]) -> Result<PathBuf, String> {
     if payload.is_empty() {
         return Err("embedded runtime payload is missing".into());
@@ -290,7 +327,8 @@ pub mod windows_setup {
 
     use crate::{
         BrowserDiagnosis, BrowserKind, BrowserRegistrationProbe, BrowserSetupConfig,
-        RegistrationStatus, install_runtime_payload, runtime_install_path,
+        RegistrationStatus, browser_install_candidates_for_roots, install_runtime_payload,
+        runtime_install_path,
     };
 
     const RUNTIME_PAYLOAD: &[u8] =
@@ -414,30 +452,16 @@ pub mod windows_setup {
     }
 
     fn browser_install_candidates(browser: BrowserKind) -> Vec<PathBuf> {
-        let mut candidates = Vec::new();
         let program_files = env::var_os("ProgramFiles").map(PathBuf::from);
         let program_files_x86 = env::var_os("ProgramFiles(x86)").map(PathBuf::from);
+        let local_app_data = env::var_os("LOCALAPPDATA").map(PathBuf::from);
 
-        match browser {
-            BrowserKind::Chrome => {
-                if let Some(root) = &program_files {
-                    candidates.push(root.join("Google/Chrome/Application/chrome.exe"));
-                }
-                if let Some(root) = &program_files_x86 {
-                    candidates.push(root.join("Google/Chrome/Application/chrome.exe"));
-                }
-            }
-            BrowserKind::Edge => {
-                if let Some(root) = &program_files {
-                    candidates.push(root.join("Microsoft/Edge/Application/msedge.exe"));
-                }
-                if let Some(root) = &program_files_x86 {
-                    candidates.push(root.join("Microsoft/Edge/Application/msedge.exe"));
-                }
-            }
-        }
-
-        candidates
+        browser_install_candidates_for_roots(
+            browser,
+            program_files.as_deref(),
+            program_files_x86.as_deref(),
+            local_app_data.as_deref(),
+        )
     }
 
     fn read_registry_manifest_path(browser: BrowserKind) -> Result<Option<PathBuf>, String> {
@@ -494,7 +518,8 @@ mod tests {
 
     use crate::{
         BrowserKind, BrowserRegistrationProbe, BrowserSetupConfig, RegistrationStatus,
-        install_runtime_payload, render_native_host_manifest, runtime_install_path,
+        browser_install_candidates_for_roots, install_runtime_payload, render_native_host_manifest,
+        runtime_install_path,
     };
 
     #[test]
@@ -584,6 +609,20 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
 
         assert!(install_runtime_payload(temp_dir.path(), b"").is_err());
+    }
+
+    #[test]
+    fn browser_install_candidates_include_local_app_data_user_installs() {
+        let candidates = browser_install_candidates_for_roots(
+            BrowserKind::Chrome,
+            Some(Path::new("/Program Files")),
+            Some(Path::new("/Program Files (x86)")),
+            Some(Path::new("/Users/alice/AppData/Local")),
+        );
+
+        assert!(candidates.contains(&PathBuf::from(
+            "/Users/alice/AppData/Local/Google/Chrome/Application/chrome.exe"
+        )));
     }
 
     #[test]
@@ -723,6 +762,14 @@ mod tests {
         assert!(script.contains("VAULTKERN_RUNTIME_PAYLOAD_PATH="));
         assert!(script.contains("VaultKernNativeSetup.exe"));
         assert!(!script.contains(r#""${output_dir}/vaultkern-runtime.exe""#));
+    }
+
+    #[test]
+    fn build_script_tracks_runtime_payload_file_changes() {
+        let build_rs = read_package_file("build.rs");
+
+        assert!(build_rs.contains(r#"cargo:rerun-if-changed={}"#));
+        assert!(build_rs.contains("payload_path.display()"));
     }
 
     fn read_package_file(path: &str) -> String {

@@ -10,10 +10,12 @@ fn main() {
     let payload_output =
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("vaultkern-runtime.exe");
     if let Some(payload_path) = env::var_os("VAULTKERN_RUNTIME_PAYLOAD_PATH") {
+        let payload_path = PathBuf::from(payload_path);
+        println!("cargo:rerun-if-changed={}", payload_path.display());
         fs::copy(&payload_path, &payload_output).unwrap_or_else(|error| {
             panic!(
                 "failed to copy runtime payload from {} to {}: {error}",
-                PathBuf::from(payload_path).display(),
+                payload_path.display(),
                 payload_output.display()
             )
         });
