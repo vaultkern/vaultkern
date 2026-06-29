@@ -44,7 +44,7 @@ fn host_match_kind(page_host: &str, entry_host: &str) -> Option<HostMatchKind> {
         return Some(HostMatchKind::Descendant);
     }
 
-    if site_domain(page_host)? == site_domain(entry_host)? {
+    if registrable_domain(page_host)? == registrable_domain(entry_host)? {
         return Some(HostMatchKind::SameSite);
     }
 
@@ -63,12 +63,12 @@ fn normalized_host(url: &Url) -> Option<String> {
         .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
 }
 
-fn site_domain(host: &str) -> Option<String> {
+fn registrable_domain(host: &str) -> Option<String> {
     let labels = host
         .split('.')
         .filter(|label| !label.is_empty())
         .collect::<Vec<_>>();
-    if labels.len() < 2 {
+    if labels.len() < 2 || requires_public_suffix_list(&labels) {
         return None;
     }
 
@@ -77,6 +77,12 @@ fn site_domain(host: &str) -> Option<String> {
         labels[labels.len() - 2],
         labels[labels.len() - 1]
     ))
+}
+
+fn requires_public_suffix_list(labels: &[&str]) -> bool {
+    labels
+        .last()
+        .is_some_and(|tld| tld.len() == 2 && tld.chars().all(|ch| ch.is_ascii_alphabetic()))
 }
 
 fn normalized_path_segments(url: &Url) -> Vec<&str> {
@@ -131,6 +137,25 @@ mod tests {
 
         assert_eq!(ancestor.host_match, HostMatchKind::Ancestor);
         assert_eq!(descendant.host_match, HostMatchKind::Descendant);
+    }
+
+    #[test]
+    fn rejects_unrelated_hosts_under_multi_label_public_suffixes() {
+        assert_eq!(
+            score_entry_match("https://evil.co.uk/phish", "https://login.bank.co.uk/login"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_same_site_fallback_for_country_code_tlds_without_psl() {
+        assert_eq!(
+            score_entry_match(
+                "https://app.example.co/login",
+                "https://admin.example.co/login"
+            ),
+            None
+        );
     }
 
     #[test]
