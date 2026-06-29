@@ -6,7 +6,9 @@
     "@vaultkern/shared-web-ui": "file:../../packages/shared-web-ui"
   },
   "scripts": {
-    "build": "vite build && cp manifest.json dist/manifest.json",
+    "build": "vite build && node scripts/writeManifest.mjs",
+    "build:e2e": "vite build && node scripts/writeManifest.mjs --fixed-key",
+    "smoke:e2e": "npm run build:e2e && cargo build -p vaultkern-runtime && node smoke/run-chrome-e2e.mjs",
     "test": "vitest run"
   }
 }
