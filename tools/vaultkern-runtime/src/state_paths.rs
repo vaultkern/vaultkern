@@ -27,9 +27,8 @@ pub(crate) fn extension_state_dir(extension_id: &str) -> PathBuf {
 }
 
 pub(crate) fn extension_id_from_browser_origin(origin: &str) -> Option<&str> {
-    let extension_id = origin
-        .strip_prefix("chrome-extension://")?
-        .strip_suffix('/')?;
+    let extension_id = origin.strip_prefix("chrome-extension://")?;
+    let extension_id = extension_id.strip_suffix('/').unwrap_or(extension_id);
 
     if extension_id.is_empty()
         || !extension_id
@@ -52,6 +51,10 @@ mod tests {
             extension_id_from_browser_origin(
                 "chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/"
             ),
+            Some("kblgblkjghklighdgmejjfondchkjcgf")
+        );
+        assert_eq!(
+            extension_id_from_browser_origin("chrome-extension://kblgblkjghklighdgmejjfondchkjcgf"),
             Some("kblgblkjghklighdgmejjfondchkjcgf")
         );
     }

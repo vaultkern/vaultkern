@@ -212,8 +212,8 @@ fn browser_origin_native_hosts_do_not_share_recent_vaults() {
     std::fs::write(&path, bytes).expect("write origin isolation vault");
     let state_dir = dir.path().join("runtime-state");
     let home_dir = dir.path().join("runtime-home");
-    let first_origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/";
-    let second_origin = "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/";
+    let first_origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let second_origin = "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     let mut first =
         spawn_isolated_runtime_native_host_for_origin(&state_dir, &home_dir, first_origin);
