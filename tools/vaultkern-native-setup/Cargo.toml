@@ -1,0 +1,16 @@
+[package]
+name = "vaultkern-native-setup"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow"] }
+winreg = "0.56.0"
+
+[dev-dependencies]
+tempfile = "3.10"

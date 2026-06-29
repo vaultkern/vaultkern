@@ -8,6 +8,7 @@ members = [
     "crates/vaultkern-runtime-protocol",
     "tools/vkdbx",
     "tools/vaultkern-runtime",
+    "tools/vaultkern-native-setup",
 ]
 
 [workspace.package]
