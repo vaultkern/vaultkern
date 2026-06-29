@@ -100,6 +100,7 @@ pub struct EntryRawState {
     pub background_color_raw: Option<String>,
     pub override_url_raw: Option<String>,
     pub tags_raw: Option<String>,
+    pub quality_check_raw: Option<String>,
     pub has_history_node: bool,
 }
 
