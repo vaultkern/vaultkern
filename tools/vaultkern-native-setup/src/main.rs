@@ -7,7 +7,10 @@ mod app {
     use eframe::egui;
     use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, RichText, Stroke};
     use vaultkern_native_setup::windows_setup;
-    use vaultkern_native_setup::{BrowserDiagnosis, BrowserKind, RegistrationStatus};
+    use vaultkern_native_setup::{
+        BrowserDiagnosis, BrowserKind, RegistrationStatus, built_in_extension_id,
+        resolve_extension_id,
+    };
 
     pub fn run() -> eframe::Result<()> {
         let options = eframe::NativeOptions {
@@ -38,10 +41,10 @@ mod app {
 
     impl NativeSetupApp {
         fn new() -> Self {
-            let extension_id = std::env::args()
-                .nth(1)
-                .or_else(|| std::env::var("VAULTKERN_EXTENSION_ID").ok())
-                .unwrap_or_default();
+            let cli_extension_id = std::env::args().nth(1);
+            let env_extension_id = std::env::var("VAULTKERN_EXTENSION_ID").ok();
+            let extension_id =
+                resolve_extension_id(cli_extension_id.as_deref(), env_extension_id.as_deref());
             let mut app = Self {
                 extension_id,
                 chrome: None,
@@ -113,7 +116,7 @@ mod app {
                         .show(ui, |ui| {
                             header(ui);
                             ui.add_space(18.0);
-                            self.extension_panel(ui);
+                            self.configuration_panel(ui);
                             ui.add_space(18.0);
 
                             let chrome = self.chrome.clone();
@@ -135,7 +138,7 @@ mod app {
     }
 
     impl NativeSetupApp {
-        fn extension_panel(&mut self, ui: &mut egui::Ui) {
+        fn configuration_panel(&mut self, ui: &mut egui::Ui) {
             egui::Frame::NONE
                 .fill(Color32::WHITE)
                 .stroke(Stroke::new(1.0, palette::BORDER))
@@ -143,22 +146,36 @@ mod app {
                 .inner_margin(egui::Margin::symmetric(18, 16))
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new("Extension ID")
+                        RichText::new("Current extension id")
                             .size(15.0)
                             .color(palette::MUTED)
                             .strong(),
                     );
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut self.extension_id)
-                                .desired_width(390.0)
-                                .hint_text("Chrome extension id"),
-                        );
-                        if response.changed() {
-                            self.refresh();
-                        }
 
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.extension_id)
+                            .desired_width(430.0)
+                            .hint_text("Chrome extension id"),
+                    );
+                    if response.changed() {
+                        self.refresh();
+                    }
+
+                    let helper = if let Some(extension_id) = built_in_extension_id() {
+                        format!(
+                            "This package was built with a default extension id ({extension_id}). Override it only for development, sideload, or E2E builds."
+                        )
+                    } else {
+                        "Paste the current extension id from chrome://extensions or from the extension error page. Release packages can prefill this field with VAULTKERN_DEFAULT_EXTENSION_ID.".into()
+                    };
+                    ui.add(
+                        egui::Label::new(RichText::new(helper).size(14.0).color(palette::MUTED))
+                            .wrap(),
+                    );
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
                         if secondary_button(ui, "Refresh").clicked() {
                             self.refresh();
                         }
@@ -173,7 +190,7 @@ mod app {
                         ui.add_space(10.0);
                         warning_bar(
                             ui,
-                            "Enter the Chrome extension id before registering a browser.",
+                            "Enter the current Chrome extension id before registering.",
                         );
                     }
                 });

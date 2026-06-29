@@ -1414,7 +1414,7 @@ describe("PopupShell fill flow", () => {
     consoleWarn.mockRestore();
   });
 
-  it("shows Chromium and Edge native host install help when the host is missing", async () => {
+  it("shows native setup install help when the host is missing", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
         id: "test-extension-id"
@@ -1458,10 +1458,21 @@ describe("PopupShell fill flow", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
 
+    expect(await screen.findByText("Install the VaultKern native host")).toBeInTheDocument();
+    expect(screen.getByText("Current extension ID: test-extension-id")).toBeInTheDocument();
+    expect(screen.getByText(/VaultKernNativeSetup\.exe/)).toBeInTheDocument();
+    expect(screen.getByText(/On Windows, run/).closest("li")).toHaveTextContent(
+      "If the extension ID field is empty"
+    );
+    expect(screen.getByText(/On Windows, run/).closest("li")).toHaveTextContent(
+      "Register / Repair for Chrome"
+    );
     expect(
-      await screen.findByText("Install the Chromium / Edge native host")
+      screen.getByText(
+        /HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com\.vaultkern\.runtime/
+      )
     ).toBeInTheDocument();
-    expect(screen.getByText("Extension ID: test-extension-id")).toBeInTheDocument();
+    expect(screen.getByText("chrome://extensions")).toBeInTheDocument();
     expect(
       screen.getByText(/tools\/vaultkern-runtime\/scripts\/install_native_host\.sh/)
     ).toBeInTheDocument();
@@ -1470,10 +1481,6 @@ describe("PopupShell fill flow", () => {
         /HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com\.vaultkern\.runtime/
       )
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/C:\\Users\\Example\\vaultkern-test\\browser-extension/)
-    ).toBeInTheDocument();
-    expect(screen.getByText("edge://extensions")).toBeInTheDocument();
   });
 
   it("keeps business errors as plain unlock failures without install help", async () => {
@@ -1520,7 +1527,7 @@ describe("PopupShell fill flow", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("vault file not found");
     expect(
-      screen.queryByText("Install the Chromium / Edge native host")
+      screen.queryByText("Install the VaultKern native host")
     ).not.toBeInTheDocument();
   });
 });
