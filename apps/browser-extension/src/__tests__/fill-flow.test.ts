@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -192,6 +193,24 @@ describe("fillLoginForm", () => {
 
     expect(usernameEvents).toEqual(["input", "change", "blur"]);
     expect(passwordEvents).toEqual(["input", "change", "blur"]);
+  });
+
+  it("fills the checked-in browser smoke login page", () => {
+    const smokePage = readFileSync("smoke/basic-login.html", "utf8");
+    const parsed = new DOMParser().parseFromString(smokePage, "text/html");
+    document.body.innerHTML = parsed.body.innerHTML;
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123"
+    });
+
+    expect(
+      (document.querySelector("#vaultkern-smoke-username") as HTMLInputElement).value
+    ).toBe("alice@example.com");
+    expect(
+      (document.querySelector("#vaultkern-smoke-password") as HTMLInputElement).value
+    ).toBe("secret-123");
   });
 });
 
