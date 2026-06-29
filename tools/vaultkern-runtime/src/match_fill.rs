@@ -44,7 +44,7 @@ fn host_match_kind(page_host: &str, entry_host: &str) -> Option<HostMatchKind> {
         return Some(HostMatchKind::Descendant);
     }
 
-    if site_domain(page_host)? == site_domain(entry_host)? {
+    if registrable_domain(page_host)? == registrable_domain(entry_host)? {
         return Some(HostMatchKind::SameSite);
     }
 
@@ -63,20 +63,8 @@ fn normalized_host(url: &Url) -> Option<String> {
         .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
 }
 
-fn site_domain(host: &str) -> Option<String> {
-    let labels = host
-        .split('.')
-        .filter(|label| !label.is_empty())
-        .collect::<Vec<_>>();
-    if labels.len() < 2 {
-        return None;
-    }
-
-    Some(format!(
-        "{}.{}",
-        labels[labels.len() - 2],
-        labels[labels.len() - 1]
-    ))
+fn registrable_domain(host: &str) -> Option<String> {
+    psl::domain_str(host).map(str::to_owned)
 }
 
 fn normalized_path_segments(url: &Url) -> Vec<&str> {
@@ -131,6 +119,36 @@ mod tests {
 
         assert_eq!(ancestor.host_match, HostMatchKind::Ancestor);
         assert_eq!(descendant.host_match, HostMatchKind::Descendant);
+    }
+
+    #[test]
+    fn rejects_unrelated_hosts_under_multi_label_public_suffixes() {
+        assert_eq!(
+            score_entry_match("https://evil.co.uk/phish", "https://login.bank.co.uk/login"),
+            None
+        );
+    }
+
+    #[test]
+    fn scores_same_site_hosts_under_known_country_code_tlds() {
+        let score = score_entry_match(
+            "https://app.example.co/login",
+            "https://admin.example.co/login",
+        )
+        .unwrap();
+
+        assert_eq!(score.host_match, HostMatchKind::SameSite);
+    }
+
+    #[test]
+    fn rejects_unrelated_hosts_under_non_country_multi_tenant_suffixes() {
+        assert_eq!(
+            score_entry_match(
+                "https://evil.appspot.com/phish",
+                "https://login.bank.appspot.com/login"
+            ),
+            None
+        );
     }
 
     #[test]
