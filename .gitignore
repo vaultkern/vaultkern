@@ -6,7 +6,11 @@ AGENTS.md
 CLAUDE.md
 docs/
 spec/*
-!spec/keepass-core-implementation-status.md
+*.md
+*.txt
+*.rst
+*.adoc
+!README.md
 fixtures/
 tools/deploy_windows_edge.sh
 node_modules/
