@@ -1,4 +1,3 @@
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::providers::local_file::VaultSourceFingerprint;
+use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteCacheKey {
@@ -60,6 +60,12 @@ impl RemoteVaultCache {
     pub fn new_default() -> Self {
         Self {
             root: default_cache_dir(),
+        }
+    }
+
+    pub fn new_for_extension_id(extension_id: &str) -> Self {
+        Self {
+            root: extension_state_dir(extension_id).join("remote-cache"),
         }
     }
 
@@ -178,31 +184,7 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
 }
 
 fn default_cache_dir() -> PathBuf {
-    if cfg!(windows) {
-        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
-            return PathBuf::from(local_app_data)
-                .join("vaultkern-runtime")
-                .join("remote-cache");
-        }
-    }
-
-    if let Ok(state_home) = env::var("XDG_STATE_HOME") {
-        return PathBuf::from(state_home)
-            .join("vaultkern-runtime")
-            .join("remote-cache");
-    }
-
-    if let Ok(home) = env::var("HOME") {
-        return PathBuf::from(home)
-            .join(".local")
-            .join("state")
-            .join("vaultkern-runtime")
-            .join("remote-cache");
-    }
-
-    env::temp_dir()
-        .join("vaultkern-runtime")
-        .join("remote-cache")
+    runtime_state_dir().join("remote-cache")
 }
 
 #[cfg(test)]

@@ -4,7 +4,9 @@ const USAGE: &str = "usage: vaultkern-runtime [--help] [--print-native-host-mani
 
 #[derive(Debug, PartialEq, Eq)]
 enum Invocation {
-    RunStdio,
+    RunStdio {
+        browser_origin: Option<String>,
+    },
     PrintUsage,
     PrintManifest {
         binary_path: String,
@@ -15,8 +17,12 @@ enum Invocation {
 
 fn main() {
     match classify_invocation(std::env::args().skip(1)) {
-        Invocation::RunStdio => {
-            if let Err(error) = run_stdio_loop(Runtime::new()) {
+        Invocation::RunStdio { browser_origin } => {
+            let runtime = browser_origin
+                .as_deref()
+                .map(Runtime::new_for_browser_origin)
+                .unwrap_or_else(Runtime::new);
+            if let Err(error) = run_stdio_loop(runtime) {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
@@ -41,7 +47,9 @@ fn classify_invocation(args: impl IntoIterator<Item = String>) -> Invocation {
     let args = args.into_iter().collect::<Vec<_>>();
 
     match args.as_slice() {
-        [] => Invocation::RunStdio,
+        [] => Invocation::RunStdio {
+            browser_origin: None,
+        },
         [flag] if flag == "--help" => Invocation::PrintUsage,
         [flag, binary_path, extension_origin] if flag == "--print-native-host-manifest" => {
             Invocation::PrintManifest {
@@ -53,7 +61,9 @@ fn classify_invocation(args: impl IntoIterator<Item = String>) -> Invocation {
             if is_browser_origin(origin)
                 && rest.iter().all(|arg| arg.starts_with("--parent-window=")) =>
         {
-            Invocation::RunStdio
+            Invocation::RunStdio {
+                browser_origin: Some(origin.clone()),
+            }
         }
         _ => Invocation::Invalid,
     }
@@ -74,13 +84,23 @@ mod tests {
             "--parent-window=0".to_string(),
         ]);
 
-        assert_eq!(invocation, Invocation::RunStdio);
+        assert_eq!(
+            invocation,
+            Invocation::RunStdio {
+                browser_origin: Some("chrome-extension://test-extension-id/".to_string())
+            }
+        );
     }
 
     #[test]
     fn browser_invocation_with_origin_only_runs_stdio() {
         let invocation = classify_invocation(["chrome-extension://test-extension-id/".to_string()]);
 
-        assert_eq!(invocation, Invocation::RunStdio);
+        assert_eq!(
+            invocation,
+            Invocation::RunStdio {
+                browser_origin: Some("chrome-extension://test-extension-id/".to_string())
+            }
+        );
     }
 }
