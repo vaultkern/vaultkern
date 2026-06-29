@@ -5,14 +5,20 @@ use serde::{Deserialize, Serialize};
 const HOST_NAME: &str = "com.vaultkern.runtime";
 const RUNTIME_DIR_NAME: &str = "vaultkern-runtime";
 const RUNTIME_FILE_NAME: &str = "vaultkern-runtime.exe";
-pub const DEFAULT_EXTENSION_ID: &str = "kblgblkjghklighdgmejjfondchkjcgf";
+pub const DEFAULT_EXTENSION_ID_ENV: &str = "VAULTKERN_DEFAULT_EXTENSION_ID";
+
+pub fn built_in_extension_id() -> Option<&'static str> {
+    option_env!("VAULTKERN_DEFAULT_EXTENSION_ID").and_then(non_empty_trimmed)
+}
 
 pub fn resolve_extension_id(cli_arg: Option<&str>, env_value: Option<&str>) -> String {
-    cli_arg
-        .and_then(non_empty_trimmed)
-        .or_else(|| env_value.and_then(non_empty_trimmed))
-        .unwrap_or(DEFAULT_EXTENSION_ID)
-        .to_string()
+    if let Some(extension_id) = cli_arg.and_then(non_empty_trimmed) {
+        return extension_id.to_string();
+    }
+    if let Some(extension_id) = env_value.and_then(non_empty_trimmed) {
+        return extension_id.to_string();
+    }
+    built_in_extension_id().unwrap_or("").to_string()
 }
 
 fn non_empty_trimmed(value: &str) -> Option<&str> {
@@ -535,18 +541,22 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::{
-        BrowserKind, BrowserRegistrationProbe, BrowserSetupConfig, DEFAULT_EXTENSION_ID,
-        RegistrationStatus, browser_install_candidates_for_roots, install_runtime_payload,
-        render_native_host_manifest, resolve_extension_id, runtime_install_path,
+        BrowserKind, BrowserRegistrationProbe, BrowserSetupConfig, DEFAULT_EXTENSION_ID_ENV,
+        RegistrationStatus, browser_install_candidates_for_roots, built_in_extension_id,
+        install_runtime_payload, render_native_host_manifest, resolve_extension_id,
+        runtime_install_path,
     };
 
     #[test]
-    fn default_extension_id_is_the_current_chrome_sideload_id() {
-        assert_eq!(DEFAULT_EXTENSION_ID, "kblgblkjghklighdgmejjfondchkjcgf");
+    fn default_extension_id_is_compile_time_configured() {
+        assert_eq!(DEFAULT_EXTENSION_ID_ENV, "VAULTKERN_DEFAULT_EXTENSION_ID");
+        if let Some(default_id) = built_in_extension_id() {
+            assert!(!default_id.trim().is_empty());
+        }
     }
 
     #[test]
-    fn extension_id_resolution_prefers_developer_overrides_then_builtin_default() {
+    fn extension_id_resolution_prefers_runtime_overrides_then_optional_built_in_default() {
         assert_eq!(
             resolve_extension_id(Some(" cli-extension "), Some("env-extension")),
             "cli-extension"
@@ -555,7 +565,10 @@ mod tests {
             resolve_extension_id(Some("   "), Some(" env-extension ")),
             "env-extension"
         );
-        assert_eq!(resolve_extension_id(None, Some("")), DEFAULT_EXTENSION_ID);
+        assert_eq!(
+            resolve_extension_id(None, Some("")),
+            built_in_extension_id().unwrap_or("")
+        );
     }
 
     #[test]
@@ -785,8 +798,8 @@ mod tests {
         assert!(main_rs.contains("egui::Visuals::light()"));
         assert!(main_rs.contains(r#"C:\Windows\Fonts\segoeui.ttf"#));
         assert!(main_rs.contains(r#"C:\Windows\Fonts\msyh.ttc"#));
-        assert!(main_rs.contains("Developer options"));
-        assert!(main_rs.contains("Using built-in extension id"));
+        assert!(main_rs.contains("Current extension id"));
+        assert!(main_rs.contains("Enter the current Chrome extension id before registering."));
         assert!(main_rs.contains("CollapsingHeader::new(\"Details\")"));
         assert!(main_rs.contains(".id_salt((browser.label(), \"details\"))"));
         assert!(main_rs.contains("CollapsingHeader::new(\"Diagnostics\")"));
@@ -806,6 +819,7 @@ mod tests {
     fn build_script_tracks_runtime_payload_file_changes() {
         let build_rs = read_package_file("build.rs");
 
+        assert!(build_rs.contains("VAULTKERN_DEFAULT_EXTENSION_ID"));
         assert!(build_rs.contains(r#"cargo:rerun-if-changed={}"#));
         assert!(build_rs.contains("payload_path.display()"));
     }

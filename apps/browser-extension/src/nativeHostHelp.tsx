@@ -43,8 +43,9 @@ export function renderNativeHostHelp(error: unknown) {
         <p>Current extension ID: {extensionId()}</p>
         <ol>
           <li>
-            On Windows, run <code>VaultKernNativeSetup.exe</code>, then click{" "}
-            <code>Register / Repair</code> for Chrome.
+            On Windows, run <code>VaultKernNativeSetup.exe</code>. If the
+            extension ID field is empty, paste this current extension ID, then
+            click <code>Register / Repair</code> for Chrome.
           </li>
           <li>
             Chrome should be registered at <code>{chromeRegistryPath()}</code>{" "}

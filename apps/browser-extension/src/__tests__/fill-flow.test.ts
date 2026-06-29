@@ -1462,6 +1462,9 @@ describe("PopupShell fill flow", () => {
     expect(screen.getByText("Current extension ID: test-extension-id")).toBeInTheDocument();
     expect(screen.getByText(/VaultKernNativeSetup\.exe/)).toBeInTheDocument();
     expect(screen.getByText(/On Windows, run/).closest("li")).toHaveTextContent(
+      "If the extension ID field is empty"
+    );
+    expect(screen.getByText(/On Windows, run/).closest("li")).toHaveTextContent(
       "Register / Repair for Chrome"
     );
     expect(

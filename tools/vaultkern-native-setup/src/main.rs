@@ -8,7 +8,7 @@ mod app {
     use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, RichText, Stroke};
     use vaultkern_native_setup::windows_setup;
     use vaultkern_native_setup::{
-        BrowserDiagnosis, BrowserKind, DEFAULT_EXTENSION_ID, RegistrationStatus,
+        BrowserDiagnosis, BrowserKind, RegistrationStatus, built_in_extension_id,
         resolve_extension_id,
     };
 
@@ -146,32 +146,32 @@ mod app {
                 .inner_margin(egui::Margin::symmetric(18, 16))
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new("Browser extension")
+                        RichText::new("Current extension id")
                             .size(15.0)
                             .color(palette::MUTED)
                             .strong(),
                     );
                     ui.add_space(6.0);
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!(
-                                "Using built-in extension id: {}",
-                                self.extension_id.trim()
-                            ))
-                            .size(16.0)
-                            .color(palette::TEXT),
-                        )
-                        .wrap(),
+
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.extension_id)
+                            .desired_width(430.0)
+                            .hint_text("Chrome extension id"),
                     );
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(
-                                "Normal installs do not require entering an extension id. Use developer options only for sideload or E2E builds.",
-                            )
-                            .size(14.0)
-                            .color(palette::MUTED),
+                    if response.changed() {
+                        self.refresh();
+                    }
+
+                    let helper = if let Some(extension_id) = built_in_extension_id() {
+                        format!(
+                            "This package was built with a default extension id ({extension_id}). Override it only for development, sideload, or E2E builds."
                         )
-                        .wrap(),
+                    } else {
+                        "Paste the current extension id from chrome://extensions or from the extension error page. Release packages can prefill this field with VAULTKERN_DEFAULT_EXTENSION_ID.".into()
+                    };
+                    ui.add(
+                        egui::Label::new(RichText::new(helper).size(14.0).color(palette::MUTED))
+                            .wrap(),
                     );
 
                     ui.add_space(10.0);
@@ -186,30 +186,13 @@ mod app {
                         }
                     });
 
-                    ui.add_space(8.0);
-                    egui::CollapsingHeader::new("Developer options")
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(format!(
-                                        "Production builds should replace the built-in id ({DEFAULT_EXTENSION_ID}) with the Chrome Web Store id. VAULTKERN_EXTENSION_ID or the first CLI argument can override it for development.",
-                                    ))
-                                    .size(14.0)
-                                    .color(palette::MUTED),
-                                )
-                                .wrap(),
-                            );
-                            ui.add_space(6.0);
-                            let response = ui.add(
-                                egui::TextEdit::singleline(&mut self.extension_id)
-                                    .desired_width(390.0)
-                                    .hint_text("Developer extension id override"),
-                            );
-                            if response.changed() {
-                                self.refresh();
-                            }
-                        });
+                    if self.extension_id.trim().is_empty() {
+                        ui.add_space(10.0);
+                        warning_bar(
+                            ui,
+                            "Enter the current Chrome extension id before registering.",
+                        );
+                    }
                 });
         }
     }
@@ -462,6 +445,16 @@ mod app {
                 .stroke(Stroke::new(1.0, palette::BORDER))
                 .corner_radius(egui::CornerRadius::same(6)),
         )
+    }
+
+    fn warning_bar(ui: &mut egui::Ui, text: &str) {
+        egui::Frame::NONE
+            .fill(palette::WARN_BG)
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.label(RichText::new(text).color(palette::WARN).strong());
+            });
     }
 
     fn info_bar(ui: &mut egui::Ui, text: &str) {

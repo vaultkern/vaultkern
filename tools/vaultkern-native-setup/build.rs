@@ -6,6 +6,7 @@ fn main() {
     println!("cargo:rerun-if-changed=windows/app.manifest");
     println!("cargo:rerun-if-changed=windows/app.rc");
     println!("cargo:rerun-if-env-changed=VAULTKERN_RUNTIME_PAYLOAD_PATH");
+    println!("cargo:rerun-if-env-changed=VAULTKERN_DEFAULT_EXTENSION_ID");
 
     let payload_output =
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("vaultkern-runtime.exe");
