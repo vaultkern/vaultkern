@@ -64,25 +64,7 @@ fn normalized_host(url: &Url) -> Option<String> {
 }
 
 fn registrable_domain(host: &str) -> Option<String> {
-    let labels = host
-        .split('.')
-        .filter(|label| !label.is_empty())
-        .collect::<Vec<_>>();
-    if labels.len() < 2 || requires_public_suffix_list(&labels) {
-        return None;
-    }
-
-    Some(format!(
-        "{}.{}",
-        labels[labels.len() - 2],
-        labels[labels.len() - 1]
-    ))
-}
-
-fn requires_public_suffix_list(labels: &[&str]) -> bool {
-    labels
-        .last()
-        .is_some_and(|tld| tld.len() == 2 && tld.chars().all(|ch| ch.is_ascii_alphabetic()))
+    psl::domain_str(host).map(str::to_owned)
 }
 
 fn normalized_path_segments(url: &Url) -> Vec<&str> {
@@ -148,11 +130,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_same_site_fallback_for_country_code_tlds_without_psl() {
+    fn scores_same_site_hosts_under_known_country_code_tlds() {
+        let score = score_entry_match(
+            "https://app.example.co/login",
+            "https://admin.example.co/login",
+        )
+        .unwrap();
+
+        assert_eq!(score.host_match, HostMatchKind::SameSite);
+    }
+
+    #[test]
+    fn rejects_unrelated_hosts_under_non_country_multi_tenant_suffixes() {
         assert_eq!(
             score_entry_match(
-                "https://app.example.co/login",
-                "https://admin.example.co/login"
+                "https://evil.appspot.com/phish",
+                "https://login.bank.appspot.com/login"
             ),
             None
         );
