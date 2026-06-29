@@ -1,4 +1,3 @@
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,6 +5,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use vaultkern_runtime_protocol::{VaultReferenceDto, VaultReferenceListDto};
+
+use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredVaultReference {
@@ -58,7 +59,14 @@ pub struct VaultReferenceStore {
 
 impl VaultReferenceStore {
     pub fn new_default() -> Self {
-        let path = default_store_path();
+        Self::new_at(default_store_path())
+    }
+
+    pub fn new_for_extension_id(extension_id: &str) -> Self {
+        Self::new_at(extension_state_dir(extension_id).join("vault-references.json"))
+    }
+
+    fn new_at(path: PathBuf) -> Self {
         let data = fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<VaultReferenceStoreData>(&bytes).ok())
@@ -360,29 +368,5 @@ fn source_summary_for_path(path: &str) -> String {
 }
 
 fn default_store_path() -> PathBuf {
-    if cfg!(windows) {
-        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
-            return PathBuf::from(local_app_data)
-                .join("vaultkern-runtime")
-                .join("vault-references.json");
-        }
-    }
-
-    if let Ok(state_home) = env::var("XDG_STATE_HOME") {
-        return PathBuf::from(state_home)
-            .join("vaultkern-runtime")
-            .join("vault-references.json");
-    }
-
-    if let Ok(home) = env::var("HOME") {
-        return PathBuf::from(home)
-            .join(".local")
-            .join("state")
-            .join("vaultkern-runtime")
-            .join("vault-references.json");
-    }
-
-    env::temp_dir()
-        .join("vaultkern-runtime")
-        .join("vault-references.json")
+    runtime_state_dir().join("vault-references.json")
 }

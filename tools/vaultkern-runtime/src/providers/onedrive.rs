@@ -17,6 +17,7 @@ use vaultkern_runtime_protocol::{
 };
 
 use crate::providers::local_file::VaultSourceFingerprint;
+use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
 const MICROSOFT_AUTH_URL: &str =
     "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
@@ -177,6 +178,16 @@ struct GraphParentReference {
 impl OneDriveVaultSourceProvider {
     pub fn new_from_env() -> Self {
         let token_cache_path = token_cache_path_from_env();
+        Self::new_from_env_with_token_cache_path(token_cache_path)
+    }
+
+    pub fn new_from_env_for_extension_id(extension_id: &str) -> Self {
+        let token_cache_path = explicit_token_cache_path_from_env()
+            .or_else(|| Some(extension_state_dir(extension_id).join("onedrive-refresh-token")));
+        Self::new_from_env_with_token_cache_path(token_cache_path)
+    }
+
+    fn new_from_env_with_token_cache_path(token_cache_path: Option<PathBuf>) -> Self {
         let refresh_token = std::env::var("VAULTKERN_ONEDRIVE_REFRESH_TOKEN")
             .ok()
             .or_else(|| {
@@ -909,39 +920,14 @@ fn callback_response(status: &str, body: &str) -> String {
 }
 
 fn token_cache_path_from_env() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("VAULTKERN_ONEDRIVE_TOKEN_CACHE") {
-        return Some(PathBuf::from(path));
-    }
+    explicit_token_cache_path_from_env()
+        .or_else(|| Some(runtime_state_dir().join("onedrive-refresh-token")))
+}
 
-    if cfg!(windows) {
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            return Some(
-                PathBuf::from(local_app_data)
-                    .join("vaultkern-runtime")
-                    .join("onedrive-refresh-token"),
-            );
-        }
-    }
-
-    if let Ok(state_home) = std::env::var("XDG_STATE_HOME") {
-        return Some(
-            PathBuf::from(state_home)
-                .join("vaultkern-runtime")
-                .join("onedrive-refresh-token"),
-        );
-    }
-
-    if let Ok(home) = std::env::var("HOME") {
-        return Some(
-            PathBuf::from(home)
-                .join(".local")
-                .join("state")
-                .join("vaultkern-runtime")
-                .join("onedrive-refresh-token"),
-        );
-    }
-
-    None
+fn explicit_token_cache_path_from_env() -> Option<PathBuf> {
+    std::env::var("VAULTKERN_ONEDRIVE_TOKEN_CACHE")
+        .ok()
+        .map(PathBuf::from)
 }
 
 fn load_cached_refresh_token(path: &Path) -> Result<Option<String>> {

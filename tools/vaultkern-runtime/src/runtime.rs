@@ -31,6 +31,7 @@ use crate::providers::onedrive::{OneDriveMemoryAccessCounts, OneDriveVaultSource
 use crate::providers::remote_cache::{RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry};
 use crate::providers::secure_storage::UnsupportedSecureStorageProvider;
 use crate::session::SessionState;
+use crate::state_paths::extension_id_from_browser_origin;
 use crate::vault_reference_store::{StoredVaultSource, VaultReferenceStore};
 
 struct LoadedVault {
@@ -117,7 +118,30 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new() -> Self {
-        let references = VaultReferenceStore::new_default();
+        Self::new_with_state(
+            VaultReferenceStore::new_default(),
+            OneDriveVaultSourceProvider::new_from_env(),
+            RemoteVaultCache::new_default(),
+        )
+    }
+
+    pub fn new_for_browser_origin(origin: &str) -> Self {
+        if let Some(extension_id) = extension_id_from_browser_origin(origin) {
+            return Self::new_with_state(
+                VaultReferenceStore::new_for_extension_id(extension_id),
+                OneDriveVaultSourceProvider::new_from_env_for_extension_id(extension_id),
+                RemoteVaultCache::new_for_extension_id(extension_id),
+            );
+        }
+
+        Self::new()
+    }
+
+    fn new_with_state(
+        references: VaultReferenceStore,
+        one_drive: OneDriveVaultSourceProvider,
+        remote_cache: RemoteVaultCache,
+    ) -> Self {
         let mut session = SessionState::default();
         if let Some(vault_ref_id) = references.current_vault_ref_id() {
             session.set_current_vault(vault_ref_id.to_owned());
@@ -128,8 +152,8 @@ impl Runtime {
             session,
             references,
             local_files: LocalFileVaultSourceProvider,
-            one_drive: OneDriveVaultSourceProvider::new_from_env(),
-            remote_cache: RemoteVaultCache::new_default(),
+            one_drive,
+            remote_cache,
             biometric: UnsupportedBiometricProvider,
             secure_storage: UnsupportedSecureStorageProvider,
             loaded: BTreeMap::new(),

@@ -194,6 +194,95 @@ fn runtime_binary_serves_browser_v0_native_messaging_loop() {
     assert!(store.contains("native-bridge.kdbx"));
 }
 
+#[test]
+fn browser_origin_native_hosts_do_not_share_recent_vaults() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+    let bytes = core
+        .save_kdbx(
+            &Vault::empty("origin-isolation"),
+            &key,
+            SaveProfile::recommended(),
+        )
+        .expect("create origin isolation vault");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("origin-isolation.kdbx");
+    std::fs::write(&path, bytes).expect("write origin isolation vault");
+    let state_dir = dir.path().join("runtime-state");
+    let home_dir = dir.path().join("runtime-home");
+    let first_origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/";
+    let second_origin = "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/";
+
+    let mut first =
+        spawn_isolated_runtime_native_host_for_origin(&state_dir, &home_dir, first_origin);
+    let opened = send_native_command(
+        &mut first,
+        json!({
+            "version": 1,
+            "command": {
+                "type": "open_local_vault",
+                "path": path.to_str().expect("utf8 path")
+            }
+        }),
+    );
+    first.kill().ok();
+    first.wait().ok();
+    assert_eq!(
+        opened.get("type").and_then(|value| value.as_str()),
+        Some("vault_opened")
+    );
+
+    let mut second =
+        spawn_isolated_runtime_native_host_for_origin(&state_dir, &home_dir, second_origin);
+    let second_recent = send_native_command(
+        &mut second,
+        json!({
+            "version": 1,
+            "command": {
+                "type": "list_recent_vaults"
+            }
+        }),
+    );
+    second.kill().ok();
+    second.wait().ok();
+
+    assert_eq!(
+        second_recent.get("type").and_then(|value| value.as_str()),
+        Some("vault_reference_list")
+    );
+    assert_eq!(
+        second_recent
+            .get("vaults")
+            .and_then(|value| value.as_array())
+            .map(Vec::len),
+        Some(0)
+    );
+
+    let mut first_again =
+        spawn_isolated_runtime_native_host_for_origin(&state_dir, &home_dir, first_origin);
+    let first_recent = send_native_command(
+        &mut first_again,
+        json!({
+            "version": 1,
+            "command": {
+                "type": "list_recent_vaults"
+            }
+        }),
+    );
+    first_again.kill().ok();
+    first_again.wait().ok();
+
+    assert_eq!(
+        first_recent
+            .get("vaults")
+            .and_then(|value| value.as_array())
+            .map(Vec::len),
+        Some(1)
+    );
+}
+
 fn spawn_isolated_runtime_native_host(state_dir: &tempfile::TempDir) -> std::process::Child {
     let home_dir = state_dir.path().join("home");
     spawn_isolated_runtime_native_host_at(state_dir.path(), &home_dir)
@@ -204,6 +293,22 @@ fn spawn_isolated_runtime_native_host_at(
     home_dir: &std::path::Path,
 ) -> std::process::Child {
     Command::new(env!("CARGO_BIN_EXE_vaultkern-runtime"))
+        .env("XDG_STATE_HOME", state_dir)
+        .env("HOME", home_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn runtime native host")
+}
+
+fn spawn_isolated_runtime_native_host_for_origin(
+    state_dir: &std::path::Path,
+    home_dir: &std::path::Path,
+    origin: &str,
+) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_vaultkern-runtime"))
+        .arg(origin)
         .env("XDG_STATE_HOME", state_dir)
         .env("HOME", home_dir)
         .stdin(Stdio::piped())
