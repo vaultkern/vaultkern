@@ -11,12 +11,16 @@ function edgeRegistryPath() {
   return `HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.vaultkern.runtime`;
 }
 
-function windowsExtensionPath() {
-  return `C:\\Users\\Example\\vaultkern-test\\browser-extension`;
+function chromeRegistryPath() {
+  return `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.vaultkern.runtime`;
 }
 
 function windowsRuntimePath() {
-  return `C:\\Users\\Example\\vaultkern-test\\runtime\\vaultkern-runtime-browser.exe`;
+  return `%LOCALAPPDATA%\\vaultkern-runtime\\vaultkern-runtime.exe`;
+}
+
+function windowsManifestPath(browser: "chrome" | "edge") {
+  return `%LOCALAPPDATA%\\vaultkern-runtime\\com.vaultkern.runtime.${browser}.json`;
 }
 
 function isErrorCode(error: unknown, code: string) {
@@ -35,22 +39,27 @@ export function renderNativeHostHelp(error: unknown) {
   ) {
     return (
       <div>
-        <h2>Install the Chromium / Edge native host</h2>
+        <h2>Install the VaultKern native host</h2>
         <p>Extension ID: {extensionId()}</p>
         <ol>
-          <li>Run `cargo build -p vaultkern-runtime` from the repository root.</li>
+          <li>
+            On Windows, run <code>VaultKernNativeSetup.exe</code>, paste this
+            extension ID, then click <code>Register / Repair</code> for Chrome.
+          </li>
+          <li>
+            Chrome should be registered at <code>{chromeRegistryPath()}</code>{" "}
+            and point to <code>{windowsManifestPath("chrome")}</code>.
+          </li>
+          <li>
+            The Windows runtime should exist at <code>{windowsRuntimePath()}</code>.
+          </li>
           <li>
             For Linux Chromium, run <code>{installCommand()}</code>.
           </li>
           <li>
-            For Windows Edge, confirm the registry key exists at{" "}
-            <code>{edgeRegistryPath()}</code> and points to the native host
-            manifest.
-          </li>
-          <li>
-            Confirm the Edge test extension is loaded from{" "}
-            <code>{windowsExtensionPath()}</code> and the native host executable
-            exists at <code>{windowsRuntimePath()}</code>.
+            If you are testing Edge separately, register{" "}
+            <code>{edgeRegistryPath()}</code> and point it to{" "}
+            <code>{windowsManifestPath("edge")}</code>.
           </li>
           <li>
             Confirm the Linux manifest exists at{" "}
@@ -59,7 +68,10 @@ export function renderNativeHostHelp(error: unknown) {
             </code>
             .
           </li>
-          <li>Open <code>edge://extensions</code>, reload the extension, and try unlocking again.</li>
+          <li>
+            Open <code>chrome://extensions</code>, reload the extension, and try
+            unlocking again.
+          </li>
         </ol>
       </div>
     );
@@ -75,11 +87,14 @@ export function renderNativeHostHelp(error: unknown) {
         <ol>
           <li>Confirm `vaultkern-runtime` still starts with `cargo run -p vaultkern-runtime -- --help`.</li>
           <li>
-            On Windows Edge, confirm <code>{windowsRuntimePath()}</code> still
-            exists and is not blocked by another running process.
+            On Windows, confirm <code>{windowsRuntimePath()}</code> still exists
+            and is not blocked by another running process.
           </li>
-          <li>Re-run the native host install script or refresh the Edge registry entry.</li>
-          <li>Open <code>edge://extensions</code> and reload the extension.</li>
+          <li>
+            Re-run <code>VaultKernNativeSetup.exe</code> or refresh the native
+            host manifest.
+          </li>
+          <li>Open <code>chrome://extensions</code> and reload the extension.</li>
           <li>Try unlocking again after the host reconnects.</li>
         </ol>
       </div>
