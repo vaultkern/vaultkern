@@ -102,6 +102,165 @@ fn runtime_can_open_unlock_mutate_and_save_local_vault() {
 }
 
 #[test]
+fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let bytes = core
+        .save_kdbx(
+            &Vault::empty("browser-v0"),
+            &key,
+            SaveProfile::recommended(),
+        )
+        .expect("create browser v0 vault");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("browser-v0.kdbx");
+    std::fs::write(&path, bytes).expect("write browser v0 vault");
+
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("open local vault");
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .expect("unlock local vault");
+
+    let root_id = runtime
+        .list_groups(&handle.vault_id)
+        .expect("list groups")
+        .root
+        .id;
+
+    let exact = match runtime
+        .handle(RuntimeCommand::CreateEntry {
+            vault_id: handle.vault_id.clone(),
+            parent_group_id: root_id.clone(),
+            title: "Exact Login".into(),
+            username: "alice".into(),
+            password: "old-secret".into(),
+            url: "https://app.example.com/login".into(),
+            notes: "created from browser v0 contract".into(),
+            totp_uri: None,
+        })
+        .expect("create exact login")
+    {
+        RuntimeResponse::EntryDetail(detail) => detail,
+        other => panic!("expected entry detail, got {other:?}"),
+    };
+
+    runtime
+        .handle(RuntimeCommand::CreateEntry {
+            vault_id: handle.vault_id.clone(),
+            parent_group_id: root_id.clone(),
+            title: "Parent Login".into(),
+            username: "parent".into(),
+            password: "parent-secret".into(),
+            url: "https://example.com/login".into(),
+            notes: String::new(),
+            totp_uri: None,
+        })
+        .expect("create parent login");
+    runtime
+        .handle(RuntimeCommand::CreateEntry {
+            vault_id: handle.vault_id.clone(),
+            parent_group_id: root_id,
+            title: "Unrelated Tenant".into(),
+            username: "mallory".into(),
+            password: "tenant-secret".into(),
+            url: "https://login.bank.co.uk/login".into(),
+            notes: String::new(),
+            totp_uri: None,
+        })
+        .expect("create unrelated tenant");
+
+    let candidates = match runtime
+        .handle(RuntimeCommand::FindFillCandidates {
+            vault_id: handle.vault_id.clone(),
+            url: "https://app.example.com/login?next=%2Fdashboard".into(),
+        })
+        .expect("find fill candidates")
+    {
+        RuntimeResponse::FillCandidates(candidates) => candidates.entries,
+        other => panic!("expected fill candidates, got {other:?}"),
+    };
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].id, exact.id);
+    assert_eq!(candidates[0].title, "Exact Login");
+    assert_eq!(candidates[1].title, "Parent Login");
+
+    let unrelated = match runtime
+        .handle(RuntimeCommand::FindFillCandidates {
+            vault_id: handle.vault_id.clone(),
+            url: "https://evil.co.uk/login".into(),
+        })
+        .expect("find unrelated candidates")
+    {
+        RuntimeResponse::FillCandidates(candidates) => candidates.entries,
+        other => panic!("expected fill candidates, got {other:?}"),
+    };
+    assert!(unrelated.is_empty());
+
+    runtime
+        .handle(RuntimeCommand::UpdateEntryFields {
+            vault_id: handle.vault_id.clone(),
+            entry_id: exact.id.clone(),
+            title: "Exact Login".into(),
+            username: "alice@example.com".into(),
+            password: "rotated-secret".into(),
+            url: "https://app.example.com/login".into(),
+            notes: "rotated from browser v0 contract".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        })
+        .expect("update exact login");
+
+    assert_eq!(
+        runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: handle.vault_id.clone(),
+            })
+            .expect("save local vault"),
+        saved_response()
+    );
+
+    let mut reopened_runtime = Runtime::for_tests();
+    let reopened = reopened_runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("reopen local vault");
+    reopened_runtime
+        .unlock_with_password(&reopened.vault_id, "demo-password")
+        .expect("unlock reopened vault");
+
+    let reopened_candidates = match reopened_runtime
+        .handle(RuntimeCommand::FindFillCandidates {
+            vault_id: reopened.vault_id.clone(),
+            url: "https://app.example.com/login".into(),
+        })
+        .expect("find reopened candidates")
+    {
+        RuntimeResponse::FillCandidates(candidates) => candidates.entries,
+        other => panic!("expected fill candidates, got {other:?}"),
+    };
+    assert_eq!(reopened_candidates[0].id, exact.id);
+
+    let detail = match reopened_runtime
+        .handle(RuntimeCommand::GetEntryDetail {
+            vault_id: reopened.vault_id,
+            entry_id: exact.id,
+        })
+        .expect("get reopened entry detail")
+    {
+        RuntimeResponse::EntryDetail(detail) => detail,
+        other => panic!("expected entry detail, got {other:?}"),
+    };
+    assert_eq!(detail.username, "alice@example.com");
+    assert_eq!(detail.password, "rotated-secret");
+    assert_eq!(detail.notes, "rotated from browser v0 contract");
+}
+
+#[test]
 fn runtime_unlocks_password_plus_key_file_vault_from_key_file_path() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("password-plus-key.kdbx");
