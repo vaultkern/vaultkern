@@ -1385,6 +1385,7 @@ impl KeepassCore {
             entry.previous_parent = Some(parsed);
             if let Some(exclude_from_reports) = update.exclude_from_reports {
                 entry.exclude_from_reports = exclude_from_reports;
+                entry.raw_state.quality_check_raw = None;
             }
             return Ok(project_entry_lineage_report_metadata(entry));
         }
@@ -1400,6 +1401,7 @@ impl KeepassCore {
         }
         if let Some(exclude_from_reports) = update.exclude_from_reports {
             entry.exclude_from_reports = exclude_from_reports;
+            entry.raw_state.quality_check_raw = None;
         }
 
         Ok(project_entry_lineage_report_metadata(entry))
@@ -3195,6 +3197,63 @@ fn build_inspection(header: KdbxHeaderSummary) -> DatabaseInspection {
         header,
         save_target_version: KdbxVersion::V4_1,
         warnings,
+    }
+}
+
+#[cfg(test)]
+mod internal_tests {
+    use super::{EntryLineageReportMetadataUpdate, Group, KeepassCore};
+    use vaultkern_model::{Entry, Vault};
+
+    #[test]
+    fn entry_lineage_report_metadata_update_clears_quality_check_raw_state() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("EntryMeta");
+        let mut entry = Entry::new("Entry");
+        entry.raw_state.quality_check_raw = Some("True".into());
+        let entry_id = entry.id.to_string();
+        vault.root.entries.push(entry);
+
+        let metadata = core
+            .update_entry_lineage_report_metadata(
+                &mut vault,
+                &entry_id,
+                EntryLineageReportMetadataUpdate {
+                    previous_parent_id: None,
+                    exclude_from_reports: Some(false),
+                },
+            )
+            .expect("update entry lineage/report metadata");
+
+        assert!(!metadata.exclude_from_reports);
+        assert!(vault.root.entries[0].raw_state.quality_check_raw.is_none());
+    }
+
+    #[test]
+    fn entry_lineage_report_metadata_parent_update_clears_quality_check_raw_state() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("EntryMeta");
+        let group = Group::new("Original");
+        let parent_group_id = group.id.to_string();
+        let mut entry = Entry::new("Entry");
+        entry.raw_state.quality_check_raw = Some("True".into());
+        let entry_id = entry.id.to_string();
+        vault.root.children.push(group);
+        vault.root.entries.push(entry);
+
+        let metadata = core
+            .update_entry_lineage_report_metadata(
+                &mut vault,
+                &entry_id,
+                EntryLineageReportMetadataUpdate {
+                    previous_parent_id: Some(Some(parent_group_id)),
+                    exclude_from_reports: Some(false),
+                },
+            )
+            .expect("update entry lineage/report metadata");
+
+        assert!(!metadata.exclude_from_reports);
+        assert!(vault.root.entries[0].raw_state.quality_check_raw.is_none());
     }
 }
 

@@ -1262,10 +1262,19 @@ fn entry_to_xml(
             &encode_uuid(previous_parent),
         )));
     }
-    if version == KdbxVersion::V4_1 && entry.exclude_from_reports {
-        element
-            .children
-            .push(XMLNode::Element(text_element("QualityCheck", "False")));
+    if version == KdbxVersion::V4_1 {
+        if entry.exclude_from_reports {
+            element
+                .children
+                .push(XMLNode::Element(text_element("QualityCheck", "False")));
+        } else if let Some(quality_check_raw) = &entry.raw_state.quality_check_raw
+            && parse_bool_text(quality_check_raw)
+        {
+            element.children.push(XMLNode::Element(text_element(
+                "QualityCheck",
+                quality_check_raw,
+            )));
+        }
     }
 
     element
@@ -2635,13 +2644,37 @@ fn parse_entry(
     let (custom_data, custom_data_blocks) = parse_entry_custom_data(element)?;
     entry.custom_data = custom_data;
     entry.custom_data_blocks = custom_data_blocks;
+    let legacy_known_bad = entry.custom_data.remove("KnownBad");
+    if legacy_known_bad.is_some() {
+        let mut cleaned_blocks = Vec::with_capacity(entry.custom_data_blocks.len());
+        for mut block in std::mem::take(&mut entry.custom_data_blocks) {
+            let original_item_count = block.items.len();
+            block.items.retain(|item| item.key != "KnownBad");
+            if original_item_count == block.items.len() || !block.items.is_empty() {
+                cleaned_blocks.push(block);
+            }
+        }
+        entry.custom_data_blocks = cleaned_blocks;
+    }
     if let Some(tags) = child_text(element, "Tags") {
         entry.tags = parse_tags(&tags);
     }
     if let Some(previous_parent) = child_text(element, "PreviousParentGroup") {
         entry.previous_parent = Some(decode_uuid(&previous_parent)?);
     }
-    entry.exclude_from_reports = child_text(element, "QualityCheck").as_deref() == Some("False");
+    let quality_check_raw = child_optional(element, "QualityCheck").map(|child| {
+        child
+            .get_text()
+            .map(|text| text.to_string())
+            .unwrap_or_default()
+    });
+    entry.exclude_from_reports = quality_check_raw
+        .as_deref()
+        .map(|value| !parse_bool_text(value))
+        .unwrap_or(false);
+    if let Some(known_bad) = legacy_known_bad {
+        entry.exclude_from_reports = parse_bool_text(&known_bad);
+    }
     entry.raw_state = EntryRawState {
         node_order: collect_entry_known_node_order(element),
         foreground_color_raw: child_optional(element, "ForegroundColor").map(|child| {
@@ -2668,6 +2701,7 @@ fn parse_entry(
                 .map(|text| text.to_string())
                 .unwrap_or_default()
         }),
+        quality_check_raw,
         has_history_node: child_optional(element, "History").is_some(),
     };
 
@@ -3748,6 +3782,200 @@ impl<'a> Cursor<'a> {
     }
 }
 
+#[cfg(test)]
+mod compatibility_tests {
+    use super::{
+        Compression, KdbxCipher, KdbxHeader, KdbxVersion, SaveKdf, SaveProfile, child_text,
+        decode_block_stream, decrypt_payload, encode_block_stream, gzip_compress, gzip_decompress,
+        header_hmac, kdf_from_variant_dict, load_kdbx, mac_seed, parse_inner_header, save_kdbx,
+        sha256_seeded, text_element,
+    };
+    use vaultkern_crypto::{CompositeKey, sha256_bytes};
+    use vaultkern_model::{Entry, Vault};
+    use xmltree::{Element, XMLNode};
+
+    fn fast_profile() -> SaveProfile {
+        SaveProfile {
+            version: KdbxVersion::V4_1,
+            cipher: KdbxCipher::Aes256,
+            compression: Compression::Gzip,
+            kdf: SaveKdf::AesKdbx4 { rounds: 1 },
+        }
+    }
+
+    fn test_key(password: &str) -> CompositeKey {
+        let mut key = CompositeKey::default();
+        key.add_password(password);
+        key
+    }
+
+    fn extract_kdbx4_xml(bytes: &[u8], composite_key: &CompositeKey) -> super::Result<String> {
+        let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
+        let mut cursor = super::Cursor::new(&bytes[header_len..]);
+        let stored_header_hash = cursor.read_exact(32)?.to_vec();
+        let _stored_header_hmac = cursor.read_exact(32)?.to_vec();
+        let payload_bytes = cursor.read_remaining().to_vec();
+
+        let header_bytes = &bytes[..header_len];
+        assert_eq!(
+            sha256_bytes(header_bytes).as_slice(),
+            stored_header_hash.as_slice()
+        );
+
+        let raw_key = composite_key.raw_key()?;
+        let kdf = kdf_from_variant_dict(&header.kdf_parameters)?;
+        let transformed = kdf.derive_key(&raw_key)?;
+        let encryption_key = sha256_seeded(&header.master_seed, &transformed);
+        let mac_seed = mac_seed(&header.master_seed, &transformed);
+        let encrypted_payload = decode_block_stream(&mac_seed, &payload_bytes)?;
+        let payload = decrypt_payload(
+            header.cipher,
+            &encryption_key,
+            &header.encryption_iv,
+            &encrypted_payload,
+        )?;
+        let payload = match header.compression {
+            Compression::None => payload,
+            Compression::Gzip => gzip_decompress(&payload)?,
+        };
+        let (_, _, _, consumed) = parse_inner_header(&payload)?;
+        String::from_utf8(payload[consumed..].to_vec()).map_err(|_| super::KdbxError::InvalidValue)
+    }
+
+    fn rewrite_kdbx4_xml(
+        bytes: &[u8],
+        composite_key: &CompositeKey,
+        mutate: impl FnOnce(&mut Element),
+    ) -> super::Result<Vec<u8>> {
+        let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
+        let mut cursor = super::Cursor::new(&bytes[header_len..]);
+        let _stored_header_hash = cursor.read_exact(32)?.to_vec();
+        let _stored_header_hmac = cursor.read_exact(32)?.to_vec();
+        let payload_bytes = cursor.read_remaining().to_vec();
+
+        let raw_key = composite_key.raw_key()?;
+        let kdf = kdf_from_variant_dict(&header.kdf_parameters)?;
+        let transformed = kdf.derive_key(&raw_key)?;
+        let encryption_key = sha256_seeded(&header.master_seed, &transformed);
+        let mac_seed = mac_seed(&header.master_seed, &transformed);
+        let encrypted_payload = decode_block_stream(&mac_seed, &payload_bytes)?;
+        let payload = decrypt_payload(
+            header.cipher,
+            &encryption_key,
+            &header.encryption_iv,
+            &encrypted_payload,
+        )?;
+        let payload = match header.compression {
+            Compression::None => payload,
+            Compression::Gzip => gzip_decompress(&payload)?,
+        };
+
+        let (_, _, _, consumed) = parse_inner_header(&payload)?;
+        let mut xml = Element::parse(std::io::Cursor::new(&payload[consumed..]))
+            .map_err(|error| super::KdbxError::Xml(error.to_string()))?;
+        mutate(&mut xml);
+        let mut xml_bytes = Vec::new();
+        xml.write(&mut xml_bytes)
+            .map_err(|error| super::KdbxError::Xml(error.to_string()))?;
+
+        let mut new_payload = payload[..consumed].to_vec();
+        new_payload.extend(xml_bytes);
+        let payload = match header.compression {
+            Compression::None => new_payload,
+            Compression::Gzip => gzip_compress(&new_payload)?,
+        };
+        let encrypted_payload = super::encrypt_payload(
+            header.cipher,
+            &encryption_key,
+            &header.encryption_iv,
+            &payload,
+        )?;
+        let block_stream = encode_block_stream(&mac_seed, &encrypted_payload)?;
+        let header_bytes = header.encode()?;
+        let header_hash = sha256_bytes(&header_bytes);
+        let header_hmac = header_hmac(&mac_seed, &header_bytes)?;
+
+        let mut file = Vec::new();
+        file.extend(header_bytes);
+        file.extend(header_hash);
+        file.extend(header_hmac);
+        file.extend(block_stream);
+        Ok(file)
+    }
+
+    fn first_live_entry_mut(root: &mut Element) -> &mut Element {
+        root.get_mut_child("Root")
+            .and_then(|root| root.get_mut_child("Group"))
+            .and_then(|group| group.get_mut_child("Entry"))
+            .expect("live entry")
+    }
+
+    fn first_live_entry(root: &Element) -> &Element {
+        root.get_child("Root")
+            .and_then(|root| root.get_child("Group"))
+            .and_then(|group| group.get_child("Entry"))
+            .expect("live entry")
+    }
+
+    #[test]
+    fn known_bad_custom_data_upgrades_to_quality_check_false() {
+        let mut vault = Vault::empty("KnownBad");
+        let mut entry = Entry::new("Legacy");
+        entry.custom_data.insert("KnownBad".into(), "True".into());
+        vault.root.entries.push(entry);
+
+        let key = test_key("known-bad");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save legacy known bad");
+        let loaded = load_kdbx(&bytes, &key).expect("load legacy known bad");
+        let loaded_entry = &loaded.root.entries[0];
+
+        assert!(loaded_entry.exclude_from_reports);
+        assert!(!loaded_entry.custom_data.contains_key("KnownBad"));
+        assert!(
+            loaded_entry
+                .custom_data_blocks
+                .iter()
+                .flat_map(|block| &block.items)
+                .all(|item| item.key != "KnownBad")
+        );
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("save upgraded known bad");
+        let xml = extract_kdbx4_xml(&rewritten, &key).expect("extract rewritten xml");
+        let parsed =
+            Element::parse(std::io::Cursor::new(xml.as_bytes())).expect("parse rewritten xml");
+        let entry = first_live_entry(&parsed);
+
+        assert_eq!(child_text(entry, "QualityCheck").as_deref(), Some("False"));
+        assert!(!xml.contains("<Key>KnownBad</Key>"));
+    }
+
+    #[test]
+    fn quality_check_true_roundtrip_preserves_explicit_true() {
+        let mut vault = Vault::empty("QualityCheck");
+        vault.root.entries.push(Entry::new("ExplicitTrue"));
+
+        let key = test_key("quality-check");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save quality check seed");
+        let injected = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            first_live_entry_mut(root)
+                .children
+                .push(XMLNode::Element(text_element("QualityCheck", "True")));
+        })
+        .expect("inject quality check true");
+
+        let loaded = load_kdbx(&injected, &key).expect("load quality check true");
+        assert!(!loaded.root.entries[0].exclude_from_reports);
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("save quality check true");
+        let xml = extract_kdbx4_xml(&rewritten, &key).expect("extract rewritten xml");
+        let parsed =
+            Element::parse(std::io::Cursor::new(xml.as_bytes())).expect("parse rewritten xml");
+        let entry = first_live_entry(&parsed);
+
+        assert_eq!(child_text(entry, "QualityCheck").as_deref(), Some("True"));
+    }
+}
+
 #[cfg(all(test, feature = "external-fixtures"))]
 mod tests {
     use super::{
@@ -3809,6 +4037,10 @@ mod tests {
         include_bytes!("../../../fixtures/kdbx/FileKeyXmlV2.kdbx");
     const FIXTURE_FILE_KEY_XML_V2: &[u8] =
         include_bytes!("../../../fixtures/kdbx/FileKeyXmlV2.keyx");
+    const FIXTURE_SCHEMA_COMPAT_KNOWN_BAD: &[u8] =
+        include_bytes!("../../../fixtures/kdbx/SchemaCompatKnownBad.kdbx");
+    const FIXTURE_SCHEMA_COMPAT_QUALITY_CHECK_TRUE: &[u8] =
+        include_bytes!("../../../fixtures/kdbx/SchemaCompatQualityCheckTrue.kdbx");
 
     #[test]
     fn variant_dictionary_roundtrips_supported_types() {
@@ -3827,6 +4059,86 @@ mod tests {
             Some(&VariantValue::String("alpha".into()))
         );
         assert_eq!(decoded.get("Enabled"), Some(&VariantValue::Bool(true)));
+    }
+
+    #[test]
+    fn schema_compat_known_bad_fixture_upgrades_to_quality_check_false() {
+        let mut key = CompositeKey::default();
+        key.add_password("a");
+
+        let original_xml =
+            extract_kdbx4_xml(FIXTURE_SCHEMA_COMPAT_KNOWN_BAD, &key).expect("extract fixture xml");
+        assert!(original_xml.contains("<Key>KnownBad</Key>"));
+
+        let loaded =
+            load_kdbx(FIXTURE_SCHEMA_COMPAT_KNOWN_BAD, &key).expect("load known bad fixture");
+        let entry = loaded.root.entries.first().expect("known bad entry");
+        assert!(entry.exclude_from_reports);
+        assert!(!entry.custom_data.contains_key("KnownBad"));
+        assert!(
+            entry
+                .custom_data_blocks
+                .iter()
+                .flat_map(|block| &block.items)
+                .all(|item| item.key != "KnownBad")
+        );
+
+        let rewritten =
+            save_kdbx(&loaded, &key, &SaveProfile::recommended()).expect("save known bad fixture");
+        let rewritten_xml =
+            extract_kdbx4_xml(&rewritten, &key).expect("extract rewritten known bad xml");
+        let rewritten_parsed =
+            Element::parse(rewritten_xml.as_bytes()).expect("parse rewritten known bad xml");
+        let mut entries = Vec::new();
+        collect_entry_elements(&rewritten_parsed, &mut entries);
+        let rewritten_entry = entries.first().expect("rewritten known bad entry");
+
+        assert_eq!(
+            child_text(rewritten_entry, "QualityCheck").as_deref(),
+            Some("False")
+        );
+        assert!(!rewritten_xml.contains("<Key>KnownBad</Key>"));
+    }
+
+    #[test]
+    fn schema_compat_quality_check_true_fixture_preserves_explicit_true() {
+        let mut key = CompositeKey::default();
+        key.add_password("a");
+
+        let original_xml = extract_kdbx4_xml(FIXTURE_SCHEMA_COMPAT_QUALITY_CHECK_TRUE, &key)
+            .expect("extract fixture xml");
+        let original_parsed =
+            Element::parse(original_xml.as_bytes()).expect("parse quality check true fixture");
+        let mut original_entries = Vec::new();
+        collect_entry_elements(&original_parsed, &mut original_entries);
+        let original_entry = original_entries
+            .first()
+            .expect("quality check true fixture entry");
+        assert_eq!(
+            child_text(original_entry, "QualityCheck").as_deref(),
+            Some("True")
+        );
+
+        let loaded = load_kdbx(FIXTURE_SCHEMA_COMPAT_QUALITY_CHECK_TRUE, &key)
+            .expect("load quality check true fixture");
+        assert!(!loaded.root.entries[0].exclude_from_reports);
+
+        let rewritten = save_kdbx(&loaded, &key, &SaveProfile::recommended())
+            .expect("save quality check true fixture");
+        let rewritten_xml =
+            extract_kdbx4_xml(&rewritten, &key).expect("extract rewritten quality check true xml");
+        let rewritten_parsed =
+            Element::parse(rewritten_xml.as_bytes()).expect("parse rewritten quality check true");
+        let mut rewritten_entries = Vec::new();
+        collect_entry_elements(&rewritten_parsed, &mut rewritten_entries);
+        let rewritten_entry = rewritten_entries
+            .first()
+            .expect("rewritten quality check true entry");
+
+        assert_eq!(
+            child_text(rewritten_entry, "QualityCheck").as_deref(),
+            Some("True")
+        );
     }
 
     #[test]
