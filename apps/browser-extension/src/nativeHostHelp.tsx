@@ -40,11 +40,11 @@ export function renderNativeHostHelp(error: unknown) {
     return (
       <div>
         <h2>Install the VaultKern native host</h2>
-        <p>Extension ID: {extensionId()}</p>
+        <p>Current extension ID: {extensionId()}</p>
         <ol>
           <li>
-            On Windows, run <code>VaultKernNativeSetup.exe</code>, paste this
-            extension ID, then click <code>Register / Repair</code> for Chrome.
+            On Windows, run <code>VaultKernNativeSetup.exe</code>, then click{" "}
+            <code>Register / Repair</code> for Chrome.
           </li>
           <li>
             Chrome should be registered at <code>{chromeRegistryPath()}</code>{" "}
