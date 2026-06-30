@@ -1050,12 +1050,15 @@ describe("PopupShell fill flow", () => {
         isCurrent: true
       }
     ]);
-    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
+    const quickUnlock = createDeferred<{
+      unlocked: boolean;
+      activeVaultId: string | null;
+      currentVaultRefId: string | null;
+      supportsBiometricUnlock: boolean;
+    }>();
+    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockReturnValue(
+      quickUnlock.promise
+    );
     runtimeClientMocks.listEntries.mockResolvedValue([]);
     runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
 
@@ -1066,6 +1069,12 @@ describe("PopupShell fill flow", () => {
     expect(await screen.findByText("Passkey request waiting")).toBeInTheDocument();
     await waitFor(() => {
       expect(runtimeClientMocks.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
+    });
+    quickUnlock.resolve({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
     });
     await waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith({

@@ -127,7 +127,8 @@ pub enum RuntimeCommand {
         vault_id: String,
         relying_party: String,
         origin: String,
-        credential_id: String,
+        #[serde(default)]
+        credential_id: Option<String>,
         client_data_json_base64url: String,
     },
     CreatePasskeyRegistration {
@@ -142,6 +143,8 @@ pub enum RuntimeCommand {
     PasskeyCredentialStatus {
         vault_id: String,
         credential_id: String,
+        #[serde(default)]
+        relying_party: Option<String>,
     },
     DeleteEntry {
         vault_id: String,

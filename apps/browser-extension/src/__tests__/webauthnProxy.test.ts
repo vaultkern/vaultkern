@@ -235,6 +235,128 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(response.id).toBe("dmF1bHRrZXJuLWNyZWRlbnRpYWw");
   });
 
+  it("derives the default WebAuthn get RP ID from the active origin", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_assertion",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        clientDataJsonBase64url: "client-data",
+        signatureBase64url: "signature",
+        userHandleBase64url: "dXNlci0x"
+      });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://login.example.com/login" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 21,
+      requestDetailsJson: JSON.stringify({
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [
+          {
+            type: "public-key",
+            id: "Y3JlZGVudGlhbC0x"
+          }
+        ]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "create_passkey_assertion",
+      vault_id: "vault-1",
+      relying_party: "login.example.com",
+      origin: "https://login.example.com",
+      credential_id: "Y3JlZGVudGlhbC0x",
+      client_data_json_base64url: expect.any(String)
+    });
+  });
+
+  it("allows discoverable WebAuthn get requests without allowed credentials", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_assertion",
+        credentialId: "ZGlzY292ZXJhYmxlLTE",
+        authenticatorDataBase64url: "auth-data",
+        clientDataJsonBase64url: "client-data",
+        signatureBase64url: "signature",
+        userHandleBase64url: "dXNlci0x"
+      });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 22,
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: []
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "create_passkey_assertion",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.com",
+      credential_id: null,
+      client_data_json_base64url: expect.any(String)
+    });
+    const response = JSON.parse(completeGetRequest.mock.calls[0][0].responseJson);
+    expect(response.id).toBe("ZGlzY292ZXJhYmxlLTE");
+  });
+
   it("completes WebAuthn create requests with a runtime registration and saves the vault", async () => {
     let createListener: ((request: unknown) => void) | undefined;
     const completeCreateRequest = vi.fn(async () => undefined);
@@ -460,7 +582,8 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
       type: "passkey_credential_status",
       vault_id: "vault-1",
-      credential_id: "Y3JlZGVudGlhbC0x"
+      credential_id: "Y3JlZGVudGlhbC0x",
+      relying_party: "example.com"
     });
     expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "create_passkey_registration" })
@@ -503,7 +626,8 @@ describe("webAuthenticationProxy wrapper", () => {
         type: "error",
         code: "invalid_request",
         message: "failed to save vault"
-      });
+      })
+      .mockResolvedValueOnce({ type: "saved" });
     const chromeApi = {
       runtime: {},
       tabs: {
@@ -546,6 +670,167 @@ describe("webAuthenticationProxy wrapper", () => {
         message: "failed to save vault"
       }
     });
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "delete_entry",
+      vault_id: "vault-1",
+      entry_id: "entry-1"
+    });
+  });
+
+  it("rolls back a created passkey when completing the WebAuthn create request fails", async () => {
+    let createListener: ((request: unknown) => void) | undefined;
+    const completeCreateRequest = vi.fn(async () => {
+      throw new Error("Chrome rejected completion");
+    });
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_registration",
+        entryId: "entry-1",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        attestationObjectBase64url: "attestation-object",
+        clientDataJsonBase64url: "client-data",
+        publicKeyBase64url: "public-key",
+        publicKeyAlgorithm: -7,
+        userHandleBase64url: "dXNlci0x"
+      })
+      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "saved" })
+      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/register" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeCreateRequest,
+        onCreateRequest: {
+          addListener(listener: (request: unknown) => void) {
+            createListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    createListener?.({
+      requestId: 23,
+      requestDetailsJson: JSON.stringify({
+        rp: { id: "example.com", name: "Example" },
+        user: {
+          id: "dXNlci0x",
+          name: "alice@example.com",
+          displayName: "Alice"
+        },
+        challenge: "cmVnaXN0ZXItMQ",
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(sendRuntimeCommand).toHaveBeenCalledWith({
+        type: "delete_entry",
+        vault_id: "vault-1",
+        entry_id: "entry-1"
+      });
+    });
+    expect(sendRuntimeCommand).toHaveBeenLastCalledWith({
+      type: "save_vault",
+      vault_id: "vault-1"
+    });
+  });
+
+  it("rolls back a created passkey when Chrome cancels before save", async () => {
+    let createListener: ((request: unknown) => void) | undefined;
+    let cancelListener: ((request: unknown) => void) | undefined;
+    let resolveRegistration: (value: unknown) => void = () => {};
+    const completeCreateRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRegistration = resolve;
+          })
+      )
+      .mockResolvedValueOnce({ type: "saved" });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/register" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeCreateRequest,
+        onCreateRequest: {
+          addListener(listener: (request: unknown) => void) {
+            createListener = listener;
+          }
+        },
+        onRequestCanceled: {
+          addListener(listener: (request: unknown) => void) {
+            cancelListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    createListener?.({
+      requestId: 24,
+      requestDetailsJson: JSON.stringify({
+        rp: { id: "example.com", name: "Example" },
+        user: {
+          id: "dXNlci0x",
+          name: "alice@example.com",
+          displayName: "Alice"
+        },
+        challenge: "cmVnaXN0ZXItMQ",
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }]
+      })
+    });
+    await vi.waitFor(() => {
+      expect(sendRuntimeCommand).toHaveBeenCalledTimes(2);
+    });
+    cancelListener?.(24);
+    resolveRegistration({
+      type: "passkey_registration",
+      entryId: "entry-1",
+      credentialId: "Y3JlZGVudGlhbC0x",
+      authenticatorDataBase64url: "auth-data",
+      attestationObjectBase64url: "attestation-object",
+      clientDataJsonBase64url: "client-data",
+      publicKeyBase64url: "public-key",
+      publicKeyAlgorithm: -7,
+      userHandleBase64url: "dXNlci0x"
+    });
+
+    await vi.waitFor(() => {
+      expect(sendRuntimeCommand).toHaveBeenCalledWith({
+        type: "delete_entry",
+        vault_id: "vault-1",
+        entry_id: "entry-1"
+      });
+    });
+    expect(sendRuntimeCommand).not.toHaveBeenCalledWith({
+      type: "save_vault",
+      vault_id: "vault-1"
+    });
+    expect(completeCreateRequest).not.toHaveBeenCalled();
   });
 
   it("returns a WebAuthn error when passkey registration fails", async () => {

@@ -798,7 +798,7 @@ fn protocol_roundtrips_passkey_assertion_command_and_response() {
         vault_id: "vault-1".into(),
         relying_party: "example.com".into(),
         origin: "https://example.com".into(),
-        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        credential_id: Some("Y3JlZGVudGlhbC0x".into()),
         client_data_json_base64url: "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0".into(),
     });
 
@@ -906,6 +906,7 @@ fn protocol_roundtrips_passkey_credential_status_command_and_response() {
     let command = ProtocolEnvelope::new(RuntimeCommand::PasskeyCredentialStatus {
         vault_id: "vault-1".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
+        relying_party: Some("example.com".into()),
     });
 
     let command_json = serde_json::to_value(&command).unwrap();
@@ -916,6 +917,10 @@ fn protocol_roundtrips_passkey_credential_status_command_and_response() {
     assert_eq!(
         command_json["command"]["credential_id"],
         serde_json::json!("Y3JlZGVudGlhbC0x")
+    );
+    assert_eq!(
+        command_json["command"]["relying_party"],
+        serde_json::json!("example.com")
     );
     assert_eq!(
         serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),

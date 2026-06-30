@@ -3,7 +3,11 @@ import {
   EXTENSION_SETTINGS_STORAGE_KEY,
   createChromeExtensionSettingsStore
 } from "./extensionSettings";
-import { attachWebAuthnProxy, detachWebAuthnProxy } from "./webauthnProxy";
+import {
+  attachWebAuthnProxy,
+  detachWebAuthnProxy,
+  registerWebAuthnProxyRequestHandlers
+} from "./webauthnProxy";
 
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
 const extensionSettingsStore = createChromeExtensionSettingsStore();
@@ -71,6 +75,10 @@ if (chromeApi?.runtime?.onMessage && nativeBridge) {
 }
 
 if (chromeApi?.webAuthenticationProxy) {
+  if (nativeBridge) {
+    registerWebAuthnProxyRequestHandlers(chromeApi, sendRuntimeCommand);
+  }
+
   void syncWebAuthnProxy();
 
   chromeApi.storage?.onChanged?.addListener?.(

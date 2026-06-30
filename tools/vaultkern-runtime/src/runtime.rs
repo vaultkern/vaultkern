@@ -1268,12 +1268,16 @@ impl Runtime {
         vault_id: &str,
         relying_party: &str,
         origin: &str,
-        credential_id: &str,
+        credential_id: Option<&str>,
         client_data_json_base64url: &str,
     ) -> Result<PasskeyAssertionDto> {
         let vault = self.loaded_vault(vault_id)?;
-        let passkey = find_passkey_by_credential_id(&vault.root, credential_id)
-            .with_context(|| format!("passkey credential not found: {credential_id}"))?;
+        let passkey = match credential_id {
+            Some(credential_id) => find_passkey_by_credential_id(&vault.root, credential_id)
+                .with_context(|| format!("passkey credential not found: {credential_id}"))?,
+            None => find_passkey_by_relying_party(&vault.root, relying_party)
+                .with_context(|| format!("passkey relying party not found: {relying_party}"))?,
+        };
         create_assertion(
             passkey,
             PasskeyAssertionRequest {
@@ -1289,11 +1293,17 @@ impl Runtime {
         &self,
         vault_id: &str,
         credential_id: &str,
+        relying_party: Option<&str>,
     ) -> Result<PasskeyCredentialStatusDto> {
         let vault = self.loaded_vault(vault_id)?;
         Ok(PasskeyCredentialStatusDto {
             credential_id: credential_id.to_owned(),
-            exists: find_passkey_by_credential_id(&vault.root, credential_id).is_some(),
+            exists: find_passkey_by_credential_id_and_relying_party(
+                &vault.root,
+                credential_id,
+                relying_party,
+            )
+            .is_some(),
         })
     }
 
@@ -1767,7 +1777,7 @@ impl Runtime {
                     &vault_id,
                     &relying_party,
                     &origin,
-                    &credential_id,
+                    credential_id.as_deref(),
                     &client_data_json_base64url,
                 ) {
                     Ok(assertion) => RuntimeResponse::PasskeyAssertion(assertion),
@@ -1799,8 +1809,13 @@ impl Runtime {
             RuntimeCommand::PasskeyCredentialStatus {
                 vault_id,
                 credential_id,
+                relying_party,
             } => Ok(
-                match self.passkey_credential_status(&vault_id, &credential_id) {
+                match self.passkey_credential_status(
+                    &vault_id,
+                    &credential_id,
+                    relying_party.as_deref(),
+                ) {
                     Ok(status) => RuntimeResponse::PasskeyCredentialStatus(status),
                     Err(error) => query_error_response(error),
                 },
@@ -2490,16 +2505,49 @@ fn find_passkey_by_credential_id<'a>(
     group: &'a vaultkern_core::Group,
     credential_id: &str,
 ) -> Option<&'a PasskeyRecord> {
+    find_passkey_by_credential_id_and_relying_party(group, credential_id, None)
+}
+
+fn find_passkey_by_credential_id_and_relying_party<'a>(
+    group: &'a vaultkern_core::Group,
+    credential_id: &str,
+    relying_party: Option<&str>,
+) -> Option<&'a PasskeyRecord> {
     for entry in &group.entries {
         if let Some(passkey) = entry.passkey.as_ref() {
-            if passkey.credential_id == credential_id {
+            if passkey.credential_id == credential_id
+                && relying_party.is_none_or(|value| passkey.relying_party == value)
+            {
                 return Some(passkey);
             }
         }
     }
 
     for child in &group.children {
-        if let Some(passkey) = find_passkey_by_credential_id(child, credential_id) {
+        if let Some(passkey) =
+            find_passkey_by_credential_id_and_relying_party(child, credential_id, relying_party)
+        {
+            return Some(passkey);
+        }
+    }
+
+    None
+}
+
+fn find_passkey_by_relying_party<'a>(
+    group: &'a vaultkern_core::Group,
+    relying_party: &str,
+) -> Option<&'a PasskeyRecord> {
+    for entry in &group.entries {
+        if let Some(passkey) = entry.passkey.as_ref() {
+            if passkey.relying_party == relying_party {
+                return Some(passkey);
+            }
+        }
+    }
+
+    for child in &group.children {
+        if let Some(passkey) = find_passkey_by_relying_party(child, relying_party) {
             return Some(passkey);
         }
     }

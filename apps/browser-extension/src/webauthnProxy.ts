@@ -115,6 +115,18 @@ export async function detachWebAuthnProxy(
   }
 }
 
+export function registerWebAuthnProxyRequestHandlers(
+  chromeApi: unknown,
+  sendRuntimeCommand: RuntimeCommandSender
+) {
+  const candidate = chromeApi as ChromeLike | null | undefined;
+  if (!candidate?.webAuthenticationProxy) {
+    return;
+  }
+
+  registerRequestHandlers(candidate, sendRuntimeCommand);
+}
+
 function registerRequestHandlers(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender
@@ -225,9 +237,12 @@ async function handleGetRequest(
   });
   try {
     const options = requestOptionsFrom(request);
-    const relyingParty = relyingPartyFromOptions(options);
     const credentialIds = credentialIdsFromOptions(options);
-    const origin = await activeOrigin(chromeApi, relyingParty);
+    const origin = await activeOrigin(
+      chromeApi,
+      relyingPartyIdFromGetOptions(options) ?? undefined
+    );
+    const relyingParty = relyingPartyFromGetOptions(options, origin);
     const clientDataJsonBase64url = base64urlEncode(
       JSON.stringify({
         type: "webauthn.get",
@@ -331,6 +346,7 @@ type PasskeyAssertionResponse = {
 };
 
 type PasskeyRegistrationResponse = {
+  entryId: string;
   credentialId: string;
   authenticatorDataBase64url: string;
   attestationObjectBase64url: string;
@@ -351,7 +367,7 @@ async function createAssertionForAllowedCredentials(
   activeVaultId: string,
   relyingParty: string,
   origin: string,
-  credentialIds: string[],
+  credentialIds: Array<string | null>,
   clientDataJsonBase64url: string,
   canceledRequests: Set<number>
 ) {
@@ -444,6 +460,7 @@ function passkeyRegistrationFromResponse(response: unknown): PasskeyRegistration
   const registration = response as Partial<PasskeyRegistrationResponse> | null;
   if (
     !registration ||
+    typeof registration.entryId !== "string" ||
     typeof registration.credentialId !== "string" ||
     typeof registration.authenticatorDataBase64url !== "string" ||
     typeof registration.attestationObjectBase64url !== "string" ||
@@ -457,6 +474,7 @@ function passkeyRegistrationFromResponse(response: unknown): PasskeyRegistration
     );
   }
   return {
+    entryId: registration.entryId,
     credentialId: registration.credentialId,
     authenticatorDataBase64url: registration.authenticatorDataBase64url,
     attestationObjectBase64url: registration.attestationObjectBase64url,
@@ -551,7 +569,8 @@ async function handleCreateRequest(
         await sendRuntimeCommand({
           type: "passkey_credential_status",
           vault_id: activeVaultId,
-          credential_id: credentialId
+          credential_id: credentialId,
+          relying_party: relyingParty
         })
       );
       if (status.exists) {
@@ -573,6 +592,14 @@ async function handleCreateRequest(
       client_data_json_base64url: clientDataJsonBase64url
     });
     const registration = passkeyRegistrationFromResponse(registrationResponse);
+    const rollbackRegistration = async (saveAfterRollback: boolean) => {
+      await rollbackPasskeyRegistration(
+        sendRuntimeCommand,
+        activeVaultId,
+        registration.entryId,
+        saveAfterRollback
+      );
+    };
     await recordWebAuthnDebug(chromeApi, {
       event: "create_runtime_registration",
       requestId,
@@ -581,43 +608,60 @@ async function handleCreateRequest(
       credentialId: registration.credentialId
     });
     if (canceledRequests.has(requestId)) {
+      await rollbackRegistration(false);
       return;
     }
 
-    const saveResponse = await sendRuntimeCommand({
-      type: "save_vault",
-      vault_id: activeVaultId
-    });
-    const saveError = runtimeErrorFromResponse(saveResponse);
-    if (saveError) {
-      throw saveError;
+    try {
+      const saveResponse = await sendRuntimeCommand({
+        type: "save_vault",
+        vault_id: activeVaultId
+      });
+      const saveError = runtimeErrorFromResponse(saveResponse);
+      if (saveError) {
+        throw saveError;
+      }
+    } catch (error) {
+      await rollbackRegistration(false);
+      throw error;
     }
     await recordWebAuthnDebug(chromeApi, {
       event: "create_saved",
       requestId
     });
     if (canceledRequests.has(requestId)) {
+      await rollbackRegistration(true);
       return;
     }
 
-    await completeCreateRequest(chromeApi, {
-      requestId,
-      responseJson: JSON.stringify({
-        id: registration.credentialId,
-        rawId: registration.credentialId,
-        type: "public-key",
-        authenticatorAttachment: "platform",
-        clientExtensionResults: {},
-        response: {
-          authenticatorData: registration.authenticatorDataBase64url,
-          attestationObject: registration.attestationObjectBase64url,
-          clientDataJSON: registration.clientDataJsonBase64url,
-          publicKey: registration.publicKeyBase64url,
-          publicKeyAlgorithm: registration.publicKeyAlgorithm,
-          transports: ["internal"]
-        }
-      })
-    });
+    try {
+      await completeCreateRequest(chromeApi, {
+        requestId,
+        responseJson: JSON.stringify({
+          id: registration.credentialId,
+          rawId: registration.credentialId,
+          type: "public-key",
+          authenticatorAttachment: "platform",
+          clientExtensionResults: {},
+          response: {
+            authenticatorData: registration.authenticatorDataBase64url,
+            attestationObject: registration.attestationObjectBase64url,
+            clientDataJSON: registration.clientDataJsonBase64url,
+            publicKey: registration.publicKeyBase64url,
+            publicKeyAlgorithm: registration.publicKeyAlgorithm,
+            transports: ["internal"]
+          }
+        })
+      });
+    } catch (error) {
+      await rollbackRegistration(true);
+      await recordWebAuthnDebug(chromeApi, {
+        event: "create_complete_error",
+        requestId,
+        error: errorSummary(error)
+      });
+      return;
+    }
     await recordWebAuthnDebug(chromeApi, {
       event: "create_completed",
       requestId
@@ -707,11 +751,44 @@ function createRequestOptionsFrom(request: unknown) {
   return options;
 }
 
-function relyingPartyFromOptions(options: { rpId?: unknown }) {
-  if (typeof options.rpId !== "string" || options.rpId.trim() === "") {
-    throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn RP ID");
+async function rollbackPasskeyRegistration(
+  sendRuntimeCommand: RuntimeCommandSender,
+  vaultId: string,
+  entryId: string,
+  saveAfterRollback: boolean
+) {
+  const deleteResponse = await sendRuntimeCommand({
+    type: "delete_entry",
+    vault_id: vaultId,
+    entry_id: entryId
+  });
+  const deleteError = runtimeErrorFromResponse(deleteResponse);
+  if (deleteError) {
+    throw deleteError;
   }
-  return options.rpId;
+
+  if (!saveAfterRollback) {
+    return;
+  }
+
+  const saveResponse = await sendRuntimeCommand({
+    type: "save_vault",
+    vault_id: vaultId
+  });
+  const saveError = runtimeErrorFromResponse(saveResponse);
+  if (saveError) {
+    throw saveError;
+  }
+}
+
+function relyingPartyIdFromGetOptions(options: { rpId?: unknown }) {
+  return typeof options.rpId === "string" && options.rpId.trim() !== ""
+    ? options.rpId.trim()
+    : null;
+}
+
+function relyingPartyFromGetOptions(options: { rpId?: unknown }, origin: string) {
+  return relyingPartyIdFromGetOptions(options) ?? relyingPartyFromOrigin(origin);
 }
 
 function relyingPartyIdFromCreateOptions(options: {
@@ -767,10 +844,7 @@ function userHandleFromCreateOptions(options: { user?: { id?: unknown } }) {
 
 function credentialIdsFromOptions(options: { allowCredentials?: unknown }) {
   if (!Array.isArray(options.allowCredentials)) {
-    throw new WebAuthnRequestError(
-      "NotAllowedError",
-      "VaultKern passkey selection requires an allowed credential"
-    );
+    return [null];
   }
 
   const credentials = options.allowCredentials.filter(
@@ -781,10 +855,7 @@ function credentialIdsFromOptions(options: { allowCredentials?: unknown }) {
       typeof (item as { id?: unknown }).id === "string"
   ) as Array<{ id: string }>;
   if (credentials.length === 0) {
-    throw new WebAuthnRequestError(
-      "NotAllowedError",
-      "VaultKern passkey selection requires an allowed credential"
-    );
+    return [null];
   }
   return credentials.map((credential) => credential.id);
 }

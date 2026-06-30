@@ -262,6 +262,68 @@ describe("background bridge", () => {
     expect(attach).toHaveBeenCalledTimes(1);
   });
 
+  it("registers WebAuthn request listeners before async settings load finishes", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+    const addGetListener = vi.fn();
+    const addCreateListener = vi.fn();
+    let resolveSettings: (items: Record<string, unknown>) => void = () => {};
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            new Promise<Record<string, unknown>>((resolve) => {
+              resolveSettings = resolve;
+            }).then(callback);
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      webAuthenticationProxy: {
+        attach,
+        onGetRequest: {
+          addListener: addGetListener
+        },
+        onCreateRequest: {
+          addListener: addCreateListener
+        },
+        onRequestCanceled: {
+          addListener() {}
+        }
+      }
+    };
+
+    await import("../background");
+
+    expect(addGetListener).toHaveBeenCalledTimes(1);
+    expect(addCreateListener).toHaveBeenCalledTimes(1);
+    expect(attach).not.toHaveBeenCalled();
+
+    resolveSettings({
+      vaultkernExtensionSettings: {
+        recentVaultLimit: 10,
+        language: "en",
+        idleLockMinutes: 10,
+        clearClipboardSeconds: 30,
+        passkeyProviderEnabled: true
+      }
+    });
+
+    await vi.waitFor(() => {
+      expect(attach).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("does not attach the WebAuthn proxy when the passkey provider setting is disabled", async () => {
     const port = createPort();
     const attach = vi.fn(async () => undefined);

@@ -24,7 +24,7 @@ const AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA: u8 = 0x40;
 pub struct PasskeyAssertionRequest<'a> {
     pub relying_party: &'a str,
     pub origin: &'a str,
-    pub credential_id: &'a str,
+    pub credential_id: Option<&'a str>,
     pub client_data_json_base64url: &'a str,
 }
 
@@ -45,7 +45,10 @@ pub fn create_assertion(
     passkey: &PasskeyRecord,
     request: PasskeyAssertionRequest<'_>,
 ) -> Result<PasskeyAssertionDto> {
-    if passkey.credential_id != request.credential_id {
+    if request
+        .credential_id
+        .is_some_and(|credential_id| passkey.credential_id != credential_id)
+    {
         anyhow::bail!("passkey credential id mismatch");
     }
     if passkey.relying_party != request.relying_party {
@@ -154,7 +157,7 @@ fn assertion_flags(passkey: &PasskeyRecord) -> u8 {
     } else {
         0
     };
-    AUTH_DATA_FLAG_USER_PRESENT | AUTH_DATA_FLAG_USER_VERIFIED | backup_eligible | backup_state
+    AUTH_DATA_FLAG_USER_PRESENT | backup_eligible | backup_state
 }
 
 fn validate_origin_for_relying_party(origin: &str, relying_party: &str) -> Result<()> {
