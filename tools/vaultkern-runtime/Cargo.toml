@@ -8,6 +8,7 @@ version.workspace = true
 external-fixtures = []
 
 [dependencies]
+aes-gcm = "0.10"
 anyhow = "1.0"
 base64.workspace = true
 psl.workspace = true

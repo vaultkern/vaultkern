@@ -744,7 +744,9 @@ impl Runtime {
             .current_vault_ref_id()
             .context("no current vault selected")?
             .to_owned();
-        self.biometric.authorize("Unlock this vault")?;
+        if !self.secure_storage.load_requires_user_presence() {
+            self.biometric.authorize("Unlock this vault")?;
+        }
         let bytes = self
             .secure_storage
             .load(&quick_unlock_storage_key(&current_vault_ref_id))?
@@ -2154,7 +2156,7 @@ impl Runtime {
             return Ok(());
         };
         let storage_key = quick_unlock_storage_key(&vault_ref_id);
-        if self.secure_storage.load(&storage_key)?.is_none() {
+        if !self.secure_storage.contains(&storage_key)? {
             return Ok(());
         }
 
@@ -2718,6 +2720,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use vaultkern_runtime_protocol::DatabaseCredentialsUpdateDto;
 
     struct LoadRejectingSecureStorageProvider {
         values: RefCell<BTreeMap<String, Vec<u8>>>,
@@ -2822,5 +2825,42 @@ mod tests {
 
         assert_eq!(listed.vaults.len(), 1);
         assert!(listed.vaults[0].supports_quick_unlock);
+    }
+
+    #[test]
+    fn refreshing_quick_unlock_after_save_checks_presence_without_loading_secret() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("old-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        runtime.secure_storage = Box::new(LoadRejectingSecureStorageProvider::new());
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("old-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    credentials: Some(DatabaseCredentialsUpdateDto {
+                        new_password: Some("new-password".into()),
+                        remove_password: false,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+
+        runtime.save_vault(&opened.vault_id).unwrap();
     }
 }
