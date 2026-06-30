@@ -596,8 +596,7 @@ impl Runtime {
             for vault in &mut list.vaults {
                 vault.supports_quick_unlock = self
                     .secure_storage
-                    .load(&quick_unlock_storage_key(&vault.vault_ref_id))?
-                    .is_some();
+                    .contains(&quick_unlock_storage_key(&vault.vault_ref_id))?;
             }
         }
         Ok(list)
@@ -2717,6 +2716,42 @@ struct RankedFillCandidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    struct LoadRejectingSecureStorageProvider {
+        values: RefCell<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl LoadRejectingSecureStorageProvider {
+        fn new() -> Self {
+            Self {
+                values: RefCell::new(BTreeMap::new()),
+            }
+        }
+    }
+
+    impl SecureStorageProvider for LoadRejectingSecureStorageProvider {
+        fn store(&self, key: &str, value: &[u8]) -> Result<()> {
+            self.values
+                .borrow_mut()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+            anyhow::bail!("quick unlock secret should not be decrypted while listing vaults")
+        }
+
+        fn contains(&self, key: &str) -> Result<bool> {
+            Ok(self.values.borrow().contains_key(key))
+        }
+
+        fn delete(&self, key: &str) -> Result<()> {
+            self.values.borrow_mut().remove(key);
+            Ok(())
+        }
+    }
 
     #[test]
     fn locking_clears_decrypted_vault_and_keeps_encrypted_snapshot_for_reunlock() {
@@ -2758,5 +2793,34 @@ mod tests {
             session.active_vault_id.as_deref(),
             Some(opened.vault_id.as_str())
         );
+    }
+
+    #[test]
+    fn listing_recent_vaults_checks_quick_unlock_without_loading_secret() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        runtime.secure_storage = Box::new(LoadRejectingSecureStorageProvider::new());
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+
+        let listed = runtime.list_recent_vaults().unwrap();
+
+        assert_eq!(listed.vaults.len(), 1);
+        assert!(listed.vaults[0].supports_quick_unlock);
     }
 }

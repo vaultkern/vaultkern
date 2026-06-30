@@ -11,6 +11,7 @@ use crate::state_paths::{extension_state_dir, runtime_state_dir};
 pub trait SecureStorageProvider {
     fn store(&self, key: &str, value: &[u8]) -> Result<()>;
     fn load(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    fn contains(&self, key: &str) -> Result<bool>;
     fn delete(&self, key: &str) -> Result<()>;
 }
 
@@ -23,6 +24,10 @@ impl SecureStorageProvider for UnsupportedSecureStorageProvider {
 
     fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
         Ok(None)
+    }
+
+    fn contains(&self, _key: &str) -> Result<bool> {
+        Ok(false)
     }
 
     fn delete(&self, _key: &str) -> Result<()> {
@@ -89,6 +94,10 @@ impl SecureStorageProvider for DpapiSecureStorageProvider {
         }
         let protected = fs::read(path)?;
         unprotect_with_current_user(&protected).map(Some)
+    }
+
+    fn contains(&self, key: &str) -> Result<bool> {
+        Ok(self.path_for(key).is_file())
     }
 
     fn delete(&self, key: &str) -> Result<()> {
@@ -208,6 +217,10 @@ impl SecureStorageProvider for MemorySecureStorageProvider {
         Ok(self.values.borrow().get(key).cloned())
     }
 
+    fn contains(&self, key: &str) -> Result<bool> {
+        Ok(self.values.borrow().contains_key(key))
+    }
+
     fn delete(&self, key: &str) -> Result<()> {
         self.values.borrow_mut().remove(key);
         Ok(())
@@ -244,6 +257,10 @@ impl SecureStorageProvider for FailingStoreSecureStorageProvider {
 
     fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.values.borrow().get(key).cloned())
+    }
+
+    fn contains(&self, key: &str) -> Result<bool> {
+        Ok(self.values.borrow().contains_key(key))
     }
 
     fn delete(&self, key: &str) -> Result<()> {
