@@ -601,9 +601,14 @@ impl Runtime {
         let mut list = self.references.list_recent_vaults();
         if self.biometric.supports_quick_unlock() {
             for vault in &mut list.vaults {
-                vault.supports_quick_unlock = self
-                    .secure_storage
-                    .contains(&quick_unlock_storage_key(&vault.vault_ref_id))?;
+                let storage_key = quick_unlock_storage_key(&vault.vault_ref_id);
+                vault.supports_quick_unlock = match self.secure_storage.contains(&storage_key) {
+                    Ok(contains) => contains,
+                    Err(_) => {
+                        let _ = self.secure_storage.delete(&storage_key);
+                        false
+                    }
+                };
             }
         }
         Ok(list)
@@ -2897,6 +2902,34 @@ mod tests {
 
         assert_eq!(listed.vaults.len(), 1);
         assert!(listed.vaults[0].supports_quick_unlock);
+    }
+
+    #[test]
+    fn listing_recent_vaults_treats_quick_unlock_probe_failures_as_disabled() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests_with_quick_unlock_failing_contains();
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+
+        let listed = runtime.list_recent_vaults().unwrap();
+
+        assert_eq!(listed.vaults.len(), 1);
+        assert!(!listed.vaults[0].supports_quick_unlock);
     }
 
     #[test]
