@@ -3,11 +3,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 #[cfg(windows)]
 use std::fs;
-#[cfg(windows)]
 use std::path::PathBuf;
 
-#[cfg(windows)]
-use crate::state_paths::runtime_state_dir;
+use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
 #[allow(dead_code)]
 pub trait SecureStorageProvider {
@@ -33,16 +31,30 @@ impl SecureStorageProvider for UnsupportedSecureStorageProvider {
 }
 
 pub(crate) fn default_secure_storage_provider() -> Box<dyn SecureStorageProvider> {
+    default_secure_storage_provider_for_extension_id(None)
+}
+
+pub(crate) fn default_secure_storage_provider_for_extension_id(
+    extension_id: Option<&str>,
+) -> Box<dyn SecureStorageProvider> {
     #[cfg(windows)]
     {
-        Box::new(DpapiSecureStorageProvider::new(
-            runtime_state_dir().join("quick-unlock"),
-        ))
+        Box::new(DpapiSecureStorageProvider::new(quick_unlock_storage_dir(
+            extension_id,
+        )))
     }
     #[cfg(not(windows))]
     {
+        let _ = extension_id;
         Box::new(UnsupportedSecureStorageProvider)
     }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn quick_unlock_storage_dir(extension_id: Option<&str>) -> PathBuf {
+    extension_id
+        .map(|id| extension_state_dir(id).join("quick-unlock"))
+        .unwrap_or_else(|| runtime_state_dir().join("quick-unlock"))
 }
 
 #[cfg(windows)]
@@ -199,5 +211,23 @@ impl SecureStorageProvider for MemorySecureStorageProvider {
     fn delete(&self, key: &str) -> Result<()> {
         self.values.borrow_mut().remove(key);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quick_unlock_storage_dir;
+    use crate::state_paths::{extension_state_dir, runtime_state_dir};
+
+    #[test]
+    fn quick_unlock_storage_dir_is_scoped_by_extension_id() {
+        assert_eq!(
+            quick_unlock_storage_dir(Some("kblgblkjghklighdgmejjfondchkjcgf")),
+            extension_state_dir("kblgblkjghklighdgmejjfondchkjcgf").join("quick-unlock")
+        );
+        assert_eq!(
+            quick_unlock_storage_dir(None),
+            runtime_state_dir().join("quick-unlock")
+        );
     }
 }

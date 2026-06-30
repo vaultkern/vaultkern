@@ -35,7 +35,7 @@ use crate::providers::onedrive::{OneDriveMemoryAccessCounts, OneDriveVaultSource
 use crate::providers::remote_cache::{RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry};
 use crate::providers::secure_storage::{
     MemorySecureStorageProvider, SecureStorageProvider, UnsupportedSecureStorageProvider,
-    default_secure_storage_provider,
+    default_secure_storage_provider, default_secure_storage_provider_for_extension_id,
 };
 use crate::session::SessionState;
 use crate::state_paths::extension_id_from_browser_origin;
@@ -128,6 +128,7 @@ impl Runtime {
             VaultReferenceStore::new_default(),
             OneDriveVaultSourceProvider::new_from_env(),
             RemoteVaultCache::new_default(),
+            default_secure_storage_provider(),
         )
     }
 
@@ -137,6 +138,7 @@ impl Runtime {
                 VaultReferenceStore::new_for_extension_id(extension_id),
                 OneDriveVaultSourceProvider::new_from_env_for_extension_id(extension_id),
                 RemoteVaultCache::new_for_extension_id(extension_id),
+                default_secure_storage_provider_for_extension_id(Some(extension_id)),
             );
         }
 
@@ -147,6 +149,7 @@ impl Runtime {
         references: VaultReferenceStore,
         one_drive: OneDriveVaultSourceProvider,
         remote_cache: RemoteVaultCache,
+        secure_storage: Box<dyn SecureStorageProvider>,
     ) -> Self {
         let mut session = SessionState::default();
         if let Some(vault_ref_id) = references.current_vault_ref_id() {
@@ -161,7 +164,7 @@ impl Runtime {
             one_drive,
             remote_cache,
             biometric: default_biometric_provider(),
-            secure_storage: default_secure_storage_provider(),
+            secure_storage,
             loaded: BTreeMap::new(),
             fixed_unix_time: None,
         }
@@ -846,63 +849,71 @@ impl Runtime {
         vault_id: &str,
         update: DatabaseSettingsUpdateDto,
     ) -> Result<DatabaseSettingsDto> {
-        let loaded = self
-            .loaded
-            .get_mut(vault_id)
-            .with_context(|| format!("vault not opened: {vault_id}"))?;
-        let vault = loaded
-            .vault
-            .as_mut()
-            .with_context(|| format!("vault is locked: {vault_id}"))?;
+        let credentials_changed = update.credentials.is_some();
+        let settings = {
+            let loaded = self
+                .loaded
+                .get_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_mut()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
 
-        if let Some(metadata) = update.metadata {
-            vault.name = metadata.name.clone();
-            vault.root.title = metadata.name;
-            vault.description = empty_string_as_none(metadata.description);
-            vault.default_username = empty_string_as_none(metadata.default_username);
-        }
-
-        if let Some(public_metadata) = update.public_metadata {
-            upsert_optional_public_string(
-                vault,
-                "display-name",
-                public_metadata.display_name.as_deref(),
-            );
-            upsert_optional_public_string(vault, "color", public_metadata.color.as_deref());
-            upsert_optional_public_string(vault, "icon", public_metadata.icon.as_deref());
-        }
-
-        if let Some(history) = update.history {
-            vault.history_max_items = history.max_items_per_entry;
-            vault.history_max_size = history.max_total_size_bytes;
-        }
-
-        if let Some(recycle_bin) = update.recycle_bin {
-            vault.recycle_bin_enabled = Some(recycle_bin.enabled);
-        }
-
-        if let Some(encryption) = update.encryption {
-            loaded.save_profile = save_profile_from_settings(encryption)?;
-        }
-
-        if let Some(credentials) = update.credentials {
-            if credentials.remove_password {
-                loaded.password = None;
-            } else if let Some(password) = credentials.new_password {
-                loaded.password = Some(password);
+            if let Some(metadata) = update.metadata {
+                vault.name = metadata.name.clone();
+                vault.root.title = metadata.name;
+                vault.description = empty_string_as_none(metadata.description);
+                vault.default_username = empty_string_as_none(metadata.default_username);
             }
+
+            if let Some(public_metadata) = update.public_metadata {
+                upsert_optional_public_string(
+                    vault,
+                    "display-name",
+                    public_metadata.display_name.as_deref(),
+                );
+                upsert_optional_public_string(vault, "color", public_metadata.color.as_deref());
+                upsert_optional_public_string(vault, "icon", public_metadata.icon.as_deref());
+            }
+
+            if let Some(history) = update.history {
+                vault.history_max_items = history.max_items_per_entry;
+                vault.history_max_size = history.max_total_size_bytes;
+            }
+
+            if let Some(recycle_bin) = update.recycle_bin {
+                vault.recycle_bin_enabled = Some(recycle_bin.enabled);
+            }
+
+            if let Some(encryption) = update.encryption {
+                loaded.save_profile = save_profile_from_settings(encryption)?;
+            }
+
+            if let Some(credentials) = update.credentials {
+                if credentials.remove_password {
+                    loaded.password = None;
+                } else if let Some(password) = credentials.new_password {
+                    loaded.password = Some(password);
+                }
+            }
+
+            if let Some(autosave_delay_seconds) = update.autosave_delay_seconds {
+                loaded.autosave_delay_seconds = Some(autosave_delay_seconds);
+            }
+
+            database_settings_dto(
+                vault,
+                &loaded.save_profile,
+                loaded.autosave_delay_seconds,
+                loaded.password.is_some(),
+            )
+        };
+        if credentials_changed {
+            self.refresh_quick_unlock_credentials_for_vault(vault_id)?;
         }
 
-        if let Some(autosave_delay_seconds) = update.autosave_delay_seconds {
-            loaded.autosave_delay_seconds = Some(autosave_delay_seconds);
-        }
-
-        Ok(database_settings_dto(
-            vault,
-            &loaded.save_profile,
-            loaded.autosave_delay_seconds,
-            loaded.password.is_some(),
-        ))
+        Ok(settings)
     }
 
     pub fn find_fill_candidates(&self, vault_id: &str, url: &str) -> Result<FillCandidateListDto> {
@@ -2089,6 +2100,47 @@ impl Runtime {
         self.loaded
             .get(&vault_id)
             .and_then(|loaded| loaded.source_status.clone())
+    }
+
+    fn vault_ref_id_for_loaded_vault(&self, vault_id: &str) -> Option<String> {
+        if self.session.active_vault_id() == Some(vault_id) {
+            if let Some(vault_ref_id) = self.session.current_vault_ref_id() {
+                return Some(vault_ref_id.to_owned());
+            }
+        }
+
+        self.references.find_ref_id_by_path(vault_id)
+    }
+
+    fn refresh_quick_unlock_credentials_for_vault(&self, vault_id: &str) -> Result<()> {
+        if !self.biometric.supports_quick_unlock() {
+            return Ok(());
+        }
+
+        let Some(vault_ref_id) = self.vault_ref_id_for_loaded_vault(vault_id) else {
+            return Ok(());
+        };
+        let storage_key = quick_unlock_storage_key(&vault_ref_id);
+        if self.secure_storage.load(&storage_key)?.is_none() {
+            return Ok(());
+        }
+
+        let loaded = self
+            .loaded
+            .get(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        let credentials = VaultCredentials {
+            password: loaded.password.clone(),
+            key_file_path: loaded.key_file_path.clone(),
+        };
+
+        if credentials.password.is_none() && credentials.key_file_path.is_none() {
+            return self.secure_storage.delete(&storage_key);
+        }
+
+        let bytes = serde_json::to_vec(&credentials)
+            .context("failed to encode quick unlock credentials")?;
+        self.secure_storage.store(&storage_key, &bytes)
     }
 }
 
