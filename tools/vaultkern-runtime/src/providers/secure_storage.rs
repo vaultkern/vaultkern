@@ -21,11 +21,14 @@ use sha2::{Digest, Sha256};
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-const QUICK_UNLOCK_ENVELOPE_VERSION: u8 = 1;
+const QUICK_UNLOCK_ENVELOPE_VERSION: u8 = 2;
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-const QUICK_UNLOCK_ENVELOPE_SCHEME: &str = "windows-cng-rsa-oaep-sha256-aes-256-gcm";
+const QUICK_UNLOCK_ENVELOPE_SCHEME: &str =
+    "windows-cng-rsa-oaep-sha256-aes-256-gcm-windows-hello-v2";
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 const QUICK_UNLOCK_KEY_STORAGE_PROVIDER: &str = "Microsoft Platform Crypto Provider";
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+const QUICK_UNLOCK_KEY_UI_POLICY_FLAG: u32 = 4;
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 #[derive(Deserialize, Serialize)]
@@ -50,6 +53,11 @@ fn is_quick_unlock_envelope(bytes: &[u8]) -> bool {
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 fn quick_unlock_key_storage_provider_name() -> &'static str {
     QUICK_UNLOCK_KEY_STORAGE_PROVIDER
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn quick_unlock_key_ui_policy_flag() -> u32 {
+    QUICK_UNLOCK_KEY_UI_POLICY_FLAG
 }
 
 #[allow(dead_code)]
@@ -133,7 +141,7 @@ impl WindowsHelloSecureStorageProvider {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        wide_null(&format!("VaultKern Quick Unlock {suffix}"))
+        wide_null(&format!("VaultKern Quick Unlock Hello v2 {suffix}"))
     }
 }
 
@@ -303,8 +311,7 @@ fn configure_hello_key(
 ) -> Result<()> {
     use windows_sys::Win32::Security::Cryptography::{
         NCRYPT_ALLOW_DECRYPT_FLAG, NCRYPT_KEY_USAGE_PROPERTY, NCRYPT_LENGTH_PROPERTY,
-        NCRYPT_UI_FORCE_HIGH_PROTECTION_FLAG, NCRYPT_UI_POLICY, NCRYPT_UI_POLICY_PROPERTY,
-        NCryptSetProperty,
+        NCRYPT_UI_POLICY, NCRYPT_UI_POLICY_PROPERTY, NCryptSetProperty,
     };
 
     let length = 2048u32;
@@ -341,7 +348,7 @@ fn configure_hello_key(
     let description = wide_null("Protect saved vault credentials with Windows Hello");
     let policy = NCRYPT_UI_POLICY {
         dwVersion: 1,
-        dwFlags: NCRYPT_UI_FORCE_HIGH_PROTECTION_FLAG,
+        dwFlags: quick_unlock_key_ui_policy_flag(),
         pszCreationTitle: title.as_ptr(),
         pszFriendlyName: friendly_name.as_ptr(),
         pszDescription: description.as_ptr(),
@@ -575,7 +582,8 @@ impl SecureStorageProvider for FailingStoreSecureStorageProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_quick_unlock_envelope, quick_unlock_key_storage_provider_name, quick_unlock_storage_dir,
+        is_quick_unlock_envelope, quick_unlock_key_storage_provider_name,
+        quick_unlock_key_ui_policy_flag, quick_unlock_storage_dir,
     };
     use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
@@ -595,6 +603,9 @@ mod tests {
     fn quick_unlock_presence_marker_rejects_legacy_dpapi_blobs() {
         assert!(!is_quick_unlock_envelope(b"legacy-dpapi-ciphertext"));
         assert!(is_quick_unlock_envelope(
+            br#"{"version":2,"scheme":"windows-cng-rsa-oaep-sha256-aes-256-gcm-windows-hello-v2","wrapped_key":"","nonce":"","ciphertext":""}"#
+        ));
+        assert!(!is_quick_unlock_envelope(
             br#"{"version":1,"scheme":"windows-cng-rsa-oaep-sha256-aes-256-gcm","wrapped_key":"","nonce":"","ciphertext":""}"#
         ));
     }
@@ -604,6 +615,21 @@ mod tests {
         assert_eq!(
             quick_unlock_key_storage_provider_name(),
             "Microsoft Platform Crypto Provider"
+        );
+    }
+
+    #[test]
+    fn quick_unlock_key_policy_does_not_request_a_second_key_password() {
+        const NCRYPT_UI_FORCE_HIGH_PROTECTION_FLAG: u32 = 2;
+        const NCRYPT_UI_FINGERPRINT_PROTECTION_FLAG: u32 = 4;
+
+        assert_eq!(
+            quick_unlock_key_ui_policy_flag(),
+            NCRYPT_UI_FINGERPRINT_PROTECTION_FLAG
+        );
+        assert_ne!(
+            quick_unlock_key_ui_policy_flag(),
+            NCRYPT_UI_FORCE_HIGH_PROTECTION_FLAG
         );
     }
 }
