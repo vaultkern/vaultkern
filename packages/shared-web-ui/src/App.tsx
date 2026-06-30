@@ -260,6 +260,7 @@ const APP_LABELS = {
       keyFilePath: "Key File Path",
       unlock: "Unlock Vault",
       unlocking: "Unlocking...",
+      unlockWithWindowsHello: "Unlock with Windows Hello",
       manageVaults: "Manage vaults",
       noRecentVaults: "No recent vaults",
       addFirstVault: "Open manager setup to add your first local vault.",
@@ -283,6 +284,7 @@ const APP_LABELS = {
       keyFilePath: "密钥文件路径",
       unlock: "解锁数据库",
       unlocking: "解锁中...",
+      unlockWithWindowsHello: "使用 Windows Hello 解锁",
       manageVaults: "管理数据库",
       noRecentVaults: "没有最近数据库",
       addFirstVault: "打开管理器设置并添加第一个本地数据库。",
@@ -1461,6 +1463,26 @@ export function App({
             setUnlockBusy(false);
           }
         }}
+        onQuickUnlock={async () => {
+          setUnlockBusy(true);
+          setUnlockError(null);
+          setUnlockErrorCause(null);
+          try {
+            const nextSession = await client.unlockCurrentVaultWithQuickUnlock();
+            setSession(nextSession);
+          } catch (unlockFailure) {
+            setUnlockError(
+              errorMessage(
+                unlockFailure,
+                translate(extensionSettings.language, "Failed to unlock vault")
+              )
+            );
+            setUnlockErrorCause(unlockFailure);
+          } finally {
+            setUnlockBusy(false);
+          }
+        }}
+        quickUnlockSupported={Boolean(session.supportsBiometricUnlock)}
         onOpenSetup={() => setShowSetup(true)}
         error={unlockError}
         errorCause={unlockErrorCause}

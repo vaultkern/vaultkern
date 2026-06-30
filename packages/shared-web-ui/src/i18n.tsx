@@ -15,6 +15,7 @@ type TranslationKey =
   | "Key File Path"
   | "Unlock Vault"
   | "Unlocking..."
+  | "Unlock with Windows Hello"
   | "Manage vaults"
   | "No recent vaults"
   | "Open manager setup to add your first local vault."
@@ -201,6 +202,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Key File Path": "密钥文件路径",
   "Unlock Vault": "解锁数据库",
   "Unlocking...": "解锁中...",
+  "Unlock with Windows Hello": "使用 Windows Hello 解锁",
   "Manage vaults": "管理数据库",
   "No recent vaults": "没有最近数据库",
   "Open manager setup to add your first local vault.": "打开管理器设置并添加第一个本地数据库。",

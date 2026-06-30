@@ -232,6 +232,57 @@ it("renders recent vaults and unlocks the current selection without a path field
   expect(screen.getByDisplayValue("secret-123")).toHaveAttribute("type", "text");
 });
 
+it("unlocks the current recent vault with Windows Hello when quick unlock is enabled", async () => {
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(async () => [
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Personal",
+        sourceKind: "local",
+        sourceSummary: "personal.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]),
+    unlockCurrentVaultWithQuickUnlock: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    })),
+    listGroups: vi.fn(async () => ({
+      root: {
+        id: "group-root",
+        title: "Demo Vault",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn()
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} />);
+
+  expect(await screen.findByText("Personal")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Unlock with Windows Hello" }));
+
+  await waitFor(() => {
+    expect(client.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
+  });
+  expect(await screen.findByText("No entries available.")).toBeInTheDocument();
+});
+
 it("shows browser settings and saves local extension preferences", async () => {
   const settingsStore = createSettingsStore();
   const client = {

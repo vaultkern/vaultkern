@@ -15,6 +15,7 @@ const runtimeClientMocks = vi.hoisted(() => ({
   openLocalVault: vi.fn(),
   lockSession: vi.fn(),
   unlockCurrentVault: vi.fn(),
+  unlockCurrentVaultWithQuickUnlock: vi.fn(),
   unlockWithPassword: vi.fn(),
   listGroups: vi.fn(),
   listEntries: vi.fn(),
@@ -56,6 +57,7 @@ beforeEach(() => {
   runtimeClientMocks.setCurrentVault.mockReset();
   runtimeClientMocks.openLocalVault.mockReset();
   runtimeClientMocks.unlockCurrentVault.mockReset();
+  runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockReset();
   runtimeClientMocks.unlockWithPassword.mockReset();
   runtimeClientMocks.lockSession.mockReset();
   runtimeClientMocks.listGroups.mockReset();
@@ -803,6 +805,54 @@ describe("PopupShell fill flow", () => {
         keyFilePath: "/tmp/demo.keyx"
       });
     });
+  });
+
+  it("unlocks the locked popup with Windows Hello when quick unlock is enabled", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Personal",
+        sourceKind: "local",
+        sourceSummary: "personal.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Personal")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Unlock with Windows Hello" }));
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
+    });
+    expect(await screen.findByText("Select a record to inspect fields.")).toBeInTheDocument();
   });
 
   it("waits for on-demand preload when unlocking before recent vaults finish loading", async () => {
