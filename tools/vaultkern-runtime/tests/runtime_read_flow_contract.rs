@@ -321,6 +321,153 @@ fn runtime_refreshes_quick_unlock_credentials_after_password_change() {
 }
 
 #[test]
+fn runtime_keeps_existing_quick_unlock_credentials_when_password_save_fails() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("old-password");
+    let bytes = core
+        .save_kdbx(
+            &Vault::empty("unsaved-password-change"),
+            &key,
+            SaveProfile::recommended(),
+        )
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unsaved-password-change.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "old-password")
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::EnableQuickUnlockForCurrentVault)
+        .unwrap();
+
+    runtime
+        .update_database_settings(
+            &handle.vault_id,
+            DatabaseSettingsUpdateDto {
+                credentials: Some(DatabaseCredentialsUpdateDto {
+                    new_password: Some("new-password".into()),
+                    remove_password: false,
+                }),
+                ..DatabaseSettingsUpdateDto::default()
+            },
+        )
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(runtime.save_vault(&handle.vault_id).is_err());
+
+    runtime.handle(RuntimeCommand::LockSession).unwrap();
+    let unlocked = runtime
+        .handle(RuntimeCommand::UnlockCurrentVaultWithQuickUnlock)
+        .unwrap();
+    let RuntimeResponse::SessionState(state) = unlocked else {
+        panic!("expected session state");
+    };
+    assert!(state.unlocked);
+}
+
+#[test]
+fn runtime_deletes_quick_unlock_credentials_when_refresh_store_fails() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("old-password");
+    let bytes = core
+        .save_kdbx(
+            &Vault::empty("failing-refresh"),
+            &key,
+            SaveProfile::recommended(),
+        )
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("failing-refresh.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_with_quick_unlock_failing_store_after(1);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "old-password")
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::EnableQuickUnlockForCurrentVault)
+        .unwrap();
+
+    runtime
+        .update_database_settings(
+            &handle.vault_id,
+            DatabaseSettingsUpdateDto {
+                credentials: Some(DatabaseCredentialsUpdateDto {
+                    new_password: Some("new-password".into()),
+                    remove_password: false,
+                }),
+                ..DatabaseSettingsUpdateDto::default()
+            },
+        )
+        .unwrap();
+    runtime.save_vault(&handle.vault_id).unwrap();
+
+    let recent = runtime.handle(RuntimeCommand::ListRecentVaults).unwrap();
+    let RuntimeResponse::VaultReferenceList(recent) = recent else {
+        panic!("expected recent vault list");
+    };
+    assert!(!recent.vaults[0].supports_quick_unlock);
+}
+
+#[test]
+fn runtime_deletes_quick_unlock_credentials_when_stored_password_is_stale() {
+    let core = KeepassCore::new();
+    let mut old_key = CompositeKey::default();
+    old_key.add_password("old-password");
+    let bytes = core
+        .save_kdbx(
+            &Vault::empty("stale-quick-unlock"),
+            &old_key,
+            SaveProfile::recommended(),
+        )
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stale-quick-unlock.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "old-password")
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::EnableQuickUnlockForCurrentVault)
+        .unwrap();
+    runtime.handle(RuntimeCommand::LockSession).unwrap();
+
+    let mut new_key = CompositeKey::default();
+    new_key.add_password("new-password");
+    let replacement = core
+        .save_kdbx(
+            &Vault::empty("stale-quick-unlock"),
+            &new_key,
+            SaveProfile::recommended(),
+        )
+        .unwrap();
+    std::fs::write(&path, replacement).unwrap();
+    runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+
+    let quick_unlock = runtime.handle(RuntimeCommand::UnlockCurrentVaultWithQuickUnlock);
+    assert!(quick_unlock.is_err());
+
+    let recent = runtime.handle(RuntimeCommand::ListRecentVaults).unwrap();
+    let RuntimeResponse::VaultReferenceList(recent) = recent else {
+        panic!("expected recent vault list");
+    };
+    assert!(!recent.vaults[0].supports_quick_unlock);
+}
+
+#[test]
 fn runtime_disables_quick_unlock_after_password_removal() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
@@ -358,6 +505,7 @@ fn runtime_disables_quick_unlock_after_password_removal() {
             },
         )
         .unwrap();
+    runtime.save_vault(&handle.vault_id).unwrap();
 
     let recent = runtime.handle(RuntimeCommand::ListRecentVaults).unwrap();
     let RuntimeResponse::VaultReferenceList(recent) = recent else {

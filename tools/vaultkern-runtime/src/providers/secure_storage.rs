@@ -214,6 +214,44 @@ impl SecureStorageProvider for MemorySecureStorageProvider {
     }
 }
 
+pub(crate) struct FailingStoreSecureStorageProvider {
+    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    stores_before_failure: RefCell<usize>,
+}
+
+impl FailingStoreSecureStorageProvider {
+    pub(crate) fn new(stores_before_failure: usize) -> Self {
+        Self {
+            values: RefCell::new(BTreeMap::new()),
+            stores_before_failure: RefCell::new(stores_before_failure),
+        }
+    }
+}
+
+impl SecureStorageProvider for FailingStoreSecureStorageProvider {
+    fn store(&self, key: &str, value: &[u8]) -> Result<()> {
+        let mut stores_before_failure = self.stores_before_failure.borrow_mut();
+        if *stores_before_failure == 0 {
+            anyhow::bail!("injected secure storage store failure");
+        }
+
+        *stores_before_failure -= 1;
+        self.values
+            .borrow_mut()
+            .insert(key.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.values.borrow().get(key).cloned())
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        self.values.borrow_mut().remove(key);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::quick_unlock_storage_dir;
