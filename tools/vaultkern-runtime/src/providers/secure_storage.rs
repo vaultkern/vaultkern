@@ -609,6 +609,39 @@ impl SecureStorageProvider for FailingContainsSecureStorageProvider {
     }
 }
 
+pub(crate) struct FailingDeleteSecureStorageProvider {
+    values: RefCell<BTreeMap<String, Vec<u8>>>,
+}
+
+impl FailingDeleteSecureStorageProvider {
+    pub(crate) fn new() -> Self {
+        Self {
+            values: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl SecureStorageProvider for FailingDeleteSecureStorageProvider {
+    fn store(&self, key: &str, value: &[u8]) -> Result<()> {
+        self.values
+            .borrow_mut()
+            .insert(key.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.values.borrow().get(key).cloned())
+    }
+
+    fn contains(&self, key: &str) -> Result<bool> {
+        Ok(self.values.borrow().contains_key(key))
+    }
+
+    fn delete(&self, _key: &str) -> Result<()> {
+        anyhow::bail!("injected secure storage delete failure")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

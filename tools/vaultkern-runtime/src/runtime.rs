@@ -34,9 +34,10 @@ use crate::providers::local_file::{LocalFileVaultSourceProvider, VaultSourceFing
 use crate::providers::onedrive::{OneDriveMemoryAccessCounts, OneDriveVaultSourceProvider};
 use crate::providers::remote_cache::{RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry};
 use crate::providers::secure_storage::{
-    FailingContainsSecureStorageProvider, FailingStoreSecureStorageProvider,
-    MemorySecureStorageProvider, SecureStorageProvider, UnsupportedSecureStorageProvider,
-    default_secure_storage_provider, default_secure_storage_provider_for_extension_id,
+    FailingContainsSecureStorageProvider, FailingDeleteSecureStorageProvider,
+    FailingStoreSecureStorageProvider, MemorySecureStorageProvider, SecureStorageProvider,
+    UnsupportedSecureStorageProvider, default_secure_storage_provider,
+    default_secure_storage_provider_for_extension_id,
 };
 use crate::session::SessionState;
 use crate::state_paths::extension_id_from_browser_origin;
@@ -216,6 +217,13 @@ impl Runtime {
         let mut runtime = Self::for_tests();
         runtime.biometric = Box::new(TestBiometricProvider);
         runtime.secure_storage = Box::new(FailingContainsSecureStorageProvider::new());
+        runtime
+    }
+
+    pub fn for_tests_with_quick_unlock_failing_delete() -> Self {
+        let mut runtime = Self::for_tests();
+        runtime.biometric = Box::new(TestBiometricProvider);
+        runtime.secure_storage = Box::new(FailingDeleteSecureStorageProvider::new());
         runtime
     }
 
@@ -624,8 +632,9 @@ impl Runtime {
     pub fn delete_vault_reference(&mut self, vault_ref_id: &str) -> Result<VaultReferenceListDto> {
         let source = self.references.source_for(vault_ref_id).ok();
         let deleted_current = self.references.delete(vault_ref_id)?;
-        self.secure_storage
-            .delete(&quick_unlock_storage_key(vault_ref_id))?;
+        let _ = self
+            .secure_storage
+            .delete(&quick_unlock_storage_key(vault_ref_id));
         if let Some(cache_key) = source.as_ref().and_then(remote_cache_key_for_stored_source) {
             self.remote_cache.delete(&cache_key)?;
         }
