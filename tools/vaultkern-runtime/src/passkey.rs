@@ -16,7 +16,6 @@ use vaultkern_runtime_protocol::PasskeyRegistrationDto;
 
 const ES256_COSE_ALGORITHM: i32 = -7;
 const AUTH_DATA_FLAG_USER_PRESENT: u8 = 0x01;
-const AUTH_DATA_FLAG_USER_VERIFIED: u8 = 0x04;
 const AUTH_DATA_FLAG_BACKUP_ELIGIBLE: u8 = 0x08;
 const AUTH_DATA_FLAG_BACKUP_STATE: u8 = 0x10;
 const AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA: u8 = 0x40;
@@ -25,6 +24,7 @@ pub struct PasskeyAssertionRequest<'a> {
     pub relying_party: &'a str,
     pub origin: &'a str,
     pub credential_id: Option<&'a str>,
+    pub user_presence_verified: bool,
     pub client_data_json_base64url: &'a str,
 }
 
@@ -53,6 +53,9 @@ pub fn create_assertion(
     }
     if passkey.relying_party != request.relying_party {
         anyhow::bail!("passkey relying party mismatch");
+    }
+    if !request.user_presence_verified {
+        anyhow::bail!("passkey user presence was not verified");
     }
     validate_origin_for_relying_party(request.origin, request.relying_party)?;
 
@@ -207,11 +210,7 @@ fn attested_authenticator_data(
 ) -> Vec<u8> {
     let mut auth_data = Vec::new();
     auth_data.extend_from_slice(&Sha256::digest(relying_party.as_bytes()));
-    auth_data.push(
-        AUTH_DATA_FLAG_USER_PRESENT
-            | AUTH_DATA_FLAG_USER_VERIFIED
-            | AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA,
-    );
+    auth_data.push(AUTH_DATA_FLAG_USER_PRESENT | AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA);
     auth_data.extend_from_slice(&0_u32.to_be_bytes());
     auth_data.extend_from_slice(&[0; 16]);
     auth_data.extend_from_slice(&(credential_id.len() as u16).to_be_bytes());

@@ -10,7 +10,8 @@ export default defineConfig({
         popup: "popup.html",
         manager: "manager.html",
         background: "src/background.ts",
-        contentScript: "src/contentScript.ts"
+        contentScript: "src/contentScript.ts",
+        webauthnPageHook: "src/webauthnPageHook.ts"
       },
       output: {
         entryFileNames: "[name].js",

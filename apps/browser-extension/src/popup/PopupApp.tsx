@@ -55,7 +55,8 @@ export function PopupApp({
   activeSite,
   extensionSettingsStore,
   renderRuntimeErrorHelp,
-  onUnlockComplete
+  onUnlockComplete,
+  onWebAuthnPresenceComplete
 }: {
   client: PopupClientLike;
   findCandidates: (vaultId: string) => Promise<EntrySummary[]>;
@@ -64,6 +65,7 @@ export function PopupApp({
   extensionSettingsStore?: ExtensionSettingsStore;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
   onUnlockComplete?: (session: SessionStateLike) => void | Promise<void>;
+  onWebAuthnPresenceComplete?: (session: SessionStateLike) => void | Promise<void>;
 }) {
   const [session, setSession] = useState<SessionStateLike | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -90,9 +92,11 @@ export function PopupApp({
   );
   const currentVaultPreload = useRef<Promise<void> | null>(null);
   const webAuthnQuickUnlockAttempted = useRef(false);
-  const webAuthnUnlockPrompt =
+  const webAuthnMode =
     typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).get("webauthn") === "unlock";
+    new URLSearchParams(window.location.search).get("webauthn");
+  const webAuthnUnlockPrompt = webAuthnMode === "unlock";
+  const webAuthnApprovePrompt = webAuthnMode === "approve";
 
   function currentVaultForSession() {
     return (
@@ -417,6 +421,19 @@ export function PopupApp({
     }
   }
 
+  async function handleWebAuthnPresenceApproval() {
+    if (!session?.unlocked || submitting) {
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await Promise.resolve(onWebAuthnPresenceComplete?.(session));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   useEffect(() => {
     if (
       !webAuthnUnlockPrompt ||
@@ -620,6 +637,48 @@ export function PopupApp({
             ? renderRuntimeErrorHelp(unlockErrorCause)
             : null}
         </form>
+      </div>
+      </I18nProvider>
+    );
+  }
+
+  if (webAuthnApprovePrompt) {
+    const passkeyPromptTitle =
+      extensionSettings.language === "zh-CN"
+        ? "确认通行密钥请求"
+        : "Confirm passkey request";
+    const passkeyPromptBody =
+      extensionSettings.language === "zh-CN"
+        ? "确认后继续当前网站的通行密钥请求。"
+        : "Approve this passkey request to continue.";
+    const passkeyPromptAction =
+      extensionSettings.language === "zh-CN"
+        ? "继续通行密钥请求"
+        : "Continue passkey request";
+
+    return (
+      <I18nProvider language={extensionSettings.language}>
+      <div style={shellStyle}>
+        <PopupStatusStrip
+          siteLabel={siteLabel}
+          unlocked
+          onLock={locking ? undefined : handleLock}
+          onOpenManager={handleOpenManager}
+        />
+        <section style={passkeyPromptStyle} aria-live="polite">
+          <strong>{passkeyPromptTitle}</strong>
+          <span>{passkeyPromptBody}</span>
+        </section>
+        <button
+          type="button"
+          onClick={() => {
+            void handleWebAuthnPresenceApproval();
+          }}
+          disabled={submitting}
+          style={primaryActionStyle}
+        >
+          {passkeyPromptAction}
+        </button>
       </div>
       </I18nProvider>
     );

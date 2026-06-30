@@ -59,31 +59,39 @@ export async function activeSiteLabel() {
   }
 }
 
-function notifyUnlockComplete() {
+function notifyWebAuthnPromptComplete(type: string, closeMode: string) {
   const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
   const sendMessage = chromeApi?.runtime?.sendMessage;
   const shouldClose =
     typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).get("webauthn") === "unlock";
+    new URLSearchParams(window.location.search).get("webauthn") === closeMode;
 
-  function closeUnlockPrompt() {
+  function closePrompt() {
     if (shouldClose) {
       window.close();
     }
   }
 
   if (typeof sendMessage !== "function") {
-    closeUnlockPrompt();
+    closePrompt();
     return;
   }
 
   void Promise.resolve(
     sendMessage.call(chromeApi.runtime, {
-      type: "vaultkern_unlock_complete"
+      type
     })
   )
     .catch(() => undefined)
-    .finally(closeUnlockPrompt);
+    .finally(closePrompt);
+}
+
+function notifyUnlockComplete() {
+  notifyWebAuthnPromptComplete("vaultkern_unlock_complete", "unlock");
+}
+
+function notifyPresenceComplete() {
+  notifyWebAuthnPromptComplete("vaultkern_presence_complete", "approve");
 }
 
 export function PopupShell() {
@@ -96,6 +104,7 @@ export function PopupShell() {
       findCandidates={requestFillCandidates}
       fillEntry={fillSelectedEntry}
       onUnlockComplete={notifyUnlockComplete}
+      onWebAuthnPresenceComplete={notifyPresenceComplete}
     />
   );
 }

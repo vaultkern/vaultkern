@@ -56,8 +56,22 @@ type ChromeLike = {
 
 let unlockPromptWindowId: number | null = null;
 const unlockCompleteWaiters = new Set<() => void>();
+let presencePromptWindowId: number | null = null;
+const presenceCompleteWaiters = new Set<() => void>();
+const observedPageRequests: ObservedWebAuthnPageRequest[] = [];
 const registeredUnlockMessageSources = new WeakSet<object>();
 const registeredRequestHandlerSources = new WeakSet<object>();
+const OBSERVED_PAGE_REQUEST_MAX_AGE_MS = 120_000;
+
+type ObservedWebAuthnPageRequest = {
+  ceremony: "create" | "get";
+  origin: string;
+  relyingParty?: string;
+  challenge?: string;
+  allowCredentialIds?: string[];
+  excludeCredentialIds?: string[];
+  observedAt: number;
+};
 
 export function webAuthnProxyAvailable(chromeApi: unknown): chromeApi is ChromeLike {
   const candidate = chromeApi as ChromeLike | null | undefined;
@@ -127,6 +141,70 @@ export function registerWebAuthnProxyRequestHandlers(
   registerRequestHandlers(candidate, sendRuntimeCommand);
 }
 
+export function recordWebAuthnPageRequest(
+  message: unknown,
+  chromeApi?: ChromeLike
+) {
+  if (typeof message !== "object" || message === null) {
+    return false;
+  }
+
+  const candidate = message as {
+    ceremony?: unknown;
+    origin?: unknown;
+    relyingParty?: unknown;
+    challenge?: unknown;
+    allowCredentialIds?: unknown;
+    excludeCredentialIds?: unknown;
+  };
+  if (candidate.ceremony !== "create" && candidate.ceremony !== "get") {
+    return false;
+  }
+  if (typeof candidate.origin !== "string" || candidate.origin.trim() === "") {
+    return false;
+  }
+
+  let origin: string;
+  try {
+    origin = new URL(candidate.origin).origin;
+  } catch {
+    return false;
+  }
+
+  pruneObservedPageRequests(Date.now());
+  observedPageRequests.push({
+    ceremony: candidate.ceremony,
+    origin,
+    relyingParty:
+      typeof candidate.relyingParty === "string" &&
+      candidate.relyingParty.trim() !== ""
+        ? candidate.relyingParty.trim()
+        : undefined,
+    challenge:
+      typeof candidate.challenge === "string" && candidate.challenge.trim() !== ""
+        ? candidate.challenge
+        : undefined,
+    allowCredentialIds: stringArrayFrom(candidate.allowCredentialIds),
+    excludeCredentialIds: stringArrayFrom(candidate.excludeCredentialIds),
+    observedAt: Date.now()
+  });
+  observedPageRequests.splice(0, Math.max(0, observedPageRequests.length - 50));
+  void (chromeApi
+    ? recordWebAuthnDebug(chromeApi, {
+        event: "page_request_observed",
+        ceremony: candidate.ceremony,
+        origin,
+        relyingParty:
+          typeof candidate.relyingParty === "string"
+            ? candidate.relyingParty
+            : undefined,
+        challenge:
+          typeof candidate.challenge === "string" ? candidate.challenge : undefined
+      })
+    : Promise.resolve());
+  return true;
+}
+
 function registerRequestHandlers(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender
@@ -185,15 +263,23 @@ function registerUnlockCompleteHandler(chromeApi: ChromeLike) {
 
   registeredUnlockMessageSources.add(messageSource);
   messageSource.addListener((message) => {
-    if (!isUnlockCompleteMessage(message)) {
+    if (isUnlockCompleteMessage(message)) {
+      void recordWebAuthnDebug(chromeApi, {
+        event: "unlock_complete_message"
+      });
+      for (const waiter of [...unlockCompleteWaiters]) {
+        waiter();
+      }
       return;
     }
 
-    void recordWebAuthnDebug(chromeApi, {
-      event: "unlock_complete_message"
-    });
-    for (const waiter of [...unlockCompleteWaiters]) {
-      waiter();
+    if (isPresenceCompleteMessage(message)) {
+      void recordWebAuthnDebug(chromeApi, {
+        event: "presence_complete_message"
+      });
+      for (const waiter of [...presenceCompleteWaiters]) {
+        waiter();
+      }
     }
   });
 }
@@ -203,6 +289,14 @@ function isUnlockCompleteMessage(message: unknown) {
     typeof message === "object" &&
     message !== null &&
     (message as { type?: unknown }).type === "vaultkern_unlock_complete"
+  );
+}
+
+function isPresenceCompleteMessage(message: unknown) {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    (message as { type?: unknown }).type === "vaultkern_presence_complete"
   );
 }
 
@@ -238,11 +332,21 @@ async function handleGetRequest(
   try {
     const options = requestOptionsFrom(request);
     const credentialIds = credentialIdsFromOptions(options);
-    const origin = await activeOrigin(
-      chromeApi,
-      relyingPartyIdFromGetOptions(options) ?? undefined
-    );
+    const requestedRpId = relyingPartyIdFromGetOptions(options);
+    const origin = await originForRequest(request, "get", options);
+    if (!origin) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "VaultKern cannot identify the WebAuthn request origin"
+      );
+    }
     const relyingParty = relyingPartyFromGetOptions(options, origin);
+    if (requestedRpId && !originMatchesRelyingParty(origin, requestedRpId)) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
+    }
     const clientDataJsonBase64url = base64urlEncode(
       JSON.stringify({
         type: "webauthn.get",
@@ -263,26 +367,37 @@ async function handleGetRequest(
     if (canceledRequests.has(requestId)) {
       return;
     }
-    const activeVaultId = await activeVaultForRequest(
+    const activeVault = await activeVaultForRequest(
       chromeApi,
       sendRuntimeCommand,
       requestId,
       session,
       canceledRequests
     );
-    if (!activeVaultId) {
+    if (!activeVault) {
       return;
+    }
+    if (!activeVault.userPresenceVerified) {
+      const approved = await userPresenceForRequest(
+        chromeApi,
+        requestId,
+        canceledRequests
+      );
+      if (!approved) {
+        return;
+      }
     }
 
     const assertion = await createAssertionForAllowedCredentials(
       chromeApi,
       sendRuntimeCommand,
       requestId,
-      activeVaultId,
+      activeVault.activeVaultId,
       relyingParty,
       origin,
       credentialIds,
       clientDataJsonBase64url,
+      true,
       canceledRequests
     );
     if (!assertion) {
@@ -369,6 +484,7 @@ async function createAssertionForAllowedCredentials(
   origin: string,
   credentialIds: Array<string | null>,
   clientDataJsonBase64url: string,
+  userPresenceVerified: boolean,
   canceledRequests: Set<number>
 ) {
   let lastError: Error | null = null;
@@ -384,6 +500,7 @@ async function createAssertionForAllowedCredentials(
       relying_party: relyingParty,
       origin,
       credential_id: credentialId,
+      user_presence_verified: userPresenceVerified,
       client_data_json_base64url: clientDataJsonBase64url
     });
     const runtimeError = runtimeErrorFromResponse(response);
@@ -523,11 +640,22 @@ async function handleCreateRequest(
   });
   try {
     const options = createRequestOptionsFrom(request);
-    const origin = await activeOrigin(
-      chromeApi,
-      relyingPartyIdFromCreateOptions(options) ?? undefined
-    );
+    rejectCrossPlatformOnlyRegistration(options);
+    const requestedRpId = relyingPartyIdFromCreateOptions(options);
+    const origin = await originForRequest(request, "create", options);
+    if (!origin) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "VaultKern cannot identify the WebAuthn request origin"
+      );
+    }
     const relyingParty = relyingPartyFromCreateOptions(options, origin);
+    if (requestedRpId && !originMatchesRelyingParty(origin, requestedRpId)) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
+    }
     const clientDataJsonBase64url = base64urlEncode(
       JSON.stringify({
         type: "webauthn.create",
@@ -548,16 +676,17 @@ async function handleCreateRequest(
     if (canceledRequests.has(requestId)) {
       return;
     }
-    const activeVaultId = await activeVaultForRequest(
+    const activeVault = await activeVaultForRequest(
       chromeApi,
       sendRuntimeCommand,
       requestId,
       session,
       canceledRequests
     );
-    if (!activeVaultId) {
+    if (!activeVault) {
       return;
     }
+    const activeVaultId = activeVault.activeVaultId;
 
     const excludedCredentialIds = excludedCredentialIdsFromCreateOptions(options);
     for (const credentialId of excludedCredentialIds) {
@@ -729,6 +858,7 @@ function createRequestOptionsFrom(request: unknown) {
     challenge?: unknown;
     pubKeyCredParams?: unknown;
     excludeCredentials?: unknown;
+    authenticatorSelection?: { authenticatorAttachment?: unknown };
   };
   if (typeof options.challenge !== "string") {
     throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn challenge");
@@ -749,6 +879,19 @@ function createRequestOptionsFrom(request: unknown) {
     );
   }
   return options;
+}
+
+function rejectCrossPlatformOnlyRegistration(options: {
+  authenticatorSelection?: { authenticatorAttachment?: unknown };
+}) {
+  if (options.authenticatorSelection?.authenticatorAttachment !== "cross-platform") {
+    return;
+  }
+
+  throw new WebAuthnRequestError(
+    "NotAllowedError",
+    "VaultKern passkey provider only supports platform authenticators"
+  );
 }
 
 async function rollbackPasskeyRegistration(
@@ -817,6 +960,193 @@ function relyingPartyFromOrigin(origin: string) {
   throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn RP ID");
 }
 
+function originFromRequest(request: unknown) {
+  const candidate = request as
+    | {
+        origin?: unknown;
+        callerOrigin?: unknown;
+        requestOrigin?: unknown;
+        requestDetailsJson?: unknown;
+      }
+    | null
+    | undefined;
+  for (const value of [
+    candidate?.origin,
+    candidate?.callerOrigin,
+    candidate?.requestOrigin
+  ]) {
+    if (typeof value === "string" && value.trim() !== "") {
+      return new URL(value).origin;
+    }
+  }
+
+  if (typeof candidate?.requestDetailsJson === "string") {
+    try {
+      const details = JSON.parse(candidate.requestDetailsJson) as { origin?: unknown };
+      if (typeof details.origin === "string" && details.origin.trim() !== "") {
+        return new URL(details.origin).origin;
+      }
+    } catch {
+      // Parsed elsewhere; keep this helper WebAuthn-shaped.
+    }
+  }
+
+  return null;
+}
+
+async function originForRequest(
+  request: unknown,
+  ceremony: "create" | "get",
+  options: {
+    challenge?: unknown;
+    rpId?: unknown;
+    rp?: { id?: unknown; name?: unknown };
+    allowCredentials?: unknown;
+    excludeCredentials?: unknown;
+  }
+) {
+  const directOrigin = originFromRequest(request);
+  if (directOrigin) {
+    return directOrigin;
+  }
+
+  const observedOrigin = originFromPageRequest(ceremony, options);
+  if (observedOrigin) {
+    return observedOrigin;
+  }
+
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    await delay(25);
+    const delayedObservedOrigin = originFromPageRequest(ceremony, options);
+    if (delayedObservedOrigin) {
+      return delayedObservedOrigin;
+    }
+  }
+
+  return null;
+}
+
+function originFromPageRequest(
+  ceremony: "create" | "get",
+  options: {
+    challenge?: unknown;
+    rpId?: unknown;
+    rp?: { id?: unknown; name?: unknown };
+    allowCredentials?: unknown;
+    excludeCredentials?: unknown;
+  }
+) {
+  const challenge = typeof options.challenge === "string" ? options.challenge : null;
+  if (!challenge) {
+    return null;
+  }
+
+  const relyingParty =
+    ceremony === "create"
+      ? relyingPartyIdFromCreateOptions(options)
+      : relyingPartyIdFromGetOptions(options);
+  const allowCredentialIds =
+    ceremony === "get" ? credentialIdsFromOptions(options).filter(isString) : [];
+  const excludeCredentialIds =
+    ceremony === "create" ? excludedCredentialIdsFromCreateOptions(options) : [];
+  const now = Date.now();
+  pruneObservedPageRequests(now);
+
+  for (let index = observedPageRequests.length - 1; index >= 0; index -= 1) {
+    const observed = observedPageRequests[index];
+    if (
+      observed &&
+      observedPageRequestMatches(observed, {
+        ceremony,
+        challenge,
+        relyingParty,
+        allowCredentialIds,
+        excludeCredentialIds
+      })
+    ) {
+      observedPageRequests.splice(index, 1);
+      return observed.origin;
+    }
+  }
+
+  return null;
+}
+
+function observedPageRequestMatches(
+  observed: ObservedWebAuthnPageRequest,
+  expected: {
+    ceremony: "create" | "get";
+    challenge: string;
+    relyingParty: string | null;
+    allowCredentialIds: string[];
+    excludeCredentialIds: string[];
+  }
+) {
+  if (observed.ceremony !== expected.ceremony) {
+    return false;
+  }
+  if (!observed.challenge || observed.challenge !== expected.challenge) {
+    return false;
+  }
+  if (
+    expected.relyingParty &&
+    observed.relyingParty &&
+    observed.relyingParty !== expected.relyingParty
+  ) {
+    return false;
+  }
+  if (
+    expected.allowCredentialIds.length > 0 &&
+    observed.allowCredentialIds &&
+    !sameStringSet(observed.allowCredentialIds, expected.allowCredentialIds)
+  ) {
+    return false;
+  }
+  if (
+    expected.excludeCredentialIds.length > 0 &&
+    observed.excludeCredentialIds &&
+    !sameStringSet(observed.excludeCredentialIds, expected.excludeCredentialIds)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function pruneObservedPageRequests(now: number) {
+  for (let index = observedPageRequests.length - 1; index >= 0; index -= 1) {
+    if (now - observedPageRequests[index].observedAt > OBSERVED_PAGE_REQUEST_MAX_AGE_MS) {
+      observedPageRequests.splice(index, 1);
+    }
+  }
+}
+
+function sameStringSet(left: string[], right: string[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
+}
+
+function stringArrayFrom(value: unknown) {
+  return Array.isArray(value) && value.every(isString) ? value : undefined;
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function originMatchesRelyingParty(origin: string, relyingParty: string) {
+  try {
+    const host = new URL(origin).hostname;
+    return host === relyingParty || host.endsWith(`.${relyingParty}`);
+  } catch {
+    return false;
+  }
+}
+
 function userNameFromCreateOptions(options: { user?: { name?: unknown } }) {
   const name = options.user?.name;
   if (typeof name !== "string" || name.trim() === "") {
@@ -878,21 +1208,6 @@ function excludedCredentialIdsFromCreateOptions(options: {
     .map((credential) => (credential as { id: string }).id);
 }
 
-async function activeOrigin(chromeApi: ChromeLike, relyingParty?: string) {
-  const tabs = await chromeApi.tabs?.query?.({
-    active: true,
-    lastFocusedWindow: true
-  });
-  const activeUrl = tabs?.[0]?.url;
-  if (activeUrl) {
-    return new URL(activeUrl).origin;
-  }
-  if (typeof relyingParty === "string" && relyingParty.trim() !== "") {
-    return `https://${relyingParty.trim()}`;
-  }
-  throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn origin");
-}
-
 function base64urlEncode(value: string) {
   const bytes = new TextEncoder().encode(value);
   let binary = "";
@@ -918,7 +1233,10 @@ async function activeVaultForRequest(
   canceledRequests: Set<number>
 ) {
   if (initialSession.activeVaultId) {
-    return initialSession.activeVaultId;
+    return {
+      activeVaultId: initialSession.activeVaultId,
+      userPresenceVerified: false
+    };
   }
 
   await recordWebAuthnDebug(chromeApi, {
@@ -953,7 +1271,10 @@ async function activeVaultForRequest(
       hasActiveVault: Boolean(session.activeVaultId)
     });
     if (session.activeVaultId) {
-      return session.activeVaultId;
+      return {
+        activeVaultId: session.activeVaultId,
+        userPresenceVerified: true
+      };
     }
 
     await delay(500);
@@ -962,6 +1283,41 @@ async function activeVaultForRequest(
   throw new WebAuthnRequestError(
     "NotAllowedError",
     "VaultKern vault unlock timed out"
+  );
+}
+
+async function userPresenceForRequest(
+  chromeApi: ChromeLike,
+  requestId: number,
+  canceledRequests: Set<number>
+) {
+  await recordWebAuthnDebug(chromeApi, {
+    event: "presence_prompt_opening",
+    requestId
+  });
+  await openPresencePrompt(chromeApi);
+
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    if (canceledRequests.has(requestId)) {
+      await recordWebAuthnDebug(chromeApi, {
+        event: "presence_wait_canceled",
+        requestId
+      });
+      return false;
+    }
+
+    const signaled = await waitForPresenceComplete(
+      Math.min(1_000, Math.max(0, deadline - Date.now()))
+    );
+    if (signaled) {
+      return true;
+    }
+  }
+
+  throw new WebAuthnRequestError(
+    "NotAllowedError",
+    "VaultKern passkey approval timed out"
   );
 }
 
@@ -987,6 +1343,31 @@ function waitForUnlockComplete(timeoutMs: number) {
     }
 
     unlockCompleteWaiters.add(waiter);
+  });
+}
+
+function waitForPresenceComplete(timeoutMs: number) {
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      finish(false);
+    }, timeoutMs);
+    const waiter = () => {
+      finish(true);
+    };
+
+    function finish(signaled: boolean) {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeoutId);
+      presenceCompleteWaiters.delete(waiter);
+      resolve(signaled);
+    }
+
+    presenceCompleteWaiters.add(waiter);
   });
 }
 
@@ -1018,6 +1399,37 @@ async function openUnlockPrompt(chromeApi: ChromeLike) {
     focused: true
   });
   unlockPromptWindowId =
+    created && typeof created.id === "number" ? created.id : null;
+}
+
+async function openPresencePrompt(chromeApi: ChromeLike) {
+  if (!chromeApi.windows?.create) {
+    throw new WebAuthnRequestError(
+      "NotAllowedError",
+      "VaultKern passkey approval window is unavailable"
+    );
+  }
+
+  if (presencePromptWindowId !== null && chromeApi.windows.update) {
+    try {
+      await chromeApi.windows.update(presencePromptWindowId, { focused: true });
+      return;
+    } catch {
+      presencePromptWindowId = null;
+    }
+  }
+
+  const url =
+    chromeApi.runtime?.getURL?.("popup.html?webauthn=approve") ??
+    "popup.html?webauthn=approve";
+  const created = await chromeApi.windows.create({
+    url,
+    type: "popup",
+    width: 460,
+    height: 360,
+    focused: true
+  });
+  presencePromptWindowId =
     created && typeof created.id === "number" ? created.id : null;
 }
 
@@ -1075,10 +1487,11 @@ async function recordWebAuthnDebug(
 }
 
 function requestSummaryFrom(request: unknown) {
+  const requestFields = requestFieldsFrom(request);
   const requestDetailsJson = (request as { requestDetailsJson?: unknown } | null)
     ?.requestDetailsJson;
   if (typeof requestDetailsJson !== "string") {
-    return { hasRequestDetailsJson: false };
+    return { ...requestFields, hasRequestDetailsJson: false };
   }
 
   try {
@@ -1094,6 +1507,7 @@ function requestSummaryFrom(request: unknown) {
       userVerification?: unknown;
     };
     return {
+      ...requestFields,
       hasRequestDetailsJson: true,
       rpId: typeof options.rpId === "string" ? options.rpId : undefined,
       rp: {
@@ -1119,10 +1533,39 @@ function requestSummaryFrom(request: unknown) {
     };
   } catch (error) {
     return {
+      ...requestFields,
       hasRequestDetailsJson: true,
       parseError: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+function requestFieldsFrom(request: unknown) {
+  if (typeof request !== "object" || request === null) {
+    return { requestType: typeof request };
+  }
+
+  const fields: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(request)) {
+    if (key === "requestDetailsJson") {
+      continue;
+    }
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean" ||
+      value === null
+    ) {
+      fields[key] = value;
+    } else {
+      fields[key] = typeof value;
+    }
+  }
+
+  return {
+    requestKeys: Object.keys(request),
+    requestFields: fields
+  };
 }
 
 function errorSummary(error: unknown) {

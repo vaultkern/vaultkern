@@ -1269,14 +1269,18 @@ impl Runtime {
         relying_party: &str,
         origin: &str,
         credential_id: Option<&str>,
+        user_presence_verified: bool,
         client_data_json_base64url: &str,
     ) -> Result<PasskeyAssertionDto> {
         let vault = self.loaded_vault(vault_id)?;
         let passkey = match credential_id {
-            Some(credential_id) => find_passkey_by_credential_id(&vault.root, credential_id)
-                .with_context(|| format!("passkey credential not found: {credential_id}"))?,
-            None => find_passkey_by_relying_party(&vault.root, relying_party)
-                .with_context(|| format!("passkey relying party not found: {relying_party}"))?,
+            Some(credential_id) => find_passkey_by_credential_id_and_relying_party(
+                &vault.root,
+                credential_id,
+                Some(relying_party),
+            )
+            .with_context(|| format!("passkey credential not found: {credential_id}"))?,
+            None => find_unique_passkey_by_relying_party(&vault.root, relying_party)?,
         };
         create_assertion(
             passkey,
@@ -1284,6 +1288,7 @@ impl Runtime {
                 relying_party,
                 origin,
                 credential_id,
+                user_presence_verified,
                 client_data_json_base64url,
             },
         )
@@ -1771,6 +1776,7 @@ impl Runtime {
                 relying_party,
                 origin,
                 credential_id,
+                user_presence_verified,
                 client_data_json_base64url,
             } => Ok(
                 match self.create_passkey_assertion(
@@ -1778,6 +1784,7 @@ impl Runtime {
                     &relying_party,
                     &origin,
                     credential_id.as_deref(),
+                    user_presence_verified,
                     &client_data_json_base64url,
                 ) {
                     Ok(assertion) => RuntimeResponse::PasskeyAssertion(assertion),
@@ -2501,13 +2508,6 @@ fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> PasskeyRecord {
     }
 }
 
-fn find_passkey_by_credential_id<'a>(
-    group: &'a vaultkern_core::Group,
-    credential_id: &str,
-) -> Option<&'a PasskeyRecord> {
-    find_passkey_by_credential_id_and_relying_party(group, credential_id, None)
-}
-
 fn find_passkey_by_credential_id_and_relying_party<'a>(
     group: &'a vaultkern_core::Group,
     credential_id: &str,
@@ -2534,25 +2534,41 @@ fn find_passkey_by_credential_id_and_relying_party<'a>(
     None
 }
 
-fn find_passkey_by_relying_party<'a>(
+fn find_unique_passkey_by_relying_party<'a>(
     group: &'a vaultkern_core::Group,
     relying_party: &str,
-) -> Option<&'a PasskeyRecord> {
+) -> Result<&'a PasskeyRecord> {
+    let mut found = None;
+    let mut count = 0usize;
+    visit_passkeys(group, &mut |passkey| {
+        if passkey.relying_party == relying_party {
+            count += 1;
+            if found.is_none() {
+                found = Some(passkey);
+            }
+        }
+    });
+
+    match (count, found) {
+        (0, _) => anyhow::bail!("passkey relying party not found: {relying_party}"),
+        (1, Some(passkey)) => Ok(passkey),
+        _ => anyhow::bail!("multiple passkey credentials found for relying party: {relying_party}"),
+    }
+}
+
+fn visit_passkeys<'a>(
+    group: &'a vaultkern_core::Group,
+    visitor: &mut impl FnMut(&'a PasskeyRecord),
+) {
     for entry in &group.entries {
         if let Some(passkey) = entry.passkey.as_ref() {
-            if passkey.relying_party == relying_party {
-                return Some(passkey);
-            }
+            visitor(passkey);
         }
     }
 
     for child in &group.children {
-        if let Some(passkey) = find_passkey_by_relying_party(child, relying_party) {
-            return Some(passkey);
-        }
+        visit_passkeys(child, visitor);
     }
-
-    None
 }
 
 fn enforce_history_limits(vault: &mut Vault) {

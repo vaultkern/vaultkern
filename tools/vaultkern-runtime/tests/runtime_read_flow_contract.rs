@@ -970,6 +970,7 @@ fn runtime_creates_passkey_assertion_for_matching_relying_party() {
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            user_presence_verified: true,
             client_data_json_base64url: client_data_json_base64url.clone(),
         })
         .unwrap();
@@ -1014,6 +1015,60 @@ fn runtime_creates_passkey_assertion_for_matching_relying_party() {
 }
 
 #[test]
+fn runtime_rejects_passkey_assertion_without_user_presence() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: None,
+        backup_eligible: false,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            user_presence_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(
+                br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
+            ),
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected error, got {response:?}");
+    };
+    assert_eq!(error.code, "invalid_request");
+    assert!(error.message.contains("user presence was not verified"));
+}
+
+#[test]
 fn runtime_rejects_passkey_assertion_for_relying_party_mismatch() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
@@ -1053,6 +1108,7 @@ fn runtime_rejects_passkey_assertion_for_relying_party_mismatch() {
             relying_party: "evil.example.net".into(),
             origin: "https://evil.example.net".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            user_presence_verified: true,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://evil.example.net","crossOrigin":false}"#,
             ),
@@ -1063,7 +1119,7 @@ fn runtime_rejects_passkey_assertion_for_relying_party_mismatch() {
         panic!("expected error, got {response:?}");
     };
     assert_eq!(error.code, "invalid_request");
-    assert!(error.message.contains("passkey relying party mismatch"));
+    assert!(error.message.contains("passkey credential not found"));
 }
 
 #[test]
@@ -1103,6 +1159,7 @@ fn runtime_rejects_passkey_assertion_when_vault_is_locked() {
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            user_presence_verified: true,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
             ),
@@ -1156,6 +1213,7 @@ fn runtime_rejects_passkey_assertion_for_unknown_credential() {
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: Some("dW5rbm93bg".into()),
+            user_presence_verified: true,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
             ),
@@ -1210,6 +1268,7 @@ fn runtime_allows_loopback_http_origin_for_passkey_assertion_smoke_tests() {
             relying_party: "127.0.0.1".into(),
             origin: origin.into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            user_presence_verified: true,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
                 format!(
                     r#"{{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"{origin}","crossOrigin":false}}"#
@@ -1266,7 +1325,7 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
     let registration_authenticator_data = URL_SAFE_NO_PAD
         .decode(&registration.authenticator_data_base64url)
         .expect("decode registration authenticator data");
-    assert_eq!(registration_authenticator_data[32], 0x45);
+    assert_eq!(registration_authenticator_data[32], 0x41);
     assert!(!registration.public_key_base64url.is_empty());
 
     let detail = runtime
@@ -1295,6 +1354,7 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: Some(registration.credential_id),
+            user_presence_verified: true,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(get_client_data),
         })
         .unwrap();
@@ -1468,6 +1528,7 @@ fn runtime_creates_discoverable_passkey_assertion_for_relying_party() {
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: None,
+            user_presence_verified: true,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(get_client_data),
         })
         .unwrap();
@@ -1476,6 +1537,69 @@ fn runtime_creates_discoverable_passkey_assertion_for_relying_party() {
     };
     assert_eq!(assertion.credential_id, "ZGlzY292ZXJhYmxlLTE");
     assert_eq!(assertion.user_handle_base64url, Some("dXNlci0x".into()));
+}
+
+#[test]
+fn runtime_rejects_discoverable_passkey_assertion_when_multiple_accounts_match() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    for (username, credential_id) in [
+        ("alice@example.com", "ZGlzY292ZXJhYmxlLTE"),
+        ("bob@example.com", "ZGlzY292ZXJhYmxlLTI"),
+    ] {
+        let mut entry = Entry::new(username);
+        entry.passkey = Some(PasskeyRecord {
+            username: username.into(),
+            credential_id: credential_id.into(),
+            generated_user_id: None,
+            private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+            relying_party: "example.com".into(),
+            user_handle: None,
+            backup_eligible: false,
+            backup_state: false,
+        });
+        vault.root.entries.push(entry);
+    }
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: None,
+            user_presence_verified: true,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(
+                br#"{"type":"webauthn.get","challenge":"bG9naW4tMQ","origin":"https://example.com","crossOrigin":false}"#,
+            ),
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected error, got {response:?}");
+    };
+    assert_eq!(error.code, "invalid_request");
+    assert!(
+        error
+            .message
+            .contains("multiple passkey credentials found for relying party")
+    );
 }
 
 #[test]

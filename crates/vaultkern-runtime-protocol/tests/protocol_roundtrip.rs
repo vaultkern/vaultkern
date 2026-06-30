@@ -799,6 +799,7 @@ fn protocol_roundtrips_passkey_assertion_command_and_response() {
         relying_party: "example.com".into(),
         origin: "https://example.com".into(),
         credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+        user_presence_verified: true,
         client_data_json_base64url: "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0".into(),
     });
 
@@ -814,6 +815,10 @@ fn protocol_roundtrips_passkey_assertion_command_and_response() {
     assert_eq!(
         command_json["command"]["client_data_json_base64url"],
         serde_json::json!("eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0")
+    );
+    assert_eq!(
+        command_json["command"]["user_presence_verified"],
+        serde_json::json!(true)
     );
     assert_eq!(
         serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),

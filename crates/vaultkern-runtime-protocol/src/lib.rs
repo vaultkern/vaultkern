@@ -129,6 +129,8 @@ pub enum RuntimeCommand {
         origin: String,
         #[serde(default)]
         credential_id: Option<String>,
+        #[serde(default)]
+        user_presence_verified: bool,
         client_data_json_base64url: String,
     },
     CreatePasskeyRegistration {

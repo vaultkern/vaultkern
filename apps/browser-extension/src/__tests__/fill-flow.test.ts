@@ -1014,6 +1014,50 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("notifies the background page after approving an unlocked WebAuthn request", async () => {
+    window.history.replaceState(null, "", "/popup.html?webauthn=approve");
+    const sendMessage = vi.fn(async () => undefined);
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Confirm passkey request")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Continue passkey request" })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_presence_complete"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("auto unlocks the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
     window.history.replaceState(null, "", "/popup.html?webauthn=unlock");
     const sendMessage = vi.fn(async () => undefined);
@@ -1938,5 +1982,46 @@ describe("content script fill message", () => {
     expect(
       (document.querySelector('input[name="password"]') as HTMLInputElement).value
     ).toBe("root-secret");
+  });
+
+  it("forwards WebAuthn page observations with the actual page origin", async () => {
+    const sendMessage = vi.fn();
+    const addListener = vi.fn();
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    await import("../contentScript");
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "create",
+          origin: "https://forged.example",
+          relyingParty: "localhost",
+          challenge: "cmVnaXN0ZXItMQ",
+          excludeCredentialIds: ["Y3JlZGVudGlhbC0x"]
+        }
+      })
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "vaultkern_webauthn_page_request",
+      ceremony: "create",
+      origin: window.location.origin,
+      relyingParty: "localhost",
+      challenge: "cmVnaXN0ZXItMQ",
+      allowCredentialIds: undefined,
+      excludeCredentialIds: ["Y3JlZGVudGlhbC0x"],
+      observedAt: expect.any(Number)
+    });
   });
 });

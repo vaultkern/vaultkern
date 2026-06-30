@@ -137,6 +137,13 @@ async function sendCommand(extensionPage, command, timeout = 60_000) {
   return wrapped.response;
 }
 
+async function approvePasskeyPrompt(context) {
+  const prompt = await context.waitForEvent("page", { timeout: 15_000 });
+  await prompt.waitForLoadState("domcontentloaded");
+  await prompt.getByRole("button", { name: "Continue passkey request" }).click();
+  await prompt.waitForEvent("close", { timeout: 5_000 }).catch(() => {});
+}
+
 async function main() {
   const manifest = JSON.parse(await readFile(join(extensionPath, "manifest.json"), "utf8"));
   if (manifest.key == null) {
@@ -262,9 +269,21 @@ async function main() {
 
     const passkeyRegisterPage = await context.newPage();
     await passkeyRegisterPage.goto(server.passkeyRegisterUrl);
+    await passkeyRegisterPage.evaluate(() => {
+      globalThis.__vaultkernWebAuthnMessages = [];
+      window.addEventListener("message", (event) => {
+        if (event.data?.type === "vaultkern_webauthn_page_request") {
+          globalThis.__vaultkernWebAuthnMessages.push(event.data);
+        }
+      });
+    });
     const passkeyRegisterReady = await passkeyRegisterPage.evaluate(() => ({
       hasButton: document.querySelector("#vaultkern-passkey-register") != null,
-      publicKeyCredentialAvailable: typeof PublicKeyCredential !== "undefined"
+      publicKeyCredentialAvailable: typeof PublicKeyCredential !== "undefined",
+      hookInstalled: Boolean(
+        navigator.credentials?.__vaultkernWebAuthnHookInstalled
+      ),
+      createSource: String(navigator.credentials?.create).slice(0, 200)
     }));
     if (!passkeyRegisterReady.hasButton) {
       throw new Error("passkey register smoke page did not expose the create button");
@@ -277,7 +296,23 @@ async function main() {
       .locator("#vaultkern-passkey-register-result")
       .evaluate((node) => node.value || node.textContent);
     if (!passkeyRegisterResult?.startsWith("credential:")) {
-      throw new Error(`unexpected passkey register result: ${passkeyRegisterResult}`);
+      const webAuthnDebug = await extensionPage
+        .evaluate(async () => await chrome.storage.local.get("vaultkernWebAuthnDebug"))
+        .catch((error) => ({ readError: String(error?.message ?? error) }));
+      const pageProbe = await passkeyRegisterPage
+        .evaluate(() => ({
+          hookInstalled: Boolean(
+            navigator.credentials?.__vaultkernWebAuthnHookInstalled
+          ),
+          createSource: String(navigator.credentials?.create).slice(0, 200),
+          messages: globalThis.__vaultkernWebAuthnMessages ?? []
+        }))
+        .catch((error) => ({ readError: String(error?.message ?? error) }));
+      throw new Error(
+        `unexpected passkey register result: ${passkeyRegisterResult}\n` +
+          `WebAuthn debug: ${JSON.stringify(webAuthnDebug, null, 2)}\n` +
+          `Page probe: ${JSON.stringify(pageProbe, null, 2)}`
+      );
     }
     const registeredPasskeyCredentialId = passkeyRegisterResult.slice("credential:".length);
 
@@ -296,14 +331,28 @@ async function main() {
     await passkeyPage.goto(
       `${server.passkeyUrl}?credential=${encodeURIComponent(registeredPasskeyCredentialId)}`
     );
+    await passkeyPage.evaluate(() => {
+      globalThis.__vaultkernWebAuthnMessages = [];
+      window.addEventListener("message", (event) => {
+        if (event.data?.type === "vaultkern_webauthn_page_request") {
+          globalThis.__vaultkernWebAuthnMessages.push(event.data);
+        }
+      });
+    });
     const passkeySmokeReady = await passkeyPage.evaluate(() => ({
       hasButton: document.querySelector("#vaultkern-passkey-login") != null,
-      publicKeyCredentialAvailable: typeof PublicKeyCredential !== "undefined"
+      publicKeyCredentialAvailable: typeof PublicKeyCredential !== "undefined",
+      hookInstalled: Boolean(
+        navigator.credentials?.__vaultkernWebAuthnHookInstalled
+      ),
+      getSource: String(navigator.credentials?.get).slice(0, 200)
     }));
     if (!passkeySmokeReady.hasButton) {
       throw new Error("passkey smoke page did not expose the login button");
     }
+    const passkeyApproval = approvePasskeyPrompt(context);
     await passkeyPage.click("#vaultkern-passkey-login");
+    await passkeyApproval;
     await passkeyPage.waitForFunction(
       () => document.querySelector("#vaultkern-passkey-result")?.value
     );
@@ -312,7 +361,23 @@ async function main() {
       .evaluate((node) => node.value || node.textContent);
     const expectedPasskeyResult = `credential:${registeredPasskeyCredentialId}`;
     if (passkeyResult !== expectedPasskeyResult) {
-      throw new Error(`unexpected passkey result: ${passkeyResult}`);
+      const webAuthnDebug = await extensionPage
+        .evaluate(async () => await chrome.storage.local.get("vaultkernWebAuthnDebug"))
+        .catch((error) => ({ readError: String(error?.message ?? error) }));
+      const pageProbe = await passkeyPage
+        .evaluate(() => ({
+          hookInstalled: Boolean(
+            navigator.credentials?.__vaultkernWebAuthnHookInstalled
+          ),
+          getSource: String(navigator.credentials?.get).slice(0, 200),
+          messages: globalThis.__vaultkernWebAuthnMessages ?? []
+        }))
+        .catch((error) => ({ readError: String(error?.message ?? error) }));
+      throw new Error(
+        `unexpected passkey result: ${passkeyResult}\n` +
+          `WebAuthn debug: ${JSON.stringify(webAuthnDebug, null, 2)}\n` +
+          `Page probe: ${JSON.stringify(pageProbe, null, 2)}`
+      );
     }
 
     console.log(

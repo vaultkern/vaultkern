@@ -6,6 +6,7 @@ import {
 import {
   attachWebAuthnProxy,
   detachWebAuthnProxy,
+  recordWebAuthnPageRequest,
   registerWebAuthnProxyRequestHandlers
 } from "./webauthnProxy";
 
@@ -24,6 +25,14 @@ function isRuntimeCommand(message: unknown): message is { version: number; comma
     "version" in message &&
     "command" in message &&
     (message as { version?: unknown }).version === 1
+  );
+}
+
+function isWebAuthnPageRequest(message: unknown) {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    (message as { type?: unknown }).type === "vaultkern_webauthn_page_request"
   );
 }
 
@@ -60,6 +69,13 @@ if (chromeApi?.runtime?.onMessage && nativeBridge) {
       _sender: unknown,
       sendResponse: (response: unknown) => void
     ) => {
+      if (isWebAuthnPageRequest(message)) {
+        if (webAuthnProxyAttached || webAuthnProxySyncPromise) {
+          recordWebAuthnPageRequest(message, chromeApi);
+        }
+        return false;
+      }
+
       if (!isRuntimeCommand(message)) {
         return false;
       }
