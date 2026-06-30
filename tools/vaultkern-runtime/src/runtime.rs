@@ -744,9 +744,7 @@ impl Runtime {
             .current_vault_ref_id()
             .context("no current vault selected")?
             .to_owned();
-        if !self.secure_storage.load_requires_user_presence() {
-            self.biometric.authorize("Unlock this vault")?;
-        }
+        self.biometric.authorize("Unlock this vault")?;
         let bytes = self
             .secure_storage
             .load(&quick_unlock_storage_key(&current_vault_ref_id))?
@@ -2756,6 +2754,60 @@ mod tests {
         }
     }
 
+    struct PresenceLoadingSecureStorageProvider {
+        values: RefCell<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl PresenceLoadingSecureStorageProvider {
+        fn new() -> Self {
+            Self {
+                values: RefCell::new(BTreeMap::new()),
+            }
+        }
+    }
+
+    impl SecureStorageProvider for PresenceLoadingSecureStorageProvider {
+        fn store(&self, key: &str, value: &[u8]) -> Result<()> {
+            self.values
+                .borrow_mut()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(self.values.borrow().get(key).cloned())
+        }
+
+        fn contains(&self, key: &str) -> Result<bool> {
+            Ok(self.values.borrow().contains_key(key))
+        }
+
+        fn load_requires_user_presence(&self) -> bool {
+            true
+        }
+
+        fn delete(&self, key: &str) -> Result<()> {
+            self.values.borrow_mut().remove(key);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingBiometricProvider {
+        authorizations: std::rc::Rc<RefCell<Vec<String>>>,
+    }
+
+    impl BiometricProvider for CountingBiometricProvider {
+        fn supports_quick_unlock(&self) -> bool {
+            true
+        }
+
+        fn authorize(&self, reason: &str) -> Result<()> {
+            self.authorizations.borrow_mut().push(reason.to_owned());
+            Ok(())
+        }
+    }
+
     #[test]
     fn locking_clears_decrypted_vault_and_keeps_encrypted_snapshot_for_reunlock() {
         let core = KeepassCore::new();
@@ -2862,5 +2914,44 @@ mod tests {
             .unwrap();
 
         runtime.save_vault(&opened.vault_id).unwrap();
+    }
+
+    #[test]
+    fn quick_unlock_requires_biometric_authorization_even_when_secret_load_is_protected() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.biometric = Box::new(CountingBiometricProvider {
+            authorizations: authorizations.clone(),
+        });
+        runtime.secure_storage = Box::new(PresenceLoadingSecureStorageProvider::new());
+
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+
+        runtime.unlock_current_vault_with_quick_unlock().unwrap();
+
+        assert_eq!(
+            authorizations.borrow().as_slice(),
+            [
+                "Enable quick unlock for this vault".to_owned(),
+                "Unlock this vault".to_owned(),
+            ]
+        );
     }
 }

@@ -220,10 +220,6 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
         Ok(is_quick_unlock_envelope(&fs::read(path)?))
     }
 
-    fn load_requires_user_presence(&self) -> bool {
-        true
-    }
-
     fn delete(&self, key: &str) -> Result<()> {
         let path = self.path_for(key);
         if path.exists() {
