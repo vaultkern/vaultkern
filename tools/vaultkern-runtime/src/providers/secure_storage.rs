@@ -24,6 +24,8 @@ use crate::state_paths::{extension_state_dir, runtime_state_dir};
 const QUICK_UNLOCK_ENVELOPE_VERSION: u8 = 1;
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 const QUICK_UNLOCK_ENVELOPE_SCHEME: &str = "windows-cng-rsa-oaep-sha256-aes-256-gcm";
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+const QUICK_UNLOCK_KEY_STORAGE_PROVIDER: &str = "Microsoft Platform Crypto Provider";
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 #[derive(Deserialize, Serialize)]
@@ -43,6 +45,11 @@ fn is_quick_unlock_envelope(bytes: &[u8]) -> bool {
                 && envelope.scheme == QUICK_UNLOCK_ENVELOPE_SCHEME
         })
         .unwrap_or(false)
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn quick_unlock_key_storage_provider_name() -> &'static str {
+    QUICK_UNLOCK_KEY_STORAGE_PROVIDER
 }
 
 #[allow(dead_code)]
@@ -248,15 +255,15 @@ fn with_hello_key<T>(
     operation: impl FnOnce(windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE) -> Result<T>,
 ) -> Result<T> {
     use windows_sys::Win32::Security::Cryptography::{
-        MS_KEY_STORAGE_PROVIDER, NCRYPT_OVERWRITE_KEY_FLAG, NCRYPT_PROV_HANDLE,
-        NCRYPT_RSA_ALGORITHM, NCryptCreatePersistedKey, NCryptFinalizeKey, NCryptOpenKey,
-        NCryptOpenStorageProvider,
+        NCRYPT_OVERWRITE_KEY_FLAG, NCRYPT_PROV_HANDLE, NCRYPT_RSA_ALGORITHM,
+        NCryptCreatePersistedKey, NCryptFinalizeKey, NCryptOpenKey, NCryptOpenStorageProvider,
     };
 
     let mut provider: NCRYPT_PROV_HANDLE = 0;
+    let provider_name = wide_null(quick_unlock_key_storage_provider_name());
     check_ncrypt(
-        unsafe { NCryptOpenStorageProvider(&mut provider, MS_KEY_STORAGE_PROVIDER, 0) },
-        "failed to open Windows key storage provider",
+        unsafe { NCryptOpenStorageProvider(&mut provider, provider_name.as_ptr(), 0) },
+        "failed to open TPM platform key storage provider",
     )?;
     let _provider = NcryptHandle(provider);
 
@@ -567,7 +574,9 @@ impl SecureStorageProvider for FailingStoreSecureStorageProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_quick_unlock_envelope, quick_unlock_storage_dir};
+    use super::{
+        is_quick_unlock_envelope, quick_unlock_key_storage_provider_name, quick_unlock_storage_dir,
+    };
     use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
     #[test]
@@ -588,5 +597,13 @@ mod tests {
         assert!(is_quick_unlock_envelope(
             br#"{"version":1,"scheme":"windows-cng-rsa-oaep-sha256-aes-256-gcm","wrapped_key":"","nonce":"","ciphertext":""}"#
         ));
+    }
+
+    #[test]
+    fn quick_unlock_uses_tpm_platform_key_storage_provider() {
+        assert_eq!(
+            quick_unlock_key_storage_provider_name(),
+            "Microsoft Platform Crypto Provider"
+        );
     }
 }
