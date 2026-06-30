@@ -34,9 +34,9 @@ use crate::providers::local_file::{LocalFileVaultSourceProvider, VaultSourceFing
 use crate::providers::onedrive::{OneDriveMemoryAccessCounts, OneDriveVaultSourceProvider};
 use crate::providers::remote_cache::{RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry};
 use crate::providers::secure_storage::{
-    FailingStoreSecureStorageProvider, MemorySecureStorageProvider, SecureStorageProvider,
-    UnsupportedSecureStorageProvider, default_secure_storage_provider,
-    default_secure_storage_provider_for_extension_id,
+    FailingContainsSecureStorageProvider, FailingStoreSecureStorageProvider,
+    MemorySecureStorageProvider, SecureStorageProvider, UnsupportedSecureStorageProvider,
+    default_secure_storage_provider, default_secure_storage_provider_for_extension_id,
 };
 use crate::session::SessionState;
 use crate::state_paths::extension_id_from_browser_origin;
@@ -209,6 +209,13 @@ impl Runtime {
         runtime.secure_storage = Box::new(FailingStoreSecureStorageProvider::new(
             stores_before_failure,
         ));
+        runtime
+    }
+
+    pub fn for_tests_with_quick_unlock_failing_contains() -> Self {
+        let mut runtime = Self::for_tests();
+        runtime.biometric = Box::new(TestBiometricProvider);
+        runtime.secure_storage = Box::new(FailingContainsSecureStorageProvider::new());
         runtime
     }
 
@@ -2146,15 +2153,25 @@ impl Runtime {
             return Ok(());
         }
 
-        self.clear_quick_unlock_refresh_pending(vault_id)?;
         if !self.biometric.supports_quick_unlock() {
+            self.clear_quick_unlock_refresh_pending(vault_id)?;
             return Ok(());
         }
         let Some(vault_ref_id) = self.vault_ref_id_for_loaded_vault(vault_id) else {
+            self.clear_quick_unlock_refresh_pending(vault_id)?;
             return Ok(());
         };
         let storage_key = quick_unlock_storage_key(&vault_ref_id);
-        if !self.secure_storage.contains(&storage_key)? {
+        let contains_quick_unlock = match self.secure_storage.contains(&storage_key) {
+            Ok(contains) => contains,
+            Err(_) => {
+                let _ = self.secure_storage.delete(&storage_key);
+                self.clear_quick_unlock_refresh_pending(vault_id)?;
+                return Ok(());
+            }
+        };
+        if !contains_quick_unlock {
+            self.clear_quick_unlock_refresh_pending(vault_id)?;
             return Ok(());
         }
 
@@ -2168,7 +2185,9 @@ impl Runtime {
         };
 
         if credentials.password.is_none() && credentials.key_file_path.is_none() {
-            return self.secure_storage.delete(&storage_key);
+            let _ = self.secure_storage.delete(&storage_key);
+            self.clear_quick_unlock_refresh_pending(vault_id)?;
+            return Ok(());
         }
 
         let bytes = serde_json::to_vec(&credentials)
@@ -2176,6 +2195,7 @@ impl Runtime {
         if self.secure_storage.store(&storage_key, &bytes).is_err() {
             let _ = self.secure_storage.delete(&storage_key);
         }
+        self.clear_quick_unlock_refresh_pending(vault_id)?;
         Ok(())
     }
 

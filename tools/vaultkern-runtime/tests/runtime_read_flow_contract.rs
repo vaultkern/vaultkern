@@ -419,6 +419,55 @@ fn runtime_deletes_quick_unlock_credentials_when_refresh_store_fails() {
 }
 
 #[test]
+fn runtime_save_succeeds_when_quick_unlock_refresh_contains_fails() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("old-password");
+    let bytes = core
+        .save_kdbx(
+            &Vault::empty("failing-refresh-contains"),
+            &key,
+            SaveProfile::recommended(),
+        )
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("failing-refresh-contains.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_with_quick_unlock_failing_contains();
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "old-password")
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::EnableQuickUnlockForCurrentVault)
+        .unwrap();
+
+    runtime
+        .update_database_settings(
+            &handle.vault_id,
+            DatabaseSettingsUpdateDto {
+                credentials: Some(DatabaseCredentialsUpdateDto {
+                    new_password: Some("new-password".into()),
+                    remove_password: false,
+                }),
+                ..DatabaseSettingsUpdateDto::default()
+            },
+        )
+        .unwrap();
+
+    let saved = runtime.save_vault(&handle.vault_id).unwrap();
+    let RuntimeResponse::SaveVaultResult(result) = saved else {
+        panic!("expected save result");
+    };
+    assert_eq!(
+        result.status,
+        vaultkern_runtime_protocol::SaveVaultStatusDto::Saved
+    );
+}
+
+#[test]
 fn runtime_deletes_quick_unlock_credentials_when_stored_password_is_stale() {
     let core = KeepassCore::new();
     let mut old_key = CompositeKey::default();

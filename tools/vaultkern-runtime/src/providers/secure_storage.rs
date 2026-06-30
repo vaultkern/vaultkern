@@ -575,6 +575,40 @@ impl SecureStorageProvider for FailingStoreSecureStorageProvider {
     }
 }
 
+pub(crate) struct FailingContainsSecureStorageProvider {
+    values: RefCell<BTreeMap<String, Vec<u8>>>,
+}
+
+impl FailingContainsSecureStorageProvider {
+    pub(crate) fn new() -> Self {
+        Self {
+            values: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl SecureStorageProvider for FailingContainsSecureStorageProvider {
+    fn store(&self, key: &str, value: &[u8]) -> Result<()> {
+        self.values
+            .borrow_mut()
+            .insert(key.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.values.borrow().get(key).cloned())
+    }
+
+    fn contains(&self, _key: &str) -> Result<bool> {
+        anyhow::bail!("injected secure storage contains failure")
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        self.values.borrow_mut().remove(key);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
