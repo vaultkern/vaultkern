@@ -414,6 +414,24 @@ export class RuntimeClient {
     });
   }
 
+  async enableQuickUnlockForCurrentVault(): Promise<SessionState> {
+    return this.sendCommand<SessionState>({
+      type: "enable_quick_unlock_for_current_vault"
+    });
+  }
+
+  async unlockCurrentVaultWithQuickUnlock(): Promise<SessionState> {
+    return this.sendCommand<SessionState>({
+      type: "unlock_current_vault_with_quick_unlock"
+    });
+  }
+
+  async disableQuickUnlockForCurrentVault(): Promise<SessionState> {
+    return this.sendCommand<SessionState>({
+      type: "disable_quick_unlock_for_current_vault"
+    });
+  }
+
   async unlockWithPassword(
     vaultId: string,
     password: string

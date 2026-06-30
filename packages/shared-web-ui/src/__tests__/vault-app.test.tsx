@@ -82,6 +82,21 @@ function createVaultSelectionMethods() {
       activeVaultId: null,
       currentVaultRefId: null
     })),
+    enableQuickUnlockForCurrentVault: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    })),
+    unlockCurrentVaultWithQuickUnlock: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    })),
+    disableQuickUnlockForCurrentVault: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    })),
     unlockWithPassword: vi.fn(),
     unlockVault: vi.fn(),
     lockSession: vi.fn(async () => ({
@@ -264,6 +279,84 @@ it("shows browser settings and saves local extension preferences", async () => {
   });
   expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "浏览器设置" })).toBeInTheDocument();
+});
+
+it("toggles quick unlock for the current vault from browser settings", async () => {
+  const settingsStore = createSettingsStore();
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn(),
+    enableQuickUnlockForCurrentVault: vi.fn(async () => {
+      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
+      return {
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      };
+    }),
+    disableQuickUnlockForCurrentVault: vi.fn(async () => {
+      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: false };
+      return {
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      };
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByText("No entries available.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+  const quickUnlock = await screen.findByRole("checkbox", {
+    name: "Quick Unlock"
+  });
+  expect(quickUnlock).not.toBeChecked();
+
+  fireEvent.click(quickUnlock);
+  await waitFor(() => {
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+  });
+  expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).toBeChecked();
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "Quick Unlock" }));
+  await waitFor(() => {
+    expect(client.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+  });
+  expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).not.toBeChecked();
 });
 
 it("renders database and entry workspace labels in Chinese when selected", async () => {

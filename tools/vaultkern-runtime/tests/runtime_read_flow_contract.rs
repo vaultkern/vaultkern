@@ -183,6 +183,92 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
 }
 
 #[test]
+fn runtime_unlocks_current_vault_with_device_quick_unlock() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let root_id = vault.root.id.to_string();
+    vault.root.entries.push(Entry::new("Quick"));
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("quick.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let enabled = runtime
+        .handle(RuntimeCommand::EnableQuickUnlockForCurrentVault)
+        .unwrap();
+    assert_eq!(
+        enabled,
+        RuntimeResponse::SessionState(vaultkern_runtime_protocol::SessionStateDto {
+            unlocked: true,
+            active_vault_id: Some(handle.vault_id.clone()),
+            current_vault_ref_id: runtime.session_state().current_vault_ref_id,
+            supports_biometric_unlock: true,
+            source_status: None,
+        })
+    );
+
+    let recent = runtime.handle(RuntimeCommand::ListRecentVaults).unwrap();
+    let RuntimeResponse::VaultReferenceList(recent) = recent else {
+        panic!("expected recent vault list");
+    };
+    assert_eq!(recent.vaults.len(), 1);
+    assert!(recent.vaults[0].supports_quick_unlock);
+
+    runtime.handle(RuntimeCommand::LockSession).unwrap();
+    let unlocked = runtime
+        .handle(RuntimeCommand::UnlockCurrentVaultWithQuickUnlock)
+        .unwrap();
+    let RuntimeResponse::SessionState(state) = unlocked else {
+        panic!("expected session state");
+    };
+    assert!(state.unlocked);
+    assert_eq!(
+        state.active_vault_id.as_deref(),
+        Some(handle.vault_id.as_str())
+    );
+    assert!(state.supports_biometric_unlock);
+
+    let groups = runtime
+        .handle(RuntimeCommand::ListGroups {
+            vault_id: handle.vault_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(
+        groups,
+        RuntimeResponse::GroupTree(vaultkern_runtime_protocol::GroupTreeDto {
+            root: vaultkern_runtime_protocol::GroupNodeDto {
+                id: root_id,
+                title: "demo".into(),
+                entry_count: 1,
+                child_count: 0,
+                children: vec![],
+            },
+        })
+    );
+
+    runtime
+        .handle(RuntimeCommand::DisableQuickUnlockForCurrentVault)
+        .unwrap();
+    let recent = runtime.handle(RuntimeCommand::ListRecentVaults).unwrap();
+    let RuntimeResponse::VaultReferenceList(recent) = recent else {
+        panic!("expected recent vault list");
+    };
+    assert!(!recent.vaults[0].supports_quick_unlock);
+}
+
+#[test]
 fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
