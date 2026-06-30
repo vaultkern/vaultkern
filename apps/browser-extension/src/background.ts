@@ -154,10 +154,6 @@ async function syncWebAuthnProxyOnce() {
     return;
   }
 
-  if (!webAuthnProxyAttached) {
-    return;
-  }
-
   const status = await detachWebAuthnProxy(chromeApi);
   if (status.status === "detached" || status.status === "unsupported") {
     webAuthnProxyAttached = false;

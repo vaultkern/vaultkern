@@ -56,8 +56,8 @@ type ChromeLike = {
 
 let unlockPromptWindowId: number | null = null;
 const unlockCompleteWaiters = new Set<() => void>();
-let presencePromptWindowId: number | null = null;
-const presenceCompleteWaiters = new Set<() => void>();
+const presencePromptWindowIds = new Map<number, number>();
+const presenceCompleteWaiters = new Map<number, Set<() => void>>();
 const observedPageRequests: ObservedWebAuthnPageRequest[] = [];
 const registeredUnlockMessageSources = new WeakSet<object>();
 const registeredRequestHandlerSources = new WeakSet<object>();
@@ -274,10 +274,16 @@ function registerUnlockCompleteHandler(chromeApi: ChromeLike) {
     }
 
     if (isPresenceCompleteMessage(message)) {
+      const requestId = requestIdFromMessage(message);
+      if (typeof requestId !== "number") {
+        return;
+      }
       void recordWebAuthnDebug(chromeApi, {
-        event: "presence_complete_message"
+        event: "presence_complete_message",
+        requestId
       });
-      for (const waiter of [...presenceCompleteWaiters]) {
+      presencePromptWindowIds.delete(requestId);
+      for (const waiter of [...(presenceCompleteWaiters.get(requestId) ?? [])]) {
         waiter();
       }
     }
@@ -300,6 +306,11 @@ function isPresenceCompleteMessage(message: unknown) {
   );
 }
 
+function requestIdFromMessage(message: unknown) {
+  const requestId = (message as { requestId?: unknown } | null)?.requestId;
+  return typeof requestId === "number" ? requestId : null;
+}
+
 async function handleIsUvpaaRequest(chromeApi: ChromeLike, request: unknown) {
   const requestId = requestIdFrom(request);
   await recordWebAuthnDebug(chromeApi, {
@@ -308,12 +319,12 @@ async function handleIsUvpaaRequest(chromeApi: ChromeLike, request: unknown) {
   });
   await chromeApi.webAuthenticationProxy?.completeIsUvpaaRequest?.({
     requestId,
-    isUvpaa: true
+    isUvpaa: false
   });
   await recordWebAuthnDebug(chromeApi, {
     event: "is_uvpaa_completed",
     requestId,
-    isUvpaa: true
+    isUvpaa: false
   });
 }
 
@@ -685,6 +696,16 @@ async function handleCreateRequest(
     );
     if (!activeVault) {
       return;
+    }
+    if (!activeVault.userPresenceVerified) {
+      const approved = await userPresenceForRequest(
+        chromeApi,
+        requestId,
+        canceledRequests
+      );
+      if (!approved) {
+        return;
+      }
     }
     const activeVaultId = activeVault.activeVaultId;
 
@@ -1295,7 +1316,7 @@ async function userPresenceForRequest(
     event: "presence_prompt_opening",
     requestId
   });
-  await openPresencePrompt(chromeApi);
+  await openPresencePrompt(chromeApi, requestId);
 
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
@@ -1308,6 +1329,7 @@ async function userPresenceForRequest(
     }
 
     const signaled = await waitForPresenceComplete(
+      requestId,
       Math.min(1_000, Math.max(0, deadline - Date.now()))
     );
     if (signaled) {
@@ -1346,7 +1368,7 @@ function waitForUnlockComplete(timeoutMs: number) {
   });
 }
 
-function waitForPresenceComplete(timeoutMs: number) {
+function waitForPresenceComplete(requestId: number, timeoutMs: number) {
   return new Promise<boolean>((resolve) => {
     let settled = false;
     const timeoutId = setTimeout(() => {
@@ -1363,11 +1385,17 @@ function waitForPresenceComplete(timeoutMs: number) {
 
       settled = true;
       clearTimeout(timeoutId);
-      presenceCompleteWaiters.delete(waiter);
+      const waiters = presenceCompleteWaiters.get(requestId);
+      waiters?.delete(waiter);
+      if (waiters?.size === 0) {
+        presenceCompleteWaiters.delete(requestId);
+      }
       resolve(signaled);
     }
 
-    presenceCompleteWaiters.add(waiter);
+    const waiters = presenceCompleteWaiters.get(requestId) ?? new Set<() => void>();
+    waiters.add(waiter);
+    presenceCompleteWaiters.set(requestId, waiters);
   });
 }
 
@@ -1402,7 +1430,7 @@ async function openUnlockPrompt(chromeApi: ChromeLike) {
     created && typeof created.id === "number" ? created.id : null;
 }
 
-async function openPresencePrompt(chromeApi: ChromeLike) {
+async function openPresencePrompt(chromeApi: ChromeLike, requestId: number) {
   if (!chromeApi.windows?.create) {
     throw new WebAuthnRequestError(
       "NotAllowedError",
@@ -1410,18 +1438,22 @@ async function openPresencePrompt(chromeApi: ChromeLike) {
     );
   }
 
-  if (presencePromptWindowId !== null && chromeApi.windows.update) {
+  const existingWindowId = presencePromptWindowIds.get(requestId);
+  if (typeof existingWindowId === "number" && chromeApi.windows.update) {
     try {
-      await chromeApi.windows.update(presencePromptWindowId, { focused: true });
+      await chromeApi.windows.update(existingWindowId, { focused: true });
       return;
     } catch {
-      presencePromptWindowId = null;
+      presencePromptWindowIds.delete(requestId);
     }
   }
 
+  const popupPath = `popup.html?webauthn=approve&requestId=${encodeURIComponent(
+    String(requestId)
+  )}`;
   const url =
-    chromeApi.runtime?.getURL?.("popup.html?webauthn=approve") ??
-    "popup.html?webauthn=approve";
+    chromeApi.runtime?.getURL?.(popupPath) ??
+    popupPath;
   const created = await chromeApi.windows.create({
     url,
     type: "popup",
@@ -1429,8 +1461,9 @@ async function openPresencePrompt(chromeApi: ChromeLike) {
     height: 360,
     focused: true
   });
-  presencePromptWindowId =
-    created && typeof created.id === "number" ? created.id : null;
+  if (created && typeof created.id === "number") {
+    presencePromptWindowIds.set(requestId, created.id);
+  }
 }
 
 function delay(milliseconds: number) {

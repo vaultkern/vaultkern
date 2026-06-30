@@ -365,6 +365,51 @@ describe("background bridge", () => {
     expect(attach).not.toHaveBeenCalled();
   });
 
+  it("detaches the WebAuthn proxy defensively when the disabled setting loads after restart", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+    const detach = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: false
+              }
+            });
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      webAuthenticationProxy: {
+        attach,
+        detach
+      }
+    };
+
+    await import("../background");
+
+    await vi.waitFor(() => {
+      expect(detach).toHaveBeenCalledTimes(1);
+    });
+    expect(attach).not.toHaveBeenCalled();
+  });
+
   it("detaches the WebAuthn proxy when the passkey provider setting is disabled later", async () => {
     const port = createPort();
     const attach = vi.fn(async () => undefined);

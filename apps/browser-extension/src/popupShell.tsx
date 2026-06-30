@@ -62,14 +62,18 @@ export async function activeSiteLabel() {
 function notifyWebAuthnPromptComplete(type: string, closeMode: string) {
   const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
   const sendMessage = chromeApi?.runtime?.sendMessage;
-  const shouldClose =
-    typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).get("webauthn") === closeMode;
+  const promptParams =
+    typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search);
+  const shouldNotify = promptParams?.get("webauthn") === closeMode;
+
+  if (!shouldNotify) {
+    return;
+  }
 
   function closePrompt() {
-    if (shouldClose) {
-      window.close();
-    }
+    window.close();
   }
 
   if (typeof sendMessage !== "function") {
@@ -77,10 +81,16 @@ function notifyWebAuthnPromptComplete(type: string, closeMode: string) {
     return;
   }
 
+  const requestIdValue = promptParams?.get("requestId");
+  const requestId =
+    requestIdValue && requestIdValue.trim() !== "" ? Number(requestIdValue) : null;
+  const message =
+    typeof requestId === "number" && Number.isFinite(requestId)
+      ? { type, requestId }
+      : { type };
+
   void Promise.resolve(
-    sendMessage.call(chromeApi.runtime, {
-      type
-    })
+    sendMessage.call(chromeApi.runtime, message)
   )
     .catch(() => undefined)
     .finally(closePrompt);

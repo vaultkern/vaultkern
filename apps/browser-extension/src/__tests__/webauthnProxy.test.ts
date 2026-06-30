@@ -48,12 +48,28 @@ function installPresencePrompt(chromeApi: any) {
 
   return {
     create,
-    async approve() {
+    async approve(requestId?: number) {
       await vi.waitFor(() => {
-        expect(create).toHaveBeenCalledTimes(1);
+        expect(create).toHaveBeenCalled();
       });
       await new Promise((resolve) => setTimeout(resolve, 0));
-      messageListener?.({ type: "vaultkern_presence_complete" }, {}, vi.fn());
+      const promptUrl = (create.mock.calls.at(-1)?.[0] as { url?: string } | undefined)
+        ?.url;
+      const approvedRequestId =
+        requestId ??
+        Number(
+          new URL(promptUrl ?? "", "chrome-extension://id/").searchParams.get(
+            "requestId"
+          )
+        );
+      messageListener?.(
+        {
+          type: "vaultkern_presence_complete",
+          requestId: approvedRequestId
+        },
+        {},
+        vi.fn()
+      );
     }
   };
 }
@@ -190,6 +206,74 @@ describe("webAuthenticationProxy wrapper", () => {
         signature: "signature",
         userHandle: "dXNlci0x"
       }
+    });
+  });
+
+  it("only resumes the WebAuthn request that matches the approved prompt", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_assertion",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        clientDataJsonBase64url: "client-data",
+        signatureBase64url: "signature",
+        userHandleBase64url: null
+      });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+    const presencePrompt = installPresencePrompt(chromeApi);
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 31,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await presencePrompt.approve(32);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(completeGetRequest).not.toHaveBeenCalled();
+
+    await presencePrompt.approve(31);
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "create_passkey_assertion",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.com",
+      credential_id: "Y3JlZGVudGlhbC0x",
+      user_presence_verified: true,
+      client_data_json_base64url: expect.any(String)
     });
   });
 
@@ -525,6 +609,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await expect(
       attachWebAuthnProxy(chromeApi, { sendRuntimeCommand })
@@ -544,6 +629,17 @@ describe("webAuthenticationProxy wrapper", () => {
         pubKeyCredParams: [{ type: "public-key", alg: -7 }]
       })
     });
+    await vi.waitFor(() => {
+      expect(presencePrompt.create).toHaveBeenCalledWith({
+        url: "chrome-extension://id/popup.html?webauthn=approve&requestId=10",
+        type: "popup",
+        width: 460,
+        height: 360,
+        focused: true
+      });
+    });
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    await presencePrompt.approve();
 
     await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
@@ -620,6 +716,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
     expect(
@@ -645,6 +742,7 @@ describe("webAuthenticationProxy wrapper", () => {
         pubKeyCredParams: [{ type: "public-key", alg: -7 }]
       })
     });
+    await presencePrompt.approve();
 
     await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
@@ -698,6 +796,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
 
@@ -715,6 +814,7 @@ describe("webAuthenticationProxy wrapper", () => {
         pubKeyCredParams: [{ type: "public-key", alg: -7 }]
       })
     });
+    await presencePrompt.approve();
 
     await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
@@ -811,6 +911,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
 
@@ -834,6 +935,7 @@ describe("webAuthenticationProxy wrapper", () => {
         ]
       })
     });
+    await presencePrompt.approve();
 
     await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
@@ -902,6 +1004,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
 
@@ -919,6 +1022,7 @@ describe("webAuthenticationProxy wrapper", () => {
         pubKeyCredParams: [{ type: "public-key", alg: -7 }]
       })
     });
+    await presencePrompt.approve();
 
     await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
@@ -978,6 +1082,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
 
@@ -995,6 +1100,7 @@ describe("webAuthenticationProxy wrapper", () => {
         pubKeyCredParams: [{ type: "public-key", alg: -7 }]
       })
     });
+    await presencePrompt.approve();
 
     await vi.waitFor(() => {
       expect(sendRuntimeCommand).toHaveBeenCalledWith({
@@ -1048,6 +1154,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
 
@@ -1065,6 +1172,7 @@ describe("webAuthenticationProxy wrapper", () => {
         pubKeyCredParams: [{ type: "public-key", alg: -7 }]
       })
     });
+    await presencePrompt.approve();
     await vi.waitFor(() => {
       expect(sendRuntimeCommand).toHaveBeenCalledTimes(2);
     });
@@ -1125,6 +1233,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
 
@@ -1142,6 +1251,7 @@ describe("webAuthenticationProxy wrapper", () => {
         pubKeyCredParams: [{ type: "public-key", alg: -7 }]
       })
     });
+    await presencePrompt.approve();
 
     await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
@@ -1188,6 +1298,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
 
@@ -1205,6 +1316,7 @@ describe("webAuthenticationProxy wrapper", () => {
         pubKeyCredParams: [{ type: "public-key", alg: -7 }]
       })
     });
+    await presencePrompt.approve();
 
     await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
@@ -1345,7 +1457,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("answers Chrome user-verifying platform authenticator availability probes", async () => {
+  it("reports user-verifying platform authenticator availability as unavailable", async () => {
     let isUvpaaListener: ((request: unknown) => void) | undefined;
     const completeIsUvpaaRequest = vi.fn(async () => undefined);
     const chromeApi = {
@@ -1372,7 +1484,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
     expect(completeIsUvpaaRequest).toHaveBeenCalledWith({
       requestId: 11,
-      isUvpaa: true
+      isUvpaa: false
     });
   });
 

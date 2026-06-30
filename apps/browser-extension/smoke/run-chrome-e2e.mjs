@@ -288,7 +288,9 @@ async function main() {
     if (!passkeyRegisterReady.hasButton) {
       throw new Error("passkey register smoke page did not expose the create button");
     }
+    const passkeyRegistrationApproval = approvePasskeyPrompt(context);
     await passkeyRegisterPage.click("#vaultkern-passkey-register");
+    await passkeyRegistrationApproval;
     await passkeyRegisterPage.waitForFunction(
       () => document.querySelector("#vaultkern-passkey-register-result")?.value
     );
