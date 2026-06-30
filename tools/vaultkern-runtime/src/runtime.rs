@@ -613,6 +613,8 @@ impl Runtime {
     pub fn delete_vault_reference(&mut self, vault_ref_id: &str) -> Result<VaultReferenceListDto> {
         let source = self.references.source_for(vault_ref_id).ok();
         let deleted_current = self.references.delete(vault_ref_id)?;
+        self.secure_storage
+            .delete(&quick_unlock_storage_key(vault_ref_id))?;
         if let Some(cache_key) = source.as_ref().and_then(remote_cache_key_for_stored_source) {
             self.remote_cache.delete(&cache_key)?;
         }
