@@ -25,7 +25,7 @@ import { popupErrorMessage, popupTheme } from "./theme";
 
 type SessionStateLike = Pick<
   SessionState,
-  "unlocked" | "activeVaultId" | "currentVaultRefId"
+  "unlocked" | "activeVaultId" | "currentVaultRefId" | "supportsBiometricUnlock"
 >;
 
 export interface PopupClientLike {
@@ -37,6 +37,7 @@ export interface PopupClientLike {
   lockSession(): Promise<SessionStateLike>;
   unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
+  unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
   listEntries(vaultId: string): Promise<EntrySummary[]>;
   getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
 }
@@ -353,6 +354,41 @@ export function PopupApp({
     }
   }
 
+  async function handleQuickUnlock() {
+    if (submitting) {
+      return;
+    }
+
+    setSubmitting(true);
+    setUnlockError(null);
+    setUnlockErrorCause(null);
+
+    try {
+      const preload =
+        currentVaultPreload.current ??
+        (session?.currentVaultRefId && !unlockError
+          ? startCurrentVaultPreload()
+          : null);
+      if (preload) {
+        await preload;
+      }
+      const nextSession = await client.unlockCurrentVaultWithQuickUnlock();
+      setSession(nextSession);
+      setPassword("");
+      setKeyFilePath("");
+    } catch (unlockFailure) {
+      setUnlockError(
+        popupErrorMessage(
+          unlockFailure,
+          translate(extensionSettings.language, "Failed to unlock vault")
+        )
+      );
+      setUnlockErrorCause(unlockFailure);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function handleOpenManager() {
     const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
     const runtime = chromeApi?.runtime;
@@ -426,6 +462,11 @@ export function PopupApp({
       null;
     const needsRepair = currentVault?.availability === "needs_repair";
     const canUnlockCurrentVault = Boolean(currentVault || session.currentVaultRefId);
+    const canQuickUnlock = Boolean(
+      session.supportsBiometricUnlock &&
+        currentVault?.supportsQuickUnlock &&
+        !needsRepair
+    );
 
     return (
       <I18nProvider language={extensionSettings.language}>
@@ -496,6 +537,18 @@ export function PopupApp({
           >
             {submitting ? text("Unlocking...") : text("Unlock Vault")}
           </button>
+          {canQuickUnlock ? (
+            <button
+              type="button"
+              onClick={() => {
+                void handleQuickUnlock();
+              }}
+              disabled={submitting}
+              style={primaryActionStyle}
+            >
+              {text("Unlock with Windows Hello")}
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={handleOpenManager}

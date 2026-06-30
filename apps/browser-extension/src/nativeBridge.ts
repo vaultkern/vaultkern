@@ -187,6 +187,8 @@ export function createNativeMessagingBridge(
         (command.type === "add_local_vault_reference" && command.path === undefined) ||
         command.type === "unlock_current_vault" ||
         command.type === "unlock_current_vault_with_password" ||
+        command.type === "enable_quick_unlock_for_current_vault" ||
+        command.type === "unlock_current_vault_with_quick_unlock" ||
         command.type === "unlock_with_password"
       ) {
         return interactiveTimeoutMs;

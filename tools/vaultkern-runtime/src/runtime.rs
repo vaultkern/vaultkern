@@ -5,12 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::form_urlencoded::byte_serialize;
 use vaultkern_core::{
-    AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression,
+    AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    KdbxCipher, KeepassCore, SaveKdf, SaveProfile, TotpSpec, Vault,
+    KdbxCipher, KdbxError, KeepassCore, SaveKdf, SaveProfile, TotpSpec, Vault,
 };
 use vaultkern_runtime_protocol::{
     DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseKdfSettingsDto,
@@ -25,11 +26,19 @@ use vaultkern_runtime_protocol::{
 
 use crate::command_loop::format_error_chain;
 use crate::match_fill::{FillMatchScore, score_entry_match};
-use crate::providers::biometric::{BiometricProvider, UnsupportedBiometricProvider};
+use crate::providers::biometric::{
+    BiometricProvider, TestBiometricProvider, UnsupportedBiometricProvider,
+    default_biometric_provider,
+};
 use crate::providers::local_file::{LocalFileVaultSourceProvider, VaultSourceFingerprint};
 use crate::providers::onedrive::{OneDriveMemoryAccessCounts, OneDriveVaultSourceProvider};
 use crate::providers::remote_cache::{RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry};
-use crate::providers::secure_storage::UnsupportedSecureStorageProvider;
+use crate::providers::secure_storage::{
+    FailingContainsSecureStorageProvider, FailingDeleteSecureStorageProvider,
+    FailingStoreSecureStorageProvider, MemorySecureStorageProvider, SecureStorageProvider,
+    UnsupportedSecureStorageProvider, default_secure_storage_provider,
+    default_secure_storage_provider_for_extension_id,
+};
 use crate::session::SessionState;
 use crate::state_paths::extension_id_from_browser_origin;
 use crate::vault_reference_store::{StoredVaultSource, VaultReferenceStore};
@@ -46,6 +55,7 @@ struct LoadedVault {
     vault: Option<Vault>,
     source_status: Option<VaultSourceStatusDto>,
     source_account_label: Option<String>,
+    quick_unlock_refresh_pending: bool,
 }
 
 impl LoadedVault {
@@ -79,7 +89,7 @@ impl VaultSource {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct VaultCredentials {
     password: Option<String>,
     key_file_path: Option<String>,
@@ -109,9 +119,8 @@ pub struct Runtime {
     local_files: LocalFileVaultSourceProvider,
     one_drive: OneDriveVaultSourceProvider,
     remote_cache: RemoteVaultCache,
-    biometric: UnsupportedBiometricProvider,
-    #[allow(dead_code)]
-    secure_storage: UnsupportedSecureStorageProvider,
+    biometric: Box<dyn BiometricProvider>,
+    secure_storage: Box<dyn SecureStorageProvider>,
     loaded: BTreeMap<String, LoadedVault>,
     fixed_unix_time: Option<u64>,
 }
@@ -122,6 +131,7 @@ impl Runtime {
             VaultReferenceStore::new_default(),
             OneDriveVaultSourceProvider::new_from_env(),
             RemoteVaultCache::new_default(),
+            default_secure_storage_provider(),
         )
     }
 
@@ -131,6 +141,7 @@ impl Runtime {
                 VaultReferenceStore::new_for_extension_id(extension_id),
                 OneDriveVaultSourceProvider::new_from_env_for_extension_id(extension_id),
                 RemoteVaultCache::new_for_extension_id(extension_id),
+                default_secure_storage_provider_for_extension_id(Some(extension_id)),
             );
         }
 
@@ -141,6 +152,7 @@ impl Runtime {
         references: VaultReferenceStore,
         one_drive: OneDriveVaultSourceProvider,
         remote_cache: RemoteVaultCache,
+        secure_storage: Box<dyn SecureStorageProvider>,
     ) -> Self {
         let mut session = SessionState::default();
         if let Some(vault_ref_id) = references.current_vault_ref_id() {
@@ -154,8 +166,8 @@ impl Runtime {
             local_files: LocalFileVaultSourceProvider,
             one_drive,
             remote_cache,
-            biometric: UnsupportedBiometricProvider,
-            secure_storage: UnsupportedSecureStorageProvider,
+            biometric: default_biometric_provider(),
+            secure_storage,
             loaded: BTreeMap::new(),
             fixed_unix_time: None,
         }
@@ -172,8 +184,8 @@ impl Runtime {
                 "vaultkern-runtime-test-remote-cache-{}",
                 uuid::Uuid::new_v4()
             ))),
-            biometric: UnsupportedBiometricProvider,
-            secure_storage: UnsupportedSecureStorageProvider,
+            biometric: Box::new(UnsupportedBiometricProvider),
+            secure_storage: Box::new(UnsupportedSecureStorageProvider),
             loaded: BTreeMap::new(),
             fixed_unix_time: None,
         }
@@ -182,6 +194,36 @@ impl Runtime {
     pub fn for_tests_at(unix_time: u64) -> Self {
         let mut runtime = Self::for_tests();
         runtime.fixed_unix_time = Some(unix_time);
+        runtime
+    }
+
+    pub fn for_tests_with_quick_unlock() -> Self {
+        let mut runtime = Self::for_tests();
+        runtime.biometric = Box::new(TestBiometricProvider);
+        runtime.secure_storage = Box::new(MemorySecureStorageProvider::new());
+        runtime
+    }
+
+    pub fn for_tests_with_quick_unlock_failing_store_after(stores_before_failure: usize) -> Self {
+        let mut runtime = Self::for_tests();
+        runtime.biometric = Box::new(TestBiometricProvider);
+        runtime.secure_storage = Box::new(FailingStoreSecureStorageProvider::new(
+            stores_before_failure,
+        ));
+        runtime
+    }
+
+    pub fn for_tests_with_quick_unlock_failing_contains() -> Self {
+        let mut runtime = Self::for_tests();
+        runtime.biometric = Box::new(TestBiometricProvider);
+        runtime.secure_storage = Box::new(FailingContainsSecureStorageProvider::new());
+        runtime
+    }
+
+    pub fn for_tests_with_quick_unlock_failing_delete() -> Self {
+        let mut runtime = Self::for_tests();
+        runtime.biometric = Box::new(TestBiometricProvider);
+        runtime.secure_storage = Box::new(FailingDeleteSecureStorageProvider::new());
         runtime
     }
 
@@ -304,6 +346,7 @@ impl Runtime {
                 vault: None,
                 source_status: None,
                 source_account_label: None,
+                quick_unlock_refresh_pending: false,
             },
         );
 
@@ -505,6 +548,7 @@ impl Runtime {
                         vault: None,
                         source_status,
                         source_account_label,
+                        quick_unlock_refresh_pending: false,
                     },
                 );
 
@@ -562,7 +606,20 @@ impl Runtime {
     }
 
     pub fn list_recent_vaults(&self) -> Result<VaultReferenceListDto> {
-        Ok(self.references.list_recent_vaults())
+        let mut list = self.references.list_recent_vaults();
+        if self.biometric.supports_quick_unlock() {
+            for vault in &mut list.vaults {
+                let storage_key = quick_unlock_storage_key(&vault.vault_ref_id);
+                vault.supports_quick_unlock = match self.secure_storage.contains(&storage_key) {
+                    Ok(contains) => contains,
+                    Err(_) => {
+                        let _ = self.secure_storage.delete(&storage_key);
+                        false
+                    }
+                };
+            }
+        }
+        Ok(list)
     }
 
     pub fn set_current_vault(&mut self, vault_ref_id: &str) -> Result<()> {
@@ -575,6 +632,9 @@ impl Runtime {
     pub fn delete_vault_reference(&mut self, vault_ref_id: &str) -> Result<VaultReferenceListDto> {
         let source = self.references.source_for(vault_ref_id).ok();
         let deleted_current = self.references.delete(vault_ref_id)?;
+        let _ = self
+            .secure_storage
+            .delete(&quick_unlock_storage_key(vault_ref_id));
         if let Some(cache_key) = source.as_ref().and_then(remote_cache_key_for_stored_source) {
             self.remote_cache.delete(&cache_key)?;
         }
@@ -660,6 +720,81 @@ impl Runtime {
             loaded.clear_unlock_secrets();
         }
         self.session.lock();
+    }
+
+    pub fn enable_quick_unlock_for_current_vault(&mut self) -> Result<()> {
+        if !self.biometric.supports_quick_unlock() {
+            anyhow::bail!("biometric quick unlock is not implemented on this host");
+        }
+        let current_vault_ref_id = self
+            .session
+            .current_vault_ref_id()
+            .context("no current vault selected")?
+            .to_owned();
+        let active_vault_id = self
+            .session
+            .active_vault_id()
+            .context("current vault is locked")?
+            .to_owned();
+        let loaded = self
+            .loaded
+            .get(&active_vault_id)
+            .with_context(|| format!("vault not opened: {active_vault_id}"))?;
+        let credentials = VaultCredentials {
+            password: loaded.password.clone(),
+            key_file_path: loaded.key_file_path.clone(),
+        };
+        if credentials.password.is_none() && credentials.key_file_path.is_none() {
+            anyhow::bail!("current vault has no reusable unlock credentials");
+        }
+
+        self.biometric
+            .authorize("Enable quick unlock for this vault")?;
+        let bytes = serde_json::to_vec(&credentials)
+            .context("failed to encode quick unlock credentials")?;
+        self.secure_storage
+            .store(&quick_unlock_storage_key(&current_vault_ref_id), &bytes)
+    }
+
+    pub fn unlock_current_vault_with_quick_unlock(&mut self) -> Result<()> {
+        if !self.biometric.supports_quick_unlock() {
+            anyhow::bail!("biometric quick unlock is not implemented on this host");
+        }
+        let current_vault_ref_id = self
+            .session
+            .current_vault_ref_id()
+            .context("no current vault selected")?
+            .to_owned();
+        self.biometric.authorize("Unlock this vault")?;
+        let bytes = self
+            .secure_storage
+            .load(&quick_unlock_storage_key(&current_vault_ref_id))?
+            .context("quick unlock is not enabled for the current vault")?;
+        let credentials: VaultCredentials =
+            serde_json::from_slice(&bytes).context("failed to decode quick unlock credentials")?;
+        let storage_key = quick_unlock_storage_key(&current_vault_ref_id);
+        match self.unlock_current_vault(
+            credentials.password.as_deref(),
+            credentials.key_file_path.as_deref(),
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if is_unlock_credentials_error(&error) {
+                    self.secure_storage.delete(&storage_key)?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn disable_quick_unlock_for_current_vault(&mut self) -> Result<()> {
+        let current_vault_ref_id = self
+            .session
+            .current_vault_ref_id()
+            .context("no current vault selected")?
+            .to_owned();
+        self.secure_storage
+            .delete(&quick_unlock_storage_key(&current_vault_ref_id))
     }
 
     pub fn session_state(&self) -> vaultkern_runtime_protocol::SessionStateDto {
@@ -758,63 +893,68 @@ impl Runtime {
         vault_id: &str,
         update: DatabaseSettingsUpdateDto,
     ) -> Result<DatabaseSettingsDto> {
-        let loaded = self
-            .loaded
-            .get_mut(vault_id)
-            .with_context(|| format!("vault not opened: {vault_id}"))?;
-        let vault = loaded
-            .vault
-            .as_mut()
-            .with_context(|| format!("vault is locked: {vault_id}"))?;
+        let settings = {
+            let loaded = self
+                .loaded
+                .get_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_mut()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
 
-        if let Some(metadata) = update.metadata {
-            vault.name = metadata.name.clone();
-            vault.root.title = metadata.name;
-            vault.description = empty_string_as_none(metadata.description);
-            vault.default_username = empty_string_as_none(metadata.default_username);
-        }
-
-        if let Some(public_metadata) = update.public_metadata {
-            upsert_optional_public_string(
-                vault,
-                "display-name",
-                public_metadata.display_name.as_deref(),
-            );
-            upsert_optional_public_string(vault, "color", public_metadata.color.as_deref());
-            upsert_optional_public_string(vault, "icon", public_metadata.icon.as_deref());
-        }
-
-        if let Some(history) = update.history {
-            vault.history_max_items = history.max_items_per_entry;
-            vault.history_max_size = history.max_total_size_bytes;
-        }
-
-        if let Some(recycle_bin) = update.recycle_bin {
-            vault.recycle_bin_enabled = Some(recycle_bin.enabled);
-        }
-
-        if let Some(encryption) = update.encryption {
-            loaded.save_profile = save_profile_from_settings(encryption)?;
-        }
-
-        if let Some(credentials) = update.credentials {
-            if credentials.remove_password {
-                loaded.password = None;
-            } else if let Some(password) = credentials.new_password {
-                loaded.password = Some(password);
+            if let Some(metadata) = update.metadata {
+                vault.name = metadata.name.clone();
+                vault.root.title = metadata.name;
+                vault.description = empty_string_as_none(metadata.description);
+                vault.default_username = empty_string_as_none(metadata.default_username);
             }
-        }
 
-        if let Some(autosave_delay_seconds) = update.autosave_delay_seconds {
-            loaded.autosave_delay_seconds = Some(autosave_delay_seconds);
-        }
+            if let Some(public_metadata) = update.public_metadata {
+                upsert_optional_public_string(
+                    vault,
+                    "display-name",
+                    public_metadata.display_name.as_deref(),
+                );
+                upsert_optional_public_string(vault, "color", public_metadata.color.as_deref());
+                upsert_optional_public_string(vault, "icon", public_metadata.icon.as_deref());
+            }
 
-        Ok(database_settings_dto(
-            vault,
-            &loaded.save_profile,
-            loaded.autosave_delay_seconds,
-            loaded.password.is_some(),
-        ))
+            if let Some(history) = update.history {
+                vault.history_max_items = history.max_items_per_entry;
+                vault.history_max_size = history.max_total_size_bytes;
+            }
+
+            if let Some(recycle_bin) = update.recycle_bin {
+                vault.recycle_bin_enabled = Some(recycle_bin.enabled);
+            }
+
+            if let Some(encryption) = update.encryption {
+                loaded.save_profile = save_profile_from_settings(encryption)?;
+            }
+
+            if let Some(credentials) = update.credentials {
+                if credentials.remove_password {
+                    loaded.password = None;
+                } else if let Some(password) = credentials.new_password {
+                    loaded.password = Some(password);
+                }
+                loaded.quick_unlock_refresh_pending = true;
+            }
+
+            if let Some(autosave_delay_seconds) = update.autosave_delay_seconds {
+                loaded.autosave_delay_seconds = Some(autosave_delay_seconds);
+            }
+
+            database_settings_dto(
+                vault,
+                &loaded.save_profile,
+                loaded.autosave_delay_seconds,
+                loaded.password.is_some(),
+            )
+        };
+
+        Ok(settings)
     }
 
     pub fn find_fill_candidates(&self, vault_id: &str, url: &str) -> Result<FillCandidateListDto> {
@@ -1290,6 +1430,15 @@ impl Runtime {
             } => self
                 .unlock_current_vault(password.as_deref(), key_file_path.as_deref())
                 .map(|_| RuntimeResponse::SessionState(self.session_state())),
+            RuntimeCommand::EnableQuickUnlockForCurrentVault => self
+                .enable_quick_unlock_for_current_vault()
+                .map(|_| RuntimeResponse::SessionState(self.session_state())),
+            RuntimeCommand::UnlockCurrentVaultWithQuickUnlock => self
+                .unlock_current_vault_with_quick_unlock()
+                .map(|_| RuntimeResponse::SessionState(self.session_state())),
+            RuntimeCommand::DisableQuickUnlockForCurrentVault => self
+                .disable_quick_unlock_for_current_vault()
+                .map(|_| RuntimeResponse::SessionState(self.session_state())),
             RuntimeCommand::OpenLocalVault { path } => self
                 .open_local_vault(&path)
                 .map(RuntimeResponse::VaultOpened),
@@ -1589,6 +1738,7 @@ impl Runtime {
         }
         loaded.bytes = next_bytes;
         loaded.baseline_fingerprint = next_fingerprint;
+        self.refresh_quick_unlock_credentials_after_successful_save(vault_id)?;
         Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
             status: if merge_summary.is_some() {
                 SaveVaultStatusDto::Merged
@@ -1655,6 +1805,7 @@ impl Runtime {
         loaded.bytes = bytes;
         loaded.baseline_fingerprint = fingerprint;
         loaded.source_status = Some(status);
+        self.refresh_quick_unlock_credentials_after_successful_save(vault_id)?;
         Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
             status: SaveVaultStatusDto::SavedToCache,
             merge_summary: None,
@@ -1992,6 +2143,83 @@ impl Runtime {
         self.loaded
             .get(&vault_id)
             .and_then(|loaded| loaded.source_status.clone())
+    }
+
+    fn vault_ref_id_for_loaded_vault(&self, vault_id: &str) -> Option<String> {
+        if self.session.active_vault_id() == Some(vault_id) {
+            if let Some(vault_ref_id) = self.session.current_vault_ref_id() {
+                return Some(vault_ref_id.to_owned());
+            }
+        }
+
+        self.references.find_ref_id_by_path(vault_id)
+    }
+
+    fn refresh_quick_unlock_credentials_after_successful_save(
+        &mut self,
+        vault_id: &str,
+    ) -> Result<()> {
+        let refresh_pending = self
+            .loaded
+            .get(vault_id)
+            .is_some_and(|loaded| loaded.quick_unlock_refresh_pending);
+        if !refresh_pending {
+            return Ok(());
+        }
+
+        if !self.biometric.supports_quick_unlock() {
+            self.clear_quick_unlock_refresh_pending(vault_id)?;
+            return Ok(());
+        }
+        let Some(vault_ref_id) = self.vault_ref_id_for_loaded_vault(vault_id) else {
+            self.clear_quick_unlock_refresh_pending(vault_id)?;
+            return Ok(());
+        };
+        let storage_key = quick_unlock_storage_key(&vault_ref_id);
+        let contains_quick_unlock = match self.secure_storage.contains(&storage_key) {
+            Ok(contains) => contains,
+            Err(_) => {
+                let _ = self.secure_storage.delete(&storage_key);
+                self.clear_quick_unlock_refresh_pending(vault_id)?;
+                return Ok(());
+            }
+        };
+        if !contains_quick_unlock {
+            self.clear_quick_unlock_refresh_pending(vault_id)?;
+            return Ok(());
+        }
+
+        let loaded = self
+            .loaded
+            .get(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        let credentials = VaultCredentials {
+            password: loaded.password.clone(),
+            key_file_path: loaded.key_file_path.clone(),
+        };
+
+        if credentials.password.is_none() && credentials.key_file_path.is_none() {
+            let _ = self.secure_storage.delete(&storage_key);
+            self.clear_quick_unlock_refresh_pending(vault_id)?;
+            return Ok(());
+        }
+
+        let bytes = serde_json::to_vec(&credentials)
+            .context("failed to encode quick unlock credentials")?;
+        if self.secure_storage.store(&storage_key, &bytes).is_err() {
+            let _ = self.secure_storage.delete(&storage_key);
+        }
+        self.clear_quick_unlock_refresh_pending(vault_id)?;
+        Ok(())
+    }
+
+    fn clear_quick_unlock_refresh_pending(&mut self, vault_id: &str) -> Result<()> {
+        let loaded = self
+            .loaded
+            .get_mut(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        loaded.quick_unlock_refresh_pending = false;
+        Ok(())
     }
 }
 
@@ -2460,6 +2688,37 @@ fn composite_key_from_credentials(credentials: &VaultCredentials) -> Result<Comp
     Ok(key)
 }
 
+fn quick_unlock_storage_key(vault_ref_id: &str) -> String {
+    let digest = Sha256::digest(vault_ref_id.as_bytes());
+    let mut key = String::from("quick_unlock_");
+    for byte in digest {
+        key.push_str(&format!("{byte:02x}"));
+    }
+    key
+}
+
+fn is_unlock_credentials_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<KdbxError>(),
+            Some(
+                KdbxError::HeaderHmacMismatch
+                    | KdbxError::PayloadHmacMismatch
+                    | KdbxError::HeaderHashMismatch
+                    | KdbxError::PayloadHashMismatch
+            )
+        ) || matches!(
+            cause.downcast_ref::<CoreError>(),
+            Some(CoreError::Kdbx(
+                KdbxError::HeaderHmacMismatch
+                    | KdbxError::PayloadHmacMismatch
+                    | KdbxError::HeaderHashMismatch
+                    | KdbxError::PayloadHashMismatch
+            ))
+        )
+    })
+}
+
 fn query_error_response(error: anyhow::Error) -> RuntimeResponse {
     RuntimeResponse::Error(ErrorDto {
         code: "invalid_request".into(),
@@ -2491,6 +2750,97 @@ struct RankedFillCandidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use vaultkern_runtime_protocol::DatabaseCredentialsUpdateDto;
+
+    struct LoadRejectingSecureStorageProvider {
+        values: RefCell<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl LoadRejectingSecureStorageProvider {
+        fn new() -> Self {
+            Self {
+                values: RefCell::new(BTreeMap::new()),
+            }
+        }
+    }
+
+    impl SecureStorageProvider for LoadRejectingSecureStorageProvider {
+        fn store(&self, key: &str, value: &[u8]) -> Result<()> {
+            self.values
+                .borrow_mut()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+            anyhow::bail!("quick unlock secret should not be decrypted while listing vaults")
+        }
+
+        fn contains(&self, key: &str) -> Result<bool> {
+            Ok(self.values.borrow().contains_key(key))
+        }
+
+        fn delete(&self, key: &str) -> Result<()> {
+            self.values.borrow_mut().remove(key);
+            Ok(())
+        }
+    }
+
+    struct PresenceLoadingSecureStorageProvider {
+        values: RefCell<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl PresenceLoadingSecureStorageProvider {
+        fn new() -> Self {
+            Self {
+                values: RefCell::new(BTreeMap::new()),
+            }
+        }
+    }
+
+    impl SecureStorageProvider for PresenceLoadingSecureStorageProvider {
+        fn store(&self, key: &str, value: &[u8]) -> Result<()> {
+            self.values
+                .borrow_mut()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(self.values.borrow().get(key).cloned())
+        }
+
+        fn contains(&self, key: &str) -> Result<bool> {
+            Ok(self.values.borrow().contains_key(key))
+        }
+
+        fn load_requires_user_presence(&self) -> bool {
+            true
+        }
+
+        fn delete(&self, key: &str) -> Result<()> {
+            self.values.borrow_mut().remove(key);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingBiometricProvider {
+        authorizations: std::rc::Rc<RefCell<Vec<String>>>,
+    }
+
+    impl BiometricProvider for CountingBiometricProvider {
+        fn supports_quick_unlock(&self) -> bool {
+            true
+        }
+
+        fn authorize(&self, reason: &str) -> Result<()> {
+            self.authorizations.borrow_mut().push(reason.to_owned());
+            Ok(())
+        }
+    }
 
     #[test]
     fn locking_clears_decrypted_vault_and_keeps_encrypted_snapshot_for_reunlock() {
@@ -2531,6 +2881,139 @@ mod tests {
         assert_eq!(
             session.active_vault_id.as_deref(),
             Some(opened.vault_id.as_str())
+        );
+    }
+
+    #[test]
+    fn listing_recent_vaults_checks_quick_unlock_without_loading_secret() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        runtime.secure_storage = Box::new(LoadRejectingSecureStorageProvider::new());
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+
+        let listed = runtime.list_recent_vaults().unwrap();
+
+        assert_eq!(listed.vaults.len(), 1);
+        assert!(listed.vaults[0].supports_quick_unlock);
+    }
+
+    #[test]
+    fn listing_recent_vaults_treats_quick_unlock_probe_failures_as_disabled() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests_with_quick_unlock_failing_contains();
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+
+        let listed = runtime.list_recent_vaults().unwrap();
+
+        assert_eq!(listed.vaults.len(), 1);
+        assert!(!listed.vaults[0].supports_quick_unlock);
+    }
+
+    #[test]
+    fn refreshing_quick_unlock_after_save_checks_presence_without_loading_secret() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("old-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        runtime.secure_storage = Box::new(LoadRejectingSecureStorageProvider::new());
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("old-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    credentials: Some(DatabaseCredentialsUpdateDto {
+                        new_password: Some("new-password".into()),
+                        remove_password: false,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+
+        runtime.save_vault(&opened.vault_id).unwrap();
+    }
+
+    #[test]
+    fn quick_unlock_requires_biometric_authorization_even_when_secret_load_is_protected() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.biometric = Box::new(CountingBiometricProvider {
+            authorizations: authorizations.clone(),
+        });
+        runtime.secure_storage = Box::new(PresenceLoadingSecureStorageProvider::new());
+
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+
+        runtime.unlock_current_vault_with_quick_unlock().unwrap();
+
+        assert_eq!(
+            authorizations.borrow().as_slice(),
+            [
+                "Enable quick unlock for this vault".to_owned(),
+                "Unlock this vault".to_owned(),
+            ]
         );
     }
 }

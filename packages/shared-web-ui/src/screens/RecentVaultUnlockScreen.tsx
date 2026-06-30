@@ -16,6 +16,7 @@ export function RecentVaultUnlockScreen({
     keyFilePath: "Key File Path",
     unlock: "Unlock Vault",
     unlocking: "Unlocking...",
+    unlockWithWindowsHello: "Unlock with Windows Hello",
     manageVaults: "Manage vaults",
     noRecentVaults: "No recent vaults",
     addFirstVault: "Open manager setup to add your first local vault.",
@@ -24,11 +25,13 @@ export function RecentVaultUnlockScreen({
   },
   onSelectVault,
   onUnlock,
+  onQuickUnlock,
   onOpenSetup,
   error,
   renderRuntimeErrorHelp,
   errorCause,
-  busy = false
+  busy = false,
+  quickUnlockSupported = false
 }: {
   recentVaults: VaultReference[];
   currentVaultRefId: string | null;
@@ -40,6 +43,7 @@ export function RecentVaultUnlockScreen({
     keyFilePath: string;
     unlock: string;
     unlocking: string;
+    unlockWithWindowsHello: string;
     manageVaults: string;
     noRecentVaults: string;
     addFirstVault: string;
@@ -48,10 +52,12 @@ export function RecentVaultUnlockScreen({
   };
   onSelectVault: (vaultRefId: string) => Promise<void>;
   onUnlock: (credentials: { password: string; keyFilePath: string }) => Promise<void>;
+  onQuickUnlock?: () => Promise<void>;
   onOpenSetup: () => void;
   error: string | null;
   errorCause?: unknown;
   busy?: boolean;
+  quickUnlockSupported?: boolean;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
 }) {
   const [password, setPassword] = useState("");
@@ -59,6 +65,8 @@ export function RecentVaultUnlockScreen({
   const currentVault =
     recentVaults.find((vault) => vault.vaultRefId === currentVaultRefId) ?? null;
   const needsRepair = currentVault?.availability === "needs_repair";
+  const canQuickUnlock =
+    quickUnlockSupported && Boolean(currentVault?.supportsQuickUnlock) && !needsRepair;
 
   return (
     <div
@@ -163,6 +171,24 @@ export function RecentVaultUnlockScreen({
         </label>
 
         <div style={{ display: "flex", gap: archiveTheme.spacing.sm }}>
+          {canQuickUnlock ? (
+            <button
+              type="button"
+              onClick={() => {
+                if (!busy) {
+                  void onQuickUnlock?.();
+                }
+              }}
+              disabled={busy}
+              style={{
+                ...primaryButtonStyle,
+                cursor: busy ? "wait" : primaryButtonStyle.cursor,
+                opacity: busy ? 0.72 : 1
+              }}
+            >
+              {labels.unlockWithWindowsHello}
+            </button>
+          ) : null}
           <button
             type="submit"
             disabled={busy || !currentVault || needsRepair}

@@ -576,6 +576,44 @@ fn protocol_roundtrips_key_file_unlock_commands() {
 }
 
 #[test]
+fn protocol_roundtrips_quick_unlock_commands() {
+    let enable = ProtocolEnvelope::new(RuntimeCommand::EnableQuickUnlockForCurrentVault);
+    let unlock = ProtocolEnvelope::new(RuntimeCommand::UnlockCurrentVaultWithQuickUnlock);
+    let disable = ProtocolEnvelope::new(RuntimeCommand::DisableQuickUnlockForCurrentVault);
+
+    let enable_json = serde_json::to_value(&enable).unwrap();
+    assert_eq!(
+        enable_json["command"]["type"],
+        "enable_quick_unlock_for_current_vault"
+    );
+
+    let unlock_json = serde_json::to_value(&unlock).unwrap();
+    assert_eq!(
+        unlock_json["command"]["type"],
+        "unlock_current_vault_with_quick_unlock"
+    );
+
+    let disable_json = serde_json::to_value(&disable).unwrap();
+    assert_eq!(
+        disable_json["command"]["type"],
+        "disable_quick_unlock_for_current_vault"
+    );
+
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(enable_json).unwrap(),
+        enable
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(unlock_json).unwrap(),
+        unlock
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(disable_json).unwrap(),
+        disable
+    );
+}
+
+#[test]
 fn protocol_roundtrips_lock_session_command() {
     let envelope = ProtocolEnvelope::new(RuntimeCommand::LockSession);
 
