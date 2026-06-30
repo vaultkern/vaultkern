@@ -54,6 +54,9 @@ pub enum RuntimeCommand {
         password: Option<String>,
         key_file_path: Option<String>,
     },
+    EnableQuickUnlockForCurrentVault,
+    UnlockCurrentVaultWithQuickUnlock,
+    DisableQuickUnlockForCurrentVault,
     OpenLocalVault {
         path: String,
     },

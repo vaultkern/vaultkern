@@ -152,6 +152,8 @@ export function createNativeMessagingBridge(
         command.type === "unlock_current_vault" ||
         command.type === "unlock_current_vault_with_password" ||
         command.type === "unlock_with_password" ||
+        command.type === "enable_quick_unlock_for_current_vault" ||
+        command.type === "unlock_current_vault_with_quick_unlock" ||
         command.type === "create_passkey_assertion" ||
         command.type === "create_passkey_registration"
       ) {

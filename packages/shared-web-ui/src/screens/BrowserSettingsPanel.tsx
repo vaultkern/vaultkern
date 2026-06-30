@@ -9,6 +9,11 @@ interface BrowserSettingsPanelProps {
   settings: ExtensionSettings;
   saving: boolean;
   error: string | null;
+  quickUnlockSupported?: boolean;
+  quickUnlockEnabled?: boolean;
+  quickUnlockBusy?: boolean;
+  quickUnlockError?: string | null;
+  onQuickUnlockChange?(enabled: boolean): void;
   onSave(settings: ExtensionSettings): void;
 }
 
@@ -16,6 +21,11 @@ export function BrowserSettingsPanel({
   settings,
   saving,
   error,
+  quickUnlockSupported = false,
+  quickUnlockEnabled = false,
+  quickUnlockBusy = false,
+  quickUnlockError = null,
+  onQuickUnlockChange,
   onSave
 }: BrowserSettingsPanelProps) {
   const text = useText();
@@ -133,6 +143,17 @@ export function BrowserSettingsPanel({
           {text("VaultKern passkey provider")}
         </label>
       </div>
+      <label style={toggleRowStyle}>
+        <input
+          aria-label={text("Quick Unlock")}
+          type="checkbox"
+          checked={quickUnlockEnabled}
+          disabled={!quickUnlockSupported || quickUnlockBusy}
+          onChange={(event) => onQuickUnlockChange?.(event.target.checked)}
+        />
+        <span>{text("Quick Unlock")}</span>
+      </label>
+      {quickUnlockError ? <div role="alert">{quickUnlockError}</div> : null}
       <p style={noteStyle}>
         {text("Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.")}
       </p>
@@ -213,6 +234,14 @@ const checkboxFieldStyle: CSSProperties = {
   alignItems: "center",
   gap: archiveTheme.spacing.sm,
   minHeight: "44px",
+  color: archiveTheme.colors.text,
+  fontFamily: archiveTheme.font.body
+};
+
+const toggleRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: archiveTheme.spacing.sm,
   color: archiveTheme.colors.text,
   fontFamily: archiveTheme.font.body
 };

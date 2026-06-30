@@ -146,3 +146,73 @@ fn runtime_deletes_recent_vault_reference_without_deleting_database_file() {
     );
     assert_eq!(runtime.session_state().current_vault_ref_id, None);
 }
+
+#[test]
+fn deleting_recent_vault_reference_removes_quick_unlock_credentials() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let bytes = core
+        .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("personal.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    let vault_ref = runtime
+        .add_local_vault_reference(path.to_str().unwrap())
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    runtime
+        .handle(vaultkern_runtime_protocol::RuntimeCommand::EnableQuickUnlockForCurrentVault)
+        .unwrap();
+
+    runtime
+        .delete_vault_reference(&vault_ref.vault_ref_id)
+        .unwrap();
+    runtime
+        .add_local_vault_reference(path.to_str().unwrap())
+        .unwrap();
+
+    let listed = runtime.list_recent_vaults().unwrap();
+    assert_eq!(listed.vaults.len(), 1);
+    assert!(!listed.vaults[0].supports_quick_unlock);
+}
+
+#[test]
+fn deleting_recent_vault_reference_ignores_quick_unlock_delete_failures() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let bytes = core
+        .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("personal.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_with_quick_unlock_failing_delete();
+    let vault_ref = runtime
+        .add_local_vault_reference(path.to_str().unwrap())
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    runtime
+        .handle(vaultkern_runtime_protocol::RuntimeCommand::EnableQuickUnlockForCurrentVault)
+        .unwrap();
+
+    let listed = runtime
+        .delete_vault_reference(&vault_ref.vault_ref_id)
+        .unwrap();
+
+    assert_eq!(listed.vaults.len(), 0);
+    assert_eq!(runtime.session_state().current_vault_ref_id, None);
+}

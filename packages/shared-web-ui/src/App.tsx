@@ -74,6 +74,9 @@ export interface RuntimeClientLike {
   openLocalVault(path: string): Promise<VaultHandle>;
   unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
+  enableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
+  unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
+  disableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
   unlockWithPassword(vaultId: string, password: string): Promise<SessionStateLike>;
   unlockVault(vaultId: string, credentials: UnlockCredentials): Promise<SessionStateLike>;
   lockSession?(): Promise<SessionStateLike>;
@@ -144,7 +147,9 @@ function browsableOneDriveItems(items: OneDriveItem[]) {
 type SessionStateLike = Pick<
   SessionState,
   "unlocked" | "activeVaultId" | "currentVaultRefId" | "sourceStatus"
->;
+> & {
+  supportsBiometricUnlock?: boolean;
+};
 
 interface FillHooks {
   findCandidates(vaultId: string): Promise<EntrySummary[]>;
@@ -262,6 +267,7 @@ const APP_LABELS = {
       keyFilePath: "Key File Path",
       unlock: "Unlock Vault",
       unlocking: "Unlocking...",
+      unlockWithWindowsHello: "Unlock with Windows Hello",
       manageVaults: "Manage vaults",
       noRecentVaults: "No recent vaults",
       addFirstVault: "Open manager setup to add your first local vault.",
@@ -285,6 +291,7 @@ const APP_LABELS = {
       keyFilePath: "密钥文件路径",
       unlock: "解锁数据库",
       unlocking: "解锁中...",
+      unlockWithWindowsHello: "使用 Windows Hello 解锁",
       manageVaults: "管理数据库",
       noRecentVaults: "没有最近数据库",
       addFirstVault: "打开管理器设置并添加第一个本地数据库。",
@@ -363,6 +370,8 @@ export function App({
     null
   );
   const [extensionSettingsSaving, setExtensionSettingsSaving] = useState(false);
+  const [quickUnlockBusy, setQuickUnlockBusy] = useState(false);
+  const [quickUnlockError, setQuickUnlockError] = useState<string | null>(null);
 
   async function reloadLockedState() {
     const [nextSession, nextRecentVaults] = await Promise.all([
@@ -412,6 +421,28 @@ export function App({
       );
     } finally {
       setExtensionSettingsSaving(false);
+    }
+  }
+
+  async function setQuickUnlockEnabled(enabled: boolean) {
+    setQuickUnlockBusy(true);
+    setQuickUnlockError(null);
+
+    try {
+      const nextSession = enabled
+        ? await client.enableQuickUnlockForCurrentVault()
+        : await client.disableQuickUnlockForCurrentVault();
+      setSession(nextSession);
+      await applyRecentVaultLimit(await client.listRecentVaults(), extensionSettings);
+    } catch (quickUnlockFailure) {
+      setQuickUnlockError(
+        errorMessage(
+          quickUnlockFailure,
+          translate(extensionSettings.language, "Failed to update quick unlock")
+        )
+      );
+    } finally {
+      setQuickUnlockBusy(false);
     }
   }
 
@@ -1496,6 +1527,26 @@ export function App({
             setUnlockBusy(false);
           }
         }}
+        onQuickUnlock={async () => {
+          setUnlockBusy(true);
+          setUnlockError(null);
+          setUnlockErrorCause(null);
+          try {
+            const nextSession = await client.unlockCurrentVaultWithQuickUnlock();
+            setSession(nextSession);
+          } catch (unlockFailure) {
+            setUnlockError(
+              errorMessage(
+                unlockFailure,
+                translate(extensionSettings.language, "Failed to unlock vault")
+              )
+            );
+            setUnlockErrorCause(unlockFailure);
+          } finally {
+            setUnlockBusy(false);
+          }
+        }}
+        quickUnlockSupported={Boolean(session.supportsBiometricUnlock)}
         onOpenSetup={() => setShowSetup(true)}
         error={unlockError}
         errorCause={unlockErrorCause}
@@ -1524,6 +1575,10 @@ export function App({
     selection.selectedEntryId !== null ||
     editorMode === "create-pending";
   const labels = APP_LABELS[extensionSettings.language];
+  const currentVaultReference =
+    recentVaults.find((vault) => vault.vaultRefId === session.currentVaultRefId) ??
+    recentVaults.find((vault) => vault.isCurrent) ??
+    null;
   const sourceStatus = session.sourceStatus;
   const sourceSyncMessage = sourceSyncError ?? sourceStatus?.lastError ?? null;
   const sourceSyncTitle =
@@ -1779,6 +1834,17 @@ export function App({
                   settings={extensionSettings}
                   saving={extensionSettingsSaving}
                   error={extensionSettingsError}
+                  quickUnlockSupported={Boolean(
+                    session.supportsBiometricUnlock && currentVaultReference
+                  )}
+                  quickUnlockEnabled={Boolean(
+                    currentVaultReference?.supportsQuickUnlock
+                  )}
+                  quickUnlockBusy={quickUnlockBusy}
+                  quickUnlockError={quickUnlockError}
+                  onQuickUnlockChange={(enabled) => {
+                    void setQuickUnlockEnabled(enabled);
+                  }}
                   onSave={(settings) => {
                     void saveExtensionSettings(settings);
                   }}

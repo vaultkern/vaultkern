@@ -15,6 +15,7 @@ const runtimeClientMocks = vi.hoisted(() => ({
   openLocalVault: vi.fn(),
   lockSession: vi.fn(),
   unlockCurrentVault: vi.fn(),
+  unlockCurrentVaultWithQuickUnlock: vi.fn(),
   unlockWithPassword: vi.fn(),
   listGroups: vi.fn(),
   listEntries: vi.fn(),
@@ -57,6 +58,7 @@ beforeEach(() => {
   runtimeClientMocks.setCurrentVault.mockReset();
   runtimeClientMocks.openLocalVault.mockReset();
   runtimeClientMocks.unlockCurrentVault.mockReset();
+  runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockReset();
   runtimeClientMocks.unlockWithPassword.mockReset();
   runtimeClientMocks.lockSession.mockReset();
   runtimeClientMocks.listGroups.mockReset();
@@ -818,7 +820,8 @@ describe("PopupShell fill flow", () => {
     runtimeClientMocks.getSessionState.mockResolvedValue({
       unlocked: false,
       activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
     });
     runtimeClientMocks.listRecentVaults.mockResolvedValue([
       {
@@ -845,6 +848,54 @@ describe("PopupShell fill flow", () => {
     ).toBeInTheDocument();
   });
 
+  it("unlocks the locked popup with Windows Hello when quick unlock is enabled", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Personal",
+        sourceKind: "local",
+        sourceSummary: "personal.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Personal")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Unlock with Windows Hello" }));
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
+    });
+    expect(await screen.findByText("Select a record to inspect fields.")).toBeInTheDocument();
+  });
+
   it("notifies the background page after unlocking for a WebAuthn request", async () => {
     window.history.replaceState(null, "", "/popup.html?webauthn=unlock");
     const sendMessage = vi.fn(async () => undefined);
@@ -865,7 +916,8 @@ describe("PopupShell fill flow", () => {
     runtimeClientMocks.getSessionState.mockResolvedValue({
       unlocked: false,
       activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
     });
     runtimeClientMocks.listRecentVaults.mockResolvedValue([
       {
@@ -882,7 +934,8 @@ describe("PopupShell fill flow", () => {
     runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
       unlocked: true,
       activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
     });
     runtimeClientMocks.listEntries.mockResolvedValue([]);
     runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
@@ -923,7 +976,8 @@ describe("PopupShell fill flow", () => {
     runtimeClientMocks.getSessionState.mockResolvedValue({
       unlocked: false,
       activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
     });
     runtimeClientMocks.listRecentVaults.mockResolvedValue([
       {
@@ -940,7 +994,8 @@ describe("PopupShell fill flow", () => {
     runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
       unlocked: true,
       activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
     });
     runtimeClientMocks.listEntries.mockResolvedValue([]);
     runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
@@ -955,6 +1010,67 @@ describe("PopupShell fill flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
 
     await waitFor(() => {
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("auto unlocks the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
+    window.history.replaceState(null, "", "/popup.html?webauthn=unlock");
+    const sendMessage = vi.fn(async () => undefined);
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Passkey request waiting")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(runtimeClientMocks.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_unlock_complete"
+      });
       expect(closeWindow).toHaveBeenCalledTimes(1);
     });
   });

@@ -8,6 +8,7 @@ version.workspace = true
 external-fixtures = []
 
 [dependencies]
+aes-gcm = "0.10"
 anyhow = "1.0"
 base64.workspace = true
 p256.workspace = true
@@ -20,6 +21,10 @@ sha2.workspace = true
 ureq = { version = "2.10", features = ["json"] }
 url = "2.5"
 uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Security_Credentials_UI"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
 mockito = "1.5"

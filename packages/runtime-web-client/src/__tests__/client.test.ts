@@ -285,6 +285,36 @@ describe("RuntimeClient", () => {
     });
   });
 
+  it("sends quick unlock commands for the current vault", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      })
+    };
+
+    const client = new RuntimeClient(transport);
+    await client.enableQuickUnlockForCurrentVault();
+    await client.unlockCurrentVaultWithQuickUnlock();
+    await client.disableQuickUnlockForCurrentVault();
+
+    expect(transport.send).toHaveBeenNthCalledWith(1, {
+      version: 1,
+      command: { type: "enable_quick_unlock_for_current_vault" }
+    });
+    expect(transport.send).toHaveBeenNthCalledWith(2, {
+      version: 1,
+      command: { type: "unlock_current_vault_with_quick_unlock" }
+    });
+    expect(transport.send).toHaveBeenNthCalledWith(3, {
+      version: 1,
+      command: { type: "disable_quick_unlock_for_current_vault" }
+    });
+  });
+
   it("locks the active session and returns the locked session state", async () => {
     const transport = {
       send: vi.fn().mockResolvedValue({

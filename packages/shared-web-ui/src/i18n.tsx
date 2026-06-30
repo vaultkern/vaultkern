@@ -15,6 +15,7 @@ type TranslationKey =
   | "Key File Path"
   | "Unlock Vault"
   | "Unlocking..."
+  | "Unlock with Windows Hello"
   | "Manage vaults"
   | "No recent vaults"
   | "Open manager setup to add your first local vault."
@@ -29,6 +30,7 @@ type TranslationKey =
   | "Clear Clipboard Seconds"
   | "Language"
   | "VaultKern passkey provider"
+  | "Quick Unlock"
   | "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret."
   | "Database"
   | "Loading database settings..."
@@ -165,6 +167,7 @@ type TranslationKey =
   | "This will remove the selected entry from the current vault."
   | "Delete permanently"
   | "Failed to save browser settings"
+  | "Failed to update quick unlock"
   | "Failed to add local vault"
   | "Failed to add OneDrive vault"
   | "Failed to save entry changes"
@@ -215,6 +218,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Key File Path": "密钥文件路径",
   "Unlock Vault": "解锁数据库",
   "Unlocking...": "解锁中...",
+  "Unlock with Windows Hello": "使用 Windows Hello 解锁",
   "Manage vaults": "管理数据库",
   "No recent vaults": "没有最近数据库",
   "Open manager setup to add your first local vault.": "打开管理器设置并添加第一个本地数据库。",
@@ -229,6 +233,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Clear Clipboard Seconds": "清空剪贴板秒数",
   Language: "语言",
   "VaultKern passkey provider": "VaultKern 通行密钥提供器",
+  "Quick Unlock": "快速解锁",
   "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.": "剪贴板清空会在延迟后写入空字符串。浏览器 API 不允许后台可靠确认剪贴板仍包含刚复制的秘密。",
   Database: "数据库",
   "Loading database settings...": "正在加载数据库设置...",
@@ -365,6 +370,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "This will remove the selected entry from the current vault.": "这会从当前数据库中删除选中的条目。",
   "Delete permanently": "永久删除",
   "Failed to save browser settings": "保存浏览器设置失败",
+  "Failed to update quick unlock": "更新快速解锁失败",
   "Failed to add local vault": "添加本地数据库失败",
   "Failed to add OneDrive vault": "添加 OneDrive 数据库失败",
   "Failed to save entry changes": "保存条目更改失败",

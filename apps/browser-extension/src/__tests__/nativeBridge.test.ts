@@ -324,6 +324,86 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
+  it("uses the interactive timeout while enabling quick unlock", async () => {
+    vi.useFakeTimers();
+
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 25,
+      interactiveTimeoutMs: 1_000
+    });
+
+    const request = bridge.send({
+      version: 1,
+      command: { type: "enable_quick_unlock_for_current_vault" }
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(port.disconnect).not.toHaveBeenCalled();
+
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+
+    await expect(request).resolves.toMatchObject({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+
+    vi.useRealTimers();
+  });
+
+  it("uses the interactive timeout while unlocking with quick unlock", async () => {
+    vi.useFakeTimers();
+
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 25,
+      interactiveTimeoutMs: 1_000
+    });
+
+    const request = bridge.send({
+      version: 1,
+      command: { type: "unlock_current_vault_with_quick_unlock" }
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(port.disconnect).not.toHaveBeenCalled();
+
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+
+    await expect(request).resolves.toMatchObject({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+
+    vi.useRealTimers();
+  });
+
   it("cancels stale preload before serving a new startup session request", async () => {
     const firstPort = createPort();
     const secondPort = createPort();
