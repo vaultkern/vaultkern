@@ -1,9 +1,17 @@
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use p256::{
+    ecdsa::{Signature, SigningKey, signature::Verifier},
+    pkcs8::DecodePrivateKey,
+};
+use sha2::{Digest, Sha256};
 use vaultkern_core::{
     Attachment, CompositeKey, CustomField, Entry, EntryFieldProtection, Group, KeepassCore,
-    SaveProfile, TotpSpec, Vault,
+    PasskeyRecord, SaveProfile, TotpSpec, Vault,
 };
 use vaultkern_runtime::Runtime;
 use vaultkern_runtime_protocol::{RuntimeCommand, RuntimeResponse};
+
+const TEST_PASSKEY_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgCrpkgmenhRkrdg3Y\n7G0+YmeyFRGgpisH5R5e75gwVHGhRANCAASOCmJegf0Fo1V7ixK+W5u/Jx8bpbIq\nCY0G7WFVp5KD6xMSKPekuRmz+kxK2wiZrN6MrH8kbCDmwLZRxnM73nXs\n-----END PRIVATE KEY-----\n";
 
 #[test]
 fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked_local_vault() {
@@ -142,6 +150,7 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
                 "otpauth://totp/Test:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Test&algorithm=SHA1&digits=6&period=30"
                     .into(),
             ),
+            passkey: None,
             field_protection: vaultkern_runtime_protocol::EntryFieldProtectionDto {
                 protect_title: false,
                 protect_username: true,
@@ -452,6 +461,528 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
         })
         .unwrap();
     assert_eq!(deleted, RuntimeResponse::Saved);
+}
+
+#[test]
+fn runtime_sets_and_clears_entry_passkey() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let root_id = vault.root.id.to_string();
+    let entry = Entry::new("Example");
+    let entry_id = entry.id.to_string();
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let passkey = vaultkern_runtime_protocol::EntryPasskeyDto {
+        username: "alice@example.com".into(),
+        credential_id: "credential-base64url".into(),
+        generated_user_id: Some("generated-user".into()),
+        private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("user-handle".into()),
+        backup_eligible: true,
+        backup_state: false,
+    };
+
+    let updated = runtime
+        .handle(RuntimeCommand::SetEntryPasskey {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            passkey: passkey.clone(),
+        })
+        .unwrap();
+    match updated {
+        RuntimeResponse::EntryDetail(detail) => {
+            assert_eq!(detail.id, entry_id);
+            assert_eq!(detail.passkey, Some(passkey.clone()));
+        }
+        other => panic!("expected entry detail, got {other:?}"),
+    }
+
+    let detail = runtime
+        .handle(RuntimeCommand::GetEntryDetail {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+        })
+        .unwrap();
+    match detail {
+        RuntimeResponse::EntryDetail(detail) => {
+            assert_eq!(detail.passkey, Some(passkey));
+        }
+        other => panic!("expected entry detail, got {other:?}"),
+    }
+
+    let cleared = runtime
+        .handle(RuntimeCommand::ClearEntryPasskey {
+            vault_id: handle.vault_id.clone(),
+            entry_id,
+        })
+        .unwrap();
+    match cleared {
+        RuntimeResponse::EntryDetail(detail) => {
+            assert_eq!(detail.passkey, None);
+        }
+        other => panic!("expected entry detail, got {other:?}"),
+    }
+
+    assert_eq!(
+        runtime.list_groups(&handle.vault_id).unwrap().root.id,
+        root_id
+    );
+}
+
+#[test]
+fn runtime_creates_passkey_assertion_for_matching_relying_party() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: Some("generated-user".into()),
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("dXNlci0x".into()),
+        backup_eligible: true,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#;
+    let client_data_json_base64url = URL_SAFE_NO_PAD.encode(client_data_json);
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: "Y3JlZGVudGlhbC0x".into(),
+            client_data_json_base64url: client_data_json_base64url.clone(),
+        })
+        .unwrap();
+
+    let RuntimeResponse::PasskeyAssertion(assertion) = response else {
+        panic!("expected passkey assertion, got {response:?}");
+    };
+    assert_eq!(assertion.credential_id, "Y3JlZGVudGlhbC0x");
+    assert_eq!(
+        assertion.client_data_json_base64url,
+        client_data_json_base64url
+    );
+    assert_eq!(assertion.user_handle_base64url, Some("dXNlci0x".into()));
+    assert!(assertion.backup_eligible);
+    assert!(!assertion.backup_state);
+
+    let authenticator_data = URL_SAFE_NO_PAD
+        .decode(assertion.authenticator_data_base64url)
+        .unwrap();
+    assert_eq!(authenticator_data.len(), 37);
+    assert_eq!(
+        &authenticator_data[..32],
+        Sha256::digest(b"example.com").as_slice()
+    );
+    assert_eq!(authenticator_data[32], 0x0d);
+    assert_eq!(&authenticator_data[33..], [0, 0, 0, 0]);
+
+    let client_data_hash = Sha256::digest(client_data_json);
+    let mut signed_payload = authenticator_data;
+    signed_payload.extend_from_slice(&client_data_hash);
+    let signature = Signature::from_der(
+        &URL_SAFE_NO_PAD
+            .decode(assertion.signature_base64url)
+            .unwrap(),
+    )
+    .unwrap();
+    let signing_key = SigningKey::from_pkcs8_pem(TEST_PASSKEY_PRIVATE_KEY).unwrap();
+    signing_key
+        .verifying_key()
+        .verify(&signed_payload, &signature)
+        .unwrap();
+}
+
+#[test]
+fn runtime_rejects_passkey_assertion_for_relying_party_mismatch() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: None,
+        backup_eligible: false,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            vault_id: handle.vault_id,
+            relying_party: "evil.example.net".into(),
+            origin: "https://evil.example.net".into(),
+            credential_id: "Y3JlZGVudGlhbC0x".into(),
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(
+                br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://evil.example.net","crossOrigin":false}"#,
+            ),
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected error, got {response:?}");
+    };
+    assert_eq!(error.code, "invalid_request");
+    assert!(error.message.contains("passkey relying party mismatch"));
+}
+
+#[test]
+fn runtime_rejects_passkey_assertion_when_vault_is_locked() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: None,
+        backup_eligible: false,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: "Y3JlZGVudGlhbC0x".into(),
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(
+                br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
+            ),
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected error, got {response:?}");
+    };
+    assert_eq!(error.code, "invalid_request");
+    assert!(error.message.contains("vault is locked"));
+}
+
+#[test]
+fn runtime_rejects_passkey_assertion_for_unknown_credential() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: None,
+        backup_eligible: false,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: "dW5rbm93bg".into(),
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(
+                br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
+            ),
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected error, got {response:?}");
+    };
+    assert_eq!(error.code, "invalid_request");
+    assert!(error.message.contains("passkey credential not found"));
+}
+
+#[test]
+fn runtime_allows_loopback_http_origin_for_passkey_assertion_smoke_tests() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "127.0.0.1".into(),
+        user_handle: None,
+        backup_eligible: false,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let origin = "http://127.0.0.1:58777";
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            vault_id: handle.vault_id,
+            relying_party: "127.0.0.1".into(),
+            origin: origin.into(),
+            credential_id: "Y3JlZGVudGlhbC0x".into(),
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(
+                format!(
+                    r#"{{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"{origin}","crossOrigin":false}}"#
+                )
+                .as_bytes(),
+            ),
+        })
+        .unwrap();
+
+    assert!(matches!(response, RuntimeResponse::PasskeyAssertion(_)));
+}
+
+#[test]
+fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let vault = Vault::empty("demo");
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let create_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMQ","origin":"https://example.com","crossOrigin":false}"#;
+    let registration = runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_display_name: Some("Alice".into()),
+            user_handle_base64url: "dXNlci0x".into(),
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(create_client_data),
+        })
+        .unwrap();
+
+    let RuntimeResponse::PasskeyRegistration(registration) = registration else {
+        panic!("expected passkey registration, got {registration:?}");
+    };
+    assert_eq!(registration.public_key_algorithm, -7);
+    assert_eq!(registration.user_handle_base64url, "dXNlci0x");
+    assert!(!registration.credential_id.is_empty());
+    assert!(!registration.attestation_object_base64url.is_empty());
+    let registration_authenticator_data = URL_SAFE_NO_PAD
+        .decode(&registration.authenticator_data_base64url)
+        .expect("decode registration authenticator data");
+    assert_eq!(registration_authenticator_data[32], 0x45);
+    assert!(!registration.public_key_base64url.is_empty());
+
+    let detail = runtime
+        .handle(RuntimeCommand::GetEntryDetail {
+            vault_id: handle.vault_id.clone(),
+            entry_id: registration.entry_id.clone(),
+        })
+        .unwrap();
+    let RuntimeResponse::EntryDetail(detail) = detail else {
+        panic!("expected entry detail, got {detail:?}");
+    };
+    assert_eq!(detail.title, "example.com");
+    assert_eq!(detail.username, "alice@example.com");
+    let passkey = detail
+        .passkey
+        .expect("registered entry should have a passkey");
+    assert_eq!(passkey.credential_id, registration.credential_id);
+    assert_eq!(passkey.relying_party, "example.com");
+    assert_eq!(passkey.user_handle, Some("dXNlci0x".into()));
+    assert!(passkey.private_key_pem.contains("BEGIN PRIVATE KEY"));
+
+    let get_client_data = br#"{"type":"webauthn.get","challenge":"bG9naW4tMQ","origin":"https://example.com","crossOrigin":false}"#;
+    let assertion = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: registration.credential_id,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(get_client_data),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyAssertion(assertion) = assertion else {
+        panic!("expected passkey assertion, got {assertion:?}");
+    };
+    let assertion_authenticator_data = URL_SAFE_NO_PAD
+        .decode(&assertion.authenticator_data_base64url)
+        .expect("decode assertion authenticator data");
+    assert_eq!(assertion_authenticator_data[32], 0x05);
+}
+
+#[test]
+fn runtime_reports_passkey_credential_status() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: None,
+        backup_eligible: false,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let existing = runtime
+        .handle(RuntimeCommand::PasskeyCredentialStatus {
+            vault_id: handle.vault_id.clone(),
+            credential_id: "Y3JlZGVudGlhbC0x".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialStatus(existing) = existing else {
+        panic!("expected passkey credential status, got {existing:?}");
+    };
+    assert_eq!(existing.credential_id, "Y3JlZGVudGlhbC0x");
+    assert!(existing.exists);
+
+    let missing = runtime
+        .handle(RuntimeCommand::PasskeyCredentialStatus {
+            vault_id: handle.vault_id,
+            credential_id: "bWlzc2luZw".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialStatus(missing) = missing else {
+        panic!("expected passkey credential status, got {missing:?}");
+    };
+    assert_eq!(missing.credential_id, "bWlzc2luZw");
+    assert!(!missing.exists);
 }
 
 #[test]

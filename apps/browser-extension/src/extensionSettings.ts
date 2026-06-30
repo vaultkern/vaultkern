@@ -4,7 +4,7 @@ import {
 } from "@vaultkern/shared-web-ui";
 import type { ExtensionSettingsStore } from "@vaultkern/shared-web-ui";
 
-const STORAGE_KEY = "vaultkernExtensionSettings";
+export const EXTENSION_SETTINGS_STORAGE_KEY = "vaultkernExtensionSettings";
 
 interface ChromeStorageArea {
   get(
@@ -33,14 +33,17 @@ export function createChromeExtensionSettingsStore(
   return {
     async load() {
       return new Promise((resolve) => {
-        storage.get(STORAGE_KEY, (items) => {
-          resolve(normalizeExtensionSettings(items[STORAGE_KEY]));
+        storage.get(EXTENSION_SETTINGS_STORAGE_KEY, (items) => {
+          resolve(normalizeExtensionSettings(items[EXTENSION_SETTINGS_STORAGE_KEY]));
         });
       });
     },
     async save(settings) {
       await new Promise<void>((resolve) => {
-        storage.set({ [STORAGE_KEY]: normalizeExtensionSettings(settings) }, resolve);
+        storage.set(
+          { [EXTENSION_SETTINGS_STORAGE_KEY]: normalizeExtensionSettings(settings) },
+          resolve
+        );
       });
     }
   };

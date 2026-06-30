@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VaultKern Passkey Smoke Register</title>
+  </head>
+  <body>
+    <main>
+      <h1>VaultKern Passkey Smoke Register</h1>
+      <button id="vaultkern-passkey-register" type="button">Create passkey</button>
+      <output id="vaultkern-passkey-register-result"></output>
+    </main>
+    <script>
+      function bytes(value) {
+        return Uint8Array.from(value, (character) => character.charCodeAt(0));
+      }
+
+      document
+        .querySelector("#vaultkern-passkey-register")
+        .addEventListener("click", async () => {
+          const result = document.querySelector("#vaultkern-passkey-register-result");
+          try {
+            const credential = await navigator.credentials.create({
+              publicKey: {
+                rp: {
+                  id: location.hostname,
+                  name: "VaultKern Smoke"
+                },
+                user: {
+                  id: bytes("user-1"),
+                  name: "smoke-user@example.com",
+                  displayName: "Smoke User"
+                },
+                challenge: bytes("register-1"),
+                pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+                timeout: 60000,
+                authenticatorSelection: {
+                  authenticatorAttachment: "platform",
+                  userVerification: "discouraged",
+                  residentKey: "discouraged"
+                },
+                attestation: "none"
+              }
+            });
+            result.value = credential ? `credential:${credential.id}` : "credential:null";
+          } catch (error) {
+            result.value =
+              error instanceof Error
+                ? `error:${error.name}:${error.message}`
+                : "error:unknown";
+          }
+        });
+    </script>
+  </body>
+</html>

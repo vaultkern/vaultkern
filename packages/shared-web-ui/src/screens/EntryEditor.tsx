@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
 
 import type {
   EntryAttachment,
   EntryCustomField,
   EntryDetail,
   EntryHistoryDetail,
-  EntryHistoryItem
+  EntryHistoryItem,
+  EntryPasskey
 } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
@@ -49,6 +51,8 @@ export function EntryEditor({
   onReplaceAttachment,
   onDeleteAttachment,
   onSelectHistoryItem,
+  onSetPasskey,
+  onClearPasskey,
   onSave,
   onCancel,
   onDelete
@@ -80,6 +84,8 @@ export function EntryEditor({
   onReplaceAttachment?: (name: string, file: File) => void;
   onDeleteAttachment?: (name: string) => void;
   onSelectHistoryItem?: (historyIndex: number) => void;
+  onSetPasskey?: (passkey: EntryPasskey) => void;
+  onClearPasskey?: () => void;
   onSave: () => void;
   onCancel: () => void;
   onDelete?: () => void;
@@ -340,6 +346,15 @@ export function EntryEditor({
           value={values.totpUri ?? ""}
           editable
           onChange={(value) => onChangeDraft("totpUri", value)}
+        />
+      ) : null}
+      {mode === "view" && entry ? (
+        <PasskeySection
+          entry={entry}
+          text={text}
+          busy={busy}
+          onSetPasskey={onSetPasskey}
+          onClearPasskey={onClearPasskey}
         />
       ) : null}
       {mode === "view" && entry ? (
@@ -675,6 +690,327 @@ function EditableAttachments({
       )}
     </section>
   );
+}
+
+function PasskeySection({
+  entry,
+  text,
+  busy,
+  onSetPasskey,
+  onClearPasskey
+}: {
+  entry: EntryDetail;
+  text: ReturnType<typeof useText>;
+  busy?: boolean;
+  onSetPasskey?: (passkey: EntryPasskey) => void;
+  onClearPasskey?: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<EntryPasskey>(() =>
+    entry.passkey ?? emptyPasskey()
+  );
+  const [revealedPasskeyFields, setRevealedPasskeyFields] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [revealedDraftFields, setRevealedDraftFields] = useState<Set<string>>(
+    () => new Set()
+  );
+
+  useEffect(() => {
+    setEditing(false);
+    setDraft(entry.passkey ?? emptyPasskey());
+    setRevealedPasskeyFields(new Set());
+    setRevealedDraftFields(new Set());
+  }, [entry.id, entry.passkey]);
+
+  function updateDraft(field: keyof EntryPasskey, value: string | boolean) {
+    setDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  function toggleRevealedField(
+    setter: Dispatch<SetStateAction<Set<string>>>,
+    field: string
+  ) {
+    setter((current) => {
+      const next = new Set(current);
+      if (next.has(field)) {
+        next.delete(field);
+      } else {
+        next.add(field);
+      }
+      return next;
+    });
+  }
+
+  function sensitiveValue(value: string | null | undefined, revealed: boolean) {
+    if (!value) {
+      return "-";
+    }
+    return revealed ? value : "************";
+  }
+
+  function showHideLabel(revealed: boolean, label: string) {
+    return `${revealed ? text("Hide password").replace(" password", "") : text("Show password").replace(" password", "")} ${label}`;
+  }
+
+  function renderSensitivePasskeyRow(
+    label: string,
+    field: string,
+    value: string | null | undefined
+  ) {
+    const revealed = revealedPasskeyFields.has(field);
+    return (
+      <div style={detailRowStyle}>
+        <div style={detailKeyStyle}>{label}</div>
+        <div style={detailValueStyle}>{sensitiveValue(value, revealed)}</div>
+        {value ? (
+          <button
+            type="button"
+            aria-label={showHideLabel(revealed, label)}
+            onClick={() =>
+              toggleRevealedField(setRevealedPasskeyFields, field)
+            }
+            style={protectedToggleStyle}
+          >
+            {revealed
+              ? text("Hide password").replace(" password", "")
+              : text("Show password").replace(" password", "")}
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderSensitiveDraftInput(
+    label: string,
+    field: "credentialId" | "generatedUserId" | "userHandle" | "privateKeyPem",
+    value: string,
+    updateField: keyof EntryPasskey
+  ) {
+    const revealed = revealedDraftFields.has(field);
+    return (
+      <div style={sensitiveDraftFieldStyle}>
+        <label style={fieldLabelStyle}>
+          {label}
+          <input
+            aria-label={label}
+            type={revealed ? "text" : "password"}
+            value={value}
+            onChange={(event) => updateDraft(updateField, event.target.value)}
+            style={fieldStyle}
+          />
+        </label>
+        <button
+          type="button"
+          aria-label={showHideLabel(revealed, label)}
+          onClick={() => toggleRevealedField(setRevealedDraftFields, field)}
+          style={protectedToggleStyle}
+        >
+          {revealed
+            ? text("Hide password").replace(" password", "")
+            : text("Show password").replace(" password", "")}
+        </button>
+      </div>
+    );
+  }
+
+  function normalizedDraft(): EntryPasskey {
+    return {
+      ...draft,
+      username: draft.username.trim(),
+      credentialId: draft.credentialId.trim(),
+      generatedUserId: emptyStringAsNull(draft.generatedUserId),
+      privateKeyPem: draft.privateKeyPem,
+      relyingParty: draft.relyingParty.trim(),
+      userHandle: emptyStringAsNull(draft.userHandle)
+    };
+  }
+
+  const passkey = entry.passkey;
+
+  return (
+    <section aria-label={text("Passkey")} style={sectionStyle}>
+      <div style={sectionHeaderStyle}>
+        <h3 style={sectionTitleStyle}>{text("Passkey")}</h3>
+        <div style={inlineActionsStyle}>
+          <button
+            type="button"
+            onClick={() => {
+              setDraft(passkey ?? emptyPasskey());
+              setRevealedDraftFields(new Set());
+              setEditing((current) => !current);
+            }}
+            disabled={busy}
+            style={secondaryActionStyle}
+          >
+            {passkey ? text("Edit passkey") : text("Add passkey")}
+          </button>
+          {passkey ? (
+            <button
+              type="button"
+              onClick={() => onClearPasskey?.()}
+              disabled={busy}
+              style={dangerSmallButtonStyle}
+            >
+              {text("Clear passkey")}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {passkey ? (
+        <div style={detailListStyle}>
+          <div style={detailRowStyle}>
+            <div style={detailKeyStyle}>{text("Relying Party")}</div>
+            <div style={detailValueStyle}>{passkey.relyingParty}</div>
+          </div>
+          <div style={detailRowStyle}>
+            <div style={detailKeyStyle}>{text("Passkey Username")}</div>
+            <div style={detailValueStyle}>{passkey.username}</div>
+          </div>
+          {renderSensitivePasskeyRow(
+            text("Credential ID"),
+            "credentialId",
+            passkey.credentialId
+          )}
+          {renderSensitivePasskeyRow(
+            text("Generated User ID"),
+            "generatedUserId",
+            passkey.generatedUserId
+          )}
+          {renderSensitivePasskeyRow(
+            text("User Handle"),
+            "userHandle",
+            passkey.userHandle
+          )}
+          {renderSensitivePasskeyRow(
+            text("Private Key PEM"),
+            "privateKeyPem",
+            passkey.privateKeyPem
+          )}
+          <div style={detailRowStyle}>
+            <div style={detailKeyStyle}>{text("Backup eligible")}</div>
+            <div style={detailValueStyle}>{passkey.backupEligible ? "true" : "false"}</div>
+          </div>
+          <div style={detailRowStyle}>
+            <div style={detailKeyStyle}>{text("Backup state")}</div>
+            <div style={detailValueStyle}>{passkey.backupState ? "true" : "false"}</div>
+          </div>
+        </div>
+      ) : (
+        <div style={detailValueStyle}>{text("No passkey.")}</div>
+      )}
+      {editing ? (
+        <div style={editableFieldListStyle}>
+          <label style={fieldLabelStyle}>
+            {text("Passkey Username")}
+            <input
+              aria-label={text("Passkey Username")}
+              value={draft.username}
+              onChange={(event) => updateDraft("username", event.target.value)}
+              style={fieldStyle}
+            />
+          </label>
+          <label style={fieldLabelStyle}>
+            {text("Relying Party")}
+            <input
+              aria-label={text("Relying Party")}
+              value={draft.relyingParty}
+              onChange={(event) => updateDraft("relyingParty", event.target.value)}
+              style={fieldStyle}
+            />
+          </label>
+          {renderSensitiveDraftInput(
+            text("Credential ID"),
+            "credentialId",
+            draft.credentialId,
+            "credentialId"
+          )}
+          {renderSensitiveDraftInput(
+            text("Generated User ID"),
+            "generatedUserId",
+            draft.generatedUserId ?? "",
+            "generatedUserId"
+          )}
+          {renderSensitiveDraftInput(
+            text("User Handle"),
+            "userHandle",
+            draft.userHandle ?? "",
+            "userHandle"
+          )}
+          {renderSensitiveDraftInput(
+            text("Private Key PEM"),
+            "privateKeyPem",
+            draft.privateKeyPem,
+            "privateKeyPem"
+          )}
+          <div style={inlineActionsStyle}>
+            <label style={checkboxFieldStyle}>
+              <input
+                aria-label={text("Backup eligible")}
+                type="checkbox"
+                checked={draft.backupEligible}
+                onChange={(event) => updateDraft("backupEligible", event.target.checked)}
+              />
+              {text("Backup eligible")}
+            </label>
+            <label style={checkboxFieldStyle}>
+              <input
+                aria-label={text("Backup state")}
+                type="checkbox"
+                checked={draft.backupState}
+                onChange={(event) => updateDraft("backupState", event.target.checked)}
+              />
+              {text("Backup state")}
+            </label>
+          </div>
+          <div style={inlineActionsStyle}>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                onSetPasskey?.(normalizedDraft());
+                setEditing(false);
+                setRevealedPasskeyFields(new Set());
+                setRevealedDraftFields(new Set());
+              }}
+              style={primaryActionStyle}
+            >
+              {text("Save passkey")}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setDraft(passkey ?? emptyPasskey());
+                setEditing(false);
+              }}
+              style={secondaryActionStyle}
+            >
+              {text("Cancel")}
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function emptyPasskey(): EntryPasskey {
+  return {
+    username: "",
+    credentialId: "",
+    generatedUserId: null,
+    privateKeyPem: "",
+    relyingParty: "",
+    userHandle: null,
+    backupEligible: false,
+    backupState: false
+  };
+}
+
+function emptyStringAsNull(value: string | null): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed ? trimmed : null;
 }
 
 function EntryDetailExtras({
@@ -1099,6 +1435,14 @@ const historyButtonStyle = {
 const editableFieldListStyle = {
   display: "grid",
   gap: archiveTheme.spacing.sm
+};
+
+const sensitiveDraftFieldStyle = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  gap: archiveTheme.spacing.sm,
+  alignItems: "end",
+  minWidth: 0
 };
 
 const editableFieldRowStyle = {

@@ -73,6 +73,8 @@ async function startSmokeServer() {
 
   return {
     url: `http://127.0.0.1:${address.port}/basic-login.html`,
+    passkeyRegisterUrl: `http://localhost:${address.port}/passkey-register.html`,
+    passkeyUrl: `http://localhost:${address.port}/passkey-login.html`,
     close: () => new Promise((resolvePromise) => server.close(resolvePromise))
   };
 }
@@ -89,6 +91,23 @@ async function writeNativeManifest(workDir) {
   const destination = join(profileHostDir, "com.vaultkern.runtime.json");
   await writeFile(destination, manifest, "utf8");
   return destination;
+}
+
+async function enablePasskeyProvider(extensionPage) {
+  await extensionPage.evaluate(
+    async (settings) => {
+      await chrome.storage.local.set({
+        vaultkernExtensionSettings: settings
+      });
+    },
+    {
+      recentVaultLimit: 10,
+      language: "en",
+      idleLockMinutes: 10,
+      clearClipboardSeconds: 30,
+      passkeyProviderEnabled: true
+    }
+  );
 }
 
 async function sendCommand(extensionPage, command, timeout = 60_000) {
@@ -239,6 +258,63 @@ async function main() {
       throw new Error(`unexpected submit result: ${submitted}`);
     }
 
+    await enablePasskeyProvider(extensionPage);
+
+    const passkeyRegisterPage = await context.newPage();
+    await passkeyRegisterPage.goto(server.passkeyRegisterUrl);
+    const passkeyRegisterReady = await passkeyRegisterPage.evaluate(() => ({
+      hasButton: document.querySelector("#vaultkern-passkey-register") != null,
+      publicKeyCredentialAvailable: typeof PublicKeyCredential !== "undefined"
+    }));
+    if (!passkeyRegisterReady.hasButton) {
+      throw new Error("passkey register smoke page did not expose the create button");
+    }
+    await passkeyRegisterPage.click("#vaultkern-passkey-register");
+    await passkeyRegisterPage.waitForFunction(
+      () => document.querySelector("#vaultkern-passkey-register-result")?.value
+    );
+    const passkeyRegisterResult = await passkeyRegisterPage
+      .locator("#vaultkern-passkey-register-result")
+      .evaluate((node) => node.value || node.textContent);
+    if (!passkeyRegisterResult?.startsWith("credential:")) {
+      throw new Error(`unexpected passkey register result: ${passkeyRegisterResult}`);
+    }
+    const registeredPasskeyCredentialId = passkeyRegisterResult.slice("credential:".length);
+
+    await sendCommand(extensionPage, { type: "lock_session" });
+    const reopened = await sendCommand(extensionPage, {
+      type: "open_local_vault",
+      path: vaultPath
+    });
+    await sendCommand(extensionPage, {
+      type: "unlock_with_password",
+      vault_id: reopened.vaultId,
+      password
+    });
+
+    const passkeyPage = await context.newPage();
+    await passkeyPage.goto(
+      `${server.passkeyUrl}?credential=${encodeURIComponent(registeredPasskeyCredentialId)}`
+    );
+    const passkeySmokeReady = await passkeyPage.evaluate(() => ({
+      hasButton: document.querySelector("#vaultkern-passkey-login") != null,
+      publicKeyCredentialAvailable: typeof PublicKeyCredential !== "undefined"
+    }));
+    if (!passkeySmokeReady.hasButton) {
+      throw new Error("passkey smoke page did not expose the login button");
+    }
+    await passkeyPage.click("#vaultkern-passkey-login");
+    await passkeyPage.waitForFunction(
+      () => document.querySelector("#vaultkern-passkey-result")?.value
+    );
+    const passkeyResult = await passkeyPage
+      .locator("#vaultkern-passkey-result")
+      .evaluate((node) => node.value || node.textContent);
+    const expectedPasskeyResult = `credential:${registeredPasskeyCredentialId}`;
+    if (passkeyResult !== expectedPasskeyResult) {
+      throw new Error(`unexpected passkey result: ${passkeyResult}`);
+    }
+
     console.log(
       JSON.stringify(
         {
@@ -246,6 +322,11 @@ async function main() {
           extensionId,
           nativeManifest,
           smokeUrl: server.url,
+          passkeyRegisterUrl: server.passkeyRegisterUrl,
+          passkeySmokeUrl: server.passkeyUrl,
+          publicKeyCredentialAvailable: passkeySmokeReady.publicKeyCredentialAvailable,
+          passkeyRegisterResult,
+          passkeyResult,
           submitResult: submitted
         },
         null,

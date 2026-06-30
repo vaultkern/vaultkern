@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.resetModules();
 });
 
@@ -38,6 +39,55 @@ function createPort() {
 }
 
 describe("background bridge", () => {
+  it("keeps the native session alive after an unlocked session response", async () => {
+    vi.useFakeTimers();
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    let listener:
+      | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean)
+      | undefined;
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        onMessage: {
+          addListener(fn: typeof listener) {
+            listener = fn;
+          }
+        }
+      }
+    };
+
+    await import("../background");
+
+    if (!listener) {
+      throw new Error("background listener was not registered");
+    }
+
+    const responsePromise = new Promise<unknown>((resolve) => {
+      listener?.({ version: 1, command: { type: "get_session_state" } }, {}, resolve);
+    });
+
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    await responsePromise;
+
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      version: 1,
+      command: { type: "get_session_state" }
+    });
+    expect(port.postMessage).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+
   it("forwards runtime commands to the native bridge and returns the response", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
@@ -135,6 +185,243 @@ describe("background bridge", () => {
         code: "native_host_missing",
         message: "Specified native messaging host not found."
       }
+    });
+  });
+
+  it("does not attach the WebAuthn proxy when no passkey provider setting is saved", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({});
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      webAuthenticationProxy: {
+        attach
+      }
+    };
+
+    await import("../background");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  it("attaches the WebAuthn proxy when explicitly enabled", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: true
+              }
+            });
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      webAuthenticationProxy: {
+        attach
+      }
+    };
+
+    await import("../background");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(attach).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not attach the WebAuthn proxy when the passkey provider setting is disabled", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: false
+              }
+            });
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      webAuthenticationProxy: {
+        attach
+      }
+    };
+
+    await import("../background");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  it("detaches the WebAuthn proxy when the passkey provider setting is disabled later", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+    const detach = vi.fn(async () => undefined);
+    let passkeyProviderEnabled = true;
+    let storageListener:
+      | ((changes: Record<string, unknown>, areaName: string) => void)
+      | undefined;
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled
+              }
+            });
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener(
+            listener: (changes: Record<string, unknown>, areaName: string) => void
+          ) {
+            storageListener = listener;
+          }
+        }
+      },
+      webAuthenticationProxy: {
+        attach,
+        detach
+      }
+    };
+
+    await import("../background");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(attach).toHaveBeenCalledTimes(1);
+
+    passkeyProviderEnabled = false;
+    storageListener?.({ vaultkernExtensionSettings: {} }, "local");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(detach).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-runs WebAuthn proxy sync when settings change during attach", async () => {
+    const port = createPort();
+    let resolveAttach: () => void = () => {};
+    const attach = vi.fn(
+      () =>
+        new Promise<undefined>((resolve) => {
+          resolveAttach = () => resolve(undefined);
+        })
+    );
+    const detach = vi.fn(async () => undefined);
+    let passkeyProviderEnabled = true;
+    let storageListener:
+      | ((changes: Record<string, unknown>, areaName: string) => void)
+      | undefined;
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled
+              }
+            });
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener(
+            listener: (changes: Record<string, unknown>, areaName: string) => void
+          ) {
+            storageListener = listener;
+          }
+        }
+      },
+      webAuthenticationProxy: {
+        attach,
+        detach
+      }
+    };
+
+    await import("../background");
+    await vi.waitFor(() => {
+      expect(attach).toHaveBeenCalledTimes(1);
+    });
+
+    passkeyProviderEnabled = false;
+    storageListener?.({ vaultkernExtensionSettings: {} }, "local");
+    resolveAttach();
+
+    await vi.waitFor(() => {
+      expect(detach).toHaveBeenCalledTimes(1);
     });
   });
 });

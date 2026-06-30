@@ -129,9 +129,21 @@ export interface EntryDetail {
   modifiedAt?: number;
   totp?: string | null;
   totpUri?: string | null;
+  passkey?: EntryPasskey | null;
   fieldProtection?: EntryFieldProtection;
   customFields?: EntryCustomField[];
   attachments?: EntryAttachment[];
+}
+
+export interface EntryPasskey {
+  username: string;
+  credentialId: string;
+  generatedUserId: string | null;
+  privateKeyPem: string;
+  relyingParty: string;
+  userHandle: string | null;
+  backupEligible: boolean;
+  backupState: boolean;
 }
 
 export interface EntryFieldProtection {
@@ -505,6 +517,30 @@ export class RuntimeClient {
   ): Promise<EntryDetail> {
     return this.sendCommand<EntryDetail>({
       type: "clear_entry_totp",
+      vault_id: vaultId,
+      entry_id: entryId
+    });
+  }
+
+  async setEntryPasskey(
+    vaultId: string,
+    entryId: string,
+    passkey: EntryPasskey
+  ): Promise<EntryDetail> {
+    return this.sendCommand<EntryDetail>({
+      type: "set_entry_passkey",
+      vault_id: vaultId,
+      entry_id: entryId,
+      passkey
+    });
+  }
+
+  async clearEntryPasskey(
+    vaultId: string,
+    entryId: string
+  ): Promise<EntryDetail> {
+    return this.sendCommand<EntryDetail>({
+      type: "clear_entry_passkey",
       vault_id: vaultId,
       entry_id: entryId
     });

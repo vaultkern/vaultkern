@@ -109,35 +109,10 @@ function isPreloadCommand(message: unknown) {
   return commandTypeFromMessage(message) === "preload_current_vault";
 }
 
-function isInterruptibleReadCommand(message: unknown) {
-  switch (commandTypeFromMessage(message)) {
-    case "preload_current_vault":
-    case "list_entries":
-    case "find_fill_candidates":
-    case "get_entry_detail":
-    case "list_groups":
-    case "get_database_settings":
-    case "list_entry_history":
-    case "get_entry_history_detail":
-    case "get_entry_attachment_content":
-    case "list_one_drive_children":
-      return true;
-    default:
-      return false;
-  }
-}
-
 function preloadCanceledError() {
   return new NativeMessagingError(
     "native_port_disconnected",
     "preload canceled by startup request"
-  );
-}
-
-function readCanceledError() {
-  return new NativeMessagingError(
-    "native_port_disconnected",
-    "native read canceled by startup request"
   );
 }
 
@@ -150,17 +125,6 @@ function shouldCancelActivePreload(
   }
 
   return isStartupCommand(nextMessage);
-}
-
-function shouldCancelActiveInterruptibleRead(
-  active: PendingRequest | null,
-  nextMessage: unknown
-) {
-  return (
-    isStartupCommand(nextMessage) &&
-    isInterruptibleReadCommand(active?.message) &&
-    !isPreloadCommand(active?.message)
-  );
 }
 
 export function createNativeMessagingBridge(
@@ -187,7 +151,9 @@ export function createNativeMessagingBridge(
         (command.type === "add_local_vault_reference" && command.path === undefined) ||
         command.type === "unlock_current_vault" ||
         command.type === "unlock_current_vault_with_password" ||
-        command.type === "unlock_with_password"
+        command.type === "unlock_with_password" ||
+        command.type === "create_passkey_assertion" ||
+        command.type === "create_passkey_registration"
       ) {
         return interactiveTimeoutMs;
       }
@@ -227,14 +193,6 @@ export function createNativeMessagingBridge(
     }
 
     cancelActiveRequest(preloadCanceledError());
-  }
-
-  function cancelActiveInterruptibleRead() {
-    if (!activeRequest) {
-      return;
-    }
-
-    cancelActiveRequest(readCanceledError());
   }
 
   function cancelActiveRequest(error: Error) {
@@ -377,8 +335,6 @@ export function createNativeMessagingBridge(
       return new Promise<unknown>((resolve, reject) => {
         if (shouldCancelActivePreload(activeRequest, message)) {
           cancelActivePreload();
-        } else if (shouldCancelActiveInterruptibleRead(activeRequest, message)) {
-          cancelActiveInterruptibleRead();
         }
         cancelQueuedPreloads(message);
         enqueueRequest({ message, resolve, reject, timeoutId: null });

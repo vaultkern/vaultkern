@@ -111,6 +111,35 @@ pub enum RuntimeCommand {
         vault_id: String,
         entry_id: String,
     },
+    SetEntryPasskey {
+        vault_id: String,
+        entry_id: String,
+        passkey: EntryPasskeyDto,
+    },
+    ClearEntryPasskey {
+        vault_id: String,
+        entry_id: String,
+    },
+    CreatePasskeyAssertion {
+        vault_id: String,
+        relying_party: String,
+        origin: String,
+        credential_id: String,
+        client_data_json_base64url: String,
+    },
+    CreatePasskeyRegistration {
+        vault_id: String,
+        relying_party: String,
+        origin: String,
+        user_name: String,
+        user_display_name: Option<String>,
+        user_handle_base64url: String,
+        client_data_json_base64url: String,
+    },
+    PasskeyCredentialStatus {
+        vault_id: String,
+        credential_id: String,
+    },
     DeleteEntry {
         vault_id: String,
         entry_id: String,
@@ -188,6 +217,9 @@ pub enum RuntimeResponse {
     EntryHistoryDetail(EntryHistoryDetailDto),
     EntryAttachmentContent(EntryAttachmentContentDto),
     FillCandidates(FillCandidateListDto),
+    PasskeyAssertion(PasskeyAssertionDto),
+    PasskeyRegistration(PasskeyRegistrationDto),
+    PasskeyCredentialStatus(PasskeyCredentialStatusDto),
     DatabaseSettings(DatabaseSettingsDto),
     Saved,
     SaveVaultResult(SaveVaultResultDto),
@@ -417,9 +449,55 @@ pub struct EntryDetailDto {
     pub modified_at: u64,
     pub totp: Option<String>,
     pub totp_uri: Option<String>,
+    pub passkey: Option<EntryPasskeyDto>,
     pub field_protection: EntryFieldProtectionDto,
     pub custom_fields: Vec<EntryCustomFieldDto>,
     pub attachments: Vec<EntryAttachmentDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryPasskeyDto {
+    pub username: String,
+    pub credential_id: String,
+    pub generated_user_id: Option<String>,
+    pub private_key_pem: String,
+    pub relying_party: String,
+    pub user_handle: Option<String>,
+    pub backup_eligible: bool,
+    pub backup_state: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyAssertionDto {
+    pub credential_id: String,
+    pub authenticator_data_base64url: String,
+    pub client_data_json_base64url: String,
+    pub signature_base64url: String,
+    pub user_handle_base64url: Option<String>,
+    pub backup_eligible: bool,
+    pub backup_state: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyRegistrationDto {
+    pub entry_id: String,
+    pub credential_id: String,
+    pub authenticator_data_base64url: String,
+    pub attestation_object_base64url: String,
+    pub client_data_json_base64url: String,
+    pub public_key_base64url: String,
+    pub public_key_algorithm: i32,
+    pub user_handle_base64url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCredentialStatusDto {
+    pub credential_id: String,
+    pub exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

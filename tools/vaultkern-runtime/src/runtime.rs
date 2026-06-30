@@ -10,21 +10,25 @@ use url::form_urlencoded::byte_serialize;
 use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    KdbxCipher, KeepassCore, SaveKdf, SaveProfile, TotpSpec, Vault,
+    KdbxCipher, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, TotpSpec, Vault,
 };
 use vaultkern_runtime_protocol::{
     DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseKdfSettingsDto,
     DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
     DatabaseSettingsDto, DatabaseSettingsUpdateDto, EntryAttachmentContentDto, EntryAttachmentDto,
     EntryCustomFieldDto, EntryDetailDto, EntryFieldProtectionDto, EntryHistoryDetailDto,
-    EntryHistoryItemDto, EntryHistoryListDto, EntryListDto, EntrySummaryDto, ErrorDto,
-    FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto, RuntimeCommand,
+    EntryHistoryItemDto, EntryHistoryListDto, EntryListDto, EntryPasskeyDto, EntrySummaryDto,
+    ErrorDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto,
+    PasskeyAssertionDto, PasskeyCredentialStatusDto, PasskeyRegistrationDto, RuntimeCommand,
     RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto,
     VaultReferenceListDto, VaultSourceStatusDto,
 };
 
 use crate::command_loop::format_error_chain;
 use crate::match_fill::{FillMatchScore, score_entry_match};
+use crate::passkey::{
+    PasskeyAssertionRequest, PasskeyRegistrationRequest, create_assertion, create_registration,
+};
 use crate::providers::biometric::{BiometricProvider, UnsupportedBiometricProvider};
 use crate::providers::local_file::{LocalFileVaultSourceProvider, VaultSourceFingerprint};
 use crate::providers::onedrive::{OneDriveMemoryAccessCounts, OneDriveVaultSourceProvider};
@@ -699,6 +703,10 @@ impl Runtime {
             .map(|value| totp_to_uri(&detail.title, &detail.username, value));
         let custom_fields = self.core.list_entry_custom_fields(vault, entry_id)?;
         let attachments = self.core.list_entry_attachments(vault, entry_id)?;
+        let passkey = self
+            .core
+            .project_entry_passkey(vault, entry_id)?
+            .map(entry_passkey_to_dto);
         Ok(EntryDetailDto {
             id: detail.id,
             title: detail.title,
@@ -709,6 +717,7 @@ impl Runtime {
             modified_at: detail.modified_at,
             totp: totp_code,
             totp_uri,
+            passkey,
             field_protection: EntryFieldProtectionDto {
                 protect_title: detail.field_protection.protect_title,
                 protect_username: detail.field_protection.protect_username,
@@ -1068,6 +1077,142 @@ impl Runtime {
         self.get_entry_detail(vault_id, entry_id)
     }
 
+    pub fn set_entry_passkey(
+        &mut self,
+        vault_id: &str,
+        entry_id: &str,
+        passkey: EntryPasskeyDto,
+    ) -> Result<EntryDetailDto> {
+        let modified_at = self.current_unix_time();
+        {
+            let loaded = self
+                .loaded
+                .get_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_mut()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            self.core
+                .set_entry_passkey(vault, entry_id, dto_to_passkey_record(passkey))?;
+            touch_entry_modified_at(&self.core, vault, entry_id, modified_at)?;
+        }
+
+        self.get_entry_detail(vault_id, entry_id)
+    }
+
+    pub fn clear_entry_passkey(
+        &mut self,
+        vault_id: &str,
+        entry_id: &str,
+    ) -> Result<EntryDetailDto> {
+        let modified_at = self.current_unix_time();
+        {
+            let loaded = self
+                .loaded
+                .get_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_mut()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            self.core.clear_entry_passkey(vault, entry_id)?;
+            touch_entry_modified_at(&self.core, vault, entry_id, modified_at)?;
+        }
+
+        self.get_entry_detail(vault_id, entry_id)
+    }
+
+    pub fn create_passkey_assertion(
+        &self,
+        vault_id: &str,
+        relying_party: &str,
+        origin: &str,
+        credential_id: &str,
+        client_data_json_base64url: &str,
+    ) -> Result<PasskeyAssertionDto> {
+        let vault = self.loaded_vault(vault_id)?;
+        let passkey = find_passkey_by_credential_id(&vault.root, credential_id)
+            .with_context(|| format!("passkey credential not found: {credential_id}"))?;
+        create_assertion(
+            passkey,
+            PasskeyAssertionRequest {
+                relying_party,
+                origin,
+                credential_id,
+                client_data_json_base64url,
+            },
+        )
+    }
+
+    pub fn passkey_credential_status(
+        &self,
+        vault_id: &str,
+        credential_id: &str,
+    ) -> Result<PasskeyCredentialStatusDto> {
+        let vault = self.loaded_vault(vault_id)?;
+        Ok(PasskeyCredentialStatusDto {
+            credential_id: credential_id.to_owned(),
+            exists: find_passkey_by_credential_id(&vault.root, credential_id).is_some(),
+        })
+    }
+
+    pub fn create_passkey_registration(
+        &mut self,
+        vault_id: &str,
+        relying_party: &str,
+        origin: &str,
+        user_name: &str,
+        user_display_name: Option<&str>,
+        user_handle_base64url: &str,
+        client_data_json_base64url: &str,
+    ) -> Result<PasskeyRegistrationDto> {
+        let modified_at = self.current_unix_time();
+        let registration = create_registration(PasskeyRegistrationRequest {
+            relying_party,
+            origin,
+            user_name,
+            user_handle_base64url,
+            client_data_json_base64url,
+        })?;
+        let mut response = registration.dto;
+
+        let loaded = self
+            .loaded
+            .get_mut(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        let vault = loaded
+            .vault
+            .as_mut()
+            .with_context(|| format!("vault is locked: {vault_id}"))?;
+        let parent_group_id = vault.root.id.to_string();
+        let title = if relying_party.trim().is_empty() {
+            user_display_name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(user_name)
+                .to_owned()
+        } else {
+            relying_party.to_owned()
+        };
+        let created = self.core.add_entry(
+            vault,
+            &parent_group_id,
+            EntryCreate {
+                title,
+                username: user_name.to_owned(),
+                password: String::new(),
+                url: format!("https://{relying_party}"),
+                notes: "Created by WebAuthn passkey registration".into(),
+            },
+        )?;
+        let entry_id = created.id.clone();
+        self.core
+            .set_entry_passkey(vault, &entry_id, registration.passkey)?;
+        touch_entry_modified_at(&self.core, vault, &entry_id, modified_at)?;
+        response.entry_id = entry_id;
+        Ok(response)
+    }
+
     pub fn delete_entry(&mut self, vault_id: &str, entry_id: &str) -> Result<()> {
         let loaded = self
             .loaded
@@ -1354,6 +1499,16 @@ impl Runtime {
             RuntimeCommand::ClearEntryTotp { vault_id, entry_id } => self
                 .clear_entry_totp(&vault_id, &entry_id)
                 .map(RuntimeResponse::EntryDetail),
+            RuntimeCommand::SetEntryPasskey {
+                vault_id,
+                entry_id,
+                passkey,
+            } => self
+                .set_entry_passkey(&vault_id, &entry_id, passkey)
+                .map(RuntimeResponse::EntryDetail),
+            RuntimeCommand::ClearEntryPasskey { vault_id, entry_id } => self
+                .clear_entry_passkey(&vault_id, &entry_id)
+                .map(RuntimeResponse::EntryDetail),
             RuntimeCommand::DeleteEntry { vault_id, entry_id } => self
                 .delete_entry(&vault_id, &entry_id)
                 .map(|_| RuntimeResponse::Saved),
@@ -1452,6 +1607,55 @@ impl Runtime {
                     Err(error) => query_error_response(error),
                 })
             }
+            RuntimeCommand::CreatePasskeyAssertion {
+                vault_id,
+                relying_party,
+                origin,
+                credential_id,
+                client_data_json_base64url,
+            } => Ok(
+                match self.create_passkey_assertion(
+                    &vault_id,
+                    &relying_party,
+                    &origin,
+                    &credential_id,
+                    &client_data_json_base64url,
+                ) {
+                    Ok(assertion) => RuntimeResponse::PasskeyAssertion(assertion),
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::CreatePasskeyRegistration {
+                vault_id,
+                relying_party,
+                origin,
+                user_name,
+                user_display_name,
+                user_handle_base64url,
+                client_data_json_base64url,
+            } => Ok(
+                match self.create_passkey_registration(
+                    &vault_id,
+                    &relying_party,
+                    &origin,
+                    &user_name,
+                    user_display_name.as_deref(),
+                    &user_handle_base64url,
+                    &client_data_json_base64url,
+                ) {
+                    Ok(registration) => RuntimeResponse::PasskeyRegistration(registration),
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::PasskeyCredentialStatus {
+                vault_id,
+                credential_id,
+            } => Ok(
+                match self.passkey_credential_status(&vault_id, &credential_id) {
+                    Ok(status) => RuntimeResponse::PasskeyCredentialStatus(status),
+                    Err(error) => query_error_response(error),
+                },
+            ),
             RuntimeCommand::UpdateEntry { .. } => Ok(RuntimeResponse::Error(ErrorDto {
                 code: "unsupported".into(),
                 message: "command is not implemented yet".into(),
@@ -2026,6 +2230,53 @@ fn project_group_node(group: &vaultkern_core::GroupView) -> GroupNodeDto {
         child_count: group.child_count,
         children: group.children.iter().map(project_group_node).collect(),
     }
+}
+
+fn entry_passkey_to_dto(passkey: vaultkern_core::EntryPasskeyView) -> EntryPasskeyDto {
+    EntryPasskeyDto {
+        username: passkey.username,
+        credential_id: passkey.credential_id,
+        generated_user_id: passkey.generated_user_id,
+        private_key_pem: passkey.private_key_pem,
+        relying_party: passkey.relying_party,
+        user_handle: passkey.user_handle,
+        backup_eligible: passkey.backup_eligible,
+        backup_state: passkey.backup_state,
+    }
+}
+
+fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> PasskeyRecord {
+    PasskeyRecord {
+        username: passkey.username,
+        credential_id: passkey.credential_id,
+        generated_user_id: passkey.generated_user_id,
+        private_key_pem: passkey.private_key_pem,
+        relying_party: passkey.relying_party,
+        user_handle: passkey.user_handle,
+        backup_eligible: passkey.backup_eligible,
+        backup_state: passkey.backup_state,
+    }
+}
+
+fn find_passkey_by_credential_id<'a>(
+    group: &'a vaultkern_core::Group,
+    credential_id: &str,
+) -> Option<&'a PasskeyRecord> {
+    for entry in &group.entries {
+        if let Some(passkey) = entry.passkey.as_ref() {
+            if passkey.credential_id == credential_id {
+                return Some(passkey);
+            }
+        }
+    }
+
+    for child in &group.children {
+        if let Some(passkey) = find_passkey_by_credential_id(child, credential_id) {
+            return Some(passkey);
+        }
+    }
+
+    None
 }
 
 fn enforce_history_limits(vault: &mut Vault) {

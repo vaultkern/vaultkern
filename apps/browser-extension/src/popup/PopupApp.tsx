@@ -53,7 +53,8 @@ export function PopupApp({
   fillEntry,
   activeSite,
   extensionSettingsStore,
-  renderRuntimeErrorHelp
+  renderRuntimeErrorHelp,
+  onUnlockComplete
 }: {
   client: PopupClientLike;
   findCandidates: (vaultId: string) => Promise<EntrySummary[]>;
@@ -61,6 +62,7 @@ export function PopupApp({
   activeSite: () => Promise<string>;
   extensionSettingsStore?: ExtensionSettingsStore;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
+  onUnlockComplete?: (session: SessionStateLike) => void | Promise<void>;
 }) {
   const [session, setSession] = useState<SessionStateLike | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -86,6 +88,9 @@ export function PopupApp({
     DEFAULT_EXTENSION_SETTINGS
   );
   const currentVaultPreload = useRef<Promise<void> | null>(null);
+  const webAuthnUnlockPrompt =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("webauthn") === "unlock";
 
   function startCurrentVaultPreload() {
     if (currentVaultPreload.current) {
@@ -340,6 +345,9 @@ export function PopupApp({
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");
+      if (nextSession.unlocked && nextSession.activeVaultId) {
+        void Promise.resolve(onUnlockComplete?.(nextSession)).catch(() => undefined);
+      }
     } catch (unlockFailure) {
       setUnlockError(
         popupErrorMessage(
@@ -426,11 +434,25 @@ export function PopupApp({
       null;
     const needsRepair = currentVault?.availability === "needs_repair";
     const canUnlockCurrentVault = Boolean(currentVault || session.currentVaultRefId);
+    const passkeyPromptTitle =
+      extensionSettings.language === "zh-CN"
+        ? "通行密钥请求等待中"
+        : "Passkey request waiting";
+    const passkeyPromptBody =
+      extensionSettings.language === "zh-CN"
+        ? "请解锁数据库以继续当前网站的通行密钥请求。"
+        : "Unlock your vault to continue the website passkey request.";
 
     return (
       <I18nProvider language={extensionSettings.language}>
       <div style={shellStyle}>
         <PopupStatusStrip siteLabel={siteLabel} unlocked={false} />
+        {webAuthnUnlockPrompt ? (
+          <section style={passkeyPromptStyle} aria-live="polite">
+            <strong>{passkeyPromptTitle}</strong>
+            <span>{passkeyPromptBody}</span>
+          </section>
+        ) : null}
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -602,6 +624,18 @@ const secondaryActionStyle = {
   color: popupTheme.colors.text,
   fontFamily: popupTheme.font.body,
   cursor: "pointer"
+};
+
+const passkeyPromptStyle = {
+  display: "grid",
+  gap: popupTheme.spacing.xs,
+  border: `1px solid ${popupTheme.colors.accentStrong}`,
+  borderRadius: popupTheme.radius.panel,
+  padding: popupTheme.spacing.sm,
+  background: popupTheme.colors.surface,
+  color: popupTheme.colors.text,
+  fontFamily: popupTheme.font.body,
+  lineHeight: 1.45
 };
 
 const messagePanelStyle = {

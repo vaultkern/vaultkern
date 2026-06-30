@@ -278,6 +278,52 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
+  it("uses the interactive timeout while creating a passkey assertion", async () => {
+    vi.useFakeTimers();
+
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 25,
+      interactiveTimeoutMs: 1_000
+    });
+
+    const request = bridge.send({
+      version: 1,
+      command: {
+        type: "create_passkey_assertion",
+        vault_id: "vault-1",
+        relying_party: "google.com",
+        origin: "https://accounts.google.com",
+        credential_id: "credential-1",
+        client_data_json_base64url: "client-data"
+      }
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(port.disconnect).not.toHaveBeenCalled();
+
+    port.emitMessage({
+      type: "error",
+      code: "invalid_request",
+      message: "passkey credential not found: credential-1"
+    });
+
+    await expect(request).resolves.toMatchObject({
+      type: "error",
+      message: "passkey credential not found: credential-1"
+    });
+
+    vi.useRealTimers();
+  });
+
   it("cancels stale preload before serving a new startup session request", async () => {
     const firstPort = createPort();
     const secondPort = createPort();
@@ -386,12 +432,9 @@ describe("createNativeMessagingBridge", () => {
     });
   });
 
-  it("serves startup requests before stale popup read requests", async () => {
-    const firstPort = createPort();
-    const secondPort = createPort();
-    const connectNative = vi.fn(() =>
-      connectNative.mock.calls.length === 1 ? firstPort : secondPort
-    );
+  it("serves startup requests before queued popup read requests without disconnecting the active port", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
         connectNative
@@ -404,7 +447,6 @@ describe("createNativeMessagingBridge", () => {
       version: 1,
       command: { type: "list_entries", vault_id: "vault-1" }
     });
-    const staleEntriesFailure = staleEntries.catch((error: unknown) => error);
     const staleCandidates = bridge.send({
       version: 1,
       command: { type: "find_fill_candidates", vault_id: "vault-1", url: "https://example.com" }
@@ -414,18 +456,27 @@ describe("createNativeMessagingBridge", () => {
       command: { type: "get_session_state" }
     });
 
-    await expect(staleEntriesFailure).resolves.toMatchObject({
-      code: "native_port_disconnected",
-      message: "native read canceled by startup request"
+    expect(port.postMessage).toHaveBeenCalledTimes(1);
+    expect(port.postMessage).toHaveBeenLastCalledWith({
+      version: 1,
+      command: { type: "list_entries", vault_id: "vault-1" }
     });
-    expect(firstPort.disconnect).toHaveBeenCalledTimes(1);
-    expect(connectNative).toHaveBeenCalledTimes(2);
-    expect(secondPort.postMessage).toHaveBeenCalledWith({
+    expect(port.disconnect).not.toHaveBeenCalled();
+    expect(connectNative).toHaveBeenCalledTimes(1);
+
+    port.emitMessage({ type: "entry_list", entries: [] });
+
+    await expect(staleEntries).resolves.toEqual({
+      type: "entry_list",
+      entries: []
+    });
+    expect(port.postMessage).toHaveBeenCalledTimes(2);
+    expect(port.postMessage).toHaveBeenLastCalledWith({
       version: 1,
       command: { type: "get_session_state" }
     });
 
-    secondPort.emitMessage({
+    port.emitMessage({
       type: "session_state",
       unlocked: true,
       activeVaultId: "vault-1",
@@ -436,17 +487,78 @@ describe("createNativeMessagingBridge", () => {
       type: "session_state",
       activeVaultId: "vault-1"
     });
-    expect(secondPort.postMessage).toHaveBeenCalledTimes(2);
-    expect(secondPort.postMessage).toHaveBeenLastCalledWith({
+    expect(port.postMessage).toHaveBeenCalledTimes(3);
+    expect(port.postMessage).toHaveBeenLastCalledWith({
       version: 1,
       command: { type: "find_fill_candidates", vault_id: "vault-1", url: "https://example.com" }
     });
 
-    secondPort.emitMessage({ type: "entry_list", entries: [] });
+    port.emitMessage({ type: "entry_list", entries: [] });
 
     await expect(staleCandidates).resolves.toEqual({
       type: "entry_list",
       entries: []
+    });
+  });
+
+  it("keeps an active native port alive when a startup session request arrives during a read", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    const candidates = bridge.send({
+      version: 1,
+      command: {
+        type: "find_fill_candidates",
+        vault_id: "vault-1",
+        url: "https://accounts.google.com"
+      }
+    });
+    const session = bridge.send({
+      version: 1,
+      command: { type: "get_session_state" }
+    });
+
+    expect(port.postMessage).toHaveBeenCalledTimes(1);
+    expect(port.postMessage).toHaveBeenLastCalledWith({
+      version: 1,
+      command: {
+        type: "find_fill_candidates",
+        vault_id: "vault-1",
+        url: "https://accounts.google.com"
+      }
+    });
+
+    port.emitMessage({ type: "entry_list", entries: [] });
+
+    await expect(candidates).resolves.toEqual({
+      type: "entry_list",
+      entries: []
+    });
+    expect(port.disconnect).not.toHaveBeenCalled();
+    expect(connectNative).toHaveBeenCalledTimes(1);
+    expect(port.postMessage).toHaveBeenCalledTimes(2);
+    expect(port.postMessage).toHaveBeenLastCalledWith({
+      version: 1,
+      command: { type: "get_session_state" }
+    });
+
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+
+    await expect(session).resolves.toMatchObject({
+      type: "session_state",
+      activeVaultId: "vault-1"
     });
   });
 

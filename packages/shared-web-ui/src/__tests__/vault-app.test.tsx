@@ -41,6 +41,8 @@ function createVaultSelectionMethods() {
     updateEntryFields: vi.fn(),
     deleteEntry: vi.fn(),
     saveVault: vi.fn(),
+    setEntryPasskey: vi.fn(),
+    clearEntryPasskey: vi.fn(),
     retryVaultSourceSync: vi.fn(),
     getDatabaseSettings: vi.fn(async () => ({
       type: "database_settings" as const,
@@ -251,6 +253,7 @@ it("shows browser settings and saves local extension preferences", async () => {
   fireEvent.change(screen.getByLabelText("Clear Clipboard Seconds"), {
     target: { value: "12" }
   });
+  fireEvent.click(screen.getByLabelText("VaultKern passkey provider"));
   fireEvent.click(screen.getByRole("button", { name: "中文" }));
   fireEvent.click(screen.getByRole("button", { name: "Save Browser Settings" }));
 
@@ -259,7 +262,8 @@ it("shows browser settings and saves local extension preferences", async () => {
       recentVaultLimit: 4,
       language: "zh-CN",
       idleLockMinutes: 7,
-      clearClipboardSeconds: 12
+      clearClipboardSeconds: 12,
+      passkeyProviderEnabled: true
     });
   });
   expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
@@ -824,11 +828,147 @@ it("shows custom fields, attachments, and protected field markers in entry detai
   expect(screen.queryByText("Protected Fields")).not.toBeInTheDocument();
   expect(screen.queryByText("Password is protected")).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "Show RecoveryCode" }));
+  const revealRecoveryCode = screen.getByRole("button", {
+    name: "Show RecoveryCode"
+  });
+  fireEvent.click(revealRecoveryCode);
 
   await waitFor(() => {
     expect(screen.getByText("one-time-code")).toBeInTheDocument();
+  }, { timeout: 3000 });
+});
+
+it("manages an entry passkey from the detail pane", async () => {
+  const originalPasskey = {
+    username: "alice@example.com",
+    credentialId: "credential-old",
+    generatedUserId: "generated-user",
+    privateKeyPem: "-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----",
+    relyingParty: "example.com",
+    userHandle: "user-handle",
+    backupEligible: true,
+    backupState: false
+  };
+  const editedPasskey = {
+    ...originalPasskey,
+    credentialId: "credential-new",
+    backupState: true
+  };
+  const setEntryPasskey = vi.fn(async () => ({
+    type: "entry_detail" as const,
+    id: "entry-1",
+    title: "GitHub",
+    username: "alice",
+    password: "secret",
+    url: "https://github.com",
+    notes: "",
+    totp: null,
+    totpUri: null,
+    passkey: editedPasskey,
+    customFields: [],
+    attachments: []
+  }));
+  const clearEntryPasskey = vi.fn(async () => ({
+    type: "entry_detail" as const,
+    id: "entry-1",
+    title: "GitHub",
+    username: "alice",
+    password: "secret",
+    url: "https://github.com",
+    notes: "",
+    totp: null,
+    totpUri: null,
+    passkey: null,
+    customFields: [],
+    attachments: []
+  }));
+  const saveVault = vi.fn(async () => undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    listGroups: vi.fn().mockResolvedValue({
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "GitHub",
+        username: "alice",
+        url: "https://github.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn().mockResolvedValue({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "GitHub",
+      username: "alice",
+      password: "secret",
+      url: "https://github.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      passkey: originalPasskey,
+      customFields: [],
+      attachments: []
+    }),
+    setEntryPasskey,
+    clearEntryPasskey,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "GitHub" }));
+
+  expect(await screen.findByText("Passkey")).toBeInTheDocument();
+  expect(screen.getByText("example.com")).toBeInTheDocument();
+  expect(screen.queryByText("credential-old")).not.toBeInTheDocument();
+  expect(screen.queryByText("generated-user")).not.toBeInTheDocument();
+  expect(screen.queryByText("user-handle")).not.toBeInTheDocument();
+  expect(screen.queryByText(/BEGIN PRIVATE KEY/)).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Show Credential ID" }));
+  expect(screen.getByText("credential-old")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Edit passkey" }));
+  expect(screen.getByLabelText("Private Key PEM")).toHaveAttribute("type", "password");
+  expect(screen.getByDisplayValue("credential-old")).toHaveAttribute("type", "password");
+  expect(screen.getByDisplayValue("generated-user")).toHaveAttribute("type", "password");
+  expect(screen.getByDisplayValue("user-handle")).toHaveAttribute("type", "password");
+  fireEvent.change(screen.getByLabelText("Credential ID"), {
+    target: { value: "credential-new" }
   });
+  fireEvent.click(screen.getByLabelText("Backup state"));
+  fireEvent.click(screen.getByRole("button", { name: "Save passkey" }));
+
+  await waitFor(() => {
+    expect(setEntryPasskey).toHaveBeenCalledWith(
+      "vault-1",
+      "entry-1",
+      editedPasskey
+    );
+  });
+  expect(saveVault).toHaveBeenCalledWith("vault-1");
+  await waitFor(() => {
+    expect(screen.queryByText("credential-new")).not.toBeInTheDocument();
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Show Credential ID" }));
+  expect(await screen.findByText("credential-new")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Clear passkey" }));
+
+  await waitFor(() => {
+    expect(clearEntryPasskey).toHaveBeenCalledWith("vault-1", "entry-1");
+  });
+  expect(saveVault).toHaveBeenCalledTimes(2);
+  expect(await screen.findByText("No passkey.")).toBeInTheDocument();
 });
 
 it("renders a setup empty state and starts the local add flow", async () => {

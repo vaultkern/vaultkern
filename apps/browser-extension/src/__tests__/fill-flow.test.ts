@@ -48,6 +48,7 @@ afterEach(() => {
 
 beforeEach(() => {
   document.body.innerHTML = "";
+  window.history.replaceState(null, "", "/");
   delete (globalThis as typeof globalThis & { chrome?: unknown }).chrome;
   runtimeClientMocks.getSessionState.mockReset();
   runtimeClientMocks.listRecentVaults.mockReset();
@@ -802,6 +803,159 @@ describe("PopupShell fill flow", () => {
         password: "demo-password",
         keyFilePath: "/tmp/demo.keyx"
       });
+    });
+  });
+
+  it("shows a passkey unlock prompt when opened for a WebAuthn request", async () => {
+    window.history.replaceState(null, "", "/popup.html?webauthn=unlock");
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(
+      await screen.findByText("Passkey request waiting")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Unlock your vault to continue the website passkey request.")
+    ).toBeInTheDocument();
+  });
+
+  it("notifies the background page after unlocking for a WebAuthn request", async () => {
+    window.history.replaceState(null, "", "/popup.html?webauthn=unlock");
+    const sendMessage = vi.fn(async () => undefined);
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: vi.fn()
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.change(await screen.findByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_unlock_complete"
+      });
+    });
+  });
+
+  it("closes the temporary WebAuthn unlock window after unlocking", async () => {
+    window.history.replaceState(null, "", "/popup.html?webauthn=unlock");
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: vi.fn(async () => undefined)
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.change(await screen.findByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    await waitFor(() => {
+      expect(closeWindow).toHaveBeenCalledTimes(1);
     });
   });
 

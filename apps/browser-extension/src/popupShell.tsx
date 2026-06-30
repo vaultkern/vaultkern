@@ -59,6 +59,33 @@ export async function activeSiteLabel() {
   }
 }
 
+function notifyUnlockComplete() {
+  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+  const sendMessage = chromeApi?.runtime?.sendMessage;
+  const shouldClose =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("webauthn") === "unlock";
+
+  function closeUnlockPrompt() {
+    if (shouldClose) {
+      window.close();
+    }
+  }
+
+  if (typeof sendMessage !== "function") {
+    closeUnlockPrompt();
+    return;
+  }
+
+  void Promise.resolve(
+    sendMessage.call(chromeApi.runtime, {
+      type: "vaultkern_unlock_complete"
+    })
+  )
+    .catch(() => undefined)
+    .finally(closeUnlockPrompt);
+}
+
 export function PopupShell() {
   return (
     <PopupApp
@@ -68,6 +95,7 @@ export function PopupShell() {
       activeSite={activeSiteLabel}
       findCandidates={requestFillCandidates}
       fillEntry={fillSelectedEntry}
+      onUnlockComplete={notifyUnlockComplete}
     />
   );
 }

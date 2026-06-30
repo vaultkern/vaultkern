@@ -1,11 +1,12 @@
 use std::io::{Read, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use anyhow::{Context, Result};
 use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse};
 
 use crate::Runtime;
 
-pub fn run_stdio_loop(mut runtime: Runtime) -> Result<()> {
+pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
     configure_stdio_for_native_messaging()?;
 
     let stdin = std::io::stdin();
@@ -13,21 +14,52 @@ pub fn run_stdio_loop(mut runtime: Runtime) -> Result<()> {
     let mut stdin = stdin.lock();
     let mut stdout = stdout.lock();
 
+    run_loop_with_io(runtime, &mut stdin, &mut stdout)
+}
+
+fn run_loop_with_io(
+    mut runtime: Runtime,
+    stdin: &mut impl Read,
+    stdout: &mut impl Write,
+) -> Result<()> {
     loop {
-        let envelope = read_native_message::<ProtocolEnvelope>(&mut stdin)?;
+        let Some(envelope) = read_native_message_or_eof::<ProtocolEnvelope>(stdin)? else {
+            return Ok(());
+        };
         let response = handle_command_response(&mut runtime, envelope.command);
-        write_native_message(&mut stdout, &response)?;
+        write_native_message(stdout, &response)?;
     }
 }
 
 fn handle_command_response(runtime: &mut Runtime, command: RuntimeCommand) -> RuntimeResponse {
-    match runtime.handle(command) {
-        Ok(response) => response,
-        Err(error) => RuntimeResponse::Error(ErrorDto {
+    command_response_from_result(|| runtime.handle(command))
+}
+
+fn command_response_from_result(run: impl FnOnce() -> Result<RuntimeResponse>) -> RuntimeResponse {
+    match catch_unwind(AssertUnwindSafe(run)) {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => RuntimeResponse::Error(ErrorDto {
             code: "invalid_request".into(),
             message: format_error_chain(&error),
         }),
+        Err(payload) => RuntimeResponse::Error(ErrorDto {
+            code: "panic".into(),
+            message: format!(
+                "runtime command panicked: {}",
+                panic_payload_message(payload.as_ref())
+            ),
+        }),
     }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_owned();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "unknown panic".into()
 }
 
 pub(crate) fn format_error_chain(error: &anyhow::Error) -> String {
@@ -38,17 +70,32 @@ pub(crate) fn format_error_chain(error: &anyhow::Error) -> String {
         .join(": ")
 }
 
-fn read_native_message<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Result<T> {
+fn read_native_message_or_eof<T: serde::de::DeserializeOwned>(
+    reader: &mut impl Read,
+) -> Result<Option<T>> {
     let mut length = [0_u8; 4];
-    reader
-        .read_exact(&mut length)
-        .context("failed to read message length")?;
+    let mut read = 0;
+    while read < length.len() {
+        let count = reader
+            .read(&mut length[read..])
+            .context("failed to read message length")?;
+        if count == 0 {
+            if read == 0 {
+                return Ok(None);
+            }
+            anyhow::bail!("failed to read message length");
+        }
+        read += count;
+    }
+
     let length = u32::from_le_bytes(length) as usize;
     let mut payload = vec![0_u8; length];
     reader
         .read_exact(&mut payload)
         .context("failed to read message payload")?;
-    serde_json::from_slice(&payload).context("failed to decode native message")
+    serde_json::from_slice(&payload)
+        .context("failed to decode native message")
+        .map(Some)
 }
 
 fn write_native_message(writer: &mut impl Write, response: &RuntimeResponse) -> Result<()> {
@@ -98,13 +145,25 @@ mod tests {
     use vaultkern_runtime_protocol::{RuntimeCommand, RuntimeResponse};
 
     use super::{
-        configure_stdio_for_native_messaging, format_error_chain, handle_command_response,
+        command_response_from_result, configure_stdio_for_native_messaging, format_error_chain,
+        handle_command_response, run_loop_with_io,
     };
     use crate::Runtime;
 
     #[test]
     fn configures_stdio_before_native_message_loop() {
         configure_stdio_for_native_messaging().expect("configure stdio for native messaging");
+    }
+
+    #[test]
+    fn native_message_loop_treats_clean_eof_as_shutdown() {
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+
+        run_loop_with_io(Runtime::for_tests(), &mut input, &mut output)
+            .expect("clean EOF should shut down without an error");
+
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -130,6 +189,21 @@ mod tests {
         assert!(
             error.message.contains("No such file")
                 || error.message.contains("cannot find the path")
+        );
+    }
+
+    #[test]
+    fn command_response_converts_panics_to_protocol_errors() {
+        let response = command_response_from_result(|| -> anyhow::Result<RuntimeResponse> {
+            panic!("passkey assertion panic");
+        });
+
+        assert_eq!(
+            response,
+            RuntimeResponse::Error(vaultkern_runtime_protocol::ErrorDto {
+                code: "panic".into(),
+                message: "runtime command panicked: passkey assertion panic".into(),
+            })
         );
     }
 
