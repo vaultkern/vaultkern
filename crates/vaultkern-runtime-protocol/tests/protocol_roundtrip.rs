@@ -3,11 +3,12 @@ use vaultkern_runtime_protocol::{
     DatabaseKdfSettingsDto, DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto,
     DatabaseRecycleBinSettingsDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
     EntryAttachmentContentDto, EntryDetailDto, EntryHistoryDetailDto, EntryHistoryItemDto,
-    EntryHistoryListDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto,
-    MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
-    OneDriveItemListDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-    SaveVaultStatusDto, SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
-    VaultSourceStatusDto,
+    EntryHistoryListDto, EntryPasskeyDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto,
+    GroupTreeDto, MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
+    OneDriveItemListDto, PasskeyAssertionDto, PasskeyCredentialCandidateDto,
+    PasskeyCredentialListDto, PasskeyCredentialStatusDto, PasskeyRegistrationDto, ProtocolEnvelope,
+    RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
+    VaultHandleDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
 };
 
 #[test]
@@ -399,6 +400,17 @@ fn protocol_roundtrips_entry_detail_response_shape() {
             "otpauth://totp/Test:user@example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Test"
                 .into(),
         ),
+        passkey: Some(EntryPasskeyDto {
+            username: "alice@example.com".into(),
+            credential_id: "credential-base64url".into(),
+            generated_user_id: Some("generated-user".into()),
+            private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+                .into(),
+            relying_party: "example.com".into(),
+            user_handle: Some("user-handle".into()),
+            backup_eligible: true,
+            backup_state: false,
+        }),
         field_protection: vaultkern_runtime_protocol::EntryFieldProtectionDto {
             protect_title: false,
             protect_username: true,
@@ -434,6 +446,14 @@ fn protocol_roundtrips_entry_detail_response_shape() {
         object.get("totpUri").unwrap(),
         "otpauth://totp/Test:user@example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Test"
     );
+    let passkey = object.get("passkey").unwrap().as_object().unwrap();
+    assert_eq!(passkey.get("username").unwrap(), "alice@example.com");
+    assert_eq!(passkey.get("credentialId").unwrap(), "credential-base64url");
+    assert_eq!(passkey.get("generatedUserId").unwrap(), "generated-user");
+    assert_eq!(passkey.get("relyingParty").unwrap(), "example.com");
+    assert_eq!(passkey.get("userHandle").unwrap(), "user-handle");
+    assert_eq!(passkey.get("backupEligible").unwrap(), true);
+    assert_eq!(passkey.get("backupState").unwrap(), false);
     let field_protection = object.get("fieldProtection").unwrap().as_object().unwrap();
     assert_eq!(field_protection.get("protectUsername").unwrap(), true);
     assert_eq!(field_protection.get("protectPassword").unwrap(), true);
@@ -448,6 +468,54 @@ fn protocol_roundtrips_entry_detail_response_shape() {
 
     let decoded: RuntimeResponse = serde_json::from_value(json).unwrap();
     assert_eq!(decoded, response);
+}
+
+#[test]
+fn protocol_roundtrips_entry_passkey_commands() {
+    let passkey = EntryPasskeyDto {
+        username: "alice@example.com".into(),
+        credential_id: "credential-base64url".into(),
+        generated_user_id: Some("generated-user".into()),
+        private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("user-handle".into()),
+        backup_eligible: true,
+        backup_state: false,
+    };
+    let set = ProtocolEnvelope::new(RuntimeCommand::SetEntryPasskey {
+        vault_id: "vault-1".into(),
+        entry_id: "entry-1".into(),
+        passkey: passkey.clone(),
+    });
+    let clear = ProtocolEnvelope::new(RuntimeCommand::ClearEntryPasskey {
+        vault_id: "vault-1".into(),
+        entry_id: "entry-1".into(),
+    });
+
+    let set_json = serde_json::to_value(&set).unwrap();
+    assert_eq!(
+        set_json["command"]["type"],
+        serde_json::json!("set_entry_passkey")
+    );
+    assert_eq!(
+        set_json["command"]["passkey"]["credentialId"],
+        serde_json::json!("credential-base64url")
+    );
+
+    let clear_json = serde_json::to_value(&clear).unwrap();
+    assert_eq!(
+        clear_json["command"]["type"],
+        serde_json::json!("clear_entry_passkey")
+    );
+
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(set_json).unwrap(),
+        set
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(clear_json).unwrap(),
+        clear
+    );
 }
 
 #[test]
@@ -722,6 +790,266 @@ fn protocol_roundtrips_entry_attachment_commands() {
             command
         );
     }
+}
+
+#[test]
+fn protocol_roundtrips_passkey_assertion_command_and_response() {
+    let command = ProtocolEnvelope::new(RuntimeCommand::CreatePasskeyAssertion {
+        vault_id: "vault-1".into(),
+        relying_party: "example.com".into(),
+        origin: "https://example.com".into(),
+        credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+        user_presence_verified: true,
+        related_origin_verified: false,
+        client_data_json_base64url: "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0".into(),
+    });
+
+    let command_json = serde_json::to_value(&command).unwrap();
+    assert_eq!(
+        command_json["command"]["type"],
+        serde_json::json!("create_passkey_assertion")
+    );
+    assert_eq!(
+        command_json["command"]["relying_party"],
+        serde_json::json!("example.com")
+    );
+    assert_eq!(
+        command_json["command"]["client_data_json_base64url"],
+        serde_json::json!("eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0")
+    );
+    assert_eq!(
+        command_json["command"]["user_presence_verified"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
+        command
+    );
+
+    let response = RuntimeResponse::PasskeyAssertion(PasskeyAssertionDto {
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        authenticator_data_base64url: "authenticator-data".into(),
+        client_data_json_base64url: "client-data-json".into(),
+        signature_base64url: "signature".into(),
+        user_handle_base64url: Some("dXNlci0x".into()),
+        backup_eligible: true,
+        backup_state: false,
+    });
+
+    let response_json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        response_json["type"],
+        serde_json::json!("passkey_assertion")
+    );
+    assert_eq!(
+        response_json["credentialId"],
+        serde_json::json!("Y3JlZGVudGlhbC0x")
+    );
+    assert_eq!(
+        response_json["userHandleBase64url"],
+        serde_json::json!("dXNlci0x")
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn protocol_roundtrips_passkey_registration_command_and_response() {
+    let command = ProtocolEnvelope::new(RuntimeCommand::CreatePasskeyRegistration {
+        vault_id: "vault-1".into(),
+        relying_party: "example.com".into(),
+        origin: "https://example.com".into(),
+        user_name: "alice@example.com".into(),
+        user_display_name: Some("Alice".into()),
+        user_handle_base64url: "dXNlci0x".into(),
+        related_origin_verified: false,
+        client_data_json_base64url: "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIn0".into(),
+    });
+
+    let command_json = serde_json::to_value(&command).unwrap();
+    assert_eq!(
+        command_json["command"]["type"],
+        serde_json::json!("create_passkey_registration")
+    );
+    assert_eq!(
+        command_json["command"]["user_name"],
+        serde_json::json!("alice@example.com")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
+        command
+    );
+
+    let rollback = ProtocolEnvelope::new(RuntimeCommand::RollbackPasskeyRegistration {
+        vault_id: "vault-1".into(),
+        entry_id: "entry-1".into(),
+        credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+        created: false,
+    });
+    let rollback_json = serde_json::to_value(&rollback).unwrap();
+    assert_eq!(
+        rollback_json["command"]["type"],
+        serde_json::json!("rollback_passkey_registration")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(rollback_json).unwrap(),
+        rollback
+    );
+    let commit = ProtocolEnvelope::new(RuntimeCommand::CommitPasskeyRegistration {
+        vault_id: "vault-1".into(),
+        entry_id: "entry-1".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+    });
+    let commit_json = serde_json::to_value(&commit).unwrap();
+    assert_eq!(
+        commit_json["command"]["type"],
+        serde_json::json!("commit_passkey_registration")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(commit_json).unwrap(),
+        commit
+    );
+    let legacy_rollback_json = serde_json::json!({
+        "version": 1,
+        "command": {
+            "type": "rollback_passkey_registration",
+            "vault_id": "vault-1",
+            "entry_id": "entry-1",
+            "created": false
+        }
+    });
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(legacy_rollback_json).unwrap(),
+        ProtocolEnvelope::new(RuntimeCommand::RollbackPasskeyRegistration {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+            credential_id: None,
+            created: false,
+        })
+    );
+
+    let response = RuntimeResponse::PasskeyRegistration(PasskeyRegistrationDto {
+        entry_id: "entry-1".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        created: true,
+        authenticator_data_base64url: "authenticator-data".into(),
+        attestation_object_base64url: "attestation-object".into(),
+        client_data_json_base64url: "client-data-json".into(),
+        public_key_base64url: "public-key".into(),
+        public_key_algorithm: -7,
+        user_handle_base64url: "dXNlci0x".into(),
+    });
+
+    let response_json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        response_json["type"],
+        serde_json::json!("passkey_registration")
+    );
+    assert_eq!(
+        response_json["credentialId"],
+        serde_json::json!("Y3JlZGVudGlhbC0x")
+    );
+    assert_eq!(response_json["created"], serde_json::json!(true));
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn protocol_roundtrips_passkey_credential_status_command_and_response() {
+    let command = ProtocolEnvelope::new(RuntimeCommand::PasskeyCredentialStatus {
+        vault_id: "vault-1".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        relying_party: Some("example.com".into()),
+    });
+
+    let command_json = serde_json::to_value(&command).unwrap();
+    assert_eq!(
+        command_json["command"]["type"],
+        serde_json::json!("passkey_credential_status")
+    );
+    assert_eq!(
+        command_json["command"]["credential_id"],
+        serde_json::json!("Y3JlZGVudGlhbC0x")
+    );
+    assert_eq!(
+        command_json["command"]["relying_party"],
+        serde_json::json!("example.com")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
+        command
+    );
+
+    let response = RuntimeResponse::PasskeyCredentialStatus(PasskeyCredentialStatusDto {
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        exists: true,
+    });
+
+    let response_json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        response_json["type"],
+        serde_json::json!("passkey_credential_status")
+    );
+    assert_eq!(response_json["exists"], serde_json::json!(true));
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn protocol_roundtrips_passkey_credential_list_command_and_response() {
+    let command = ProtocolEnvelope::new(RuntimeCommand::ListPasskeyCredentials {
+        vault_id: "vault-1".into(),
+        relying_party: "example.com".into(),
+    });
+
+    let command_json = serde_json::to_value(&command).unwrap();
+    assert_eq!(
+        command_json["command"]["type"],
+        serde_json::json!("list_passkey_credentials")
+    );
+    assert_eq!(
+        command_json["command"]["relying_party"],
+        serde_json::json!("example.com")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
+        command
+    );
+
+    let response = RuntimeResponse::PasskeyCredentialList(PasskeyCredentialListDto {
+        credentials: vec![
+            PasskeyCredentialCandidateDto {
+                credential_id: "Y3JlZGVudGlhbC0x".into(),
+                username: "alice@example.com".into(),
+                user_handle: Some("dXNlci0x".into()),
+            },
+            PasskeyCredentialCandidateDto {
+                credential_id: "Y3JlZGVudGlhbC0y".into(),
+                username: "bob@example.com".into(),
+                user_handle: None,
+            },
+        ],
+    });
+
+    let response_json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        response_json["type"],
+        serde_json::json!("passkey_credential_list")
+    );
+    assert_eq!(
+        response_json["credentials"][0]["username"],
+        "alice@example.com"
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
+        response
+    );
 }
 
 #[test]

@@ -5,10 +5,11 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import playwright from "playwright";
 
 import { E2E_EXTENSION_ID } from "../scripts/manifestBuild.mjs";
+import { SMOKE_HOST, smokeUrl } from "./smokeUrls.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const extensionRoot = resolve(__dirname, "..");
@@ -49,9 +50,9 @@ function contentType(path) {
   }
 }
 
-async function startSmokeServer() {
+export async function startSmokeServer() {
   const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    const url = new URL(request.url ?? "/", `http://${SMOKE_HOST}`);
     const name = basename(url.pathname === "/" ? "basic-login.html" : url.pathname);
     const file = join(__dirname, name);
 
@@ -65,14 +66,16 @@ async function startSmokeServer() {
     createReadStream(file).pipe(response);
   });
 
-  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  await new Promise((resolvePromise) => server.listen(0, SMOKE_HOST, resolvePromise));
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("failed to bind smoke server");
   }
 
   return {
-    url: `http://127.0.0.1:${address.port}/basic-login.html`,
+    url: smokeUrl(address.port, "basic-login.html"),
+    passkeyRegisterUrl: smokeUrl(address.port, "passkey-register.html"),
+    passkeyUrl: smokeUrl(address.port, "passkey-login.html"),
     close: () => new Promise((resolvePromise) => server.close(resolvePromise))
   };
 }
@@ -89,6 +92,37 @@ async function writeNativeManifest(workDir) {
   const destination = join(profileHostDir, "com.vaultkern.runtime.json");
   await writeFile(destination, manifest, "utf8");
   return destination;
+}
+
+async function enablePasskeyProvider(extensionPage) {
+  await extensionPage.evaluate(
+    async (settings) => {
+      await chrome.storage.local.set({
+        vaultkernExtensionSettings: settings,
+        vaultkernWebAuthnDebugEnabled: true
+      });
+    },
+    {
+      recentVaultLimit: 10,
+      language: "en",
+      idleLockMinutes: 10,
+      clearClipboardSeconds: 30,
+      passkeyProviderEnabled: true
+    }
+  );
+  await extensionPage.waitForFunction(
+    async () => {
+      const { vaultkernWebAuthnDebug } = await chrome.storage.local.get(
+        "vaultkernWebAuthnDebug"
+      );
+      return (
+        Array.isArray(vaultkernWebAuthnDebug) &&
+        vaultkernWebAuthnDebug.some((entry) => entry?.event === "page_hook_registered")
+      );
+    },
+    undefined,
+    { timeout: 15_000 }
+  );
 }
 
 async function sendCommand(extensionPage, command, timeout = 60_000) {
@@ -116,6 +150,13 @@ async function sendCommand(extensionPage, command, timeout = 60_000) {
   }
 
   return wrapped.response;
+}
+
+async function approvePasskeyPrompt(context) {
+  const prompt = await context.waitForEvent("page", { timeout: 15_000 });
+  await prompt.waitForLoadState("domcontentloaded");
+  await prompt.getByRole("button", { name: "Continue passkey request" }).click();
+  await prompt.waitForEvent("close", { timeout: 5_000 }).catch(() => {});
 }
 
 async function main() {
@@ -209,11 +250,15 @@ async function main() {
     await page.goto(server.url);
     await extensionPage.evaluate(
       async ({ serverUrl, username, entryPassword }) => {
-        const tabs = await chrome.tabs.query({ url: serverUrl });
-        if (!tabs[0]?.id) {
+        const smokeUrl = new URL(serverUrl);
+        const tabs = await chrome.tabs.query({
+          url: `${smokeUrl.protocol}//${smokeUrl.hostname}/*`
+        });
+        const tab = tabs.find((candidate) => candidate.url === serverUrl);
+        if (!tab?.id) {
           throw new Error("smoke tab not found");
         }
-        await chrome.tabs.sendMessage(tabs[0].id, {
+        await chrome.tabs.sendMessage(tab.id, {
           type: "fill_entry_detail",
           username,
           password: entryPassword
@@ -239,6 +284,123 @@ async function main() {
       throw new Error(`unexpected submit result: ${submitted}`);
     }
 
+    await enablePasskeyProvider(extensionPage);
+
+    const passkeyRegisterPage = await context.newPage();
+    await passkeyRegisterPage.goto(server.passkeyRegisterUrl);
+    await passkeyRegisterPage.evaluate(() => {
+      globalThis.__vaultkernWebAuthnMessages = [];
+      window.addEventListener("message", (event) => {
+        if (event.data?.type === "vaultkern_webauthn_page_request") {
+          globalThis.__vaultkernWebAuthnMessages.push(event.data);
+        }
+      });
+    });
+    const passkeyRegisterReady = await passkeyRegisterPage.evaluate(() => ({
+      hasButton: document.querySelector("#vaultkern-passkey-register") != null,
+      publicKeyCredentialAvailable: typeof PublicKeyCredential !== "undefined",
+      hookInstalled: Boolean(
+        navigator.credentials?.__vaultkernWebAuthnHookInstalled
+      ),
+      createSource: String(navigator.credentials?.create).slice(0, 200)
+    }));
+    if (!passkeyRegisterReady.hasButton) {
+      throw new Error("passkey register smoke page did not expose the create button");
+    }
+    const passkeyRegistrationApproval = approvePasskeyPrompt(context);
+    await passkeyRegisterPage.click("#vaultkern-passkey-register");
+    await passkeyRegistrationApproval;
+    await passkeyRegisterPage.waitForFunction(
+      () => document.querySelector("#vaultkern-passkey-register-result")?.value
+    );
+    const passkeyRegisterResult = await passkeyRegisterPage
+      .locator("#vaultkern-passkey-register-result")
+      .evaluate((node) => node.value || node.textContent);
+    if (!passkeyRegisterResult?.startsWith("credential:")) {
+      const webAuthnDebug = await extensionPage
+        .evaluate(async () => await chrome.storage.local.get("vaultkernWebAuthnDebug"))
+        .catch((error) => ({ readError: String(error?.message ?? error) }));
+      const pageProbe = await passkeyRegisterPage
+        .evaluate(() => ({
+          hookInstalled: Boolean(
+            navigator.credentials?.__vaultkernWebAuthnHookInstalled
+          ),
+          createSource: String(navigator.credentials?.create).slice(0, 200),
+          messages: globalThis.__vaultkernWebAuthnMessages ?? []
+        }))
+        .catch((error) => ({ readError: String(error?.message ?? error) }));
+      throw new Error(
+        `unexpected passkey register result: ${passkeyRegisterResult}\n` +
+          `WebAuthn debug: ${JSON.stringify(webAuthnDebug, null, 2)}\n` +
+          `Page probe: ${JSON.stringify(pageProbe, null, 2)}`
+      );
+    }
+    const registeredPasskeyCredentialId = passkeyRegisterResult.slice("credential:".length);
+
+    await sendCommand(extensionPage, { type: "lock_session" });
+    const reopened = await sendCommand(extensionPage, {
+      type: "open_local_vault",
+      path: vaultPath
+    });
+    await sendCommand(extensionPage, {
+      type: "unlock_with_password",
+      vault_id: reopened.vaultId,
+      password
+    });
+
+    const passkeyPage = await context.newPage();
+    await passkeyPage.goto(
+      `${server.passkeyUrl}?credential=${encodeURIComponent(registeredPasskeyCredentialId)}`
+    );
+    await passkeyPage.evaluate(() => {
+      globalThis.__vaultkernWebAuthnMessages = [];
+      window.addEventListener("message", (event) => {
+        if (event.data?.type === "vaultkern_webauthn_page_request") {
+          globalThis.__vaultkernWebAuthnMessages.push(event.data);
+        }
+      });
+    });
+    const passkeySmokeReady = await passkeyPage.evaluate(() => ({
+      hasButton: document.querySelector("#vaultkern-passkey-login") != null,
+      publicKeyCredentialAvailable: typeof PublicKeyCredential !== "undefined",
+      hookInstalled: Boolean(
+        navigator.credentials?.__vaultkernWebAuthnHookInstalled
+      ),
+      getSource: String(navigator.credentials?.get).slice(0, 200)
+    }));
+    if (!passkeySmokeReady.hasButton) {
+      throw new Error("passkey smoke page did not expose the login button");
+    }
+    const passkeyApproval = approvePasskeyPrompt(context);
+    await passkeyPage.click("#vaultkern-passkey-login");
+    await passkeyApproval;
+    await passkeyPage.waitForFunction(
+      () => document.querySelector("#vaultkern-passkey-result")?.value
+    );
+    const passkeyResult = await passkeyPage
+      .locator("#vaultkern-passkey-result")
+      .evaluate((node) => node.value || node.textContent);
+    const expectedPasskeyResult = `credential:${registeredPasskeyCredentialId}`;
+    if (passkeyResult !== expectedPasskeyResult) {
+      const webAuthnDebug = await extensionPage
+        .evaluate(async () => await chrome.storage.local.get("vaultkernWebAuthnDebug"))
+        .catch((error) => ({ readError: String(error?.message ?? error) }));
+      const pageProbe = await passkeyPage
+        .evaluate(() => ({
+          hookInstalled: Boolean(
+            navigator.credentials?.__vaultkernWebAuthnHookInstalled
+          ),
+          getSource: String(navigator.credentials?.get).slice(0, 200),
+          messages: globalThis.__vaultkernWebAuthnMessages ?? []
+        }))
+        .catch((error) => ({ readError: String(error?.message ?? error) }));
+      throw new Error(
+        `unexpected passkey result: ${passkeyResult}\n` +
+          `WebAuthn debug: ${JSON.stringify(webAuthnDebug, null, 2)}\n` +
+          `Page probe: ${JSON.stringify(pageProbe, null, 2)}`
+      );
+    }
+
     console.log(
       JSON.stringify(
         {
@@ -246,6 +408,11 @@ async function main() {
           extensionId,
           nativeManifest,
           smokeUrl: server.url,
+          passkeyRegisterUrl: server.passkeyRegisterUrl,
+          passkeySmokeUrl: server.passkeyUrl,
+          publicKeyCredentialAvailable: passkeySmokeReady.publicKeyCredentialAvailable,
+          passkeyRegisterResult,
+          passkeyResult,
           submitResult: submitted
         },
         null,
@@ -259,10 +426,12 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  if (String(error?.message ?? error).includes("Executable doesn't exist")) {
-    console.error("Playwright Chromium is missing. Run: npx playwright install chromium");
-  }
-  console.error(error.stack ?? error.message ?? String(error));
-  process.exit(1);
-});
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((error) => {
+    if (String(error?.message ?? error).includes("Executable doesn't exist")) {
+      console.error("Playwright Chromium is missing. Run: npx playwright install chromium");
+    }
+    console.error(error.stack ?? error.message ?? String(error));
+    process.exit(1);
+  });
+}

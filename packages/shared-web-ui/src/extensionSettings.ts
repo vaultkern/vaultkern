@@ -5,6 +5,7 @@ export interface ExtensionSettings {
   language: ExtensionLanguage;
   idleLockMinutes: number;
   clearClipboardSeconds: number;
+  passkeyProviderEnabled: boolean;
 }
 
 export interface ExtensionSettingsStore {
@@ -16,7 +17,8 @@ export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings = {
   recentVaultLimit: 10,
   language: "en",
   idleLockMinutes: 10,
-  clearClipboardSeconds: 30
+  clearClipboardSeconds: 30,
+  passkeyProviderEnabled: false
 };
 
 export function normalizeExtensionSettings(value: unknown): ExtensionSettings {
@@ -29,7 +31,8 @@ export function normalizeExtensionSettings(value: unknown): ExtensionSettings {
     recentVaultLimit: clampInteger(source.recentVaultLimit, 1, 50, 10),
     language: source.language === "zh-CN" ? "zh-CN" : "en",
     idleLockMinutes: clampInteger(source.idleLockMinutes, 0, 240, 10),
-    clearClipboardSeconds: clampInteger(source.clearClipboardSeconds, 0, 3600, 30)
+    clearClipboardSeconds: clampInteger(source.clearClipboardSeconds, 0, 3600, 30),
+    passkeyProviderEnabled: source.passkeyProviderEnabled === true
   };
 }
 

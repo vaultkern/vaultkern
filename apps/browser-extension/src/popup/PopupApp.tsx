@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type {
@@ -28,6 +28,12 @@ type SessionStateLike = Pick<
   "unlocked" | "activeVaultId" | "currentVaultRefId" | "supportsBiometricUnlock"
 >;
 
+type PasskeyCredentialOption = {
+  credentialId: string;
+  username: string;
+  userHandle?: string | null;
+};
+
 export interface PopupClientLike {
   getSessionState(): Promise<SessionStateLike>;
   listRecentVaults(): Promise<VaultReference[]>;
@@ -48,13 +54,56 @@ function limitRecentVaults(vaults: VaultReference[], limit: number) {
     .slice(0, limit);
 }
 
+function passkeyCredentialOptionsFromSearch(): PasskeyCredentialOption[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const encodedOptions = new URLSearchParams(window.location.search).get(
+    "credentialOptions"
+  );
+  if (!encodedOptions) {
+    return [];
+  }
+
+  try {
+    const options = JSON.parse(encodedOptions);
+    if (!Array.isArray(options)) {
+      return [];
+    }
+    return options.flatMap((option) => {
+      const candidate = option as Partial<PasskeyCredentialOption> | null;
+      if (
+        !candidate ||
+        typeof candidate.credentialId !== "string" ||
+        candidate.credentialId.trim() === "" ||
+        typeof candidate.username !== "string"
+      ) {
+        return [];
+      }
+      return [
+        {
+          credentialId: candidate.credentialId,
+          username: candidate.username,
+          userHandle:
+            typeof candidate.userHandle === "string" ? candidate.userHandle : null
+        }
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
 export function PopupApp({
   client,
   findCandidates,
   fillEntry,
   activeSite,
   extensionSettingsStore,
-  renderRuntimeErrorHelp
+  renderRuntimeErrorHelp,
+  onUnlockComplete,
+  onWebAuthnPresenceComplete
 }: {
   client: PopupClientLike;
   findCandidates: (vaultId: string) => Promise<EntrySummary[]>;
@@ -62,6 +111,11 @@ export function PopupApp({
   activeSite: () => Promise<string>;
   extensionSettingsStore?: ExtensionSettingsStore;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
+  onUnlockComplete?: (session: SessionStateLike) => void | Promise<void>;
+  onWebAuthnPresenceComplete?: (
+    session: SessionStateLike,
+    options?: { credentialId?: string }
+  ) => void | Promise<void>;
 }) {
   const [session, setSession] = useState<SessionStateLike | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -87,6 +141,48 @@ export function PopupApp({
     DEFAULT_EXTENSION_SETTINGS
   );
   const currentVaultPreload = useRef<Promise<void> | null>(null);
+  const webAuthnQuickUnlockAttempted = useRef(false);
+  const webAuthnUnlockCompletionSent = useRef(false);
+  const webAuthnMode =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("webauthn");
+  const webAuthnUnlockPrompt = webAuthnMode === "unlock";
+  const webAuthnApprovePrompt = webAuthnMode === "approve";
+  const passkeyCredentialOptions = useMemo(
+    () => (webAuthnApprovePrompt ? passkeyCredentialOptionsFromSearch() : []),
+    [webAuthnApprovePrompt]
+  );
+  const [selectedPasskeyCredentialId, setSelectedPasskeyCredentialId] = useState("");
+
+  function currentVaultForSession() {
+    return (
+      recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
+      recentVaults.find((vault) => vault.isCurrent) ??
+      null
+    );
+  }
+
+  function canQuickUnlockVault(vault: VaultReference | null) {
+    return Boolean(
+      session?.supportsBiometricUnlock &&
+        vault?.supportsQuickUnlock &&
+        vault.availability !== "needs_repair"
+    );
+  }
+
+  function notifyWebAuthnUnlockCompleteOnce(nextSession: SessionStateLike) {
+    if (
+      !webAuthnUnlockPrompt ||
+      webAuthnUnlockCompletionSent.current ||
+      !nextSession.unlocked ||
+      !nextSession.activeVaultId
+    ) {
+      return;
+    }
+
+    webAuthnUnlockCompletionSent.current = true;
+    void Promise.resolve(onUnlockComplete?.(nextSession)).catch(() => undefined);
+  }
 
   function startCurrentVaultPreload() {
     if (currentVaultPreload.current) {
@@ -192,6 +288,12 @@ export function PopupApp({
   }, [recentVaultsLoading, session?.currentVaultRefId, session?.unlocked]);
 
   useEffect(() => {
+    setSelectedPasskeyCredentialId(
+      passkeyCredentialOptions[0]?.credentialId ?? ""
+    );
+  }, [passkeyCredentialOptions]);
+
+  useEffect(() => {
     if (
       typeof window === "undefined" ||
       !session?.unlocked ||
@@ -227,6 +329,15 @@ export function PopupApp({
   }, [client, extensionSettings.idleLockMinutes, session?.unlocked]);
 
   useEffect(() => {
+    if (webAuthnApprovePrompt) {
+      setEntries([]);
+      setCandidates([]);
+      setSelectedEntryId(null);
+      setSelectedDetail(null);
+      setDetailError(null);
+      return;
+    }
+
     if (!session?.unlocked || !session.activeVaultId) {
       setEntries([]);
       setCandidates([]);
@@ -280,10 +391,17 @@ export function PopupApp({
     extensionSettings.language,
     findCandidates,
     session?.activeVaultId,
-    session?.unlocked
+    session?.unlocked,
+    webAuthnApprovePrompt
   ]);
 
   useEffect(() => {
+    if (webAuthnApprovePrompt) {
+      setSelectedDetail(null);
+      setDetailError(null);
+      return;
+    }
+
     if (!session?.activeVaultId || !selectedEntryId) {
       setSelectedDetail(null);
       setDetailError(null);
@@ -314,7 +432,13 @@ export function PopupApp({
     return () => {
       cancelled = true;
     };
-  }, [client, extensionSettings.language, selectedEntryId, session?.activeVaultId]);
+  }, [
+    client,
+    extensionSettings.language,
+    selectedEntryId,
+    session?.activeVaultId,
+    webAuthnApprovePrompt
+  ]);
 
   async function handleUnlock() {
     if (submitting) {
@@ -341,6 +465,7 @@ export function PopupApp({
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");
+      notifyWebAuthnUnlockCompleteOnce(nextSession);
     } catch (unlockFailure) {
       setUnlockError(
         popupErrorMessage(
@@ -376,6 +501,7 @@ export function PopupApp({
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");
+      notifyWebAuthnUnlockCompleteOnce(nextSession);
     } catch (unlockFailure) {
       setUnlockError(
         popupErrorMessage(
@@ -388,6 +514,55 @@ export function PopupApp({
       setSubmitting(false);
     }
   }
+
+  async function handleWebAuthnPresenceApproval() {
+    if (!session?.unlocked || submitting) {
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await Promise.resolve(
+        onWebAuthnPresenceComplete?.(
+          session,
+          selectedPasskeyCredentialId
+            ? { credentialId: selectedPasskeyCredentialId }
+            : undefined
+        )
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  useEffect(() => {
+    if (session) {
+      notifyWebAuthnUnlockCompleteOnce(session);
+    }
+  }, [session, webAuthnUnlockPrompt]);
+
+  useEffect(() => {
+    if (
+      !webAuthnUnlockPrompt ||
+      webAuthnQuickUnlockAttempted.current ||
+      submitting ||
+      recentVaultsLoading ||
+      !session ||
+      session.unlocked ||
+      !canQuickUnlockVault(currentVaultForSession())
+    ) {
+      return;
+    }
+
+    webAuthnQuickUnlockAttempted.current = true;
+    void handleQuickUnlock();
+  }, [
+    recentVaults,
+    recentVaultsLoading,
+    session,
+    submitting,
+    webAuthnUnlockPrompt
+  ]);
 
   async function handleOpenManager() {
     const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
@@ -456,22 +631,33 @@ export function PopupApp({
   if (!session.unlocked) {
     const text = (key: Parameters<typeof translate>[1]) =>
       translate(extensionSettings.language, key);
-    const currentVault =
-      recentVaults.find((vault) => vault.vaultRefId === session.currentVaultRefId) ??
-      recentVaults.find((vault) => vault.isCurrent) ??
-      null;
+    const currentVault = currentVaultForSession();
     const needsRepair = currentVault?.availability === "needs_repair";
     const canUnlockCurrentVault = Boolean(currentVault || session.currentVaultRefId);
-    const canQuickUnlock = Boolean(
-      session.supportsBiometricUnlock &&
-        currentVault?.supportsQuickUnlock &&
-        !needsRepair
-    );
+    const passkeyPromptTitle =
+      extensionSettings.language === "zh-CN"
+        ? "通行密钥请求等待中"
+        : "Passkey request waiting";
+    const passkeyPromptBody =
+      siteLabel === "No active site"
+        ? extensionSettings.language === "zh-CN"
+          ? "请解锁数据库以继续当前网站的通行密钥请求。"
+          : "Unlock your vault to continue the website passkey request."
+        : extensionSettings.language === "zh-CN"
+          ? `请解锁数据库以继续 ${siteLabel} 的通行密钥请求。`
+          : `Unlock your vault to continue the passkey request for ${siteLabel}.`;
+    const canQuickUnlock = canQuickUnlockVault(currentVault);
 
     return (
       <I18nProvider language={extensionSettings.language}>
       <div style={shellStyle}>
         <PopupStatusStrip siteLabel={siteLabel} unlocked={false} />
+        {webAuthnUnlockPrompt ? (
+          <section style={passkeyPromptStyle} aria-live="polite">
+            <strong>{passkeyPromptTitle}</strong>
+            <span>{passkeyPromptBody}</span>
+          </section>
+        ) : null}
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -567,6 +753,78 @@ export function PopupApp({
     );
   }
 
+  if (webAuthnApprovePrompt) {
+    const passkeyPromptTitle =
+      extensionSettings.language === "zh-CN"
+        ? "确认通行密钥请求"
+        : "Confirm passkey request";
+    const passkeyPromptBody =
+      siteLabel === "No active site"
+        ? extensionSettings.language === "zh-CN"
+          ? "确认后继续当前网站的通行密钥请求。"
+          : "Approve this passkey request to continue."
+        : extensionSettings.language === "zh-CN"
+          ? `确认后继续 ${siteLabel} 的通行密钥请求。`
+          : `Approve this passkey request for ${siteLabel}.`;
+    const passkeyPromptAction =
+      extensionSettings.language === "zh-CN"
+        ? "继续通行密钥请求"
+        : "Continue passkey request";
+
+    return (
+      <I18nProvider language={extensionSettings.language}>
+      <div style={shellStyle}>
+        <PopupStatusStrip
+          siteLabel={siteLabel}
+          unlocked
+          onLock={undefined}
+          onOpenManager={handleOpenManager}
+        />
+        <section style={passkeyPromptStyle} aria-live="polite">
+          <strong>{passkeyPromptTitle}</strong>
+          <span>{passkeyPromptBody}</span>
+        </section>
+        {passkeyCredentialOptions.length > 0 ? (
+          <div
+            role="radiogroup"
+            aria-label={
+              extensionSettings.language === "zh-CN"
+                ? "选择通行密钥账号"
+                : "Choose passkey account"
+            }
+            style={passkeyCredentialListStyle}
+          >
+            {passkeyCredentialOptions.map((option) => (
+              <label key={option.credentialId} style={passkeyCredentialOptionStyle}>
+                <input
+                  type="radio"
+                  aria-label={option.username || option.credentialId}
+                  checked={selectedPasskeyCredentialId === option.credentialId}
+                  onChange={() => setSelectedPasskeyCredentialId(option.credentialId)}
+                />
+                <span>{option.username || option.credentialId}</span>
+              </label>
+            ))}
+          </div>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => {
+            void handleWebAuthnPresenceApproval();
+          }}
+          disabled={
+            submitting ||
+            (passkeyCredentialOptions.length > 0 && !selectedPasskeyCredentialId)
+          }
+          style={primaryActionStyle}
+        >
+          {passkeyPromptAction}
+        </button>
+      </div>
+      </I18nProvider>
+    );
+  }
+
   return (
     <I18nProvider language={extensionSettings.language}>
     <div style={shellStyle}>
@@ -655,6 +913,37 @@ const secondaryActionStyle = {
   color: popupTheme.colors.text,
   fontFamily: popupTheme.font.body,
   cursor: "pointer"
+};
+
+const passkeyPromptStyle = {
+  display: "grid",
+  gap: popupTheme.spacing.xs,
+  border: `1px solid ${popupTheme.colors.accentStrong}`,
+  borderRadius: popupTheme.radius.panel,
+  padding: popupTheme.spacing.sm,
+  background: popupTheme.colors.surface,
+  color: popupTheme.colors.text,
+  fontFamily: popupTheme.font.body,
+  lineHeight: 1.45
+};
+
+const passkeyCredentialListStyle = {
+  display: "grid",
+  gap: popupTheme.spacing.xs,
+  minWidth: 0
+};
+
+const passkeyCredentialOptionStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: popupTheme.spacing.sm,
+  border: `1px solid ${popupTheme.colors.line}`,
+  borderRadius: popupTheme.radius.field,
+  padding: popupTheme.spacing.sm,
+  background: popupTheme.colors.surface,
+  color: popupTheme.colors.text,
+  fontFamily: popupTheme.font.body,
+  overflowWrap: "anywhere" as const
 };
 
 const messagePanelStyle = {

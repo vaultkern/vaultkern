@@ -17,13 +17,15 @@ it("persists extension settings in the memory store", async () => {
     recentVaultLimit: 3,
     language: "zh-CN",
     idleLockMinutes: 5,
-    clearClipboardSeconds: 20
+    clearClipboardSeconds: 20,
+    passkeyProviderEnabled: false
   });
 
   await expect(store.load()).resolves.toEqual({
     recentVaultLimit: 3,
     language: "zh-CN",
     idleLockMinutes: 5,
-    clearClipboardSeconds: 20
+    clearClipboardSeconds: 20,
+    passkeyProviderEnabled: false
   });
 });

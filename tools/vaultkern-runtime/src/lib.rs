@@ -1,6 +1,7 @@
 mod command_loop;
 mod match_fill;
 pub mod native_host;
+mod passkey;
 mod providers;
 mod runtime;
 mod session;

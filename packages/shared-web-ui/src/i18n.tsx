@@ -29,6 +29,7 @@ type TranslationKey =
   | "Idle Lock Minutes"
   | "Clear Clipboard Seconds"
   | "Language"
+  | "VaultKern passkey provider"
   | "Quick Unlock"
   | "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret."
   | "Database"
@@ -84,6 +85,8 @@ type TranslationKey =
   | "Title"
   | "Username"
   | "Password"
+  | "Show"
+  | "Hide"
   | "Show password"
   | "Hide password"
   | "Generate"
@@ -99,6 +102,20 @@ type TranslationKey =
   | "URL"
   | "Notes"
   | "TOTP URI"
+  | "Passkey"
+  | "No passkey."
+  | "Add passkey"
+  | "Edit passkey"
+  | "Save passkey"
+  | "Clear passkey"
+  | "Passkey Username"
+  | "Credential ID"
+  | "Generated User ID"
+  | "Private Key PEM"
+  | "Relying Party"
+  | "User Handle"
+  | "Backup eligible"
+  | "Backup state"
   | "Additional Properties"
   | "Add property"
   | "No additional properties."
@@ -156,6 +173,7 @@ type TranslationKey =
   | "Failed to add local vault"
   | "Failed to add OneDrive vault"
   | "Failed to save entry changes"
+  | "Failed to save entry passkey"
   | "Failed to delete entry"
   | "Failed to download attachment"
   | "Failed to add attachment"
@@ -216,6 +234,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Idle Lock Minutes": "闲置锁定分钟数",
   "Clear Clipboard Seconds": "清空剪贴板秒数",
   Language: "语言",
+  "VaultKern passkey provider": "VaultKern 通行密钥提供器",
   "Quick Unlock": "快速解锁",
   "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.": "剪贴板清空会在延迟后写入空字符串。浏览器 API 不允许后台可靠确认剪贴板仍包含刚复制的秘密。",
   Database: "数据库",
@@ -271,6 +290,8 @@ const ZH_CN: Record<TranslationKey, string> = {
   Title: "标题",
   Username: "用户名",
   Password: "密码",
+  Show: "显示",
+  Hide: "隐藏",
   "Show password": "显示密码",
   "Hide password": "隐藏密码",
   Generate: "生成",
@@ -286,6 +307,20 @@ const ZH_CN: Record<TranslationKey, string> = {
   URL: "URL",
   Notes: "备注",
   "TOTP URI": "TOTP URI",
+  Passkey: "Passkey",
+  "No passkey.": "没有 Passkey。",
+  "Add passkey": "添加 Passkey",
+  "Edit passkey": "编辑 Passkey",
+  "Save passkey": "保存 Passkey",
+  "Clear passkey": "清除 Passkey",
+  "Passkey Username": "Passkey 用户名",
+  "Credential ID": "凭据 ID",
+  "Generated User ID": "生成的用户 ID",
+  "Private Key PEM": "私钥 PEM",
+  "Relying Party": "依赖方",
+  "User Handle": "用户句柄",
+  "Backup eligible": "可备份",
+  "Backup state": "已备份",
   "Additional Properties": "附加属性",
   "Add property": "添加属性",
   "No additional properties.": "没有附加属性。",
@@ -343,6 +378,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Failed to add local vault": "添加本地数据库失败",
   "Failed to add OneDrive vault": "添加 OneDrive 数据库失败",
   "Failed to save entry changes": "保存条目更改失败",
+  "Failed to save entry passkey": "保存条目 Passkey 失败",
   "Failed to delete entry": "删除条目失败",
   "Failed to download attachment": "下载附件失败",
   "Failed to add attachment": "添加附件失败",

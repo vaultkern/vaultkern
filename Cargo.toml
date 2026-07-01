@@ -27,6 +27,7 @@ data-encoding = "2.6"
 flate2 = "1.0"
 hmac = "0.12"
 psl = "2.1"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
 rust_argon2 = { package = "rust-argon2", version = "3.0.0" }
 salsa20 = "0.10"
 sha1 = "0.10"
