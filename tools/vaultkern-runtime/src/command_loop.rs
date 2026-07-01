@@ -6,7 +6,7 @@ use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeCommand, Run
 
 use crate::Runtime;
 
-const MAX_NATIVE_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_NATIVE_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
     configure_stdio_for_native_messaging()?;
@@ -20,16 +20,33 @@ pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
 }
 
 fn run_loop_with_io(
-    mut runtime: Runtime,
+    runtime: Runtime,
     stdin: &mut impl Read,
     stdout: &mut impl Write,
 ) -> Result<()> {
+    run_loop_with_io_with_limit(runtime, stdin, stdout, MAX_NATIVE_MESSAGE_BYTES)
+}
+
+fn run_loop_with_io_with_limit(
+    mut runtime: Runtime,
+    stdin: &mut impl Read,
+    stdout: &mut impl Write,
+    max_message_bytes: usize,
+) -> Result<()> {
     loop {
-        let Some(envelope) = read_native_message_or_eof::<ProtocolEnvelope>(stdin)? else {
-            return Ok(());
+        match read_native_message_or_eof_with_limit::<ProtocolEnvelope>(stdin, max_message_bytes)? {
+            NativeMessage::Eof => return Ok(()),
+            NativeMessage::Message(envelope) => {
+                let response = handle_command_response(&mut runtime, envelope.command);
+                write_native_message(stdout, &response)?;
+            }
+            NativeMessage::Oversized { length, max_length } => {
+                write_native_message(
+                    stdout,
+                    &oversized_native_message_response(length, max_length),
+                )?;
+            }
         };
-        let response = handle_command_response(&mut runtime, envelope.command);
-        write_native_message(stdout, &response)?;
     }
 }
 
@@ -72,9 +89,17 @@ pub(crate) fn format_error_chain(error: &anyhow::Error) -> String {
         .join(": ")
 }
 
-fn read_native_message_or_eof<T: serde::de::DeserializeOwned>(
+#[derive(Debug, PartialEq)]
+enum NativeMessage<T> {
+    Eof,
+    Message(T),
+    Oversized { length: usize, max_length: usize },
+}
+
+fn read_native_message_or_eof_with_limit<T: serde::de::DeserializeOwned>(
     reader: &mut impl Read,
-) -> Result<Option<T>> {
+    max_message_bytes: usize,
+) -> Result<NativeMessage<T>> {
     let mut length = [0_u8; 4];
     let mut read = 0;
     while read < length.len() {
@@ -83,7 +108,7 @@ fn read_native_message_or_eof<T: serde::de::DeserializeOwned>(
             .context("failed to read message length")?;
         if count == 0 {
             if read == 0 {
-                return Ok(None);
+                return Ok(NativeMessage::Eof);
             }
             anyhow::bail!("failed to read message length");
         }
@@ -91,10 +116,14 @@ fn read_native_message_or_eof<T: serde::de::DeserializeOwned>(
     }
 
     let length = u32::from_le_bytes(length) as usize;
-    if length > MAX_NATIVE_MESSAGE_BYTES {
-        anyhow::bail!(
-            "native message exceeds maximum length: {length} > {MAX_NATIVE_MESSAGE_BYTES}"
-        );
+    if length > max_message_bytes {
+        discard_native_message_payload(reader, length).with_context(|| {
+            format!("failed to discard oversized native message payload: {length}")
+        })?;
+        return Ok(NativeMessage::Oversized {
+            length,
+            max_length: max_message_bytes,
+        });
     }
     let mut payload = vec![0_u8; length];
     reader
@@ -102,7 +131,23 @@ fn read_native_message_or_eof<T: serde::de::DeserializeOwned>(
         .context("failed to read message payload")?;
     serde_json::from_slice(&payload)
         .context("failed to decode native message")
-        .map(Some)
+        .map(NativeMessage::Message)
+}
+
+fn discard_native_message_payload(reader: &mut impl Read, length: usize) -> Result<()> {
+    let copied = std::io::copy(&mut reader.take(length as u64), &mut std::io::sink())
+        .context("failed to read oversized native message payload")?;
+    if copied != length as u64 {
+        anyhow::bail!("failed to read oversized native message payload");
+    }
+    Ok(())
+}
+
+fn oversized_native_message_response(length: usize, max_length: usize) -> RuntimeResponse {
+    RuntimeResponse::Error(ErrorDto {
+        code: "invalid_request".into(),
+        message: format!("native message exceeds maximum length: {length} > {max_length}"),
+    })
 }
 
 fn write_native_message(writer: &mut impl Write, response: &RuntimeResponse) -> Result<()> {
@@ -152,8 +197,9 @@ mod tests {
     use vaultkern_runtime_protocol::{RuntimeCommand, RuntimeResponse};
 
     use super::{
-        command_response_from_result, configure_stdio_for_native_messaging, format_error_chain,
-        handle_command_response, read_native_message_or_eof, run_loop_with_io,
+        NativeMessage, command_response_from_result, configure_stdio_for_native_messaging,
+        format_error_chain, handle_command_response, read_native_message_or_eof_with_limit,
+        run_loop_with_io, run_loop_with_io_with_limit,
     };
     use crate::Runtime;
 
@@ -174,16 +220,83 @@ mod tests {
     }
 
     #[test]
-    fn native_message_reader_rejects_oversized_messages_before_allocating() {
-        let mut input = std::io::Cursor::new(u32::MAX.to_le_bytes().to_vec());
+    fn native_message_reader_reports_oversized_messages_after_draining_payload() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&9_u32.to_le_bytes());
+        input.extend_from_slice(b"oversized");
+        input.extend_from_slice(&2_u32.to_le_bytes());
+        input.extend_from_slice(b"{}");
+        let mut input = std::io::Cursor::new(input);
 
-        let error = read_native_message_or_eof::<serde_json::Value>(&mut input).unwrap_err();
+        let result = read_native_message_or_eof_with_limit::<serde_json::Value>(&mut input, 8)
+            .expect("read oversized native message");
 
+        assert_eq!(
+            result,
+            NativeMessage::Oversized {
+                length: 9,
+                max_length: 8,
+            }
+        );
+        assert_eq!(
+            read_native_message_or_eof_with_limit::<serde_json::Value>(&mut input, 8)
+                .expect("read following message"),
+            NativeMessage::Message(serde_json::json!({}))
+        );
+    }
+
+    #[test]
+    fn native_message_loop_serializes_oversized_errors_without_exiting_the_host() {
+        let max_length = 1024;
+        let mut input = Vec::new();
+        input.extend_from_slice(&((max_length + 1) as u32).to_le_bytes());
+        input.extend(vec![b'x'; max_length + 1]);
+        let command = vaultkern_runtime_protocol::ProtocolEnvelope::new(
+            RuntimeCommand::AddLocalVaultReference {
+                path: Some("/definitely/missing/demo.kdbx".into()),
+            },
+        );
+        let command_payload = serde_json::to_vec(&command).unwrap();
+        input.extend_from_slice(&(command_payload.len() as u32).to_le_bytes());
+        input.extend_from_slice(&command_payload);
+        let mut input = std::io::Cursor::new(input);
+        let mut output = Vec::new();
+
+        run_loop_with_io_with_limit(Runtime::for_tests(), &mut input, &mut output, max_length)
+            .expect("native loop should continue after oversized command");
+
+        let mut output = std::io::Cursor::new(output);
+        let first = read_response_from(&mut output);
+        let second = read_response_from(&mut output);
+        assert!(matches!(first, RuntimeResponse::Error(_)));
+        let RuntimeResponse::Error(first_error) = first else {
+            panic!("expected oversized error");
+        };
         assert!(
-            error
-                .to_string()
+            first_error
+                .message
                 .contains("native message exceeds maximum length")
         );
+        let RuntimeResponse::Error(second_error) = second else {
+            panic!("expected command error");
+        };
+        assert!(
+            second_error
+                .message
+                .contains("failed to resolve vault path: /definitely/missing/demo.kdbx")
+        );
+    }
+
+    fn read_response_from(reader: &mut impl std::io::Read) -> RuntimeResponse {
+        let mut length = [0_u8; 4];
+        reader
+            .read_exact(&mut length)
+            .expect("read native response length");
+        let mut payload = vec![0_u8; u32::from_le_bytes(length) as usize];
+        reader
+            .read_exact(&mut payload)
+            .expect("read native response payload");
+        serde_json::from_slice(&payload).expect("decode native response")
     }
 
     #[test]

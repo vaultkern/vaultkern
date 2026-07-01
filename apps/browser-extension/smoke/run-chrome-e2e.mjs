@@ -98,7 +98,8 @@ async function enablePasskeyProvider(extensionPage) {
   await extensionPage.evaluate(
     async (settings) => {
       await chrome.storage.local.set({
-        vaultkernExtensionSettings: settings
+        vaultkernExtensionSettings: settings,
+        vaultkernWebAuthnDebugEnabled: true
       });
     },
     {

@@ -5,6 +5,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
   waitFor
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -232,8 +233,15 @@ it("renders recent vaults and unlocks the current selection without a path field
   expect(screen.getByDisplayValue("demo note")).toBeInTheDocument();
   expect(client.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
 
-  fireEvent.click(screen.getByRole("button", { name: "Show password" }));
-  expect(screen.getByDisplayValue("secret-123")).toHaveAttribute("type", "text");
+  const passwordInput = screen.getByDisplayValue("secret-123");
+  const passwordField = passwordInput.closest("label");
+  expect(passwordField).not.toBeNull();
+  fireEvent.click(
+    within(passwordField as HTMLElement).getByRole("button", {
+      name: "Show password"
+    })
+  );
+  expect(passwordInput).toHaveAttribute("type", "text");
 });
 
 it("unlocks the current recent vault with Windows Hello when quick unlock is enabled", async () => {
@@ -989,7 +997,7 @@ it("manages an entry passkey from the detail pane", async () => {
     username: "alice@example.com",
     credentialId: "credential-old",
     generatedUserId: "generated-user",
-    privateKeyPem: "-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----",
+    privateKeyPem: "-----BEGIN EC PRIVATE KEY-----\nold\n-----END EC PRIVATE KEY-----",
     relyingParty: "example.com",
     userHandle: "user-handle",
     backupEligible: true,

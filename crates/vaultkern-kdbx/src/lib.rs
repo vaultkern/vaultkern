@@ -2862,15 +2862,10 @@ fn parse_entry(
     entry.totp = build_totp(&raw_fields);
     entry.passkey = PasskeyRecord::from_attributes(&raw_fields);
     let has_complete_passkey = entry.passkey.is_some();
-    let passkey_used_legacy_username = has_complete_passkey
-        && !raw_fields.contains_key(PasskeyRecord::USERNAME_KEY)
-        && raw_fields.contains_key(PasskeyRecord::LEGACY_USERNAME_KEY);
     entry.attributes = raw_fields
         .into_iter()
         .filter(|(key, _)| {
-            !is_totp_attribute_key(key)
-                && !(has_complete_passkey
-                    && is_passkey_attribute_key(key, passkey_used_legacy_username))
+            !is_totp_attribute_key(key) && !(has_complete_passkey && is_passkey_attribute_key(key))
         })
         .collect();
 
@@ -2884,11 +2879,7 @@ fn is_totp_attribute_key(key: &str) -> bool {
     )
 }
 
-fn is_passkey_attribute_key(key: &str, include_legacy_username: bool) -> bool {
-    if include_legacy_username && key == PasskeyRecord::LEGACY_USERNAME_KEY {
-        return true;
-    }
-
+fn is_passkey_attribute_key(key: &str) -> bool {
     matches!(
         key,
         PasskeyRecord::USERNAME_KEY
@@ -4032,7 +4023,7 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn complete_kpex_passkey_preserves_legacy_username_custom_field() {
+    fn complete_kpex_passkey_preserves_passkey_username_custom_field() {
         let mut vault = Vault::empty("LegacyUsernameCustomField");
         let mut entry = Entry::new("Example");
         entry.passkey = Some(PasskeyRecord {
@@ -4046,7 +4037,7 @@ mod compatibility_tests {
             backup_state: true,
         });
         entry.attributes.insert(
-            PasskeyRecord::LEGACY_USERNAME_KEY.into(),
+            "Passkey Username".into(),
             CustomField {
                 value: "custom legacy label".into(),
                 protected: false,
@@ -4062,7 +4053,7 @@ mod compatibility_tests {
         assert_eq!(
             loaded_entry
                 .attributes
-                .get(PasskeyRecord::LEGACY_USERNAME_KEY)
+                .get("Passkey Username")
                 .map(|field| (field.value.as_str(), field.protected)),
             Some(("custom legacy label", false))
         );

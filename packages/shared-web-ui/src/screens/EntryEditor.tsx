@@ -1035,9 +1035,10 @@ function emptyPasskey(): EntryPasskey {
 
 function privateKeyPemLooksValid(value: string) {
   const trimmed = value.trim();
-  return /^-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----$/u.test(
-    trimmed
+  const match = trimmed.match(
+    /^-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]+-----END \1-----$/u
   );
+  return Boolean(match);
 }
 
 function emptyStringAsNull(value: string | null): string | null {

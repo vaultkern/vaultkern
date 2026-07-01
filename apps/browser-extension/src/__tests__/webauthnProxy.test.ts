@@ -4,6 +4,7 @@ import { Buffer } from "node:buffer";
 import {
   attachWebAuthnProxy,
   detachWebAuthnProxy,
+  recordWebAuthnDebug,
   recordWebAuthnPageRequest,
   webAuthnProxyAvailable
 } from "../webauthnProxy";
@@ -1013,6 +1014,132 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
+  it("allows modal WebAuthn get observations with optional and required mediation", async () => {
+    for (const mediation of ["optional", "required"]) {
+      let getListener: ((request: unknown) => void) | undefined;
+      const completeGetRequest = vi.fn(async () => undefined);
+      const sendRuntimeCommand = vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: "session_state",
+          unlocked: true,
+          activeVaultId: "vault-1"
+        })
+        .mockResolvedValueOnce({
+          type: "passkey_assertion",
+          credentialId: "Y3JlZGVudGlhbC0x",
+          authenticatorDataBase64url: "auth-data",
+          clientDataJsonBase64url: "client-data",
+          signatureBase64url: "signature",
+          userHandleBase64url: null
+        });
+      const chromeApi = {
+        runtime: {},
+        tabs: {
+          query: vi.fn(async () => [{ url: "https://example.com/login" }])
+        },
+        webAuthenticationProxy: {
+          attach: vi.fn(async () => undefined),
+          completeGetRequest,
+          onGetRequest: {
+            addListener(listener: (request: unknown) => void) {
+              getListener = listener;
+            }
+          }
+        }
+      };
+      const presencePrompt = installPresencePrompt(chromeApi);
+      const challenge =
+        mediation === "optional" ? "b3B0aW9uYWwtMQ" : "cmVxdWlyZWQtMQ";
+
+      await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+      expect(
+        recordWebAuthnPageRequest({
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "get",
+          origin: "https://example.com",
+          relyingParty: "example.com",
+          challenge,
+          allowCredentialIds: ["Y3JlZGVudGlhbC0x"],
+          mediation
+        })
+      ).toBe(true);
+
+      getListener?.({
+        requestId: mediation === "optional" ? 59 : 60,
+        requestDetailsJson: JSON.stringify({
+          rpId: "example.com",
+          challenge,
+          allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+        })
+      });
+      await presencePrompt.approve();
+
+      await vi.waitFor(() => {
+        expect(completeGetRequest).toHaveBeenCalledTimes(1);
+      });
+      expect(completeGetRequest).toHaveBeenCalledWith({
+        requestId: mediation === "optional" ? 59 : 60,
+        responseJson: expect.any(String)
+      });
+      expect(sendRuntimeCommand).toHaveBeenNthCalledWith(1, {
+        type: "get_session_state"
+      });
+    }
+  });
+
+  it("rejects mismatched WebAuthn get RP IDs before session lookup or prompts", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false
+    } as Response);
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi.fn(async () => ({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    }));
+    const chromeApi = {
+      runtime: {},
+      windows: {
+        create: vi.fn(async () => ({ id: 77 }))
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+    getListener?.({
+      requestId: 61,
+      origin: "https://evil.example",
+      requestDetailsJson: JSON.stringify({
+        rpId: "victim.example",
+        challenge: "bWlzbWF0Y2gtMQ",
+        allowCredentials: []
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).not.toHaveBeenCalled();
+    expect(chromeApi.windows.create).not.toHaveBeenCalled();
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 61,
+      error: {
+        name: "NotAllowedError",
+        message: "WebAuthn request origin does not match relying party"
+      }
+    });
+  });
+
   it("allows related-origin get requests after well-known validation", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
@@ -1095,14 +1222,15 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("defers related-origin well-known fetch until after user interaction", async () => {
+  it("validates related-origin well-known data before opening a user prompt", async () => {
     let getListener: ((request: unknown) => void) | undefined;
-    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      json: vi.fn(async () => ({
-        origins: ["https://example.co.uk"]
-      }))
-    } as unknown as Response);
+    let resolveFetch: (value: Response) => void = () => {};
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
     const completeGetRequest = vi.fn(async () => undefined);
     const sendRuntimeCommand = vi
       .fn()
@@ -1154,19 +1282,28 @@ describe("webAuthenticationProxy wrapper", () => {
     });
 
     await vi.waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+    expect(presencePrompt.create).not.toHaveBeenCalled();
+
+    resolveFetch({
+      ok: true,
+      json: vi.fn(async () => ({
+        origins: ["https://example.co.uk"]
+      }))
+    } as unknown as Response);
+
+    await vi.waitFor(() => {
       expect(presencePrompt.create).toHaveBeenCalledTimes(1);
     });
-    expect(fetch).not.toHaveBeenCalled();
-
     await presencePrompt.approve();
 
     await vi.waitFor(() => {
-      expect(fetch).toHaveBeenCalledTimes(1);
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
     });
   });
 
-  it("rejects related-origin responses with more than five distinct labels", async () => {
+  it("allows related-origin responses that reuse one label across suffixes", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
@@ -1188,6 +1325,14 @@ describe("webAuthenticationProxy wrapper", () => {
         type: "session_state",
         unlocked: true,
         activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_assertion",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        clientDataJsonBase64url: "client-data",
+        signatureBase64url: "signature",
+        userHandleBase64url: "dXNlci0x"
       });
     const chromeApi = {
       runtime: {},
@@ -1227,14 +1372,16 @@ describe("webAuthenticationProxy wrapper", () => {
     await vi.waitFor(() => {
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
     });
-    expect(completeGetRequest).toHaveBeenCalledWith({
-      requestId: 133,
-      error: {
-        name: "NotAllowedError",
-        message: "WebAuthn request origin does not match relying party"
-      }
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "create_passkey_assertion",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://same.app",
+      credential_id: "Y3JlZGVudGlhbC0x",
+      user_presence_verified: true,
+      related_origin_verified: true,
+      client_data_json_base64url: expect.any(String)
     });
-    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
   });
 
   it("completes WebAuthn create requests with a runtime registration and saves the vault", async () => {
@@ -1660,6 +1807,64 @@ describe("webAuthenticationProxy wrapper", () => {
         message: "WebAuthn request origin does not match relying party"
       }
     });
+    expect(presencePrompt.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects mismatched WebAuthn create RP IDs before session lookup or prompts", async () => {
+    let createListener: ((request: unknown) => void) | undefined;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false
+    } as Response);
+    const completeCreateRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi.fn(async () => ({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    }));
+    const chromeApi = {
+      runtime: {},
+      windows: {
+        create: vi.fn(async () => ({ id: 77 }))
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeCreateRequest,
+        onCreateRequest: {
+          addListener(listener: (request: unknown) => void) {
+            createListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+    createListener?.({
+      requestId: 62,
+      origin: "https://evil.example",
+      requestDetailsJson: JSON.stringify({
+        rp: { id: "victim.example", name: "Victim" },
+        user: {
+          id: "dXNlci0x",
+          name: "alice@example.com",
+          displayName: "Alice"
+        },
+        challenge: "bWlzbWF0Y2gtMg",
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).not.toHaveBeenCalled();
+    expect(chromeApi.windows.create).not.toHaveBeenCalled();
+    expect(completeCreateRequest).toHaveBeenCalledWith({
+      requestId: 62,
+      error: {
+        name: "NotAllowedError",
+        message: "WebAuthn request origin does not match relying party"
+      }
+    });
   });
 
   it("derives unbracketed IPv6 loopback RP IDs from the request origin", async () => {
@@ -2057,6 +2262,7 @@ describe("webAuthenticationProxy wrapper", () => {
       type: "rollback_passkey_registration",
       vault_id: "vault-1",
       entry_id: "entry-1",
+      credential_id: "Y3JlZGVudGlhbC0x",
       created: true
     });
   });
@@ -2128,6 +2334,7 @@ describe("webAuthenticationProxy wrapper", () => {
         type: "rollback_passkey_registration",
         vault_id: "vault-1",
         entry_id: "entry-1",
+        credential_id: "Y3JlZGVudGlhbC0x",
         created: true
       });
     });
@@ -2212,6 +2419,7 @@ describe("webAuthenticationProxy wrapper", () => {
         type: "rollback_passkey_registration",
         vault_id: "vault-1",
         entry_id: "entry-1",
+        credential_id: "Y3JlZGVudGlhbC0y",
         created: false
       });
     });
@@ -2303,6 +2511,7 @@ describe("webAuthenticationProxy wrapper", () => {
         type: "rollback_passkey_registration",
         vault_id: "vault-1",
         entry_id: "entry-1",
+        credential_id: "Y3JlZGVudGlhbC0x",
         created: true
       });
     });
@@ -3406,5 +3615,41 @@ describe("webAuthenticationProxy wrapper", () => {
       user_presence_verified: true,
       client_data_json_base64url: expect.any(String)
     });
+  });
+
+  it("serializes WebAuthn diagnostics writes without clobbering concurrent entries", async () => {
+    let debugLog: unknown[] = [];
+    const get = vi.fn(async () => {
+      const snapshot = debugLog;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return {
+        vaultkernWebAuthnDebugEnabled: true,
+        vaultkernWebAuthnDebug: snapshot
+      };
+    });
+    const set = vi.fn(async (items: Record<string, unknown>) => {
+      debugLog = items.vaultkernWebAuthnDebug as unknown[];
+    });
+    const chromeApi = {
+      storage: {
+        local: {
+          get,
+          set
+        }
+      }
+    };
+
+    await Promise.all([
+      recordWebAuthnDebug(chromeApi, { event: "first" }),
+      recordWebAuthnDebug(chromeApi, { event: "second" })
+    ]);
+
+    await vi.waitFor(() => {
+      expect(debugLog.map((entry) => (entry as { event?: string }).event)).toEqual([
+        "first",
+        "second"
+      ]);
+    });
+    expect(set).toHaveBeenCalledTimes(2);
   });
 });

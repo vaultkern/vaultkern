@@ -153,6 +153,8 @@ pub enum RuntimeCommand {
     RollbackPasskeyRegistration {
         vault_id: String,
         entry_id: String,
+        #[serde(default)]
+        credential_id: Option<String>,
         created: bool,
     },
     PasskeyCredentialStatus {

@@ -1387,17 +1387,6 @@ impl Runtime {
             registration.passkey.user_handle.as_deref(),
         ) {
             self.core.snapshot_entry_to_history(vault, &entry_id)?;
-            self.core.update_entry_fields(
-                vault,
-                &entry_id,
-                EntryUpdate {
-                    title: Some(title),
-                    username: Some(user_name.to_owned()),
-                    password: Some(String::new()),
-                    url: Some(format!("https://{relying_party}")),
-                    notes: Some("Updated by WebAuthn passkey registration".into()),
-                },
-            )?;
             self.core
                 .set_entry_passkey(vault, &entry_id, registration.passkey)?;
             touch_entry_modified_at(&self.core, vault, &entry_id, modified_at)?;
@@ -1428,6 +1417,7 @@ impl Runtime {
         &mut self,
         vault_id: &str,
         entry_id: &str,
+        credential_id: Option<&str>,
         created: bool,
     ) -> Result<()> {
         let loaded = self
@@ -1440,11 +1430,18 @@ impl Runtime {
             .with_context(|| format!("vault is locked: {vault_id}"))?;
 
         if created {
+            if let Some(credential_id) = credential_id {
+                match entry_has_passkey_credential(&vault.root, entry_id, credential_id) {
+                    Some(true) => {}
+                    Some(false) => return Ok(()),
+                    None => anyhow::bail!("entry not found: {entry_id}"),
+                }
+            }
             self.core.delete_entry(vault, entry_id)?;
             return Ok(());
         }
 
-        if !restore_entry_from_latest_history(&mut vault.root, entry_id)? {
+        if !restore_entry_from_latest_history(&mut vault.root, entry_id, credential_id)? {
             anyhow::bail!("entry not found: {entry_id}");
         }
         Ok(())
@@ -1911,9 +1908,15 @@ impl Runtime {
             RuntimeCommand::RollbackPasskeyRegistration {
                 vault_id,
                 entry_id,
+                credential_id,
                 created,
             } => Ok(
-                match self.rollback_passkey_registration(&vault_id, &entry_id, created) {
+                match self.rollback_passkey_registration(
+                    &vault_id,
+                    &entry_id,
+                    credential_id.as_deref(),
+                    created,
+                ) {
                     Ok(()) => RuntimeResponse::Saved,
                     Err(error) => query_error_response(error),
                 },
@@ -1997,9 +2000,11 @@ impl Runtime {
                     history_snapshots_added: summary.history_snapshots_added,
                 })
             };
+            let mut vault_for_save = vault.clone();
+            enforce_history_limits(&mut vault_for_save);
             let bytes = self
                 .core
-                .save_kdbx(vault, &key, save_profile)
+                .save_kdbx(&vault_for_save, &key, save_profile)
                 .with_context(|| format!("failed to save vault: {vault_id}"))?;
             (bytes, merge_summary)
         };
@@ -2064,6 +2069,9 @@ impl Runtime {
             .loaded
             .get_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
+        if let Some(vault) = loaded.vault.as_mut() {
+            enforce_history_limits(vault);
+        }
         if let Some(status) = next_source_status {
             loaded.source_status = Some(status);
         }
@@ -2093,8 +2101,10 @@ impl Runtime {
         let Some(vault) = loaded.vault.as_mut() else {
             anyhow::bail!("vault is locked: {vault_id}");
         };
+        let mut vault_for_save = vault.clone();
+        enforce_history_limits(&mut vault_for_save);
         self.core
-            .save_kdbx(vault, key, save_profile)
+            .save_kdbx(&vault_for_save, key, save_profile)
             .with_context(|| format!("failed to save vault: {vault_id}"))
     }
 
@@ -2133,6 +2143,9 @@ impl Runtime {
             .loaded
             .get_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
+        if let Some(vault) = loaded.vault.as_mut() {
+            enforce_history_limits(vault);
+        }
         loaded.bytes = bytes;
         loaded.baseline_fingerprint = fingerprint;
         loaded.source_status = Some(status);
@@ -2327,8 +2340,10 @@ impl Runtime {
                 self.core.load_and_merge_kdbx(vault, &snapshot.bytes, key)?;
             }
             let bytes = if let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key) {
+                let mut vault_for_save = vault.clone();
+                enforce_history_limits(&mut vault_for_save);
                 self.core
-                    .save_kdbx(vault, key, loaded.save_profile.clone())
+                    .save_kdbx(&vault_for_save, key, loaded.save_profile.clone())
                     .with_context(|| format!("failed to save vault: {vault_id}"))?
             } else {
                 loaded.bytes.clone()
@@ -2371,6 +2386,9 @@ impl Runtime {
             .loaded
             .get_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
+        if let Some(vault) = loaded.vault.as_mut() {
+            enforce_history_limits(vault);
+        }
         loaded.bytes = bytes;
         loaded.baseline_fingerprint = write_fingerprint;
         loaded.source_status = Some(status.clone());
@@ -2772,17 +2790,58 @@ fn visit_passkeys_in_group<'a>(
 
 fn group_is_recycle_bin(group: &vaultkern_core::Group, recycle_bin_group: Option<Uuid>) -> bool {
     recycle_bin_group.is_some_and(|recycle_bin_group| group.id == recycle_bin_group)
+        || (recycle_bin_group.is_none() && group.title.eq_ignore_ascii_case("Recycle Bin"))
+}
+
+fn entry_has_passkey_credential(
+    group: &vaultkern_core::Group,
+    entry_id: &str,
+    credential_id: &str,
+) -> Option<bool> {
+    for entry in &group.entries {
+        if entry.id.to_string() == entry_id {
+            return Some(
+                entry
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|passkey| passkey.credential_id == credential_id),
+            );
+        }
+    }
+
+    for child in &group.children {
+        if let Some(found) = entry_has_passkey_credential(child, entry_id, credential_id) {
+            return Some(found);
+        }
+    }
+
+    None
 }
 
 fn restore_entry_from_latest_history(
     group: &mut vaultkern_core::Group,
     entry_id: &str,
+    credential_id: Option<&str>,
 ) -> Result<bool> {
     for entry in &mut group.entries {
         if entry.id.to_string() != entry_id {
             continue;
         }
 
+        if credential_id.is_some_and(|credential_id| {
+            entry
+                .passkey
+                .as_ref()
+                .is_none_or(|passkey| passkey.credential_id != credential_id)
+        }) {
+            return Ok(true);
+        }
+        let history = entry.history.last().with_context(|| {
+            format!("passkey registration rollback history not found: {entry_id}")
+        })?;
+        if !history_matches_passkey_registration_rollback(entry, history, credential_id) {
+            anyhow::bail!("passkey registration rollback history does not match: {entry_id}");
+        }
         let mut restored = entry.history.pop().with_context(|| {
             format!("passkey registration rollback history not found: {entry_id}")
         })?;
@@ -2792,12 +2851,32 @@ fn restore_entry_from_latest_history(
     }
 
     for child in &mut group.children {
-        if restore_entry_from_latest_history(child, entry_id)? {
+        if restore_entry_from_latest_history(child, entry_id, credential_id)? {
             return Ok(true);
         }
     }
 
     Ok(false)
+}
+
+fn history_matches_passkey_registration_rollback(
+    current: &vaultkern_core::Entry,
+    history: &vaultkern_core::Entry,
+    credential_id: Option<&str>,
+) -> bool {
+    let Some(current_passkey) = current.passkey.as_ref() else {
+        return false;
+    };
+    if credential_id.is_some_and(|credential_id| current_passkey.credential_id != credential_id) {
+        return false;
+    }
+    let Some(history_passkey) = history.passkey.as_ref() else {
+        return false;
+    };
+
+    history_passkey.relying_party == current_passkey.relying_party
+        && history_passkey.user_handle == current_passkey.user_handle
+        && history_passkey.credential_id != current_passkey.credential_id
 }
 
 fn enforce_history_limits(vault: &mut Vault) {

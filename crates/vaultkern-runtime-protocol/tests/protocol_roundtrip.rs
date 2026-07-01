@@ -885,6 +885,7 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
     let rollback = ProtocolEnvelope::new(RuntimeCommand::RollbackPasskeyRegistration {
         vault_id: "vault-1".into(),
         entry_id: "entry-1".into(),
+        credential_id: Some("Y3JlZGVudGlhbC0x".into()),
         created: false,
     });
     let rollback_json = serde_json::to_value(&rollback).unwrap();
@@ -895,6 +896,24 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
     assert_eq!(
         serde_json::from_value::<ProtocolEnvelope>(rollback_json).unwrap(),
         rollback
+    );
+    let legacy_rollback_json = serde_json::json!({
+        "version": 1,
+        "command": {
+            "type": "rollback_passkey_registration",
+            "vault_id": "vault-1",
+            "entry_id": "entry-1",
+            "created": false
+        }
+    });
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(legacy_rollback_json).unwrap(),
+        ProtocolEnvelope::new(RuntimeCommand::RollbackPasskeyRegistration {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+            credential_id: None,
+            created: false,
+        })
     );
 
     let response = RuntimeResponse::PasskeyRegistration(PasskeyRegistrationDto {

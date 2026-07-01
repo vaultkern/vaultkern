@@ -104,6 +104,7 @@ const OBSERVED_PAGE_REQUEST_MAX_AGE_MS = 120_000;
 const WEB_AUTHN_DEBUG_STORAGE_KEY = "vaultkernWebAuthnDebug";
 const WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY = "vaultkernWebAuthnDebugEnabled";
 const RELATED_ORIGIN_LABEL_LIMIT = 5;
+const webAuthnDebugWriteChains = new WeakMap<object, Promise<void>>();
 
 type ObservedWebAuthnPageRequest = {
   ceremony: "create" | "get";
@@ -495,6 +496,15 @@ async function handleGetRequest(
     rejectUnsupportedMediation(options, originContext);
     const origin = originContext.origin;
     const relyingParty = relyingPartyFromGetOptions(options, origin);
+    const relyingPartyValidation = requestedRpId
+      ? await validateOriginForRelyingParty(origin, requestedRpId)
+      : { allowed: true, relatedOriginVerified: false };
+    if (!relyingPartyValidation.allowed) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
+    }
     const clientDataJsonBase64url = clientDataJsonBase64urlFrom(
       "webauthn.get",
       options.challenge,
@@ -549,16 +559,6 @@ async function handleGetRequest(
         credentialIds = [approved.selectedCredentialId];
       }
     }
-    const relyingPartyValidation = requestedRpId
-      ? await validateOriginForRelyingParty(origin, requestedRpId)
-      : { allowed: true, relatedOriginVerified: false };
-    if (!relyingPartyValidation.allowed) {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "WebAuthn request origin does not match relying party"
-      );
-    }
-
     const assertion = await createAssertionForAllowedCredentials(
       chromeApi,
       sendRuntimeCommand,
@@ -914,6 +914,15 @@ async function handleCreateRequest(
     }
     const origin = originContext.origin;
     const relyingParty = relyingPartyFromCreateOptions(options, origin);
+    const relyingPartyValidation = requestedRpId
+      ? await validateOriginForRelyingParty(origin, requestedRpId)
+      : { allowed: true, relatedOriginVerified: false };
+    if (!relyingPartyValidation.allowed) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
+    }
     const clientDataJsonBase64url = clientDataJsonBase64urlFrom(
       "webauthn.create",
       options.challenge,
@@ -952,15 +961,6 @@ async function handleCreateRequest(
       if (!approved) {
         return;
       }
-    }
-    const relyingPartyValidation = requestedRpId
-      ? await validateOriginForRelyingParty(origin, requestedRpId)
-      : { allowed: true, relatedOriginVerified: false };
-    if (!relyingPartyValidation.allowed) {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "WebAuthn request origin does not match relying party"
-      );
     }
     const activeVaultId = activeVault.activeVaultId;
 
@@ -1005,6 +1005,7 @@ async function handleCreateRequest(
         sendRuntimeCommand,
         activeVaultId,
         registration.entryId,
+        registration.credentialId,
         registration.created,
         saveAfterRollback
       );
@@ -1203,7 +1204,7 @@ function rejectUnsupportedMediation(
     typeof options.mediation === "string"
       ? options.mediation
       : originContext.mediation;
-  if (!mediation) {
+  if (!mediation || mediation === "optional" || mediation === "required") {
     return;
   }
 
@@ -1248,6 +1249,7 @@ async function rollbackPasskeyRegistration(
   sendRuntimeCommand: RuntimeCommandSender,
   vaultId: string,
   entryId: string,
+  credentialId: string,
   created: boolean,
   saveAfterRollback: boolean
 ) {
@@ -1255,6 +1257,7 @@ async function rollbackPasskeyRegistration(
     type: "rollback_passkey_registration",
     vault_id: vaultId,
     entry_id: entryId,
+    credential_id: credentialId,
     created
   });
   const rollbackError = runtimeErrorFromResponse(rollbackResponse);
@@ -1671,7 +1674,11 @@ function relatedOriginLabel(origin: unknown) {
     if (isLoopbackHost(host) || isIpAddress(host)) {
       return null;
     }
-    return psl.get(host);
+    const parsed = psl.parse(host);
+    if ("error" in parsed || !parsed.sld) {
+      return null;
+    }
+    return parsed.sld;
   } catch {
     return null;
   }
@@ -2261,7 +2268,18 @@ export function recordWebAuthnDebug(
   chromeApi: ChromeLike,
   event: Record<string, unknown>
 ) {
-  void persistWebAuthnDebug(chromeApi, event);
+  const chainKey = chromeApi.storage?.local ?? chromeApi;
+  const previous =
+    typeof chainKey === "object"
+      ? webAuthnDebugWriteChains.get(chainKey) ?? Promise.resolve()
+      : Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(() => persistWebAuthnDebug(chromeApi, event));
+  if (typeof chainKey === "object") {
+    webAuthnDebugWriteChains.set(chainKey, next);
+  }
+  void next.catch(() => undefined);
   return Promise.resolve();
 }
 
