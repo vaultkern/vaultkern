@@ -970,6 +970,65 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("notifies the background page when a WebAuthn unlock popup mounts already unlocked", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=13&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-13"
+    );
+    const sendMessage = vi.fn(async () => undefined);
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_unlock_complete",
+        requestId: 13,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-13"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("does not notify WebAuthn waiters after unlocking in the regular popup", async () => {
     window.history.replaceState(null, "", "/popup.html");
     const sendMessage = vi.fn(async () => undefined);

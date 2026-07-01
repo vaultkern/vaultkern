@@ -16,6 +16,7 @@ const extensionSettingsStore = createChromeExtensionSettingsStore();
 let webAuthnProxyAttached = false;
 let webAuthnProxySyncPromise: Promise<void> | null = null;
 let webAuthnProxySyncRequested = false;
+let passkeyProviderEnabled = false;
 let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
 const WEB_AUTHN_PAGE_HOOK_SCRIPT_ID = "vaultkern-webauthn-page-hook";
@@ -143,6 +144,7 @@ async function syncWebAuthnProxyOnce() {
   }
 
   const settings = await extensionSettingsStore.load();
+  passkeyProviderEnabled = settings.passkeyProviderEnabled;
   if (settings.passkeyProviderEnabled) {
     if (webAuthnProxyAttached) {
       await registerWebAuthnPageHook();
@@ -170,6 +172,7 @@ async function syncWebAuthnProxyOnce() {
   const status = await detachWebAuthnProxy(chromeApi);
   if (status.status === "detached" || status.status === "unsupported") {
     webAuthnProxyAttached = false;
+    stopNativeKeepAlive();
   }
 }
 
@@ -360,7 +363,12 @@ function syncNativeKeepAliveFromResponse(response: unknown) {
     return;
   }
 
-  if (session.unlocked && session.activeVaultId) {
+  if (
+    session.unlocked &&
+    session.activeVaultId &&
+    passkeyProviderEnabled &&
+    webAuthnProxyAttached
+  ) {
     startNativeKeepAlive();
     return;
   }

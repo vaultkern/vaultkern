@@ -6,6 +6,8 @@ use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeCommand, Run
 
 use crate::Runtime;
 
+const MAX_NATIVE_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
 pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
     configure_stdio_for_native_messaging()?;
 
@@ -89,6 +91,11 @@ fn read_native_message_or_eof<T: serde::de::DeserializeOwned>(
     }
 
     let length = u32::from_le_bytes(length) as usize;
+    if length > MAX_NATIVE_MESSAGE_BYTES {
+        anyhow::bail!(
+            "native message exceeds maximum length: {length} > {MAX_NATIVE_MESSAGE_BYTES}"
+        );
+    }
     let mut payload = vec![0_u8; length];
     reader
         .read_exact(&mut payload)
@@ -146,7 +153,7 @@ mod tests {
 
     use super::{
         command_response_from_result, configure_stdio_for_native_messaging, format_error_chain,
-        handle_command_response, run_loop_with_io,
+        handle_command_response, read_native_message_or_eof, run_loop_with_io,
     };
     use crate::Runtime;
 
@@ -164,6 +171,19 @@ mod tests {
             .expect("clean EOF should shut down without an error");
 
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn native_message_reader_rejects_oversized_messages_before_allocating() {
+        let mut input = std::io::Cursor::new(u32::MAX.to_le_bytes().to_vec());
+
+        let error = read_native_message_or_eof::<serde_json::Value>(&mut input).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("native message exceeds maximum length")
+        );
     }
 
     #[test]

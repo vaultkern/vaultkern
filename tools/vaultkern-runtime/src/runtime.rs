@@ -8,6 +8,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::form_urlencoded::byte_serialize;
+use uuid::Uuid;
 use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
@@ -971,7 +972,14 @@ impl Runtime {
         let vault = self.loaded_vault(vault_id)?;
         let mut entries = Vec::new();
         let mut index = 0;
-        collect_fill_candidates(&vault.root, url, &mut index, &mut entries);
+        collect_fill_candidates(
+            &vault.root,
+            vault.recycle_bin_group,
+            false,
+            url,
+            &mut index,
+            &mut entries,
+        );
 
         entries.sort_by(|left, right| {
             left.score
@@ -1270,11 +1278,16 @@ impl Runtime {
         let passkey = match credential_id {
             Some(credential_id) => find_passkey_by_credential_id_and_relying_party(
                 &vault.root,
+                vault.recycle_bin_group,
                 credential_id,
                 Some(relying_party),
             )
             .with_context(|| format!("passkey credential not found: {credential_id}"))?,
-            None => find_unique_passkey_by_relying_party(&vault.root, relying_party)?,
+            None => find_unique_passkey_by_relying_party(
+                &vault.root,
+                vault.recycle_bin_group,
+                relying_party,
+            )?,
         };
         create_assertion(
             passkey,
@@ -1300,6 +1313,7 @@ impl Runtime {
             credential_id: credential_id.to_owned(),
             exists: find_passkey_by_credential_id_and_relying_party(
                 &vault.root,
+                vault.recycle_bin_group,
                 credential_id,
                 relying_party,
             )
@@ -1314,7 +1328,7 @@ impl Runtime {
     ) -> Result<PasskeyCredentialListDto> {
         let vault = self.loaded_vault(vault_id)?;
         let mut credentials = Vec::new();
-        visit_passkeys(&vault.root, &mut |passkey| {
+        visit_passkeys(&vault.root, vault.recycle_bin_group, &mut |passkey| {
             if passkey.relying_party == relying_party {
                 credentials.push(PasskeyCredentialCandidateDto {
                     credential_id: passkey.credential_id.clone(),
@@ -1366,6 +1380,31 @@ impl Runtime {
         } else {
             relying_party.to_owned()
         };
+        if let Some(entry_id) = find_passkey_entry_id_by_relying_party_and_user_handle(
+            &vault.root,
+            vault.recycle_bin_group,
+            relying_party,
+            registration.passkey.user_handle.as_deref(),
+        ) {
+            self.core.snapshot_entry_to_history(vault, &entry_id)?;
+            self.core.update_entry_fields(
+                vault,
+                &entry_id,
+                EntryUpdate {
+                    title: Some(title),
+                    username: Some(user_name.to_owned()),
+                    password: Some(String::new()),
+                    url: Some(format!("https://{relying_party}")),
+                    notes: Some("Updated by WebAuthn passkey registration".into()),
+                },
+            )?;
+            self.core
+                .set_entry_passkey(vault, &entry_id, registration.passkey)?;
+            touch_entry_modified_at(&self.core, vault, &entry_id, modified_at)?;
+            response.entry_id = entry_id;
+            response.created = false;
+            return Ok(response);
+        }
         let created = self.core.add_entry(
             vault,
             &parent_group_id,
@@ -1383,6 +1422,32 @@ impl Runtime {
         touch_entry_modified_at(&self.core, vault, &entry_id, modified_at)?;
         response.entry_id = entry_id;
         Ok(response)
+    }
+
+    pub fn rollback_passkey_registration(
+        &mut self,
+        vault_id: &str,
+        entry_id: &str,
+        created: bool,
+    ) -> Result<()> {
+        let loaded = self
+            .loaded
+            .get_mut(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        let vault = loaded
+            .vault
+            .as_mut()
+            .with_context(|| format!("vault is locked: {vault_id}"))?;
+
+        if created {
+            self.core.delete_entry(vault, entry_id)?;
+            return Ok(());
+        }
+
+        if !restore_entry_from_latest_history(&mut vault.root, entry_id)? {
+            anyhow::bail!("entry not found: {entry_id}");
+        }
+        Ok(())
     }
 
     pub fn delete_entry(&mut self, vault_id: &str, entry_id: &str) -> Result<()> {
@@ -1840,6 +1905,16 @@ impl Runtime {
                     &client_data_json_base64url,
                 ) {
                     Ok(registration) => RuntimeResponse::PasskeyRegistration(registration),
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::RollbackPasskeyRegistration {
+                vault_id,
+                entry_id,
+                created,
+            } => Ok(
+                match self.rollback_passkey_registration(&vault_id, &entry_id, created) {
+                    Ok(()) => RuntimeResponse::Saved,
                     Err(error) => query_error_response(error),
                 },
             ),
@@ -2504,35 +2579,47 @@ fn collect_group_entries(group: &vaultkern_core::GroupView, output: &mut Vec<Ent
 
 fn collect_fill_candidates(
     group: &vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    ancestor_recycled: bool,
     url: &str,
     next_index: &mut usize,
     output: &mut Vec<RankedFillCandidate>,
 ) {
-    for entry in &group.entries {
-        let index = *next_index;
-        *next_index += 1;
+    let group_recycled = ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group);
+    if !group_recycled {
+        for entry in &group.entries {
+            let index = *next_index;
+            *next_index += 1;
 
-        if entry.password.is_empty() && entry.passkey.is_some() {
-            continue;
-        }
+            if entry.password.is_empty() && entry.passkey.is_some() {
+                continue;
+            }
 
-        if let Some(score) = score_entry_match(url, &entry.url) {
-            output.push(RankedFillCandidate {
-                index,
-                entry: EntrySummaryDto {
-                    id: entry.id.to_string(),
-                    title: entry.title.clone(),
-                    username: entry.username.clone(),
-                    url: entry.url.clone(),
-                    group_id: group.id.to_string(),
-                },
-                score,
-            });
+            if let Some(score) = score_entry_match(url, &entry.url) {
+                output.push(RankedFillCandidate {
+                    index,
+                    entry: EntrySummaryDto {
+                        id: entry.id.to_string(),
+                        title: entry.title.clone(),
+                        username: entry.username.clone(),
+                        url: entry.url.clone(),
+                        group_id: group.id.to_string(),
+                    },
+                    score,
+                });
+            }
         }
     }
 
     for child in &group.children {
-        collect_fill_candidates(child, url, next_index, output);
+        collect_fill_candidates(
+            child,
+            recycle_bin_group,
+            group_recycled,
+            url,
+            next_index,
+            output,
+        );
     }
 }
 
@@ -2574,11 +2661,12 @@ fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> PasskeyRecord {
 
 fn find_passkey_by_credential_id_and_relying_party<'a>(
     group: &'a vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
     credential_id: &str,
     relying_party: Option<&str>,
 ) -> Option<&'a PasskeyRecord> {
     let mut found = None;
-    visit_passkeys(group, &mut |passkey| {
+    visit_passkeys(group, recycle_bin_group, &mut |passkey| {
         if found.is_none()
             && passkey.credential_id == credential_id
             && relying_party.is_none_or(|value| passkey.relying_party == value)
@@ -2592,11 +2680,12 @@ fn find_passkey_by_credential_id_and_relying_party<'a>(
 
 fn find_unique_passkey_by_relying_party<'a>(
     group: &'a vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
     relying_party: &str,
 ) -> Result<&'a PasskeyRecord> {
     let mut found = None;
     let mut count = 0usize;
-    visit_passkeys(group, &mut |passkey| {
+    visit_passkeys(group, recycle_bin_group, &mut |passkey| {
         if passkey.relying_party == relying_party {
             count += 1;
             if found.is_none() {
@@ -2612,31 +2701,103 @@ fn find_unique_passkey_by_relying_party<'a>(
     }
 }
 
+fn find_passkey_entry_id_by_relying_party_and_user_handle(
+    group: &vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    relying_party: &str,
+    user_handle: Option<&str>,
+) -> Option<String> {
+    find_passkey_entry_id_in_group(group, recycle_bin_group, false, relying_party, user_handle)
+}
+
+fn find_passkey_entry_id_in_group(
+    group: &vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    ancestor_recycled: bool,
+    relying_party: &str,
+    user_handle: Option<&str>,
+) -> Option<String> {
+    let group_recycled = ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group);
+    if !group_recycled {
+        for entry in &group.entries {
+            if let Some(passkey) = entry.passkey.as_ref()
+                && passkey.relying_party == relying_party
+                && passkey.user_handle.as_deref() == user_handle
+            {
+                return Some(entry.id.to_string());
+            }
+        }
+    }
+
+    for child in &group.children {
+        if let Some(found) = find_passkey_entry_id_in_group(
+            child,
+            recycle_bin_group,
+            group_recycled,
+            relying_party,
+            user_handle,
+        ) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
 fn visit_passkeys<'a>(
     group: &'a vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
     visitor: &mut impl FnMut(&'a PasskeyRecord),
 ) {
-    visit_passkeys_in_group(group, false, visitor);
+    visit_passkeys_in_group(group, recycle_bin_group, false, visitor);
 }
 
 fn visit_passkeys_in_group<'a>(
     group: &'a vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
     ancestor_recycled: bool,
     visitor: &mut impl FnMut(&'a PasskeyRecord),
 ) {
-    let group_recycled = ancestor_recycled || group.previous_parent.is_some();
+    let group_recycled = ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group);
     for entry in &group.entries {
-        if !group_recycled
-            && entry.previous_parent.is_none()
-            && let Some(passkey) = entry.passkey.as_ref()
-        {
+        if !group_recycled && let Some(passkey) = entry.passkey.as_ref() {
             visitor(passkey);
         }
     }
 
     for child in &group.children {
-        visit_passkeys_in_group(child, group_recycled, visitor);
+        visit_passkeys_in_group(child, recycle_bin_group, group_recycled, visitor);
     }
+}
+
+fn group_is_recycle_bin(group: &vaultkern_core::Group, recycle_bin_group: Option<Uuid>) -> bool {
+    recycle_bin_group.is_some_and(|recycle_bin_group| group.id == recycle_bin_group)
+}
+
+fn restore_entry_from_latest_history(
+    group: &mut vaultkern_core::Group,
+    entry_id: &str,
+) -> Result<bool> {
+    for entry in &mut group.entries {
+        if entry.id.to_string() != entry_id {
+            continue;
+        }
+
+        let mut restored = entry.history.pop().with_context(|| {
+            format!("passkey registration rollback history not found: {entry_id}")
+        })?;
+        restored.history = std::mem::take(&mut entry.history);
+        *entry = restored;
+        return Ok(true);
+    }
+
+    for child in &mut group.children {
+        if restore_entry_from_latest_history(child, entry_id)? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn enforce_history_limits(vault: &mut Vault) {

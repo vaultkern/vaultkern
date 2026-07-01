@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+type RuntimeMessageListener = (
+  message: unknown,
+  sender: unknown,
+  sendResponse: (response: unknown) => void
+) => boolean;
+
 afterEach(() => {
   vi.useRealTimers();
   vi.resetModules();
@@ -8,6 +14,32 @@ afterEach(() => {
 beforeEach(() => {
   delete (globalThis as typeof globalThis & { chrome?: unknown }).chrome;
 });
+
+async function flushMicrotasks() {
+  for (let index = 0; index < 6; index += 1) {
+    await Promise.resolve();
+  }
+}
+
+function sendRuntimeMessage(
+  listeners: RuntimeMessageListener[],
+  message: unknown
+) {
+  let response: unknown;
+  const handled = listeners.some((listener) =>
+    listener(message, {}, (value) => {
+      response = value;
+    })
+  );
+
+  expect(handled).toBe(true);
+  return {
+    async response() {
+      await flushMicrotasks();
+      return response;
+    }
+  };
+}
 
 function createPort() {
   const messageListeners: Array<(message: unknown) => void> = [];
@@ -43,29 +75,53 @@ describe("background bridge", () => {
     vi.useFakeTimers();
     const port = createPort();
     const connectNative = vi.fn(() => port);
-    let listener:
-      | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean)
-      | undefined;
+    const attach = vi.fn(async () => undefined);
+    const listeners: RuntimeMessageListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
         connectNative,
         onMessage: {
-          addListener(fn: typeof listener) {
-            listener = fn;
+          addListener(fn: RuntimeMessageListener) {
+            listeners.push(fn);
           }
         }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: true
+              }
+            });
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      webAuthenticationProxy: {
+        attach
       }
     };
 
     await import("../background");
+    await flushMicrotasks();
+    expect(attach).toHaveBeenCalledTimes(1);
 
-    if (!listener) {
+    if (listeners.length === 0) {
       throw new Error("background listener was not registered");
     }
 
-    const responsePromise = new Promise<unknown>((resolve) => {
-      listener?.({ version: 1, command: { type: "get_session_state" } }, {}, resolve);
+    const response = sendRuntimeMessage(listeners, {
+      version: 1,
+      command: { type: "get_session_state" }
     });
 
     port.emitMessage({
@@ -75,7 +131,13 @@ describe("background bridge", () => {
       currentVaultRefId: "vault-ref-1",
       supportsBiometricUnlock: false
     });
-    await responsePromise;
+    await expect(response.response()).resolves.toEqual({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
 
     await vi.advanceTimersByTimeAsync(20_000);
 
@@ -84,6 +146,80 @@ describe("background bridge", () => {
       command: { type: "get_session_state" }
     });
     expect(port.postMessage).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+
+  it("does not keep the native session alive when passkeys are disabled", async () => {
+    vi.useFakeTimers();
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const listeners: RuntimeMessageListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        onMessage: {
+          addListener(fn: RuntimeMessageListener) {
+            listeners.push(fn);
+          }
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: false
+              }
+            });
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        detach: vi.fn(async () => undefined)
+      }
+    };
+
+    await import("../background");
+    await flushMicrotasks();
+
+    if (listeners.length === 0) {
+      throw new Error("background listener was not registered");
+    }
+
+    const response = sendRuntimeMessage(listeners, {
+      version: 1,
+      command: { type: "get_session_state" }
+    });
+
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    await expect(response.response()).resolves.toEqual({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    expect(port.postMessage).toHaveBeenCalledTimes(1);
 
     vi.useRealTimers();
   });
@@ -241,6 +377,7 @@ describe("background bridge", () => {
           get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
             const items = {
               ...storedItems,
+              vaultkernWebAuthnDebugEnabled: true,
               vaultkernExtensionSettings: {
                 recentVaultLimit: 10,
                 language: "en",

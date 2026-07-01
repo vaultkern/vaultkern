@@ -179,7 +179,8 @@ pub struct PasskeyRecord {
 }
 
 impl PasskeyRecord {
-    pub const USERNAME_KEY: &'static str = "Passkey Username";
+    pub const USERNAME_KEY: &'static str = "KPEX_PASSKEY_USERNAME";
+    pub const LEGACY_USERNAME_KEY: &'static str = "Passkey Username";
     pub const CREDENTIAL_ID_KEY: &'static str = "KPEX_PASSKEY_CREDENTIAL_ID";
     pub const GENERATED_USER_ID_KEY: &'static str = "KPEX_PASSKEY_GENERATED_USER_ID";
     pub const PRIVATE_KEY_PEM_KEY: &'static str = "KPEX_PASSKEY_PRIVATE_KEY_PEM";
@@ -253,7 +254,11 @@ impl PasskeyRecord {
 
     pub fn from_attributes(attributes: &BTreeMap<String, CustomField>) -> Option<Self> {
         Some(Self {
-            username: attributes.get(Self::USERNAME_KEY)?.value.clone(),
+            username: attributes
+                .get(Self::USERNAME_KEY)
+                .or_else(|| attributes.get(Self::LEGACY_USERNAME_KEY))?
+                .value
+                .clone(),
             credential_id: attributes.get(Self::CREDENTIAL_ID_KEY)?.value.clone(),
             generated_user_id: attributes
                 .get(Self::GENERATED_USER_ID_KEY)
@@ -720,8 +725,48 @@ mod tests {
         let mut attributes = BTreeMap::new();
         passkey.write_to_attributes(&mut attributes);
 
+        assert!(attributes.contains_key("KPEX_PASSKEY_USERNAME"));
+        assert!(!attributes.contains_key("Passkey Username"));
         let restored = PasskeyRecord::from_attributes(&attributes).expect("restore passkey");
         assert_eq!(restored, passkey);
+    }
+
+    #[test]
+    fn passkey_record_reads_legacy_username_attribute() {
+        let attributes = BTreeMap::from([
+            (
+                "Passkey Username".into(),
+                CustomField {
+                    value: "alice".into(),
+                    protected: false,
+                },
+            ),
+            (
+                PasskeyRecord::CREDENTIAL_ID_KEY.into(),
+                CustomField {
+                    value: "cred-123".into(),
+                    protected: true,
+                },
+            ),
+            (
+                PasskeyRecord::PRIVATE_KEY_PEM_KEY.into(),
+                CustomField {
+                    value: "pem".into(),
+                    protected: true,
+                },
+            ),
+            (
+                PasskeyRecord::RELYING_PARTY_KEY.into(),
+                CustomField {
+                    value: "example.com".into(),
+                    protected: false,
+                },
+            ),
+        ]);
+
+        let restored = PasskeyRecord::from_attributes(&attributes).expect("restore legacy passkey");
+
+        assert_eq!(restored.username, "alice");
     }
 
     #[test]

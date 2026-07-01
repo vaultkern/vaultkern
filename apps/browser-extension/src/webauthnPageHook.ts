@@ -69,21 +69,28 @@ function observeWebAuthnRequest(
     return;
   }
 
-  window.postMessage(
-    {
-      type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
-      ceremony,
-      relyingParty: relyingPartyFromOptions(publicKey),
-      challenge: base64urlFrom(publicKey.challenge),
-      allowCredentialIds: credentialIdsFrom(publicKey.allowCredentials),
-      excludeCredentialIds: credentialIdsFrom(publicKey.excludeCredentials),
-      mediation:
-        ceremony === "get" && credentialOptions?.mediation === "conditional"
-          ? "conditional"
-          : undefined
-    },
-    window.location.origin
-  );
+  try {
+    window.postMessage(
+      {
+        type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
+        ceremony,
+        relyingParty: relyingPartyFromOptions(publicKey),
+        challenge: base64urlFrom(publicKey.challenge),
+        allowCredentialIds: credentialIdsFrom(publicKey.allowCredentials),
+        excludeCredentialIds: credentialIdsFrom(publicKey.excludeCredentials),
+        mediation: mediationFrom(ceremony, credentialOptions?.mediation)
+      },
+      window.location.origin === "null" ? "*" : window.location.origin
+    );
+  } catch {
+    // Page observations are advisory; never change the page's WebAuthn behavior.
+  }
+}
+
+function mediationFrom(ceremony: "create" | "get", value: unknown) {
+  return ceremony === "get" && typeof value === "string" && value !== ""
+    ? value
+    : undefined;
 }
 
 function relyingPartyFromOptions(options: PublicKeyCredentialOptionsLike) {

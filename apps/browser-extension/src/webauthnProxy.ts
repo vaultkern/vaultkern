@@ -63,7 +63,7 @@ type ChromeLike = {
 type WebAuthnOriginContext = {
   origin: string;
   topOrigin?: string;
-  mediation?: "conditional";
+  mediation?: string;
 };
 
 type WebAuthnPromptContext = WebAuthnOriginContext & {
@@ -86,6 +86,7 @@ const unlockPromptWindowIds = new Map<number, number>();
 const unlockCompleteWaiters = new Map<number, Set<() => void>>();
 const unlockDismissWaiters = new Map<number, Set<() => void>>();
 const unlockPromptContexts = new Map<number, WebAuthnPromptContext>();
+const unlockPromptNonces = new Map<number, string>();
 const unlockPromptRemovalCleanups = new Map<number, () => void>();
 const presencePromptWindowIds = new Map<number, number>();
 const presenceCompleteWaiters = new Map<
@@ -94,11 +95,15 @@ const presenceCompleteWaiters = new Map<
 >();
 const presenceDismissWaiters = new Map<number, Set<() => void>>();
 const presencePromptContexts = new Map<number, WebAuthnPromptContext>();
+const presencePromptNonces = new Map<number, string>();
 const presencePromptRemovalCleanups = new Map<number, () => void>();
 const observedPageRequests: ObservedWebAuthnPageRequest[] = [];
 const registeredUnlockMessageSources = new WeakSet<object>();
 const registeredRequestHandlerSources = new WeakSet<object>();
 const OBSERVED_PAGE_REQUEST_MAX_AGE_MS = 120_000;
+const WEB_AUTHN_DEBUG_STORAGE_KEY = "vaultkernWebAuthnDebug";
+const WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY = "vaultkernWebAuthnDebugEnabled";
+const RELATED_ORIGIN_LABEL_LIMIT = 5;
 
 type ObservedWebAuthnPageRequest = {
   ceremony: "create" | "get";
@@ -108,7 +113,7 @@ type ObservedWebAuthnPageRequest = {
   challenge?: string;
   allowCredentialIds?: string[];
   excludeCredentialIds?: string[];
-  mediation?: "conditional";
+  mediation?: string;
   observedAt: number;
 };
 
@@ -229,7 +234,7 @@ export function recordWebAuthnPageRequest(
         : undefined,
     allowCredentialIds: stringArrayFrom(candidate.allowCredentialIds),
     excludeCredentialIds: stringArrayFrom(candidate.excludeCredentialIds),
-    mediation: candidate.mediation === "conditional" ? "conditional" : undefined,
+    mediation: typeof candidate.mediation === "string" ? candidate.mediation : undefined,
     observedAt: Date.now()
   });
   observedPageRequests.splice(0, Math.max(0, observedPageRequests.length - 50));
@@ -306,13 +311,22 @@ function registerUnlockCompleteHandler(chromeApi: ChromeLike) {
   }
 
   registeredUnlockMessageSources.add(messageSource);
-  messageSource.addListener((message) => {
+  messageSource.addListener((message, sender) => {
     if (isUnlockCompleteMessage(message)) {
       const requestId = requestIdFromMessage(message);
       if (typeof requestId !== "number") {
         return;
       }
-      if (!promptContextMatches(unlockPromptContexts, requestId, message)) {
+      if (
+        !promptCompletionMatches(
+          unlockPromptContexts,
+          unlockPromptNonces,
+          requestId,
+          message,
+          sender,
+          "unlock"
+        )
+      ) {
         return;
       }
       void recordWebAuthnDebug(chromeApi, {
@@ -331,7 +345,16 @@ function registerUnlockCompleteHandler(chromeApi: ChromeLike) {
       if (typeof requestId !== "number") {
         return;
       }
-      if (!promptContextMatches(presencePromptContexts, requestId, message)) {
+      if (
+        !promptCompletionMatches(
+          presencePromptContexts,
+          presencePromptNonces,
+          requestId,
+          message,
+          sender,
+          "approve"
+        )
+      ) {
         return;
       }
       void recordWebAuthnDebug(chromeApi, {
@@ -375,21 +398,57 @@ function credentialIdFromMessage(message: unknown) {
     : undefined;
 }
 
-function promptContextMatches(
+function promptCompletionMatches(
   contexts: Map<number, WebAuthnPromptContext>,
+  nonces: Map<number, string>,
   requestId: number,
-  message: unknown
+  message: unknown,
+  sender: unknown,
+  mode: "unlock" | "approve"
 ) {
   const expected = contexts.get(requestId);
+  const expectedNonce = nonces.get(requestId);
   const candidate = message as
-    | { origin?: unknown; relyingParty?: unknown; topOrigin?: unknown }
+    | {
+        origin?: unknown;
+        relyingParty?: unknown;
+        topOrigin?: unknown;
+        nonce?: unknown;
+      }
     | null;
   return (
     Boolean(expected) &&
+    typeof expectedNonce === "string" &&
+    candidate?.nonce === expectedNonce &&
     candidate?.origin === expected?.origin &&
     candidate?.relyingParty === expected?.relyingParty &&
-    candidate?.topOrigin === expected?.topOrigin
+    candidate?.topOrigin === expected?.topOrigin &&
+    senderMatchesPrompt(sender, mode, requestId, expectedNonce)
   );
+}
+
+function senderMatchesPrompt(
+  sender: unknown,
+  mode: "unlock" | "approve",
+  requestId: number,
+  nonce: string
+) {
+  const url = (sender as { url?: unknown } | null)?.url;
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "chrome-extension:" &&
+      parsed.pathname.endsWith("/popup.html") &&
+      parsed.searchParams.get("webauthn") === mode &&
+      parsed.searchParams.get("requestId") === String(requestId) &&
+      parsed.searchParams.get("nonce") === nonce
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function handleIsUvpaaRequest(chromeApi: ChromeLike, request: unknown) {
@@ -433,18 +492,9 @@ async function handleGetRequest(
         "VaultKern cannot identify the WebAuthn request origin"
       );
     }
-    rejectConditionalMediation(options, originContext);
+    rejectUnsupportedMediation(options, originContext);
     const origin = originContext.origin;
     const relyingParty = relyingPartyFromGetOptions(options, origin);
-    const relyingPartyValidation = requestedRpId
-      ? await validateOriginForRelyingParty(origin, requestedRpId)
-      : { allowed: true, relatedOriginVerified: false };
-    if (!relyingPartyValidation.allowed) {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "WebAuthn request origin does not match relying party"
-      );
-    }
     const clientDataJsonBase64url = clientDataJsonBase64urlFrom(
       "webauthn.get",
       options.challenge,
@@ -498,6 +548,15 @@ async function handleGetRequest(
       if (approved.selectedCredentialId) {
         credentialIds = [approved.selectedCredentialId];
       }
+    }
+    const relyingPartyValidation = requestedRpId
+      ? await validateOriginForRelyingParty(origin, requestedRpId)
+      : { allowed: true, relatedOriginVerified: false };
+    if (!relyingPartyValidation.allowed) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
     }
 
     const assertion = await createAssertionForAllowedCredentials(
@@ -576,6 +635,7 @@ type PasskeyAssertionResponse = {
 type PasskeyRegistrationResponse = {
   entryId: string;
   credentialId: string;
+  created: boolean;
   authenticatorDataBase64url: string;
   attestationObjectBase64url: string;
   clientDataJsonBase64url: string;
@@ -753,6 +813,7 @@ function passkeyRegistrationFromResponse(response: unknown): PasskeyRegistration
   return {
     entryId: registration.entryId,
     credentialId: registration.credentialId,
+    created: registration.created !== false,
     authenticatorDataBase64url: registration.authenticatorDataBase64url,
     attestationObjectBase64url: registration.attestationObjectBase64url,
     clientDataJsonBase64url: registration.clientDataJsonBase64url,
@@ -853,15 +914,6 @@ async function handleCreateRequest(
     }
     const origin = originContext.origin;
     const relyingParty = relyingPartyFromCreateOptions(options, origin);
-    const relyingPartyValidation = requestedRpId
-      ? await validateOriginForRelyingParty(origin, requestedRpId)
-      : { allowed: true, relatedOriginVerified: false };
-    if (!relyingPartyValidation.allowed) {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "WebAuthn request origin does not match relying party"
-      );
-    }
     const clientDataJsonBase64url = clientDataJsonBase64urlFrom(
       "webauthn.create",
       options.challenge,
@@ -900,6 +952,15 @@ async function handleCreateRequest(
       if (!approved) {
         return;
       }
+    }
+    const relyingPartyValidation = requestedRpId
+      ? await validateOriginForRelyingParty(origin, requestedRpId)
+      : { allowed: true, relatedOriginVerified: false };
+    if (!relyingPartyValidation.allowed) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
     }
     const activeVaultId = activeVault.activeVaultId;
 
@@ -944,6 +1005,7 @@ async function handleCreateRequest(
         sendRuntimeCommand,
         activeVaultId,
         registration.entryId,
+        registration.created,
         saveAfterRollback
       );
     };
@@ -1007,7 +1069,7 @@ async function handleCreateRequest(
         requestId,
         error: errorSummary(error)
       });
-      return;
+      throw error;
     }
     await recordWebAuthnDebug(chromeApi, {
       event: "create_completed",
@@ -1133,17 +1195,21 @@ function rejectRequiredUserVerification(options: {
   );
 }
 
-function rejectConditionalMediation(
+function rejectUnsupportedMediation(
   options: { mediation?: unknown },
   originContext: WebAuthnOriginContext
 ) {
-  if (options.mediation !== "conditional" && originContext.mediation !== "conditional") {
+  const mediation =
+    typeof options.mediation === "string"
+      ? options.mediation
+      : originContext.mediation;
+  if (!mediation) {
     return;
   }
 
   throw new WebAuthnRequestError(
     "NotAllowedError",
-    "VaultKern passkey provider does not support conditional mediation"
+    `VaultKern passkey provider does not support ${mediation} mediation`
   );
 }
 
@@ -1182,16 +1248,18 @@ async function rollbackPasskeyRegistration(
   sendRuntimeCommand: RuntimeCommandSender,
   vaultId: string,
   entryId: string,
+  created: boolean,
   saveAfterRollback: boolean
 ) {
-  const deleteResponse = await sendRuntimeCommand({
-    type: "delete_entry",
+  const rollbackResponse = await sendRuntimeCommand({
+    type: "rollback_passkey_registration",
     vault_id: vaultId,
-    entry_id: entryId
+    entry_id: entryId,
+    created
   });
-  const deleteError = runtimeErrorFromResponse(deleteResponse);
-  if (deleteError) {
-    throw deleteError;
+  const rollbackError = runtimeErrorFromResponse(rollbackResponse);
+  if (rollbackError) {
+    throw rollbackError;
   }
 
   if (!saveAfterRollback) {
@@ -1335,7 +1403,7 @@ function mediationFromRequestDetails(requestDetailsJson: unknown) {
 
   try {
     const details = JSON.parse(requestDetailsJson) as { mediation?: unknown };
-    return details.mediation === "conditional" ? "conditional" : undefined;
+    return typeof details.mediation === "string" ? details.mediation : undefined;
   } catch {
     return undefined;
   }
@@ -1568,6 +1636,9 @@ async function originAllowedByRelatedOrigins(origin: string, relyingParty: strin
     if (!Array.isArray(body.origins)) {
       return false;
     }
+    if (relatedOriginLabelCount(body.origins) > RELATED_ORIGIN_LABEL_LIMIT) {
+      return false;
+    }
 
     const normalizedOrigin = parsedOrigin.origin;
     return body.origins.some((candidate) => {
@@ -1576,6 +1647,33 @@ async function originAllowedByRelatedOrigins(origin: string, relyingParty: strin
     });
   } catch {
     return false;
+  }
+}
+
+function relatedOriginLabelCount(origins: unknown[]) {
+  const labels = new Set<string>();
+  for (const origin of origins) {
+    const label = relatedOriginLabel(origin);
+    if (label) {
+      labels.add(label);
+    }
+  }
+  return labels.size;
+}
+
+function relatedOriginLabel(origin: unknown) {
+  const candidateOrigin = originFromUnknown(origin);
+  if (!candidateOrigin) {
+    return null;
+  }
+  try {
+    const host = normalizedHostFromUrl(candidateOrigin);
+    if (isLoopbackHost(host) || isIpAddress(host)) {
+      return null;
+    }
+    return psl.get(host);
+  } catch {
+    return null;
   }
 }
 
@@ -1715,6 +1813,21 @@ async function activeVaultForRequest(
 
     const signal = await unlockSignal;
     if (!signal) {
+      const session = (await sendRuntimeCommand({
+        type: "get_session_state"
+      })) as { activeVaultId?: string | null };
+      await recordWebAuthnDebug(chromeApi, {
+        event: "unlock_poll_session_state",
+        requestId,
+        hasActiveVault: Boolean(session.activeVaultId)
+      });
+      if (session.activeVaultId) {
+        clearUnlockPromptState(requestId);
+        return {
+          activeVaultId: session.activeVaultId,
+          userPresenceVerified: false
+        };
+      }
       unlockSignal = waitForUnlockSignal(
         requestId,
         Math.min(1_000, Math.max(0, deadline - Date.now()))
@@ -1937,8 +2050,10 @@ async function openUnlockPrompt(
     }
   }
 
+  const nonce = generatePromptNonce();
   unlockPromptContexts.set(requestId, promptContext);
-  const popupPath = popupPathForWebAuthnPrompt("unlock", requestId, promptContext);
+  unlockPromptNonces.set(requestId, nonce);
+  const popupPath = popupPathForWebAuthnPrompt("unlock", requestId, promptContext, nonce);
   const url =
     chromeApi.runtime?.getURL?.(popupPath) ??
     popupPath;
@@ -1977,8 +2092,10 @@ async function openPresencePrompt(
     }
   }
 
+  const nonce = generatePromptNonce();
   presencePromptContexts.set(requestId, promptContext);
-  const popupPath = popupPathForWebAuthnPrompt("approve", requestId, promptContext);
+  presencePromptNonces.set(requestId, nonce);
+  const popupPath = popupPathForWebAuthnPrompt("approve", requestId, promptContext, nonce);
   const url =
     chromeApi.runtime?.getURL?.(popupPath) ??
     popupPath;
@@ -2064,13 +2181,15 @@ function watchUnlockPromptWindow(
 function popupPathForWebAuthnPrompt(
   mode: "unlock" | "approve",
   requestId: number,
-  promptContext: WebAuthnPromptContext
+  promptContext: WebAuthnPromptContext,
+  nonce: string
 ) {
   const params = new URLSearchParams({
     webauthn: mode,
     requestId: String(requestId),
     relyingParty: promptContext.relyingParty,
-    origin: promptContext.origin
+    origin: promptContext.origin,
+    nonce
   });
   if (promptContext.topOrigin) {
     params.set("topOrigin", promptContext.topOrigin);
@@ -2081,16 +2200,35 @@ function popupPathForWebAuthnPrompt(
   return `popup.html?${params.toString()}`;
 }
 
+function generatePromptNonce() {
+  const bytes = new Uint8Array(16);
+  const cryptoApi = (globalThis as typeof globalThis & { crypto?: Crypto }).crypto;
+  if (cryptoApi?.getRandomValues) {
+    cryptoApi.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
 function clearUnlockPromptState(requestId: number) {
   unlockPromptRemovalCleanups.get(requestId)?.();
   unlockPromptWindowIds.delete(requestId);
   unlockPromptContexts.delete(requestId);
+  unlockPromptNonces.delete(requestId);
 }
 
 function clearPresencePromptState(requestId: number) {
   presencePromptRemovalCleanups.get(requestId)?.();
   presencePromptWindowIds.delete(requestId);
   presencePromptContexts.delete(requestId);
+  presencePromptNonces.delete(requestId);
 }
 
 function delay(milliseconds: number) {
@@ -2119,7 +2257,15 @@ function webAuthnError(error: unknown) {
   };
 }
 
-export async function recordWebAuthnDebug(
+export function recordWebAuthnDebug(
+  chromeApi: ChromeLike,
+  event: Record<string, unknown>
+) {
+  void persistWebAuthnDebug(chromeApi, event);
+  return Promise.resolve();
+}
+
+async function persistWebAuthnDebug(
   chromeApi: ChromeLike,
   event: Record<string, unknown>
 ) {
@@ -2128,12 +2274,18 @@ export async function recordWebAuthnDebug(
     if (!storage?.get || !storage.set) {
       return;
     }
-    const existing = await storage.get(["vaultkernWebAuthnDebug"]);
-    const previous = Array.isArray(existing.vaultkernWebAuthnDebug)
-      ? existing.vaultkernWebAuthnDebug
+    const existing = await storage.get([
+      WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY,
+      WEB_AUTHN_DEBUG_STORAGE_KEY
+    ]);
+    if (existing[WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY] !== true) {
+      return;
+    }
+    const previous = Array.isArray(existing[WEB_AUTHN_DEBUG_STORAGE_KEY])
+      ? existing[WEB_AUTHN_DEBUG_STORAGE_KEY]
       : [];
     await storage.set({
-      vaultkernWebAuthnDebug: [
+      [WEB_AUTHN_DEBUG_STORAGE_KEY]: [
         ...previous.slice(-49),
         {
           at: new Date().toISOString(),

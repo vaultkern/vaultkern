@@ -750,7 +750,11 @@ function PasskeySection({
   }
 
   function showHideLabel(revealed: boolean, label: string) {
-    return `${revealed ? text("Hide password").replace(" password", "") : text("Show password").replace(" password", "")} ${label}`;
+    return `${showHideAction(revealed)} ${label}`;
+  }
+
+  function showHideAction(revealed: boolean) {
+    return revealed ? text("Hide") : text("Show");
   }
 
   function renderSensitivePasskeyRow(
@@ -772,9 +776,7 @@ function PasskeySection({
             }
             style={protectedToggleStyle}
           >
-            {revealed
-              ? text("Hide password").replace(" password", "")
-              : text("Show password").replace(" password", "")}
+            {showHideAction(revealed)}
           </button>
         ) : null}
       </div>
@@ -823,9 +825,7 @@ function PasskeySection({
           onClick={() => toggleRevealedField(setRevealedDraftFields, field)}
           style={protectedToggleStyle}
         >
-          {revealed
-            ? text("Hide password").replace(" password", "")
-            : text("Show password").replace(" password", "")}
+          {showHideAction(revealed)}
         </button>
       </div>
     );
@@ -841,6 +841,14 @@ function PasskeySection({
       relyingParty: draft.relyingParty.trim(),
       userHandle: emptyStringAsNull(draft.userHandle)
     };
+  }
+
+  function draftIsValid() {
+    return (
+      draft.credentialId.trim() !== "" &&
+      draft.relyingParty.trim() !== "" &&
+      privateKeyPemLooksValid(draft.privateKeyPem)
+    );
   }
 
   const passkey = entry.passkey;
@@ -983,7 +991,7 @@ function PasskeySection({
           <div style={inlineActionsStyle}>
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || !draftIsValid()}
               onClick={() => {
                 onSetPasskey?.(normalizedDraft());
                 setEditing(false);
@@ -1023,6 +1031,13 @@ function emptyPasskey(): EntryPasskey {
     backupEligible: false,
     backupState: false
   };
+}
+
+function privateKeyPemLooksValid(value: string) {
+  const trimmed = value.trim();
+  return /^-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----$/u.test(
+    trimmed
+  );
 }
 
 function emptyStringAsNull(value: string | null): string | null {
@@ -1075,7 +1090,7 @@ function EntryDetailExtras({
                   {field.protected ? (
                     <button
                       type="button"
-                      aria-label={`${revealed ? text("Hide password").replace(" password", "") : text("Show password").replace(" password", "")} ${field.key}`}
+                      aria-label={`${revealed ? text("Hide") : text("Show")} ${field.key}`}
                       onClick={() => {
                         setRevealedFields((current) => {
                           const next = new Set(current);
@@ -1089,7 +1104,7 @@ function EntryDetailExtras({
                       }}
                       style={protectedToggleStyle}
                     >
-                      {revealed ? text("Hide password").replace(" password", "") : text("Show password").replace(" password", "")}
+                      {revealed ? text("Hide") : text("Show")}
                     </button>
                   ) : null}
                 </div>

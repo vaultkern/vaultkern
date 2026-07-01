@@ -150,6 +150,11 @@ pub enum RuntimeCommand {
         related_origin_verified: bool,
         client_data_json_base64url: String,
     },
+    RollbackPasskeyRegistration {
+        vault_id: String,
+        entry_id: String,
+        created: bool,
+    },
     PasskeyCredentialStatus {
         vault_id: String,
         credential_id: String,
@@ -502,6 +507,7 @@ pub struct PasskeyAssertionDto {
 pub struct PasskeyRegistrationDto {
     pub entry_id: String,
     pub credential_id: String,
+    pub created: bool,
     pub authenticator_data_base64url: String,
     pub attestation_object_base64url: String,
     pub client_data_json_base64url: String,

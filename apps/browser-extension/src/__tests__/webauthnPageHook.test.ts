@@ -52,6 +52,49 @@ describe("WebAuthn page hook", () => {
     );
   });
 
+  it("forwards immediate mediation on get observations", async () => {
+    installCredentialMocks();
+    const postMessage = vi
+      .spyOn(window, "postMessage")
+      .mockImplementation(() => undefined);
+
+    await import("../webauthnPageHook");
+
+    await navigator.credentials.get({
+      mediation: "immediate",
+      publicKey: {
+        challenge: new Uint8Array([7, 8, 9])
+      }
+    } as CredentialRequestOptions);
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "vaultkern_webauthn_page_request",
+        ceremony: "get",
+        mediation: "immediate"
+      }),
+      window.location.origin
+    );
+  });
+
+  it("does not let observation postMessage failures break WebAuthn calls", async () => {
+    const { originalGet } = installCredentialMocks();
+    vi.spyOn(window, "postMessage").mockImplementation(() => {
+      throw new SyntaxError("Invalid target origin 'null'");
+    });
+
+    await import("../webauthnPageHook");
+
+    await expect(
+      navigator.credentials.get({
+        publicKey: {
+          challenge: new Uint8Array([6, 5, 4])
+        }
+      } as CredentialRequestOptions)
+    ).resolves.toBeNull();
+    expect(originalGet).toHaveBeenCalledTimes(1);
+  });
+
   it("does not post observations while the already-injected hook is disabled", async () => {
     const { originalCreate } = installCredentialMocks();
     const postMessage = vi

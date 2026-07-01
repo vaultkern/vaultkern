@@ -49,7 +49,7 @@ function isWebAuthnPageRequest(message: unknown): message is {
   challenge?: string;
   allowCredentialIds?: string[];
   excludeCredentialIds?: string[];
-  mediation?: "conditional";
+  mediation?: string;
 } {
   if (
     typeof message !== "object" ||

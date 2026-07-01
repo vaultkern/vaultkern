@@ -132,8 +132,8 @@ pub fn create_registration(request: PasskeyRegistrationRequest<'_>) -> Result<Pa
         private_key_pem,
         relying_party: request.relying_party.to_owned(),
         user_handle: Some(request.user_handle_base64url.to_owned()),
-        backup_eligible: false,
-        backup_state: false,
+        backup_eligible: true,
+        backup_state: true,
     };
 
     Ok(PasskeyRegistration {
@@ -141,6 +141,7 @@ pub fn create_registration(request: PasskeyRegistrationRequest<'_>) -> Result<Pa
         dto: PasskeyRegistrationDto {
             entry_id: String::new(),
             credential_id,
+            created: true,
             authenticator_data_base64url: URL_SAFE_NO_PAD.encode(authenticator_data),
             attestation_object_base64url: URL_SAFE_NO_PAD.encode(attestation_object),
             client_data_json_base64url: request.client_data_json_base64url.to_owned(),
@@ -267,7 +268,12 @@ fn attested_authenticator_data(
 ) -> Vec<u8> {
     let mut auth_data = Vec::new();
     auth_data.extend_from_slice(&Sha256::digest(relying_party.as_bytes()));
-    auth_data.push(AUTH_DATA_FLAG_USER_PRESENT | AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA);
+    auth_data.push(
+        AUTH_DATA_FLAG_USER_PRESENT
+            | AUTH_DATA_FLAG_BACKUP_ELIGIBLE
+            | AUTH_DATA_FLAG_BACKUP_STATE
+            | AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA,
+    );
     auth_data.extend_from_slice(&0_u32.to_be_bytes());
     auth_data.extend_from_slice(&[0; 16]);
     auth_data.extend_from_slice(&(credential_id.len() as u16).to_be_bytes());
@@ -399,5 +405,35 @@ mod tests {
         .expect("verified related origins are allowed");
 
         assert_eq!(registration.passkey.relying_party, "example.com");
+    }
+
+    #[test]
+    fn registration_marks_vault_backed_passkeys_as_backed_up() {
+        let client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
+        );
+
+        let registration = create_registration(PasskeyRegistrationRequest {
+            relying_party: "example.com",
+            origin: "https://example.com",
+            user_name: "alice@example.com",
+            user_handle_base64url: "dXNlci0x",
+            related_origin_verified: false,
+            client_data_json_base64url: &client_data_json,
+        })
+        .expect("registration");
+        let authenticator_data = URL_SAFE_NO_PAD
+            .decode(&registration.dto.authenticator_data_base64url)
+            .expect("decode auth data");
+
+        assert!(registration.passkey.backup_eligible);
+        assert!(registration.passkey.backup_state);
+        assert_eq!(
+            authenticator_data[32],
+            super::AUTH_DATA_FLAG_USER_PRESENT
+                | super::AUTH_DATA_FLAG_BACKUP_ELIGIBLE
+                | super::AUTH_DATA_FLAG_BACKUP_STATE
+                | super::AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA
+        );
     }
 }

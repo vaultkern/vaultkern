@@ -85,6 +85,8 @@ type TranslationKey =
   | "Title"
   | "Username"
   | "Password"
+  | "Show"
+  | "Hide"
   | "Show password"
   | "Hide password"
   | "Generate"
@@ -288,6 +290,8 @@ const ZH_CN: Record<TranslationKey, string> = {
   Title: "标题",
   Username: "用户名",
   Password: "密码",
+  Show: "显示",
+  Hide: "隐藏",
   "Show password": "显示密码",
   "Hide password": "隐藏密码",
   Generate: "生成",

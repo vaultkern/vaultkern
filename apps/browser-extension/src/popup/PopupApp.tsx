@@ -142,6 +142,7 @@ export function PopupApp({
   );
   const currentVaultPreload = useRef<Promise<void> | null>(null);
   const webAuthnQuickUnlockAttempted = useRef(false);
+  const webAuthnUnlockCompletionSent = useRef(false);
   const webAuthnMode =
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("webauthn");
@@ -167,6 +168,20 @@ export function PopupApp({
         vault?.supportsQuickUnlock &&
         vault.availability !== "needs_repair"
     );
+  }
+
+  function notifyWebAuthnUnlockCompleteOnce(nextSession: SessionStateLike) {
+    if (
+      !webAuthnUnlockPrompt ||
+      webAuthnUnlockCompletionSent.current ||
+      !nextSession.unlocked ||
+      !nextSession.activeVaultId
+    ) {
+      return;
+    }
+
+    webAuthnUnlockCompletionSent.current = true;
+    void Promise.resolve(onUnlockComplete?.(nextSession)).catch(() => undefined);
   }
 
   function startCurrentVaultPreload() {
@@ -428,9 +443,7 @@ export function PopupApp({
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");
-      if (nextSession.unlocked && nextSession.activeVaultId) {
-        void Promise.resolve(onUnlockComplete?.(nextSession)).catch(() => undefined);
-      }
+      notifyWebAuthnUnlockCompleteOnce(nextSession);
     } catch (unlockFailure) {
       setUnlockError(
         popupErrorMessage(
@@ -466,9 +479,7 @@ export function PopupApp({
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");
-      if (nextSession.unlocked && nextSession.activeVaultId) {
-        void Promise.resolve(onUnlockComplete?.(nextSession)).catch(() => undefined);
-      }
+      notifyWebAuthnUnlockCompleteOnce(nextSession);
     } catch (unlockFailure) {
       setUnlockError(
         popupErrorMessage(
@@ -501,6 +512,12 @@ export function PopupApp({
       setSubmitting(false);
     }
   }
+
+  useEffect(() => {
+    if (session) {
+      notifyWebAuthnUnlockCompleteOnce(session);
+    }
+  }, [session, webAuthnUnlockPrompt]);
 
   useEffect(() => {
     if (

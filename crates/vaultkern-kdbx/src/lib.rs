@@ -2862,10 +2862,15 @@ fn parse_entry(
     entry.totp = build_totp(&raw_fields);
     entry.passkey = PasskeyRecord::from_attributes(&raw_fields);
     let has_complete_passkey = entry.passkey.is_some();
+    let passkey_used_legacy_username = has_complete_passkey
+        && !raw_fields.contains_key(PasskeyRecord::USERNAME_KEY)
+        && raw_fields.contains_key(PasskeyRecord::LEGACY_USERNAME_KEY);
     entry.attributes = raw_fields
         .into_iter()
         .filter(|(key, _)| {
-            !is_totp_attribute_key(key) && !(has_complete_passkey && is_passkey_attribute_key(key))
+            !is_totp_attribute_key(key)
+                && !(has_complete_passkey
+                    && is_passkey_attribute_key(key, passkey_used_legacy_username))
         })
         .collect();
 
@@ -2879,7 +2884,11 @@ fn is_totp_attribute_key(key: &str) -> bool {
     )
 }
 
-fn is_passkey_attribute_key(key: &str) -> bool {
+fn is_passkey_attribute_key(key: &str, include_legacy_username: bool) -> bool {
+    if include_legacy_username && key == PasskeyRecord::LEGACY_USERNAME_KEY {
+        return true;
+    }
+
     matches!(
         key,
         PasskeyRecord::USERNAME_KEY
@@ -4019,6 +4028,43 @@ mod compatibility_tests {
                 .get(PasskeyRecord::CREDENTIAL_ID_KEY)
                 .map(|field| (field.value.as_str(), field.protected)),
             Some(("partial-credential", true))
+        );
+    }
+
+    #[test]
+    fn complete_kpex_passkey_preserves_legacy_username_custom_field() {
+        let mut vault = Vault::empty("LegacyUsernameCustomField");
+        let mut entry = Entry::new("Example");
+        entry.passkey = Some(PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "credential-1".into(),
+            generated_user_id: None,
+            private_key_pem: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----".into(),
+            relying_party: "example.com".into(),
+            user_handle: Some("user-handle".into()),
+            backup_eligible: true,
+            backup_state: true,
+        });
+        entry.attributes.insert(
+            PasskeyRecord::LEGACY_USERNAME_KEY.into(),
+            CustomField {
+                value: "custom legacy label".into(),
+                protected: false,
+            },
+        );
+        vault.root.entries.push(entry);
+
+        let key = test_key("legacy-passkey-username-custom-field");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save kdbx");
+        let loaded = load_kdbx(&bytes, &key).expect("load kdbx");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(
+            loaded_entry
+                .attributes
+                .get(PasskeyRecord::LEGACY_USERNAME_KEY)
+                .map(|field| (field.value.as_str(), field.protected)),
+            Some(("custom legacy label", false))
         );
     }
 }

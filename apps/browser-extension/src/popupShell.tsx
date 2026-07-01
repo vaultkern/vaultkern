@@ -133,6 +133,10 @@ function notifyWebAuthnPromptComplete(
   if (options.credentialId) {
     message.credentialId = options.credentialId;
   }
+  const nonce = promptParams?.get("nonce");
+  if (nonce) {
+    message.nonce = nonce;
+  }
 
   void Promise.resolve(
     sendMessage.call(chromeApi.runtime, message)
