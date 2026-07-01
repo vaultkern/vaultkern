@@ -4,7 +4,8 @@
   "type": "module",
   "dependencies": {
     "@simplewebauthn/server": "^13.3.2",
-    "@vaultkern/shared-web-ui": "file:../../packages/shared-web-ui"
+    "@vaultkern/shared-web-ui": "file:../../packages/shared-web-ui",
+    "psl": "^1.15.0"
   },
   "scripts": {
     "build": "vite build && node scripts/writeManifest.mjs",

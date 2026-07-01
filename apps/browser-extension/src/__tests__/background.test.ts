@@ -295,13 +295,23 @@ describe("background bridge", () => {
     expect(query).toHaveBeenCalledWith({
       url: ["http://*/*", "https://*/*"]
     });
-    expect(executeScript).toHaveBeenCalledTimes(2);
-    expect(executeScript).toHaveBeenCalledWith({
+    expect(executeScript).toHaveBeenCalledTimes(4);
+    expect(executeScript).toHaveBeenNthCalledWith(1, {
+      target: { tabId: 7, allFrames: true },
+      files: ["webauthnContentScript.js"],
+      world: "ISOLATED"
+    });
+    expect(executeScript).toHaveBeenNthCalledWith(2, {
       target: { tabId: 7, allFrames: true },
       files: ["webauthnPageHook.js"],
       world: "MAIN"
     });
-    expect(executeScript).toHaveBeenCalledWith({
+    expect(executeScript).toHaveBeenNthCalledWith(3, {
+      target: { tabId: 8, allFrames: true },
+      files: ["webauthnContentScript.js"],
+      world: "ISOLATED"
+    });
+    expect(executeScript).toHaveBeenNthCalledWith(4, {
       target: { tabId: 8, allFrames: true },
       files: ["webauthnPageHook.js"],
       world: "MAIN"
@@ -312,6 +322,80 @@ describe("background bridge", () => {
           expect.objectContaining({ event: "page_hook_registered" })
         ])
       );
+    });
+  });
+
+  it("reattaches the WebAuthn proxy when Chrome wakes the worker for remote session changes", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+    const registerContentScripts = vi.fn(async () => undefined);
+    const executeScript = vi.fn(async () => undefined);
+    const query = vi.fn(async () => []);
+    let remoteSessionListener: (() => void) | undefined;
+    let storedItems: Record<string, unknown> = {};
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+            const items = {
+              ...storedItems,
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: true
+              }
+            };
+            if (callback) {
+              callback(items);
+              return undefined;
+            }
+            return Promise.resolve(items);
+          },
+          set(items: Record<string, unknown>, callback?: () => void) {
+            storedItems = { ...storedItems, ...items };
+            callback?.();
+            return Promise.resolve();
+          }
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      scripting: {
+        executeScript,
+        registerContentScripts
+      },
+      tabs: {
+        query
+      },
+      webAuthenticationProxy: {
+        attach,
+        onRemoteSessionStateChange: {
+          addListener(listener: () => void) {
+            remoteSessionListener = listener;
+          }
+        }
+      }
+    };
+
+    await import("../background");
+    await vi.waitFor(() => {
+      expect(attach).toHaveBeenCalledTimes(1);
+    });
+
+    remoteSessionListener?.();
+
+    await vi.waitFor(() => {
+      expect(attach).toHaveBeenCalledTimes(2);
     });
   });
 

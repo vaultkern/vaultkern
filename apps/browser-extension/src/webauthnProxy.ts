@@ -1,3 +1,5 @@
+import psl from "psl";
+
 export type WebAuthnProxyStatus =
   | { status: "unsupported" }
   | { status: "attached" }
@@ -1310,7 +1312,20 @@ function isString(value: unknown): value is string {
 function originMatchesRelyingParty(origin: string, relyingParty: string) {
   try {
     const host = normalizedHostFromUrl(origin);
-    return host === relyingParty || host.endsWith(`.${relyingParty}`);
+    const normalizedRelyingParty = normalizeHost(relyingParty);
+    if (isLoopbackHost(host) || isLoopbackHost(normalizedRelyingParty)) {
+      return host === normalizedRelyingParty;
+    }
+    if (isIpAddress(host) || isIpAddress(normalizedRelyingParty)) {
+      return host === normalizedRelyingParty;
+    }
+    if (!psl.get(normalizedRelyingParty)) {
+      return false;
+    }
+    return (
+      host === normalizedRelyingParty ||
+      host.endsWith(`.${normalizedRelyingParty}`)
+    );
   } catch {
     return false;
   }
@@ -1319,9 +1334,21 @@ function originMatchesRelyingParty(origin: string, relyingParty: string) {
 function normalizedHostFromUrl(value: string) {
   const hostname = new URL(value).hostname;
   if (hostname.startsWith("[") && hostname.endsWith("]")) {
-    return hostname.slice(1, -1);
+    return normalizeHost(hostname.slice(1, -1));
   }
-  return hostname;
+  return normalizeHost(hostname);
+}
+
+function normalizeHost(value: string) {
+  return value.trim().replace(/\.$/, "").toLowerCase();
+}
+
+function isLoopbackHost(host: string) {
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+function isIpAddress(host: string) {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(":");
 }
 
 function userNameFromCreateOptions(options: { user?: { name?: unknown } }) {

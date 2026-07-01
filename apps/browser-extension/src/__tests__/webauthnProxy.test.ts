@@ -882,6 +882,84 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
+  it("rejects WebAuthn create requests whose RP ID is only a public suffix", async () => {
+    let createListener: ((request: unknown) => void) | undefined;
+    const completeCreateRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_registration",
+        entryId: "entry-1",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        attestationObjectBase64url: "attestation-object",
+        clientDataJsonBase64url: "client-data",
+        publicKeyBase64url: "public-key",
+        publicKeyAlgorithm: -7,
+        userHandleBase64url: "dXNlci0x"
+      })
+      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://attacker.com/register" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeCreateRequest,
+        onCreateRequest: {
+          addListener(listener: (request: unknown) => void) {
+            createListener = listener;
+          }
+        }
+      }
+    };
+    const presencePrompt = installPresencePrompt(chromeApi);
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    createListener?.({
+      requestId: 25,
+      origin: "https://attacker.com",
+      requestDetailsJson: JSON.stringify({
+        rp: { id: "com", name: "Example" },
+        user: {
+          id: "dXNlci0x",
+          name: "alice@example.com",
+          displayName: "Alice"
+        },
+        challenge: "cmVnaXN0ZXItMQ",
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }]
+      })
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (presencePrompt.create.mock.calls.length > 0) {
+      await presencePrompt.approve();
+    }
+
+    await vi.waitFor(() => {
+      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "create_passkey_registration"
+      })
+    );
+    expect(completeCreateRequest).toHaveBeenCalledWith({
+      requestId: 25,
+      error: {
+        name: "NotAllowedError",
+        message: "WebAuthn request origin does not match relying party"
+      }
+    });
+  });
+
   it("derives unbracketed IPv6 loopback RP IDs from the request origin", async () => {
     let createListener: ((request: unknown) => void) | undefined;
     const completeCreateRequest = vi.fn(async () => undefined);

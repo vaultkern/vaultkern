@@ -1,7 +1,11 @@
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
 const WEB_AUTHN_PAGE_REQUEST_MESSAGE = "vaultkern_webauthn_page_request";
+const globalState = globalThis as typeof globalThis & {
+  __vaultkernWebAuthnContentScriptInstalled?: boolean;
+};
 
-if (chromeApi?.runtime?.sendMessage) {
+if (!globalState.__vaultkernWebAuthnContentScriptInstalled && chromeApi?.runtime?.sendMessage) {
+  globalState.__vaultkernWebAuthnContentScriptInstalled = true;
   window.addEventListener("message", (event) => {
     if (
       event.origin !== window.location.origin ||

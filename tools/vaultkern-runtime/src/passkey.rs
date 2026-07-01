@@ -165,18 +165,45 @@ fn assertion_flags(passkey: &PasskeyRecord) -> u8 {
 
 fn validate_origin_for_relying_party(origin: &str, relying_party: &str) -> Result<()> {
     let parsed = Url::parse(origin).context("invalid passkey origin")?;
-    let host = parsed
-        .host_str()
-        .context("passkey origin is missing a host")?;
-    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_loopback_host(host)) {
+    let host = normalize_host(
+        parsed
+            .host_str()
+            .context("passkey origin is missing a host")?,
+    );
+    let relying_party = normalize_host(relying_party);
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_loopback_host(&host)) {
         anyhow::bail!("passkey origin must use https");
     }
 
-    if host != relying_party && !host.ends_with(&format!(".{relying_party}")) {
+    if !origin_host_matches_relying_party(&host, &relying_party) {
         anyhow::bail!("passkey origin does not match relying party");
     }
 
     Ok(())
+}
+
+fn origin_host_matches_relying_party(host: &str, relying_party: &str) -> bool {
+    if is_loopback_host(host) || is_loopback_host(relying_party) {
+        return host == relying_party;
+    }
+
+    if is_ip_address(host) || is_ip_address(relying_party) {
+        return host == relying_party;
+    }
+
+    if psl::domain_str(relying_party).is_none() {
+        return false;
+    }
+
+    host == relying_party || host.ends_with(&format!(".{relying_party}"))
+}
+
+fn normalize_host(host: &str) -> String {
+    host.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn is_ip_address(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>().is_ok()
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -292,5 +319,35 @@ fn cbor_major(output: &mut Vec<u8>, major: u8, value: u64) {
             output.push(prefix | 27);
             output.extend_from_slice(&value.to_be_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PasskeyRegistrationRequest, create_registration};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    #[test]
+    fn registration_rejects_public_suffix_relying_party() {
+        let client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTE","origin":"https://attacker.com","crossOrigin":false}"#,
+        );
+
+        let error = match create_registration(PasskeyRegistrationRequest {
+            relying_party: "com",
+            origin: "https://attacker.com",
+            user_name: "alice@example.com",
+            user_handle_base64url: "dXNlci0x",
+            client_data_json_base64url: &client_data_json,
+        }) {
+            Ok(_) => panic!("public suffix RP ID must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("passkey origin does not match relying party")
+        );
     }
 }

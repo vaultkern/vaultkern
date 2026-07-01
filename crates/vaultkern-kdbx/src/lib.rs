@@ -2861,29 +2861,36 @@ fn parse_entry(
 
     entry.totp = build_totp(&raw_fields);
     entry.passkey = PasskeyRecord::from_attributes(&raw_fields);
+    let has_complete_passkey = entry.passkey.is_some();
     entry.attributes = raw_fields
         .into_iter()
         .filter(|(key, _)| {
-            !matches!(
-                key.as_str(),
-                "otp"
-                    | "TimeOtp-Secret-Base32"
-                    | "TimeOtp-Algorithm"
-                    | "TimeOtp-Length"
-                    | "TimeOtp-Period"
-                    | PasskeyRecord::USERNAME_KEY
-                    | PasskeyRecord::CREDENTIAL_ID_KEY
-                    | PasskeyRecord::GENERATED_USER_ID_KEY
-                    | PasskeyRecord::PRIVATE_KEY_PEM_KEY
-                    | PasskeyRecord::RELYING_PARTY_KEY
-                    | PasskeyRecord::USER_HANDLE_KEY
-                    | PasskeyRecord::FLAG_BE_KEY
-                    | PasskeyRecord::FLAG_BS_KEY
-            )
+            !is_totp_attribute_key(key) && !(has_complete_passkey && is_passkey_attribute_key(key))
         })
         .collect();
 
     Ok(entry)
+}
+
+fn is_totp_attribute_key(key: &str) -> bool {
+    matches!(
+        key,
+        "otp" | "TimeOtp-Secret-Base32" | "TimeOtp-Algorithm" | "TimeOtp-Length" | "TimeOtp-Period"
+    )
+}
+
+fn is_passkey_attribute_key(key: &str) -> bool {
+    matches!(
+        key,
+        PasskeyRecord::USERNAME_KEY
+            | PasskeyRecord::CREDENTIAL_ID_KEY
+            | PasskeyRecord::GENERATED_USER_ID_KEY
+            | PasskeyRecord::PRIVATE_KEY_PEM_KEY
+            | PasskeyRecord::RELYING_PARTY_KEY
+            | PasskeyRecord::USER_HANDLE_KEY
+            | PasskeyRecord::FLAG_BE_KEY
+            | PasskeyRecord::FLAG_BS_KEY
+    )
 }
 
 fn collect_entry_known_node_order(entry: &Element) -> Vec<String> {
@@ -3791,7 +3798,7 @@ mod compatibility_tests {
         sha256_seeded, text_element,
     };
     use vaultkern_crypto::{CompositeKey, sha256_bytes};
-    use vaultkern_model::{Entry, Vault};
+    use vaultkern_model::{CustomField, Entry, PasskeyRecord, Vault};
     use xmltree::{Element, XMLNode};
 
     fn fast_profile() -> SaveProfile {
@@ -3973,6 +3980,46 @@ mod compatibility_tests {
         let entry = first_live_entry(&parsed);
 
         assert_eq!(child_text(entry, "QualityCheck").as_deref(), Some("True"));
+    }
+
+    #[test]
+    fn partial_passkey_fields_roundtrip_as_custom_fields() {
+        let mut vault = Vault::empty("PartialPasskey");
+        let mut entry = Entry::new("Example");
+        entry.attributes.insert(
+            PasskeyRecord::CREDENTIAL_ID_KEY.into(),
+            CustomField {
+                value: "partial-credential".into(),
+                protected: true,
+            },
+        );
+        vault.root.entries.push(entry);
+
+        let key = test_key("partial-passkey");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save kdbx");
+        let loaded = load_kdbx(&bytes, &key).expect("load kdbx");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert!(loaded_entry.passkey.is_none());
+        assert_eq!(
+            loaded_entry
+                .attributes
+                .get(PasskeyRecord::CREDENTIAL_ID_KEY)
+                .map(|field| (field.value.as_str(), field.protected)),
+            Some(("partial-credential", true))
+        );
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("save kdbx");
+        let reloaded = load_kdbx(&rewritten, &key).expect("reload kdbx");
+        let reloaded_entry = reloaded.root.entries.first().expect("reloaded entry");
+
+        assert_eq!(
+            reloaded_entry
+                .attributes
+                .get(PasskeyRecord::CREDENTIAL_ID_KEY)
+                .map(|field| (field.value.as_str(), field.protected)),
+            Some(("partial-credential", true))
+        );
     }
 }
 

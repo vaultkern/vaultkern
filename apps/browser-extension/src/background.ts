@@ -94,6 +94,11 @@ if (chromeApi?.runtime?.onMessage && nativeBridge) {
 }
 
 if (chromeApi?.webAuthenticationProxy) {
+  chromeApi.webAuthenticationProxy.onRemoteSessionStateChange?.addListener?.(() => {
+    webAuthnProxyAttached = false;
+    void syncWebAuthnProxy();
+  });
+
   if (nativeBridge) {
     registerWebAuthnProxyRequestHandlers(chromeApi, sendRuntimeCommand);
   }
@@ -233,6 +238,11 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
     }
 
     try {
+      await chromeApi.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ["webauthnContentScript.js"],
+        world: "ISOLATED"
+      });
       await chromeApi.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },
         files: ["webauthnPageHook.js"],

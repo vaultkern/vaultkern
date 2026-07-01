@@ -51,6 +51,9 @@ beforeEach(() => {
   document.body.innerHTML = "";
   window.history.replaceState(null, "", "/");
   delete (globalThis as typeof globalThis & { chrome?: unknown }).chrome;
+  delete (globalThis as typeof globalThis & {
+    __vaultkernWebAuthnContentScriptInstalled?: boolean;
+  }).__vaultkernWebAuthnContentScriptInstalled;
   runtimeClientMocks.getSessionState.mockReset();
   runtimeClientMocks.listRecentVaults.mockReset();
   runtimeClientMocks.preloadCurrentVault.mockReset();
@@ -2119,5 +2122,34 @@ describe("content script fill message", () => {
       excludeCredentialIds: ["Y3JlZGVudGlhbC0x"],
       observedAt: expect.any(Number)
     });
+  });
+
+  it("installs the WebAuthn page observation bridge only once when reinjected", async () => {
+    const sendMessage = vi.fn();
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+
+    await import("../webauthnContentScript");
+    vi.resetModules();
+    await import("../webauthnContentScript");
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "get",
+          relyingParty: "example.com",
+          challenge: "Y2hhbGxlbmdlLTE",
+          allowCredentialIds: ["Y3JlZGVudGlhbC0x"]
+        }
+      })
+    );
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 });
