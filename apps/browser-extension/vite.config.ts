@@ -11,6 +11,7 @@ export default defineConfig({
         manager: "manager.html",
         background: "src/background.ts",
         contentScript: "src/contentScript.ts",
+        webauthnContentScript: "src/webauthnContentScript.ts",
         webauthnPageHook: "src/webauthnPageHook.ts"
       },
       output: {

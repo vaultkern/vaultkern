@@ -734,6 +734,72 @@ fn runtime_returns_empty_fill_candidates_for_hostless_page_urls() {
 }
 
 #[test]
+fn runtime_excludes_passkey_only_entries_from_password_fill_candidates() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let root_id = vault.root.id.to_string();
+
+    let mut passkey_only = Entry::new("Passkey Only");
+    passkey_only.username = "alice@example.com".into();
+    passkey_only.url = "https://example.com/login".into();
+    passkey_only.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: Some("generated-user".into()),
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("dXNlci0x".into()),
+        backup_eligible: true,
+        backup_state: false,
+    });
+    vault.root.entries.push(passkey_only);
+
+    let mut password_entry = Entry::new("Password Entry");
+    password_entry.username = "alice@example.com".into();
+    password_entry.password = "secret".into();
+    password_entry.url = "https://example.com/login".into();
+    let password_entry_id = password_entry.id.to_string();
+    vault.root.entries.push(password_entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let fill = runtime
+        .handle(RuntimeCommand::FindFillCandidates {
+            vault_id: handle.vault_id,
+            url: "https://example.com/login".into(),
+        })
+        .unwrap();
+
+    assert_eq!(
+        fill,
+        RuntimeResponse::FillCandidates(vaultkern_runtime_protocol::FillCandidateListDto {
+            entries: vec![vaultkern_runtime_protocol::EntrySummaryDto {
+                id: password_entry_id,
+                title: "Password Entry".into(),
+                username: "alice@example.com".into(),
+                url: "https://example.com/login".into(),
+                group_id: root_id,
+            }],
+        })
+    );
+}
+
+#[test]
 fn runtime_returns_protocol_errors_for_query_failures() {
     let mut runtime = Runtime::for_tests();
 

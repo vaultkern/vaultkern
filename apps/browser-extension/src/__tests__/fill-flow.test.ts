@@ -2091,7 +2091,7 @@ describe("content script fill message", () => {
       }
     };
 
-    await import("../contentScript");
+    await import("../webauthnContentScript");
 
     window.dispatchEvent(
       new MessageEvent("message", {

@@ -44,17 +44,24 @@ describe("manifest build", () => {
     expect(manifest.key).toBe(E2E_MANIFEST_KEY);
   });
 
-  it("injects only the isolated WebAuthn bridge content script statically", () => {
+  it("keeps autofill top-frame only while injecting the isolated WebAuthn bridge in all frames", () => {
     const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
 
     expect(manifest.content_scripts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          js: ["contentScript.js"],
+          js: ["contentScript.js"]
+        }),
+        expect.objectContaining({
+          js: ["webauthnContentScript.js"],
           all_frames: true
         })
       ])
     );
+    const autofillScript = manifest.content_scripts.find(
+      (script: { js?: string[] }) => script.js?.includes("contentScript.js")
+    );
+    expect(autofillScript?.all_frames).not.toBe(true);
     expect(manifest.content_scripts).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({

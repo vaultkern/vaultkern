@@ -194,6 +194,7 @@ async function registerWebAuthnPageHook() {
       }
     ]);
     webAuthnPageHookRegistered = true;
+    await injectWebAuthnPageHookIntoOpenTabs();
     await recordWebAuthnDebug(chromeApi, {
       event: "page_hook_registered"
     });
@@ -204,6 +205,50 @@ async function registerWebAuthnPageHook() {
       message: error instanceof Error ? error.message : String(error)
     });
   }
+}
+
+async function injectWebAuthnPageHookIntoOpenTabs() {
+  if (!chromeApi?.tabs?.query || !chromeApi?.scripting?.executeScript) {
+    return;
+  }
+
+  let tabs: Array<{ id?: unknown }> = [];
+  try {
+    tabs = await chromeApi.tabs.query({
+      url: ["http://*/*", "https://*/*"]
+    });
+  } catch (error) {
+    await recordWebAuthnDebug(chromeApi, {
+      event: "page_hook_open_tabs_query_error",
+      message: error instanceof Error ? error.message : String(error)
+    });
+    return;
+  }
+
+  let injectedCount = 0;
+  let failedCount = 0;
+  for (const tab of tabs) {
+    if (typeof tab.id !== "number") {
+      continue;
+    }
+
+    try {
+      await chromeApi.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ["webauthnPageHook.js"],
+        world: "MAIN"
+      });
+      injectedCount += 1;
+    } catch {
+      failedCount += 1;
+    }
+  }
+
+  await recordWebAuthnDebug(chromeApi, {
+    event: "page_hook_open_tabs_injected",
+    injectedCount,
+    failedCount
+  });
 }
 
 async function unregisterWebAuthnPageHook() {

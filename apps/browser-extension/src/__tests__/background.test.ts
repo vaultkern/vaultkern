@@ -225,6 +225,8 @@ describe("background bridge", () => {
     const port = createPort();
     const attach = vi.fn(async () => undefined);
     const registerContentScripts = vi.fn(async () => undefined);
+    const executeScript = vi.fn(async () => undefined);
+    const query = vi.fn(async () => [{ id: 7 }, { id: 8 }, { id: "not-a-tab" }]);
     let storedItems: Record<string, unknown> = {};
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -264,7 +266,11 @@ describe("background bridge", () => {
         }
       },
       scripting: {
+        executeScript,
         registerContentScripts
+      },
+      tabs: {
+        query
       },
       webAuthenticationProxy: {
         attach
@@ -286,6 +292,20 @@ describe("background bridge", () => {
         persistAcrossSessions: false
       }
     ]);
+    expect(query).toHaveBeenCalledWith({
+      url: ["http://*/*", "https://*/*"]
+    });
+    expect(executeScript).toHaveBeenCalledTimes(2);
+    expect(executeScript).toHaveBeenCalledWith({
+      target: { tabId: 7, allFrames: true },
+      files: ["webauthnPageHook.js"],
+      world: "MAIN"
+    });
+    expect(executeScript).toHaveBeenCalledWith({
+      target: { tabId: 8, allFrames: true },
+      files: ["webauthnPageHook.js"],
+      world: "MAIN"
+    });
     await vi.waitFor(() => {
       expect(storedItems.vaultkernWebAuthnDebug).toEqual(
         expect.arrayContaining([

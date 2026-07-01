@@ -967,18 +967,10 @@ impl Runtime {
     }
 
     pub fn find_fill_candidates(&self, vault_id: &str, url: &str) -> Result<FillCandidateListDto> {
-        let mut entries = self
-            .list_entries(vault_id)?
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                score_entry_match(url, &entry.url).map(|score| RankedFillCandidate {
-                    index,
-                    entry,
-                    score,
-                })
-            })
-            .collect::<Vec<_>>();
+        let vault = self.loaded_vault(vault_id)?;
+        let mut entries = Vec::new();
+        let mut index = 0;
+        collect_fill_candidates(&vault.root, url, &mut index, &mut entries);
 
         entries.sort_by(|left, right| {
             left.score
@@ -2469,6 +2461,40 @@ fn collect_group_entries(group: &vaultkern_core::GroupView, output: &mut Vec<Ent
 
     for child in &group.children {
         collect_group_entries(child, output);
+    }
+}
+
+fn collect_fill_candidates(
+    group: &vaultkern_core::Group,
+    url: &str,
+    next_index: &mut usize,
+    output: &mut Vec<RankedFillCandidate>,
+) {
+    for entry in &group.entries {
+        let index = *next_index;
+        *next_index += 1;
+
+        if entry.password.is_empty() && entry.passkey.is_some() {
+            continue;
+        }
+
+        if let Some(score) = score_entry_match(url, &entry.url) {
+            output.push(RankedFillCandidate {
+                index,
+                entry: EntrySummaryDto {
+                    id: entry.id.to_string(),
+                    title: entry.title.clone(),
+                    username: entry.username.clone(),
+                    url: entry.url.clone(),
+                    group_id: group.id.to_string(),
+                },
+                score,
+            });
+        }
+    }
+
+    for child in &group.children {
+        collect_fill_candidates(child, url, next_index, output);
     }
 }
 

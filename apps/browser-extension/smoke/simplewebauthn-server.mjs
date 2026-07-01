@@ -10,13 +10,13 @@ import {
 } from "@simplewebauthn/server";
 
 const rpName = "VaultKern SimpleWebAuthn Smoke";
-const rpId = "localhost";
 const userName = "smoke-user@example.com";
 const userDisplayName = "Smoke User";
 const userId = new TextEncoder().encode("vaultkern-smoke-user-1");
 
 export async function createSimpleWebAuthnSmokeServer(options = {}) {
-  const hostname = options.hostname ?? "127.0.0.1";
+  const hostname = options.hostname ?? "localhost";
+  const rpId = options.rpId ?? hostname;
   const requestedPort = options.port ?? 8877;
   const state = {
     currentRegistrationChallenge: null,
@@ -27,7 +27,7 @@ export async function createSimpleWebAuthnSmokeServer(options = {}) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
-      const origin = publicOrigin(server);
+      const origin = publicOrigin(server, hostname);
 
       if (request.method === "GET" && url.pathname === "/") {
         sendHtml(response, renderPage());
@@ -176,17 +176,18 @@ export async function createSimpleWebAuthnSmokeServer(options = {}) {
   });
 
   return {
-    origin: publicOrigin(server),
+    origin: publicOrigin(server, hostname),
     close: () => new Promise((resolve) => server.close(resolve))
   };
 }
 
-function publicOrigin(server) {
+function publicOrigin(server, hostname) {
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("simplewebauthn smoke server is not listening");
   }
-  return `http://localhost:${address.port}`;
+  const host = hostname.includes(":") && !hostname.startsWith("[") ? `[${hostname}]` : hostname;
+  return `http://${host}:${address.port}`;
 }
 
 function sendJson(response, value, status = 200) {
@@ -492,7 +493,7 @@ function renderPage() {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const port = Number.parseInt(readArg("--port") ?? process.env.PORT ?? "8877", 10);
-  const hostname = readArg("--host") ?? "127.0.0.1";
+  const hostname = readArg("--host") ?? "localhost";
   const server = await createSimpleWebAuthnSmokeServer({ hostname, port });
   console.log(`VaultKern SimpleWebAuthn smoke server: ${server.origin}/`);
 }
