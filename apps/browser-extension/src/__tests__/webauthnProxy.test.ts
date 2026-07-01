@@ -1334,6 +1334,114 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
+  it("only resumes the locked WebAuthn request that matches the unlock prompt", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    let unlockMessageListener:
+      | ((message: unknown, sender: unknown, sendResponse: unknown) => void)
+      | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: false,
+        activeVaultId: null
+      })
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_assertion",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        clientDataJsonBase64url: "client-data",
+        signatureBase64url: "signature",
+        userHandleBase64url: null
+      });
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`),
+        onMessage: {
+          addListener(
+            listener: (message: unknown, sender: unknown, sendResponse: unknown) => void
+          ) {
+            unlockMessageListener = listener;
+          }
+        }
+      },
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      windows: {
+        create: vi.fn(async () => ({ id: 42 }))
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 33,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(chromeApi.windows.create).toHaveBeenCalledWith({
+        url: "chrome-extension://id/popup.html?webauthn=unlock&requestId=33",
+        type: "popup",
+        width: 460,
+        height: 620,
+        focused: true
+      });
+    });
+
+    unlockMessageListener?.(
+      { type: "vaultkern_unlock_complete", requestId: 34 },
+      {},
+      vi.fn()
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(completeGetRequest).not.toHaveBeenCalled();
+
+    unlockMessageListener?.(
+      { type: "vaultkern_unlock_complete", requestId: 33 },
+      {},
+      vi.fn()
+    );
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "get_session_state"
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(3, {
+      type: "create_passkey_assertion",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.com",
+      credential_id: "Y3JlZGVudGlhbC0x",
+      user_presence_verified: true,
+      client_data_json_base64url: expect.any(String)
+    });
+  });
+
   it("opens an unlock window and waits for an active vault before creating a passkey", async () => {
     let createListener: ((request: unknown) => void) | undefined;
     let unlockMessageListener:
@@ -1423,7 +1531,7 @@ describe("webAuthenticationProxy wrapper", () => {
       expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
     });
     expect(chromeApi.windows.create).toHaveBeenCalledWith({
-      url: "chrome-extension://id/popup.html?webauthn=unlock",
+      url: "chrome-extension://id/popup.html?webauthn=unlock&requestId=12",
       type: "popup",
       width: 460,
       height: 620,
@@ -1434,7 +1542,7 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
 
     unlockMessageListener?.(
-      { type: "vaultkern_unlock_complete" },
+      { type: "vaultkern_unlock_complete", requestId: 12 },
       {},
       vi.fn()
     );

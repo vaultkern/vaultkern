@@ -108,6 +108,19 @@ async function enablePasskeyProvider(extensionPage) {
       passkeyProviderEnabled: true
     }
   );
+  await extensionPage.waitForFunction(
+    async () => {
+      const { vaultkernWebAuthnDebug } = await chrome.storage.local.get(
+        "vaultkernWebAuthnDebug"
+      );
+      return (
+        Array.isArray(vaultkernWebAuthnDebug) &&
+        vaultkernWebAuthnDebug.some((entry) => entry?.event === "attach_success")
+      );
+    },
+    undefined,
+    { timeout: 15_000 }
+  );
 }
 
 async function sendCommand(extensionPage, command, timeout = 60_000) {

@@ -43,4 +43,21 @@ describe("manifest build", () => {
     const manifest = JSON.parse(readFileSync(destination, "utf8"));
     expect(manifest.key).toBe(E2E_MANIFEST_KEY);
   });
+
+  it("injects WebAuthn bridge scripts into every frame", () => {
+    const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
+
+    expect(manifest.content_scripts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          js: ["contentScript.js"],
+          all_frames: true
+        }),
+        expect.objectContaining({
+          js: ["webauthnPageHook.js"],
+          all_frames: true
+        })
+      ])
+    );
+  });
 });

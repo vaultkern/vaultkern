@@ -809,7 +809,7 @@ describe("PopupShell fill flow", () => {
   });
 
   it("shows a passkey unlock prompt when opened for a WebAuthn request", async () => {
-    window.history.replaceState(null, "", "/popup.html?webauthn=unlock");
+    window.history.replaceState(null, "", "/popup.html?webauthn=unlock&requestId=9");
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       tabs: {
         query: vi.fn(async () => []),
@@ -897,7 +897,7 @@ describe("PopupShell fill flow", () => {
   });
 
   it("notifies the background page after unlocking for a WebAuthn request", async () => {
-    window.history.replaceState(null, "", "/popup.html?webauthn=unlock");
+    window.history.replaceState(null, "", "/popup.html?webauthn=unlock&requestId=12");
     const sendMessage = vi.fn(async () => undefined);
     Object.defineProperty(window, "close", {
       configurable: true,
@@ -951,7 +951,8 @@ describe("PopupShell fill flow", () => {
 
     await waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_unlock_complete"
+        type: "vaultkern_unlock_complete",
+        requestId: 12
       });
     });
   });
@@ -1020,7 +1021,7 @@ describe("PopupShell fill flow", () => {
   });
 
   it("closes the temporary WebAuthn unlock window after unlocking", async () => {
-    window.history.replaceState(null, "", "/popup.html?webauthn=unlock");
+    window.history.replaceState(null, "", "/popup.html?webauthn=unlock&requestId=24");
     const closeWindow = vi.fn();
     Object.defineProperty(window, "close", {
       configurable: true,
@@ -1127,7 +1128,7 @@ describe("PopupShell fill flow", () => {
   });
 
   it("auto unlocks the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
-    window.history.replaceState(null, "", "/popup.html?webauthn=unlock");
+    window.history.replaceState(null, "", "/popup.html?webauthn=unlock&requestId=24");
     const sendMessage = vi.fn(async () => undefined);
     const closeWindow = vi.fn();
     Object.defineProperty(window, "close", {
@@ -1190,7 +1191,8 @@ describe("PopupShell fill flow", () => {
     });
     await waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_unlock_complete"
+        type: "vaultkern_unlock_complete",
+        requestId: 24
       });
       expect(closeWindow).toHaveBeenCalledTimes(1);
     });

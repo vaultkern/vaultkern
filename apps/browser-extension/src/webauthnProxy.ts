@@ -54,8 +54,8 @@ type ChromeLike = {
   };
 };
 
-let unlockPromptWindowId: number | null = null;
-const unlockCompleteWaiters = new Set<() => void>();
+const unlockPromptWindowIds = new Map<number, number>();
+const unlockCompleteWaiters = new Map<number, Set<() => void>>();
 const presencePromptWindowIds = new Map<number, number>();
 const presenceCompleteWaiters = new Map<number, Set<() => void>>();
 const observedPageRequests: ObservedWebAuthnPageRequest[] = [];
@@ -264,10 +264,16 @@ function registerUnlockCompleteHandler(chromeApi: ChromeLike) {
   registeredUnlockMessageSources.add(messageSource);
   messageSource.addListener((message) => {
     if (isUnlockCompleteMessage(message)) {
+      const requestId = requestIdFromMessage(message);
+      if (typeof requestId !== "number") {
+        return;
+      }
       void recordWebAuthnDebug(chromeApi, {
-        event: "unlock_complete_message"
+        event: "unlock_complete_message",
+        requestId
       });
-      for (const waiter of [...unlockCompleteWaiters]) {
+      unlockPromptWindowIds.delete(requestId);
+      for (const waiter of [...(unlockCompleteWaiters.get(requestId) ?? [])]) {
         waiter();
       }
       return;
@@ -1264,7 +1270,7 @@ async function activeVaultForRequest(
     event: "unlock_prompt_opening",
     requestId
   });
-  await openUnlockPrompt(chromeApi);
+  await openUnlockPrompt(chromeApi, requestId);
 
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
@@ -1277,6 +1283,7 @@ async function activeVaultForRequest(
     }
 
     const signaled = await waitForUnlockComplete(
+      requestId,
       Math.min(1_000, Math.max(0, deadline - Date.now()))
     );
     if (!signaled) {
@@ -1343,7 +1350,7 @@ async function userPresenceForRequest(
   );
 }
 
-function waitForUnlockComplete(timeoutMs: number) {
+function waitForUnlockComplete(requestId: number, timeoutMs: number) {
   return new Promise<boolean>((resolve) => {
     let settled = false;
     const timeoutId = setTimeout(() => {
@@ -1360,11 +1367,17 @@ function waitForUnlockComplete(timeoutMs: number) {
 
       settled = true;
       clearTimeout(timeoutId);
-      unlockCompleteWaiters.delete(waiter);
+      const waiters = unlockCompleteWaiters.get(requestId);
+      waiters?.delete(waiter);
+      if (waiters?.size === 0) {
+        unlockCompleteWaiters.delete(requestId);
+      }
       resolve(signaled);
     }
 
-    unlockCompleteWaiters.add(waiter);
+    const waiters = unlockCompleteWaiters.get(requestId) ?? new Set<() => void>();
+    waiters.add(waiter);
+    unlockCompleteWaiters.set(requestId, waiters);
   });
 }
 
@@ -1399,7 +1412,7 @@ function waitForPresenceComplete(requestId: number, timeoutMs: number) {
   });
 }
 
-async function openUnlockPrompt(chromeApi: ChromeLike) {
+async function openUnlockPrompt(chromeApi: ChromeLike, requestId: number) {
   if (!chromeApi.windows?.create) {
     throw new WebAuthnRequestError(
       "NotAllowedError",
@@ -1407,18 +1420,22 @@ async function openUnlockPrompt(chromeApi: ChromeLike) {
     );
   }
 
-  if (unlockPromptWindowId !== null && chromeApi.windows.update) {
+  const existingWindowId = unlockPromptWindowIds.get(requestId);
+  if (typeof existingWindowId === "number" && chromeApi.windows.update) {
     try {
-      await chromeApi.windows.update(unlockPromptWindowId, { focused: true });
+      await chromeApi.windows.update(existingWindowId, { focused: true });
       return;
     } catch {
-      unlockPromptWindowId = null;
+      unlockPromptWindowIds.delete(requestId);
     }
   }
 
+  const popupPath = `popup.html?webauthn=unlock&requestId=${encodeURIComponent(
+    String(requestId)
+  )}`;
   const url =
-    chromeApi.runtime?.getURL?.("popup.html?webauthn=unlock") ??
-    "popup.html?webauthn=unlock";
+    chromeApi.runtime?.getURL?.(popupPath) ??
+    popupPath;
   const created = await chromeApi.windows.create({
     url,
     type: "popup",
@@ -1426,8 +1443,9 @@ async function openUnlockPrompt(chromeApi: ChromeLike) {
     height: 620,
     focused: true
   });
-  unlockPromptWindowId =
-    created && typeof created.id === "number" ? created.id : null;
+  if (created && typeof created.id === "number") {
+    unlockPromptWindowIds.set(requestId, created.id);
+  }
 }
 
 async function openPresencePrompt(chromeApi: ChromeLike, requestId: number) {
