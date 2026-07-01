@@ -224,6 +224,81 @@ describe("background bridge", () => {
   it("attaches the WebAuthn proxy when explicitly enabled", async () => {
     const port = createPort();
     const attach = vi.fn(async () => undefined);
+    const registerContentScripts = vi.fn(async () => undefined);
+    let storedItems: Record<string, unknown> = {};
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+            const items = {
+              ...storedItems,
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: true
+              }
+            };
+            if (callback) {
+              callback(items);
+              return undefined;
+            }
+            return Promise.resolve(items);
+          },
+          set(items: Record<string, unknown>, callback?: () => void) {
+            storedItems = { ...storedItems, ...items };
+            callback?.();
+            return Promise.resolve();
+          }
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      scripting: {
+        registerContentScripts
+      },
+      webAuthenticationProxy: {
+        attach
+      }
+    };
+
+    await import("../background");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(registerContentScripts).toHaveBeenCalledWith([
+      {
+        id: "vaultkern-webauthn-page-hook",
+        matches: ["<all_urls>"],
+        js: ["webauthnPageHook.js"],
+        runAt: "document_start",
+        world: "MAIN",
+        allFrames: true,
+        persistAcrossSessions: false
+      }
+    ]);
+    await vi.waitFor(() => {
+      expect(storedItems.vaultkernWebAuthnDebug).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ event: "page_hook_registered" })
+        ])
+      );
+    });
+  });
+
+  it("unregisters the WebAuthn page hook when the provider is disabled", async () => {
+    const port = createPort();
+    const detach = vi.fn(async () => undefined);
+    const unregisterContentScripts = vi.fn(async () => undefined);
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -241,7 +316,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: true
+                passkeyProviderEnabled: false
               }
             });
           },
@@ -251,15 +326,21 @@ describe("background bridge", () => {
           addListener() {}
         }
       },
+      scripting: {
+        unregisterContentScripts
+      },
       webAuthenticationProxy: {
-        attach
+        detach
       }
     };
 
     await import("../background");
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(attach).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(unregisterContentScripts).toHaveBeenCalledWith({
+        ids: ["vaultkern-webauthn-page-hook"]
+      });
+    });
   });
 
   it("registers WebAuthn request listeners before async settings load finishes", async () => {

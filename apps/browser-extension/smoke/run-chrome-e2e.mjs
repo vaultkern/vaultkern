@@ -5,10 +5,11 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import playwright from "playwright";
 
 import { E2E_EXTENSION_ID } from "../scripts/manifestBuild.mjs";
+import { SMOKE_HOST, smokeUrl } from "./smokeUrls.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const extensionRoot = resolve(__dirname, "..");
@@ -49,9 +50,9 @@ function contentType(path) {
   }
 }
 
-async function startSmokeServer() {
+export async function startSmokeServer() {
   const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    const url = new URL(request.url ?? "/", `http://${SMOKE_HOST}`);
     const name = basename(url.pathname === "/" ? "basic-login.html" : url.pathname);
     const file = join(__dirname, name);
 
@@ -65,16 +66,16 @@ async function startSmokeServer() {
     createReadStream(file).pipe(response);
   });
 
-  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  await new Promise((resolvePromise) => server.listen(0, SMOKE_HOST, resolvePromise));
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("failed to bind smoke server");
   }
 
   return {
-    url: `http://127.0.0.1:${address.port}/basic-login.html`,
-    passkeyRegisterUrl: `http://localhost:${address.port}/passkey-register.html`,
-    passkeyUrl: `http://localhost:${address.port}/passkey-login.html`,
+    url: smokeUrl(address.port, "basic-login.html"),
+    passkeyRegisterUrl: smokeUrl(address.port, "passkey-register.html"),
+    passkeyUrl: smokeUrl(address.port, "passkey-login.html"),
     close: () => new Promise((resolvePromise) => server.close(resolvePromise))
   };
 }
@@ -115,7 +116,7 @@ async function enablePasskeyProvider(extensionPage) {
       );
       return (
         Array.isArray(vaultkernWebAuthnDebug) &&
-        vaultkernWebAuthnDebug.some((entry) => entry?.event === "attach_success")
+        vaultkernWebAuthnDebug.some((entry) => entry?.event === "page_hook_registered")
       );
     },
     undefined,
@@ -420,10 +421,12 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  if (String(error?.message ?? error).includes("Executable doesn't exist")) {
-    console.error("Playwright Chromium is missing. Run: npx playwright install chromium");
-  }
-  console.error(error.stack ?? error.message ?? String(error));
-  process.exit(1);
-});
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((error) => {
+    if (String(error?.message ?? error).includes("Executable doesn't exist")) {
+      console.error("Playwright Chromium is missing. Run: npx playwright install chromium");
+    }
+    console.error(error.stack ?? error.message ?? String(error));
+    process.exit(1);
+  });
+}

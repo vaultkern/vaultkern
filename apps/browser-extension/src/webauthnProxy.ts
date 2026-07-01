@@ -1068,7 +1068,7 @@ function relyingPartyFromCreateOptions(
 
 function relyingPartyFromOrigin(origin: string) {
   try {
-    const hostname = new URL(origin).hostname;
+    const hostname = normalizedHostFromUrl(origin);
     if (hostname.trim() !== "") {
       return hostname;
     }
@@ -1309,11 +1309,19 @@ function isString(value: unknown): value is string {
 
 function originMatchesRelyingParty(origin: string, relyingParty: string) {
   try {
-    const host = new URL(origin).hostname;
+    const host = normalizedHostFromUrl(origin);
     return host === relyingParty || host.endsWith(`.${relyingParty}`);
   } catch {
     return false;
   }
+}
+
+function normalizedHostFromUrl(value: string) {
+  const hostname = new URL(value).hostname;
+  if (hostname.startsWith("[") && hostname.endsWith("]")) {
+    return hostname.slice(1, -1);
+  }
+  return hostname;
 }
 
 function userNameFromCreateOptions(options: { user?: { name?: unknown } }) {
@@ -1700,7 +1708,7 @@ function webAuthnError(error: unknown) {
   };
 }
 
-async function recordWebAuthnDebug(
+export async function recordWebAuthnDebug(
   chromeApi: ChromeLike,
   event: Record<string, unknown>
 ) {

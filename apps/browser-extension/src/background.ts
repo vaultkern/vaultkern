@@ -6,6 +6,7 @@ import {
 import {
   attachWebAuthnProxy,
   detachWebAuthnProxy,
+  recordWebAuthnDebug,
   recordWebAuthnPageRequest,
   registerWebAuthnProxyRequestHandlers
 } from "./webauthnProxy";
@@ -17,6 +18,8 @@ let webAuthnProxySyncPromise: Promise<void> | null = null;
 let webAuthnProxySyncRequested = false;
 let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
+const WEB_AUTHN_PAGE_HOOK_SCRIPT_ID = "vaultkern-webauthn-page-hook";
+let webAuthnPageHookRegistered = false;
 
 function isRuntimeCommand(message: unknown): message is { version: number; command: unknown } {
   return (
@@ -137,6 +140,7 @@ async function syncWebAuthnProxyOnce() {
   const settings = await extensionSettingsStore.load();
   if (settings.passkeyProviderEnabled) {
     if (webAuthnProxyAttached) {
+      await registerWebAuthnPageHook();
       return;
     }
 
@@ -151,13 +155,74 @@ async function syncWebAuthnProxyOnce() {
         : undefined
     );
     webAuthnProxyAttached = status.status === "attached";
+    if (webAuthnProxyAttached) {
+      await registerWebAuthnPageHook();
+    }
     return;
   }
 
+  await unregisterWebAuthnPageHook();
   const status = await detachWebAuthnProxy(chromeApi);
   if (status.status === "detached" || status.status === "unsupported") {
     webAuthnProxyAttached = false;
   }
+}
+
+async function registerWebAuthnPageHook() {
+  if (webAuthnPageHookRegistered || !chromeApi?.scripting?.registerContentScripts) {
+    return;
+  }
+
+  try {
+    await chromeApi.scripting.unregisterContentScripts?.({
+      ids: [WEB_AUTHN_PAGE_HOOK_SCRIPT_ID]
+    });
+  } catch {
+    // The script may not have been registered in this browser session.
+  }
+
+  try {
+    await chromeApi.scripting.registerContentScripts([
+      {
+        id: WEB_AUTHN_PAGE_HOOK_SCRIPT_ID,
+        matches: ["<all_urls>"],
+        js: ["webauthnPageHook.js"],
+        runAt: "document_start",
+        world: "MAIN",
+        allFrames: true,
+        persistAcrossSessions: false
+      }
+    ]);
+    webAuthnPageHookRegistered = true;
+    await recordWebAuthnDebug(chromeApi, {
+      event: "page_hook_registered"
+    });
+  } catch (error) {
+    webAuthnPageHookRegistered = false;
+    await recordWebAuthnDebug(chromeApi, {
+      event: "page_hook_register_error",
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+async function unregisterWebAuthnPageHook() {
+  if (!chromeApi?.scripting?.unregisterContentScripts) {
+    webAuthnPageHookRegistered = false;
+    return;
+  }
+
+  try {
+    await chromeApi.scripting.unregisterContentScripts({
+      ids: [WEB_AUTHN_PAGE_HOOK_SCRIPT_ID]
+    });
+  } catch {
+    // Disabling is idempotent even when there is no dynamic hook.
+  }
+  webAuthnPageHookRegistered = false;
+  await recordWebAuthnDebug(chromeApi, {
+    event: "page_hook_unregistered"
+  });
 }
 
 function sendRuntimeCommand(command: unknown) {
