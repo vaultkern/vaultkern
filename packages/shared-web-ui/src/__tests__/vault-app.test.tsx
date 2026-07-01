@@ -1111,6 +1111,12 @@ it("manages an entry passkey from the detail pane", async () => {
   });
   expect(savePasskeyButton).toBeDisabled();
   fireEvent.change(privateKeyPemField, {
+    target: {
+      value: "-----BEGIN EC PRIVATE KEY-----\nnew\n-----END EC PRIVATE KEY-----"
+    }
+  });
+  expect(savePasskeyButton).toBeDisabled();
+  fireEvent.change(privateKeyPemField, {
     target: { value: originalPasskey.privateKeyPem }
   });
   expect(savePasskeyButton).not.toBeDisabled();

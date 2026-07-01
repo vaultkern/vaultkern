@@ -464,6 +464,73 @@ describe("background bridge", () => {
     });
   });
 
+  it("still injects the WebAuthn page hook when bridge reinjection is already installed", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+    const registerContentScripts = vi.fn(async () => undefined);
+    const executeScript = vi.fn(async (details: { files?: string[] }) => {
+      if (details.files?.includes("webauthnContentScript.js")) {
+        throw new Error("Identifier 'WEB_AUTHN_PAGE_REQUEST_MESSAGE' has already been declared");
+      }
+    });
+    const query = vi.fn(async () => [{ id: 7 }]);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+            const items = {
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: true
+              }
+            };
+            if (callback) {
+              callback(items);
+              return undefined;
+            }
+            return Promise.resolve(items);
+          },
+          set(_items: Record<string, unknown>, callback?: () => void) {
+            callback?.();
+            return Promise.resolve();
+          }
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      scripting: {
+        executeScript,
+        registerContentScripts
+      },
+      tabs: {
+        query
+      },
+      webAuthenticationProxy: {
+        attach
+      }
+    };
+
+    await import("../background");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(executeScript).toHaveBeenCalledWith({
+      target: { tabId: 7, allFrames: true },
+      files: ["webauthnPageHook.js"],
+      world: "MAIN"
+    });
+  });
+
   it("reattaches the WebAuthn proxy when Chrome wakes the worker for remote session changes", async () => {
     const port = createPort();
     const attach = vi.fn(async () => undefined);

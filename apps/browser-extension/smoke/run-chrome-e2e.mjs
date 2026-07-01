@@ -250,11 +250,15 @@ async function main() {
     await page.goto(server.url);
     await extensionPage.evaluate(
       async ({ serverUrl, username, entryPassword }) => {
-        const tabs = await chrome.tabs.query({ url: serverUrl });
-        if (!tabs[0]?.id) {
+        const smokeUrl = new URL(serverUrl);
+        const tabs = await chrome.tabs.query({
+          url: `${smokeUrl.protocol}//${smokeUrl.hostname}/*`
+        });
+        const tab = tabs.find((candidate) => candidate.url === serverUrl);
+        if (!tab?.id) {
           throw new Error("smoke tab not found");
         }
-        await chrome.tabs.sendMessage(tabs[0].id, {
+        await chrome.tabs.sendMessage(tab.id, {
           type: "fill_entry_detail",
           username,
           password: entryPassword

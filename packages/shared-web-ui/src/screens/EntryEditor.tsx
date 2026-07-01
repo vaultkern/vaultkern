@@ -843,15 +843,15 @@ function PasskeySection({
     };
   }
 
+  const passkey = entry.passkey;
+
   function draftIsValid() {
     return (
       draft.credentialId.trim() !== "" &&
       draft.relyingParty.trim() !== "" &&
-      privateKeyPemLooksValid(draft.privateKeyPem)
+      privateKeyPemLooksValid(draft.privateKeyPem, passkey?.privateKeyPem)
     );
   }
-
-  const passkey = entry.passkey;
 
   return (
     <section aria-label={text("Passkey")} style={sectionStyle}>
@@ -1033,9 +1033,22 @@ function emptyPasskey(): EntryPasskey {
   };
 }
 
-function privateKeyPemLooksValid(value: string) {
+function privateKeyPemLooksValid(value: string, existingValue?: string) {
   const trimmed = value.trim();
-  const match = trimmed.match(
+  if (
+    existingValue !== undefined &&
+    trimmed === existingValue.trim() &&
+    privateKeyPemHasMatchingEnvelope(trimmed)
+  ) {
+    return true;
+  }
+  return /^-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----$/u.test(
+    trimmed
+  );
+}
+
+function privateKeyPemHasMatchingEnvelope(value: string) {
+  const match = value.match(
     /^-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]+-----END \1-----$/u
   );
   return Boolean(match);

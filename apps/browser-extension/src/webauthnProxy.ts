@@ -496,7 +496,7 @@ async function handleGetRequest(
     rejectUnsupportedMediation(options, originContext);
     const origin = originContext.origin;
     const relyingParty = relyingPartyFromGetOptions(options, origin);
-    const relyingPartyValidation = requestedRpId
+    let relyingPartyValidation = requestedRpId
       ? await validateOriginForRelyingParty(origin, requestedRpId)
       : { allowed: true, relatedOriginVerified: false };
     if (!relyingPartyValidation.allowed) {
@@ -533,6 +533,33 @@ async function handleGetRequest(
     if (!activeVault) {
       return;
     }
+    let userPresenceVerified = activeVault.userPresenceVerified;
+    if (
+      relyingPartyValidation.needsRelatedOriginVerification &&
+      !userPresenceVerified
+    ) {
+      const approved = await userPresenceForRequest(
+        chromeApi,
+        requestId,
+        promptContextFrom(originContext, relyingParty),
+        canceledRequests
+      );
+      if (!approved) {
+        return;
+      }
+      userPresenceVerified = true;
+    }
+    relyingPartyValidation = await completeRelyingPartyValidationAfterInteraction(
+      origin,
+      requestedRpId,
+      relyingPartyValidation
+    );
+    if (!relyingPartyValidation.allowed) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
+    }
     const credentialSelection = await credentialSelectionForGetRequest(
       sendRuntimeCommand,
       activeVault.activeVaultId,
@@ -545,7 +572,7 @@ async function handleGetRequest(
       relyingParty,
       credentialSelection.promptOptions
     );
-    if (!activeVault.userPresenceVerified || credentialSelection.promptOptions.length > 0) {
+    if (!userPresenceVerified || credentialSelection.promptOptions.length > 0) {
       const approved = await userPresenceForRequest(
         chromeApi,
         requestId,
@@ -558,6 +585,7 @@ async function handleGetRequest(
       if (approved.selectedCredentialId) {
         credentialIds = [approved.selectedCredentialId];
       }
+      userPresenceVerified = true;
     }
     const assertion = await createAssertionForAllowedCredentials(
       chromeApi,
@@ -568,7 +596,7 @@ async function handleGetRequest(
       origin,
       credentialIds,
       clientDataJsonBase64url,
-      true,
+      userPresenceVerified,
       relyingPartyValidation.relatedOriginVerified,
       canceledRequests
     );
@@ -914,7 +942,7 @@ async function handleCreateRequest(
     }
     const origin = originContext.origin;
     const relyingParty = relyingPartyFromCreateOptions(options, origin);
-    const relyingPartyValidation = requestedRpId
+    let relyingPartyValidation = requestedRpId
       ? await validateOriginForRelyingParty(origin, requestedRpId)
       : { allowed: true, relatedOriginVerified: false };
     if (!relyingPartyValidation.allowed) {
@@ -951,7 +979,8 @@ async function handleCreateRequest(
     if (!activeVault) {
       return;
     }
-    if (!activeVault.userPresenceVerified) {
+    let userPresenceVerified = activeVault.userPresenceVerified;
+    if (!userPresenceVerified) {
       const approved = await userPresenceForRequest(
         chromeApi,
         requestId,
@@ -961,6 +990,18 @@ async function handleCreateRequest(
       if (!approved) {
         return;
       }
+      userPresenceVerified = true;
+    }
+    relyingPartyValidation = await completeRelyingPartyValidationAfterInteraction(
+      origin,
+      requestedRpId,
+      relyingPartyValidation
+    );
+    if (!relyingPartyValidation.allowed) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
     }
     const activeVaultId = activeVault.activeVaultId;
 
@@ -1425,7 +1466,18 @@ async function originContextForRequest(
 ) {
   const directOrigin = originContextFromRequest(request);
   if (directOrigin) {
-    return directOrigin;
+    const observedOrigin = originContextFromPageRequest(
+      ceremony,
+      options,
+      directOrigin.origin
+    );
+    return observedOrigin
+      ? {
+          ...directOrigin,
+          topOrigin: directOrigin.topOrigin ?? observedOrigin.topOrigin,
+          mediation: directOrigin.mediation ?? observedOrigin.mediation
+        }
+      : directOrigin;
   }
 
   const observedOrigin = originContextFromPageRequest(ceremony, options);
@@ -1453,7 +1505,8 @@ function originContextFromPageRequest(
     rp?: { id?: unknown; name?: unknown };
     allowCredentials?: unknown;
     excludeCredentials?: unknown;
-  }
+  },
+  expectedOrigin?: string
 ) {
   const challenge = typeof options.challenge === "string" ? options.challenge : null;
   if (!challenge) {
@@ -1480,7 +1533,8 @@ function originContextFromPageRequest(
         challenge,
         relyingParty,
         allowCredentialIds,
-        excludeCredentialIds
+        excludeCredentialIds,
+        expectedOrigin
       })
     ) {
       observedPageRequests.splice(index, 1);
@@ -1503,12 +1557,16 @@ function observedPageRequestMatches(
     relyingParty: string | null;
     allowCredentialIds: string[];
     excludeCredentialIds: string[];
+    expectedOrigin?: string;
   }
 ) {
   if (observed.ceremony !== expected.ceremony) {
     return false;
   }
   if (!observed.challenge || observed.challenge !== expected.challenge) {
+    return false;
+  }
+  if (expected.expectedOrigin && observed.origin !== expected.expectedOrigin) {
     return false;
   }
   if (
@@ -1560,15 +1618,42 @@ function isString(value: unknown): value is string {
   return typeof value === "string";
 }
 
-async function validateOriginForRelyingParty(origin: string, relyingParty: string) {
+type RelyingPartyValidation = {
+  allowed: boolean;
+  relatedOriginVerified: boolean;
+  needsRelatedOriginVerification?: boolean;
+};
+
+function validateOriginForRelyingParty(
+  origin: string,
+  relyingParty: string
+): RelyingPartyValidation {
   if (originMatchesRelyingParty(origin, relyingParty)) {
     return { allowed: true, relatedOriginVerified: false };
   }
 
-  if (await originAllowedByRelatedOrigins(origin, relyingParty)) {
-    return { allowed: true, relatedOriginVerified: true };
+  if (originCanUseRelatedOriginVerification(origin, relyingParty)) {
+    return {
+      allowed: true,
+      relatedOriginVerified: false,
+      needsRelatedOriginVerification: true
+    };
   }
 
+  return { allowed: false, relatedOriginVerified: false };
+}
+
+async function completeRelyingPartyValidationAfterInteraction(
+  origin: string,
+  relyingParty: string | null,
+  validation: RelyingPartyValidation
+): Promise<RelyingPartyValidation> {
+  if (!validation.needsRelatedOriginVerification) {
+    return validation;
+  }
+  if (relyingParty && (await originAllowedByRelatedOrigins(origin, relyingParty))) {
+    return { allowed: true, relatedOriginVerified: true };
+  }
   return { allowed: false, relatedOriginVerified: false };
 }
 
@@ -1594,8 +1679,38 @@ function originMatchesRelyingParty(origin: string, relyingParty: string) {
   }
 }
 
+function originCanUseRelatedOriginVerification(origin: string, relyingParty: string) {
+  try {
+    const parsedOrigin = new URL(origin);
+    if (parsedOrigin.protocol !== "https:") {
+      return false;
+    }
+
+    const originHost = normalizedHostFromUrl(origin);
+    const normalizedRelyingParty = normalizeHost(relyingParty);
+    if (
+      isLoopbackHost(originHost) ||
+      isLoopbackHost(normalizedRelyingParty) ||
+      isIpAddress(originHost) ||
+      isIpAddress(normalizedRelyingParty) ||
+      !psl.get(originHost) ||
+      !psl.get(normalizedRelyingParty)
+    ) {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function originAllowedByRelatedOrigins(origin: string, relyingParty: string) {
   if (typeof fetch !== "function") {
+    return false;
+  }
+
+  if (!originCanUseRelatedOriginVerification(origin, relyingParty)) {
     return false;
   }
 
@@ -1605,22 +1720,8 @@ async function originAllowedByRelatedOrigins(origin: string, relyingParty: strin
   } catch {
     return false;
   }
-  if (parsedOrigin.protocol !== "https:") {
-    return false;
-  }
-  const originHost = normalizedHostFromUrl(origin);
-  if (isLoopbackHost(originHost) || isIpAddress(originHost) || !psl.get(originHost)) {
-    return false;
-  }
 
   const normalizedRelyingParty = normalizeHost(relyingParty);
-  if (
-    isLoopbackHost(normalizedRelyingParty) ||
-    isIpAddress(normalizedRelyingParty) ||
-    !psl.get(normalizedRelyingParty)
-  ) {
-    return false;
-  }
 
   try {
     const response = await fetch(
@@ -1674,14 +1775,18 @@ function relatedOriginLabel(origin: unknown) {
     if (isLoopbackHost(host) || isIpAddress(host)) {
       return null;
     }
-    const parsed = psl.parse(host);
-    if ("error" in parsed || !parsed.sld) {
-      return null;
-    }
-    return parsed.sld;
+    return relatedOriginLabelFromHost(host);
   } catch {
     return null;
   }
+}
+
+function relatedOriginLabelFromHost(host: string) {
+  const parsed = psl.parse(host);
+  if ("error" in parsed || !parsed.sld) {
+    return null;
+  }
+  return parsed.sld;
 }
 
 function normalizedHostFromUrl(value: string) {

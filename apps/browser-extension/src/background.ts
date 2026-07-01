@@ -242,12 +242,18 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
       continue;
     }
 
+    let tabHadFailure = false;
     try {
       await chromeApi.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },
         files: ["webauthnContentScript.js"],
         world: "ISOLATED"
       });
+    } catch {
+      tabHadFailure = true;
+    }
+
+    try {
       await chromeApi.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },
         files: ["webauthnPageHook.js"],
@@ -255,6 +261,10 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
       });
       injectedCount += 1;
     } catch {
+      tabHadFailure = true;
+    }
+
+    if (tabHadFailure) {
       failedCount += 1;
     }
   }

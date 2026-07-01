@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use url::form_urlencoded::byte_serialize;
 use uuid::Uuid;
 use vaultkern_core::{
-    AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError,
+    AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError, Entry,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
     KdbxCipher, KdbxError, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, TotpSpec, Vault,
 };
@@ -84,6 +84,23 @@ struct LoadedSourceSnapshot {
     one_drive_etag: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PasskeyRollbackKey {
+    vault_id: String,
+    entry_id: String,
+    credential_id: String,
+}
+
+impl PasskeyRollbackKey {
+    fn new(vault_id: &str, entry_id: &str, credential_id: &str) -> Self {
+        Self {
+            vault_id: vault_id.to_owned(),
+            entry_id: entry_id.to_owned(),
+            credential_id: credential_id.to_owned(),
+        }
+    }
+}
+
 impl VaultSource {
     fn vault_id(&self) -> String {
         match self {
@@ -128,6 +145,7 @@ pub struct Runtime {
     biometric: Box<dyn BiometricProvider>,
     secure_storage: Box<dyn SecureStorageProvider>,
     loaded: BTreeMap<String, LoadedVault>,
+    pending_passkey_rollbacks: BTreeMap<PasskeyRollbackKey, Entry>,
     fixed_unix_time: Option<u64>,
 }
 
@@ -175,6 +193,7 @@ impl Runtime {
             biometric: default_biometric_provider(),
             secure_storage,
             loaded: BTreeMap::new(),
+            pending_passkey_rollbacks: BTreeMap::new(),
             fixed_unix_time: None,
         }
     }
@@ -193,6 +212,7 @@ impl Runtime {
             biometric: Box::new(UnsupportedBiometricProvider),
             secure_storage: Box::new(UnsupportedSecureStorageProvider),
             loaded: BTreeMap::new(),
+            pending_passkey_rollbacks: BTreeMap::new(),
             fixed_unix_time: None,
         }
     }
@@ -975,6 +995,7 @@ impl Runtime {
         collect_fill_candidates(
             &vault.root,
             vault.recycle_bin_group,
+            vault.recycle_bin_enabled.unwrap_or(true),
             false,
             url,
             &mut index,
@@ -1279,6 +1300,7 @@ impl Runtime {
             Some(credential_id) => find_passkey_by_credential_id_and_relying_party(
                 &vault.root,
                 vault.recycle_bin_group,
+                vault.recycle_bin_enabled.unwrap_or(true),
                 credential_id,
                 Some(relying_party),
             )
@@ -1286,6 +1308,7 @@ impl Runtime {
             None => find_unique_passkey_by_relying_party(
                 &vault.root,
                 vault.recycle_bin_group,
+                vault.recycle_bin_enabled.unwrap_or(true),
                 relying_party,
             )?,
         };
@@ -1314,6 +1337,7 @@ impl Runtime {
             exists: find_passkey_by_credential_id_and_relying_party(
                 &vault.root,
                 vault.recycle_bin_group,
+                vault.recycle_bin_enabled.unwrap_or(true),
                 credential_id,
                 relying_party,
             )
@@ -1328,15 +1352,20 @@ impl Runtime {
     ) -> Result<PasskeyCredentialListDto> {
         let vault = self.loaded_vault(vault_id)?;
         let mut credentials = Vec::new();
-        visit_passkeys(&vault.root, vault.recycle_bin_group, &mut |passkey| {
-            if passkey.relying_party == relying_party {
-                credentials.push(PasskeyCredentialCandidateDto {
-                    credential_id: passkey.credential_id.clone(),
-                    username: passkey.username.clone(),
-                    user_handle: passkey.user_handle.clone(),
-                });
-            }
-        });
+        visit_passkeys(
+            &vault.root,
+            vault.recycle_bin_group,
+            vault.recycle_bin_enabled.unwrap_or(true),
+            &mut |passkey| {
+                if passkey.relying_party == relying_party {
+                    credentials.push(PasskeyCredentialCandidateDto {
+                        credential_id: passkey.credential_id.clone(),
+                        username: passkey.username.clone(),
+                        user_handle: passkey.user_handle.clone(),
+                    });
+                }
+            },
+        );
 
         Ok(PasskeyCredentialListDto { credentials })
     }
@@ -1383,15 +1412,24 @@ impl Runtime {
         if let Some(entry_id) = find_passkey_entry_id_by_relying_party_and_user_handle(
             &vault.root,
             vault.recycle_bin_group,
+            vault.recycle_bin_enabled.unwrap_or(true),
             relying_party,
             registration.passkey.user_handle.as_deref(),
         ) {
+            let rollback_entry = cloned_entry_by_id(&vault.root, &entry_id)
+                .with_context(|| format!("entry not found: {entry_id}"))?;
+            let rollback_key =
+                PasskeyRollbackKey::new(vault_id, &entry_id, &registration.passkey.credential_id);
+            self.pending_passkey_rollbacks
+                .retain(|key, _| !(key.vault_id == vault_id && key.entry_id == entry_id));
             self.core.snapshot_entry_to_history(vault, &entry_id)?;
             self.core
                 .set_entry_passkey(vault, &entry_id, registration.passkey)?;
             touch_entry_modified_at(&self.core, vault, &entry_id, modified_at)?;
             response.entry_id = entry_id;
             response.created = false;
+            self.pending_passkey_rollbacks
+                .insert(rollback_key, rollback_entry);
             return Ok(response);
         }
         let created = self.core.add_entry(
@@ -1420,6 +1458,9 @@ impl Runtime {
         credential_id: Option<&str>,
         created: bool,
     ) -> Result<()> {
+        let pending_rollback = credential_id
+            .map(|credential_id| PasskeyRollbackKey::new(vault_id, entry_id, credential_id))
+            .and_then(|key| self.pending_passkey_rollbacks.remove(&key));
         let loaded = self
             .loaded
             .get_mut(vault_id)
@@ -1439,6 +1480,18 @@ impl Runtime {
             }
             self.core.delete_entry(vault, entry_id)?;
             return Ok(());
+        }
+
+        if let Some(rollback_entry) = pending_rollback {
+            if restore_entry_from_snapshot(
+                &mut vault.root,
+                entry_id,
+                credential_id,
+                rollback_entry,
+            )? {
+                return Ok(());
+            }
+            anyhow::bail!("entry not found: {entry_id}");
         }
 
         if !restore_entry_from_latest_history(&mut vault.root, entry_id, credential_id)? {
@@ -2000,11 +2053,7 @@ impl Runtime {
                     history_snapshots_added: summary.history_snapshots_added,
                 })
             };
-            let mut vault_for_save = vault.clone();
-            enforce_history_limits(&mut vault_for_save);
-            let bytes = self
-                .core
-                .save_kdbx(&vault_for_save, &key, save_profile)
+            let bytes = save_kdbx_with_history_limits(&self.core, vault, &key, save_profile)
                 .with_context(|| format!("failed to save vault: {vault_id}"))?;
             (bytes, merge_summary)
         };
@@ -2101,10 +2150,7 @@ impl Runtime {
         let Some(vault) = loaded.vault.as_mut() else {
             anyhow::bail!("vault is locked: {vault_id}");
         };
-        let mut vault_for_save = vault.clone();
-        enforce_history_limits(&mut vault_for_save);
-        self.core
-            .save_kdbx(&vault_for_save, key, save_profile)
+        save_kdbx_with_history_limits(&self.core, vault, key, save_profile)
             .with_context(|| format!("failed to save vault: {vault_id}"))
     }
 
@@ -2340,10 +2386,7 @@ impl Runtime {
                 self.core.load_and_merge_kdbx(vault, &snapshot.bytes, key)?;
             }
             let bytes = if let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key) {
-                let mut vault_for_save = vault.clone();
-                enforce_history_limits(&mut vault_for_save);
-                self.core
-                    .save_kdbx(&vault_for_save, key, loaded.save_profile.clone())
+                save_kdbx_with_history_limits(&self.core, vault, key, loaded.save_profile.clone())
                     .with_context(|| format!("failed to save vault: {vault_id}"))?
             } else {
                 loaded.bytes.clone()
@@ -2598,16 +2641,22 @@ fn collect_group_entries(group: &vaultkern_core::GroupView, output: &mut Vec<Ent
 fn collect_fill_candidates(
     group: &vaultkern_core::Group,
     recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
     ancestor_recycled: bool,
     url: &str,
     next_index: &mut usize,
     output: &mut Vec<RankedFillCandidate>,
 ) {
-    let group_recycled = ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group);
+    let group_recycled =
+        ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group, recycle_bin_enabled);
     if !group_recycled {
         for entry in &group.entries {
             let index = *next_index;
             *next_index += 1;
+
+            if entry.previous_parent.is_some() {
+                continue;
+            }
 
             if entry.password.is_empty() && entry.passkey.is_some() {
                 continue;
@@ -2633,6 +2682,7 @@ fn collect_fill_candidates(
         collect_fill_candidates(
             child,
             recycle_bin_group,
+            recycle_bin_enabled,
             group_recycled,
             url,
             next_index,
@@ -2680,18 +2730,24 @@ fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> PasskeyRecord {
 fn find_passkey_by_credential_id_and_relying_party<'a>(
     group: &'a vaultkern_core::Group,
     recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
     credential_id: &str,
     relying_party: Option<&str>,
 ) -> Option<&'a PasskeyRecord> {
     let mut found = None;
-    visit_passkeys(group, recycle_bin_group, &mut |passkey| {
-        if found.is_none()
-            && passkey.credential_id == credential_id
-            && relying_party.is_none_or(|value| passkey.relying_party == value)
-        {
-            found = Some(passkey);
-        }
-    });
+    visit_passkeys(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        &mut |passkey| {
+            if found.is_none()
+                && passkey.credential_id == credential_id
+                && relying_party.is_none_or(|value| passkey.relying_party == value)
+            {
+                found = Some(passkey);
+            }
+        },
+    );
 
     found
 }
@@ -2699,18 +2755,24 @@ fn find_passkey_by_credential_id_and_relying_party<'a>(
 fn find_unique_passkey_by_relying_party<'a>(
     group: &'a vaultkern_core::Group,
     recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
     relying_party: &str,
 ) -> Result<&'a PasskeyRecord> {
     let mut found = None;
     let mut count = 0usize;
-    visit_passkeys(group, recycle_bin_group, &mut |passkey| {
-        if passkey.relying_party == relying_party {
-            count += 1;
-            if found.is_none() {
-                found = Some(passkey);
+    visit_passkeys(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        &mut |passkey| {
+            if passkey.relying_party == relying_party {
+                count += 1;
+                if found.is_none() {
+                    found = Some(passkey);
+                }
             }
-        }
-    });
+        },
+    );
 
     match (count, found) {
         (0, _) => anyhow::bail!("passkey relying party not found: {relying_party}"),
@@ -2722,22 +2784,35 @@ fn find_unique_passkey_by_relying_party<'a>(
 fn find_passkey_entry_id_by_relying_party_and_user_handle(
     group: &vaultkern_core::Group,
     recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
     relying_party: &str,
     user_handle: Option<&str>,
 ) -> Option<String> {
-    find_passkey_entry_id_in_group(group, recycle_bin_group, false, relying_party, user_handle)
+    find_passkey_entry_id_in_group(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        false,
+        relying_party,
+        user_handle,
+    )
 }
 
 fn find_passkey_entry_id_in_group(
     group: &vaultkern_core::Group,
     recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
     ancestor_recycled: bool,
     relying_party: &str,
     user_handle: Option<&str>,
 ) -> Option<String> {
-    let group_recycled = ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group);
+    let group_recycled =
+        ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group, recycle_bin_enabled);
     if !group_recycled {
         for entry in &group.entries {
+            if entry.previous_parent.is_some() {
+                continue;
+            }
             if let Some(passkey) = entry.passkey.as_ref()
                 && passkey.relying_party == relying_party
                 && passkey.user_handle.as_deref() == user_handle
@@ -2751,6 +2826,7 @@ fn find_passkey_entry_id_in_group(
         if let Some(found) = find_passkey_entry_id_in_group(
             child,
             recycle_bin_group,
+            recycle_bin_enabled,
             group_recycled,
             relying_party,
             user_handle,
@@ -2765,32 +2841,56 @@ fn find_passkey_entry_id_in_group(
 fn visit_passkeys<'a>(
     group: &'a vaultkern_core::Group,
     recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
     visitor: &mut impl FnMut(&'a PasskeyRecord),
 ) {
-    visit_passkeys_in_group(group, recycle_bin_group, false, visitor);
+    visit_passkeys_in_group(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        false,
+        visitor,
+    );
 }
 
 fn visit_passkeys_in_group<'a>(
     group: &'a vaultkern_core::Group,
     recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
     ancestor_recycled: bool,
     visitor: &mut impl FnMut(&'a PasskeyRecord),
 ) {
-    let group_recycled = ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group);
+    let group_recycled =
+        ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group, recycle_bin_enabled);
     for entry in &group.entries {
-        if !group_recycled && let Some(passkey) = entry.passkey.as_ref() {
+        if !group_recycled
+            && entry.previous_parent.is_none()
+            && let Some(passkey) = entry.passkey.as_ref()
+        {
             visitor(passkey);
         }
     }
 
     for child in &group.children {
-        visit_passkeys_in_group(child, recycle_bin_group, group_recycled, visitor);
+        visit_passkeys_in_group(
+            child,
+            recycle_bin_group,
+            recycle_bin_enabled,
+            group_recycled,
+            visitor,
+        );
     }
 }
 
-fn group_is_recycle_bin(group: &vaultkern_core::Group, recycle_bin_group: Option<Uuid>) -> bool {
+fn group_is_recycle_bin(
+    group: &vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+) -> bool {
     recycle_bin_group.is_some_and(|recycle_bin_group| group.id == recycle_bin_group)
-        || (recycle_bin_group.is_none() && group.title.eq_ignore_ascii_case("Recycle Bin"))
+        || (recycle_bin_group.is_none()
+            && recycle_bin_enabled
+            && group.title.eq_ignore_ascii_case("Recycle Bin"))
 }
 
 fn entry_has_passkey_credential(
@@ -2816,6 +2916,58 @@ fn entry_has_passkey_credential(
     }
 
     None
+}
+
+fn cloned_entry_by_id(group: &vaultkern_core::Group, entry_id: &str) -> Option<Entry> {
+    for entry in &group.entries {
+        if entry.id.to_string() == entry_id {
+            let mut cloned = entry.clone();
+            cloned.history.clear();
+            return Some(cloned);
+        }
+    }
+
+    for child in &group.children {
+        if let Some(found) = cloned_entry_by_id(child, entry_id) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn restore_entry_from_snapshot(
+    group: &mut vaultkern_core::Group,
+    entry_id: &str,
+    credential_id: Option<&str>,
+    mut restored: Entry,
+) -> Result<bool> {
+    for entry in &mut group.entries {
+        if entry.id.to_string() != entry_id {
+            continue;
+        }
+
+        if credential_id.is_some_and(|credential_id| {
+            entry
+                .passkey
+                .as_ref()
+                .is_none_or(|passkey| passkey.credential_id != credential_id)
+        }) {
+            return Ok(true);
+        }
+
+        restored.history = std::mem::take(&mut entry.history);
+        *entry = restored;
+        return Ok(true);
+    }
+
+    for child in &mut group.children {
+        if restore_entry_from_snapshot(child, entry_id, credential_id, restored.clone())? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn restore_entry_from_latest_history(
@@ -2877,6 +3029,21 @@ fn history_matches_passkey_registration_rollback(
     history_passkey.relying_party == current_passkey.relying_party
         && history_passkey.user_handle == current_passkey.user_handle
         && history_passkey.credential_id != current_passkey.credential_id
+}
+
+fn save_kdbx_with_history_limits(
+    core: &KeepassCore,
+    vault: &Vault,
+    key: &CompositeKey,
+    save_profile: SaveProfile,
+) -> std::result::Result<Vec<u8>, KdbxError> {
+    if vault.history_max_items.is_none() && vault.history_max_size.is_none() {
+        return core.save_kdbx(vault, key, save_profile);
+    }
+
+    let mut vault_for_save = vault.clone();
+    enforce_history_limits(&mut vault_for_save);
+    core.save_kdbx(&vault_for_save, key, save_profile)
 }
 
 fn enforce_history_limits(vault: &mut Vault) {
