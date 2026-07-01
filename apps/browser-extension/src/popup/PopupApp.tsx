@@ -329,6 +329,15 @@ export function PopupApp({
   }, [client, extensionSettings.idleLockMinutes, session?.unlocked]);
 
   useEffect(() => {
+    if (webAuthnApprovePrompt) {
+      setEntries([]);
+      setCandidates([]);
+      setSelectedEntryId(null);
+      setSelectedDetail(null);
+      setDetailError(null);
+      return;
+    }
+
     if (!session?.unlocked || !session.activeVaultId) {
       setEntries([]);
       setCandidates([]);
@@ -382,10 +391,17 @@ export function PopupApp({
     extensionSettings.language,
     findCandidates,
     session?.activeVaultId,
-    session?.unlocked
+    session?.unlocked,
+    webAuthnApprovePrompt
   ]);
 
   useEffect(() => {
+    if (webAuthnApprovePrompt) {
+      setSelectedDetail(null);
+      setDetailError(null);
+      return;
+    }
+
     if (!session?.activeVaultId || !selectedEntryId) {
       setSelectedDetail(null);
       setDetailError(null);
@@ -416,7 +432,13 @@ export function PopupApp({
     return () => {
       cancelled = true;
     };
-  }, [client, extensionSettings.language, selectedEntryId, session?.activeVaultId]);
+  }, [
+    client,
+    extensionSettings.language,
+    selectedEntryId,
+    session?.activeVaultId,
+    webAuthnApprovePrompt
+  ]);
 
   async function handleUnlock() {
     if (submitting) {
@@ -755,7 +777,7 @@ export function PopupApp({
         <PopupStatusStrip
           siteLabel={siteLabel}
           unlocked
-          onLock={locking ? undefined : handleLock}
+          onLock={undefined}
           onOpenManager={handleOpenManager}
         />
         <section style={passkeyPromptStyle} aria-live="polite">

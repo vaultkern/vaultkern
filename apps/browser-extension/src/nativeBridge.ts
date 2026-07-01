@@ -155,7 +155,10 @@ export function createNativeMessagingBridge(
         command.type === "enable_quick_unlock_for_current_vault" ||
         command.type === "unlock_current_vault_with_quick_unlock" ||
         command.type === "create_passkey_assertion" ||
-        command.type === "create_passkey_registration"
+        command.type === "create_passkey_registration" ||
+        command.type === "save_vault" ||
+        command.type === "rollback_passkey_registration" ||
+        command.type === "commit_passkey_registration"
       ) {
         return interactiveTimeoutMs;
       }

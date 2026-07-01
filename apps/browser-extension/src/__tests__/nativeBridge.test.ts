@@ -324,6 +324,82 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
+  it("uses the interactive timeout while saving a vault after passkey registration", async () => {
+    vi.useFakeTimers();
+
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 25,
+      interactiveTimeoutMs: 1_000
+    });
+
+    const request = bridge.send({
+      version: 1,
+      command: { type: "save_vault", vault_id: "vault-1" }
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(port.disconnect).not.toHaveBeenCalled();
+
+    port.emitMessage({
+      type: "save_vault_result",
+      status: "saved"
+    });
+
+    await expect(request).resolves.toMatchObject({
+      type: "save_vault_result",
+      status: "saved"
+    });
+
+    vi.useRealTimers();
+  });
+
+  it("uses the interactive timeout while rolling back a passkey registration", async () => {
+    vi.useFakeTimers();
+
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 25,
+      interactiveTimeoutMs: 1_000
+    });
+
+    const request = bridge.send({
+      version: 1,
+      command: {
+        type: "rollback_passkey_registration",
+        vault_id: "vault-1",
+        entry_id: "entry-1",
+        credential_id: "credential-1",
+        created: true
+      }
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(port.disconnect).not.toHaveBeenCalled();
+
+    port.emitMessage({ type: "saved" });
+
+    await expect(request).resolves.toEqual({ type: "saved" });
+
+    vi.useRealTimers();
+  });
+
   it("uses the interactive timeout while enabling quick unlock", async () => {
     vi.useFakeTimers();
 

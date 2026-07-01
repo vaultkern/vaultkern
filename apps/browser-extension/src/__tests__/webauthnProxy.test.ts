@@ -921,11 +921,26 @@ describe("webAuthenticationProxy wrapper", () => {
     await vi.waitFor(() => {
       expect(presencePrompt.create).toHaveBeenCalledTimes(1);
     });
-    const promptParams = new URL(
+    const initialPromptParams = new URL(
       (presencePrompt.create.mock.calls[0][0] as { url: string }).url,
       "chrome-extension://id/"
     ).searchParams;
-    expect(JSON.parse(promptParams.get("credentialOptions") ?? "[]")).toEqual([
+    expect(initialPromptParams.get("credentialOptions")).toBeNull();
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(1, {
+      type: "get_session_state"
+    });
+
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
+      expect(presencePrompt.create).toHaveBeenCalledTimes(2);
+    });
+    const selectionPromptParams = new URL(
+      (presencePrompt.create.mock.calls[1][0] as { url: string }).url,
+      "chrome-extension://id/"
+    ).searchParams;
+    expect(JSON.parse(selectionPromptParams.get("credentialOptions") ?? "[]")).toEqual([
       {
         credentialId: "Y3JlZGVudGlhbC0x",
         username: "alice@example.com",
@@ -1202,7 +1217,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("rejects unauthorized related-origin get requests before session lookup or prompts", async () => {
+  it("rejects unauthorized related-origin get requests after user approval without enumeration", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: false
@@ -1228,6 +1243,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
     getListener?.({
@@ -1241,18 +1257,33 @@ describe("webAuthenticationProxy wrapper", () => {
     });
 
     await vi.waitFor(() => {
+      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(1, {
+      type: "get_session_state"
+    });
+
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
     });
     expect(fetch).toHaveBeenCalledWith(
       "https://victim.com/.well-known/webauthn",
-      {
+      expect.objectContaining({
         cache: "no-store",
         credentials: "omit",
         redirect: "error"
-      }
+      })
     );
-    expect(sendRuntimeCommand).not.toHaveBeenCalled();
-    expect(chromeApi.windows.create).not.toHaveBeenCalled();
+    expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "list_passkey_credentials" })
+    );
+    expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "create_passkey_assertion" })
+    );
     expect(completeGetRequest).toHaveBeenCalledWith({
       requestId: 63,
       error: {
@@ -1326,11 +1357,11 @@ describe("webAuthenticationProxy wrapper", () => {
     });
     expect(fetch).toHaveBeenCalledWith(
       "https://example.com/.well-known/webauthn",
-      {
+      expect.objectContaining({
         cache: "no-store",
         credentials: "omit",
         redirect: "error"
-      }
+      })
     );
     expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
       type: "create_passkey_assertion",
@@ -1413,10 +1444,19 @@ describe("webAuthenticationProxy wrapper", () => {
     });
 
     await vi.waitFor(() => {
+      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(1, {
+      type: "get_session_state"
+    });
+
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
       expect(fetch).toHaveBeenCalledTimes(1);
     });
-    expect(sendRuntimeCommand).not.toHaveBeenCalled();
-    expect(presencePrompt.create).not.toHaveBeenCalled();
     resolveFetch({
       ok: true,
       json: vi.fn(async () => ({
@@ -1425,7 +1465,7 @@ describe("webAuthenticationProxy wrapper", () => {
     } as unknown as Response);
 
     await vi.waitFor(() => {
-      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+      expect(presencePrompt.create).toHaveBeenCalledTimes(2);
     });
     const promptUrl = presencePrompt.latestPromptUrl();
     const promptParams = new URL(
@@ -1452,14 +1492,14 @@ describe("webAuthenticationProxy wrapper", () => {
     await vi.waitFor(() => {
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
     });
-    expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+    expect(presencePrompt.create).toHaveBeenCalledTimes(2);
     expect(fetch).toHaveBeenCalledWith(
       "https://example.com/.well-known/webauthn",
-      {
+      expect.objectContaining({
         cache: "no-store",
         credentials: "omit",
         redirect: "error"
-      }
+      })
     );
     expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
       type: "list_passkey_credentials",
@@ -1478,7 +1518,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("validates related-origin get requests before session lookup or prompts", async () => {
+  it("validates related-origin get requests after user approval before assertion", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     let resolveFetch: (value: Response) => void = () => {};
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -1538,10 +1578,19 @@ describe("webAuthenticationProxy wrapper", () => {
     });
 
     await vi.waitFor(() => {
+      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(1, {
+      type: "get_session_state"
+    });
+
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
       expect(fetch).toHaveBeenCalledTimes(1);
     });
-    expect(sendRuntimeCommand).not.toHaveBeenCalled();
-    expect(presencePrompt.create).not.toHaveBeenCalled();
 
     resolveFetch({
       ok: true,
@@ -1551,13 +1600,83 @@ describe("webAuthenticationProxy wrapper", () => {
     } as unknown as Response);
 
     await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("times out stalled related-origin well-known responses", async () => {
+    vi.useFakeTimers();
+
+    let getListener: ((request: unknown) => void) | undefined;
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: vi.fn(() => new Promise(() => undefined))
+    } as unknown as Response);
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi.fn(async () => ({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    }));
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.co.uk/login" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+    const presencePrompt = installPresencePrompt(chromeApi);
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 135,
+      origin: "https://example.co.uk",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [
+          {
+            type: "public-key",
+            id: "Y3JlZGVudGlhbC0x"
+          }
+        ]
+      })
+    });
+
+    await vi.waitFor(() => {
       expect(presencePrompt.create).toHaveBeenCalledTimes(1);
     });
     await presencePrompt.approve();
 
     await vi.waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await vi.waitFor(() => {
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
     });
+    expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "create_passkey_assertion" })
+    );
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 135,
+      error: {
+        name: "NotAllowedError",
+        message: "WebAuthn request origin does not match relying party"
+      }
+    });
+
+    vi.useRealTimers();
   });
 
   it("allows related-origin responses across distinct labels within the client limit", async () => {
@@ -1633,6 +1752,87 @@ describe("webAuthenticationProxy wrapper", () => {
       vault_id: "vault-1",
       relying_party: "google.com",
       origin: "https://youtube.com",
+      credential_id: "Y3JlZGVudGlhbC0x",
+      user_presence_verified: true,
+      related_origin_verified: true,
+      client_data_json_base64url: expect.any(String)
+    });
+  });
+
+  it("allows related-origin responses that reuse one label across more than the client origin limit", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: vi.fn(async () => ({
+        origins: [
+          "https://same.com",
+          "https://same.net",
+          "https://same.org",
+          "https://same.io",
+          "https://same.dev",
+          "https://same.app"
+        ]
+      }))
+    } as unknown as Response);
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_assertion",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        clientDataJsonBase64url: "client-data",
+        signatureBase64url: "signature",
+        userHandleBase64url: "dXNlci0x"
+      });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://same.app/login" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+    const presencePrompt = installPresencePrompt(chromeApi);
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 134,
+      origin: "https://same.app",
+      requestDetailsJson: JSON.stringify({
+        rpId: "same.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [
+          {
+            type: "public-key",
+            id: "Y3JlZGVudGlhbC0x"
+          }
+        ]
+      })
+    });
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "create_passkey_assertion",
+      vault_id: "vault-1",
+      relying_party: "same.com",
+      origin: "https://same.app",
       credential_id: "Y3JlZGVudGlhbC0x",
       user_presence_verified: true,
       related_origin_verified: true,
@@ -1759,7 +1959,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("validates related-origin create requests before session lookup or prompts", async () => {
+  it("validates related-origin create requests after user approval before registration", async () => {
     let createListener: ((request: unknown) => void) | undefined;
     let resolveFetch: (value: Response) => void = () => {};
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -1819,21 +2019,25 @@ describe("webAuthenticationProxy wrapper", () => {
     });
 
     await vi.waitFor(() => {
+      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(1, {
+      type: "get_session_state"
+    });
+
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
       expect(fetch).toHaveBeenCalledTimes(1);
     });
-    expect(sendRuntimeCommand).not.toHaveBeenCalled();
-    expect(presencePrompt.create).not.toHaveBeenCalled();
     resolveFetch({
       ok: true,
       json: vi.fn(async () => ({
         origins: ["https://example.co.uk"]
       }))
     } as unknown as Response);
-
-    await vi.waitFor(() => {
-      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
-    });
-    await presencePrompt.approve();
 
     await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
@@ -2207,10 +2411,19 @@ describe("webAuthenticationProxy wrapper", () => {
     });
 
     await vi.waitFor(() => {
+      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(1, {
+      type: "get_session_state"
+    });
+
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
     });
-    expect(sendRuntimeCommand).not.toHaveBeenCalled();
-    expect(presencePrompt.create).not.toHaveBeenCalled();
     expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
       expect.objectContaining({
         type: "create_passkey_registration"
@@ -2218,11 +2431,11 @@ describe("webAuthenticationProxy wrapper", () => {
     );
     expect(fetch).toHaveBeenCalledWith(
       "https://example.com/.well-known/webauthn",
-      {
+      expect.objectContaining({
         cache: "no-store",
         credentials: "omit",
         redirect: "error"
-      }
+      })
     );
     expect(completeCreateRequest).toHaveBeenCalledWith({
       requestId: 62,

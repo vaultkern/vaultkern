@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -2943,12 +2943,9 @@ fn entry_is_recycled(_entry: &vaultkern_core::Entry, ancestor_recycled: bool) ->
 fn group_is_recycle_bin(
     group: &vaultkern_core::Group,
     recycle_bin_group: Option<Uuid>,
-    recycle_bin_enabled: bool,
+    _recycle_bin_enabled: bool,
 ) -> bool {
     recycle_bin_group.is_some_and(|recycle_bin_group| group.id == recycle_bin_group)
-        || (recycle_bin_group.is_none()
-            && recycle_bin_enabled
-            && group.title.eq_ignore_ascii_case("Recycle Bin"))
 }
 
 fn entry_has_passkey_credential(
@@ -3105,27 +3102,22 @@ fn save_kdbx_with_history_limits(
         return core.save_kdbx(vault, key, save_profile);
     }
 
-    let history_snapshots = clone_entry_histories(&vault.root);
+    let mut history_snapshots = clone_entry_histories(&vault.root).into_iter();
     enforce_history_limits(vault);
     let result = core.save_kdbx(vault, key, save_profile);
-    restore_entry_histories(&mut vault.root, &history_snapshots);
+    restore_entry_histories(&mut vault.root, &mut history_snapshots);
     result
 }
 
-fn clone_entry_histories(group: &vaultkern_core::Group) -> HashMap<Uuid, Vec<Entry>> {
-    let mut snapshots = HashMap::new();
+fn clone_entry_histories(group: &vaultkern_core::Group) -> Vec<Vec<Entry>> {
+    let mut snapshots = Vec::new();
     collect_entry_histories(group, &mut snapshots);
     snapshots
 }
 
-fn collect_entry_histories(
-    group: &vaultkern_core::Group,
-    snapshots: &mut HashMap<Uuid, Vec<Entry>>,
-) {
+fn collect_entry_histories(group: &vaultkern_core::Group, snapshots: &mut Vec<Vec<Entry>>) {
     for entry in &group.entries {
-        if !entry.history.is_empty() {
-            snapshots.insert(entry.id, entry.history.clone());
-        }
+        snapshots.push(entry.history.clone());
     }
 
     for child in &group.children {
@@ -3135,11 +3127,11 @@ fn collect_entry_histories(
 
 fn restore_entry_histories(
     group: &mut vaultkern_core::Group,
-    snapshots: &HashMap<Uuid, Vec<Entry>>,
+    snapshots: &mut std::vec::IntoIter<Vec<Entry>>,
 ) {
     for entry in &mut group.entries {
-        if let Some(history) = snapshots.get(&entry.id) {
-            entry.history = history.clone();
+        if let Some(history) = snapshots.next() {
+            entry.history = history;
         }
     }
 
@@ -3716,6 +3708,30 @@ mod tests {
             self.values.borrow_mut().remove(key);
             Ok(())
         }
+    }
+
+    #[test]
+    fn history_snapshot_restore_preserves_duplicate_entry_histories_by_position() {
+        let duplicate_id = Uuid::new_v4();
+        let mut group = vaultkern_core::Group::new("Root");
+
+        let mut first = Entry::new("First");
+        first.id = duplicate_id;
+        first.history.push(Entry::new("First old"));
+        let mut second = Entry::new("Second");
+        second.id = duplicate_id;
+        second.history.push(Entry::new("Second old"));
+        group.entries.push(first);
+        group.entries.push(second);
+
+        let mut snapshots = clone_entry_histories(&group).into_iter();
+        group.entries[0].history.clear();
+        group.entries[1].history.clear();
+
+        restore_entry_histories(&mut group, &mut snapshots);
+
+        assert_eq!(group.entries[0].history[0].title, "First old");
+        assert_eq!(group.entries[1].history[0].title, "Second old");
     }
 
     #[derive(Default)]

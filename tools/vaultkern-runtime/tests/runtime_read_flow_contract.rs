@@ -2653,7 +2653,7 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
 }
 
 #[test]
-fn runtime_skips_passkeys_in_recycle_bin_named_group_without_uuid_metadata() {
+fn runtime_keeps_group_named_recycle_bin_live_without_uuid_metadata() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("demo-password");
@@ -2712,10 +2712,14 @@ fn runtime_skips_passkeys_in_recycle_bin_named_group_without_uuid_metadata() {
     let RuntimeResponse::PasskeyCredentialList(credential_list) = credential_list else {
         panic!("expected credential list, got {credential_list:?}");
     };
-    assert_eq!(credential_list.credentials.len(), 1);
+    assert_eq!(credential_list.credentials.len(), 2);
     assert_eq!(
         credential_list.credentials[0].credential_id,
         "YWN0aXZlLWNyZWRlbnRpYWw"
+    );
+    assert_eq!(
+        credential_list.credentials[1].credential_id,
+        "ZGVsZXRlZC1jcmVkZW50aWFs"
     );
 
     let deleted_status = runtime
@@ -2728,7 +2732,7 @@ fn runtime_skips_passkeys_in_recycle_bin_named_group_without_uuid_metadata() {
     let RuntimeResponse::PasskeyCredentialStatus(deleted_status) = deleted_status else {
         panic!("expected credential status, got {deleted_status:?}");
     };
-    assert!(!deleted_status.exists);
+    assert!(deleted_status.exists);
 }
 
 #[test]

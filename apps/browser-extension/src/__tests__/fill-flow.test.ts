@@ -1193,6 +1193,9 @@ describe("PopupShell fill flow", () => {
     expect(
       screen.getByText("Approve this passkey request for example.com.")
     ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Lock" })).not.toBeInTheDocument();
+    expect(runtimeClientMocks.listEntries).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.findFillCandidates).not.toHaveBeenCalled();
     fireEvent.click(
       screen.getByRole("button", { name: "Continue passkey request" })
     );

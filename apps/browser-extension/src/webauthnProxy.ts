@@ -105,6 +105,7 @@ const OBSERVED_PAGE_REQUEST_MAX_AGE_MS = 120_000;
 const WEB_AUTHN_DEBUG_STORAGE_KEY = "vaultkernWebAuthnDebug";
 const WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY = "vaultkernWebAuthnDebugEnabled";
 const RELATED_ORIGIN_LABEL_LIMIT = 5;
+const RELATED_ORIGIN_FETCH_TIMEOUT_MS = 5_000;
 const webAuthnDebugWriteChains = new WeakMap<object, Promise<void>>();
 
 type ObservedWebAuthnPageRequest = {
@@ -508,17 +509,6 @@ async function handleGetRequest(
         "WebAuthn request origin does not match relying party"
       );
     }
-    relyingPartyValidation = await completeRelyingPartyValidation(
-      origin,
-      requestedRpId,
-      relyingPartyValidation
-    );
-    if (!relyingPartyValidation.allowed) {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "WebAuthn request origin does not match relying party"
-      );
-    }
     const clientDataJsonBase64url = clientDataJsonBase64urlFrom(
       "webauthn.get",
       options.challenge,
@@ -548,6 +538,35 @@ async function handleGetRequest(
       return;
     }
     let userPresenceVerified = activeVault.userPresenceVerified;
+    if (!userPresenceVerified) {
+      const approved = await userPresenceForRequest(
+        chromeApi,
+        requestId,
+        promptContextFrom(originContext, relyingParty),
+        canceledRequests
+      );
+      if (!approved) {
+        return;
+      }
+      userPresenceVerified = true;
+    }
+    if (canceledRequests.has(requestId)) {
+      return;
+    }
+    relyingPartyValidation = await completeRelyingPartyValidation(
+      origin,
+      requestedRpId,
+      relyingPartyValidation
+    );
+    if (!relyingPartyValidation.allowed) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
+    }
+    if (canceledRequests.has(requestId)) {
+      return;
+    }
     const credentialSelection = await credentialSelectionForGetRequest(
       sendRuntimeCommand,
       activeVault.activeVaultId,
@@ -555,16 +574,11 @@ async function handleGetRequest(
       credentialIds
     );
     credentialIds = credentialSelection.credentialIds;
-    const presencePromptContext = promptContextFrom(
-      originContext,
-      relyingParty,
-      credentialSelection.promptOptions
-    );
-    if (!userPresenceVerified || credentialSelection.promptOptions.length > 0) {
+    if (credentialSelection.promptOptions.length > 0) {
       const approved = await userPresenceForRequest(
         chromeApi,
         requestId,
-        presencePromptContext,
+        promptContextFrom(originContext, relyingParty, credentialSelection.promptOptions),
         canceledRequests
       );
       if (!approved) {
@@ -939,17 +953,6 @@ async function handleCreateRequest(
         "WebAuthn request origin does not match relying party"
       );
     }
-    relyingPartyValidation = await completeRelyingPartyValidation(
-      origin,
-      requestedRpId,
-      relyingPartyValidation
-    );
-    if (!relyingPartyValidation.allowed) {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "WebAuthn request origin does not match relying party"
-      );
-    }
     const clientDataJsonBase64url = clientDataJsonBase64urlFrom(
       "webauthn.create",
       options.challenge,
@@ -990,6 +993,20 @@ async function handleCreateRequest(
         return;
       }
       userPresenceVerified = true;
+    }
+    if (canceledRequests.has(requestId)) {
+      return;
+    }
+    relyingPartyValidation = await completeRelyingPartyValidation(
+      origin,
+      requestedRpId,
+      relyingPartyValidation
+    );
+    if (!relyingPartyValidation.allowed) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
     }
     const activeVaultId = activeVault.activeVaultId;
 
@@ -1749,20 +1766,10 @@ async function originAllowedByRelatedOrigins(origin: string, relyingParty: strin
   const normalizedRelyingParty = normalizeHost(relyingParty);
 
   try {
-    const response = await fetch(
-      `https://${normalizedRelyingParty}/.well-known/webauthn`,
-      {
-        cache: "no-store",
-        credentials: "omit",
-        redirect: "error"
-      }
+    const body = await fetchRelatedOriginsJson(
+      `https://${normalizedRelyingParty}/.well-known/webauthn`
     );
-    if (!response.ok) {
-      return false;
-    }
-
-    const body = (await response.json()) as { origins?: unknown };
-    if (!Array.isArray(body.origins)) {
+    if (!body || !Array.isArray(body.origins)) {
       return false;
     }
     if (relatedOriginLabelCount(body.origins) > RELATED_ORIGIN_LABEL_LIMIT) {
@@ -1776,6 +1783,42 @@ async function originAllowedByRelatedOrigins(origin: string, relyingParty: strin
     });
   } catch {
     return false;
+  }
+}
+
+async function fetchRelatedOriginsJson(url: string) {
+  const controller =
+    typeof AbortController === "function" ? new AbortController() : null;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timeoutId = setTimeout(() => {
+      controller?.abort();
+      resolve(null);
+    }, RELATED_ORIGIN_FETCH_TIMEOUT_MS);
+  });
+  const request = (async () => {
+    try {
+      const response = await fetch(url, {
+        cache: "no-store",
+        credentials: "omit",
+        redirect: "error",
+        ...(controller ? { signal: controller.signal } : {})
+      });
+      if (!response.ok) {
+        return null;
+      }
+      return (await response.json()) as { origins?: unknown };
+    } catch {
+      return null;
+    }
+  })();
+
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
   }
 }
 
