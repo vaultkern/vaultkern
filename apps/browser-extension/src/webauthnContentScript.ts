@@ -23,6 +23,7 @@ if (!globalState.__vaultkernWebAuthnContentScriptInstalled && chromeApi?.runtime
       challenge: event.data.challenge,
       allowCredentialIds: event.data.allowCredentialIds,
       excludeCredentialIds: event.data.excludeCredentialIds,
+      mediation: event.data.mediation,
       observedAt: Date.now()
     });
     if (sendResult && typeof sendResult.catch === "function") {
@@ -48,6 +49,7 @@ function isWebAuthnPageRequest(message: unknown): message is {
   challenge?: string;
   allowCredentialIds?: string[];
   excludeCredentialIds?: string[];
+  mediation?: "conditional";
 } {
   if (
     typeof message !== "object" ||

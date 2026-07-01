@@ -2066,6 +2066,73 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
+  it("returns NotAllowedError when an unlock popup is dismissed", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    let removedListener: ((windowId: number) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi.fn(async () => ({
+      type: "session_state",
+      unlocked: false,
+      activeVaultId: null
+    }));
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`)
+      },
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      windows: {
+        create: vi.fn(async () => ({ id: 42 })),
+        onRemoved: {
+          addListener(listener: (windowId: number) => void) {
+            removedListener = listener;
+          },
+          removeListener: vi.fn()
+        }
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 45,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+      expect(removedListener).toBeDefined();
+    });
+    removedListener?.(42);
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(chromeApi.windows.onRemoved.removeListener).toHaveBeenCalled();
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 45,
+      error: {
+        name: "NotAllowedError",
+        message: "VaultKern vault unlock was dismissed"
+      }
+    });
+  });
+
   it("does not miss unlock completion sent while opening the prompt", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     let unlockMessageListener:

@@ -2106,7 +2106,8 @@ describe("content script fill message", () => {
           origin: "https://forged.example",
           relyingParty: "localhost",
           challenge: "cmVnaXN0ZXItMQ",
-          excludeCredentialIds: ["Y3JlZGVudGlhbC0x"]
+          excludeCredentialIds: ["Y3JlZGVudGlhbC0x"],
+          mediation: "conditional"
         }
       })
     );
@@ -2120,6 +2121,7 @@ describe("content script fill message", () => {
       challenge: "cmVnaXN0ZXItMQ",
       allowCredentialIds: undefined,
       excludeCredentialIds: ["Y3JlZGVudGlhbC0x"],
+      mediation: "conditional",
       observedAt: expect.any(Number)
     });
   });

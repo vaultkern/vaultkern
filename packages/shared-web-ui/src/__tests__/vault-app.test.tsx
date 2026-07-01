@@ -1082,7 +1082,9 @@ it("manages an entry passkey from the detail pane", async () => {
   expect(screen.getByText("credential-old")).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "Edit passkey" }));
-  expect(screen.getByLabelText("Private Key PEM")).toHaveAttribute("type", "password");
+  const privateKeyPemField = screen.getByLabelText("Private Key PEM");
+  expect(privateKeyPemField.tagName).toBe("TEXTAREA");
+  expect(privateKeyPemField).toHaveValue(originalPasskey.privateKeyPem);
   expect(screen.getByDisplayValue("credential-old")).toHaveAttribute("type", "password");
   expect(screen.getByDisplayValue("generated-user")).toHaveAttribute("type", "password");
   expect(screen.getByDisplayValue("user-handle")).toHaveAttribute("type", "password");

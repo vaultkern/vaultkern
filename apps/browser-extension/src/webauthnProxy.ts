@@ -72,7 +72,9 @@ type WebAuthnPromptContext = WebAuthnOriginContext & {
 
 const unlockPromptWindowIds = new Map<number, number>();
 const unlockCompleteWaiters = new Map<number, Set<() => void>>();
+const unlockDismissWaiters = new Map<number, Set<() => void>>();
 const unlockPromptContexts = new Map<number, WebAuthnPromptContext>();
+const unlockPromptRemovalCleanups = new Map<number, () => void>();
 const presencePromptWindowIds = new Map<number, number>();
 const presenceCompleteWaiters = new Map<number, Set<() => void>>();
 const presenceDismissWaiters = new Map<number, Set<() => void>>();
@@ -302,8 +304,7 @@ function registerUnlockCompleteHandler(chromeApi: ChromeLike) {
         event: "unlock_complete_message",
         requestId
       });
-      unlockPromptWindowIds.delete(requestId);
-      unlockPromptContexts.delete(requestId);
+      clearUnlockPromptState(requestId);
       for (const waiter of [...(unlockCompleteWaiters.get(requestId) ?? [])]) {
         waiter();
       }
@@ -1570,7 +1571,7 @@ async function activeVaultForRequest(
     requestId
   });
   const deadline = Date.now() + 120_000;
-  let unlockSignal = waitForUnlockComplete(
+  let unlockSignal = waitForUnlockSignal(
     requestId,
     Math.min(1_000, Math.max(0, deadline - Date.now()))
   );
@@ -1586,13 +1587,19 @@ async function activeVaultForRequest(
       return null;
     }
 
-    const signaled = await unlockSignal;
-    if (!signaled) {
-      unlockSignal = waitForUnlockComplete(
+    const signal = await unlockSignal;
+    if (!signal) {
+      unlockSignal = waitForUnlockSignal(
         requestId,
         Math.min(1_000, Math.max(0, deadline - Date.now()))
       );
       continue;
+    }
+    if (signal === "dismissed") {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "VaultKern vault unlock was dismissed"
+      );
     }
 
     const session = (await sendRuntimeCommand({
@@ -1610,7 +1617,7 @@ async function activeVaultForRequest(
       };
     }
 
-    unlockSignal = waitForUnlockComplete(
+    unlockSignal = waitForUnlockSignal(
       requestId,
       Math.min(1_000, Math.max(0, deadline - Date.now()))
     );
@@ -1669,34 +1676,45 @@ async function userPresenceForRequest(
   );
 }
 
-function waitForUnlockComplete(requestId: number, timeoutMs: number) {
-  return new Promise<boolean>((resolve) => {
+function waitForUnlockSignal(requestId: number, timeoutMs: number) {
+  return new Promise<"complete" | "dismissed" | null>((resolve) => {
     let settled = false;
     const timeoutId = setTimeout(() => {
-      finish(false);
+      finish(null);
     }, timeoutMs);
-    const waiter = () => {
-      finish(true);
+    const completeWaiter = () => {
+      finish("complete");
+    };
+    const dismissWaiter = () => {
+      finish("dismissed");
     };
 
-    function finish(signaled: boolean) {
+    function finish(signaled: "complete" | "dismissed" | null) {
       if (settled) {
         return;
       }
 
       settled = true;
       clearTimeout(timeoutId);
-      const waiters = unlockCompleteWaiters.get(requestId);
-      waiters?.delete(waiter);
-      if (waiters?.size === 0) {
+      const completeWaiters = unlockCompleteWaiters.get(requestId);
+      completeWaiters?.delete(completeWaiter);
+      if (completeWaiters?.size === 0) {
         unlockCompleteWaiters.delete(requestId);
+      }
+      const dismissWaiters = unlockDismissWaiters.get(requestId);
+      dismissWaiters?.delete(dismissWaiter);
+      if (dismissWaiters?.size === 0) {
+        unlockDismissWaiters.delete(requestId);
       }
       resolve(signaled);
     }
 
-    const waiters = unlockCompleteWaiters.get(requestId) ?? new Set<() => void>();
-    waiters.add(waiter);
-    unlockCompleteWaiters.set(requestId, waiters);
+    const completeWaiters = unlockCompleteWaiters.get(requestId) ?? new Set<() => void>();
+    completeWaiters.add(completeWaiter);
+    unlockCompleteWaiters.set(requestId, completeWaiters);
+    const dismissWaiters = unlockDismissWaiters.get(requestId) ?? new Set<() => void>();
+    dismissWaiters.add(dismissWaiter);
+    unlockDismissWaiters.set(requestId, dismissWaiters);
   });
 }
 
@@ -1760,7 +1778,7 @@ async function openUnlockPrompt(
       await chromeApi.windows.update(existingWindowId, { focused: true });
       return;
     } catch {
-      unlockPromptWindowIds.delete(requestId);
+      clearUnlockPromptState(requestId);
     }
   }
 
@@ -1778,6 +1796,7 @@ async function openUnlockPrompt(
   });
   if (created && typeof created.id === "number") {
     unlockPromptWindowIds.set(requestId, created.id);
+    watchUnlockPromptWindow(chromeApi, requestId, created.id);
   }
 }
 
@@ -1854,6 +1873,39 @@ function watchPresencePromptWindow(
   });
 }
 
+function watchUnlockPromptWindow(
+  chromeApi: ChromeLike,
+  requestId: number,
+  windowId: number
+) {
+  const onRemoved = chromeApi.windows?.onRemoved;
+  if (!onRemoved?.addListener) {
+    return;
+  }
+
+  unlockPromptRemovalCleanups.get(requestId)?.();
+  const listener = (removedWindowId: number) => {
+    if (removedWindowId !== windowId) {
+      return;
+    }
+
+    clearUnlockPromptState(requestId);
+    void recordWebAuthnDebug(chromeApi, {
+      event: "unlock_prompt_dismissed",
+      requestId,
+      windowId
+    });
+    for (const waiter of [...(unlockDismissWaiters.get(requestId) ?? [])]) {
+      waiter();
+    }
+  };
+  onRemoved.addListener(listener);
+  unlockPromptRemovalCleanups.set(requestId, () => {
+    onRemoved.removeListener?.(listener);
+    unlockPromptRemovalCleanups.delete(requestId);
+  });
+}
+
 function popupPathForWebAuthnPrompt(
   mode: "unlock" | "approve",
   requestId: number,
@@ -1872,6 +1924,7 @@ function popupPathForWebAuthnPrompt(
 }
 
 function clearUnlockPromptState(requestId: number) {
+  unlockPromptRemovalCleanups.get(requestId)?.();
   unlockPromptWindowIds.delete(requestId);
   unlockPromptContexts.delete(requestId);
 }

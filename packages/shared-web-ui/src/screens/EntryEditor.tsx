@@ -788,17 +788,34 @@ function PasskeySection({
     updateField: keyof EntryPasskey
   ) {
     const revealed = revealedDraftFields.has(field);
+    const control =
+      field === "privateKeyPem" ? (
+        <textarea
+          aria-label={label}
+          value={value}
+          onChange={(event) => updateDraft(updateField, event.target.value)}
+          spellCheck={false}
+          style={
+            revealed
+              ? privateKeyPemDraftStyle
+              : concealedPrivateKeyPemDraftStyle
+          }
+        />
+      ) : (
+        <input
+          aria-label={label}
+          type={revealed ? "text" : "password"}
+          value={value}
+          onChange={(event) => updateDraft(updateField, event.target.value)}
+          style={fieldStyle}
+        />
+      );
+
     return (
       <div style={sensitiveDraftFieldStyle}>
         <label style={fieldLabelStyle}>
           {label}
-          <input
-            aria-label={label}
-            type={revealed ? "text" : "password"}
-            value={value}
-            onChange={(event) => updateDraft(updateField, event.target.value)}
-            style={fieldStyle}
-          />
+          {control}
         </label>
         <button
           type="button"
@@ -1265,6 +1282,19 @@ const notesStyle = {
   ...fieldStyle,
   minHeight: "130px",
   resize: "vertical" as const
+};
+
+const privateKeyPemDraftStyle = {
+  ...fieldStyle,
+  minHeight: "150px",
+  resize: "vertical" as const,
+  fontFamily: "monospace",
+  whiteSpace: "pre-wrap" as const
+};
+
+const concealedPrivateKeyPemDraftStyle = {
+  ...privateKeyPemDraftStyle,
+  WebkitTextSecurity: "disc"
 };
 
 const fieldLabelStyle = {

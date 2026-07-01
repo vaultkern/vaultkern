@@ -289,6 +289,8 @@ describe("background bridge", () => {
         runAt: "document_start",
         world: "MAIN",
         allFrames: true,
+        matchAboutBlank: true,
+        matchOriginAsFallback: true,
         persistAcrossSessions: false
       }
     ]);
