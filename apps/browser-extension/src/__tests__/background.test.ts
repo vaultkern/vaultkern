@@ -652,6 +652,104 @@ describe("background bridge", () => {
     expect(detach).toHaveBeenCalledTimes(1);
   });
 
+  it("disables WebAuthn page hooks already injected into open tabs", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+    const detach = vi.fn(async () => undefined);
+    const registerContentScripts = vi.fn(async () => undefined);
+    const unregisterContentScripts = vi.fn(async () => undefined);
+    const executeScript = vi.fn(async () => undefined);
+    const query = vi.fn(async () => [{ id: 7 }]);
+    let passkeyProviderEnabled = true;
+    let storageListener:
+      | ((changes: Record<string, unknown>, areaName: string) => void)
+      | undefined;
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled
+              }
+            });
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener(
+            listener: (changes: Record<string, unknown>, areaName: string) => void
+          ) {
+            storageListener = listener;
+          }
+        }
+      },
+      scripting: {
+        executeScript,
+        registerContentScripts,
+        unregisterContentScripts
+      },
+      tabs: {
+        query
+      },
+      webAuthenticationProxy: {
+        attach,
+        detach
+      }
+    };
+
+    await import("../background");
+    await vi.waitFor(() => {
+      expect(executeScript).toHaveBeenCalledWith({
+        target: { tabId: 7, allFrames: true },
+        files: ["webauthnPageHook.js"],
+        world: "MAIN"
+      });
+    });
+
+    executeScript.mockClear();
+    query.mockClear();
+    unregisterContentScripts.mockClear();
+
+    passkeyProviderEnabled = false;
+    storageListener?.({ vaultkernExtensionSettings: {} }, "local");
+
+    await vi.waitFor(() => {
+      expect(detach).toHaveBeenCalledTimes(1);
+    });
+    expect(query).toHaveBeenCalledWith({
+      url: ["http://*/*", "https://*/*"]
+    });
+    expect(executeScript).toHaveBeenCalledWith({
+      target: { tabId: 7, allFrames: true },
+      func: expect.any(Function),
+      world: "MAIN"
+    });
+    const disableCall = executeScript.mock.calls.find(
+      ([details]) => typeof details.func === "function"
+    );
+    disableCall?.[0].func();
+    expect(
+      (globalThis as Record<string, unknown>).__vaultkernWebAuthnPageHookEnabled
+    ).toBe(false);
+    delete (globalThis as Record<string, unknown>)
+      .__vaultkernWebAuthnPageHookEnabled;
+    expect(unregisterContentScripts).toHaveBeenCalledWith({
+      ids: ["vaultkern-webauthn-page-hook"]
+    });
+  });
+
   it("re-runs WebAuthn proxy sync when settings change during attach", async () => {
     const port = createPort();
     let resolveAttach: () => void = () => {};

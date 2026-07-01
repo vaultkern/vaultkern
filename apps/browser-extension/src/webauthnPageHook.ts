@@ -1,4 +1,5 @@
 const WEB_AUTHN_PAGE_REQUEST_MESSAGE = "vaultkern_webauthn_page_request";
+const HOOK_ENABLED_MARKER = "__vaultkernWebAuthnPageHookEnabled";
 const HOOK_MARKER = "__vaultkernWebAuthnHookInstalled";
 
 type PublicKeyCredentialOptionsLike = {
@@ -16,6 +17,11 @@ type CredentialsContainerWithMarker = CredentialsContainer & {
 installWebAuthnPageHook();
 
 function installWebAuthnPageHook() {
+  const hookState = globalThis as typeof globalThis & {
+    [HOOK_ENABLED_MARKER]?: boolean;
+  };
+  hookState[HOOK_ENABLED_MARKER] = true;
+
   const credentials = navigator.credentials as CredentialsContainerWithMarker | undefined;
   if (!credentials || credentials[HOOK_MARKER]) {
     return;
@@ -45,6 +51,13 @@ function observeWebAuthnRequest(
   ceremony: "create" | "get",
   options?: CredentialCreationOptions | CredentialRequestOptions
 ) {
+  const hookState = globalThis as typeof globalThis & {
+    [HOOK_ENABLED_MARKER]?: boolean;
+  };
+  if (hookState[HOOK_ENABLED_MARKER] === false) {
+    return;
+  }
+
   const publicKey = (options as { publicKey?: PublicKeyCredentialOptionsLike } | undefined)
     ?.publicKey;
   if (!publicKey || typeof publicKey !== "object") {

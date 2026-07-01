@@ -262,6 +262,8 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
 }
 
 async function unregisterWebAuthnPageHook() {
+  await disableWebAuthnPageHookInOpenTabs();
+
   if (!chromeApi?.scripting?.unregisterContentScripts) {
     webAuthnPageHookRegistered = false;
     return;
@@ -278,6 +280,57 @@ async function unregisterWebAuthnPageHook() {
   await recordWebAuthnDebug(chromeApi, {
     event: "page_hook_unregistered"
   });
+}
+
+async function disableWebAuthnPageHookInOpenTabs() {
+  if (!chromeApi?.tabs?.query || !chromeApi?.scripting?.executeScript) {
+    return;
+  }
+
+  let tabs: Array<{ id?: unknown }> = [];
+  try {
+    tabs = await chromeApi.tabs.query({
+      url: ["http://*/*", "https://*/*"]
+    });
+  } catch (error) {
+    await recordWebAuthnDebug(chromeApi, {
+      event: "page_hook_disable_open_tabs_query_error",
+      message: error instanceof Error ? error.message : String(error)
+    });
+    return;
+  }
+
+  let disabledCount = 0;
+  let failedCount = 0;
+  for (const tab of tabs) {
+    if (typeof tab.id !== "number") {
+      continue;
+    }
+
+    try {
+      await chromeApi.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        func: disableVaultKernWebAuthnPageHook,
+        world: "MAIN"
+      });
+      disabledCount += 1;
+    } catch {
+      failedCount += 1;
+    }
+  }
+
+  await recordWebAuthnDebug(chromeApi, {
+    event: "page_hook_open_tabs_disabled",
+    disabledCount,
+    failedCount
+  });
+}
+
+function disableVaultKernWebAuthnPageHook() {
+  const hookState = globalThis as typeof globalThis & {
+    __vaultkernWebAuthnPageHookEnabled?: boolean;
+  };
+  hookState.__vaultkernWebAuthnPageHookEnabled = false;
 }
 
 function sendRuntimeCommand(command: unknown) {
