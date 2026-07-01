@@ -25,6 +25,7 @@ pub struct PasskeyAssertionRequest<'a> {
     pub origin: &'a str,
     pub credential_id: Option<&'a str>,
     pub user_presence_verified: bool,
+    pub related_origin_verified: bool,
     pub client_data_json_base64url: &'a str,
 }
 
@@ -33,6 +34,7 @@ pub struct PasskeyRegistrationRequest<'a> {
     pub origin: &'a str,
     pub user_name: &'a str,
     pub user_handle_base64url: &'a str,
+    pub related_origin_verified: bool,
     pub client_data_json_base64url: &'a str,
 }
 
@@ -57,7 +59,11 @@ pub fn create_assertion(
     if !request.user_presence_verified {
         anyhow::bail!("passkey user presence was not verified");
     }
-    validate_origin_for_relying_party(request.origin, request.relying_party)?;
+    validate_origin_for_relying_party(
+        request.origin,
+        request.relying_party,
+        request.related_origin_verified,
+    )?;
 
     let client_data_json = URL_SAFE_NO_PAD
         .decode(request.client_data_json_base64url)
@@ -86,7 +92,11 @@ pub fn create_assertion(
 }
 
 pub fn create_registration(request: PasskeyRegistrationRequest<'_>) -> Result<PasskeyRegistration> {
-    validate_origin_for_relying_party(request.origin, request.relying_party)?;
+    validate_origin_for_relying_party(
+        request.origin,
+        request.relying_party,
+        request.related_origin_verified,
+    )?;
 
     let client_data_json = URL_SAFE_NO_PAD
         .decode(request.client_data_json_base64url)
@@ -163,7 +173,11 @@ fn assertion_flags(passkey: &PasskeyRecord) -> u8 {
     AUTH_DATA_FLAG_USER_PRESENT | backup_eligible | backup_state
 }
 
-fn validate_origin_for_relying_party(origin: &str, relying_party: &str) -> Result<()> {
+fn validate_origin_for_relying_party(
+    origin: &str,
+    relying_party: &str,
+    related_origin_verified: bool,
+) -> Result<()> {
     let parsed = Url::parse(origin).context("invalid passkey origin")?;
     let host = normalize_host(
         parsed
@@ -175,11 +189,15 @@ fn validate_origin_for_relying_party(origin: &str, relying_party: &str) -> Resul
         anyhow::bail!("passkey origin must use https");
     }
 
-    if !origin_host_matches_relying_party(&host, &relying_party) {
-        anyhow::bail!("passkey origin does not match relying party");
+    if origin_host_matches_relying_party(&host, &relying_party) {
+        return Ok(());
     }
 
-    Ok(())
+    if related_origin_verified && can_accept_verified_related_origin(&host, &relying_party) {
+        return Ok(());
+    }
+
+    anyhow::bail!("passkey origin does not match relying party")
 }
 
 fn origin_host_matches_relying_party(host: &str, relying_party: &str) -> bool {
@@ -196,6 +214,18 @@ fn origin_host_matches_relying_party(host: &str, relying_party: &str) -> bool {
     }
 
     host == relying_party || host.ends_with(&format!(".{relying_party}"))
+}
+
+fn can_accept_verified_related_origin(host: &str, relying_party: &str) -> bool {
+    if is_loopback_host(host) || is_loopback_host(relying_party) {
+        return false;
+    }
+
+    if is_ip_address(host) || is_ip_address(relying_party) {
+        return false;
+    }
+
+    psl::domain_str(host).is_some() && psl::domain_str(relying_party).is_some()
 }
 
 fn normalize_host(host: &str) -> String {
@@ -338,6 +368,7 @@ mod tests {
             origin: "https://attacker.com",
             user_name: "alice@example.com",
             user_handle_base64url: "dXNlci0x",
+            related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
         }) {
             Ok(_) => panic!("public suffix RP ID must be rejected"),
@@ -349,5 +380,24 @@ mod tests {
                 .to_string()
                 .contains("passkey origin does not match relying party")
         );
+    }
+
+    #[test]
+    fn registration_accepts_verified_related_origin() {
+        let client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.co.uk","crossOrigin":false}"#,
+        );
+
+        let registration = create_registration(PasskeyRegistrationRequest {
+            relying_party: "example.com",
+            origin: "https://example.co.uk",
+            user_name: "alice@example.com",
+            user_handle_base64url: "dXNlci0x",
+            related_origin_verified: true,
+            client_data_json_base64url: &client_data_json,
+        })
+        .expect("verified related origins are allowed");
+
+        assert_eq!(registration.passkey.relying_party, "example.com");
     }
 }

@@ -1037,6 +1037,7 @@ fn runtime_creates_passkey_assertion_for_matching_relying_party() {
             origin: "https://example.com".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
             user_presence_verified: true,
+            related_origin_verified: false,
             client_data_json_base64url: client_data_json_base64url.clone(),
         })
         .unwrap();
@@ -1121,6 +1122,7 @@ fn runtime_rejects_passkey_assertion_without_user_presence() {
             origin: "https://example.com".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
             user_presence_verified: false,
+            related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
             ),
@@ -1175,6 +1177,7 @@ fn runtime_rejects_passkey_assertion_for_relying_party_mismatch() {
             origin: "https://evil.example.net".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
             user_presence_verified: true,
+            related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://evil.example.net","crossOrigin":false}"#,
             ),
@@ -1226,6 +1229,7 @@ fn runtime_rejects_passkey_assertion_when_vault_is_locked() {
             origin: "https://example.com".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
             user_presence_verified: true,
+            related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
             ),
@@ -1280,6 +1284,7 @@ fn runtime_rejects_passkey_assertion_for_unknown_credential() {
             origin: "https://example.com".into(),
             credential_id: Some("dW5rbm93bg".into()),
             user_presence_verified: true,
+            related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
             ),
@@ -1335,6 +1340,7 @@ fn runtime_allows_loopback_http_origin_for_passkey_assertion_smoke_tests() {
             origin: origin.into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
             user_presence_verified: true,
+            related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
                 format!(
                     r#"{{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"{origin}","crossOrigin":false}}"#
@@ -1377,6 +1383,7 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
             user_name: "alice@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
+            related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(create_client_data),
         })
         .unwrap();
@@ -1421,6 +1428,7 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
             origin: "https://example.com".into(),
             credential_id: Some(registration.credential_id),
             user_presence_verified: true,
+            related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(get_client_data),
         })
         .unwrap();
@@ -1595,6 +1603,7 @@ fn runtime_creates_discoverable_passkey_assertion_for_relying_party() {
             origin: "https://example.com".into(),
             credential_id: None,
             user_presence_verified: true,
+            related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(get_client_data),
         })
         .unwrap();
@@ -1651,6 +1660,7 @@ fn runtime_rejects_discoverable_passkey_assertion_when_multiple_accounts_match()
             origin: "https://example.com".into(),
             credential_id: None,
             user_presence_verified: true,
+            related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.get","challenge":"bG9naW4tMQ","origin":"https://example.com","crossOrigin":false}"#,
             ),

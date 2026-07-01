@@ -800,6 +800,7 @@ fn protocol_roundtrips_passkey_assertion_command_and_response() {
         origin: "https://example.com".into(),
         credential_id: Some("Y3JlZGVudGlhbC0x".into()),
         user_presence_verified: true,
+        related_origin_verified: false,
         client_data_json_base64url: "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0".into(),
     });
 
@@ -863,6 +864,7 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
         user_name: "alice@example.com".into(),
         user_display_name: Some("Alice".into()),
         user_handle_base64url: "dXNlci0x".into(),
+        related_origin_verified: false,
         client_data_json_base64url: "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIn0".into(),
     });
 

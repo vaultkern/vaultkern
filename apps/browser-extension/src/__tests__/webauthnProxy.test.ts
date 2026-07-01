@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Buffer } from "node:buffer";
 
 import {
@@ -7,6 +7,11 @@ import {
   recordWebAuthnPageRequest,
   webAuthnProxyAvailable
 } from "../webauthnProxy";
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 async function expectResolvesSoon<T>(promise: Promise<T>, expected: T) {
   const timeout = Symbol("timeout");
@@ -545,6 +550,73 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
+  it("canonicalizes requested WebAuthn get RP IDs before signing", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_assertion",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        clientDataJsonBase64url: "client-data",
+        signatureBase64url: "signature",
+        userHandleBase64url: "dXNlci0x"
+      });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+    const presencePrompt = installPresencePrompt(chromeApi);
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 29,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "Example.COM.",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [
+          {
+            type: "public-key",
+            id: "Y3JlZGVudGlhbC0x"
+          }
+        ]
+      })
+    });
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "create_passkey_assertion",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.com",
+      credential_id: "Y3JlZGVudGlhbC0x",
+      user_presence_verified: true,
+      client_data_json_base64url: expect.any(String)
+    });
+  });
+
   it("allows discoverable WebAuthn get requests without allowed credentials", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     const completeGetRequest = vi.fn(async () => undefined);
@@ -607,6 +679,145 @@ describe("webAuthenticationProxy wrapper", () => {
     });
     const response = JSON.parse(completeGetRequest.mock.calls[0][0].responseJson);
     expect(response.id).toBe("ZGlzY292ZXJhYmxlLTE");
+  });
+
+  it("rejects conditional mediation get observations without opening an approval prompt", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi.fn();
+    const chromeApi = {
+      runtime: {},
+      windows: {
+        create: vi.fn(async () => ({ id: 77 }))
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+    expect(
+      recordWebAuthnPageRequest({
+        type: "vaultkern_webauthn_page_request",
+        ceremony: "get",
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        challenge: "Y29uZGl0aW9uYWwtMQ",
+        allowCredentialIds: [],
+        mediation: "conditional"
+      })
+    ).toBe(true);
+
+    getListener?.({
+      requestId: 31,
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y29uZGl0aW9uYWwtMQ",
+        allowCredentials: []
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).not.toHaveBeenCalled();
+    expect(chromeApi.windows.create).not.toHaveBeenCalled();
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 31,
+      error: {
+        name: "NotAllowedError",
+        message:
+          "VaultKern passkey provider does not support conditional mediation"
+      }
+    });
+  });
+
+  it("allows related-origin get requests after well-known validation", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: vi.fn(async () => ({
+        origins: ["https://example.co.uk"]
+      }))
+    } as unknown as Response);
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_assertion",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        clientDataJsonBase64url: "client-data",
+        signatureBase64url: "signature",
+        userHandleBase64url: "dXNlci0x"
+      });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.co.uk/login" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+    const presencePrompt = installPresencePrompt(chromeApi);
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 32,
+      origin: "https://example.co.uk",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [
+          {
+            type: "public-key",
+            id: "Y3JlZGVudGlhbC0x"
+          }
+        ]
+      })
+    });
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      "https://example.com/.well-known/webauthn",
+      {
+        cache: "no-store",
+        credentials: "omit",
+        redirect: "error"
+      }
+    );
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "create_passkey_assertion",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.co.uk",
+      credential_id: "Y3JlZGVudGlhbC0x",
+      user_presence_verified: true,
+      related_origin_verified: true,
+      client_data_json_base64url: expect.any(String)
+    });
   });
 
   it("completes WebAuthn create requests with a runtime registration and saves the vault", async () => {
@@ -716,6 +927,78 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         transports: ["internal"]
       }
+    });
+  });
+
+  it("canonicalizes requested WebAuthn create RP IDs before registering", async () => {
+    let createListener: ((request: unknown) => void) | undefined;
+    const completeCreateRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_registration",
+        entryId: "entry-1",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        attestationObjectBase64url: "attestation-object",
+        clientDataJsonBase64url: "client-data",
+        publicKeyBase64url: "public-key",
+        publicKeyAlgorithm: -7,
+        userHandleBase64url: "dXNlci0x"
+      })
+      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/register" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeCreateRequest,
+        onCreateRequest: {
+          addListener(listener: (request: unknown) => void) {
+            createListener = listener;
+          }
+        }
+      }
+    };
+    const presencePrompt = installPresencePrompt(chromeApi);
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    createListener?.({
+      requestId: 30,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rp: { id: "Example.COM.", name: "Example" },
+        user: {
+          id: "dXNlci0x",
+          name: "alice@example.com",
+          displayName: "Alice"
+        },
+        challenge: "cmVnaXN0ZXItMQ",
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }]
+      })
+    });
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
+      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "create_passkey_registration",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.com",
+      user_name: "alice@example.com",
+      user_display_name: "Alice",
+      user_handle_base64url: "dXNlci0x",
+      client_data_json_base64url: expect.any(String)
     });
   });
 
@@ -1207,6 +1490,74 @@ describe("webAuthenticationProxy wrapper", () => {
       error: {
         name: "InvalidStateError",
         message: "VaultKern passkey credential is already registered"
+      }
+    });
+  });
+
+  it("returns NotAllowedError when an approval popup is dismissed", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    let removedListener: ((windowId: number) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi.fn(async () => ({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    }));
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`)
+      },
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      windows: {
+        create: vi.fn(async () => ({ id: 77 })),
+        onRemoved: {
+          addListener(listener: (windowId: number) => void) {
+            removedListener = listener;
+          },
+          removeListener: vi.fn()
+        }
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 41,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+      expect(removedListener).toBeDefined();
+    });
+    removedListener?.(77);
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(chromeApi.windows.onRemoved.removeListener).toHaveBeenCalled();
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 41,
+      error: {
+        name: "NotAllowedError",
+        message: "VaultKern passkey approval was dismissed"
       }
     });
   });

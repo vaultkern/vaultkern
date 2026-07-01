@@ -34,6 +34,10 @@ type ChromeLike = {
   windows?: {
     create?: (createData: Record<string, unknown>) => Promise<{ id?: number }> | void;
     update?: (windowId: number, updateInfo: Record<string, unknown>) => Promise<unknown> | void;
+    onRemoved?: {
+      addListener?: (listener: (windowId: number) => void) => void;
+      removeListener?: (listener: (windowId: number) => void) => void;
+    };
   };
   webAuthenticationProxy?: {
     attach?: () => Promise<string | undefined> | string | undefined;
@@ -59,6 +63,7 @@ type ChromeLike = {
 type WebAuthnOriginContext = {
   origin: string;
   topOrigin?: string;
+  mediation?: "conditional";
 };
 
 type WebAuthnPromptContext = WebAuthnOriginContext & {
@@ -70,7 +75,9 @@ const unlockCompleteWaiters = new Map<number, Set<() => void>>();
 const unlockPromptContexts = new Map<number, WebAuthnPromptContext>();
 const presencePromptWindowIds = new Map<number, number>();
 const presenceCompleteWaiters = new Map<number, Set<() => void>>();
+const presenceDismissWaiters = new Map<number, Set<() => void>>();
 const presencePromptContexts = new Map<number, WebAuthnPromptContext>();
+const presencePromptRemovalCleanups = new Map<number, () => void>();
 const observedPageRequests: ObservedWebAuthnPageRequest[] = [];
 const registeredUnlockMessageSources = new WeakSet<object>();
 const registeredRequestHandlerSources = new WeakSet<object>();
@@ -84,6 +91,7 @@ type ObservedWebAuthnPageRequest = {
   challenge?: string;
   allowCredentialIds?: string[];
   excludeCredentialIds?: string[];
+  mediation?: "conditional";
   observedAt: number;
 };
 
@@ -171,6 +179,7 @@ export function recordWebAuthnPageRequest(
     challenge?: unknown;
     allowCredentialIds?: unknown;
     excludeCredentialIds?: unknown;
+    mediation?: unknown;
   };
   if (candidate.ceremony !== "create" && candidate.ceremony !== "get") {
     return false;
@@ -195,7 +204,7 @@ export function recordWebAuthnPageRequest(
     relyingParty:
       typeof candidate.relyingParty === "string" &&
       candidate.relyingParty.trim() !== ""
-        ? candidate.relyingParty.trim()
+        ? normalizeHost(candidate.relyingParty)
         : undefined,
     challenge:
       typeof candidate.challenge === "string" && candidate.challenge.trim() !== ""
@@ -203,6 +212,7 @@ export function recordWebAuthnPageRequest(
         : undefined,
     allowCredentialIds: stringArrayFrom(candidate.allowCredentialIds),
     excludeCredentialIds: stringArrayFrom(candidate.excludeCredentialIds),
+    mediation: candidate.mediation === "conditional" ? "conditional" : undefined,
     observedAt: Date.now()
   });
   observedPageRequests.splice(0, Math.max(0, observedPageRequests.length - 50));
@@ -312,8 +322,7 @@ function registerUnlockCompleteHandler(chromeApi: ChromeLike) {
         event: "presence_complete_message",
         requestId
       });
-      presencePromptWindowIds.delete(requestId);
-      presencePromptContexts.delete(requestId);
+      clearPresencePromptState(requestId);
       for (const waiter of [...(presenceCompleteWaiters.get(requestId) ?? [])]) {
         waiter();
       }
@@ -400,9 +409,13 @@ async function handleGetRequest(
         "VaultKern cannot identify the WebAuthn request origin"
       );
     }
+    rejectConditionalMediation(options, originContext);
     const origin = originContext.origin;
     const relyingParty = relyingPartyFromGetOptions(options, origin);
-    if (requestedRpId && !originMatchesRelyingParty(origin, requestedRpId)) {
+    const relyingPartyValidation = requestedRpId
+      ? await validateOriginForRelyingParty(origin, requestedRpId)
+      : { allowed: true, relatedOriginVerified: false };
+    if (!relyingPartyValidation.allowed) {
       throw new WebAuthnRequestError(
         "NotAllowedError",
         "WebAuthn request origin does not match relying party"
@@ -458,6 +471,7 @@ async function handleGetRequest(
       credentialIds,
       clientDataJsonBase64url,
       true,
+      relyingPartyValidation.relatedOriginVerified,
       canceledRequests
     );
     if (!assertion) {
@@ -545,6 +559,7 @@ async function createAssertionForAllowedCredentials(
   credentialIds: Array<string | null>,
   clientDataJsonBase64url: string,
   userPresenceVerified: boolean,
+  relatedOriginVerified: boolean,
   canceledRequests: Set<number>
 ) {
   let lastError: Error | null = null;
@@ -561,6 +576,7 @@ async function createAssertionForAllowedCredentials(
       origin,
       credential_id: credentialId,
       user_presence_verified: userPresenceVerified,
+      ...(relatedOriginVerified ? { related_origin_verified: true } : {}),
       client_data_json_base64url: clientDataJsonBase64url
     });
     const runtimeError = runtimeErrorFromResponse(response);
@@ -712,7 +728,10 @@ async function handleCreateRequest(
     }
     const origin = originContext.origin;
     const relyingParty = relyingPartyFromCreateOptions(options, origin);
-    if (requestedRpId && !originMatchesRelyingParty(origin, requestedRpId)) {
+    const relyingPartyValidation = requestedRpId
+      ? await validateOriginForRelyingParty(origin, requestedRpId)
+      : { allowed: true, relatedOriginVerified: false };
+    if (!relyingPartyValidation.allowed) {
       throw new WebAuthnRequestError(
         "NotAllowedError",
         "WebAuthn request origin does not match relying party"
@@ -789,6 +808,9 @@ async function handleCreateRequest(
       user_name: userNameFromCreateOptions(options),
       user_display_name: userDisplayNameFromCreateOptions(options),
       user_handle_base64url: userHandleFromCreateOptions(options),
+      ...(relyingPartyValidation.relatedOriginVerified
+        ? { related_origin_verified: true }
+        : {}),
       client_data_json_base64url: clientDataJsonBase64url
     });
     const registration = passkeyRegistrationFromResponse(registrationResponse);
@@ -907,6 +929,7 @@ function requestOptionsFrom(request: unknown) {
     challenge?: unknown;
     allowCredentials?: unknown;
     userVerification?: unknown;
+    mediation?: unknown;
   };
   if (typeof options.challenge !== "string") {
     throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn challenge");
@@ -985,6 +1008,20 @@ function rejectRequiredUserVerification(options: {
   );
 }
 
+function rejectConditionalMediation(
+  options: { mediation?: unknown },
+  originContext: WebAuthnOriginContext
+) {
+  if (options.mediation !== "conditional" && originContext.mediation !== "conditional") {
+    return;
+  }
+
+  throw new WebAuthnRequestError(
+    "NotAllowedError",
+    "VaultKern passkey provider does not support conditional mediation"
+  );
+}
+
 function clientDataJsonBase64urlFrom(
   type: "webauthn.create" | "webauthn.get",
   challenge: unknown,
@@ -1046,7 +1083,7 @@ async function rollbackPasskeyRegistration(
 
 function relyingPartyIdFromGetOptions(options: { rpId?: unknown }) {
   return typeof options.rpId === "string" && options.rpId.trim() !== ""
-    ? options.rpId.trim()
+    ? normalizeHost(options.rpId)
     : null;
 }
 
@@ -1058,7 +1095,7 @@ function relyingPartyIdFromCreateOptions(options: {
   rp?: { id?: unknown; name?: unknown };
 }) {
   const rpId = options.rp?.id;
-  return typeof rpId === "string" && rpId.trim() !== "" ? rpId.trim() : null;
+  return typeof rpId === "string" && rpId.trim() !== "" ? normalizeHost(rpId) : null;
 }
 
 function relyingPartyFromCreateOptions(
@@ -1155,11 +1192,26 @@ function originContextFromRequest(request: unknown) {
     originFromUnknown(candidate?.callerTopOrigin) ??
     originFromUnknown(candidate?.topLevelOrigin) ??
     topOriginFromRequestDetails(candidate?.requestDetailsJson);
+  const mediation = mediationFromRequestDetails(candidate?.requestDetailsJson);
 
   return {
     origin,
-    topOrigin: topOrigin && topOrigin !== origin ? topOrigin : undefined
+    topOrigin: topOrigin && topOrigin !== origin ? topOrigin : undefined,
+    mediation
   };
+}
+
+function mediationFromRequestDetails(requestDetailsJson: unknown) {
+  if (typeof requestDetailsJson !== "string") {
+    return undefined;
+  }
+
+  try {
+    const details = JSON.parse(requestDetailsJson) as { mediation?: unknown };
+    return details.mediation === "conditional" ? "conditional" : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function originContextForRequest(
@@ -1236,7 +1288,8 @@ function originContextFromPageRequest(
       observedPageRequests.splice(index, 1);
       return {
         origin: observed.origin,
-        topOrigin: observed.topOrigin
+        topOrigin: observed.topOrigin,
+        mediation: observed.mediation
       };
     }
   }
@@ -1309,6 +1362,18 @@ function isString(value: unknown): value is string {
   return typeof value === "string";
 }
 
+async function validateOriginForRelyingParty(origin: string, relyingParty: string) {
+  if (originMatchesRelyingParty(origin, relyingParty)) {
+    return { allowed: true, relatedOriginVerified: false };
+  }
+
+  if (await originAllowedByRelatedOrigins(origin, relyingParty)) {
+    return { allowed: true, relatedOriginVerified: true };
+  }
+
+  return { allowed: false, relatedOriginVerified: false };
+}
+
 function originMatchesRelyingParty(origin: string, relyingParty: string) {
   try {
     const host = normalizedHostFromUrl(origin);
@@ -1326,6 +1391,62 @@ function originMatchesRelyingParty(origin: string, relyingParty: string) {
       host === normalizedRelyingParty ||
       host.endsWith(`.${normalizedRelyingParty}`)
     );
+  } catch {
+    return false;
+  }
+}
+
+async function originAllowedByRelatedOrigins(origin: string, relyingParty: string) {
+  if (typeof fetch !== "function") {
+    return false;
+  }
+
+  let parsedOrigin: URL;
+  try {
+    parsedOrigin = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (parsedOrigin.protocol !== "https:") {
+    return false;
+  }
+  const originHost = normalizedHostFromUrl(origin);
+  if (isLoopbackHost(originHost) || isIpAddress(originHost) || !psl.get(originHost)) {
+    return false;
+  }
+
+  const normalizedRelyingParty = normalizeHost(relyingParty);
+  if (
+    isLoopbackHost(normalizedRelyingParty) ||
+    isIpAddress(normalizedRelyingParty) ||
+    !psl.get(normalizedRelyingParty)
+  ) {
+    return false;
+  }
+
+  try {
+    const response = await fetch(
+      `https://${normalizedRelyingParty}/.well-known/webauthn`,
+      {
+        cache: "no-store",
+        credentials: "omit",
+        redirect: "error"
+      }
+    );
+    if (!response.ok) {
+      return false;
+    }
+
+    const body = (await response.json()) as { origins?: unknown };
+    if (!Array.isArray(body.origins)) {
+      return false;
+    }
+
+    const normalizedOrigin = parsedOrigin.origin;
+    return body.origins.some((candidate) => {
+      const candidateOrigin = originFromUnknown(candidate);
+      return candidateOrigin === normalizedOrigin;
+    });
   } catch {
     return false;
   }
@@ -1526,12 +1647,18 @@ async function userPresenceForRequest(
       return false;
     }
 
-    const signaled = await waitForPresenceComplete(
+    const signal = await waitForPresenceSignal(
       requestId,
       Math.min(1_000, Math.max(0, deadline - Date.now()))
     );
-    if (signaled) {
+    if (signal === "complete") {
       return true;
+    }
+    if (signal === "dismissed") {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "VaultKern passkey approval was dismissed"
+      );
     }
   }
 
@@ -1573,34 +1700,45 @@ function waitForUnlockComplete(requestId: number, timeoutMs: number) {
   });
 }
 
-function waitForPresenceComplete(requestId: number, timeoutMs: number) {
-  return new Promise<boolean>((resolve) => {
+function waitForPresenceSignal(requestId: number, timeoutMs: number) {
+  return new Promise<"complete" | "dismissed" | null>((resolve) => {
     let settled = false;
     const timeoutId = setTimeout(() => {
-      finish(false);
+      finish(null);
     }, timeoutMs);
-    const waiter = () => {
-      finish(true);
+    const completeWaiter = () => {
+      finish("complete");
+    };
+    const dismissWaiter = () => {
+      finish("dismissed");
     };
 
-    function finish(signaled: boolean) {
+    function finish(signaled: "complete" | "dismissed" | null) {
       if (settled) {
         return;
       }
 
       settled = true;
       clearTimeout(timeoutId);
-      const waiters = presenceCompleteWaiters.get(requestId);
-      waiters?.delete(waiter);
-      if (waiters?.size === 0) {
+      const completeWaiters = presenceCompleteWaiters.get(requestId);
+      completeWaiters?.delete(completeWaiter);
+      if (completeWaiters?.size === 0) {
         presenceCompleteWaiters.delete(requestId);
+      }
+      const dismissWaiters = presenceDismissWaiters.get(requestId);
+      dismissWaiters?.delete(dismissWaiter);
+      if (dismissWaiters?.size === 0) {
+        presenceDismissWaiters.delete(requestId);
       }
       resolve(signaled);
     }
 
-    const waiters = presenceCompleteWaiters.get(requestId) ?? new Set<() => void>();
-    waiters.add(waiter);
-    presenceCompleteWaiters.set(requestId, waiters);
+    const completeWaiters = presenceCompleteWaiters.get(requestId) ?? new Set<() => void>();
+    completeWaiters.add(completeWaiter);
+    presenceCompleteWaiters.set(requestId, completeWaiters);
+    const dismissWaiters = presenceDismissWaiters.get(requestId) ?? new Set<() => void>();
+    dismissWaiters.add(dismissWaiter);
+    presenceDismissWaiters.set(requestId, dismissWaiters);
   });
 }
 
@@ -1661,7 +1799,7 @@ async function openPresencePrompt(
       await chromeApi.windows.update(existingWindowId, { focused: true });
       return;
     } catch {
-      presencePromptWindowIds.delete(requestId);
+      clearPresencePromptState(requestId);
     }
   }
 
@@ -1679,7 +1817,41 @@ async function openPresencePrompt(
   });
   if (created && typeof created.id === "number") {
     presencePromptWindowIds.set(requestId, created.id);
+    watchPresencePromptWindow(chromeApi, requestId, created.id);
   }
+}
+
+function watchPresencePromptWindow(
+  chromeApi: ChromeLike,
+  requestId: number,
+  windowId: number
+) {
+  const onRemoved = chromeApi.windows?.onRemoved;
+  if (!onRemoved?.addListener) {
+    return;
+  }
+
+  presencePromptRemovalCleanups.get(requestId)?.();
+  const listener = (removedWindowId: number) => {
+    if (removedWindowId !== windowId) {
+      return;
+    }
+
+    clearPresencePromptState(requestId);
+    void recordWebAuthnDebug(chromeApi, {
+      event: "presence_prompt_dismissed",
+      requestId,
+      windowId
+    });
+    for (const waiter of [...(presenceDismissWaiters.get(requestId) ?? [])]) {
+      waiter();
+    }
+  };
+  onRemoved.addListener(listener);
+  presencePromptRemovalCleanups.set(requestId, () => {
+    onRemoved.removeListener?.(listener);
+    presencePromptRemovalCleanups.delete(requestId);
+  });
 }
 
 function popupPathForWebAuthnPrompt(
@@ -1705,6 +1877,7 @@ function clearUnlockPromptState(requestId: number) {
 }
 
 function clearPresencePromptState(requestId: number) {
+  presencePromptRemovalCleanups.get(requestId)?.();
   presencePromptWindowIds.delete(requestId);
   presencePromptContexts.delete(requestId);
 }

@@ -1262,6 +1262,7 @@ impl Runtime {
         origin: &str,
         credential_id: Option<&str>,
         user_presence_verified: bool,
+        related_origin_verified: bool,
         client_data_json_base64url: &str,
     ) -> Result<PasskeyAssertionDto> {
         let vault = self.loaded_vault(vault_id)?;
@@ -1281,6 +1282,7 @@ impl Runtime {
                 origin,
                 credential_id,
                 user_presence_verified,
+                related_origin_verified,
                 client_data_json_base64url,
             },
         )
@@ -1312,6 +1314,7 @@ impl Runtime {
         user_name: &str,
         user_display_name: Option<&str>,
         user_handle_base64url: &str,
+        related_origin_verified: bool,
         client_data_json_base64url: &str,
     ) -> Result<PasskeyRegistrationDto> {
         let modified_at = self.current_unix_time();
@@ -1320,6 +1323,7 @@ impl Runtime {
             origin,
             user_name,
             user_handle_base64url,
+            related_origin_verified,
             client_data_json_base64url,
         })?;
         let mut response = registration.dto;
@@ -1769,6 +1773,7 @@ impl Runtime {
                 origin,
                 credential_id,
                 user_presence_verified,
+                related_origin_verified,
                 client_data_json_base64url,
             } => Ok(
                 match self.create_passkey_assertion(
@@ -1777,6 +1782,7 @@ impl Runtime {
                     &origin,
                     credential_id.as_deref(),
                     user_presence_verified,
+                    related_origin_verified,
                     &client_data_json_base64url,
                 ) {
                     Ok(assertion) => RuntimeResponse::PasskeyAssertion(assertion),
@@ -1790,6 +1796,7 @@ impl Runtime {
                 user_name,
                 user_display_name,
                 user_handle_base64url,
+                related_origin_verified,
                 client_data_json_base64url,
             } => Ok(
                 match self.create_passkey_registration(
@@ -1799,6 +1806,7 @@ impl Runtime {
                     &user_name,
                     user_display_name.as_deref(),
                     &user_handle_base64url,
+                    related_origin_verified,
                     &client_data_json_base64url,
                 ) {
                     Ok(registration) => RuntimeResponse::PasskeyRegistration(registration),

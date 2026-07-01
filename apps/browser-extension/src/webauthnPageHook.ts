@@ -10,6 +10,11 @@ type PublicKeyCredentialOptionsLike = {
   excludeCredentials?: unknown;
 };
 
+type CredentialOptionsLike = {
+  publicKey?: PublicKeyCredentialOptionsLike;
+  mediation?: unknown;
+};
+
 type CredentialsContainerWithMarker = CredentialsContainer & {
   [HOOK_MARKER]?: boolean;
 };
@@ -58,8 +63,8 @@ function observeWebAuthnRequest(
     return;
   }
 
-  const publicKey = (options as { publicKey?: PublicKeyCredentialOptionsLike } | undefined)
-    ?.publicKey;
+  const credentialOptions = options as CredentialOptionsLike | undefined;
+  const publicKey = credentialOptions?.publicKey;
   if (!publicKey || typeof publicKey !== "object") {
     return;
   }
@@ -71,7 +76,11 @@ function observeWebAuthnRequest(
       relyingParty: relyingPartyFromOptions(publicKey),
       challenge: base64urlFrom(publicKey.challenge),
       allowCredentialIds: credentialIdsFrom(publicKey.allowCredentials),
-      excludeCredentialIds: credentialIdsFrom(publicKey.excludeCredentials)
+      excludeCredentialIds: credentialIdsFrom(publicKey.excludeCredentials),
+      mediation:
+        ceremony === "get" && credentialOptions?.mediation === "conditional"
+          ? "conditional"
+          : undefined
     },
     window.location.origin
   );

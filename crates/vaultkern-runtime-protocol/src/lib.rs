@@ -131,6 +131,8 @@ pub enum RuntimeCommand {
         credential_id: Option<String>,
         #[serde(default)]
         user_presence_verified: bool,
+        #[serde(default)]
+        related_origin_verified: bool,
         client_data_json_base64url: String,
     },
     CreatePasskeyRegistration {
@@ -140,6 +142,8 @@ pub enum RuntimeCommand {
         user_name: String,
         user_display_name: Option<String>,
         user_handle_base64url: String,
+        #[serde(default)]
+        related_origin_verified: bool,
         client_data_json_base64url: String,
     },
     PasskeyCredentialStatus {

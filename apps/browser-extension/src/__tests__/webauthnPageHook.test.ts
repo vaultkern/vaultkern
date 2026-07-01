@@ -27,6 +27,31 @@ function installCredentialMocks() {
 }
 
 describe("WebAuthn page hook", () => {
+  it("forwards conditional mediation on get observations", async () => {
+    installCredentialMocks();
+    const postMessage = vi
+      .spyOn(window, "postMessage")
+      .mockImplementation(() => undefined);
+
+    await import("../webauthnPageHook");
+
+    await navigator.credentials.get({
+      mediation: "conditional",
+      publicKey: {
+        challenge: new Uint8Array([9, 8, 7])
+      }
+    } as CredentialRequestOptions);
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "vaultkern_webauthn_page_request",
+        ceremony: "get",
+        mediation: "conditional"
+      }),
+      window.location.origin
+    );
+  });
+
   it("does not post observations while the already-injected hook is disabled", async () => {
     const { originalCreate } = installCredentialMocks();
     const postMessage = vi
