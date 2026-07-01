@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Buffer } from "node:buffer";
 
 import {
   attachWebAuthnProxy,
@@ -16,6 +17,10 @@ async function expectResolvesSoon<T>(promise: Promise<T>, expected: T) {
 
   expect(result).not.toBe(timeout);
   expect(result).toEqual(expected);
+}
+
+function clientDataJsonFrom(base64url: string) {
+  return JSON.parse(Buffer.from(base64url, "base64url").toString("utf8"));
 }
 
 function installPresencePrompt(chromeApi: any) {
@@ -48,25 +53,38 @@ function installPresencePrompt(chromeApi: any) {
 
   return {
     create,
-    async approve(requestId?: number) {
+    async approve(
+      requestId?: number,
+      overrides: Partial<{
+        origin: string;
+        relyingParty: string;
+        topOrigin: string;
+      }> = {}
+    ) {
       await vi.waitFor(() => {
         expect(create).toHaveBeenCalled();
       });
       await new Promise((resolve) => setTimeout(resolve, 0));
       const promptUrl = (create.mock.calls.at(-1)?.[0] as { url?: string } | undefined)
         ?.url;
+      const promptParams = new URL(
+        promptUrl ?? "",
+        "chrome-extension://id/"
+      ).searchParams;
       const approvedRequestId =
-        requestId ??
-        Number(
-          new URL(promptUrl ?? "", "chrome-extension://id/").searchParams.get(
-            "requestId"
-          )
-        );
+        requestId ?? Number(promptParams.get("requestId"));
+      const message: Record<string, unknown> = {
+        type: "vaultkern_presence_complete",
+        requestId: approvedRequestId
+      };
+      for (const key of ["origin", "relyingParty", "topOrigin"] as const) {
+        const value = overrides[key] ?? promptParams.get(key);
+        if (value) {
+          message[key] = value;
+        }
+      }
       messageListener?.(
-        {
-          type: "vaultkern_presence_complete",
-          requestId: approvedRequestId
-        },
+        message,
         {},
         vi.fn()
       );
@@ -261,6 +279,11 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
     expect(completeGetRequest).not.toHaveBeenCalled();
 
+    await presencePrompt.approve(31, { origin: "https://evil.example" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(completeGetRequest).not.toHaveBeenCalled();
+
     await presencePrompt.approve(31);
 
     await vi.waitFor(() => {
@@ -315,6 +338,7 @@ describe("webAuthenticationProxy wrapper", () => {
         type: "vaultkern_webauthn_page_request",
         ceremony: "get",
         origin: "https://observed.example",
+        topOrigin: "https://top.example",
         relyingParty: "observed.example",
         challenge: "b2JzZXJ2ZWQtZ2V0",
         allowCredentialIds: ["Y3JlZGVudGlhbC1vYnM"]
@@ -347,6 +371,19 @@ describe("webAuthenticationProxy wrapper", () => {
       credential_id: "Y3JlZGVudGlhbC1vYnM",
       user_presence_verified: true,
       client_data_json_base64url: expect.any(String)
+    });
+    expect(
+      clientDataJsonFrom(
+        (sendRuntimeCommand.mock.calls[1][0] as {
+          client_data_json_base64url: string;
+        }).client_data_json_base64url
+      )
+    ).toEqual({
+      type: "webauthn.get",
+      challenge: "b2JzZXJ2ZWQtZ2V0",
+      origin: "https://observed.example",
+      crossOrigin: true,
+      topOrigin: "https://top.example"
     });
   });
 
@@ -631,7 +668,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
     await vi.waitFor(() => {
       expect(presencePrompt.create).toHaveBeenCalledWith({
-        url: "chrome-extension://id/popup.html?webauthn=approve&requestId=10",
+        url: "chrome-extension://id/popup.html?webauthn=approve&requestId=10&relyingParty=example.com&origin=https%3A%2F%2Fexample.com",
         type: "popup",
         width: 460,
         height: 360,
@@ -724,6 +761,7 @@ describe("webAuthenticationProxy wrapper", () => {
         type: "vaultkern_webauthn_page_request",
         ceremony: "create",
         origin: "https://observed.example",
+        topOrigin: "https://top.example",
         relyingParty: "observed.example",
         challenge: "b2JzZXJ2ZWQtY3JlYXRl"
       })
@@ -756,6 +794,19 @@ describe("webAuthenticationProxy wrapper", () => {
       user_display_name: "Alice",
       user_handle_base64url: "dXNlci0x",
       client_data_json_base64url: expect.any(String)
+    });
+    expect(
+      clientDataJsonFrom(
+        (sendRuntimeCommand.mock.calls[1][0] as {
+          client_data_json_base64url: string;
+        }).client_data_json_base64url
+      )
+    ).toEqual({
+      type: "webauthn.create",
+      challenge: "b2JzZXJ2ZWQtY3JlYXRl",
+      origin: "https://observed.example",
+      crossOrigin: true,
+      topOrigin: "https://top.example"
     });
   });
 
@@ -877,6 +928,57 @@ describe("webAuthenticationProxy wrapper", () => {
       error: {
         name: "NotAllowedError",
         message: "VaultKern passkey provider only supports platform authenticators"
+      }
+    });
+  });
+
+  it("rejects WebAuthn create requests that require user verification", async () => {
+    let createListener: ((request: unknown) => void) | undefined;
+    const completeCreateRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi.fn();
+    const chromeApi = {
+      runtime: {},
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeCreateRequest,
+        onCreateRequest: {
+          addListener(listener: (request: unknown) => void) {
+            createListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    createListener?.({
+      requestId: 21,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rp: { id: "example.com", name: "Example" },
+        user: {
+          id: "dXNlci0x",
+          name: "alice@example.com",
+          displayName: "Alice"
+        },
+        challenge: "cmVnaXN0ZXItMQ",
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+        authenticatorSelection: {
+          userVerification: "required"
+        }
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).not.toHaveBeenCalled();
+    expect(completeCreateRequest).toHaveBeenCalledWith({
+      requestId: 21,
+      error: {
+        name: "NotAllowedError",
+        message:
+          "VaultKern passkey provider does not support required user verification"
       }
     });
   });
@@ -1402,7 +1504,7 @@ describe("webAuthenticationProxy wrapper", () => {
 
     await vi.waitFor(() => {
       expect(chromeApi.windows.create).toHaveBeenCalledWith({
-        url: "chrome-extension://id/popup.html?webauthn=unlock&requestId=33",
+        url: "chrome-extension://id/popup.html?webauthn=unlock&requestId=33&relyingParty=example.com&origin=https%3A%2F%2Fexample.com",
         type: "popup",
         width: 460,
         height: 620,
@@ -1411,7 +1513,12 @@ describe("webAuthenticationProxy wrapper", () => {
     });
 
     unlockMessageListener?.(
-      { type: "vaultkern_unlock_complete", requestId: 34 },
+      {
+        type: "vaultkern_unlock_complete",
+        requestId: 34,
+        origin: "https://example.com",
+        relyingParty: "example.com"
+      },
       {},
       vi.fn()
     );
@@ -1420,10 +1527,124 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(completeGetRequest).not.toHaveBeenCalled();
 
     unlockMessageListener?.(
-      { type: "vaultkern_unlock_complete", requestId: 33 },
+      {
+        type: "vaultkern_unlock_complete",
+        requestId: 33,
+        origin: "https://evil.example",
+        relyingParty: "example.com"
+      },
       {},
       vi.fn()
     );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
+    expect(completeGetRequest).not.toHaveBeenCalled();
+
+    unlockMessageListener?.(
+      {
+        type: "vaultkern_unlock_complete",
+        requestId: 33,
+        origin: "https://example.com",
+        relyingParty: "example.com"
+      },
+      {},
+      vi.fn()
+    );
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "get_session_state"
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(3, {
+      type: "create_passkey_assertion",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.com",
+      credential_id: "Y3JlZGVudGlhbC0x",
+      user_presence_verified: true,
+      client_data_json_base64url: expect.any(String)
+    });
+  });
+
+  it("does not miss unlock completion sent while opening the prompt", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    let unlockMessageListener:
+      | ((message: unknown, sender: unknown, sendResponse: unknown) => void)
+      | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: false,
+        activeVaultId: null
+      })
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_assertion",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        authenticatorDataBase64url: "auth-data",
+        clientDataJsonBase64url: "client-data",
+        signatureBase64url: "signature",
+        userHandleBase64url: null
+      });
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`),
+        onMessage: {
+          addListener(
+            listener: (message: unknown, sender: unknown, sendResponse: unknown) => void
+          ) {
+            unlockMessageListener = listener;
+          }
+        }
+      },
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      windows: {
+        create: vi.fn(async () => {
+          unlockMessageListener?.(
+            {
+              type: "vaultkern_unlock_complete",
+              requestId: 44,
+              origin: "https://example.com",
+              relyingParty: "example.com"
+            },
+            {},
+            vi.fn()
+          );
+          return { id: 42 };
+        })
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 44,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
 
     await vi.waitFor(() => {
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
@@ -1531,7 +1752,7 @@ describe("webAuthenticationProxy wrapper", () => {
       expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
     });
     expect(chromeApi.windows.create).toHaveBeenCalledWith({
-      url: "chrome-extension://id/popup.html?webauthn=unlock&requestId=12",
+      url: "chrome-extension://id/popup.html?webauthn=unlock&requestId=12&relyingParty=example.com&origin=https%3A%2F%2Fexample.com",
       type: "popup",
       width: 460,
       height: 620,
@@ -1542,7 +1763,12 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sendRuntimeCommand).toHaveBeenCalledTimes(1);
 
     unlockMessageListener?.(
-      { type: "vaultkern_unlock_complete", requestId: 12 },
+      {
+        type: "vaultkern_unlock_complete",
+        requestId: 12,
+        origin: "https://example.com",
+        relyingParty: "example.com"
+      },
       {},
       vi.fn()
     );
@@ -1638,6 +1864,50 @@ describe("webAuthenticationProxy wrapper", () => {
       error: {
         name: "NotAllowedError",
         message: "VaultKern vault is locked and no unlock window is available"
+      }
+    });
+  });
+
+  it("rejects WebAuthn get requests that require user verification", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi.fn();
+    const chromeApi = {
+      runtime: {},
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 25,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        userVerification: "required",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).not.toHaveBeenCalled();
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 25,
+      error: {
+        name: "NotAllowedError",
+        message:
+          "VaultKern passkey provider does not support required user verification"
       }
     });
   });

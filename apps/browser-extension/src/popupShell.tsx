@@ -46,6 +46,11 @@ export async function fillSelectedEntry(vaultId: string, entryId: string) {
 }
 
 export async function activeSiteLabel() {
+  const promptSite = webAuthnPromptSiteLabel();
+  if (promptSite) {
+    return promptSite;
+  }
+
   const tab = await getActiveTab();
 
   if (!tab?.url) {
@@ -56,6 +61,33 @@ export async function activeSiteLabel() {
     return new URL(tab.url).host || tab.url;
   } catch {
     return tab.url;
+  }
+}
+
+function webAuthnPromptSiteLabel() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  if (!params.get("webauthn")) {
+    return null;
+  }
+
+  const relyingParty = params.get("relyingParty");
+  if (relyingParty && relyingParty.trim() !== "") {
+    return relyingParty;
+  }
+
+  const origin = params.get("origin");
+  if (!origin) {
+    return null;
+  }
+
+  try {
+    return new URL(origin).host || origin;
+  } catch {
+    return origin;
   }
 }
 
@@ -84,10 +116,16 @@ function notifyWebAuthnPromptComplete(type: string, closeMode: string) {
   const requestIdValue = promptParams?.get("requestId");
   const requestId =
     requestIdValue && requestIdValue.trim() !== "" ? Number(requestIdValue) : null;
-  const message =
+  const message: Record<string, unknown> =
     typeof requestId === "number" && Number.isFinite(requestId)
       ? { type, requestId }
       : { type };
+  for (const key of ["origin", "relyingParty", "topOrigin"] as const) {
+    const value = promptParams?.get(key);
+    if (value) {
+      message[key] = value;
+    }
+  }
 
   void Promise.resolve(
     sendMessage.call(chromeApi.runtime, message)

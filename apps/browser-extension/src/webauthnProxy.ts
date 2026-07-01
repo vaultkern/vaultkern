@@ -54,10 +54,21 @@ type ChromeLike = {
   };
 };
 
+type WebAuthnOriginContext = {
+  origin: string;
+  topOrigin?: string;
+};
+
+type WebAuthnPromptContext = WebAuthnOriginContext & {
+  relyingParty: string;
+};
+
 const unlockPromptWindowIds = new Map<number, number>();
 const unlockCompleteWaiters = new Map<number, Set<() => void>>();
+const unlockPromptContexts = new Map<number, WebAuthnPromptContext>();
 const presencePromptWindowIds = new Map<number, number>();
 const presenceCompleteWaiters = new Map<number, Set<() => void>>();
+const presencePromptContexts = new Map<number, WebAuthnPromptContext>();
 const observedPageRequests: ObservedWebAuthnPageRequest[] = [];
 const registeredUnlockMessageSources = new WeakSet<object>();
 const registeredRequestHandlerSources = new WeakSet<object>();
@@ -66,6 +77,7 @@ const OBSERVED_PAGE_REQUEST_MAX_AGE_MS = 120_000;
 type ObservedWebAuthnPageRequest = {
   ceremony: "create" | "get";
   origin: string;
+  topOrigin?: string;
   relyingParty?: string;
   challenge?: string;
   allowCredentialIds?: string[];
@@ -152,6 +164,7 @@ export function recordWebAuthnPageRequest(
   const candidate = message as {
     ceremony?: unknown;
     origin?: unknown;
+    topOrigin?: unknown;
     relyingParty?: unknown;
     challenge?: unknown;
     allowCredentialIds?: unknown;
@@ -170,11 +183,13 @@ export function recordWebAuthnPageRequest(
   } catch {
     return false;
   }
+  const topOrigin = originFromUnknown(candidate.topOrigin);
 
   pruneObservedPageRequests(Date.now());
   observedPageRequests.push({
     ceremony: candidate.ceremony,
     origin,
+    topOrigin: topOrigin && topOrigin !== origin ? topOrigin : undefined,
     relyingParty:
       typeof candidate.relyingParty === "string" &&
       candidate.relyingParty.trim() !== ""
@@ -268,11 +283,15 @@ function registerUnlockCompleteHandler(chromeApi: ChromeLike) {
       if (typeof requestId !== "number") {
         return;
       }
+      if (!promptContextMatches(unlockPromptContexts, requestId, message)) {
+        return;
+      }
       void recordWebAuthnDebug(chromeApi, {
         event: "unlock_complete_message",
         requestId
       });
       unlockPromptWindowIds.delete(requestId);
+      unlockPromptContexts.delete(requestId);
       for (const waiter of [...(unlockCompleteWaiters.get(requestId) ?? [])]) {
         waiter();
       }
@@ -284,11 +303,15 @@ function registerUnlockCompleteHandler(chromeApi: ChromeLike) {
       if (typeof requestId !== "number") {
         return;
       }
+      if (!promptContextMatches(presencePromptContexts, requestId, message)) {
+        return;
+      }
       void recordWebAuthnDebug(chromeApi, {
         event: "presence_complete_message",
         requestId
       });
       presencePromptWindowIds.delete(requestId);
+      presencePromptContexts.delete(requestId);
       for (const waiter of [...(presenceCompleteWaiters.get(requestId) ?? [])]) {
         waiter();
       }
@@ -315,6 +338,23 @@ function isPresenceCompleteMessage(message: unknown) {
 function requestIdFromMessage(message: unknown) {
   const requestId = (message as { requestId?: unknown } | null)?.requestId;
   return typeof requestId === "number" ? requestId : null;
+}
+
+function promptContextMatches(
+  contexts: Map<number, WebAuthnPromptContext>,
+  requestId: number,
+  message: unknown
+) {
+  const expected = contexts.get(requestId);
+  const candidate = message as
+    | { origin?: unknown; relyingParty?: unknown; topOrigin?: unknown }
+    | null;
+  return (
+    Boolean(expected) &&
+    candidate?.origin === expected?.origin &&
+    candidate?.relyingParty === expected?.relyingParty &&
+    candidate?.topOrigin === expected?.topOrigin
+  );
 }
 
 async function handleIsUvpaaRequest(chromeApi: ChromeLike, request: unknown) {
@@ -348,15 +388,17 @@ async function handleGetRequest(
   });
   try {
     const options = requestOptionsFrom(request);
+    rejectRequiredUserVerification(options);
     const credentialIds = credentialIdsFromOptions(options);
     const requestedRpId = relyingPartyIdFromGetOptions(options);
-    const origin = await originForRequest(request, "get", options);
-    if (!origin) {
+    const originContext = await originContextForRequest(request, "get", options);
+    if (!originContext) {
       throw new WebAuthnRequestError(
         "NotAllowedError",
         "VaultKern cannot identify the WebAuthn request origin"
       );
     }
+    const origin = originContext.origin;
     const relyingParty = relyingPartyFromGetOptions(options, origin);
     if (requestedRpId && !originMatchesRelyingParty(origin, requestedRpId)) {
       throw new WebAuthnRequestError(
@@ -364,13 +406,10 @@ async function handleGetRequest(
         "WebAuthn request origin does not match relying party"
       );
     }
-    const clientDataJsonBase64url = base64urlEncode(
-      JSON.stringify({
-        type: "webauthn.get",
-        challenge: options.challenge,
-        origin,
-        crossOrigin: false
-      })
+    const clientDataJsonBase64url = clientDataJsonBase64urlFrom(
+      "webauthn.get",
+      options.challenge,
+      originContext
     );
 
     const session = (await sendRuntimeCommand({
@@ -389,6 +428,7 @@ async function handleGetRequest(
       sendRuntimeCommand,
       requestId,
       session,
+      promptContextFrom(originContext, relyingParty),
       canceledRequests
     );
     if (!activeVault) {
@@ -398,6 +438,7 @@ async function handleGetRequest(
       const approved = await userPresenceForRequest(
         chromeApi,
         requestId,
+        promptContextFrom(originContext, relyingParty),
         canceledRequests
       );
       if (!approved) {
@@ -658,14 +699,16 @@ async function handleCreateRequest(
   try {
     const options = createRequestOptionsFrom(request);
     rejectCrossPlatformOnlyRegistration(options);
+    rejectRequiredUserVerification(options);
     const requestedRpId = relyingPartyIdFromCreateOptions(options);
-    const origin = await originForRequest(request, "create", options);
-    if (!origin) {
+    const originContext = await originContextForRequest(request, "create", options);
+    if (!originContext) {
       throw new WebAuthnRequestError(
         "NotAllowedError",
         "VaultKern cannot identify the WebAuthn request origin"
       );
     }
+    const origin = originContext.origin;
     const relyingParty = relyingPartyFromCreateOptions(options, origin);
     if (requestedRpId && !originMatchesRelyingParty(origin, requestedRpId)) {
       throw new WebAuthnRequestError(
@@ -673,13 +716,10 @@ async function handleCreateRequest(
         "WebAuthn request origin does not match relying party"
       );
     }
-    const clientDataJsonBase64url = base64urlEncode(
-      JSON.stringify({
-        type: "webauthn.create",
-        challenge: options.challenge,
-        origin,
-        crossOrigin: false
-      })
+    const clientDataJsonBase64url = clientDataJsonBase64urlFrom(
+      "webauthn.create",
+      options.challenge,
+      originContext
     );
 
     const session = (await sendRuntimeCommand({
@@ -698,6 +738,7 @@ async function handleCreateRequest(
       sendRuntimeCommand,
       requestId,
       session,
+      promptContextFrom(originContext, relyingParty),
       canceledRequests
     );
     if (!activeVault) {
@@ -707,6 +748,7 @@ async function handleCreateRequest(
       const approved = await userPresenceForRequest(
         chromeApi,
         requestId,
+        promptContextFrom(originContext, relyingParty),
         canceledRequests
       );
       if (!approved) {
@@ -862,6 +904,7 @@ function requestOptionsFrom(request: unknown) {
     rpId?: unknown;
     challenge?: unknown;
     allowCredentials?: unknown;
+    userVerification?: unknown;
   };
   if (typeof options.challenge !== "string") {
     throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn challenge");
@@ -885,7 +928,10 @@ function createRequestOptionsFrom(request: unknown) {
     challenge?: unknown;
     pubKeyCredParams?: unknown;
     excludeCredentials?: unknown;
-    authenticatorSelection?: { authenticatorAttachment?: unknown };
+    authenticatorSelection?: {
+      authenticatorAttachment?: unknown;
+      userVerification?: unknown;
+    };
   };
   if (typeof options.challenge !== "string") {
     throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn challenge");
@@ -919,6 +965,51 @@ function rejectCrossPlatformOnlyRegistration(options: {
     "NotAllowedError",
     "VaultKern passkey provider only supports platform authenticators"
   );
+}
+
+function rejectRequiredUserVerification(options: {
+  userVerification?: unknown;
+  authenticatorSelection?: { userVerification?: unknown };
+}) {
+  const userVerification =
+    options.userVerification ?? options.authenticatorSelection?.userVerification;
+  if (userVerification !== "required") {
+    return;
+  }
+
+  throw new WebAuthnRequestError(
+    "NotAllowedError",
+    "VaultKern passkey provider does not support required user verification"
+  );
+}
+
+function clientDataJsonBase64urlFrom(
+  type: "webauthn.create" | "webauthn.get",
+  challenge: unknown,
+  originContext: WebAuthnOriginContext
+) {
+  const crossOrigin =
+    typeof originContext.topOrigin === "string" &&
+    originContext.topOrigin !== originContext.origin;
+  return base64urlEncode(
+    JSON.stringify({
+      type,
+      challenge,
+      origin: originContext.origin,
+      crossOrigin,
+      ...(crossOrigin ? { topOrigin: originContext.topOrigin } : {})
+    })
+  );
+}
+
+function promptContextFrom(
+  originContext: WebAuthnOriginContext,
+  relyingParty: string
+): WebAuthnPromptContext {
+  return {
+    ...originContext,
+    relyingParty
+  };
 }
 
 async function rollbackPasskeyRegistration(
@@ -987,41 +1078,89 @@ function relyingPartyFromOrigin(origin: string) {
   throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn RP ID");
 }
 
-function originFromRequest(request: unknown) {
+function originFromUnknown(value: unknown) {
+  if (typeof value !== "string" || value.trim() === "") {
+    return null;
+  }
+
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+function topOriginFromRequestDetails(requestDetailsJson: unknown) {
+  if (typeof requestDetailsJson !== "string") {
+    return null;
+  }
+
+  try {
+    const details = JSON.parse(requestDetailsJson) as { topOrigin?: unknown };
+    return originFromUnknown(details.topOrigin);
+  } catch {
+    return null;
+  }
+}
+
+function originContextFromRequest(request: unknown) {
   const candidate = request as
     | {
         origin?: unknown;
         callerOrigin?: unknown;
         requestOrigin?: unknown;
+        topOrigin?: unknown;
+        callerTopOrigin?: unknown;
+        topLevelOrigin?: unknown;
         requestDetailsJson?: unknown;
       }
     | null
     | undefined;
+  let origin: string | null = null;
   for (const value of [
     candidate?.origin,
     candidate?.callerOrigin,
     candidate?.requestOrigin
   ]) {
-    if (typeof value === "string" && value.trim() !== "") {
-      return new URL(value).origin;
+    const parsedOrigin = originFromUnknown(value);
+    if (parsedOrigin) {
+      origin = parsedOrigin;
+      break;
     }
   }
 
   if (typeof candidate?.requestDetailsJson === "string") {
     try {
-      const details = JSON.parse(candidate.requestDetailsJson) as { origin?: unknown };
-      if (typeof details.origin === "string" && details.origin.trim() !== "") {
-        return new URL(details.origin).origin;
+      const details = JSON.parse(candidate.requestDetailsJson) as {
+        origin?: unknown;
+        topOrigin?: unknown;
+      };
+      const parsedOrigin = originFromUnknown(details.origin);
+      if (!origin && parsedOrigin) {
+        origin = parsedOrigin;
       }
     } catch {
       // Parsed elsewhere; keep this helper WebAuthn-shaped.
     }
   }
 
-  return null;
+  if (!origin) {
+    return null;
+  }
+
+  const topOrigin =
+    originFromUnknown(candidate?.topOrigin) ??
+    originFromUnknown(candidate?.callerTopOrigin) ??
+    originFromUnknown(candidate?.topLevelOrigin) ??
+    topOriginFromRequestDetails(candidate?.requestDetailsJson);
+
+  return {
+    origin,
+    topOrigin: topOrigin && topOrigin !== origin ? topOrigin : undefined
+  };
 }
 
-async function originForRequest(
+async function originContextForRequest(
   request: unknown,
   ceremony: "create" | "get",
   options: {
@@ -1032,12 +1171,12 @@ async function originForRequest(
     excludeCredentials?: unknown;
   }
 ) {
-  const directOrigin = originFromRequest(request);
+  const directOrigin = originContextFromRequest(request);
   if (directOrigin) {
     return directOrigin;
   }
 
-  const observedOrigin = originFromPageRequest(ceremony, options);
+  const observedOrigin = originContextFromPageRequest(ceremony, options);
   if (observedOrigin) {
     return observedOrigin;
   }
@@ -1045,7 +1184,7 @@ async function originForRequest(
   const deadline = Date.now() + 500;
   while (Date.now() < deadline) {
     await delay(25);
-    const delayedObservedOrigin = originFromPageRequest(ceremony, options);
+    const delayedObservedOrigin = originContextFromPageRequest(ceremony, options);
     if (delayedObservedOrigin) {
       return delayedObservedOrigin;
     }
@@ -1054,7 +1193,7 @@ async function originForRequest(
   return null;
 }
 
-function originFromPageRequest(
+function originContextFromPageRequest(
   ceremony: "create" | "get",
   options: {
     challenge?: unknown;
@@ -1093,7 +1232,10 @@ function originFromPageRequest(
       })
     ) {
       observedPageRequests.splice(index, 1);
-      return observed.origin;
+      return {
+        origin: observed.origin,
+        topOrigin: observed.topOrigin
+      };
     }
   }
 
@@ -1257,6 +1399,7 @@ async function activeVaultForRequest(
   sendRuntimeCommand: RuntimeCommandSender,
   requestId: number,
   initialSession: { activeVaultId?: string | null },
+  promptContext: WebAuthnPromptContext,
   canceledRequests: Set<number>
 ) {
   if (initialSession.activeVaultId) {
@@ -1270,11 +1413,16 @@ async function activeVaultForRequest(
     event: "unlock_prompt_opening",
     requestId
   });
-  await openUnlockPrompt(chromeApi, requestId);
-
   const deadline = Date.now() + 120_000;
+  let unlockSignal = waitForUnlockComplete(
+    requestId,
+    Math.min(1_000, Math.max(0, deadline - Date.now()))
+  );
+  await openUnlockPrompt(chromeApi, requestId, promptContext);
+
   while (Date.now() < deadline) {
     if (canceledRequests.has(requestId)) {
+      clearUnlockPromptState(requestId);
       await recordWebAuthnDebug(chromeApi, {
         event: "unlock_wait_canceled",
         requestId
@@ -1282,11 +1430,12 @@ async function activeVaultForRequest(
       return null;
     }
 
-    const signaled = await waitForUnlockComplete(
-      requestId,
-      Math.min(1_000, Math.max(0, deadline - Date.now()))
-    );
+    const signaled = await unlockSignal;
     if (!signaled) {
+      unlockSignal = waitForUnlockComplete(
+        requestId,
+        Math.min(1_000, Math.max(0, deadline - Date.now()))
+      );
       continue;
     }
 
@@ -1305,9 +1454,14 @@ async function activeVaultForRequest(
       };
     }
 
+    unlockSignal = waitForUnlockComplete(
+      requestId,
+      Math.min(1_000, Math.max(0, deadline - Date.now()))
+    );
     await delay(500);
   }
 
+  clearUnlockPromptState(requestId);
   throw new WebAuthnRequestError(
     "NotAllowedError",
     "VaultKern vault unlock timed out"
@@ -1317,17 +1471,19 @@ async function activeVaultForRequest(
 async function userPresenceForRequest(
   chromeApi: ChromeLike,
   requestId: number,
+  promptContext: WebAuthnPromptContext,
   canceledRequests: Set<number>
 ) {
   await recordWebAuthnDebug(chromeApi, {
     event: "presence_prompt_opening",
     requestId
   });
-  await openPresencePrompt(chromeApi, requestId);
+  await openPresencePrompt(chromeApi, requestId, promptContext);
 
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
     if (canceledRequests.has(requestId)) {
+      clearPresencePromptState(requestId);
       await recordWebAuthnDebug(chromeApi, {
         event: "presence_wait_canceled",
         requestId
@@ -1344,6 +1500,7 @@ async function userPresenceForRequest(
     }
   }
 
+  clearPresencePromptState(requestId);
   throw new WebAuthnRequestError(
     "NotAllowedError",
     "VaultKern passkey approval timed out"
@@ -1412,7 +1569,11 @@ function waitForPresenceComplete(requestId: number, timeoutMs: number) {
   });
 }
 
-async function openUnlockPrompt(chromeApi: ChromeLike, requestId: number) {
+async function openUnlockPrompt(
+  chromeApi: ChromeLike,
+  requestId: number,
+  promptContext: WebAuthnPromptContext
+) {
   if (!chromeApi.windows?.create) {
     throw new WebAuthnRequestError(
       "NotAllowedError",
@@ -1430,9 +1591,8 @@ async function openUnlockPrompt(chromeApi: ChromeLike, requestId: number) {
     }
   }
 
-  const popupPath = `popup.html?webauthn=unlock&requestId=${encodeURIComponent(
-    String(requestId)
-  )}`;
+  unlockPromptContexts.set(requestId, promptContext);
+  const popupPath = popupPathForWebAuthnPrompt("unlock", requestId, promptContext);
   const url =
     chromeApi.runtime?.getURL?.(popupPath) ??
     popupPath;
@@ -1448,7 +1608,11 @@ async function openUnlockPrompt(chromeApi: ChromeLike, requestId: number) {
   }
 }
 
-async function openPresencePrompt(chromeApi: ChromeLike, requestId: number) {
+async function openPresencePrompt(
+  chromeApi: ChromeLike,
+  requestId: number,
+  promptContext: WebAuthnPromptContext
+) {
   if (!chromeApi.windows?.create) {
     throw new WebAuthnRequestError(
       "NotAllowedError",
@@ -1466,9 +1630,8 @@ async function openPresencePrompt(chromeApi: ChromeLike, requestId: number) {
     }
   }
 
-  const popupPath = `popup.html?webauthn=approve&requestId=${encodeURIComponent(
-    String(requestId)
-  )}`;
+  presencePromptContexts.set(requestId, promptContext);
+  const popupPath = popupPathForWebAuthnPrompt("approve", requestId, promptContext);
   const url =
     chromeApi.runtime?.getURL?.(popupPath) ??
     popupPath;
@@ -1482,6 +1645,33 @@ async function openPresencePrompt(chromeApi: ChromeLike, requestId: number) {
   if (created && typeof created.id === "number") {
     presencePromptWindowIds.set(requestId, created.id);
   }
+}
+
+function popupPathForWebAuthnPrompt(
+  mode: "unlock" | "approve",
+  requestId: number,
+  promptContext: WebAuthnPromptContext
+) {
+  const params = new URLSearchParams({
+    webauthn: mode,
+    requestId: String(requestId),
+    relyingParty: promptContext.relyingParty,
+    origin: promptContext.origin
+  });
+  if (promptContext.topOrigin) {
+    params.set("topOrigin", promptContext.topOrigin);
+  }
+  return `popup.html?${params.toString()}`;
+}
+
+function clearUnlockPromptState(requestId: number) {
+  unlockPromptWindowIds.delete(requestId);
+  unlockPromptContexts.delete(requestId);
+}
+
+function clearPresencePromptState(requestId: number) {
+  presencePromptWindowIds.delete(requestId);
+  presencePromptContexts.delete(requestId);
 }
 
 function delay(milliseconds: number) {

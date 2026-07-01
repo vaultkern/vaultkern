@@ -130,6 +130,7 @@ if (chromeApi?.runtime?.sendMessage) {
       type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
       ceremony: event.data.ceremony,
       origin: window.location.origin,
+      topOrigin: topOriginFromWindow(),
       relyingParty: event.data.relyingParty,
       challenge: event.data.challenge,
       allowCredentialIds: event.data.allowCredentialIds,
@@ -140,6 +141,16 @@ if (chromeApi?.runtime?.sendMessage) {
       sendResult.catch(() => undefined);
     }
   });
+}
+
+function topOriginFromWindow() {
+  const ancestorOrigins = window.location.ancestorOrigins;
+  const topOrigin = ancestorOrigins?.[ancestorOrigins.length - 1];
+  if (typeof topOrigin === "string" && topOrigin.trim() !== "") {
+    return topOrigin;
+  }
+
+  return window.location.origin;
 }
 
 function isWebAuthnPageRequest(message: unknown): message is {

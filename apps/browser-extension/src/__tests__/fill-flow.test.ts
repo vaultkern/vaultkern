@@ -809,7 +809,11 @@ describe("PopupShell fill flow", () => {
   });
 
   it("shows a passkey unlock prompt when opened for a WebAuthn request", async () => {
-    window.history.replaceState(null, "", "/popup.html?webauthn=unlock&requestId=9");
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=9&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+    );
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       tabs: {
         query: vi.fn(async () => []),
@@ -844,7 +848,7 @@ describe("PopupShell fill flow", () => {
       await screen.findByText("Passkey request waiting")
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Unlock your vault to continue the website passkey request.")
+      screen.getByText("Unlock your vault to continue the passkey request for example.com.")
     ).toBeInTheDocument();
   });
 
@@ -897,7 +901,11 @@ describe("PopupShell fill flow", () => {
   });
 
   it("notifies the background page after unlocking for a WebAuthn request", async () => {
-    window.history.replaceState(null, "", "/popup.html?webauthn=unlock&requestId=12");
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=12&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+    );
     const sendMessage = vi.fn(async () => undefined);
     Object.defineProperty(window, "close", {
       configurable: true,
@@ -952,7 +960,9 @@ describe("PopupShell fill flow", () => {
     await waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith({
         type: "vaultkern_unlock_complete",
-        requestId: 12
+        requestId: 12,
+        origin: "https://example.com",
+        relyingParty: "example.com"
       });
     });
   });
@@ -1021,7 +1031,11 @@ describe("PopupShell fill flow", () => {
   });
 
   it("closes the temporary WebAuthn unlock window after unlocking", async () => {
-    window.history.replaceState(null, "", "/popup.html?webauthn=unlock&requestId=24");
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=24&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+    );
     const closeWindow = vi.fn();
     Object.defineProperty(window, "close", {
       configurable: true,
@@ -1082,7 +1096,7 @@ describe("PopupShell fill flow", () => {
     window.history.replaceState(
       null,
       "",
-      "/popup.html?webauthn=approve&requestId=42"
+      "/popup.html?webauthn=approve&requestId=42&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
     );
     const sendMessage = vi.fn(async () => undefined);
     const closeWindow = vi.fn();
@@ -1114,6 +1128,9 @@ describe("PopupShell fill flow", () => {
     render(createElement(PopupShell));
 
     expect(await screen.findByText("Confirm passkey request")).toBeInTheDocument();
+    expect(
+      screen.getByText("Approve this passkey request for example.com.")
+    ).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: "Continue passkey request" })
     );
@@ -1121,14 +1138,20 @@ describe("PopupShell fill flow", () => {
     await waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith({
         type: "vaultkern_presence_complete",
-        requestId: 42
+        requestId: 42,
+        origin: "https://example.com",
+        relyingParty: "example.com"
       });
       expect(closeWindow).toHaveBeenCalledTimes(1);
     });
   });
 
   it("auto unlocks the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
-    window.history.replaceState(null, "", "/popup.html?webauthn=unlock&requestId=24");
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=24&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+    );
     const sendMessage = vi.fn(async () => undefined);
     const closeWindow = vi.fn();
     Object.defineProperty(window, "close", {
@@ -1192,7 +1215,9 @@ describe("PopupShell fill flow", () => {
     await waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith({
         type: "vaultkern_unlock_complete",
-        requestId: 24
+        requestId: 24,
+        origin: "https://example.com",
+        relyingParty: "example.com"
       });
       expect(closeWindow).toHaveBeenCalledTimes(1);
     });
@@ -2087,6 +2112,7 @@ describe("content script fill message", () => {
       type: "vaultkern_webauthn_page_request",
       ceremony: "create",
       origin: window.location.origin,
+      topOrigin: window.location.origin,
       relyingParty: "localhost",
       challenge: "cmVnaXN0ZXItMQ",
       allowCredentialIds: undefined,

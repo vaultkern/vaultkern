@@ -532,9 +532,13 @@ export function PopupApp({
         ? "通行密钥请求等待中"
         : "Passkey request waiting";
     const passkeyPromptBody =
-      extensionSettings.language === "zh-CN"
-        ? "请解锁数据库以继续当前网站的通行密钥请求。"
-        : "Unlock your vault to continue the website passkey request.";
+      siteLabel === "No active site"
+        ? extensionSettings.language === "zh-CN"
+          ? "请解锁数据库以继续当前网站的通行密钥请求。"
+          : "Unlock your vault to continue the website passkey request."
+        : extensionSettings.language === "zh-CN"
+          ? `请解锁数据库以继续 ${siteLabel} 的通行密钥请求。`
+          : `Unlock your vault to continue the passkey request for ${siteLabel}.`;
     const canQuickUnlock = canQuickUnlockVault(currentVault);
 
     return (
@@ -648,9 +652,13 @@ export function PopupApp({
         ? "确认通行密钥请求"
         : "Confirm passkey request";
     const passkeyPromptBody =
-      extensionSettings.language === "zh-CN"
-        ? "确认后继续当前网站的通行密钥请求。"
-        : "Approve this passkey request to continue.";
+      siteLabel === "No active site"
+        ? extensionSettings.language === "zh-CN"
+          ? "确认后继续当前网站的通行密钥请求。"
+          : "Approve this passkey request to continue."
+        : extensionSettings.language === "zh-CN"
+          ? `确认后继续 ${siteLabel} 的通行密钥请求。`
+          : `Approve this passkey request for ${siteLabel}.`;
     const passkeyPromptAction =
       extensionSettings.language === "zh-CN"
         ? "继续通行密钥请求"
