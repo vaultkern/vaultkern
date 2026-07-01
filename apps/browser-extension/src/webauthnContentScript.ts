@@ -7,8 +7,10 @@ const globalState = globalThis as typeof globalThis & {
 if (!globalState.__vaultkernWebAuthnContentScriptInstalled && chromeApi?.runtime?.sendMessage) {
   globalState.__vaultkernWebAuthnContentScriptInstalled = true;
   window.addEventListener("message", (event) => {
+    const frameOrigin = originFromFrame(event);
     if (
-      event.origin !== window.location.origin ||
+      event.source !== window ||
+      event.origin !== frameOrigin ||
       !isWebAuthnPageRequest(event.data)
     ) {
       return;
@@ -17,7 +19,7 @@ if (!globalState.__vaultkernWebAuthnContentScriptInstalled && chromeApi?.runtime
     const sendResult = chromeApi.runtime.sendMessage({
       type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
       ceremony: event.data.ceremony,
-      origin: window.location.origin,
+      origin: frameOrigin,
       topOrigin: topOriginFromWindow(),
       relyingParty: event.data.relyingParty,
       challenge: event.data.challenge,
@@ -32,6 +34,27 @@ if (!globalState.__vaultkernWebAuthnContentScriptInstalled && chromeApi?.runtime
   });
 }
 
+function originFromFrame(event?: MessageEvent) {
+  const globalOrigin = (globalThis as typeof globalThis & { origin?: unknown }).origin;
+  if (typeof globalOrigin === "string" && validOrigin(globalOrigin)) {
+    return globalOrigin;
+  }
+
+  if (validOrigin(window.location.origin)) {
+    return window.location.origin;
+  }
+
+  if (event && validOrigin(event.origin)) {
+    return event.origin;
+  }
+
+  return window.location.origin;
+}
+
+function validOrigin(origin: string) {
+  return origin.trim() !== "" && origin !== "null";
+}
+
 function topOriginFromWindow() {
   const ancestorOrigins = window.location.ancestorOrigins;
   const topOrigin = ancestorOrigins?.[ancestorOrigins.length - 1];
@@ -39,7 +62,7 @@ function topOriginFromWindow() {
     return topOrigin;
   }
 
-  return window.location.origin;
+  return originFromFrame();
 }
 
 function isWebAuthnPageRequest(message: unknown): message is {

@@ -508,6 +508,17 @@ async function handleGetRequest(
         "WebAuthn request origin does not match relying party"
       );
     }
+    relyingPartyValidation = await completeRelyingPartyValidation(
+      origin,
+      requestedRpId,
+      relyingPartyValidation
+    );
+    if (!relyingPartyValidation.allowed) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
+    }
     const clientDataJsonBase64url = clientDataJsonBase64urlFrom(
       "webauthn.get",
       options.challenge,
@@ -549,33 +560,6 @@ async function handleGetRequest(
       relyingParty,
       credentialSelection.promptOptions
     );
-    if (
-      relyingPartyValidation.needsRelatedOriginVerification &&
-      !userPresenceVerified &&
-      credentialSelection.promptOptions.length === 0
-    ) {
-      const approved = await userPresenceForRequest(
-        chromeApi,
-        requestId,
-        promptContextFrom(originContext, relyingParty),
-        canceledRequests
-      );
-      if (!approved) {
-        return;
-      }
-      userPresenceVerified = true;
-    }
-    relyingPartyValidation = await completeRelyingPartyValidationAfterInteraction(
-      origin,
-      requestedRpId,
-      relyingPartyValidation
-    );
-    if (!relyingPartyValidation.allowed) {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "WebAuthn request origin does not match relying party"
-      );
-    }
     if (!userPresenceVerified || credentialSelection.promptOptions.length > 0) {
       const approved = await userPresenceForRequest(
         chromeApi,
@@ -955,6 +939,17 @@ async function handleCreateRequest(
         "WebAuthn request origin does not match relying party"
       );
     }
+    relyingPartyValidation = await completeRelyingPartyValidation(
+      origin,
+      requestedRpId,
+      relyingPartyValidation
+    );
+    if (!relyingPartyValidation.allowed) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "WebAuthn request origin does not match relying party"
+      );
+    }
     const clientDataJsonBase64url = clientDataJsonBase64urlFrom(
       "webauthn.create",
       options.challenge,
@@ -995,17 +990,6 @@ async function handleCreateRequest(
         return;
       }
       userPresenceVerified = true;
-    }
-    relyingPartyValidation = await completeRelyingPartyValidationAfterInteraction(
-      origin,
-      requestedRpId,
-      relyingPartyValidation
-    );
-    if (!relyingPartyValidation.allowed) {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "WebAuthn request origin does not match relying party"
-      );
     }
     const activeVaultId = activeVault.activeVaultId;
 
@@ -1097,7 +1081,7 @@ async function handleCreateRequest(
           rawId: registration.credentialId,
           type: "public-key",
           authenticatorAttachment: "platform",
-          clientExtensionResults: {},
+          clientExtensionResults: clientExtensionResultsForCreateOptions(options),
           response: {
             authenticatorData: registration.authenticatorDataBase64url,
             attestationObject: registration.attestationObjectBase64url,
@@ -1192,6 +1176,9 @@ function createRequestOptionsFrom(request: unknown) {
     challenge?: unknown;
     pubKeyCredParams?: unknown;
     excludeCredentials?: unknown;
+    extensions?: {
+      credProps?: unknown;
+    };
     authenticatorSelection?: {
       authenticatorAttachment?: unknown;
       userVerification?: unknown;
@@ -1216,6 +1203,16 @@ function createRequestOptionsFrom(request: unknown) {
     );
   }
   return options;
+}
+
+function clientExtensionResultsForCreateOptions(options: {
+  extensions?: { credProps?: unknown };
+}) {
+  if (options.extensions?.credProps === true) {
+    return { credProps: { rk: true } };
+  }
+
+  return {};
 }
 
 function rejectCrossPlatformOnlyRegistration(options: {
@@ -1671,7 +1668,7 @@ function validateOriginForRelyingParty(
   return { allowed: false, relatedOriginVerified: false };
 }
 
-async function completeRelyingPartyValidationAfterInteraction(
+async function completeRelyingPartyValidation(
   origin: string,
   relyingParty: string | null,
   validation: RelyingPartyValidation
@@ -1727,10 +1724,7 @@ function originCanUseRelatedOriginVerification(origin: string, relyingParty: str
       return false;
     }
 
-    return (
-      relatedOriginLabelFromHost(originHost) ===
-      relatedOriginLabelFromHost(normalizedRelyingParty)
-    );
+    return true;
   } catch {
     return false;
   }
