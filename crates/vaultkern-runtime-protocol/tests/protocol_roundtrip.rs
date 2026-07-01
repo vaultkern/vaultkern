@@ -897,6 +897,20 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
         serde_json::from_value::<ProtocolEnvelope>(rollback_json).unwrap(),
         rollback
     );
+    let commit = ProtocolEnvelope::new(RuntimeCommand::CommitPasskeyRegistration {
+        vault_id: "vault-1".into(),
+        entry_id: "entry-1".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+    });
+    let commit_json = serde_json::to_value(&commit).unwrap();
+    assert_eq!(
+        commit_json["command"]["type"],
+        serde_json::json!("commit_passkey_registration")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(commit_json).unwrap(),
+        commit
+    );
     let legacy_rollback_json = serde_json::json!({
         "version": 1,
         "command": {

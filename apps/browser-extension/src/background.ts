@@ -259,13 +259,14 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
         files: ["webauthnPageHook.js"],
         world: "MAIN"
       });
-      injectedCount += 1;
     } catch {
       tabHadFailure = true;
     }
 
     if (tabHadFailure) {
       failedCount += 1;
+    } else {
+      injectedCount += 1;
     }
   }
 

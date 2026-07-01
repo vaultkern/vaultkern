@@ -1255,6 +1255,7 @@ impl Runtime {
                 .vault
                 .as_mut()
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
+            self.core.snapshot_entry_to_history(vault, entry_id)?;
             self.core
                 .set_entry_passkey(vault, entry_id, dto_to_passkey_record(passkey))?;
             touch_entry_modified_at(&self.core, vault, entry_id, modified_at)?;
@@ -1278,6 +1279,7 @@ impl Runtime {
                 .vault
                 .as_mut()
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
+            self.core.snapshot_entry_to_history(vault, entry_id)?;
             self.core.clear_entry_passkey(vault, entry_id)?;
             touch_entry_modified_at(&self.core, vault, entry_id, modified_at)?;
         }
@@ -1418,6 +1420,11 @@ impl Runtime {
         ) {
             let rollback_entry = cloned_entry_by_id(&vault.root, &entry_id)
                 .with_context(|| format!("entry not found: {entry_id}"))?;
+            let refresh_entry_username = rollback_entry
+                .passkey
+                .as_ref()
+                .is_some_and(|passkey| rollback_entry.username == passkey.username);
+            let next_passkey_username = registration.passkey.username.clone();
             let rollback_key =
                 PasskeyRollbackKey::new(vault_id, &entry_id, &registration.passkey.credential_id);
             self.pending_passkey_rollbacks
@@ -1425,7 +1432,21 @@ impl Runtime {
             self.core.snapshot_entry_to_history(vault, &entry_id)?;
             self.core
                 .set_entry_passkey(vault, &entry_id, registration.passkey)?;
+            if refresh_entry_username {
+                self.core.update_entry_fields(
+                    vault,
+                    &entry_id,
+                    EntryUpdate {
+                        title: None,
+                        username: Some(next_passkey_username),
+                        password: None,
+                        url: None,
+                        notes: None,
+                    },
+                )?;
+            }
             touch_entry_modified_at(&self.core, vault, &entry_id, modified_at)?;
+            enforce_history_limits(vault);
             response.entry_id = entry_id;
             response.created = false;
             self.pending_passkey_rollbacks
@@ -1494,10 +1515,24 @@ impl Runtime {
             anyhow::bail!("entry not found: {entry_id}");
         }
 
+        if credential_id.is_some() {
+            return Ok(());
+        }
+
         if !restore_entry_from_latest_history(&mut vault.root, entry_id, credential_id)? {
             anyhow::bail!("entry not found: {entry_id}");
         }
         Ok(())
+    }
+
+    pub fn commit_passkey_registration(
+        &mut self,
+        vault_id: &str,
+        entry_id: &str,
+        credential_id: &str,
+    ) {
+        let rollback_key = PasskeyRollbackKey::new(vault_id, entry_id, credential_id);
+        self.pending_passkey_rollbacks.remove(&rollback_key);
     }
 
     pub fn delete_entry(&mut self, vault_id: &str, entry_id: &str) -> Result<()> {
@@ -1974,6 +2009,14 @@ impl Runtime {
                     Err(error) => query_error_response(error),
                 },
             ),
+            RuntimeCommand::CommitPasskeyRegistration {
+                vault_id,
+                entry_id,
+                credential_id,
+            } => {
+                self.commit_passkey_registration(&vault_id, &entry_id, &credential_id);
+                Ok(RuntimeResponse::Saved)
+            }
             RuntimeCommand::PasskeyCredentialStatus {
                 vault_id,
                 credential_id,
@@ -2118,9 +2161,6 @@ impl Runtime {
             .loaded
             .get_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
-        if let Some(vault) = loaded.vault.as_mut() {
-            enforce_history_limits(vault);
-        }
         if let Some(status) = next_source_status {
             loaded.source_status = Some(status);
         }
@@ -2189,9 +2229,6 @@ impl Runtime {
             .loaded
             .get_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
-        if let Some(vault) = loaded.vault.as_mut() {
-            enforce_history_limits(vault);
-        }
         loaded.bytes = bytes;
         loaded.baseline_fingerprint = fingerprint;
         loaded.source_status = Some(status);
@@ -2429,9 +2466,6 @@ impl Runtime {
             .loaded
             .get_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
-        if let Some(vault) = loaded.vault.as_mut() {
-            enforce_history_limits(vault);
-        }
         loaded.bytes = bytes;
         loaded.baseline_fingerprint = write_fingerprint;
         loaded.source_status = Some(status.clone());
@@ -2647,34 +2681,36 @@ fn collect_fill_candidates(
     next_index: &mut usize,
     output: &mut Vec<RankedFillCandidate>,
 ) {
-    let group_recycled =
-        ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group, recycle_bin_enabled);
-    if !group_recycled {
-        for entry in &group.entries {
-            let index = *next_index;
-            *next_index += 1;
+    let group_recycled = group_is_recycled(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        ancestor_recycled,
+    );
+    for entry in &group.entries {
+        if entry_is_recycled(entry, group_recycled) {
+            continue;
+        }
 
-            if entry.previous_parent.is_some() {
-                continue;
-            }
+        let index = *next_index;
+        *next_index += 1;
 
-            if entry.password.is_empty() && entry.passkey.is_some() {
-                continue;
-            }
+        if entry.password.is_empty() && entry.passkey.is_some() {
+            continue;
+        }
 
-            if let Some(score) = score_entry_match(url, &entry.url) {
-                output.push(RankedFillCandidate {
-                    index,
-                    entry: EntrySummaryDto {
-                        id: entry.id.to_string(),
-                        title: entry.title.clone(),
-                        username: entry.username.clone(),
-                        url: entry.url.clone(),
-                        group_id: group.id.to_string(),
-                    },
-                    score,
-                });
-            }
+        if let Some(score) = score_entry_match(url, &entry.url) {
+            output.push(RankedFillCandidate {
+                index,
+                entry: EntrySummaryDto {
+                    id: entry.id.to_string(),
+                    title: entry.title.clone(),
+                    username: entry.username.clone(),
+                    url: entry.url.clone(),
+                    group_id: group.id.to_string(),
+                },
+                score,
+            });
         }
     }
 
@@ -2806,19 +2842,21 @@ fn find_passkey_entry_id_in_group(
     relying_party: &str,
     user_handle: Option<&str>,
 ) -> Option<String> {
-    let group_recycled =
-        ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group, recycle_bin_enabled);
-    if !group_recycled {
-        for entry in &group.entries {
-            if entry.previous_parent.is_some() {
-                continue;
-            }
-            if let Some(passkey) = entry.passkey.as_ref()
-                && passkey.relying_party == relying_party
-                && passkey.user_handle.as_deref() == user_handle
-            {
-                return Some(entry.id.to_string());
-            }
+    let group_recycled = group_is_recycled(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        ancestor_recycled,
+    );
+    for entry in &group.entries {
+        if entry_is_recycled(entry, group_recycled) {
+            continue;
+        }
+        if let Some(passkey) = entry.passkey.as_ref()
+            && passkey.relying_party == relying_party
+            && passkey.user_handle.as_deref() == user_handle
+        {
+            return Some(entry.id.to_string());
         }
     }
 
@@ -2860,11 +2898,14 @@ fn visit_passkeys_in_group<'a>(
     ancestor_recycled: bool,
     visitor: &mut impl FnMut(&'a PasskeyRecord),
 ) {
-    let group_recycled =
-        ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group, recycle_bin_enabled);
+    let group_recycled = group_is_recycled(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        ancestor_recycled,
+    );
     for entry in &group.entries {
-        if !group_recycled
-            && entry.previous_parent.is_none()
+        if !entry_is_recycled(entry, group_recycled)
             && let Some(passkey) = entry.passkey.as_ref()
         {
             visitor(passkey);
@@ -2880,6 +2921,23 @@ fn visit_passkeys_in_group<'a>(
             visitor,
         );
     }
+}
+
+fn group_is_recycled(
+    group: &vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+    ancestor_recycled: bool,
+) -> bool {
+    ancestor_recycled
+        || group.previous_parent.is_some()
+        || group_is_recycle_bin(group, recycle_bin_group, recycle_bin_enabled)
+}
+
+fn entry_is_recycled(_entry: &vaultkern_core::Entry, ancestor_recycled: bool) -> bool {
+    // Entry.previous_parent is also written for ordinary moves by other clients;
+    // only ancestor group state is a recycle signal here.
+    ancestor_recycled
 }
 
 fn group_is_recycle_bin(
@@ -2956,7 +3014,13 @@ fn restore_entry_from_snapshot(
             return Ok(true);
         }
 
-        restored.history = std::mem::take(&mut entry.history);
+        let mut retained_history = std::mem::take(&mut entry.history);
+        if retained_history.last().is_some_and(|history| {
+            history_matches_passkey_registration_rollback(entry, history, credential_id)
+        }) {
+            retained_history.pop();
+        }
+        restored.history = retained_history;
         *entry = restored;
         return Ok(true);
     }
@@ -3033,7 +3097,7 @@ fn history_matches_passkey_registration_rollback(
 
 fn save_kdbx_with_history_limits(
     core: &KeepassCore,
-    vault: &Vault,
+    vault: &mut Vault,
     key: &CompositeKey,
     save_profile: SaveProfile,
 ) -> std::result::Result<Vec<u8>, KdbxError> {
@@ -3041,9 +3105,41 @@ fn save_kdbx_with_history_limits(
         return core.save_kdbx(vault, key, save_profile);
     }
 
-    let mut vault_for_save = vault.clone();
-    enforce_history_limits(&mut vault_for_save);
-    core.save_kdbx(&vault_for_save, key, save_profile)
+    let history_snapshots = clone_entry_histories(&vault.root);
+    enforce_history_limits(vault);
+    let result = core.save_kdbx(vault, key, save_profile);
+    restore_entry_histories(&mut vault.root, &history_snapshots);
+    result
+}
+
+fn clone_entry_histories(group: &vaultkern_core::Group) -> Vec<(Uuid, Vec<Entry>)> {
+    let mut snapshots = Vec::new();
+    collect_entry_histories(group, &mut snapshots);
+    snapshots
+}
+
+fn collect_entry_histories(group: &vaultkern_core::Group, snapshots: &mut Vec<(Uuid, Vec<Entry>)>) {
+    for entry in &group.entries {
+        if !entry.history.is_empty() {
+            snapshots.push((entry.id, entry.history.clone()));
+        }
+    }
+
+    for child in &group.children {
+        collect_entry_histories(child, snapshots);
+    }
+}
+
+fn restore_entry_histories(group: &mut vaultkern_core::Group, snapshots: &[(Uuid, Vec<Entry>)]) {
+    for entry in &mut group.entries {
+        if let Some((_, history)) = snapshots.iter().find(|(entry_id, _)| *entry_id == entry.id) {
+            entry.history = history.clone();
+        }
+    }
+
+    for child in &mut group.children {
+        restore_entry_histories(child, snapshots);
+    }
 }
 
 fn enforce_history_limits(vault: &mut Vault) {

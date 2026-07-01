@@ -34,6 +34,7 @@ type ChromeLike = {
   windows?: {
     create?: (createData: Record<string, unknown>) => Promise<{ id?: number }> | void;
     update?: (windowId: number, updateInfo: Record<string, unknown>) => Promise<unknown> | void;
+    remove?: (windowId: number) => Promise<unknown> | void;
     onRemoved?: {
       addListener?: (listener: (windowId: number) => void) => void;
       removeListener?: (listener: (windowId: number) => void) => void;
@@ -278,6 +279,8 @@ function registerRequestHandlers(
         event: "request_canceled",
         requestId
       });
+      void closeUnlockPromptWindow(chromeApi, requestId);
+      void closePresencePromptWindow(chromeApi, requestId);
     }
   });
   chromeApi.webAuthenticationProxy?.onIsUvpaaRequest?.addListener?.((request) => {
@@ -534,9 +537,22 @@ async function handleGetRequest(
       return;
     }
     let userPresenceVerified = activeVault.userPresenceVerified;
+    const credentialSelection = await credentialSelectionForGetRequest(
+      sendRuntimeCommand,
+      activeVault.activeVaultId,
+      relyingParty,
+      credentialIds
+    );
+    credentialIds = credentialSelection.credentialIds;
+    const presencePromptContext = promptContextFrom(
+      originContext,
+      relyingParty,
+      credentialSelection.promptOptions
+    );
     if (
       relyingPartyValidation.needsRelatedOriginVerification &&
-      !userPresenceVerified
+      !userPresenceVerified &&
+      credentialSelection.promptOptions.length === 0
     ) {
       const approved = await userPresenceForRequest(
         chromeApi,
@@ -560,18 +576,6 @@ async function handleGetRequest(
         "WebAuthn request origin does not match relying party"
       );
     }
-    const credentialSelection = await credentialSelectionForGetRequest(
-      sendRuntimeCommand,
-      activeVault.activeVaultId,
-      relyingParty,
-      credentialIds
-    );
-    credentialIds = credentialSelection.credentialIds;
-    const presencePromptContext = promptContextFrom(
-      originContext,
-      relyingParty,
-      credentialSelection.promptOptions
-    );
     if (!userPresenceVerified || credentialSelection.promptOptions.length > 0) {
       const approved = await userPresenceForRequest(
         chromeApi,
@@ -1117,6 +1121,12 @@ async function handleCreateRequest(
       event: "create_completed",
       requestId
     });
+    await commitPasskeyRegistration(
+      sendRuntimeCommand,
+      activeVaultId,
+      registration.entryId,
+      registration.credentialId
+    );
   } catch (error) {
     await recordWebAuthnDebug(chromeApi, {
       event: "create_error",
@@ -1317,6 +1327,24 @@ async function rollbackPasskeyRegistration(
   const saveError = runtimeErrorFromResponse(saveResponse);
   if (saveError) {
     throw saveError;
+  }
+}
+
+async function commitPasskeyRegistration(
+  sendRuntimeCommand: RuntimeCommandSender,
+  vaultId: string,
+  entryId: string,
+  credentialId: string
+) {
+  try {
+    await sendRuntimeCommand({
+      type: "commit_passkey_registration",
+      vault_id: vaultId,
+      entry_id: entryId,
+      credential_id: credentialId
+    });
+  } catch {
+    // Best-effort cleanup after Chrome has already accepted the credential.
   }
 }
 
@@ -1699,7 +1727,10 @@ function originCanUseRelatedOriginVerification(origin: string, relyingParty: str
       return false;
     }
 
-    return true;
+    return (
+      relatedOriginLabelFromHost(originHost) ===
+      relatedOriginLabelFromHost(normalizedRelyingParty)
+    );
   } catch {
     return false;
   }
@@ -2341,6 +2372,32 @@ function clearPresencePromptState(requestId: number) {
   presencePromptWindowIds.delete(requestId);
   presencePromptContexts.delete(requestId);
   presencePromptNonces.delete(requestId);
+}
+
+async function closeUnlockPromptWindow(chromeApi: ChromeLike, requestId: number) {
+  const windowId = unlockPromptWindowIds.get(requestId);
+  clearUnlockPromptState(requestId);
+  if (typeof windowId !== "number" || !chromeApi.windows?.remove) {
+    return;
+  }
+  try {
+    await chromeApi.windows.remove(windowId);
+  } catch {
+    // The user or browser may already have closed the prompt.
+  }
+}
+
+async function closePresencePromptWindow(chromeApi: ChromeLike, requestId: number) {
+  const windowId = presencePromptWindowIds.get(requestId);
+  clearPresencePromptState(requestId);
+  if (typeof windowId !== "number" || !chromeApi.windows?.remove) {
+    return;
+  }
+  try {
+    await chromeApi.windows.remove(windowId);
+  } catch {
+    // The user or browser may already have closed the prompt.
+  }
 }
 
 function delay(milliseconds: number) {

@@ -681,6 +681,56 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
 }
 
 #[test]
+fn runtime_includes_moved_live_entries_in_fill_candidates() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let root_id = vault.root.id;
+    let mut entry = Entry::new("Moved Login");
+    entry.previous_parent = Some(root_id);
+    entry.username = "alice".into();
+    entry.password = "secret".into();
+    entry.url = "https://app.example.com/login".into();
+    let entry_id = entry.id.to_string();
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let fill = runtime
+        .handle(RuntimeCommand::FindFillCandidates {
+            vault_id: handle.vault_id,
+            url: "https://app.example.com/login".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        fill,
+        RuntimeResponse::FillCandidates(vaultkern_runtime_protocol::FillCandidateListDto {
+            entries: vec![vaultkern_runtime_protocol::EntrySummaryDto {
+                id: entry_id,
+                title: "Moved Login".into(),
+                username: "alice".into(),
+                url: "https://app.example.com/login".into(),
+                group_id: root_id.to_string(),
+            }],
+        })
+    );
+}
+
+#[test]
 fn runtime_returns_empty_fill_candidates_for_hostless_page_urls() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
@@ -1037,10 +1087,21 @@ fn runtime_sets_and_clears_entry_passkey() {
         other => panic!("expected entry detail, got {other:?}"),
     }
 
+    let history = runtime
+        .handle(RuntimeCommand::ListEntryHistory {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+        })
+        .unwrap();
+    let RuntimeResponse::EntryHistoryList(history) = history else {
+        panic!("expected history list, got {history:?}");
+    };
+    assert_eq!(history.items.len(), 1);
+
     let cleared = runtime
         .handle(RuntimeCommand::ClearEntryPasskey {
             vault_id: handle.vault_id.clone(),
-            entry_id,
+            entry_id: entry_id.clone(),
         })
         .unwrap();
     match cleared {
@@ -1049,6 +1110,17 @@ fn runtime_sets_and_clears_entry_passkey() {
         }
         other => panic!("expected entry detail, got {other:?}"),
     }
+
+    let history = runtime
+        .handle(RuntimeCommand::ListEntryHistory {
+            vault_id: handle.vault_id.clone(),
+            entry_id,
+        })
+        .unwrap();
+    let RuntimeResponse::EntryHistoryList(history) = history else {
+        panic!("expected history list, got {history:?}");
+    };
+    assert_eq!(history.items.len(), 2);
 
     assert_eq!(
         runtime.list_groups(&handle.vault_id).unwrap().root.id,
@@ -1550,7 +1622,7 @@ fn runtime_reregisters_passkey_by_overwriting_matching_rp_and_user_handle() {
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
-            user_name: "alice@example.com".into(),
+            user_name: "alice-renamed@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
             related_origin_verified: false,
@@ -1583,6 +1655,24 @@ fn runtime_reregisters_passkey_by_overwriting_matching_rp_and_user_handle() {
         second_registration.credential_id
     );
 
+    let detail = runtime
+        .handle(RuntimeCommand::GetEntryDetail {
+            vault_id: handle.vault_id.clone(),
+            entry_id: first_registration.entry_id.clone(),
+        })
+        .unwrap();
+    let RuntimeResponse::EntryDetail(detail) = detail else {
+        panic!("expected entry detail, got {detail:?}");
+    };
+    assert_eq!(detail.username, "alice-renamed@example.com");
+    assert_eq!(
+        detail
+            .passkey
+            .as_ref()
+            .map(|passkey| passkey.username.as_str()),
+        Some("alice-renamed@example.com")
+    );
+
     let get_client_data = br#"{"type":"webauthn.get","challenge":"bG9naW4tMQ","origin":"https://example.com","crossOrigin":false}"#;
     let assertion = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
@@ -1599,6 +1689,77 @@ fn runtime_reregisters_passkey_by_overwriting_matching_rp_and_user_handle() {
         panic!("expected passkey assertion, got {assertion:?}");
     };
     assert_eq!(assertion.credential_id, second_registration.credential_id);
+}
+
+#[test]
+fn runtime_reregisters_moved_live_passkey_without_creating_duplicate() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Moved Passkey");
+    entry.previous_parent = Some(vault.root.id);
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "bW92ZWQtb2xkLWNyZWRlbnRpYWw".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("dXNlci0x".into()),
+        backup_eligible: false,
+        backup_state: false,
+    });
+    let entry_id = entry.id.to_string();
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItbW92ZWQ","origin":"https://example.com","crossOrigin":false}"#;
+    let registration = runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_display_name: Some("Alice".into()),
+            user_handle_base64url: "dXNlci0x".into(),
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(registration_client_data),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyRegistration(registration) = registration else {
+        panic!("expected passkey registration, got {registration:?}");
+    };
+    assert!(!registration.created);
+    assert_eq!(registration.entry_id, entry_id);
+
+    let credentials = runtime
+        .handle(RuntimeCommand::ListPasskeyCredentials {
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialList(credentials) = credentials else {
+        panic!("expected passkey credential list, got {credentials:?}");
+    };
+    assert_eq!(credentials.credentials.len(), 1);
+    assert_eq!(
+        credentials.credentials[0].credential_id,
+        registration.credential_id
+    );
 }
 
 #[test]
@@ -1678,6 +1839,17 @@ fn runtime_reregistration_preserves_user_fields_and_enforces_history_limit() {
         };
         assert!(!registration.created);
     }
+
+    let history = runtime
+        .handle(RuntimeCommand::ListEntryHistory {
+            vault_id: handle.vault_id.clone(),
+            entry_id: first_registration.entry_id.clone(),
+        })
+        .unwrap();
+    let RuntimeResponse::EntryHistoryList(history) = history else {
+        panic!("expected history list, got {history:?}");
+    };
+    assert_eq!(history.items.len(), 1);
 
     let detail = runtime
         .handle(RuntimeCommand::GetEntryDetail {
@@ -1806,6 +1978,92 @@ fn runtime_rolls_back_overwritten_passkey_registration_from_history() {
     assert_eq!(
         credentials.credentials[0].credential_id,
         first_registration.credential_id
+    );
+}
+
+#[test]
+fn runtime_commits_overwritten_passkey_registration_by_dropping_pending_rollback() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("passkey-commit");
+    let mut vault = Vault::empty("Passkey Commit");
+    vault.root.entries.push(Entry::new("Seed"));
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .expect("save seed vault");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("passkey-commit.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("open vault");
+    runtime
+        .unlock_with_password(&handle.vault_id, "passkey-commit")
+        .unwrap();
+
+    let first_registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMQ","origin":"https://example.com","crossOrigin":false}"#;
+    runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_display_name: Some("Alice".into()),
+            user_handle_base64url: "dXNlci0x".into(),
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(first_registration_client_data),
+        })
+        .unwrap();
+
+    let second_registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMg","origin":"https://example.com","crossOrigin":false}"#;
+    let second_registration = runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_display_name: Some("Alice".into()),
+            user_handle_base64url: "dXNlci0x".into(),
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(second_registration_client_data),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyRegistration(second_registration) = second_registration else {
+        panic!("expected passkey registration, got {second_registration:?}");
+    };
+    assert!(!second_registration.created);
+
+    runtime
+        .handle(RuntimeCommand::CommitPasskeyRegistration {
+            vault_id: handle.vault_id.clone(),
+            entry_id: second_registration.entry_id.clone(),
+            credential_id: second_registration.credential_id.clone(),
+        })
+        .unwrap();
+
+    runtime
+        .handle(RuntimeCommand::RollbackPasskeyRegistration {
+            vault_id: handle.vault_id.clone(),
+            entry_id: second_registration.entry_id,
+            credential_id: Some(second_registration.credential_id.clone()),
+            created: false,
+        })
+        .unwrap();
+
+    let credentials = runtime
+        .handle(RuntimeCommand::ListPasskeyCredentials {
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialList(credentials) = credentials else {
+        panic!("expected passkey credential list, got {credentials:?}");
+    };
+    assert_eq!(credentials.credentials.len(), 1);
+    assert_eq!(
+        credentials.credentials[0].credential_id,
+        second_registration.credential_id
     );
 }
 
@@ -2142,6 +2400,7 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
     });
 
     let mut moved_live_entry = Entry::new("Moved Live");
+    moved_live_entry.previous_parent = Some(vault.root.id);
     moved_live_entry.passkey = Some(PasskeyRecord {
         username: "moved@example.com".into(),
         credential_id: "bW92ZWQtbGl2ZS1jcmVkZW50aWFs".into(),
@@ -2149,19 +2408,6 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
         private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
         relying_party: "moved.example.com".into(),
         user_handle: Some("bW92ZWQtdXNlcg".into()),
-        backup_eligible: false,
-        backup_state: false,
-    });
-
-    let mut stale_recycled_entry = Entry::new("Stale Deleted");
-    stale_recycled_entry.previous_parent = Some(vault.root.id);
-    stale_recycled_entry.passkey = Some(PasskeyRecord {
-        username: "stale-deleted@example.com".into(),
-        credential_id: "c3RhbGUtZGVsZXRlZC1jcmVkZW50aWFs".into(),
-        generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
-        relying_party: "example.com".into(),
-        user_handle: Some("c3RhbGUtZGVsZXRlZC11c2Vy".into()),
         backup_eligible: false,
         backup_state: false,
     });
@@ -2180,10 +2426,24 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
     let mut recycle_bin = Group::new("Recycle Bin");
     let recycle_bin_id = recycle_bin.id;
     recycle_bin.entries.push(recycled_entry);
+    let mut group_deleted_entry = Entry::new("Group Deleted");
+    group_deleted_entry.passkey = Some(PasskeyRecord {
+        username: "group-deleted@example.com".into(),
+        credential_id: "Z3JvdXAtZGVsZXRlZC1jcmVkZW50aWFs".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("Z3JvdXAtZGVsZXRlZC11c2Vy".into()),
+        backup_eligible: false,
+        backup_state: false,
+    });
+    let mut group_deleted = Group::new("Papierkorb");
+    group_deleted.previous_parent = Some(vault.root.id);
+    group_deleted.entries.push(group_deleted_entry);
     vault.recycle_bin_enabled = Some(true);
     vault.recycle_bin_group = Some(recycle_bin_id);
     vault.root.children.push(recycle_bin);
-    vault.root.entries.push(stale_recycled_entry);
+    vault.root.children.push(group_deleted);
     vault.root.entries.push(moved_live_entry);
     vault.root.entries.push(active_entry);
 
@@ -2228,17 +2488,18 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
     };
     assert!(!status.exists);
 
-    let stale_status = runtime
+    let group_deleted_status = runtime
         .handle(RuntimeCommand::PasskeyCredentialStatus {
             vault_id: handle.vault_id.clone(),
-            credential_id: "c3RhbGUtZGVsZXRlZC1jcmVkZW50aWFs".into(),
+            credential_id: "Z3JvdXAtZGVsZXRlZC1jcmVkZW50aWFs".into(),
             relying_party: Some("example.com".into()),
         })
         .unwrap();
-    let RuntimeResponse::PasskeyCredentialStatus(stale_status) = stale_status else {
-        panic!("expected credential status, got {stale_status:?}");
+    let RuntimeResponse::PasskeyCredentialStatus(group_deleted_status) = group_deleted_status
+    else {
+        panic!("expected credential status, got {group_deleted_status:?}");
     };
-    assert!(!stale_status.exists);
+    assert!(!group_deleted_status.exists);
 
     let moved_status = runtime
         .handle(RuntimeCommand::PasskeyCredentialStatus {

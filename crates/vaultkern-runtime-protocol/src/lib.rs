@@ -157,6 +157,11 @@ pub enum RuntimeCommand {
         credential_id: Option<String>,
         created: bool,
     },
+    CommitPasskeyRegistration {
+        vault_id: String,
+        entry_id: String,
+        credential_id: String,
+    },
     PasskeyCredentialStatus {
         vault_id: String,
         credential_id: String,
