@@ -5,10 +5,10 @@ use vaultkern_runtime_protocol::{
     EntryAttachmentContentDto, EntryDetailDto, EntryHistoryDetailDto, EntryHistoryItemDto,
     EntryHistoryListDto, EntryPasskeyDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto,
     GroupTreeDto, MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
-    OneDriveItemListDto, PasskeyAssertionDto, PasskeyCredentialStatusDto, PasskeyRegistrationDto,
-    ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto,
-    SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
-    VaultSourceStatusDto,
+    OneDriveItemListDto, PasskeyAssertionDto, PasskeyCredentialCandidateDto,
+    PasskeyCredentialListDto, PasskeyCredentialStatusDto, PasskeyRegistrationDto, ProtocolEnvelope,
+    RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
+    VaultHandleDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
 };
 
 #[test]
@@ -945,6 +945,57 @@ fn protocol_roundtrips_passkey_credential_status_command_and_response() {
         serde_json::json!("passkey_credential_status")
     );
     assert_eq!(response_json["exists"], serde_json::json!(true));
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn protocol_roundtrips_passkey_credential_list_command_and_response() {
+    let command = ProtocolEnvelope::new(RuntimeCommand::ListPasskeyCredentials {
+        vault_id: "vault-1".into(),
+        relying_party: "example.com".into(),
+    });
+
+    let command_json = serde_json::to_value(&command).unwrap();
+    assert_eq!(
+        command_json["command"]["type"],
+        serde_json::json!("list_passkey_credentials")
+    );
+    assert_eq!(
+        command_json["command"]["relying_party"],
+        serde_json::json!("example.com")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
+        command
+    );
+
+    let response = RuntimeResponse::PasskeyCredentialList(PasskeyCredentialListDto {
+        credentials: vec![
+            PasskeyCredentialCandidateDto {
+                credential_id: "Y3JlZGVudGlhbC0x".into(),
+                username: "alice@example.com".into(),
+                user_handle: Some("dXNlci0x".into()),
+            },
+            PasskeyCredentialCandidateDto {
+                credential_id: "Y3JlZGVudGlhbC0y".into(),
+                username: "bob@example.com".into(),
+                user_handle: None,
+            },
+        ],
+    });
+
+    let response_json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        response_json["type"],
+        serde_json::json!("passkey_credential_list")
+    );
+    assert_eq!(
+        response_json["credentials"][0]["username"],
+        "alice@example.com"
+    );
     assert_eq!(
         serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
         response

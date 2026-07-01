@@ -20,8 +20,9 @@ use vaultkern_runtime_protocol::{
     EntryCustomFieldDto, EntryDetailDto, EntryFieldProtectionDto, EntryHistoryDetailDto,
     EntryHistoryItemDto, EntryHistoryListDto, EntryListDto, EntryPasskeyDto, EntrySummaryDto,
     ErrorDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto,
-    PasskeyAssertionDto, PasskeyCredentialStatusDto, PasskeyRegistrationDto, RuntimeCommand,
-    RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto,
+    PasskeyAssertionDto, PasskeyCredentialCandidateDto, PasskeyCredentialListDto,
+    PasskeyCredentialStatusDto, PasskeyRegistrationDto, RuntimeCommand, RuntimeResponse,
+    SaveVaultResultDto, SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto,
     VaultReferenceListDto, VaultSourceStatusDto,
 };
 
@@ -1306,6 +1307,26 @@ impl Runtime {
         })
     }
 
+    pub fn list_passkey_credentials(
+        &self,
+        vault_id: &str,
+        relying_party: &str,
+    ) -> Result<PasskeyCredentialListDto> {
+        let vault = self.loaded_vault(vault_id)?;
+        let mut credentials = Vec::new();
+        visit_passkeys(&vault.root, &mut |passkey| {
+            if passkey.relying_party == relying_party {
+                credentials.push(PasskeyCredentialCandidateDto {
+                    credential_id: passkey.credential_id.clone(),
+                    username: passkey.username.clone(),
+                    user_handle: passkey.user_handle.clone(),
+                });
+            }
+        });
+
+        Ok(PasskeyCredentialListDto { credentials })
+    }
+
     pub fn create_passkey_registration(
         &mut self,
         vault_id: &str,
@@ -1767,6 +1788,15 @@ impl Runtime {
                     Err(error) => query_error_response(error),
                 })
             }
+            RuntimeCommand::ListPasskeyCredentials {
+                vault_id,
+                relying_party,
+            } => Ok(
+                match self.list_passkey_credentials(&vault_id, &relying_party) {
+                    Ok(credentials) => RuntimeResponse::PasskeyCredentialList(credentials),
+                    Err(error) => query_error_response(error),
+                },
+            ),
             RuntimeCommand::CreatePasskeyAssertion {
                 vault_id,
                 relying_party,
@@ -2547,25 +2577,17 @@ fn find_passkey_by_credential_id_and_relying_party<'a>(
     credential_id: &str,
     relying_party: Option<&str>,
 ) -> Option<&'a PasskeyRecord> {
-    for entry in &group.entries {
-        if let Some(passkey) = entry.passkey.as_ref() {
-            if passkey.credential_id == credential_id
-                && relying_party.is_none_or(|value| passkey.relying_party == value)
-            {
-                return Some(passkey);
-            }
-        }
-    }
-
-    for child in &group.children {
-        if let Some(passkey) =
-            find_passkey_by_credential_id_and_relying_party(child, credential_id, relying_party)
+    let mut found = None;
+    visit_passkeys(group, &mut |passkey| {
+        if found.is_none()
+            && passkey.credential_id == credential_id
+            && relying_party.is_none_or(|value| passkey.relying_party == value)
         {
-            return Some(passkey);
+            found = Some(passkey);
         }
-    }
+    });
 
-    None
+    found
 }
 
 fn find_unique_passkey_by_relying_party<'a>(
@@ -2594,14 +2616,26 @@ fn visit_passkeys<'a>(
     group: &'a vaultkern_core::Group,
     visitor: &mut impl FnMut(&'a PasskeyRecord),
 ) {
+    visit_passkeys_in_group(group, false, visitor);
+}
+
+fn visit_passkeys_in_group<'a>(
+    group: &'a vaultkern_core::Group,
+    ancestor_recycled: bool,
+    visitor: &mut impl FnMut(&'a PasskeyRecord),
+) {
+    let group_recycled = ancestor_recycled || group.previous_parent.is_some();
     for entry in &group.entries {
-        if let Some(passkey) = entry.passkey.as_ref() {
+        if !group_recycled
+            && entry.previous_parent.is_none()
+            && let Some(passkey) = entry.passkey.as_ref()
+        {
             visitor(passkey);
         }
     }
 
     for child in &group.children {
-        visit_passkeys(child, visitor);
+        visit_passkeys_in_group(child, group_recycled, visitor);
     }
 }
 

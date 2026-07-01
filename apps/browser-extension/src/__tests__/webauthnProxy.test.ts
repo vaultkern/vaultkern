@@ -64,6 +64,7 @@ function installPresencePrompt(chromeApi: any) {
         origin: string;
         relyingParty: string;
         topOrigin: string;
+        credentialId: string;
       }> = {}
     ) {
       await vi.waitFor(() => {
@@ -82,7 +83,7 @@ function installPresencePrompt(chromeApi: any) {
         type: "vaultkern_presence_complete",
         requestId: approvedRequestId
       };
-      for (const key of ["origin", "relyingParty", "topOrigin"] as const) {
+      for (const key of ["origin", "relyingParty", "topOrigin", "credentialId"] as const) {
         const value = overrides[key] ?? promptParams.get(key);
         if (value) {
           message[key] = value;
@@ -628,6 +629,16 @@ describe("webAuthenticationProxy wrapper", () => {
         activeVaultId: "vault-1"
       })
       .mockResolvedValueOnce({
+        type: "passkey_credential_list",
+        credentials: [
+          {
+            credentialId: "ZGlzY292ZXJhYmxlLTE",
+            username: "alice@example.com",
+            userHandle: "dXNlci0x"
+          }
+        ]
+      })
+      .mockResolvedValueOnce({
         type: "passkey_assertion",
         credentialId: "ZGlzY292ZXJhYmxlLTE",
         authenticatorDataBase64url: "auth-data",
@@ -669,16 +680,125 @@ describe("webAuthenticationProxy wrapper", () => {
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
     });
     expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "list_passkey_credentials",
+      vault_id: "vault-1",
+      relying_party: "example.com"
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(3, {
       type: "create_passkey_assertion",
       vault_id: "vault-1",
       relying_party: "example.com",
       origin: "https://example.com",
-      credential_id: null,
+      credential_id: "ZGlzY292ZXJhYmxlLTE",
       user_presence_verified: true,
       client_data_json_base64url: expect.any(String)
     });
     const response = JSON.parse(completeGetRequest.mock.calls[0][0].responseJson);
     expect(response.id).toBe("ZGlzY292ZXJhYmxlLTE");
+  });
+
+  it("uses the passkey credential selected by the approval prompt for discoverable get requests", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_credential_list",
+        credentials: [
+          {
+            credentialId: "Y3JlZGVudGlhbC0x",
+            username: "alice@example.com",
+            userHandle: "dXNlci0x"
+          },
+          {
+            credentialId: "Y3JlZGVudGlhbC0y",
+            username: "bob@example.com",
+            userHandle: "dXNlci0y"
+          }
+        ]
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_assertion",
+        credentialId: "Y3JlZGVudGlhbC0y",
+        authenticatorDataBase64url: "auth-data",
+        clientDataJsonBase64url: "client-data",
+        signatureBase64url: "signature",
+        userHandleBase64url: "dXNlci0y"
+      });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+    const presencePrompt = installPresencePrompt(chromeApi);
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 57,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "bG9naW4tMQ"
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+    });
+    const promptParams = new URL(
+      (presencePrompt.create.mock.calls[0][0] as { url: string }).url,
+      "chrome-extension://id/"
+    ).searchParams;
+    expect(JSON.parse(promptParams.get("credentialOptions") ?? "[]")).toEqual([
+      {
+        credentialId: "Y3JlZGVudGlhbC0x",
+        username: "alice@example.com",
+        userHandle: "dXNlci0x"
+      },
+      {
+        credentialId: "Y3JlZGVudGlhbC0y",
+        username: "bob@example.com",
+        userHandle: "dXNlci0y"
+      }
+    ]);
+
+    await presencePrompt.approve(undefined, {
+      credentialId: "Y3JlZGVudGlhbC0y"
+    });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(2, {
+      type: "list_passkey_credentials",
+      vault_id: "vault-1",
+      relying_party: "example.com"
+    });
+    expect(sendRuntimeCommand).toHaveBeenNthCalledWith(3, {
+      type: "create_passkey_assertion",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.com",
+      credential_id: "Y3JlZGVudGlhbC0y",
+      user_presence_verified: true,
+      client_data_json_base64url: expect.any(String)
+    });
   });
 
   it("rejects conditional mediation get observations without opening an approval prompt", async () => {

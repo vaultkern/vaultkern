@@ -1149,6 +1149,70 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("sends the selected passkey credential when approving a discoverable WebAuthn request", async () => {
+    const credentialOptions = encodeURIComponent(
+      JSON.stringify([
+        {
+          credentialId: "Y3JlZGVudGlhbC0x",
+          username: "alice@example.com",
+          userHandle: "dXNlci0x"
+        },
+        {
+          credentialId: "Y3JlZGVudGlhbC0y",
+          username: "bob@example.com",
+          userHandle: "dXNlci0y"
+        }
+      ])
+    );
+    window.history.replaceState(
+      null,
+      "",
+      `/popup.html?webauthn=approve&requestId=43&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&credentialOptions=${credentialOptions}`
+    );
+    const sendMessage = vi.fn(async () => undefined);
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    const chromeApi = {
+      runtime: {
+        sendMessage
+      }
+    };
+    (globalThis as typeof globalThis & { chrome: unknown }).chrome = chromeApi;
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Confirm passkey request")).toBeInTheDocument();
+    expect(screen.getByText("alice@example.com")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("bob@example.com"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Continue passkey request" })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_presence_complete",
+        requestId: 43,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        credentialId: "Y3JlZGVudGlhbC0y"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("auto unlocks the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
     window.history.replaceState(
       null,

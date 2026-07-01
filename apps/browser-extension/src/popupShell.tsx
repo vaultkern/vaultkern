@@ -91,7 +91,11 @@ function webAuthnPromptSiteLabel() {
   }
 }
 
-function notifyWebAuthnPromptComplete(type: string, closeMode: string) {
+function notifyWebAuthnPromptComplete(
+  type: string,
+  closeMode: string,
+  options: { credentialId?: string } = {}
+) {
   const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
   const sendMessage = chromeApi?.runtime?.sendMessage;
   const promptParams =
@@ -126,6 +130,9 @@ function notifyWebAuthnPromptComplete(type: string, closeMode: string) {
       message[key] = value;
     }
   }
+  if (options.credentialId) {
+    message.credentialId = options.credentialId;
+  }
 
   void Promise.resolve(
     sendMessage.call(chromeApi.runtime, message)
@@ -138,8 +145,15 @@ function notifyUnlockComplete() {
   notifyWebAuthnPromptComplete("vaultkern_unlock_complete", "unlock");
 }
 
-function notifyPresenceComplete() {
-  notifyWebAuthnPromptComplete("vaultkern_presence_complete", "approve");
+function notifyPresenceComplete(
+  _session: unknown,
+  options?: { credentialId?: string }
+) {
+  notifyWebAuthnPromptComplete(
+    "vaultkern_presence_complete",
+    "approve",
+    options
+  );
 }
 
 export function PopupShell() {

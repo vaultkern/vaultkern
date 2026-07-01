@@ -123,6 +123,10 @@ pub enum RuntimeCommand {
         vault_id: String,
         entry_id: String,
     },
+    ListPasskeyCredentials {
+        vault_id: String,
+        relying_party: String,
+    },
     CreatePasskeyAssertion {
         vault_id: String,
         relying_party: String,
@@ -232,6 +236,7 @@ pub enum RuntimeResponse {
     PasskeyAssertion(PasskeyAssertionDto),
     PasskeyRegistration(PasskeyRegistrationDto),
     PasskeyCredentialStatus(PasskeyCredentialStatusDto),
+    PasskeyCredentialList(PasskeyCredentialListDto),
     DatabaseSettings(DatabaseSettingsDto),
     Saved,
     SaveVaultResult(SaveVaultResultDto),
@@ -510,6 +515,20 @@ pub struct PasskeyRegistrationDto {
 pub struct PasskeyCredentialStatusDto {
     pub credential_id: String,
     pub exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCredentialListDto {
+    pub credentials: Vec<PasskeyCredentialCandidateDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCredentialCandidateDto {
+    pub credential_id: String,
+    pub username: String,
+    pub user_handle: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

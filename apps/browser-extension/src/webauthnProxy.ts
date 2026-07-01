@@ -68,7 +68,19 @@ type WebAuthnOriginContext = {
 
 type WebAuthnPromptContext = WebAuthnOriginContext & {
   relyingParty: string;
+  credentialOptions?: PasskeyCredentialOption[];
 };
+
+type PasskeyCredentialOption = {
+  credentialId: string;
+  username: string;
+  userHandle?: string | null;
+};
+
+type PresenceSignal =
+  | { type: "complete"; credentialId?: string }
+  | { type: "dismissed" }
+  | null;
 
 const unlockPromptWindowIds = new Map<number, number>();
 const unlockCompleteWaiters = new Map<number, Set<() => void>>();
@@ -76,7 +88,10 @@ const unlockDismissWaiters = new Map<number, Set<() => void>>();
 const unlockPromptContexts = new Map<number, WebAuthnPromptContext>();
 const unlockPromptRemovalCleanups = new Map<number, () => void>();
 const presencePromptWindowIds = new Map<number, number>();
-const presenceCompleteWaiters = new Map<number, Set<() => void>>();
+const presenceCompleteWaiters = new Map<
+  number,
+  Set<(credentialId?: string) => void>
+>();
 const presenceDismissWaiters = new Map<number, Set<() => void>>();
 const presencePromptContexts = new Map<number, WebAuthnPromptContext>();
 const presencePromptRemovalCleanups = new Map<number, () => void>();
@@ -323,9 +338,10 @@ function registerUnlockCompleteHandler(chromeApi: ChromeLike) {
         event: "presence_complete_message",
         requestId
       });
+      const credentialId = credentialIdFromMessage(message);
       clearPresencePromptState(requestId);
       for (const waiter of [...(presenceCompleteWaiters.get(requestId) ?? [])]) {
-        waiter();
+        waiter(credentialId);
       }
     }
   });
@@ -350,6 +366,13 @@ function isPresenceCompleteMessage(message: unknown) {
 function requestIdFromMessage(message: unknown) {
   const requestId = (message as { requestId?: unknown } | null)?.requestId;
   return typeof requestId === "number" ? requestId : null;
+}
+
+function credentialIdFromMessage(message: unknown) {
+  const credentialId = (message as { credentialId?: unknown } | null)?.credentialId;
+  return typeof credentialId === "string" && credentialId.trim() !== ""
+    ? credentialId
+    : undefined;
 }
 
 function promptContextMatches(
@@ -401,7 +424,7 @@ async function handleGetRequest(
   try {
     const options = requestOptionsFrom(request);
     rejectRequiredUserVerification(options);
-    const credentialIds = credentialIdsFromOptions(options);
+    let credentialIds = credentialIdsFromOptions(options);
     const requestedRpId = relyingPartyIdFromGetOptions(options);
     const originContext = await originContextForRequest(request, "get", options);
     if (!originContext) {
@@ -450,15 +473,30 @@ async function handleGetRequest(
     if (!activeVault) {
       return;
     }
-    if (!activeVault.userPresenceVerified) {
+    const credentialSelection = await credentialSelectionForGetRequest(
+      sendRuntimeCommand,
+      activeVault.activeVaultId,
+      relyingParty,
+      credentialIds
+    );
+    credentialIds = credentialSelection.credentialIds;
+    const presencePromptContext = promptContextFrom(
+      originContext,
+      relyingParty,
+      credentialSelection.promptOptions
+    );
+    if (!activeVault.userPresenceVerified || credentialSelection.promptOptions.length > 0) {
       const approved = await userPresenceForRequest(
         chromeApi,
         requestId,
-        promptContextFrom(originContext, relyingParty),
+        presencePromptContext,
         canceledRequests
       );
       if (!approved) {
         return;
+      }
+      if (approved.selectedCredentialId) {
+        credentialIds = [approved.selectedCredentialId];
       }
     }
 
@@ -549,6 +587,51 @@ type PasskeyCredentialStatusResponse = {
   credentialId: string;
   exists: boolean;
 };
+
+type PasskeyCredentialListResponse = {
+  credentials: PasskeyCredentialOption[];
+};
+
+async function credentialSelectionForGetRequest(
+  sendRuntimeCommand: RuntimeCommandSender,
+  activeVaultId: string,
+  relyingParty: string,
+  credentialIds: Array<string | null>
+) {
+  if (!(credentialIds.length === 1 && credentialIds[0] === null)) {
+    return {
+      credentialIds,
+      promptOptions: [] as PasskeyCredentialOption[]
+    };
+  }
+
+  const credentials = passkeyCredentialListFromResponse(
+    await sendRuntimeCommand({
+      type: "list_passkey_credentials",
+      vault_id: activeVaultId,
+      relying_party: relyingParty
+    })
+  ).credentials;
+
+  if (credentials.length === 0) {
+    throw new WebAuthnRequestError(
+      "NotAllowedError",
+      "VaultKern passkey credential not found"
+    );
+  }
+
+  if (credentials.length === 1) {
+    return {
+      credentialIds: [credentials[0].credentialId],
+      promptOptions: [] as PasskeyCredentialOption[]
+    };
+  }
+
+  return {
+    credentialIds,
+    promptOptions: credentials
+  };
+}
 
 async function createAssertionForAllowedCredentials(
   chromeApi: ChromeLike,
@@ -701,6 +784,47 @@ function passkeyCredentialStatusFromResponse(
     credentialId: status.credentialId,
     exists: status.exists
   };
+}
+
+function passkeyCredentialListFromResponse(
+  response: unknown
+): PasskeyCredentialListResponse {
+  const runtimeError = runtimeErrorFromResponse(response);
+  if (runtimeError) {
+    throw runtimeError;
+  }
+
+  const list = response as { credentials?: unknown } | null;
+  if (!list || !Array.isArray(list.credentials)) {
+    throw new WebAuthnRequestError(
+      "NotAllowedError",
+      "runtime returned an invalid passkey credential list"
+    );
+  }
+
+  const credentials = list.credentials.map((credential) => {
+    const candidate = credential as Partial<PasskeyCredentialOption> | null;
+    if (
+      !candidate ||
+      typeof candidate.credentialId !== "string" ||
+      candidate.credentialId.trim() === "" ||
+      typeof candidate.username !== "string"
+    ) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "runtime returned an invalid passkey credential list"
+      );
+    }
+
+    return {
+      credentialId: candidate.credentialId,
+      username: candidate.username,
+      userHandle:
+        typeof candidate.userHandle === "string" ? candidate.userHandle : null
+    };
+  });
+
+  return { credentials };
 }
 
 async function handleCreateRequest(
@@ -1044,11 +1168,13 @@ function clientDataJsonBase64urlFrom(
 
 function promptContextFrom(
   originContext: WebAuthnOriginContext,
-  relyingParty: string
+  relyingParty: string,
+  credentialOptions: PasskeyCredentialOption[] = []
 ): WebAuthnPromptContext {
   return {
     ...originContext,
-    relyingParty
+    relyingParty,
+    ...(credentialOptions.length > 0 ? { credentialOptions } : {})
   };
 }
 
@@ -1658,10 +1784,14 @@ async function userPresenceForRequest(
       requestId,
       Math.min(1_000, Math.max(0, deadline - Date.now()))
     );
-    if (signal === "complete") {
-      return true;
+    if (signal?.type === "complete") {
+      const selectedCredentialId = selectedCredentialIdForPrompt(
+        promptContext,
+        signal.credentialId
+      );
+      return selectedCredentialId ? { selectedCredentialId } : {};
     }
-    if (signal === "dismissed") {
+    if (signal?.type === "dismissed") {
       throw new WebAuthnRequestError(
         "NotAllowedError",
         "VaultKern passkey approval was dismissed"
@@ -1674,6 +1804,29 @@ async function userPresenceForRequest(
     "NotAllowedError",
     "VaultKern passkey approval timed out"
   );
+}
+
+function selectedCredentialIdForPrompt(
+  promptContext: WebAuthnPromptContext,
+  credentialId: string | undefined
+) {
+  const credentialOptions = promptContext.credentialOptions ?? [];
+  if (credentialOptions.length === 0) {
+    return credentialId;
+  }
+  if (!credentialId) {
+    throw new WebAuthnRequestError(
+      "NotAllowedError",
+      "VaultKern passkey credential was not selected"
+    );
+  }
+  if (!credentialOptions.some((option) => option.credentialId === credentialId)) {
+    throw new WebAuthnRequestError(
+      "NotAllowedError",
+      "VaultKern passkey credential selection is not allowed"
+    );
+  }
+  return credentialId;
 }
 
 function waitForUnlockSignal(requestId: number, timeoutMs: number) {
@@ -1719,19 +1872,19 @@ function waitForUnlockSignal(requestId: number, timeoutMs: number) {
 }
 
 function waitForPresenceSignal(requestId: number, timeoutMs: number) {
-  return new Promise<"complete" | "dismissed" | null>((resolve) => {
+  return new Promise<PresenceSignal>((resolve) => {
     let settled = false;
     const timeoutId = setTimeout(() => {
       finish(null);
     }, timeoutMs);
-    const completeWaiter = () => {
-      finish("complete");
+    const completeWaiter = (credentialId?: string) => {
+      finish({ type: "complete", credentialId });
     };
     const dismissWaiter = () => {
-      finish("dismissed");
+      finish({ type: "dismissed" });
     };
 
-    function finish(signaled: "complete" | "dismissed" | null) {
+    function finish(signaled: PresenceSignal) {
       if (settled) {
         return;
       }
@@ -1751,7 +1904,9 @@ function waitForPresenceSignal(requestId: number, timeoutMs: number) {
       resolve(signaled);
     }
 
-    const completeWaiters = presenceCompleteWaiters.get(requestId) ?? new Set<() => void>();
+    const completeWaiters =
+      presenceCompleteWaiters.get(requestId) ??
+      new Set<(credentialId?: string) => void>();
     completeWaiters.add(completeWaiter);
     presenceCompleteWaiters.set(requestId, completeWaiters);
     const dismissWaiters = presenceDismissWaiters.get(requestId) ?? new Set<() => void>();
@@ -1919,6 +2074,9 @@ function popupPathForWebAuthnPrompt(
   });
   if (promptContext.topOrigin) {
     params.set("topOrigin", promptContext.topOrigin);
+  }
+  if (mode === "approve" && promptContext.credentialOptions?.length) {
+    params.set("credentialOptions", JSON.stringify(promptContext.credentialOptions));
   }
   return `popup.html?${params.toString()}`;
 }

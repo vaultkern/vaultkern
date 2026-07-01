@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type {
@@ -28,6 +28,12 @@ type SessionStateLike = Pick<
   "unlocked" | "activeVaultId" | "currentVaultRefId" | "supportsBiometricUnlock"
 >;
 
+type PasskeyCredentialOption = {
+  credentialId: string;
+  username: string;
+  userHandle?: string | null;
+};
+
 export interface PopupClientLike {
   getSessionState(): Promise<SessionStateLike>;
   listRecentVaults(): Promise<VaultReference[]>;
@@ -48,6 +54,47 @@ function limitRecentVaults(vaults: VaultReference[], limit: number) {
     .slice(0, limit);
 }
 
+function passkeyCredentialOptionsFromSearch(): PasskeyCredentialOption[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const encodedOptions = new URLSearchParams(window.location.search).get(
+    "credentialOptions"
+  );
+  if (!encodedOptions) {
+    return [];
+  }
+
+  try {
+    const options = JSON.parse(encodedOptions);
+    if (!Array.isArray(options)) {
+      return [];
+    }
+    return options.flatMap((option) => {
+      const candidate = option as Partial<PasskeyCredentialOption> | null;
+      if (
+        !candidate ||
+        typeof candidate.credentialId !== "string" ||
+        candidate.credentialId.trim() === "" ||
+        typeof candidate.username !== "string"
+      ) {
+        return [];
+      }
+      return [
+        {
+          credentialId: candidate.credentialId,
+          username: candidate.username,
+          userHandle:
+            typeof candidate.userHandle === "string" ? candidate.userHandle : null
+        }
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
 export function PopupApp({
   client,
   findCandidates,
@@ -65,7 +112,10 @@ export function PopupApp({
   extensionSettingsStore?: ExtensionSettingsStore;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
   onUnlockComplete?: (session: SessionStateLike) => void | Promise<void>;
-  onWebAuthnPresenceComplete?: (session: SessionStateLike) => void | Promise<void>;
+  onWebAuthnPresenceComplete?: (
+    session: SessionStateLike,
+    options?: { credentialId?: string }
+  ) => void | Promise<void>;
 }) {
   const [session, setSession] = useState<SessionStateLike | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -97,6 +147,11 @@ export function PopupApp({
     new URLSearchParams(window.location.search).get("webauthn");
   const webAuthnUnlockPrompt = webAuthnMode === "unlock";
   const webAuthnApprovePrompt = webAuthnMode === "approve";
+  const passkeyCredentialOptions = useMemo(
+    () => (webAuthnApprovePrompt ? passkeyCredentialOptionsFromSearch() : []),
+    [webAuthnApprovePrompt]
+  );
+  const [selectedPasskeyCredentialId, setSelectedPasskeyCredentialId] = useState("");
 
   function currentVaultForSession() {
     return (
@@ -216,6 +271,12 @@ export function PopupApp({
 
     startCurrentVaultPreload();
   }, [recentVaultsLoading, session?.currentVaultRefId, session?.unlocked]);
+
+  useEffect(() => {
+    setSelectedPasskeyCredentialId(
+      passkeyCredentialOptions[0]?.credentialId ?? ""
+    );
+  }, [passkeyCredentialOptions]);
 
   useEffect(() => {
     if (
@@ -428,7 +489,14 @@ export function PopupApp({
 
     setSubmitting(true);
     try {
-      await Promise.resolve(onWebAuthnPresenceComplete?.(session));
+      await Promise.resolve(
+        onWebAuthnPresenceComplete?.(
+          session,
+          selectedPasskeyCredentialId
+            ? { credentialId: selectedPasskeyCredentialId }
+            : undefined
+        )
+      );
     } finally {
       setSubmitting(false);
     }
@@ -677,12 +745,38 @@ export function PopupApp({
           <strong>{passkeyPromptTitle}</strong>
           <span>{passkeyPromptBody}</span>
         </section>
+        {passkeyCredentialOptions.length > 0 ? (
+          <div
+            role="radiogroup"
+            aria-label={
+              extensionSettings.language === "zh-CN"
+                ? "选择通行密钥账号"
+                : "Choose passkey account"
+            }
+            style={passkeyCredentialListStyle}
+          >
+            {passkeyCredentialOptions.map((option) => (
+              <label key={option.credentialId} style={passkeyCredentialOptionStyle}>
+                <input
+                  type="radio"
+                  aria-label={option.username || option.credentialId}
+                  checked={selectedPasskeyCredentialId === option.credentialId}
+                  onChange={() => setSelectedPasskeyCredentialId(option.credentialId)}
+                />
+                <span>{option.username || option.credentialId}</span>
+              </label>
+            ))}
+          </div>
+        ) : null}
         <button
           type="button"
           onClick={() => {
             void handleWebAuthnPresenceApproval();
           }}
-          disabled={submitting}
+          disabled={
+            submitting ||
+            (passkeyCredentialOptions.length > 0 && !selectedPasskeyCredentialId)
+          }
           style={primaryActionStyle}
         >
           {passkeyPromptAction}
@@ -792,6 +886,25 @@ const passkeyPromptStyle = {
   color: popupTheme.colors.text,
   fontFamily: popupTheme.font.body,
   lineHeight: 1.45
+};
+
+const passkeyCredentialListStyle = {
+  display: "grid",
+  gap: popupTheme.spacing.xs,
+  minWidth: 0
+};
+
+const passkeyCredentialOptionStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: popupTheme.spacing.sm,
+  border: `1px solid ${popupTheme.colors.line}`,
+  borderRadius: popupTheme.radius.field,
+  padding: popupTheme.spacing.sm,
+  background: popupTheme.colors.surface,
+  color: popupTheme.colors.text,
+  fontFamily: popupTheme.font.body,
+  overflowWrap: "anywhere" as const
 };
 
 const messagePanelStyle = {
