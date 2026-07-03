@@ -1579,7 +1579,8 @@ impl Runtime {
         )?;
         let user_verified = self.passkey_ceremony_user_verified(ceremony_token, vault_id)?;
         let credential_id = credential_id.context("passkey assertion credential id is required")?;
-        if !user_presence_verified && !user_verified {
+        let effective_user_presence_verified = user_presence_verified || user_verified;
+        if !effective_user_presence_verified {
             anyhow::bail!("passkey user presence was not verified");
         }
         let _ = self.loaded_vault(vault_id)?;
@@ -1599,7 +1600,7 @@ impl Runtime {
                 origin,
                 credential_id: Some(credential_id),
                 discoverable,
-                user_presence_verified,
+                user_presence_verified: effective_user_presence_verified,
                 user_verified,
                 related_origin_verified,
                 client_data_json_base64url,
