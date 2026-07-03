@@ -1592,11 +1592,13 @@ async function handleGetRequest(
       ceremonyPhase,
       error
     );
-    await delayPublicWebAuthnError(ceremonyToken);
-    await completeGetRequest(chromeApi, {
+    await completePasskeyRequestWithError(
+      chromeApi,
+      "get",
       requestId,
-      error: webAuthnError(error, Boolean(ceremonyToken))
-    });
+      ceremonyToken,
+      error
+    );
   } finally {
     clearWebAuthnRequestCanceled(canceledRequests, requestId, requestCancelKey);
   }
@@ -2174,11 +2176,13 @@ async function resumePasskeyGetAfterPromptComplete(
       ceremonyPhase,
       error
     );
-    await delayPublicWebAuthnError(mirror?.ceremonyToken ?? null);
-    await completeGetRequest(chromeApi, {
+    await completePasskeyRequestWithError(
+      chromeApi,
+      "get",
       requestId,
-      error: webAuthnError(error, Boolean(mirror?.ceremonyToken))
-    });
+      mirror?.ceremonyToken ?? null,
+      error
+    );
   }
 }
 
@@ -2531,11 +2535,13 @@ async function resumePasskeyCreateAfterPromptComplete(
         error
       );
     }
-    await delayPublicWebAuthnError(mirror?.ceremonyToken ?? null);
-    await completeCreateRequest(chromeApi, {
+    await completePasskeyRequestWithError(
+      chromeApi,
+      "create",
       requestId,
-      error: webAuthnError(error, Boolean(mirror?.ceremonyToken))
-    });
+      mirror?.ceremonyToken ?? null,
+      error
+    );
   }
 }
 
@@ -3201,16 +3207,13 @@ async function completeRestoredPasskeyPromptDismissal(
     mirror.phase,
     error
   );
-  await delayPublicWebAuthnError(mirror.ceremonyToken);
-  const details = {
-    requestId: mirror.requestId,
-    error: webAuthnError(error, true)
-  };
-  if (mirror.ceremony === "get") {
-    await completeGetRequest(chromeApi, details);
-  } else {
-    await completeCreateRequest(chromeApi, details);
-  }
+  await completePasskeyRequestWithError(
+    chromeApi,
+    mirror.ceremony,
+    mirror.requestId,
+    mirror.ceremonyToken,
+    error
+  );
 }
 
 function passkeyCeremonyMirrorForPhase(
@@ -4631,11 +4634,13 @@ async function handleCreateRequest(
         );
       }
     }
-    await delayPublicWebAuthnError(ceremonyToken);
-    await completeCreateRequest(chromeApi, {
+    await completePasskeyRequestWithError(
+      chromeApi,
+      "create",
       requestId,
-      error: webAuthnError(error, Boolean(ceremonyToken))
-    });
+      ceremonyToken,
+      error
+    );
   } finally {
     clearWebAuthnRequestCanceled(canceledRequests, requestId, requestCancelKey);
   }
@@ -6721,6 +6726,25 @@ function promptKeysForCancellation(
 
 function delay(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function completePasskeyRequestWithError(
+  chromeApi: ChromeLike,
+  ceremony: "get" | "create",
+  requestId: number,
+  ceremonyToken: string | null | undefined,
+  error: unknown
+) {
+  await delayPublicWebAuthnError(ceremonyToken);
+  const details = {
+    requestId,
+    error: webAuthnError(error, Boolean(ceremonyToken))
+  };
+  if (ceremony === "get") {
+    await completeGetRequest(chromeApi, details);
+  } else {
+    await completeCreateRequest(chromeApi, details);
+  }
 }
 
 async function delayPublicWebAuthnError(ceremonyToken: string | null | undefined) {

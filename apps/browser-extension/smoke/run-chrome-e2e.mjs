@@ -11,6 +11,7 @@ import playwright from "playwright";
 import { E2E_EXTENSION_ID } from "../scripts/manifestBuild.mjs";
 import { createSimpleWebAuthnSmokeServer } from "./simplewebauthn-server.mjs";
 import { SMOKE_HOST, smokeUrl } from "./smokeUrls.mjs";
+import { waitForWebAuthnDebugEvent } from "./webauthnDebug.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const extensionRoot = resolve(__dirname, "..");
@@ -278,23 +279,17 @@ async function clearWebAuthnDebug(extensionPage) {
 }
 
 async function expectWebAuthnDebugEvent(extensionPage, event, expected, label) {
-  const { vaultkernWebAuthnDebug = [] } = await extensionPage.evaluate(
-    async () => await chrome.storage.local.get("vaultkernWebAuthnDebug")
+  await waitForWebAuthnDebugEvent(
+    async () => {
+      const { vaultkernWebAuthnDebug = [] } = await extensionPage.evaluate(
+        async () => await chrome.storage.local.get("vaultkernWebAuthnDebug")
+      );
+      return vaultkernWebAuthnDebug;
+    },
+    event,
+    expected,
+    { label }
   );
-  const matched = vaultkernWebAuthnDebug.some((entry) =>
-    Object.entries({ event, ...expected }).every(
-      ([key, value]) => entry?.[key] === value
-    )
-  );
-  if (!matched) {
-    throw new Error(
-      `${label} did not record ${event}: ${JSON.stringify(
-        vaultkernWebAuthnDebug,
-        null,
-        2
-      )}`
-    );
-  }
 }
 
 async function waitForPasskeyRegisterResult(extensionPage, passkeyRegisterPage, label) {
