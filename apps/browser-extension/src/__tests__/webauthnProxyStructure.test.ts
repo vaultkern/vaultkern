@@ -236,4 +236,15 @@ describe("webauthn proxy structure", () => {
     expect(source).toContain("async function abortPendingPasskeyCreateRegistration");
     expect(source).not.toContain("const abortRegistration = async");
   });
+
+  it("saves pending create registrations through one abort-aware helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("async function savePendingPasskeyCreateRegistration");
+    expect(source.match(/await savePasskeyRegistration\(/g) ?? []).toHaveLength(1);
+  });
 });

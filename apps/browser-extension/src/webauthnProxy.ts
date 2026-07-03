@@ -2225,21 +2225,15 @@ async function resumePasskeyCreateAfterPromptComplete(
       return;
     }
 
-    try {
-      await savePasskeyRegistration(
-        sendRuntimeCommand,
-        mirror.ceremonyToken,
-        activeVaultId
-      );
-    } catch (error) {
-      ceremonyPhase = await abortPendingPasskeyCreateRegistration(
-        chromeApi,
-        sendRuntimeCommand,
-        mirror.ceremonyToken,
-        "closed_failed"
-      );
-      throw error;
-    }
+    await savePendingPasskeyCreateRegistration(
+      chromeApi,
+      sendRuntimeCommand,
+      mirror.ceremonyToken,
+      activeVaultId,
+      (closedPhase) => {
+        ceremonyPhase = closedPhase;
+      }
+    );
     if (requestIsCanceled()) {
       ceremonyPhase = await abortPendingPasskeyCreateRegistration(
         chromeApi,
@@ -3895,6 +3889,31 @@ async function abortPendingPasskeyCreateRegistration(
   return closedPhase;
 }
 
+async function savePendingPasskeyCreateRegistration(
+  chromeApi: ChromeLike,
+  sendRuntimeCommand: RuntimeCommandSender,
+  ceremonyToken: string,
+  activeVaultId: string,
+  setCeremonyPhase: (phase: "closed_failed") => void
+) {
+  try {
+    await savePasskeyRegistration(
+      sendRuntimeCommand,
+      ceremonyToken,
+      activeVaultId
+    );
+  } catch (error) {
+    const closedPhase = await abortPendingPasskeyCreateRegistration(
+      chromeApi,
+      sendRuntimeCommand,
+      ceremonyToken,
+      "closed_failed"
+    );
+    setCeremonyPhase(closedPhase);
+    throw error;
+  }
+}
+
 async function markCommittedPasskeyCreateUnknownDelivery(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender,
@@ -4301,21 +4320,15 @@ async function handleCreateRequest(
       return;
     }
 
-    try {
-      await savePasskeyRegistration(
-        sendRuntimeCommand,
-        ceremonyContext.ceremonyToken,
-        activeVaultId
-      );
-    } catch (error) {
-      ceremonyPhase = await abortPendingPasskeyCreateRegistration(
-        chromeApi,
-        sendRuntimeCommand,
-        ceremonyContext.ceremonyToken,
-        "closed_failed"
-      );
-      throw error;
-    }
+    await savePendingPasskeyCreateRegistration(
+      chromeApi,
+      sendRuntimeCommand,
+      ceremonyContext.ceremonyToken,
+      activeVaultId,
+      (closedPhase) => {
+        ceremonyPhase = closedPhase;
+      }
+    );
     await recordWebAuthnDebug(chromeApi, {
       event: "create_saved",
       requestId
