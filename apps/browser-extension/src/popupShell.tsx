@@ -97,7 +97,15 @@ type WebAuthnPromptCompleteOptions = {
   password?: string;
 };
 
-function notifyWebAuthnPromptComplete(
+function responseKeepsWebAuthnPromptOpen(response: unknown) {
+  return (
+    typeof response === "object" &&
+    response !== null &&
+    (response as { keepOpen?: unknown }).keepOpen === true
+  );
+}
+
+async function notifyWebAuthnPromptComplete(
   type: string,
   closeMode: string,
   options: WebAuthnPromptCompleteOptions = {}
@@ -111,7 +119,7 @@ function notifyWebAuthnPromptComplete(
   const shouldNotify = promptParams?.get("webauthn") === closeMode;
 
   if (!shouldNotify) {
-    return;
+    return undefined;
   }
 
   function closePrompt() {
@@ -120,7 +128,7 @@ function notifyWebAuthnPromptComplete(
 
   if (typeof sendMessage !== "function") {
     closePrompt();
-    return;
+    return undefined;
   }
 
   const requestIdValue = promptParams?.get("requestId");
@@ -150,11 +158,22 @@ function notifyWebAuthnPromptComplete(
     message.nonce = nonce;
   }
 
-  void Promise.resolve(
-    sendMessage.call(chromeApi.runtime, message)
-  )
-    .catch(() => undefined)
-    .finally(closePrompt);
+  let shouldClose = true;
+  try {
+    const response = await Promise.resolve(
+      sendMessage.call(chromeApi.runtime, message)
+    );
+    if (responseKeepsWebAuthnPromptOpen(response)) {
+      shouldClose = false;
+    }
+    return response;
+  } catch {
+    return undefined;
+  } finally {
+    if (shouldClose) {
+      closePrompt();
+    }
+  }
 }
 
 async function sendWebAuthnPromptMessage(
@@ -208,14 +227,14 @@ function notifyUnlockComplete(
   _session: unknown,
   options?: { method: "master_password" | "quick_unlock"; password?: string }
 ) {
-  notifyWebAuthnPromptComplete("vaultkern_unlock_complete", "unlock", options);
+  void notifyWebAuthnPromptComplete("vaultkern_unlock_complete", "unlock", options);
 }
 
 function notifyPresenceComplete(
   _session: unknown,
   options?: { credentialId?: string }
 ) {
-  notifyWebAuthnPromptComplete(
+  return notifyWebAuthnPromptComplete(
     "vaultkern_presence_complete",
     "approve",
     options

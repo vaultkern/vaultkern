@@ -8455,13 +8455,20 @@ describe("webAuthenticationProxy wrapper", () => {
     await presencePrompt.approve();
 
     await vi.waitFor(() => {
-      expect(presencePrompt.create).toHaveBeenCalledTimes(2);
+      expect(presencePrompt.requestOptions()).toEqual({
+        credentialOptions: [
+          {
+            credentialId: "Y3JlZGVudGlhbC0x",
+            username: "alice@example.com"
+          },
+          {
+            credentialId: "Y3JlZGVudGlhbC0y",
+            username: "bob@example.com"
+          }
+        ]
+      });
     });
-    const selectionPromptParams = new URL(
-      (presencePrompt.create.mock.calls[1][0] as { url: string }).url,
-      "chrome-extension://id/"
-    ).searchParams;
-    expect(selectionPromptParams.get("credentialOptions")).toBeNull();
+    expect(presencePrompt.create).toHaveBeenCalledTimes(1);
     expect(presencePrompt.requestOptions()).toEqual({
       credentialOptions: [
         {
@@ -8548,13 +8555,11 @@ describe("webAuthenticationProxy wrapper", () => {
         credentials: [
           {
             credentialId: "Y3JlZGVudGlhbC0x",
-            username: "alice@example.com",
-            userHandle: "dXNlci0x"
+            username: "alice@example.com"
           },
           {
             credentialId: "Y3JlZGVudGlhbC0y",
-            username: "bob@example.com",
-            userHandle: "dXNlci0y"
+            username: "bob@example.com"
           }
         ]
       });
@@ -8601,8 +8606,20 @@ describe("webAuthenticationProxy wrapper", () => {
     });
     await presencePrompt.approve();
     await vi.waitFor(() => {
-      expect(presencePrompt.create).toHaveBeenCalledTimes(2);
+      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
       expect(removedListener).toBeDefined();
+      expect(presencePrompt.requestOptions()).toEqual({
+        credentialOptions: [
+          {
+            credentialId: "Y3JlZGVudGlhbC0x",
+            username: "alice@example.com"
+          },
+          {
+            credentialId: "Y3JlZGVudGlhbC0y",
+            username: "bob@example.com"
+          }
+        ]
+      });
     });
 
     removedListener?.(77);
@@ -8658,13 +8675,11 @@ describe("webAuthenticationProxy wrapper", () => {
         credentials: [
           {
             credentialId: "Y3JlZGVudGlhbC0x",
-            username: "alice@example.com",
-            userHandle: "dXNlci0x"
+            username: "alice@example.com"
           },
           {
             credentialId: "Y3JlZGVudGlhbC0y",
-            username: "bob@example.com",
-            userHandle: "dXNlci0y"
+            username: "bob@example.com"
           }
         ]
       });
@@ -8703,7 +8718,19 @@ describe("webAuthenticationProxy wrapper", () => {
     });
     await presencePrompt.approve();
     await vi.waitFor(() => {
-      expect(presencePrompt.create).toHaveBeenCalledTimes(2);
+      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+      expect(presencePrompt.requestOptions()).toEqual({
+        credentialOptions: [
+          {
+            credentialId: "Y3JlZGVudGlhbC0x",
+            username: "alice@example.com"
+          },
+          {
+            credentialId: "Y3JlZGVudGlhbC0y",
+            username: "bob@example.com"
+          }
+        ]
+      });
     });
     await presencePrompt.approve(undefined, {
       credentialId: "bm90LWluLXRoZS1vcHRpb25z"
@@ -8744,7 +8771,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("does not expose S3B credential options when the selection popup fails to open", async () => {
+  it("does not expose S3B credential options in the approval popup URL", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
@@ -8787,9 +8814,6 @@ describe("webAuthenticationProxy wrapper", () => {
       }
     };
     const presencePrompt = installPresencePrompt(chromeApi);
-    presencePrompt.create
-      .mockResolvedValueOnce({ id: 77 })
-      .mockRejectedValueOnce(new Error("popup blocked"));
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
 
@@ -8834,33 +8858,34 @@ describe("webAuthenticationProxy wrapper", () => {
     for (let microtask = 0; microtask < 20; microtask += 1) {
       await Promise.resolve();
       await vi.advanceTimersByTimeAsync(0);
-      if (presencePrompt.create.mock.calls.length >= 2) {
+      if (
+        (
+          presencePrompt.requestOptions() as
+            | { credentialOptions?: Array<{ credentialId: string; username: string }> }
+            | undefined
+        )?.credentialOptions?.length === 2
+      ) {
         break;
       }
     }
-    expect(presencePrompt.create).toHaveBeenCalledTimes(2);
-    const failedPromptUrl = (
-      presencePrompt.create.mock.calls[1][0] as { url: string }
-    ).url;
-
-    for (let microtask = 0; microtask < 10; microtask += 1) {
-      await Promise.resolve();
-    }
-    expect(completeGetRequest).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(74);
-    expect(completeGetRequest).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    await vi.waitFor(() => {
-      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+    expect(firstPromptUrl).not.toContain("credentialOptions");
+    expect(firstPromptUrl).not.toContain("Y3JlZGVudGlhbC0x");
+    expect(firstPromptUrl).not.toContain("alice@example.com");
+    expect(presencePrompt.requestOptions()).toEqual({
+      credentialOptions: [
+        {
+          credentialId: "Y3JlZGVudGlhbC0x",
+          username: "alice@example.com"
+        },
+        {
+          credentialId: "Y3JlZGVudGlhbC0y",
+          username: "bob@example.com"
+        }
+      ]
     });
-    expect(completeGetRequest).toHaveBeenCalledWith({
-      requestId: 571,
-      error: {
-        name: "NotAllowedError",
-        message: "VaultKern passkey request failed"
-      }
-    });
-    expect(presencePrompt.requestOptions({ senderUrl: failedPromptUrl })).toBeUndefined();
+    expect(presencePrompt.requestOptions({ senderUrl: null })).toBeUndefined();
+    expect(completeGetRequest).not.toHaveBeenCalled();
     expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "create_passkey_assertion" })
     );
@@ -10365,7 +10390,19 @@ describe("webAuthenticationProxy wrapper", () => {
     } as unknown as Response);
 
     await vi.waitFor(() => {
-      expect(presencePrompt.create).toHaveBeenCalledTimes(2);
+      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
+      expect(presencePrompt.requestOptions()).toEqual({
+        credentialOptions: [
+          {
+            credentialId: "Y3JlZGVudGlhbC0x",
+            username: "Alice"
+          },
+          {
+            credentialId: "Y3JlZGVudGlhbC0y",
+            username: "Bob"
+          }
+        ]
+      });
     });
     const promptUrl = presencePrompt.latestPromptUrl();
     const promptParams = new URL(
@@ -10401,7 +10438,7 @@ describe("webAuthenticationProxy wrapper", () => {
     await vi.waitFor(() => {
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
     });
-    expect(presencePrompt.create).toHaveBeenCalledTimes(2);
+    expect(presencePrompt.create).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledWith(
       "https://example.com/.well-known/webauthn",
       expect.objectContaining({

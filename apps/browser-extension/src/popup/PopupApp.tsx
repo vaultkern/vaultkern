@@ -85,6 +85,14 @@ function passkeyCredentialOptionsFromUnknown(
   return parsed as PasskeyCredentialOption[];
 }
 
+function responseKeepsPasskeyPromptOpen(response: unknown) {
+  return (
+    typeof response === "object" &&
+    response !== null &&
+    (response as { keepOpen?: unknown }).keepOpen === true
+  );
+}
+
 async function loadPasskeyCredentialOptionsFromPrompt() {
   if (typeof window === "undefined") {
     return [];
@@ -154,7 +162,7 @@ export function PopupApp({
   onWebAuthnPresenceComplete?: (
     session: SessionStateLike,
     options?: { credentialId?: string }
-  ) => void | Promise<void>;
+  ) => unknown | Promise<unknown>;
   onWebAuthnUserVerificationComplete?: (
     session: SessionStateLike,
     options: { method: "master_password" | "quick_unlock"; password?: string }
@@ -198,6 +206,10 @@ export function PopupApp({
     PasskeyCredentialOption[]
   >([]);
   const [selectedPasskeyCredentialId, setSelectedPasskeyCredentialId] = useState("");
+  const [
+    waitingForPasskeyCredentialOptions,
+    setWaitingForPasskeyCredentialOptions
+  ] = useState(false);
 
   function currentVaultForSession() {
     return (
@@ -356,6 +368,9 @@ export function PopupApp({
       .then((options) => {
         if (!cancelled) {
           setPasskeyCredentialOptions(options);
+          if (options.length > 0) {
+            setWaitingForPasskeyCredentialOptions(false);
+          }
         }
       })
       .catch(() => {
@@ -368,6 +383,38 @@ export function PopupApp({
       cancelled = true;
     };
   }, [webAuthnApprovePrompt]);
+
+  useEffect(() => {
+    if (
+      !webAuthnApprovePrompt ||
+      !waitingForPasskeyCredentialOptions ||
+      passkeyCredentialOptions.length > 0
+    ) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      loadPasskeyCredentialOptionsFromPrompt()
+        .then((options) => {
+          if (cancelled || options.length === 0) {
+            return;
+          }
+          setPasskeyCredentialOptions(options);
+          setWaitingForPasskeyCredentialOptions(false);
+        })
+        .catch(() => undefined);
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    passkeyCredentialOptions.length,
+    waitingForPasskeyCredentialOptions,
+    webAuthnApprovePrompt
+  ]);
 
   useEffect(() => {
     if (
@@ -604,7 +651,7 @@ export function PopupApp({
 
     setSubmitting(true);
     try {
-      await Promise.resolve(
+      const response = await Promise.resolve(
         onWebAuthnPresenceComplete?.(
           session,
           passkeyCredentialOptions.length > 0 && selectedPasskeyCredentialId
@@ -612,6 +659,14 @@ export function PopupApp({
             : undefined
         )
       );
+      if (responseKeepsPasskeyPromptOpen(response)) {
+        setWaitingForPasskeyCredentialOptions(true);
+        const options = await loadPasskeyCredentialOptionsFromPrompt();
+        setPasskeyCredentialOptions(options);
+        if (options.length > 0) {
+          setWaitingForPasskeyCredentialOptions(false);
+        }
+      }
     } finally {
       setSubmitting(false);
     }
@@ -993,8 +1048,11 @@ export function PopupApp({
         : extensionSettings.language === "zh-CN"
           ? `确认后继续 ${siteLabel} 的通行密钥请求。`
           : `Approve this passkey request for ${siteLabel}.`;
-    const passkeyPromptAction =
-      extensionSettings.language === "zh-CN"
+    const passkeyPromptAction = waitingForPasskeyCredentialOptions
+      ? extensionSettings.language === "zh-CN"
+        ? "正在载入通行密钥账号..."
+        : "Loading passkey accounts..."
+      : extensionSettings.language === "zh-CN"
         ? "继续通行密钥请求"
         : "Continue passkey request";
 
@@ -1041,6 +1099,7 @@ export function PopupApp({
           }}
           disabled={
             submitting ||
+            waitingForPasskeyCredentialOptions ||
             (passkeyCredentialOptions.length > 0 && !selectedPasskeyCredentialId)
           }
           style={primaryActionStyle}

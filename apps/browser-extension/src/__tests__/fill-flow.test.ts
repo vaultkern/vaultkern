@@ -1476,6 +1476,61 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("keeps the passkey approval popup open while background prepares credential selection", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=approve&requestId=47&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-47"
+    );
+    const sendMessage = vi.fn(async (message: unknown) => {
+      if (
+        (message as { type?: unknown } | null)?.type ===
+        "vaultkern_presence_complete"
+      ) {
+        return { ok: true, keepOpen: true };
+      }
+      return { credentialOptions: [] };
+    });
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Confirm passkey request")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Continue passkey request" })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_presence_complete",
+        requestId: 47,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-47"
+      });
+    });
+    expect(closeWindow).not.toHaveBeenCalled();
+  });
+
   it("ignores passkey credential options that contain non-UI fields", async () => {
     const credentialOptions = [
       {

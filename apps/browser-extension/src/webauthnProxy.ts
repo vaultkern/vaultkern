@@ -81,6 +81,7 @@ type WebAuthnOriginContext = {
 type WebAuthnPromptContext = WebAuthnOriginContext & {
   relyingParty: string;
   credentialOptions?: PasskeyCredentialOption[];
+  keepOpenForCredentialSelection?: boolean;
 };
 
 type WebAuthnUserVerificationPromptContext = WebAuthnPromptContext & {
@@ -903,13 +904,28 @@ function registerUnlockCompleteHandler(
         requestId
       });
       const credentialId = credentialIdFromMessage(message);
+      const expected = promptStates.approve.contexts.get(promptKey);
+      const keepOpenForCredentialSelection =
+        !credentialId &&
+        expected?.keepOpenForCredentialSelection === true &&
+        (expected.credentialOptions?.length ?? 0) === 0;
       const completeSignal: PresenceCompleteSignal = {
         ...(credentialId ? { credentialId } : {})
       };
       const waiters = [...(promptStates.approve.completeWaiters.get(promptKey) ?? [])];
-      clearPresencePromptState(promptKey);
+      if (keepOpenForCredentialSelection) {
+        promptStates.approve.completeWaiters.delete(promptKey);
+      } else {
+        clearPresencePromptState(promptKey);
+      }
       for (const waiter of waiters) {
         waiter(completeSignal);
+      }
+      if (typeof sendResponse === "function") {
+        sendResponse({
+          ok: true,
+          ...(keepOpenForCredentialSelection ? { keepOpen: true } : {})
+        });
       }
       if (waiters.length === 0 && promptStates.approve.activeDrivers.has(promptKey)) {
         promptStates.approve.pendingCompleteSignals.set(promptKey, completeSignal);
@@ -1376,7 +1392,9 @@ async function handleGetRequest(
       requestId,
       ceremonyToken: ceremonyContext.ceremonyToken,
       session,
-      promptContext: promptContextFrom(originContext, relyingParty),
+      promptContext: promptContextFrom(originContext, relyingParty, [], {
+        keepOpenForCredentialSelection: discloseUserHandle
+      }),
       userVerification,
       canceledRequests,
       requestCancelKey,
@@ -1491,6 +1509,7 @@ async function handleGetRequest(
     if (!delivered) {
       return;
     }
+    await closePromptWindowsForCeremony(chromeApi, ceremonyContext.ceremonyToken);
   } catch (error) {
     await recordWebAuthnDebug(chromeApi, {
       event: "get_error",
@@ -4709,12 +4728,16 @@ function clientDataJsonBase64urlFrom(
 function promptContextFrom(
   originContext: WebAuthnOriginContext,
   relyingParty: string,
-  credentialOptions: PasskeyCredentialOption[] = []
+  credentialOptions: PasskeyCredentialOption[] = [],
+  options: { keepOpenForCredentialSelection?: boolean } = {}
 ): WebAuthnPromptContext {
   return {
     ...originContext,
     relyingParty,
-    ...(credentialOptions.length > 0 ? { credentialOptions } : {})
+    ...(credentialOptions.length > 0 ? { credentialOptions } : {}),
+    ...(options.keepOpenForCredentialSelection
+      ? { keepOpenForCredentialSelection: true }
+      : {})
   };
 }
 
@@ -6567,17 +6590,35 @@ async function openPromptWindow<
   }
 
   const existingWindowId = state.windowIds.get(promptKey);
-  if (typeof existingWindowId === "number" && chromeApi.windows.update) {
-    try {
-      await chromeApi.windows.update(existingWindowId, { focused: true });
-      const existingNonce = state.nonces.get(promptKey);
-      if (typeof existingNonce === "string") {
-        return { nonce: existingNonce, windowId: existingWindowId };
+  if (typeof existingWindowId === "number") {
+    const existingNonce = state.nonces.get(promptKey);
+    if (typeof existingNonce === "string") {
+      if (chromeApi.windows.update) {
+        try {
+          await chromeApi.windows.update(existingWindowId, { focused: true });
+        } catch {
+          clearPromptState(promptKey);
+          return openPromptWindow(
+            chromeApi,
+            state,
+            config,
+            clearPromptState,
+            requestId,
+            promptKey,
+            promptContext,
+            requestCancelKey,
+            preparedNonce
+          );
+        }
       }
-      clearPromptState(promptKey);
-    } catch {
-      clearPromptState(promptKey);
+      state.contexts.set(promptKey, promptContext);
+      state.requestIds.set(promptKey, requestId);
+      if (requestCancelKey) {
+        state.requestKeys.set(promptKey, requestCancelKey);
+      }
+      return { nonce: existingNonce, windowId: existingWindowId };
     }
+    clearPromptState(promptKey);
   }
 
   const nonce = preparedNonce ?? generatePromptNonce();
