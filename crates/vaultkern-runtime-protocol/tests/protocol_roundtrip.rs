@@ -9,11 +9,12 @@ use vaultkern_runtime_protocol::{
     PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
     PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
     PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto,
-    PasskeyCredentialListDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
-    PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
-    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, ProtocolEnvelope,
-    RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
-    VaultHandleDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
+    PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto,
+    PasskeyFrameKindDto, PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto,
+    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto,
+    PasskeyUserVerifiedDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
+    SaveVaultStatusDto, SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
+    VaultSourceStatusDto,
 };
 
 #[test]
@@ -1125,6 +1126,70 @@ fn protocol_roundtrips_passkey_credential_status_command_and_response() {
         serde_json::json!("passkey_credential_status")
     );
     assert_eq!(response_json["exists"], serde_json::json!(true));
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn protocol_roundtrips_passkey_credential_status_batch_command_and_response() {
+    let command = ProtocolEnvelope::new(RuntimeCommand::PasskeyCredentialStatusBatch {
+        ceremony_token: "token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+        vault_id: "vault-1".into(),
+        credential_ids: vec!["Y3JlZGVudGlhbC0x".into(), "Y3JlZGVudGlhbC0y".into()],
+        relying_party: "example.com".into(),
+    });
+
+    let command_json = serde_json::to_value(&command).unwrap();
+    assert_eq!(
+        command_json["command"]["type"],
+        serde_json::json!("passkey_credential_status_batch")
+    );
+    assert_eq!(
+        command_json["command"]["credential_ids"],
+        serde_json::json!(["Y3JlZGVudGlhbC0x", "Y3JlZGVudGlhbC0y"])
+    );
+    assert_eq!(
+        command_json["command"]["ceremony_token"],
+        serde_json::json!("token-1")
+    );
+    assert_eq!(
+        command_json["command"]["expected_phase"],
+        serde_json::json!("s3_credential_resolution")
+    );
+    assert_eq!(
+        command_json["command"]["relying_party"],
+        serde_json::json!("example.com")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
+        command
+    );
+
+    let response = RuntimeResponse::PasskeyCredentialStatusBatch(PasskeyCredentialStatusBatchDto {
+        statuses: vec![
+            PasskeyCredentialStatusDto {
+                credential_id: "Y3JlZGVudGlhbC0x".into(),
+                exists: true,
+            },
+            PasskeyCredentialStatusDto {
+                credential_id: "Y3JlZGVudGlhbC0y".into(),
+                exists: false,
+            },
+        ],
+    });
+
+    let response_json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        response_json["type"],
+        serde_json::json!("passkey_credential_status_batch")
+    );
+    assert_eq!(
+        response_json["statuses"][0]["exists"],
+        serde_json::json!(true)
+    );
     assert_eq!(
         serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
         response

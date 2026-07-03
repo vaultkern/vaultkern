@@ -1573,6 +1573,10 @@ type PasskeyCredentialStatusResponse = {
   exists: boolean;
 };
 
+type PasskeyCredentialStatusBatchResponse = {
+  statuses: PasskeyCredentialStatusResponse[];
+};
+
 type PasskeyCredentialListResponse = {
   credentials: PasskeyCredentialListItem[];
 };
@@ -1615,6 +1619,44 @@ async function credentialSelectionForGetRequest(
       username
     }))
   };
+}
+
+async function excludedCredentialStatusesForCreateRequest(
+  sendRuntimeCommand: RuntimeCommandSender,
+  ceremonyToken: string,
+  activeVaultId: string,
+  relyingParty: string,
+  excludedCredentialIds: string[]
+) {
+  if (excludedCredentialIds.length === 0) {
+    return [];
+  }
+
+  if (excludedCredentialIds.length === 1) {
+    return [
+      passkeyCredentialStatusFromResponse(
+        await sendRuntimeCommand({
+          type: "passkey_credential_status",
+          ceremony_token: ceremonyToken,
+          expected_phase: "s3_credential_resolution",
+          vault_id: activeVaultId,
+          credential_id: excludedCredentialIds[0],
+          relying_party: relyingParty
+        })
+      )
+    ];
+  }
+
+  return passkeyCredentialStatusBatchFromResponse(
+    await sendRuntimeCommand({
+      type: "passkey_credential_status_batch",
+      ceremony_token: ceremonyToken,
+      expected_phase: "s3_credential_resolution",
+      vault_id: activeVaultId,
+      credential_ids: excludedCredentialIds,
+      relying_party: relyingParty
+    })
+  ).statuses;
 }
 
 async function createAssertionForAllowedCredentials(
@@ -3468,6 +3510,28 @@ function passkeyCredentialStatusFromResponse(
   };
 }
 
+function passkeyCredentialStatusBatchFromResponse(
+  response: unknown
+): PasskeyCredentialStatusBatchResponse {
+  const runtimeError = runtimeErrorFromResponse(response);
+  if (runtimeError) {
+    throw runtimeError;
+  }
+
+  const batch = response as Partial<{
+    statuses: unknown;
+  }> | null;
+  if (!batch || !Array.isArray(batch.statuses)) {
+    throw new InternalPasskeyRequestError(
+      "runtime returned an invalid passkey credential status batch"
+    );
+  }
+
+  return {
+    statuses: batch.statuses.map(passkeyCredentialStatusFromResponse)
+  };
+}
+
 function passkeyCredentialListFromResponse(
   response: unknown
 ): PasskeyCredentialListResponse {
@@ -4258,19 +4322,12 @@ async function handleCreateRequest(
 
     const excludedCredentialIds = excludedCredentialIdsFromCreateOptions(options);
     throwIfRequestCanceled();
-    const excludedCredentialStatuses = await Promise.all(
-      excludedCredentialIds.map(async (credentialId) =>
-        passkeyCredentialStatusFromResponse(
-          await sendRuntimeCommand({
-            type: "passkey_credential_status",
-            ceremony_token: ceremonyContext.ceremonyToken,
-            expected_phase: "s3_credential_resolution",
-            vault_id: activeVaultId,
-            credential_id: credentialId,
-            relying_party: relyingParty
-          })
-        )
-      )
+    const excludedCredentialStatuses = await excludedCredentialStatusesForCreateRequest(
+      sendRuntimeCommand,
+      ceremonyContext.ceremonyToken,
+      activeVaultId,
+      relyingParty,
+      excludedCredentialIds
     );
     throwIfRequestCanceled();
     if (excludedCredentialStatuses.some((status) => status.exists)) {

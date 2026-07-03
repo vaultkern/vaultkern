@@ -28,11 +28,12 @@ use vaultkern_runtime_protocol::{
     PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
     PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto,
     PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto, PasskeyCredentialCandidateDto,
-    PasskeyCredentialListDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
-    PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
-    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse,
-    SaveVaultResultDto, SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto,
-    VaultReferenceListDto, VaultSourceStatusDto,
+    PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto,
+    PasskeyFrameKindDto, PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto,
+    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto,
+    PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
+    SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
+    VaultSourceStatusDto,
 };
 
 use crate::command_loop::format_error_chain;
@@ -1693,6 +1694,28 @@ impl Runtime {
         credential_id: &str,
         relying_party: &str,
     ) -> Result<PasskeyCredentialStatusDto> {
+        let batch = self.passkey_credential_status_batch(
+            ceremony_token,
+            expected_phase,
+            vault_id,
+            &[credential_id.to_owned()],
+            relying_party,
+        )?;
+        batch
+            .statuses
+            .into_iter()
+            .next()
+            .context("passkey credential status batch returned no status")
+    }
+
+    pub fn passkey_credential_status_batch(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+        credential_ids: &[String],
+        relying_party: &str,
+    ) -> Result<PasskeyCredentialStatusBatchDto> {
         self.validate_passkey_ceremony_for_s3_read(
             ceremony_token,
             expected_phase,
@@ -1703,17 +1726,22 @@ impl Runtime {
         let _ = self.loaded_vault(vault_id)?;
         self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
         let vault = self.loaded_vault(vault_id)?;
-        Ok(PasskeyCredentialStatusDto {
-            credential_id: credential_id.to_owned(),
-            exists: find_passkey_by_credential_id_and_relying_party(
-                &vault.root,
-                vault.recycle_bin_group,
-                vault.recycle_bin_enabled.unwrap_or(true),
-                credential_id,
-                Some(relying_party),
-            )
-            .is_some(),
-        })
+        let statuses = credential_ids
+            .iter()
+            .map(|credential_id| PasskeyCredentialStatusDto {
+                credential_id: credential_id.to_owned(),
+                exists: find_passkey_by_credential_id_and_relying_party(
+                    &vault.root,
+                    vault.recycle_bin_group,
+                    vault.recycle_bin_enabled.unwrap_or(true),
+                    credential_id,
+                    Some(relying_party),
+                )
+                .is_some(),
+            })
+            .collect();
+
+        Ok(PasskeyCredentialStatusBatchDto { statuses })
     }
 
     pub fn list_passkey_credentials(
@@ -3177,6 +3205,24 @@ impl Runtime {
                     &relying_party,
                 ) {
                     Ok(status) => RuntimeResponse::PasskeyCredentialStatus(status),
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::PasskeyCredentialStatusBatch {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                credential_ids,
+                relying_party,
+            } => Ok(
+                match self.passkey_credential_status_batch(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    &credential_ids,
+                    &relying_party,
+                ) {
+                    Ok(status) => RuntimeResponse::PasskeyCredentialStatusBatch(status),
                     Err(error) => query_error_response(error),
                 },
             ),

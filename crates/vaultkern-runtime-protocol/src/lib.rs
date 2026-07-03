@@ -236,6 +236,13 @@ pub enum RuntimeCommand {
         credential_id: String,
         relying_party: String,
     },
+    PasskeyCredentialStatusBatch {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: String,
+        credential_ids: Vec<String>,
+        relying_party: String,
+    },
     DeleteEntry {
         vault_id: String,
         entry_id: String,
@@ -316,6 +323,7 @@ pub enum RuntimeResponse {
     PasskeyAssertion(PasskeyAssertionDto),
     PasskeyRegistration(PasskeyRegistrationDto),
     PasskeyCredentialStatus(PasskeyCredentialStatusDto),
+    PasskeyCredentialStatusBatch(PasskeyCredentialStatusBatchDto),
     PasskeyCredentialList(PasskeyCredentialListDto),
     PasskeyUserVerificationCapability(PasskeyUserVerificationCapabilityDto),
     PasskeyUserVerified(PasskeyUserVerifiedDto),
@@ -603,6 +611,12 @@ pub struct PasskeyRegistrationDto {
 pub struct PasskeyCredentialStatusDto {
     pub credential_id: String,
     pub exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCredentialStatusBatchDto {
+    pub statuses: Vec<PasskeyCredentialStatusDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -13759,6 +13759,117 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
+  it("checks WebAuthn create excludeCredentials with one native batch command", async () => {
+    let createListener: ((request: unknown) => void) | undefined;
+    const completeCreateRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = runtimeCommandMock(async (command) => {
+      if (command.type === "get_session_state") {
+        return {
+          type: "session_state",
+          unlocked: true,
+          activeVaultId: "vault-1"
+        };
+      }
+      if (command.type === "passkey_credential_status") {
+        throw new Error("exclude status lookup must be batched");
+      }
+      if (command.type === "passkey_credential_status_batch") {
+        return {
+          type: "passkey_credential_status_batch",
+          statuses: [
+            { credentialId: "Y3JlZGVudGlhbC0x", exists: false },
+            { credentialId: "Y3JlZGVudGlhbC0y", exists: false }
+          ]
+        };
+      }
+      if (command.type === "create_passkey_registration") {
+        return {
+          type: "passkey_registration",
+          entryId: "entry-1",
+          credentialId: "bmV3LWNyZWRlbnRpYWw",
+          created: true,
+          authenticatorDataBase64url: "auth-data",
+          attestationObjectBase64url: "attestation-object",
+          clientDataJsonBase64url: "client-data",
+          publicKeyBase64url: "public-key",
+          publicKeyAlgorithm: -7
+        };
+      }
+      if (command.type === "save_passkey_registration") {
+        return { type: "save_vault_result", status: "saved" };
+      }
+      if (command.type === "commit_passkey_registration") {
+        return { type: "saved" };
+      }
+      if (command.type === "bind_passkey_ceremony_vault") {
+        return { type: "passkey_ceremony_vault_bound", bound: true };
+      }
+
+      throw new Error(`unexpected command: ${command.type}`);
+    });
+    const chromeApi = {
+      runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/register" }])
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeCreateRequest,
+        onCreateRequest: {
+          addListener(listener: (request: unknown) => void) {
+            createListener = listener;
+          }
+        }
+      }
+    };
+    const presencePrompt = installPresencePrompt(chromeApi);
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    createListener?.({
+      requestId: 236,
+      tabId: 101,
+      frameId: 0,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rp: { id: "example.com", name: "Example" },
+        user: {
+          id: "dXNlci0x",
+          name: "alice@example.com",
+          displayName: "Alice"
+        },
+        challenge: "cmVnaXN0ZXItMQ",
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+        excludeCredentials: [
+          {
+            type: "public-key",
+            id: "Y3JlZGVudGlhbC0x"
+          },
+          {
+            type: "public-key",
+            id: "Y3JlZGVudGlhbC0y"
+          }
+        ]
+      })
+    });
+    await presencePrompt.approve();
+
+    await vi.waitFor(() => {
+      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "passkey_credential_status" })
+    );
+    expect(sendRuntimeCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "passkey_credential_status_batch",
+        vault_id: "vault-1",
+        credential_ids: ["Y3JlZGVudGlhbC0x", "Y3JlZGVudGlhbC0y"],
+        relying_party: "example.com"
+      })
+    );
+  });
+
   it("delays WebAuthn create exclude status errors before completing the request", async () => {
     vi.useFakeTimers();
 

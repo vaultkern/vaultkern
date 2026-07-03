@@ -3488,6 +3488,61 @@ fn runtime_reports_passkey_credential_status() {
 }
 
 #[test]
+fn runtime_reports_passkey_credential_status_batch() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: None,
+        backup_eligible: false,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    register_create_ceremony_at_s3(&mut runtime, "status-batch-token-example");
+    let response = runtime
+        .handle(RuntimeCommand::PasskeyCredentialStatusBatch {
+            ceremony_token: "status-batch-token-example".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            vault_id: handle.vault_id,
+            credential_ids: vec!["Y3JlZGVudGlhbC0x".into(), "bWlzc2luZw".into()],
+            relying_party: "example.com".into(),
+        })
+        .unwrap();
+
+    let RuntimeResponse::PasskeyCredentialStatusBatch(statuses) = response else {
+        panic!("expected passkey credential status batch, got {response:?}");
+    };
+    assert_eq!(statuses.statuses.len(), 2);
+    assert_eq!(statuses.statuses[0].credential_id, "Y3JlZGVudGlhbC0x");
+    assert!(statuses.statuses[0].exists);
+    assert_eq!(statuses.statuses[1].credential_id, "bWlzc2luZw");
+    assert!(!statuses.statuses[1].exists);
+}
+
+#[test]
 fn runtime_scopes_passkey_credential_status_to_relying_party() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
