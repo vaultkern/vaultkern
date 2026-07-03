@@ -13811,6 +13811,7 @@ describe("webAuthenticationProxy wrapper", () => {
     await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
     });
+    expect(verificationPrompt.create).toHaveBeenCalledTimes(1);
     expect(sendRuntimeCommand).toHaveBeenCalledWith({
       type: "verify_passkey_user",
       ceremony_token: ceremonyToken,
@@ -18066,6 +18067,7 @@ describe("webAuthenticationProxy wrapper", () => {
     await vi.waitFor(() => {
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
     });
+    expect(verificationPrompt.create).toHaveBeenCalledTimes(1);
     expect(sendRuntimeCommand).toHaveBeenCalledWith({
       type: "verify_passkey_user",
       ceremony_token: ceremonyToken,
