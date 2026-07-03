@@ -5122,6 +5122,7 @@ async function originContextForRequest(
     excludeCredentials?: unknown;
   }
 ) {
+  const requestFrame = trustedFrameIdsFromWebAuthnRequest(request);
   const directOrigin = originContextFromRequest(request);
   if (directOrigin) {
     const requestFrameId = (request as { frameId?: unknown } | null | undefined)
@@ -5129,7 +5130,8 @@ async function originContextForRequest(
     const observedOrigin = originContextFromPageRequest(
       ceremony,
       options,
-      directOrigin.origin
+      directOrigin.origin,
+      requestFrame ?? undefined
     );
     const observedAncestorChainTrusted =
       typeof requestFrameId === "number" &&
@@ -5150,7 +5152,6 @@ async function originContextForRequest(
       : directOrigin;
   }
 
-  const requestFrame = trustedFrameIdsFromWebAuthnRequest(request);
   return waitForOriginContextFromPageRequest(
     ceremony,
     options,

@@ -6934,16 +6934,24 @@ describe("webAuthenticationProxy wrapper", () => {
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
     expect(
-      recordWebAuthnPageRequest({
-        type: "vaultkern_webauthn_page_request",
-        ceremony: "get",
-        origin: "https://observed.example",
-        topOrigin: "https://observed.example",
-        ancestorOrigins: ["https://middle.example", "https://observed.example"],
-        relyingParty: "observed.example",
-        challenge: "b2JzZXJ2ZWQtZ2V0LW1pZA",
-        allowCredentialIds: ["Y3JlZGVudGlhbC1taWQ"]
-      })
+      recordWebAuthnPageRequest(
+        {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "get",
+          origin: "https://observed.example",
+          topOrigin: "https://observed.example",
+          ancestorOrigins: ["https://middle.example", "https://observed.example"],
+          relyingParty: "observed.example",
+          challenge: "b2JzZXJ2ZWQtZ2V0LW1pZA",
+          allowCredentialIds: ["Y3JlZGVudGlhbC1taWQ"]
+        },
+        chromeApi,
+        {
+          url: "https://observed.example/frame",
+          tab: { id: 101 },
+          frameId: 5
+        }
+      )
     ).toBe(true);
 
     getListener?.({
@@ -6990,6 +6998,86 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
+  it("does not use page-observed ancestor chains from a different frame", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = runtimeCommandMock(async (command) => {
+      if (command.type === "reconcile_passkey_ceremony_ledger") {
+        return { type: "passkey_ceremony_reconciliation", reconciled: [] };
+      }
+      throw new Error("cross-frame observed ancestor chain must not reach native");
+    });
+    const chromeApi = {
+      runtime: {},
+      windows: {
+        create: vi.fn(async () => ({ id: 77 }))
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+    expect(
+      recordWebAuthnPageRequest(
+        {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "get",
+          origin: "https://observed.example",
+          topOrigin: "https://observed.example",
+          ancestorOrigins: ["https://middle.example", "https://observed.example"],
+          relyingParty: "observed.example",
+          challenge: "Y3Jvc3MtZnJhbWUtY2hhaW4",
+          allowCredentialIds: ["Y3JlZGVudGlhbC1jcm9zcy1mcmFtZQ"]
+        },
+        chromeApi,
+        {
+          url: "https://observed.example/frame",
+          tab: { id: 202 },
+          frameId: 9
+        }
+      )
+    ).toBe(true);
+
+    getListener?.({
+      requestId: 129,
+      tabId: 101,
+      frameId: 5,
+      origin: "https://observed.example",
+      requestDetailsJson: JSON.stringify({
+        rpId: "observed.example",
+        challenge: "Y3Jvc3MtZnJhbWUtY2hhaW4",
+        allowCredentials: [
+          {
+            type: "public-key",
+            id: "Y3JlZGVudGlhbC1jcm9zcy1mcmFtZQ"
+          }
+        ]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "register_passkey_ceremony" })
+    );
+    expect(chromeApi.windows.create).not.toHaveBeenCalled();
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 129,
+      error: {
+        name: "NotAllowedError",
+        message: "VaultKern cannot identify the WebAuthn request frame"
+      }
+    });
+  });
+
   it("does not mark clientDataJSON crossOrigin for same-origin default-port ancestors", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     const completeGetRequest = vi.fn(async () => undefined);
@@ -7023,16 +7111,24 @@ describe("webAuthenticationProxy wrapper", () => {
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
     expect(
-      recordWebAuthnPageRequest({
-        type: "vaultkern_webauthn_page_request",
-        ceremony: "get",
-        origin: "https://observed.example",
-        topOrigin: "https://observed.example:443",
-        ancestorOrigins: ["https://observed.example:443"],
-        relyingParty: "observed.example",
-        challenge: "ZGVmYXVsdC1wb3J0",
-        allowCredentialIds: ["Y3JlZGVudGlhbC1kZWZhdWx0LXBvcnQ"]
-      })
+      recordWebAuthnPageRequest(
+        {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "get",
+          origin: "https://observed.example",
+          topOrigin: "https://observed.example:443",
+          ancestorOrigins: ["https://observed.example:443"],
+          relyingParty: "observed.example",
+          challenge: "ZGVmYXVsdC1wb3J0",
+          allowCredentialIds: ["Y3JlZGVudGlhbC1kZWZhdWx0LXBvcnQ"]
+        },
+        chromeApi,
+        {
+          url: "https://observed.example/frame",
+          tab: { id: 101 },
+          frameId: 5
+        }
+      )
     ).toBe(true);
 
     getListener?.({
@@ -9014,15 +9110,23 @@ describe("webAuthenticationProxy wrapper", () => {
 
       await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
       expect(
-        recordWebAuthnPageRequest({
-          type: "vaultkern_webauthn_page_request",
-          ceremony: "get",
-          origin: "https://example.com",
-          relyingParty: "example.com",
-          challenge,
-          allowCredentialIds: ["Y3JlZGVudGlhbC0x"],
-          mediation
-        })
+        recordWebAuthnPageRequest(
+          {
+            type: "vaultkern_webauthn_page_request",
+            ceremony: "get",
+            origin: "https://example.com",
+            relyingParty: "example.com",
+            challenge,
+            allowCredentialIds: ["Y3JlZGVudGlhbC0x"],
+            mediation
+          },
+          chromeApi,
+          {
+            url: "https://example.com/login",
+            tab: { id: 101 },
+            frameId: 0
+          }
+        )
       ).toBe(true);
 
       getListener?.({
@@ -13576,15 +13680,23 @@ describe("webAuthenticationProxy wrapper", () => {
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
     expect(
-      recordWebAuthnPageRequest({
-        type: "vaultkern_webauthn_page_request",
-        ceremony: "create",
-        origin: "https://example.com",
-        relyingParty: "example.com",
-        challenge: "Y29uZGl0aW9uYWwtY3JlYXRl",
-        excludeCredentialIds: [],
-        mediation: "conditional"
-      })
+      recordWebAuthnPageRequest(
+        {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "create",
+          origin: "https://example.com",
+          relyingParty: "example.com",
+          challenge: "Y29uZGl0aW9uYWwtY3JlYXRl",
+          excludeCredentialIds: [],
+          mediation: "conditional"
+        },
+        chromeApi,
+        {
+          url: "https://example.com/register",
+          tab: { id: 101 },
+          frameId: 0
+        }
+      )
     ).toBe(true);
 
     createListener?.({
