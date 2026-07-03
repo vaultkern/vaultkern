@@ -1841,7 +1841,7 @@ async function resumePasskeyGetAfterPromptComplete(
         credentialId
       );
       if (!selectedCredentialId) {
-        throw new WebAuthnRequestError(
+        throw userAbortWebAuthnRequestError(
           "NotAllowedError",
           "VaultKern passkey credential was not selected"
         );
@@ -3062,7 +3062,7 @@ async function completeRestoredPasskeyPromptDismissal(
   sendRuntimeCommand: RuntimeCommandSender,
   mirror: PasskeyCeremonyContext
 ) {
-  const error = new WebAuthnRequestError(
+  const error = userAbortWebAuthnRequestError(
     "NotAllowedError",
     "VaultKern passkey prompt was dismissed"
   );
@@ -3837,12 +3837,7 @@ async function closePasskeyCeremony(
 }
 
 function isUserAbortError(error: unknown) {
-  return (
-    error instanceof WebAuthnRequestError &&
-    (error.message.includes("dismissed") ||
-      error.message.includes("canceled") ||
-      error.message.includes("was not selected"))
-  );
+  return error instanceof WebAuthnRequestError && error.userAbort;
 }
 
 function throwIfWebAuthnRequestCanceled(
@@ -3851,7 +3846,7 @@ function throwIfWebAuthnRequestCanceled(
   requestCancelKey: string | null
 ) {
   if (webAuthnRequestIsCanceled(canceledRequests, requestId, requestCancelKey)) {
-    throw new WebAuthnRequestError(
+    throw userAbortWebAuthnRequestError(
       "NotAllowedError",
       "VaultKern WebAuthn request was canceled"
     );
@@ -5741,7 +5736,7 @@ async function activeVaultForRequest(
           }
           const lateSignal = await lateUnlockSignal;
           if (lateSignal === "dismissed") {
-            throw new WebAuthnRequestError(
+            throw userAbortWebAuthnRequestError(
               "NotAllowedError",
               "VaultKern vault unlock was dismissed"
             );
@@ -5766,7 +5761,7 @@ async function activeVaultForRequest(
         continue;
       }
       if (signal === "dismissed") {
-        throw new WebAuthnRequestError(
+        throw userAbortWebAuthnRequestError(
           "NotAllowedError",
           "VaultKern vault unlock was dismissed"
         );
@@ -5904,7 +5899,7 @@ async function userPresenceForRequest(
         return selectedCredentialId ? { selectedCredentialId } : {};
       }
       if (signal?.type === "dismissed") {
-        throw new WebAuthnRequestError(
+        throw userAbortWebAuthnRequestError(
           "NotAllowedError",
           "VaultKern passkey approval was dismissed"
         );
@@ -6013,7 +6008,7 @@ async function userVerificationForRequest(
         return true;
       }
       if (signal?.type === "dismissed") {
-        throw new WebAuthnRequestError(
+        throw userAbortWebAuthnRequestError(
           "NotAllowedError",
           "VaultKern passkey user verification was dismissed"
         );
@@ -6038,7 +6033,7 @@ function selectedCredentialIdForPrompt(
     return undefined;
   }
   if (!credentialId) {
-    throw new WebAuthnRequestError(
+    throw userAbortWebAuthnRequestError(
       "NotAllowedError",
       "VaultKern passkey credential was not selected"
     );
@@ -6754,13 +6749,22 @@ async function delayPublicWebAuthnError(ceremonyToken: string | null | undefined
 class WebAuthnRequestError extends Error {
   constructor(
     public readonly name: string,
-    message: string
+    message: string,
+    public readonly options: { userAbort?: boolean } = {}
   ) {
     super(message);
+  }
+
+  get userAbort() {
+    return this.options.userAbort === true;
   }
 }
 
 class InternalPasskeyRequestError extends Error {}
+
+function userAbortWebAuthnRequestError(name: string, message: string) {
+  return new WebAuthnRequestError(name, message, { userAbort: true });
+}
 
 function webAuthnError(error: unknown, concealNotAllowedDetails = false) {
   if (error instanceof InternalPasskeyRequestError) {
