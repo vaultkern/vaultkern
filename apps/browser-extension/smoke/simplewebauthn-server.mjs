@@ -18,6 +18,7 @@ export async function createSimpleWebAuthnSmokeServer(options = {}) {
   const hostname = options.hostname ?? "localhost";
   const rpId = options.rpId ?? hostname;
   const requestedPort = options.port ?? 8877;
+  const userVerification = options.userVerification ?? "preferred";
   const state = {
     currentRegistrationChallenge: null,
     currentAuthenticationChallenge: null,
@@ -58,7 +59,7 @@ export async function createSimpleWebAuthnSmokeServer(options = {}) {
           authenticatorSelection: {
             authenticatorAttachment: "platform",
             residentKey: "preferred",
-            userVerification: "preferred"
+            userVerification
           },
           excludeCredentials: state.credential ? [{ id: state.credential.id }] : [],
           supportedAlgorithmIDs: [-7]
@@ -110,7 +111,7 @@ export async function createSimpleWebAuthnSmokeServer(options = {}) {
           rpID: rpId,
           allowCredentials: [{ id: state.credential.id }],
           timeout: 60_000,
-          userVerification: "preferred"
+          userVerification
         });
 
         state.currentAuthenticationChallenge = authenticationOptions.challenge;

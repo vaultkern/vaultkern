@@ -35,6 +35,10 @@
         return value ? base64urlBytes(value) : null;
       }
 
+      function discoverableRequest() {
+        return new URLSearchParams(location.search).get("discoverable") === "1";
+      }
+
       function userVerificationRequirement() {
         const value = new URLSearchParams(location.search).get("uv");
         return ["discouraged", "preferred", "required"].includes(value)
@@ -47,20 +51,25 @@
         .addEventListener("click", async () => {
           const result = document.querySelector("#vaultkern-passkey-result");
           try {
-            const selectedCredentialId = credentialIdBytes();
-            if (!selectedCredentialId) {
+            const discoverable = discoverableRequest();
+            const selectedCredentialId = discoverable ? null : credentialIdBytes();
+            if (!discoverable && !selectedCredentialId) {
               result.value = "error:NotFoundError:Register a passkey first";
               return;
             }
             const credential = await navigator.credentials.get({
               publicKey: {
                 challenge: bytes("challenge-1"),
-                allowCredentials: [
-                  {
-                    type: "public-key",
-                    id: selectedCredentialId
-                  }
-                ],
+                ...(discoverable
+                  ? {}
+                  : {
+                      allowCredentials: [
+                        {
+                          type: "public-key",
+                          id: selectedCredentialId
+                        }
+                      ]
+                    }),
                 timeout: 60000,
                 rpId: location.hostname,
                 userVerification: userVerificationRequirement()

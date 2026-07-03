@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import playwright from "playwright";
 
 import { E2E_EXTENSION_ID } from "../scripts/manifestBuild.mjs";
+import { createSimpleWebAuthnSmokeServer } from "./simplewebauthn-server.mjs";
 import { SMOKE_HOST, smokeUrl } from "./smokeUrls.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -202,15 +203,13 @@ async function passkeyDiagnostics(extensionPage, webAuthnPage) {
 }
 
 async function approvePasskeyPrompt(context, extensionPage, webAuthnPage, label) {
-  const prompt = await context
-    .waitForEvent("page", { timeout: 15_000 })
-    .catch(async (error) => {
-      const diagnostics = await passkeyDiagnostics(extensionPage, webAuthnPage);
-      throw new Error(
-        `${label} passkey prompt did not open: ${error.message}\n` +
-          `Diagnostics: ${JSON.stringify(diagnostics, null, 2)}`
-      );
-    });
+  const prompt = await waitForPasskeyPromptPage(
+    context,
+    extensionPage,
+    webAuthnPage,
+    label,
+    "passkey prompt"
+  );
   await prompt.waitForLoadState("domcontentloaded");
   await prompt.getByRole("button", { name: "Continue passkey request" }).click();
   await prompt.waitForEvent("close", { timeout: 5_000 }).catch(() => {});
@@ -223,19 +222,53 @@ async function unlockPasskeyPromptWithPassword(
   password,
   label
 ) {
-  const prompt = await context
-    .waitForEvent("page", { timeout: 15_000 })
-    .catch(async (error) => {
-      const diagnostics = await passkeyDiagnostics(extensionPage, webAuthnPage);
-      throw new Error(
-        `${label} passkey unlock prompt did not open: ${error.message}\n` +
-          `Diagnostics: ${JSON.stringify(diagnostics, null, 2)}`
-      );
-    });
+  const prompt = await waitForPasskeyPromptPage(
+    context,
+    extensionPage,
+    webAuthnPage,
+    label,
+    "passkey unlock prompt"
+  );
   await prompt.waitForLoadState("domcontentloaded");
   await prompt.getByLabel("Master Password").fill(password);
   await prompt.getByRole("button", { name: "Unlock Vault" }).click();
   await prompt.waitForEvent("close", { timeout: 5_000 }).catch(() => {});
+}
+
+async function waitForPasskeyPromptPage(
+  context,
+  extensionPage,
+  webAuthnPage,
+  label,
+  promptLabel
+) {
+  const existingPrompt = context
+    .pages()
+    .find((page) => isPasskeyPromptPage(page, extensionPage));
+  if (existingPrompt) {
+    return existingPrompt;
+  }
+
+  return context.waitForEvent("page", { timeout: 15_000 }).catch(async (error) => {
+    const diagnostics = await passkeyDiagnostics(extensionPage, webAuthnPage);
+    throw new Error(
+      `${label} ${promptLabel} did not open: ${error.message}\n` +
+        `Diagnostics: ${JSON.stringify(diagnostics, null, 2)}`
+    );
+  });
+}
+
+function isPasskeyPromptPage(page, extensionPage) {
+  if (page === extensionPage || page.isClosed()) {
+    return false;
+  }
+
+  try {
+    const url = new URL(page.url());
+    return url.pathname.endsWith("/popup.html") && url.searchParams.has("webauthn");
+  } catch {
+    return false;
+  }
 }
 
 async function clearWebAuthnDebug(extensionPage) {
@@ -346,6 +379,37 @@ async function waitForPasskeyLoginResult(
   return passkeyResult;
 }
 
+async function waitForSimpleWebAuthnVerification(page, label) {
+  await page
+    .waitForFunction(() => {
+      const value = document.querySelector("#result")?.value;
+      if (!value?.trim().startsWith("{")) {
+        return false;
+      }
+      try {
+        return JSON.parse(value).verified === true;
+      } catch {
+        return false;
+      }
+    })
+    .catch(async (error) => {
+      const state = await page
+        .evaluate(() => ({
+          result: document.querySelector("#result")?.value ?? null,
+          status: document.querySelector("#status-json")?.textContent ?? null,
+          messages: globalThis.__vaultkernWebAuthnMessages ?? []
+        }))
+        .catch((innerError) => ({ readError: String(innerError?.message ?? innerError) }));
+      throw new Error(
+        `${label} SimpleWebAuthn verification did not succeed: ${error.message}\n` +
+          `Page state: ${JSON.stringify(state, null, 2)}`
+      );
+    });
+
+  const value = await page.locator("#result").evaluate((node) => node.value);
+  return JSON.parse(value);
+}
+
 async function main() {
   const manifest = JSON.parse(await readFile(join(extensionPath, "manifest.json"), "utf8"));
   if (manifest.key == null) {
@@ -359,10 +423,16 @@ async function main() {
   const vaultPath = join(workDir, "smoke.kdbx");
   let context;
   let server;
+  let simpleWebAuthnServer;
 
   try {
     run("cargo", [...vkdbxArgs, vaultPath, password]);
     server = await startSmokeServer();
+    simpleWebAuthnServer = await createSimpleWebAuthnSmokeServer({
+      hostname: SMOKE_HOST,
+      port: 0,
+      userVerification: "discouraged"
+    });
     const nativeManifest = await writeNativeManifest(workDir);
 
     context = await playwright.chromium.launchPersistentContext(join(workDir, "profile"), {
@@ -600,6 +670,63 @@ async function main() {
       "stored assertion"
     );
 
+    const discoverablePasskeyPage = await context.newPage();
+    await discoverablePasskeyPage.goto(`${server.passkeyUrl}?discoverable=1`);
+    await discoverablePasskeyPage.evaluate(() => {
+      globalThis.__vaultkernWebAuthnMessages = [];
+      window.addEventListener("message", (event) => {
+        if (event.data?.type === "vaultkern_webauthn_page_request") {
+          globalThis.__vaultkernWebAuthnMessages.push(event.data);
+        }
+      });
+    });
+    if (
+      !(await discoverablePasskeyPage.evaluate(
+        () => document.querySelector("#vaultkern-passkey-login") != null
+      ))
+    ) {
+      throw new Error("discoverable passkey smoke page did not expose the login button");
+    }
+    const discoverablePasskeyApproval = approvePasskeyPrompt(
+      context,
+      extensionPage,
+      discoverablePasskeyPage,
+      "discoverable assertion"
+    );
+    await discoverablePasskeyPage.click("#vaultkern-passkey-login");
+    await discoverablePasskeyApproval;
+    const discoverablePasskeySelection = approvePasskeyPrompt(
+      context,
+      extensionPage,
+      discoverablePasskeyPage,
+      "discoverable selection"
+    );
+    await discoverablePasskeySelection;
+    const discoverablePasskeyResult = await waitForPasskeyLoginResult(
+      extensionPage,
+      discoverablePasskeyPage,
+      expectedPasskeyResult,
+      "discoverable assertion"
+    );
+    const discoverableMessages = await discoverablePasskeyPage.evaluate(
+      () => globalThis.__vaultkernWebAuthnMessages ?? []
+    );
+    if (
+      !discoverableMessages.some(
+        (message) =>
+          message?.ceremony === "get" &&
+          !Array.isArray(message.allowCredentialIds)
+      )
+    ) {
+      throw new Error(
+        `discoverable assertion sent allowCredentials: ${JSON.stringify(
+          discoverableMessages,
+          null,
+          2
+        )}`
+      );
+    }
+
     await sendCommand(extensionPage, { type: "lock_session" });
     await clearWebAuthnDebug(extensionPage);
     const lockedPasskeyRegisterPage = await context.newPage();
@@ -689,6 +816,42 @@ async function main() {
       "locked assertion"
     );
 
+    const simpleWebAuthnPage = await context.newPage();
+    await simpleWebAuthnPage.goto(simpleWebAuthnServer.origin);
+    await simpleWebAuthnPage.evaluate(() => {
+      globalThis.__vaultkernWebAuthnMessages = [];
+      window.addEventListener("message", (event) => {
+        if (event.data?.type === "vaultkern_webauthn_page_request") {
+          globalThis.__vaultkernWebAuthnMessages.push(event.data);
+        }
+      });
+    });
+    const simpleRegistrationApproval = approvePasskeyPrompt(
+      context,
+      extensionPage,
+      simpleWebAuthnPage,
+      "simplewebauthn registration"
+    );
+    await simpleWebAuthnPage.getByRole("button", { name: "Register Passkey" }).click();
+    await simpleRegistrationApproval;
+    const simpleRegistrationVerification = await waitForSimpleWebAuthnVerification(
+      simpleWebAuthnPage,
+      "registration"
+    );
+
+    const simpleAuthenticationApproval = approvePasskeyPrompt(
+      context,
+      extensionPage,
+      simpleWebAuthnPage,
+      "simplewebauthn authentication"
+    );
+    await simpleWebAuthnPage.getByRole("button", { name: "Login With Passkey" }).click();
+    await simpleAuthenticationApproval;
+    const simpleAuthenticationVerification = await waitForSimpleWebAuthnVerification(
+      simpleWebAuthnPage,
+      "authentication"
+    );
+
     console.log(
       JSON.stringify(
         {
@@ -704,6 +867,11 @@ async function main() {
           passkeyRegisterResult,
           passkeyResult,
           storedPasskeyResult,
+          discoverablePasskeyResult,
+          simpleWebAuthnRegistrationVerified:
+            simpleRegistrationVerification.verified === true,
+          simpleWebAuthnAuthenticationVerified:
+            simpleAuthenticationVerification.verified === true,
           lockedPasskeyRegisterResult,
           lockedPasskeyResult,
           submitResult: submitted
@@ -715,6 +883,7 @@ async function main() {
   } finally {
     await context?.close().catch(() => {});
     await server?.close().catch(() => {});
+    await simpleWebAuthnServer?.close().catch(() => {});
     await rm(workDir, { recursive: true, force: true });
   }
 }

@@ -50,8 +50,39 @@ test("simplewebauthn smoke server advertises the requested listener host", async
   }
 });
 
-async function fetchJson(url, init) {
+test("simplewebauthn smoke server can request discouraged user verification", async () => {
+  const server = await createSimpleWebAuthnSmokeServer({
+    port: 0,
+    userVerification: "discouraged"
+  });
+
+  try {
+    const registrationOptions = await fetchJson(
+      `${server.origin}/api/register/options`,
+      {
+        method: "POST"
+      }
+    );
+    assert.equal(
+      registrationOptions.authenticatorSelection.userVerification,
+      "discouraged"
+    );
+
+    const authenticationOptions = await fetchJson(
+      `${server.origin}/api/authenticate/options`,
+      {
+        method: "POST"
+      },
+      409
+    );
+    assert.equal(authenticationOptions.error, "no registered credential");
+  } finally {
+    await server.close();
+  }
+});
+
+async function fetchJson(url, init, expectedStatus = 200) {
   const response = await fetch(url, init);
-  assert.equal(response.status, 200);
+  assert.equal(response.status, expectedStatus);
   return response.json();
 }
