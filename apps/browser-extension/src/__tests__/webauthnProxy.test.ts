@@ -4873,6 +4873,104 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
   });
 
+  it("fails closed when a restored approval prompt window is dismissed", async () => {
+    vi.useFakeTimers();
+
+    let removedListener: ((windowId: number) => void) | undefined;
+    const sessionStorage = createSessionStorage({
+      vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
+        "token-restored-dismiss": {
+          version: 1,
+          ceremonyToken: "token-restored-dismiss",
+          ceremony: "get",
+          phase: "s1_user_authorization",
+          origin: "https://example.com",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          challengeBase64url: "Y2hhbGxlbmdlLTE",
+          requestId: 216,
+          tabId: 101,
+          frameId: 0,
+          frameKind: "top",
+          activeVaultId: "vault-1",
+          getCredentialIds: ["Y3JlZGVudGlhbC0x"],
+          popupNonce: "nonce-dismiss",
+          promptMode: "approve",
+          promptWindowId: 52,
+          getClientExtensionResults: {},
+          registeredAtEpochMs: 1_000,
+          expiresAtEpochMs: Date.now() + 300_000
+        }
+      })
+    });
+    const completeGetRequest = vi.fn(async () => undefined);
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`)
+      },
+      storage: {
+        session: sessionStorage
+      },
+      windows: {
+        onRemoved: {
+          addListener(listener: (windowId: number) => void) {
+            removedListener = listener;
+          },
+          removeListener: vi.fn()
+        }
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest
+      }
+    };
+    const sendRuntimeCommand = vi.fn(async (command: Record<string, unknown>) => {
+      if (command.type === "query_passkey_ceremony_ledger") {
+        return {
+          type: "passkey_ceremony_ledger",
+          known: true,
+          phase: "s1_user_authorization",
+          durableState: "none",
+          deliveryState: "not_delivered"
+        };
+      }
+      if (command.type === "advance_passkey_ceremony_phase") {
+        return { type: "passkey_ceremony_advanced", advanced: true };
+      }
+      throw new Error(`unexpected command: ${command.type}`);
+    });
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+    await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
+
+    expect(removedListener).toBeDefined();
+    removedListener?.(52);
+
+    for (let microtask = 0; microtask < 10; microtask += 1) {
+      await Promise.resolve();
+    }
+    await vi.advanceTimersByTimeAsync(75);
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "advance_passkey_ceremony_phase",
+      ceremony_token: "token-restored-dismiss",
+      expected_phase: "s1_user_authorization",
+      next_phase: "closed_aborted"
+    });
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 216,
+      error: {
+        name: "NotAllowedError",
+        message: "VaultKern passkey request failed"
+      }
+    });
+    expect(chromeApi.windows.onRemoved.removeListener).toHaveBeenCalled();
+    expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
+  });
+
   it("resumes a known equal-phase S1 get request when the restored unlock prompt completes", async () => {
     let messageListener:
       | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void)
@@ -15315,6 +15413,113 @@ describe("webAuthenticationProxy wrapper", () => {
       user_presence_verified: true,
       client_data_json_base64url: expect.any(String)
     });
+  });
+
+  it("latches early approval messages for the active prompt driver instead of resuming twice", async () => {
+    vi.useFakeTimers();
+
+    let getListener: ((request: unknown) => void) | undefined;
+    let messageListener:
+      | ((message: unknown, sender: unknown, sendResponse: unknown) => void)
+      | undefined;
+    const sessionStorage = createSessionStorage();
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = runtimeCommandMock(async (command) => {
+      if (command.type === "get_session_state") {
+        return {
+          type: "session_state",
+          unlocked: true,
+          activeVaultId: "vault-1"
+        };
+      }
+      if (command.type === "create_passkey_assertion") {
+        return {
+          type: "passkey_assertion",
+          credentialId: "Y3JlZGVudGlhbC0x",
+          authenticatorDataBase64url: "auth-data",
+          clientDataJsonBase64url: "client-data",
+          signatureBase64url: "signature",
+          userHandleBase64url: null
+        };
+      }
+      throw new Error(`unexpected command: ${String(command.type)}`);
+    });
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`),
+        onMessage: {
+          addListener(
+            listener: (message: unknown, sender: unknown, sendResponse: unknown) => void
+          ) {
+            messageListener = listener;
+          }
+        }
+      },
+      storage: {
+        session: sessionStorage
+      },
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      windows: {
+        create: vi.fn(async (options: { url?: string }) => {
+          const promptUrl = options.url ?? "";
+          const promptParams = new URL(
+            promptUrl,
+            "chrome-extension://id/"
+          ).searchParams;
+          messageListener?.(
+            {
+              type: "vaultkern_presence_complete",
+              requestId: Number(promptParams.get("requestId")),
+              origin: promptParams.get("origin"),
+              relyingParty: promptParams.get("relyingParty"),
+              nonce: promptParams.get("nonce")
+            },
+            { url: promptUrl },
+            vi.fn()
+          );
+          return { id: 77 };
+        })
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 335,
+      tabId: 101,
+      frameId: 0,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expectBusinessRuntimeCommandCount(sendRuntimeCommand, 2);
+    expectBusinessRuntimeCommand(sendRuntimeCommand, 2, {
+      type: "create_passkey_assertion"
+    });
+
+    await vi.advanceTimersByTimeAsync(121_000);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    expectBusinessRuntimeCommandCount(sendRuntimeCommand, 2);
   });
 
   it("persists locked WebAuthn unlock prompt state for worker resume", async () => {
