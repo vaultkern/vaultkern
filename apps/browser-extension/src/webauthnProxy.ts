@@ -2216,13 +2216,12 @@ async function resumePasskeyCreateAfterPromptComplete(
       clientDataJsonBase64url
     });
     if (requestIsCanceled()) {
-      await abortPasskeyRegistrationStrict(
+      ceremonyPhase = await abortPendingPasskeyCreateRegistration(
+        chromeApi,
         sendRuntimeCommand,
         mirror.ceremonyToken,
         "closed_aborted"
       );
-      ceremonyPhase = "closed_aborted";
-      await clearPasskeyCeremonyMirror(chromeApi, mirror.ceremonyToken);
       return;
     }
 
@@ -2233,23 +2232,21 @@ async function resumePasskeyCreateAfterPromptComplete(
         activeVaultId
       );
     } catch (error) {
-      await abortPasskeyRegistrationStrict(
+      ceremonyPhase = await abortPendingPasskeyCreateRegistration(
+        chromeApi,
         sendRuntimeCommand,
         mirror.ceremonyToken,
         "closed_failed"
       );
-      ceremonyPhase = "closed_failed";
-      await clearPasskeyCeremonyMirror(chromeApi, mirror.ceremonyToken);
       throw error;
     }
     if (requestIsCanceled()) {
-      await abortPasskeyRegistrationStrict(
+      ceremonyPhase = await abortPendingPasskeyCreateRegistration(
+        chromeApi,
         sendRuntimeCommand,
         mirror.ceremonyToken,
         "closed_aborted"
       );
-      ceremonyPhase = "closed_aborted";
-      await clearPasskeyCeremonyMirror(chromeApi, mirror.ceremonyToken);
       return;
     }
 
@@ -3883,6 +3880,21 @@ async function abortS4PasskeyCreateCeremony(
   return true;
 }
 
+async function abortPendingPasskeyCreateRegistration(
+  chromeApi: ChromeLike,
+  sendRuntimeCommand: RuntimeCommandSender,
+  ceremonyToken: string,
+  closedPhase: "closed_aborted" | "closed_failed"
+) {
+  await abortPasskeyRegistrationStrict(
+    sendRuntimeCommand,
+    ceremonyToken,
+    closedPhase
+  );
+  await clearPasskeyCeremonyMirror(chromeApi, ceremonyToken);
+  return closedPhase;
+}
+
 async function markCommittedPasskeyCreateUnknownDelivery(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender,
@@ -4262,17 +4274,6 @@ async function handleCreateRequest(
         clientDataJsonBase64url
       }
     );
-    const abortRegistration = async (
-      closedPhase: "closed_aborted" | "closed_failed"
-    ) => {
-      await abortPasskeyRegistrationStrict(
-        sendRuntimeCommand,
-        ceremonyContext.ceremonyToken,
-        closedPhase
-      );
-      ceremonyPhase = closedPhase;
-      await clearPasskeyCeremonyMirror(chromeApi, ceremonyContext.ceremonyToken);
-    };
     const markCommittedUnknownDelivery = async () => {
       const marked = await markCommittedPasskeyCreateUnknownDelivery(
         chromeApi,
@@ -4291,7 +4292,12 @@ async function handleCreateRequest(
       credentialId: registration.credentialId
     });
     if (requestIsCanceled()) {
-      await abortRegistration("closed_aborted");
+      ceremonyPhase = await abortPendingPasskeyCreateRegistration(
+        chromeApi,
+        sendRuntimeCommand,
+        ceremonyContext.ceremonyToken,
+        "closed_aborted"
+      );
       return;
     }
 
@@ -4302,7 +4308,12 @@ async function handleCreateRequest(
         activeVaultId
       );
     } catch (error) {
-      await abortRegistration("closed_failed");
+      ceremonyPhase = await abortPendingPasskeyCreateRegistration(
+        chromeApi,
+        sendRuntimeCommand,
+        ceremonyContext.ceremonyToken,
+        "closed_failed"
+      );
       throw error;
     }
     await recordWebAuthnDebug(chromeApi, {
@@ -4310,7 +4321,12 @@ async function handleCreateRequest(
       requestId
     });
     if (requestIsCanceled()) {
-      await abortRegistration("closed_aborted");
+      ceremonyPhase = await abortPendingPasskeyCreateRegistration(
+        chromeApi,
+        sendRuntimeCommand,
+        ceremonyContext.ceremonyToken,
+        "closed_aborted"
+      );
       return;
     }
 

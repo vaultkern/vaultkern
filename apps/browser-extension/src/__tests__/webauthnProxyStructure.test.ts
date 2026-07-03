@@ -225,4 +225,15 @@ describe("webauthn proxy structure", () => {
       "const markCommittedRegistrationUnknownDelivery"
     );
   });
+
+  it("aborts pending create registrations through one helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("async function abortPendingPasskeyCreateRegistration");
+    expect(source).not.toContain("const abortRegistration = async");
+  });
 });
