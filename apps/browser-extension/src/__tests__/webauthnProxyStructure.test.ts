@@ -18,7 +18,11 @@ describe("webauthn proxy structure", () => {
       "PromptNonces",
       "PromptRequestIds",
       "PromptRequestKeys",
-      "PromptRemovalCleanups"
+      "PromptRemovalCleanups",
+      "CompleteWaiters",
+      "DismissWaiters",
+      "PendingCompletePromptKeys",
+      "PendingCompleteSignals"
     ]) {
       expect(source).not.toMatch(new RegExp(`const\\s+unlock${field}\\b`));
       expect(source).not.toMatch(new RegExp(`const\\s+presence${field}\\b`));

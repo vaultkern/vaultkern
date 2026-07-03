@@ -185,6 +185,23 @@ type UserVerificationSignal =
   | { type: "dismissed" }
   | null;
 
+type UnlockSignal =
+  | { type: "complete"; signal: UnlockCompleteSignal }
+  | { type: "dismissed" }
+  | null;
+
+type UnlockCompleteSignal = {
+  userVerificationProof?: UnlockUserVerificationProof;
+};
+
+type PresenceCompleteSignal = {
+  credentialId?: string;
+};
+
+type UserVerificationCompleteSignal = {
+  method: PasskeyUserVerificationMethod;
+};
+
 type PromptOpenResult = {
   nonce: string;
   windowId?: number;
@@ -195,10 +212,16 @@ type CanceledWebAuthnRequests = {
   requestKeys: Set<string>;
 };
 
-type PromptState<TContext extends WebAuthnPromptContext> = {
+type PromptState<
+  TContext extends WebAuthnPromptContext,
+  TCompleteSignal
+> = {
   windowIds: Map<string, number>;
   activeDrivers: Set<string>;
   dismissedPromptKeys: Set<string>;
+  pendingCompleteSignals: Map<string, TCompleteSignal>;
+  completeWaiters: Map<string, Set<(signal: TCompleteSignal) => void>>;
+  dismissWaiters: Map<string, Set<() => void>>;
   contexts: Map<string, TContext>;
   nonces: Map<string, string>;
   requestIds: Map<string, number>;
@@ -207,16 +230,25 @@ type PromptState<TContext extends WebAuthnPromptContext> = {
 };
 
 type PromptStateRegistry = {
-  unlock: PromptState<WebAuthnPromptContext>;
-  approve: PromptState<WebAuthnPromptContext>;
-  verify: PromptState<WebAuthnUserVerificationPromptContext>;
+  unlock: PromptState<WebAuthnPromptContext, UnlockCompleteSignal>;
+  approve: PromptState<WebAuthnPromptContext, PresenceCompleteSignal>;
+  verify: PromptState<
+    WebAuthnUserVerificationPromptContext,
+    UserVerificationCompleteSignal
+  >;
 };
 
-function createPromptState<TContext extends WebAuthnPromptContext>(): PromptState<TContext> {
+function createPromptState<
+  TContext extends WebAuthnPromptContext,
+  TCompleteSignal
+>(): PromptState<TContext, TCompleteSignal> {
   return {
     windowIds: new Map<string, number>(),
     activeDrivers: new Set<string>(),
     dismissedPromptKeys: new Set<string>(),
+    pendingCompleteSignals: new Map<string, TCompleteSignal>(),
+    completeWaiters: new Map<string, Set<(signal: TCompleteSignal) => void>>(),
+    dismissWaiters: new Map<string, Set<() => void>>(),
     contexts: new Map<string, TContext>(),
     nonces: new Map<string, string>(),
     requestIds: new Map<string, number>(),
@@ -227,33 +259,17 @@ function createPromptState<TContext extends WebAuthnPromptContext>(): PromptStat
 
 function createPromptStateRegistry(): PromptStateRegistry {
   return {
-    unlock: createPromptState<WebAuthnPromptContext>(),
-    approve: createPromptState<WebAuthnPromptContext>(),
-    verify: createPromptState<WebAuthnUserVerificationPromptContext>()
+    unlock: createPromptState<WebAuthnPromptContext, UnlockCompleteSignal>(),
+    approve: createPromptState<WebAuthnPromptContext, PresenceCompleteSignal>(),
+    verify: createPromptState<
+      WebAuthnUserVerificationPromptContext,
+      UserVerificationCompleteSignal
+    >()
   };
 }
 
 const promptStates = createPromptStateRegistry();
 
-const unlockPendingCompletePromptKeys = new Set<string>();
-const unlockCompleteWaiters = new Map<string, Set<() => void>>();
-const unlockDismissWaiters = new Map<string, Set<() => void>>();
-const unlockUserVerificationProofs = new Map<string, UnlockUserVerificationProof>();
-const presencePendingCompleteSignals = new Map<string, string | undefined>();
-const presenceCompleteWaiters = new Map<
-  string,
-  Set<(credentialId?: string) => void>
->();
-const presenceDismissWaiters = new Map<string, Set<() => void>>();
-const userVerificationPendingCompleteSignals = new Map<
-  string,
-  "master_password" | "quick_unlock"
->();
-const userVerificationCompleteWaiters = new Map<
-  string,
-  Set<(method: "master_password" | "quick_unlock") => void>
->();
-const userVerificationDismissWaiters = new Map<string, Set<() => void>>();
 const knownPasskeyCeremonyTokens = new Set<string>();
 const knownPasskeyCeremonyTokenQueue: string[] = [];
 const observedPageRequests: ObservedWebAuthnPageRequest[] = [];
@@ -774,16 +790,21 @@ function registerUnlockCompleteHandler(
       });
       const unlockUserVerificationProof =
         unlockUserVerificationProofFromMessage(message);
-      const waiters = [...(unlockCompleteWaiters.get(promptKey) ?? [])];
+      const completeSignal: UnlockCompleteSignal = {
+        ...(unlockUserVerificationProof
+          ? { userVerificationProof: unlockUserVerificationProof }
+          : {})
+      };
+      const waiters = [...(promptStates.unlock.completeWaiters.get(promptKey) ?? [])];
       clearUnlockPromptState(promptKey);
-      if (unlockUserVerificationProof) {
-        unlockUserVerificationProofs.set(promptKey, unlockUserVerificationProof);
-      }
       for (const waiter of waiters) {
-        waiter();
+        waiter(completeSignal);
+      }
+      if (waiters.length === 0) {
+        promptStates.unlock.pendingCompleteSignals.set(promptKey, completeSignal);
       }
       if (waiters.length === 0 && promptStates.unlock.activeDrivers.has(promptKey)) {
-        unlockPendingCompletePromptKeys.add(promptKey);
+        return;
       } else if (waiters.length === 0) {
         void resumePasskeyCeremonyAfterPromptComplete(
           chromeApi,
@@ -820,13 +841,16 @@ function registerUnlockCompleteHandler(
         requestId
       });
       const credentialId = credentialIdFromMessage(message);
-      const waiters = [...(presenceCompleteWaiters.get(promptKey) ?? [])];
+      const completeSignal: PresenceCompleteSignal = {
+        ...(credentialId ? { credentialId } : {})
+      };
+      const waiters = [...(promptStates.approve.completeWaiters.get(promptKey) ?? [])];
       clearPresencePromptState(promptKey);
       for (const waiter of waiters) {
-        waiter(credentialId);
+        waiter(completeSignal);
       }
       if (waiters.length === 0 && promptStates.approve.activeDrivers.has(promptKey)) {
-        presencePendingCompleteSignals.set(promptKey, credentialId);
+        promptStates.approve.pendingCompleteSignals.set(promptKey, completeSignal);
       } else if (waiters.length === 0) {
         void resumePasskeyCeremonyAfterPromptComplete(
           chromeApi,
@@ -901,11 +925,12 @@ function registerUnlockCompleteHandler(
             method
           });
           const waiters = [
-            ...(userVerificationCompleteWaiters.get(promptKey) ?? [])
+            ...(promptStates.verify.completeWaiters.get(promptKey) ?? [])
           ];
+          const completeSignal: UserVerificationCompleteSignal = { method };
           clearUserVerificationPromptState(promptKey);
           for (const waiter of waiters) {
-            waiter(method);
+            waiter(completeSignal);
           }
           if (typeof sendResponse === "function") {
             sendResponse({ ok: true });
@@ -914,7 +939,7 @@ function registerUnlockCompleteHandler(
             waiters.length === 0 &&
             promptStates.verify.activeDrivers.has(promptKey)
           ) {
-            userVerificationPendingCompleteSignals.set(promptKey, method);
+            promptStates.verify.pendingCompleteSignals.set(promptKey, completeSignal);
           } else if (waiters.length === 0) {
             void resumePasskeyCeremonyAfterPromptComplete(
               chromeApi,
@@ -1819,7 +1844,8 @@ async function resumePasskeyGetAfterPromptComplete(
         mirror.ceremonyToken,
         mirror.activeVaultId,
         mirror.userVerification,
-        takeUnlockUserVerificationProof(mirror.ceremonyToken)
+        takePendingUnlockCompleteSignal(mirror.ceremonyToken)
+          ?.userVerificationProof ?? null
       );
       if (!userVerified) {
         const promptContext = promptContextFromMirror(mirror);
@@ -2238,7 +2264,8 @@ async function resumePasskeyCreateAfterPromptComplete(
         mirror.ceremonyToken,
         mirror.activeVaultId,
         mirror.userVerification,
-        takeUnlockUserVerificationProof(mirror.ceremonyToken)
+        takePendingUnlockCompleteSignal(mirror.ceremonyToken)
+          ?.userVerificationProof ?? null
       );
       if (!userVerified) {
         const promptContext = promptContextFromMirror(mirror);
@@ -5969,31 +5996,33 @@ async function activeVaultForRequest(
           hasActiveVault: Boolean(session.activeVaultId)
         });
         if (session.activeVaultId) {
-          const lateUnlockSignal = waitForUnlockSignal(
-            promptKey,
-            Math.min(1_500, Math.max(0, deadline - Date.now()))
-          );
-          const existingProof = takeUnlockUserVerificationProof(promptKey);
-          if (existingProof) {
+          const pendingCompleteSignal = takePendingUnlockCompleteSignal(promptKey);
+          if (pendingCompleteSignal) {
             clearUnlockPromptState(promptKey);
             return {
               activeVaultId: session.activeVaultId,
               userPresenceVerified: true,
-              unlockUserVerificationProof: existingProof
+              unlockUserVerificationProof:
+                pendingCompleteSignal.userVerificationProof ?? null
             };
           }
+          const lateUnlockSignal = waitForUnlockSignal(
+            promptKey,
+            Math.min(1_500, Math.max(0, deadline - Date.now()))
+          );
           const lateSignal = await lateUnlockSignal;
-          if (lateSignal === "dismissed") {
+          if (lateSignal?.type === "dismissed") {
             throw userAbortWebAuthnRequestError(
               "NotAllowedError",
               "VaultKern vault unlock was dismissed"
             );
           }
-          if (lateSignal === "complete") {
+          if (lateSignal?.type === "complete") {
             return {
               activeVaultId: session.activeVaultId,
               userPresenceVerified: true,
-              unlockUserVerificationProof: takeUnlockUserVerificationProof(promptKey)
+              unlockUserVerificationProof:
+                lateSignal.signal.userVerificationProof ?? null
             };
           }
           clearUnlockPromptState(promptKey);
@@ -6008,7 +6037,7 @@ async function activeVaultForRequest(
         );
         continue;
       }
-      if (signal === "dismissed") {
+      if (signal.type === "dismissed") {
         throw userAbortWebAuthnRequestError(
           "NotAllowedError",
           "VaultKern vault unlock was dismissed"
@@ -6027,11 +6056,10 @@ async function activeVaultForRequest(
         return {
           activeVaultId: session.activeVaultId,
           userPresenceVerified: true,
-          unlockUserVerificationProof: takeUnlockUserVerificationProof(promptKey)
+          unlockUserVerificationProof: signal.signal.userVerificationProof ?? null
         };
       }
 
-      takeUnlockUserVerificationProof(promptKey);
       unlockSignal = waitForUnlockSignal(
         promptKey,
         Math.min(1_000, Math.max(0, deadline - Date.now()))
@@ -6039,7 +6067,6 @@ async function activeVaultForRequest(
       await delay(500);
     }
 
-    takeUnlockUserVerificationProof(promptKey);
     throw new WebAuthnRequestError(
       "NotAllowedError",
       "VaultKern vault unlock timed out"
@@ -6049,10 +6076,10 @@ async function activeVaultForRequest(
   }
 }
 
-function takeUnlockUserVerificationProof(promptKey: string) {
-  const proof = unlockUserVerificationProofs.get(promptKey) ?? null;
-  unlockUserVerificationProofs.delete(promptKey);
-  return proof;
+function takePendingUnlockCompleteSignal(promptKey: string) {
+  const signal = promptStates.unlock.pendingCompleteSignals.get(promptKey) ?? null;
+  promptStates.unlock.pendingCompleteSignals.delete(promptKey);
+  return signal;
 }
 
 async function verifyPasskeyUserFromUnlockProof(
@@ -6297,50 +6324,57 @@ function selectedCredentialIdForPrompt(
 
 function waitForUnlockSignal(promptKey: string, timeoutMs: number) {
   if (promptStates.unlock.dismissedPromptKeys.delete(promptKey)) {
-    return Promise.resolve<"dismissed">("dismissed");
+    return Promise.resolve<UnlockSignal>({ type: "dismissed" });
   }
-  if (unlockPendingCompletePromptKeys.delete(promptKey)) {
-    return Promise.resolve<"complete">("complete");
+  const pendingSignal = takePendingUnlockCompleteSignal(promptKey);
+  if (pendingSignal) {
+    return Promise.resolve<UnlockSignal>({
+      type: "complete",
+      signal: pendingSignal
+    });
   }
 
-  return new Promise<"complete" | "dismissed" | null>((resolve) => {
+  return new Promise<UnlockSignal>((resolve) => {
     let settled = false;
     const timeoutId = setTimeout(() => {
       finish(null);
     }, timeoutMs);
-    const completeWaiter = () => {
-      finish("complete");
+    const completeWaiter = (signal: UnlockCompleteSignal) => {
+      finish({ type: "complete", signal });
     };
     const dismissWaiter = () => {
-      finish("dismissed");
+      finish({ type: "dismissed" });
     };
 
-    function finish(signaled: "complete" | "dismissed" | null) {
+    function finish(signaled: UnlockSignal) {
       if (settled) {
         return;
       }
 
       settled = true;
       clearTimeout(timeoutId);
-      const completeWaiters = unlockCompleteWaiters.get(promptKey);
+      const completeWaiters = promptStates.unlock.completeWaiters.get(promptKey);
       completeWaiters?.delete(completeWaiter);
       if (completeWaiters?.size === 0) {
-        unlockCompleteWaiters.delete(promptKey);
+        promptStates.unlock.completeWaiters.delete(promptKey);
       }
-      const dismissWaiters = unlockDismissWaiters.get(promptKey);
+      const dismissWaiters = promptStates.unlock.dismissWaiters.get(promptKey);
       dismissWaiters?.delete(dismissWaiter);
       if (dismissWaiters?.size === 0) {
-        unlockDismissWaiters.delete(promptKey);
+        promptStates.unlock.dismissWaiters.delete(promptKey);
       }
       resolve(signaled);
     }
 
-    const completeWaiters = unlockCompleteWaiters.get(promptKey) ?? new Set<() => void>();
+    const completeWaiters =
+      promptStates.unlock.completeWaiters.get(promptKey) ??
+      new Set<(signal: UnlockCompleteSignal) => void>();
     completeWaiters.add(completeWaiter);
-    unlockCompleteWaiters.set(promptKey, completeWaiters);
-    const dismissWaiters = unlockDismissWaiters.get(promptKey) ?? new Set<() => void>();
+    promptStates.unlock.completeWaiters.set(promptKey, completeWaiters);
+    const dismissWaiters =
+      promptStates.unlock.dismissWaiters.get(promptKey) ?? new Set<() => void>();
     dismissWaiters.add(dismissWaiter);
-    unlockDismissWaiters.set(promptKey, dismissWaiters);
+    promptStates.unlock.dismissWaiters.set(promptKey, dismissWaiters);
   });
 }
 
@@ -6348,10 +6382,13 @@ function waitForPresenceSignal(promptKey: string, timeoutMs: number) {
   if (promptStates.approve.dismissedPromptKeys.delete(promptKey)) {
     return Promise.resolve<PresenceSignal>({ type: "dismissed" });
   }
-  if (presencePendingCompleteSignals.has(promptKey)) {
-    const credentialId = presencePendingCompleteSignals.get(promptKey);
-    presencePendingCompleteSignals.delete(promptKey);
-    return Promise.resolve<PresenceSignal>({ type: "complete", credentialId });
+  if (promptStates.approve.pendingCompleteSignals.has(promptKey)) {
+    const completeSignal = promptStates.approve.pendingCompleteSignals.get(promptKey);
+    promptStates.approve.pendingCompleteSignals.delete(promptKey);
+    return Promise.resolve<PresenceSignal>({
+      type: "complete",
+      credentialId: completeSignal?.credentialId
+    });
   }
 
   return new Promise<PresenceSignal>((resolve) => {
@@ -6359,8 +6396,8 @@ function waitForPresenceSignal(promptKey: string, timeoutMs: number) {
     const timeoutId = setTimeout(() => {
       finish(null);
     }, timeoutMs);
-    const completeWaiter = (credentialId?: string) => {
-      finish({ type: "complete", credentialId });
+    const completeWaiter = (signal: PresenceCompleteSignal) => {
+      finish({ type: "complete", credentialId: signal.credentialId });
     };
     const dismissWaiter = () => {
       finish({ type: "dismissed" });
@@ -6373,27 +6410,27 @@ function waitForPresenceSignal(promptKey: string, timeoutMs: number) {
 
       settled = true;
       clearTimeout(timeoutId);
-      const completeWaiters = presenceCompleteWaiters.get(promptKey);
+      const completeWaiters = promptStates.approve.completeWaiters.get(promptKey);
       completeWaiters?.delete(completeWaiter);
       if (completeWaiters?.size === 0) {
-        presenceCompleteWaiters.delete(promptKey);
+        promptStates.approve.completeWaiters.delete(promptKey);
       }
-      const dismissWaiters = presenceDismissWaiters.get(promptKey);
+      const dismissWaiters = promptStates.approve.dismissWaiters.get(promptKey);
       dismissWaiters?.delete(dismissWaiter);
       if (dismissWaiters?.size === 0) {
-        presenceDismissWaiters.delete(promptKey);
+        promptStates.approve.dismissWaiters.delete(promptKey);
       }
       resolve(signaled);
     }
 
     const completeWaiters =
-      presenceCompleteWaiters.get(promptKey) ??
-      new Set<(credentialId?: string) => void>();
+      promptStates.approve.completeWaiters.get(promptKey) ??
+      new Set<(signal: PresenceCompleteSignal) => void>();
     completeWaiters.add(completeWaiter);
-    presenceCompleteWaiters.set(promptKey, completeWaiters);
-    const dismissWaiters = presenceDismissWaiters.get(promptKey) ?? new Set<() => void>();
+    promptStates.approve.completeWaiters.set(promptKey, completeWaiters);
+    const dismissWaiters = promptStates.approve.dismissWaiters.get(promptKey) ?? new Set<() => void>();
     dismissWaiters.add(dismissWaiter);
-    presenceDismissWaiters.set(promptKey, dismissWaiters);
+    promptStates.approve.dismissWaiters.set(promptKey, dismissWaiters);
   });
 }
 
@@ -6401,11 +6438,14 @@ function waitForUserVerificationSignal(promptKey: string, timeoutMs: number) {
   if (promptStates.verify.dismissedPromptKeys.delete(promptKey)) {
     return Promise.resolve<UserVerificationSignal>({ type: "dismissed" });
   }
-  if (userVerificationPendingCompleteSignals.has(promptKey)) {
-    const method = userVerificationPendingCompleteSignals.get(promptKey);
-    userVerificationPendingCompleteSignals.delete(promptKey);
-    if (method) {
-      return Promise.resolve<UserVerificationSignal>({ type: "complete", method });
+  if (promptStates.verify.pendingCompleteSignals.has(promptKey)) {
+    const completeSignal = promptStates.verify.pendingCompleteSignals.get(promptKey);
+    promptStates.verify.pendingCompleteSignals.delete(promptKey);
+    if (completeSignal) {
+      return Promise.resolve<UserVerificationSignal>({
+        type: "complete",
+        method: completeSignal.method
+      });
     }
   }
 
@@ -6414,8 +6454,8 @@ function waitForUserVerificationSignal(promptKey: string, timeoutMs: number) {
     const timeoutId = setTimeout(() => {
       finish(null);
     }, timeoutMs);
-    const completeWaiter = (method: "master_password" | "quick_unlock") => {
-      finish({ type: "complete", method });
+    const completeWaiter = (signal: UserVerificationCompleteSignal) => {
+      finish({ type: "complete", method: signal.method });
     };
     const dismissWaiter = () => {
       finish({ type: "dismissed" });
@@ -6428,28 +6468,28 @@ function waitForUserVerificationSignal(promptKey: string, timeoutMs: number) {
 
       settled = true;
       clearTimeout(timeoutId);
-      const completeWaiters = userVerificationCompleteWaiters.get(promptKey);
+      const completeWaiters = promptStates.verify.completeWaiters.get(promptKey);
       completeWaiters?.delete(completeWaiter);
       if (completeWaiters?.size === 0) {
-        userVerificationCompleteWaiters.delete(promptKey);
+        promptStates.verify.completeWaiters.delete(promptKey);
       }
-      const dismissWaiters = userVerificationDismissWaiters.get(promptKey);
+      const dismissWaiters = promptStates.verify.dismissWaiters.get(promptKey);
       dismissWaiters?.delete(dismissWaiter);
       if (dismissWaiters?.size === 0) {
-        userVerificationDismissWaiters.delete(promptKey);
+        promptStates.verify.dismissWaiters.delete(promptKey);
       }
       resolve(signaled);
     }
 
     const completeWaiters =
-      userVerificationCompleteWaiters.get(promptKey) ??
-      new Set<(method: "master_password" | "quick_unlock") => void>();
+      promptStates.verify.completeWaiters.get(promptKey) ??
+      new Set<(signal: UserVerificationCompleteSignal) => void>();
     completeWaiters.add(completeWaiter);
-    userVerificationCompleteWaiters.set(promptKey, completeWaiters);
+    promptStates.verify.completeWaiters.set(promptKey, completeWaiters);
     const dismissWaiters =
-      userVerificationDismissWaiters.get(promptKey) ?? new Set<() => void>();
+      promptStates.verify.dismissWaiters.get(promptKey) ?? new Set<() => void>();
     dismissWaiters.add(dismissWaiter);
-    userVerificationDismissWaiters.set(promptKey, dismissWaiters);
+    promptStates.verify.dismissWaiters.set(promptKey, dismissWaiters);
   });
 }
 
@@ -6668,7 +6708,7 @@ function watchPresencePromptWindow(
       requestId,
       windowId
     });
-    const waiters = [...(presenceDismissWaiters.get(promptKey) ?? [])];
+    const waiters = [...(promptStates.approve.dismissWaiters.get(promptKey) ?? [])];
     for (const waiter of waiters) {
       waiter();
     }
@@ -6711,7 +6751,7 @@ function watchUserVerificationPromptWindow(
       requestId,
       windowId
     });
-    const waiters = [...(userVerificationDismissWaiters.get(promptKey) ?? [])];
+    const waiters = [...(promptStates.verify.dismissWaiters.get(promptKey) ?? [])];
     for (const waiter of waiters) {
       waiter();
     }
@@ -6754,7 +6794,7 @@ function watchUnlockPromptWindow(
       requestId,
       windowId
     });
-    const waiters = [...(unlockDismissWaiters.get(promptKey) ?? [])];
+    const waiters = [...(promptStates.unlock.dismissWaiters.get(promptKey) ?? [])];
     for (const waiter of waiters) {
       waiter();
     }
@@ -6812,8 +6852,7 @@ function clearUnlockPromptState(
   promptStates.unlock.nonces.delete(promptKey);
   promptStates.unlock.requestIds.delete(promptKey);
   promptStates.unlock.requestKeys.delete(promptKey);
-  unlockUserVerificationProofs.delete(promptKey);
-  unlockPendingCompletePromptKeys.delete(promptKey);
+  promptStates.unlock.pendingCompleteSignals.delete(promptKey);
   if (!options.preserveDismissed) {
     promptStates.unlock.dismissedPromptKeys.delete(promptKey);
   }
@@ -6829,7 +6868,7 @@ function clearPresencePromptState(
   promptStates.approve.nonces.delete(promptKey);
   promptStates.approve.requestIds.delete(promptKey);
   promptStates.approve.requestKeys.delete(promptKey);
-  presencePendingCompleteSignals.delete(promptKey);
+  promptStates.approve.pendingCompleteSignals.delete(promptKey);
   if (!options.preserveDismissed) {
     promptStates.approve.dismissedPromptKeys.delete(promptKey);
   }
@@ -6845,7 +6884,7 @@ function clearUserVerificationPromptState(
   promptStates.verify.nonces.delete(promptKey);
   promptStates.verify.requestIds.delete(promptKey);
   promptStates.verify.requestKeys.delete(promptKey);
-  userVerificationPendingCompleteSignals.delete(promptKey);
+  promptStates.verify.pendingCompleteSignals.delete(promptKey);
   if (!options.preserveDismissed) {
     promptStates.verify.dismissedPromptKeys.delete(promptKey);
   }
