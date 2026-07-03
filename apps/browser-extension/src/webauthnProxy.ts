@@ -1265,30 +1265,19 @@ async function handleGetRequest(
     throwIfWebAuthnRequestCanceled(canceledRequests, requestId, requestCancelKey);
   const requestIsCanceled = () =>
     webAuthnRequestIsCanceled(canceledRequests, requestId, requestCancelKey);
-  const advanceCeremony = async (
-    expectedPhase: string,
-    nextPhase: string,
-    relatedOriginVerified = false
-  ) => {
-    if (!ceremonyToken) {
-      throw new WebAuthnRequestError("NotAllowedError", "passkey ceremony is not registered");
-    }
-    await advancePasskeyCeremonyPhase(
-      sendRuntimeCommand,
-      ceremonyToken,
-      expectedPhase,
-      nextPhase,
-      relatedOriginVerified
-    );
-    ceremonyPhase = nextPhase;
-    if (ceremonyMirror) {
-      ceremonyMirror = passkeyCeremonyMirrorForPhase(
-        { ...ceremonyMirror, phase: nextPhase },
-        nextPhase
-      );
-      await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-    }
-  };
+  const advanceCeremony = createPasskeyCeremonyAdvancer({
+    chromeApi,
+    sendRuntimeCommand,
+    ceremonyToken: () => ceremonyToken,
+    ceremonyMirror: () => ceremonyMirror,
+    updateCeremonyMirror: (mirror) => {
+      ceremonyMirror = mirror;
+    },
+    updateCeremonyPhase: (phase) => {
+      ceremonyPhase = phase;
+    },
+    missingCeremonyMessage: "passkey ceremony is not registered"
+  });
   const persistPresencePromptState = async (
     nonce: string,
     credentialOptions: PasskeyCredentialOption[] = []
@@ -1926,31 +1915,19 @@ async function resumePasskeyGetAfterPromptComplete(
       }
     }
 
-    const advanceCeremony = async (
-      expectedPhase: string,
-      nextPhase: string,
-      relatedOriginVerified = false
-    ) => {
-      if (!mirror) {
-        throw new WebAuthnRequestError(
-          "NotAllowedError",
-          "passkey ceremony is not restored"
-        );
-      }
-      await advancePasskeyCeremonyPhase(
-        sendRuntimeCommand,
-        mirror.ceremonyToken,
-        expectedPhase,
-        nextPhase,
-        relatedOriginVerified
-      );
-      ceremonyPhase = nextPhase;
-      mirror = passkeyCeremonyMirrorForPhase(
-        { ...mirror, phase: nextPhase },
-        nextPhase
-      );
-      await persistPasskeyCeremonyMirror(chromeApi, mirror);
-    };
+    const advanceCeremony = createPasskeyCeremonyAdvancer({
+      chromeApi,
+      sendRuntimeCommand,
+      ceremonyToken: () => mirror?.ceremonyToken,
+      ceremonyMirror: () => mirror,
+      updateCeremonyMirror: (nextMirror) => {
+        mirror = nextMirror;
+      },
+      updateCeremonyPhase: (phase) => {
+        ceremonyPhase = phase;
+      },
+      missingCeremonyMessage: "passkey ceremony is not restored"
+    });
 
     let credentialIds: Array<string | null>;
     let assertionExpectedPhase: string;
@@ -2340,31 +2317,19 @@ async function resumePasskeyCreateAfterPromptComplete(
       );
     }
 
-    const advanceCeremony = async (
-      expectedPhase: string,
-      nextPhase: string,
-      relatedOriginVerified = false
-    ) => {
-      if (!mirror) {
-        throw new WebAuthnRequestError(
-          "NotAllowedError",
-          "passkey ceremony is not restored"
-        );
-      }
-      await advancePasskeyCeremonyPhase(
-        sendRuntimeCommand,
-        mirror.ceremonyToken,
-        expectedPhase,
-        nextPhase,
-        relatedOriginVerified
-      );
-      ceremonyPhase = nextPhase;
-      mirror = passkeyCeremonyMirrorForPhase(
-        { ...mirror, phase: nextPhase },
-        nextPhase
-      );
-      await persistPasskeyCeremonyMirror(chromeApi, mirror);
-    };
+    const advanceCeremony = createPasskeyCeremonyAdvancer({
+      chromeApi,
+      sendRuntimeCommand,
+      ceremonyToken: () => mirror?.ceremonyToken,
+      ceremonyMirror: () => mirror,
+      updateCeremonyMirror: (nextMirror) => {
+        mirror = nextMirror;
+      },
+      updateCeremonyPhase: (phase) => {
+        ceremonyPhase = phase;
+      },
+      missingCeremonyMessage: "passkey ceremony is not restored"
+    });
 
     let relyingPartyValidation = validateOriginForRelyingParty(
       mirror.origin,
@@ -4280,30 +4245,19 @@ async function handleCreateRequest(
     throwIfWebAuthnRequestCanceled(canceledRequests, requestId, requestCancelKey);
   const requestIsCanceled = () =>
     webAuthnRequestIsCanceled(canceledRequests, requestId, requestCancelKey);
-  const advanceCeremony = async (
-    expectedPhase: string,
-    nextPhase: string,
-    relatedOriginVerified = false
-  ) => {
-    if (!ceremonyToken) {
-      throw new WebAuthnRequestError("NotAllowedError", "passkey ceremony is not registered");
-    }
-    await advancePasskeyCeremonyPhase(
-      sendRuntimeCommand,
-      ceremonyToken,
-      expectedPhase,
-      nextPhase,
-      relatedOriginVerified
-    );
-    ceremonyPhase = nextPhase;
-    if (ceremonyMirror) {
-      ceremonyMirror = passkeyCeremonyMirrorForPhase(
-        { ...ceremonyMirror, phase: nextPhase },
-        nextPhase
-      );
-      await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-    }
-  };
+  const advanceCeremony = createPasskeyCeremonyAdvancer({
+    chromeApi,
+    sendRuntimeCommand,
+    ceremonyToken: () => ceremonyToken,
+    ceremonyMirror: () => ceremonyMirror,
+    updateCeremonyMirror: (mirror) => {
+      ceremonyMirror = mirror;
+    },
+    updateCeremonyPhase: (phase) => {
+      ceremonyPhase = phase;
+    },
+    missingCeremonyMessage: "passkey ceremony is not registered"
+  });
   const persistPresencePromptState = async (nonce: string) => {
     if (!ceremonyMirror) {
       return;
@@ -5509,6 +5463,16 @@ type AdvancePasskeyCeremony = (
   relatedOriginVerified?: boolean
 ) => Promise<void>;
 
+type PasskeyCeremonyAdvancerOptions = {
+  chromeApi: ChromeLike;
+  sendRuntimeCommand: RuntimeCommandSender;
+  ceremonyToken: () => string | null | undefined;
+  ceremonyMirror: () => PasskeyCeremonyContext | null;
+  updateCeremonyMirror: (mirror: PasskeyCeremonyContext) => void;
+  updateCeremonyPhase: (phase: string) => void;
+  missingCeremonyMessage: string;
+};
+
 function validateOriginForRelyingParty(
   origin: string,
   relyingParty: string
@@ -5563,6 +5527,42 @@ async function completeRelyingPartyValidation(
     return { allowed: true, relatedOriginVerified: true };
   }
   return { allowed: false, relatedOriginVerified: false };
+}
+
+function createPasskeyCeremonyAdvancer({
+  chromeApi,
+  sendRuntimeCommand,
+  ceremonyToken,
+  ceremonyMirror,
+  updateCeremonyMirror,
+  updateCeremonyPhase,
+  missingCeremonyMessage
+}: PasskeyCeremonyAdvancerOptions): AdvancePasskeyCeremony {
+  return async (expectedPhase, nextPhase, relatedOriginVerified = false) => {
+    const token = ceremonyToken();
+    if (!token) {
+      throw new WebAuthnRequestError("NotAllowedError", missingCeremonyMessage);
+    }
+    await advancePasskeyCeremonyPhase(
+      sendRuntimeCommand,
+      token,
+      expectedPhase,
+      nextPhase,
+      relatedOriginVerified
+    );
+    updateCeremonyPhase(nextPhase);
+
+    const mirror = ceremonyMirror();
+    if (!mirror) {
+      return;
+    }
+    const nextMirror = passkeyCeremonyMirrorForPhase(
+      { ...mirror, phase: nextPhase },
+      nextPhase
+    );
+    updateCeremonyMirror(nextMirror);
+    await persistPasskeyCeremonyMirror(chromeApi, nextMirror);
+  };
 }
 
 async function advanceToCredentialResolution(

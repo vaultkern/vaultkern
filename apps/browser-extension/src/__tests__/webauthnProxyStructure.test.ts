@@ -77,4 +77,17 @@ describe("webauthn proxy structure", () => {
     expect(source).toContain("function advanceToCredentialResolution");
     expect(source.match(/completeRelyingPartyValidation\(/g)).toHaveLength(2);
   });
+
+  it("uses one ceremony phase advancer for live and resumed pipelines", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("function createPasskeyCeremonyAdvancer");
+    expect(source.match(/const\s+advanceCeremony\s*=\s*async/g) ?? []).toHaveLength(
+      0
+    );
+  });
 });
