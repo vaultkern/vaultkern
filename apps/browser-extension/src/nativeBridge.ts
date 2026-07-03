@@ -53,6 +53,16 @@ function classifyNativeMessagingError(
     return "native_permission_denied";
   }
 
+  if (
+    normalized.includes("host has exited") ||
+    normalized.includes("port closed") ||
+    normalized.includes("port disconnected") ||
+    normalized.includes("native port disconnected") ||
+    normalized.includes("disconnected")
+  ) {
+    return "native_port_disconnected";
+  }
+
   return fallback;
 }
 
@@ -344,6 +354,7 @@ export function createNativeMessagingBridge(
     activeRequest = request;
 
     try {
+      request.postMessageAttempts += 1;
       const requestPort = ensurePort();
       request.timeoutId = setTimeout(() => {
         if (activeRequest !== request || port !== requestPort) {
@@ -363,7 +374,6 @@ export function createNativeMessagingBridge(
         request.reject(timeoutError());
         flushQueue();
       }, timeoutForMessage(request.message));
-      request.postMessageAttempts += 1;
       emitEvent({
         event: "post",
         commandType: commandTypeFromMessage(request.message)
@@ -373,7 +383,7 @@ export function createNativeMessagingBridge(
       clearRequestTimeout(request);
       activeRequest = null;
       detachPort();
-      const nativeError = toNativeMessagingError(error, "native_port_disconnected");
+      const nativeError = toNativeMessagingError(error, "native_unknown");
       emitEvent({
         event: "post_error",
         commandType: commandTypeFromMessage(request.message),
@@ -382,7 +392,7 @@ export function createNativeMessagingBridge(
       });
       if (
         nativeError.code === "native_port_disconnected" &&
-        request.postMessageAttempts === 1
+        request.postMessageAttempts < 2
       ) {
         queuedRequests.unshift(request);
         flushQueue();

@@ -219,9 +219,11 @@ const userVerificationPromptRequestIds = new Map<string, number>();
 const userVerificationPromptRequestKeys = new Map<string, string>();
 const userVerificationPromptRemovalCleanups = new Map<string, () => void>();
 const knownPasskeyCeremonyTokens = new Set<string>();
+const knownPasskeyCeremonyTokenQueue: string[] = [];
 const observedPageRequests: ObservedWebAuthnPageRequest[] = [];
 const registeredUnlockMessageSources = new WeakSet<object>();
 const registeredRequestHandlerSources = new WeakSet<object>();
+const trustedPasskeyCeremonySessionStorage = new WeakSet<object>();
 const OBSERVED_PAGE_REQUEST_MAX_AGE_MS = 120_000;
 const OBSERVED_PAGE_REQUEST_WAIT_MS = 100;
 const OBSERVED_PAGE_REQUEST_POLL_MS = 5;
@@ -245,7 +247,9 @@ const RELATED_ORIGIN_LABEL_LIMIT = 5;
 const RELATED_ORIGIN_FETCH_TIMEOUT_MS = 5_000;
 const GENERIC_PASSKEY_REQUEST_ERROR_MESSAGE = "VaultKern passkey request failed";
 const PASSKEY_PUBLIC_ERROR_MIN_DELAY_MS = 75;
+const MAX_KNOWN_PASSKEY_CEREMONY_TOKENS = 512;
 const webAuthnDebugWriteChains = new WeakMap<object, Promise<void>>();
+let passkeyCeremonyMirrorMutationQueue: Promise<void> = Promise.resolve();
 let passkeyLedgerConnectionId: string | null = null;
 
 type ObservedWebAuthnPageRequest = {
@@ -1153,6 +1157,18 @@ async function handleGetRequest(
     };
     await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
   };
+  const persistUnlockPromptState = async (nonce: string) => {
+    if (!ceremonyMirror) {
+      return;
+    }
+    ceremonyMirror = {
+      ...ceremonyMirror,
+      popupNonce: nonce,
+      promptMode: "unlock",
+      promptCredentialOptions: []
+    };
+    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
+  };
   const persistUserVerificationPromptState = async (nonce: string) => {
     if (!ceremonyMirror) {
       return;
@@ -1239,7 +1255,8 @@ async function handleGetRequest(
       session,
       promptContextFrom(originContext, relyingParty),
       canceledRequests,
-      requestCancelKey
+      requestCancelKey,
+      { onPromptOpened: persistUnlockPromptState }
     );
     if (!activeVault) {
       throwIfRequestCanceled();
@@ -2569,22 +2586,39 @@ async function ensurePasskeyCeremonySessionStorageTrusted(
   if (!storage?.setAccessLevel) {
     return false;
   }
+  if (typeof storage === "object" && trustedPasskeyCeremonySessionStorage.has(storage)) {
+    return true;
+  }
 
   try {
     await storage.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+    if (typeof storage === "object") {
+      trustedPasskeyCeremonySessionStorage.add(storage);
+    }
     return true;
   } catch {
     return false;
   }
 }
 
+function enqueuePasskeyCeremonyMirrorMutation<T>(mutation: () => Promise<T>) {
+  const run = passkeyCeremonyMirrorMutationQueue.then(mutation, mutation);
+  passkeyCeremonyMirrorMutationQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 async function persistPasskeyCeremonyMirror(
   chromeApi: ChromeLike,
   mirror: PasskeyCeremonyContext
 ) {
-  const mirrors = await loadPasskeyCeremonyMirrors(chromeApi);
-  mirrors[mirror.ceremonyToken] = mirror;
-  await storePasskeyCeremonyMirrors(chromeApi, mirrors);
+  await enqueuePasskeyCeremonyMirrorMutation(async () => {
+    const mirrors = await loadPasskeyCeremonyMirrors(chromeApi);
+    mirrors[mirror.ceremonyToken] = mirror;
+    await storePasskeyCeremonyMirrors(chromeApi, mirrors);
+  });
 }
 
 async function clearPasskeyCeremonyMirror(
@@ -2594,12 +2628,14 @@ async function clearPasskeyCeremonyMirror(
   if (!ceremonyToken) {
     return;
   }
-  const mirrors = await loadPasskeyCeremonyMirrors(chromeApi);
-  if (!(ceremonyToken in mirrors)) {
-    return;
-  }
-  delete mirrors[ceremonyToken];
-  await storePasskeyCeremonyMirrors(chromeApi, mirrors);
+  await enqueuePasskeyCeremonyMirrorMutation(async () => {
+    const mirrors = await loadPasskeyCeremonyMirrors(chromeApi);
+    if (!(ceremonyToken in mirrors)) {
+      return;
+    }
+    delete mirrors[ceremonyToken];
+    await storePasskeyCeremonyMirrors(chromeApi, mirrors);
+  });
 }
 
 function isPasskeyCeremonyMirror(value: unknown): value is PasskeyCeremonyContext {
@@ -3568,6 +3604,7 @@ async function closePasskeyCeremony(
   ceremonyPhase: string | null,
   closedPhase: "closed_aborted" | "closed_failed"
 ) {
+  await closePromptWindowsForCeremony(chromeApi, ceremonyToken);
   if (!ceremonyToken || !ceremonyPhase || ceremonyPhase.startsWith("closed_")) {
     return;
   }
@@ -3795,6 +3832,18 @@ async function handleCreateRequest(
     };
     await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
   };
+  const persistUnlockPromptState = async (nonce: string) => {
+    if (!ceremonyMirror) {
+      return;
+    }
+    ceremonyMirror = {
+      ...ceremonyMirror,
+      popupNonce: nonce,
+      promptMode: "unlock",
+      promptCredentialOptions: []
+    };
+    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
+  };
   const persistUserVerificationPromptState = async (nonce: string) => {
     if (!ceremonyMirror) {
       return;
@@ -3883,7 +3932,8 @@ async function handleCreateRequest(
       session,
       promptContextFrom(originContext, relyingParty),
       canceledRequests,
-      requestCancelKey
+      requestCancelKey,
+      { onPromptOpened: persistUnlockPromptState }
     );
     if (!activeVault) {
       throwIfRequestCanceled();
@@ -3975,25 +4025,27 @@ async function handleCreateRequest(
     const activeVaultId = activeVault.activeVaultId;
 
     const excludedCredentialIds = excludedCredentialIdsFromCreateOptions(options);
-    for (const credentialId of excludedCredentialIds) {
-      throwIfRequestCanceled();
-
-      const status = passkeyCredentialStatusFromResponse(
-        await sendRuntimeCommand({
-          type: "passkey_credential_status",
-          ceremony_token: ceremonyContext.ceremonyToken,
-          expected_phase: "s3_credential_resolution",
-          vault_id: activeVaultId,
-          credential_id: credentialId,
-          relying_party: relyingParty
-        })
+    throwIfRequestCanceled();
+    const excludedCredentialStatuses = await Promise.all(
+      excludedCredentialIds.map(async (credentialId) =>
+        passkeyCredentialStatusFromResponse(
+          await sendRuntimeCommand({
+            type: "passkey_credential_status",
+            ceremony_token: ceremonyContext.ceremonyToken,
+            expected_phase: "s3_credential_resolution",
+            vault_id: activeVaultId,
+            credential_id: credentialId,
+            relying_party: relyingParty
+          })
+        )
+      )
+    );
+    throwIfRequestCanceled();
+    if (excludedCredentialStatuses.some((status) => status.exists)) {
+      throw new WebAuthnRequestError(
+        "InvalidStateError",
+        "VaultKern passkey credential is already registered"
       );
-      if (status.exists) {
-        throw new WebAuthnRequestError(
-          "InvalidStateError",
-          "VaultKern passkey credential is already registered"
-        );
-      }
     }
 
     await advanceCeremony("s3_credential_resolution", "s4_completion_and_mutation");
@@ -5377,7 +5429,10 @@ async function activeVaultForRequest(
   initialSession: { activeVaultId?: string | null },
   promptContext: WebAuthnPromptContext,
   canceledRequests: CanceledWebAuthnRequests,
-  requestCancelKey: string | null
+  requestCancelKey: string | null,
+  options: {
+    onPromptOpened?: (nonce: string) => Promise<void> | void;
+  } = {}
 ) {
   if (initialSession.activeVaultId) {
     return {
@@ -5395,7 +5450,14 @@ async function activeVaultForRequest(
     promptKey,
     Math.min(1_000, Math.max(0, deadline - Date.now()))
   );
-  await openUnlockPrompt(chromeApi, requestId, promptKey, promptContext, requestCancelKey);
+  const nonce = await openUnlockPrompt(
+    chromeApi,
+    requestId,
+    promptKey,
+    promptContext,
+    requestCancelKey
+  );
+  await options.onPromptOpened?.(nonce);
 
   while (Date.now() < deadline) {
     if (webAuthnRequestIsCanceled(canceledRequests, requestId, requestCancelKey)) {
@@ -5859,7 +5921,7 @@ async function openUnlockPrompt(
   promptKey: string,
   promptContext: WebAuthnPromptContext,
   requestCancelKey: string | null
-) {
+): Promise<string> {
   if (!chromeApi.windows?.create) {
     throw new WebAuthnRequestError(
       "NotAllowedError",
@@ -5871,7 +5933,11 @@ async function openUnlockPrompt(
   if (typeof existingWindowId === "number" && chromeApi.windows.update) {
     try {
       await chromeApi.windows.update(existingWindowId, { focused: true });
-      return;
+      const existingNonce = unlockPromptNonces.get(promptKey);
+      if (typeof existingNonce === "string") {
+        return existingNonce;
+      }
+      clearUnlockPromptState(promptKey);
     } catch {
       clearUnlockPromptState(promptKey);
     }
@@ -5905,6 +5971,7 @@ async function openUnlockPrompt(
     unlockPromptWindowIds.set(promptKey, created.id);
     watchUnlockPromptWindow(chromeApi, requestId, promptKey, created.id);
   }
+  return nonce;
 }
 
 async function openPresencePrompt(
@@ -6176,6 +6243,35 @@ function clearUserVerificationPromptState(promptKey: string) {
   userVerificationPromptRequestKeys.delete(promptKey);
 }
 
+async function closePromptWindowsForCeremony(
+  chromeApi: ChromeLike,
+  ceremonyToken: string | null
+) {
+  if (!ceremonyToken) {
+    return;
+  }
+
+  const windowIds = [
+    unlockPromptWindowIds.get(ceremonyToken),
+    presencePromptWindowIds.get(ceremonyToken),
+    userVerificationPromptWindowIds.get(ceremonyToken)
+  ].filter((windowId): windowId is number => typeof windowId === "number");
+  clearUnlockPromptState(ceremonyToken);
+  clearPresencePromptState(ceremonyToken);
+  clearUserVerificationPromptState(ceremonyToken);
+
+  if (!chromeApi.windows?.remove) {
+    return;
+  }
+  for (const windowId of windowIds) {
+    try {
+      await chromeApi.windows.remove(windowId);
+    } catch {
+      // The user or browser may already have closed the prompt.
+    }
+  }
+}
+
 async function closeUnlockPromptWindow(
   chromeApi: ChromeLike,
   requestId: number,
@@ -6330,10 +6426,6 @@ export function recordWebAuthnDebug(
   chromeApi: ChromeLike,
   event: Record<string, unknown>
 ) {
-  const redactedEvent = redactKnownPasskeyCeremonyTokens(event) as Record<
-    string,
-    unknown
-  >;
   const chainKey = chromeApi.storage?.local ?? chromeApi;
   const previous =
     typeof chainKey === "object"
@@ -6341,7 +6433,7 @@ export function recordWebAuthnDebug(
       : Promise.resolve();
   const next = previous
     .catch(() => undefined)
-    .then(() => persistWebAuthnDebug(chromeApi, redactedEvent));
+    .then(() => persistWebAuthnDebug(chromeApi, event));
   if (typeof chainKey === "object") {
     webAuthnDebugWriteChains.set(chainKey, next);
   }
@@ -6350,8 +6442,16 @@ export function recordWebAuthnDebug(
 }
 
 function rememberPasskeyCeremonyToken(token: string) {
-  if (token.trim() !== "") {
-    knownPasskeyCeremonyTokens.add(token);
+  if (token.trim() === "" || knownPasskeyCeremonyTokens.has(token)) {
+    return;
+  }
+  knownPasskeyCeremonyTokens.add(token);
+  knownPasskeyCeremonyTokenQueue.push(token);
+  while (knownPasskeyCeremonyTokenQueue.length > MAX_KNOWN_PASSKEY_CEREMONY_TOKENS) {
+    const expiredToken = knownPasskeyCeremonyTokenQueue.shift();
+    if (expiredToken) {
+      knownPasskeyCeremonyTokens.delete(expiredToken);
+    }
   }
 }
 
@@ -6398,6 +6498,10 @@ async function persistWebAuthnDebug(
     if (existing[WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY] !== true) {
       return;
     }
+    const redactedEvent = redactKnownPasskeyCeremonyTokens(event) as Record<
+      string,
+      unknown
+    >;
     const previous = Array.isArray(existing[WEB_AUTHN_DEBUG_STORAGE_KEY])
       ? existing[WEB_AUTHN_DEBUG_STORAGE_KEY]
       : [];
@@ -6409,7 +6513,7 @@ async function persistWebAuthnDebug(
         ...redactedPrevious,
         {
           at: new Date().toISOString(),
-          ...event
+          ...redactedEvent
         }
       ]
     });

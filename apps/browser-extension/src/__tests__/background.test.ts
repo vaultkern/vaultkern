@@ -533,26 +533,28 @@ describe("background bridge", () => {
     await vi.waitFor(() => {
       expect(executeScript).toHaveBeenCalledTimes(4);
     });
-    expect(executeScript).toHaveBeenNthCalledWith(1, {
-      target: { tabId: 7, allFrames: true },
-      func: expect.any(Function),
-      world: "ISOLATED"
-    });
-    expect(executeScript).toHaveBeenNthCalledWith(2, {
-      target: { tabId: 7, allFrames: true },
-      files: ["webauthnPageHook.js"],
-      world: "MAIN"
-    });
-    expect(executeScript).toHaveBeenNthCalledWith(3, {
-      target: { tabId: 8, allFrames: true },
-      func: expect.any(Function),
-      world: "ISOLATED"
-    });
-    expect(executeScript).toHaveBeenNthCalledWith(4, {
-      target: { tabId: 8, allFrames: true },
-      files: ["webauthnPageHook.js"],
-      world: "MAIN"
-    });
+    const callsByTab = new Map<number, unknown[]>();
+    for (const [details] of executeScript.mock.calls) {
+      const tabId = (details as { target?: { tabId?: unknown } }).target?.tabId;
+      if (typeof tabId !== "number") {
+        continue;
+      }
+      callsByTab.set(tabId, [...(callsByTab.get(tabId) ?? []), details]);
+    }
+    for (const tabId of [7, 8]) {
+      expect(callsByTab.get(tabId)).toEqual([
+        {
+          target: { tabId, allFrames: true },
+          func: expect.any(Function),
+          world: "ISOLATED"
+        },
+        {
+          target: { tabId, allFrames: true },
+          files: ["webauthnPageHook.js"],
+          world: "MAIN"
+        }
+      ]);
+    }
     await vi.waitFor(() => {
       expect(storedItems.vaultkernWebAuthnDebug).toEqual(
         expect.arrayContaining([

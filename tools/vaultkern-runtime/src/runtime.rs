@@ -1764,6 +1764,7 @@ impl Runtime {
         identity: PasskeyCeremonyIdentity,
     ) -> Result<PasskeyCeremonyRegisteredDto> {
         let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        self.prune_expired_closed_passkey_ceremonies(now_epoch_ms);
         validate_passkey_ceremony_ttl(
             identity.registered_at_epoch_ms,
             identity.expires_at_epoch_ms,
@@ -1861,9 +1862,6 @@ impl Runtime {
             .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
         if entry.phase != expected_phase {
             if is_stale_passkey_phase_advance_noop(entry.phase, expected_phase, next_phase) {
-                if next_phase == PasskeyCeremonyPhaseDto::ClosedDelivered {
-                    entry.delivery_state = PasskeyCeremonyDeliveryStateDto::Delivered;
-                }
                 return Ok(PasskeyCeremonyAdvancedDto { advanced: true });
             }
             anyhow::bail!("passkey ceremony phase mismatch");
@@ -1964,9 +1962,9 @@ impl Runtime {
         validate_passkey_ceremony_connection_id(active_connection_id)?;
         let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
         let mut reconciled = Vec::new();
+        let mut rollback_tokens = Vec::new();
         for (ceremony_token, entry) in &mut self.passkey_ceremonies {
             if entry.phase != PasskeyCeremonyPhaseDto::CompletionAndMutation
-                || entry.durable_state != PasskeyCeremonyDurableStateDto::Committed
                 || entry.delivery_state != PasskeyCeremonyDeliveryStateDto::NotDelivered
                 || (entry.identity.connection_id == active_connection_id
                     && entry.identity.expires_at_epoch_ms > now_epoch_ms)
@@ -1974,15 +1972,48 @@ impl Runtime {
                 continue;
             }
 
-            entry.phase = PasskeyCeremonyPhaseDto::ClosedDelivered;
-            entry.delivery_state = PasskeyCeremonyDeliveryStateDto::UnknownDelivery;
+            if entry.durable_state == PasskeyCeremonyDurableStateDto::Committed {
+                entry.phase = PasskeyCeremonyPhaseDto::ClosedDelivered;
+                entry.delivery_state = PasskeyCeremonyDeliveryStateDto::UnknownDelivery;
+                reconciled.push(PasskeyCeremonyReconciledDto {
+                    ceremony_token: ceremony_token.clone(),
+                    delivery_state: PasskeyCeremonyDeliveryStateDto::UnknownDelivery,
+                });
+                continue;
+            }
+
+            if entry.identity.ceremony == PasskeyCeremonyKindDto::Create
+                && matches!(
+                    entry.durable_state,
+                    PasskeyCeremonyDurableStateDto::Snapshot
+                        | PasskeyCeremonyDurableStateDto::Mutated
+                        | PasskeyCeremonyDurableStateDto::Saved
+                )
+            {
+                rollback_tokens.push(ceremony_token.clone());
+            }
+        }
+
+        for ceremony_token in rollback_tokens {
+            self.abort_passkey_registration(
+                &ceremony_token,
+                PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                PasskeyCeremonyPhaseDto::ClosedFailed,
+            )?;
             reconciled.push(PasskeyCeremonyReconciledDto {
-                ceremony_token: ceremony_token.clone(),
-                delivery_state: PasskeyCeremonyDeliveryStateDto::UnknownDelivery,
+                ceremony_token,
+                delivery_state: PasskeyCeremonyDeliveryStateDto::NotDelivered,
             });
         }
 
         Ok(PasskeyCeremonyReconciliationDto { reconciled })
+    }
+
+    fn prune_expired_closed_passkey_ceremonies(&mut self, now_epoch_ms: u64) {
+        self.passkey_ceremonies.retain(|_, entry| {
+            !is_closed_passkey_ceremony_phase(entry.phase)
+                || entry.identity.expires_at_epoch_ms > now_epoch_ms
+        });
     }
 
     fn mark_passkey_ceremony_unknown_delivery(
@@ -4834,6 +4865,11 @@ fn passkey_ceremony_origin_matches_relying_party(origin: &str, relying_party: &s
     if parsed.scheme() != "https" {
         return parsed.scheme() == "http"
             && is_passkey_loopback_host(&host)
+            && is_passkey_loopback_host(&relying_party)
+            && host == relying_party;
+    }
+    if is_passkey_loopback_host(&host) || is_passkey_loopback_host(&relying_party) {
+        return is_passkey_loopback_host(&host)
             && is_passkey_loopback_host(&relying_party)
             && host == relying_party;
     }

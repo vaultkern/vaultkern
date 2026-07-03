@@ -353,6 +353,39 @@ fn runtime_rejects_passkey_ceremony_registration_with_ip_relying_party_mismatch(
 }
 
 #[test]
+fn runtime_allows_https_loopback_ceremony_to_skip_network_validation() {
+    let mut runtime = Runtime::for_tests_at(100);
+
+    runtime
+        .handle(register_command_with(
+            "token-https-localhost",
+            PasskeyCeremonyKindDto::Get,
+            "https://localhost",
+            "localhost",
+            "Y2hhbGxlbmdl",
+            301_000,
+        ))
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "token-https-localhost".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            related_origin_verified: false,
+        })
+        .unwrap();
+
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "token-https-localhost".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            related_origin_verified: false,
+        })
+        .unwrap();
+}
+
+#[test]
 fn runtime_rejects_concurrent_passkey_ceremonies_for_same_origin_rp_tab_and_frame() {
     let mut runtime = Runtime::for_tests_at(100);
 
@@ -1500,6 +1533,55 @@ fn runtime_reconciliation_marks_expired_committed_passkey_ceremonies_unknown_del
 }
 
 #[test]
+fn runtime_reconciliation_rolls_back_expired_saved_uncommitted_passkey_ceremonies() {
+    let mut runtime = Runtime::for_tests_at(100);
+    let (vault_id, _, _) = create_mutated_passkey_registration(
+        &mut runtime,
+        "token-saved-uncommitted",
+        "Y2hhbGxlbmdl",
+    );
+    runtime
+        .handle(RuntimeCommand::SavePasskeyRegistration {
+            ceremony_token: "token-saved-uncommitted".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id,
+        })
+        .unwrap();
+    runtime.set_test_unix_time(400);
+
+    let response = runtime
+        .handle(RuntimeCommand::ReconcilePasskeyCeremonyLedger {
+            active_connection_id: "connection-1".into(),
+        })
+        .unwrap();
+
+    assert_eq!(
+        response,
+        RuntimeResponse::PasskeyCeremonyReconciliation(
+            vaultkern_runtime_protocol::PasskeyCeremonyReconciliationDto {
+                reconciled: vec![vaultkern_runtime_protocol::PasskeyCeremonyReconciledDto {
+                    ceremony_token: "token-saved-uncommitted".into(),
+                    delivery_state: PasskeyCeremonyDeliveryStateDto::NotDelivered,
+                }],
+            }
+        )
+    );
+    assert_eq!(
+        runtime
+            .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+                ceremony_token: "token-saved-uncommitted".into(),
+            })
+            .unwrap(),
+        RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+            known: true,
+            phase: Some(PasskeyCeremonyPhaseDto::ClosedFailed),
+            durable_state: Some(PasskeyCeremonyDurableStateDto::None),
+            delivery_state: Some(PasskeyCeremonyDeliveryStateDto::NotDelivered),
+        })
+    );
+}
+
+#[test]
 fn runtime_reconciliation_preserves_expired_delivered_passkey_ceremonies() {
     let mut runtime = Runtime::for_tests_at(100);
     create_committed_passkey_registration(&mut runtime, "token-1", "Y2hhbGxlbmdl");
@@ -1536,6 +1618,56 @@ fn runtime_reconciliation_preserves_expired_delivered_passkey_ceremonies() {
             phase: Some(PasskeyCeremonyPhaseDto::ClosedDelivered),
             durable_state: Some(PasskeyCeremonyDurableStateDto::Committed),
             delivery_state: Some(PasskeyCeremonyDeliveryStateDto::Delivered),
+        })
+    );
+}
+
+#[test]
+fn runtime_prunes_expired_closed_passkey_ceremonies_before_registration() {
+    let mut runtime = Runtime::for_tests_at(100);
+    create_committed_passkey_registration(&mut runtime, "token-closed-expired", "Y2hhbGxlbmdl");
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "token-closed-expired".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            next_phase: PasskeyCeremonyPhaseDto::ClosedDelivered,
+            related_origin_verified: false,
+        })
+        .unwrap();
+    runtime.set_test_unix_time(400);
+
+    runtime
+        .handle(RuntimeCommand::RegisterPasskeyCeremony {
+            ceremony_token: "token-new-after-prune".into(),
+            connection_id: "connection-1".into(),
+            origin: "https://login.example.com".into(),
+            top_origin: None,
+            ancestor_origins: vec![],
+            relying_party: "example.com".into(),
+            ceremony: PasskeyCeremonyKindDto::Get,
+            discoverable: false,
+            user_verification: PasskeyUserVerificationRequirementDto::Preferred,
+            challenge_base64url: "Y2hhbGxlbmdlLTI".into(),
+            request_id: 43,
+            tab_id: 8,
+            frame_id: 0,
+            frame_kind: PasskeyFrameKindDto::Top,
+            registered_at_epoch_ms: 400_000,
+            expires_at_epoch_ms: 700_000,
+        })
+        .unwrap();
+
+    assert_eq!(
+        runtime
+            .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+                ceremony_token: "token-closed-expired".into(),
+            })
+            .unwrap(),
+        RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+            known: false,
+            phase: None,
+            durable_state: None,
+            delivery_state: None,
         })
     );
 }
@@ -2587,6 +2719,45 @@ fn runtime_treats_duplicate_passkey_delivery_confirmation_as_noop() {
             phase: Some(PasskeyCeremonyPhaseDto::ClosedDelivered),
             durable_state: Some(PasskeyCeremonyDurableStateDto::None),
             delivery_state: Some(PasskeyCeremonyDeliveryStateDto::Delivered),
+        })
+    );
+}
+
+#[test]
+fn runtime_stale_delivery_confirmation_preserves_unknown_delivery_audit_state() {
+    let mut runtime = Runtime::for_tests_at(100);
+    create_committed_passkey_registration(
+        &mut runtime,
+        "token-unknown-then-stale-delivery",
+        "Y2hhbGxlbmdl",
+    );
+    runtime
+        .handle(RuntimeCommand::MarkPasskeyCeremonyUnknownDelivery {
+            ceremony_token: "token-unknown-then-stale-delivery".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+        })
+        .unwrap();
+
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "token-unknown-then-stale-delivery".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            next_phase: PasskeyCeremonyPhaseDto::ClosedDelivered,
+            related_origin_verified: false,
+        })
+        .unwrap();
+
+    assert_eq!(
+        runtime
+            .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+                ceremony_token: "token-unknown-then-stale-delivery".into(),
+            })
+            .unwrap(),
+        RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+            known: true,
+            phase: Some(PasskeyCeremonyPhaseDto::ClosedDelivered),
+            durable_state: Some(PasskeyCeremonyDurableStateDto::Committed),
+            delivery_state: Some(PasskeyCeremonyDeliveryStateDto::UnknownDelivery),
         })
     );
 }

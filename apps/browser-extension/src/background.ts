@@ -138,18 +138,18 @@ if (chromeApi?.webAuthenticationProxy) {
 
   chromeApi.tabs?.onUpdated?.addListener?.(
     (tabId: number, changeInfo: { status?: string }) => {
-      void recordWebAuthnDebug(chromeApi, {
-        event: "page_hook_tab_updated",
-        tabId,
-        status: changeInfo.status,
-        enabled: passkeyProviderEnabled,
-        registered: webAuthnPageHookRegistered
-      });
       if (
         webAuthnPageHookRegistered &&
         passkeyProviderEnabled &&
         changeInfo.status === "complete"
       ) {
+        void recordWebAuthnDebug(chromeApi, {
+          event: "page_hook_tab_updated",
+          tabId,
+          status: changeInfo.status,
+          enabled: passkeyProviderEnabled,
+          registered: webAuthnPageHookRegistered
+        });
         void injectWebAuthnPageHookIntoTab(tabId);
       }
     }
@@ -283,19 +283,14 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
     return;
   }
 
-  let injectedCount = 0;
-  let failedCount = 0;
-  for (const tab of tabs) {
-    if (typeof tab.id !== "number") {
-      continue;
-    }
-
-    if (await injectWebAuthnPageHookIntoTab(tab.id)) {
-      injectedCount += 1;
-    } else {
-      failedCount += 1;
-    }
-  }
+  const tabIds = tabs
+    .map((tab) => tab.id)
+    .filter((tabId): tabId is number => typeof tabId === "number");
+  const injectionResults = await Promise.all(
+    tabIds.map((tabId) => injectWebAuthnPageHookIntoTab(tabId))
+  );
+  const injectedCount = injectionResults.filter(Boolean).length;
+  const failedCount = injectionResults.length - injectedCount;
 
   await recordWebAuthnDebug(chromeApi, {
     event: "page_hook_open_tabs_injected",
@@ -544,24 +539,25 @@ async function disableWebAuthnPageHookInOpenTabs() {
     return;
   }
 
-  let disabledCount = 0;
-  let failedCount = 0;
-  for (const tab of tabs) {
-    if (typeof tab.id !== "number") {
-      continue;
-    }
-
-    try {
-      await chromeApi.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: true },
-        func: disableVaultKernWebAuthnPageHook,
-        world: "MAIN"
-      });
-      disabledCount += 1;
-    } catch {
-      failedCount += 1;
-    }
-  }
+  const tabIds = tabs
+    .map((tab) => tab.id)
+    .filter((tabId): tabId is number => typeof tabId === "number");
+  const disabledResults = await Promise.all(
+    tabIds.map(async (tabId) => {
+      try {
+        await chromeApi.scripting.executeScript({
+          target: { tabId, allFrames: true },
+          func: disableVaultKernWebAuthnPageHook,
+          world: "MAIN"
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    })
+  );
+  const disabledCount = disabledResults.filter(Boolean).length;
+  const failedCount = disabledResults.length - disabledCount;
 
   await recordWebAuthnDebug(chromeApi, {
     event: "page_hook_open_tabs_disabled",

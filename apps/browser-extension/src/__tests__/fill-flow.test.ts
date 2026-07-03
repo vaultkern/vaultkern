@@ -1097,6 +1097,9 @@ describe("PopupShell fill flow", () => {
       });
       expect(closeWindow).toHaveBeenCalledTimes(1);
     });
+    expect(runtimeClientMocks.listEntries).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.findFillCandidates).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
   });
 
   it("does not notify WebAuthn waiters after unlocking in the regular popup", async () => {
@@ -1323,6 +1326,9 @@ describe("PopupShell fill flow", () => {
     expect(
       screen.queryByRole("button", { name: "Open Manager" })
     ).not.toBeInTheDocument();
+    expect(runtimeClientMocks.listEntries).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.findFillCandidates).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText("Master Password"), {
       target: { value: "demo-password" }

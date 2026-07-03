@@ -192,6 +192,8 @@ export function PopupApp({
   const webAuthnUnlockPrompt = webAuthnMode === "unlock";
   const webAuthnApprovePrompt = webAuthnMode === "approve";
   const webAuthnVerifyPrompt = webAuthnMode === "verify";
+  const webAuthnCeremonyPrompt =
+    webAuthnUnlockPrompt || webAuthnApprovePrompt || webAuthnVerifyPrompt;
   const [passkeyCredentialOptions, setPasskeyCredentialOptions] = useState<
     PasskeyCredentialOption[]
   >([]);
@@ -403,7 +405,7 @@ export function PopupApp({
   }, [client, extensionSettings.idleLockMinutes, session?.unlocked]);
 
   useEffect(() => {
-    if (webAuthnApprovePrompt) {
+    if (webAuthnCeremonyPrompt) {
       setEntries([]);
       setCandidates([]);
       setSelectedEntryId(null);
@@ -466,11 +468,11 @@ export function PopupApp({
     findCandidates,
     session?.activeVaultId,
     session?.unlocked,
-    webAuthnApprovePrompt
+    webAuthnCeremonyPrompt
   ]);
 
   useEffect(() => {
-    if (webAuthnApprovePrompt) {
+    if (webAuthnCeremonyPrompt) {
       setSelectedDetail(null);
       setDetailError(null);
       return;
@@ -511,7 +513,7 @@ export function PopupApp({
     extensionSettings.language,
     selectedEntryId,
     session?.activeVaultId,
-    webAuthnApprovePrompt
+    webAuthnCeremonyPrompt
   ]);
 
   async function handleUnlock() {

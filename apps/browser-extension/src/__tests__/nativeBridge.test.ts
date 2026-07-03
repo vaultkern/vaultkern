@@ -147,6 +147,65 @@ describe("createNativeMessagingBridge", () => {
     });
   });
 
+  it("does not retry forever when reconnecting after a stale post fails", async () => {
+    const firstPort = createPort();
+    firstPort.postMessage.mockImplementation(() => {
+      throw new Error("Native host has exited.");
+    });
+    const connectNative = vi.fn(() => {
+      if (connectNative.mock.calls.length === 1) {
+        return firstPort;
+      }
+      throw new Error("Native host has exited.");
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    await expect(
+      bridge.send({
+        version: 1,
+        command: { type: "create_passkey_assertion" }
+      })
+    ).rejects.toMatchObject({
+      code: "native_port_disconnected",
+      message: "Native host has exited."
+    });
+    expect(connectNative).toHaveBeenCalledTimes(2);
+    expect(firstPort.postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry unclassified native post failures as stale ports", async () => {
+    const port = createPort();
+    port.postMessage.mockImplementation(() => {
+      throw new Error("message serialization failed");
+    });
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    await expect(
+      bridge.send({
+        version: 1,
+        command: { type: "create_passkey_assertion" }
+      })
+    ).rejects.toMatchObject({
+      code: "native_unknown",
+      message: "message serialization failed"
+    });
+    expect(connectNative).toHaveBeenCalledTimes(1);
+    expect(port.postMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a silent request after a timeout and continues with queued requests", async () => {
     vi.useFakeTimers();
 
