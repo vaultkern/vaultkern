@@ -419,7 +419,7 @@ export async function reconcilePersistedPasskeyCeremonies(
             phase: replay.replayedPhase
           };
           mirrors[token] = restoredMirror;
-          await restorePasskeyCeremonyPrompt(candidate, restoredMirror);
+          restorePasskeyCeremonyPromptState(restoredMirror);
         } else {
           if (replay.lastNativePhase) {
             await closePersistedNativePasskeyCeremony(
@@ -483,7 +483,7 @@ export async function reconcilePersistedPasskeyCeremonies(
         delete mirrors[token];
         changed = true;
       } else if (ledgerPhase === mirror.phase) {
-        await restorePasskeyCeremonyPrompt(candidate, mirror);
+        restorePasskeyCeremonyPromptState(mirror);
         continue;
       } else if (passkeyCeremonyCanAdvanceMirrorPhase(mirror.phase, ledgerPhase)) {
         const advancedMirror = passkeyCeremonyMirrorForPhase(
@@ -2822,65 +2822,6 @@ function passkeyCeremonyMirrorPhaseOriginIsConsistent(
   }
 
   return true;
-}
-
-async function restorePasskeyCeremonyPrompt(
-  chromeApi: ChromeLike | null | undefined,
-  mirror: PasskeyCeremonyContext
-) {
-  if (!restorePasskeyCeremonyPromptState(mirror)) {
-    return;
-  }
-  const promptContext = promptContextFromMirror(mirror);
-  if (!promptContext) {
-    return;
-  }
-  const requestCancelKey = webAuthnRequestCancelKeyFromMirror(mirror);
-  try {
-    if (mirror.promptMode === "approve") {
-      await openPresencePrompt(
-        chromeApi ?? {},
-        mirror.requestId,
-        mirror.ceremonyToken,
-        promptContext,
-        requestCancelKey,
-        mirror.popupNonce
-      );
-      return;
-    }
-
-    if (mirror.promptMode === "verify") {
-      if (!passkeyNonemptyString(mirror.activeVaultId)) {
-        return;
-      }
-      await openUserVerificationPrompt(
-        chromeApi ?? {},
-        mirror.requestId,
-        mirror.ceremonyToken,
-        {
-          ...promptContext,
-          ceremonyToken: mirror.ceremonyToken,
-          activeVaultId: mirror.activeVaultId
-        },
-        requestCancelKey,
-        mirror.popupNonce
-      );
-      return;
-    }
-
-    await openUnlockPrompt(
-      chromeApi ?? {},
-      mirror.requestId,
-      mirror.ceremonyToken,
-      promptContext,
-      requestCancelKey,
-      mirror.popupNonce
-    );
-  } catch {
-    // A restored popup may already exist outside this service worker, or the
-    // browser may not expose windows in tests. The nonce-bound message state
-    // remains authoritative, so resumption can still fail closed later.
-  }
 }
 
 function restorePasskeyCeremonyPromptState(mirror: PasskeyCeremonyContext) {

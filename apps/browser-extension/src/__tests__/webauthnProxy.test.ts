@@ -2597,6 +2597,8 @@ describe("webAuthenticationProxy wrapper", () => {
           frameKind: "top",
           getCredentialIds: ["Y3JlZGVudGlhbC0x"],
           getClientExtensionResults: {},
+          popupNonce: "nonce-pre-s4",
+          promptMode: "unlock",
           registeredAtEpochMs: 1_000,
           expiresAtEpochMs: Date.now() + 300_000
         },
@@ -2621,6 +2623,10 @@ describe("webAuthenticationProxy wrapper", () => {
     const chromeApi = {
       storage: {
         session: sessionStorage
+      },
+      windows: {
+        create: vi.fn(async () => ({ id: 47 })),
+        update: vi.fn(async () => undefined)
       }
     };
     const sendRuntimeCommand = vi.fn(async (command: Record<string, unknown>) => {
@@ -2635,6 +2641,8 @@ describe("webAuthenticationProxy wrapper", () => {
 
     await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
 
+    expect(chromeApi.windows.create).not.toHaveBeenCalled();
+    expect(chromeApi.windows.update).not.toHaveBeenCalled();
     expect(sendRuntimeCommand).toHaveBeenCalledWith({
       type: "query_passkey_ceremony_ledger",
       ceremony_token: "token-pre-s4"
@@ -4913,7 +4921,8 @@ describe("webAuthenticationProxy wrapper", () => {
         session: sessionStorage
       },
       windows: {
-        create: vi.fn(async () => ({ id: 52 }))
+        create: vi.fn(async () => ({ id: 52 })),
+        update: vi.fn(async () => undefined)
       },
       webAuthenticationProxy: {
         attach: vi.fn(async () => undefined),
@@ -4962,13 +4971,8 @@ describe("webAuthenticationProxy wrapper", () => {
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
     await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
 
-    expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
-    const restoredUnlockUrl = (chromeApi.windows.create.mock.calls[0][0] as {
-      url: string;
-    }).url;
-    expect(restoredUnlockUrl).toContain("webauthn=unlock");
-    expect(restoredUnlockUrl).toContain("nonce=nonce-unlock");
-    expect(restoredUnlockUrl).not.toContain("token-unlock");
+    expect(chromeApi.windows.create).not.toHaveBeenCalled();
+    expect(chromeApi.windows.update).not.toHaveBeenCalled();
 
     messageListener?.(
       {
