@@ -1095,6 +1095,20 @@ it("manages an entry passkey from the detail pane", async () => {
   const privateKeyPemField = screen.getByLabelText("Private Key PEM");
   expect(privateKeyPemField.tagName).toBe("TEXTAREA");
   expect(privateKeyPemField).toHaveValue(originalPasskey.privateKeyPem);
+  expect(privateKeyPemField).toHaveStyle({ WebkitTextSecurity: "disc" });
+  const privateKeyPemDraftRow = privateKeyPemField.closest("div");
+  expect(privateKeyPemDraftRow).not.toBeNull();
+  fireEvent.click(
+    within(privateKeyPemDraftRow as HTMLElement).getByRole("button", {
+      name: "Show Private Key PEM"
+    })
+  );
+  expect(privateKeyPemField).not.toHaveStyle({ WebkitTextSecurity: "disc" });
+  fireEvent.click(
+    within(privateKeyPemDraftRow as HTMLElement).getByRole("button", {
+      name: "Hide Private Key PEM"
+    })
+  );
   expect(screen.getByDisplayValue("credential-old")).toHaveAttribute("type", "password");
   expect(screen.getByDisplayValue("generated-user")).toHaveAttribute("type", "password");
   expect(screen.getByDisplayValue("user-handle")).toHaveAttribute("type", "password");

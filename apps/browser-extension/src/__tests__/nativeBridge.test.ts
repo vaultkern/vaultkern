@@ -324,7 +324,7 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
-  it("uses the interactive timeout while saving a vault after passkey registration", async () => {
+  it("uses the interactive timeout while saving a passkey registration", async () => {
     vi.useFakeTimers();
 
     const port = createPort();
@@ -342,7 +342,12 @@ describe("createNativeMessagingBridge", () => {
 
     const request = bridge.send({
       version: 1,
-      command: { type: "save_vault", vault_id: "vault-1" }
+      command: {
+        type: "save_passkey_registration",
+        ceremony_token: "ceremony-token-1",
+        expected_phase: "s4_completion_and_mutation",
+        vault_id: "vault-1"
+      }
     });
 
     await vi.advanceTimersByTimeAsync(25);
@@ -362,7 +367,7 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
-  it("uses the interactive timeout while rolling back a passkey registration", async () => {
+  it("uses the interactive timeout while aborting a passkey registration", async () => {
     vi.useFakeTimers();
 
     const port = createPort();
@@ -381,11 +386,10 @@ describe("createNativeMessagingBridge", () => {
     const request = bridge.send({
       version: 1,
       command: {
-        type: "rollback_passkey_registration",
-        vault_id: "vault-1",
-        entry_id: "entry-1",
-        credential_id: "credential-1",
-        created: true
+        type: "abort_passkey_registration",
+        ceremony_token: "ceremony-token-1",
+        expected_phase: "s4_completion_and_mutation",
+        closed_phase: "closed_failed"
       }
     });
 
@@ -745,5 +749,34 @@ describe("createNativeMessagingBridge", () => {
       code: "native_port_disconnected",
       message: "native port disconnected"
     });
+  });
+
+  it("runs port-detach observers without masking native disconnect errors", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const onPortDetached = vi.fn(() => {
+      throw new Error("observer failed");
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        lastError: { message: "native port disconnected" }
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      onPortDetached
+    });
+
+    const request = bridge.send({ version: 1, command: { type: "first" } });
+    const failure = request.catch((error: unknown) => error);
+
+    port.emitDisconnect();
+
+    await expect(failure).resolves.toMatchObject({
+      code: "native_port_disconnected",
+      message: "native port disconnected"
+    });
+    expect(onPortDetached).toHaveBeenCalledTimes(1);
   });
 });

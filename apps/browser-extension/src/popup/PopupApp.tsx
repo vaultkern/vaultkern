@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type {
@@ -31,7 +31,6 @@ type SessionStateLike = Pick<
 type PasskeyCredentialOption = {
   credentialId: string;
   username: string;
-  userHandle?: string | null;
 };
 
 export interface PopupClientLike {
@@ -54,45 +53,81 @@ function limitRecentVaults(vaults: VaultReference[], limit: number) {
     .slice(0, limit);
 }
 
-function passkeyCredentialOptionsFromSearch(): PasskeyCredentialOption[] {
+function passkeyCredentialOptionsFromUnknown(
+  options: unknown
+): PasskeyCredentialOption[] {
+  if (!Array.isArray(options)) {
+    return [];
+  }
+  const parsed = options.map((option) => {
+    const candidate = option as Partial<PasskeyCredentialOption> | null;
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate) ||
+      typeof candidate.credentialId !== "string" ||
+      candidate.credentialId.trim() === "" ||
+      typeof candidate.username !== "string" ||
+      Object.keys(candidate).some(
+        (key) => key !== "credentialId" && key !== "username"
+      )
+    ) {
+      return null;
+    }
+    return {
+      credentialId: candidate.credentialId,
+      username: candidate.username
+    };
+  });
+  if (parsed.some((option) => option === null)) {
+    return [];
+  }
+  return parsed as PasskeyCredentialOption[];
+}
+
+async function loadPasskeyCredentialOptionsFromPrompt() {
   if (typeof window === "undefined") {
     return [];
   }
-
-  const encodedOptions = new URLSearchParams(window.location.search).get(
-    "credentialOptions"
-  );
-  if (!encodedOptions) {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("webauthn") !== "approve") {
     return [];
   }
-
-  try {
-    const options = JSON.parse(encodedOptions);
-    if (!Array.isArray(options)) {
-      return [];
+  const requestIdValue = params.get("requestId");
+  const requestId =
+    requestIdValue && requestIdValue.trim() !== "" ? Number(requestIdValue) : null;
+  if (typeof requestId !== "number" || !Number.isFinite(requestId)) {
+    return [];
+  }
+  const runtime = (
+    globalThis as typeof globalThis & {
+      chrome?: {
+        runtime?: {
+          sendMessage?: (message: unknown) => Promise<unknown> | unknown;
+        };
+      };
     }
-    return options.flatMap((option) => {
-      const candidate = option as Partial<PasskeyCredentialOption> | null;
-      if (
-        !candidate ||
-        typeof candidate.credentialId !== "string" ||
-        candidate.credentialId.trim() === "" ||
-        typeof candidate.username !== "string"
-      ) {
-        return [];
-      }
-      return [
-        {
-          credentialId: candidate.credentialId,
-          username: candidate.username,
-          userHandle:
-            typeof candidate.userHandle === "string" ? candidate.userHandle : null
-        }
-      ];
-    });
-  } catch {
+  ).chrome?.runtime;
+  if (typeof runtime?.sendMessage !== "function") {
     return [];
   }
+  const nonce = params.get("nonce");
+  const origin = params.get("origin");
+  const relyingParty = params.get("relyingParty");
+  const topOrigin = params.get("topOrigin");
+  const response = await Promise.resolve(
+    runtime.sendMessage({
+      type: "vaultkern_presence_options_request",
+      requestId,
+      ...(origin ? { origin } : {}),
+      ...(relyingParty ? { relyingParty } : {}),
+      ...(topOrigin ? { topOrigin } : {}),
+      ...(nonce ? { nonce } : {})
+    })
+  );
+  return passkeyCredentialOptionsFromUnknown(
+    (response as { credentialOptions?: unknown } | null)?.credentialOptions
+  );
 }
 
 export function PopupApp({
@@ -148,10 +183,9 @@ export function PopupApp({
     new URLSearchParams(window.location.search).get("webauthn");
   const webAuthnUnlockPrompt = webAuthnMode === "unlock";
   const webAuthnApprovePrompt = webAuthnMode === "approve";
-  const passkeyCredentialOptions = useMemo(
-    () => (webAuthnApprovePrompt ? passkeyCredentialOptionsFromSearch() : []),
-    [webAuthnApprovePrompt]
-  );
+  const [passkeyCredentialOptions, setPasskeyCredentialOptions] = useState<
+    PasskeyCredentialOption[]
+  >([]);
   const [selectedPasskeyCredentialId, setSelectedPasskeyCredentialId] = useState("");
 
   function currentVaultForSession() {
@@ -292,6 +326,32 @@ export function PopupApp({
       passkeyCredentialOptions[0]?.credentialId ?? ""
     );
   }, [passkeyCredentialOptions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!webAuthnApprovePrompt) {
+      setPasskeyCredentialOptions([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    loadPasskeyCredentialOptionsFromPrompt()
+      .then((options) => {
+        if (!cancelled) {
+          setPasskeyCredentialOptions(options);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPasskeyCredentialOptions([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [webAuthnApprovePrompt]);
 
   useEffect(() => {
     if (
@@ -525,7 +585,7 @@ export function PopupApp({
       await Promise.resolve(
         onWebAuthnPresenceComplete?.(
           session,
-          selectedPasskeyCredentialId
+          passkeyCredentialOptions.length > 0 && selectedPasskeyCredentialId
             ? { credentialId: selectedPasskeyCredentialId }
             : undefined
         )

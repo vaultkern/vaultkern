@@ -24,6 +24,7 @@ pub struct PasskeyAssertionRequest<'a> {
     pub relying_party: &'a str,
     pub origin: &'a str,
     pub credential_id: Option<&'a str>,
+    pub discoverable: bool,
     pub user_presence_verified: bool,
     pub related_origin_verified: bool,
     pub client_data_json_base64url: &'a str,
@@ -34,6 +35,7 @@ pub struct PasskeyRegistrationRequest<'a> {
     pub origin: &'a str,
     pub user_name: &'a str,
     pub user_handle_base64url: &'a str,
+    pub public_key_algorithm: i32,
     pub related_origin_verified: bool,
     pub client_data_json_base64url: &'a str,
 }
@@ -41,6 +43,10 @@ pub struct PasskeyRegistrationRequest<'a> {
 pub struct PasskeyRegistration {
     pub passkey: PasskeyRecord,
     pub dto: PasskeyRegistrationDto,
+}
+
+pub fn generate_passkey_credential_id() -> String {
+    URL_SAFE_NO_PAD.encode(Uuid::new_v4().as_bytes())
 }
 
 pub fn create_assertion(
@@ -85,13 +91,25 @@ pub fn create_assertion(
         authenticator_data_base64url: URL_SAFE_NO_PAD.encode(authenticator_data),
         client_data_json_base64url: request.client_data_json_base64url.to_owned(),
         signature_base64url: URL_SAFE_NO_PAD.encode(signature_der.as_bytes()),
-        user_handle_base64url: passkey.user_handle.clone(),
+        user_handle_base64url: if request.discoverable {
+            passkey.user_handle.clone()
+        } else {
+            None
+        },
         backup_eligible: passkey.backup_eligible,
         backup_state: passkey.backup_state,
     })
 }
 
+#[cfg(test)]
 pub fn create_registration(request: PasskeyRegistrationRequest<'_>) -> Result<PasskeyRegistration> {
+    create_registration_with_credential_id(request, generate_passkey_credential_id())
+}
+
+pub fn create_registration_with_credential_id(
+    request: PasskeyRegistrationRequest<'_>,
+    credential_id: String,
+) -> Result<PasskeyRegistration> {
     validate_origin_for_relying_party(
         request.origin,
         request.relying_party,
@@ -102,6 +120,8 @@ pub fn create_registration(request: PasskeyRegistrationRequest<'_>) -> Result<Pa
         .decode(request.client_data_json_base64url)
         .context("invalid passkey clientDataJSON base64url")?;
     validate_client_data_type(&client_data_json, request.origin, "webauthn.create")?;
+    validate_public_key_algorithm(request.public_key_algorithm)?;
+    validate_user_handle(request.user_handle_base64url)?;
 
     let signing_key = SigningKey::random(&mut OsRng);
     let private_key_pem = signing_key
@@ -114,7 +134,6 @@ pub fn create_registration(request: PasskeyRegistrationRequest<'_>) -> Result<Pa
         .to_public_key_der()
         .context("failed to encode passkey public key")?;
     let public_key_cose = cose_es256_public_key(&public_key)?;
-    let credential_id = URL_SAFE_NO_PAD.encode(Uuid::new_v4().as_bytes());
     let credential_id_bytes = URL_SAFE_NO_PAD
         .decode(&credential_id)
         .context("generated passkey credential id was not base64url")?;
@@ -161,7 +180,7 @@ fn authenticator_data(relying_party: &str, passkey: &PasskeyRecord) -> Vec<u8> {
 }
 
 fn assertion_flags(passkey: &PasskeyRecord) -> u8 {
-    let backup_eligible = if passkey.backup_eligible {
+    let backup_eligible = if passkey.backup_eligible || passkey.backup_state {
         AUTH_DATA_FLAG_BACKUP_ELIGIBLE
     } else {
         0
@@ -179,22 +198,41 @@ fn validate_origin_for_relying_party(
     relying_party: &str,
     related_origin_verified: bool,
 ) -> Result<()> {
+    if origin.trim() != origin {
+        anyhow::bail!("invalid passkey origin");
+    }
+    if relying_party.trim().is_empty() || relying_party.trim() != relying_party {
+        anyhow::bail!("invalid passkey relying party");
+    }
+    let canonical_relying_party = normalize_host(relying_party);
+    if relying_party != canonical_relying_party {
+        anyhow::bail!("invalid passkey relying party");
+    }
     let parsed = Url::parse(origin).context("invalid passkey origin")?;
     let host = normalize_host(
         parsed
             .host_str()
             .context("passkey origin is missing a host")?,
     );
-    let relying_party = normalize_host(relying_party);
+    if parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        anyhow::bail!("invalid passkey origin");
+    }
     if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_loopback_host(&host)) {
         anyhow::bail!("passkey origin must use https");
     }
 
-    if origin_host_matches_relying_party(&host, &relying_party) {
+    if origin_host_matches_relying_party(&host, &canonical_relying_party) {
         return Ok(());
     }
 
-    if related_origin_verified && can_accept_verified_related_origin(&host, &relying_party) {
+    if related_origin_verified
+        && can_accept_verified_related_origin(&host, &canonical_relying_party)
+    {
         return Ok(());
     }
 
@@ -257,6 +295,23 @@ fn validate_client_data_type(
     }
     if value.get("origin").and_then(Value::as_str) != Some(origin) {
         anyhow::bail!("passkey clientDataJSON origin mismatch");
+    }
+    Ok(())
+}
+
+fn validate_user_handle(user_handle_base64url: &str) -> Result<()> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(user_handle_base64url)
+        .context("invalid passkey user handle base64url")?;
+    if bytes.is_empty() || bytes.len() > 64 {
+        anyhow::bail!("passkey user handle must be 1 to 64 bytes");
+    }
+    Ok(())
+}
+
+fn validate_public_key_algorithm(public_key_algorithm: i32) -> Result<()> {
+    if public_key_algorithm != ES256_COSE_ALGORITHM {
+        anyhow::bail!("unsupported passkey public key algorithm");
     }
     Ok(())
 }
@@ -362,6 +417,7 @@ fn cbor_major(output: &mut Vec<u8>, major: u8, value: u64) {
 mod tests {
     use super::{PasskeyRegistrationRequest, create_registration};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use vaultkern_core::PasskeyRecord;
 
     #[test]
     fn registration_rejects_public_suffix_relying_party() {
@@ -374,6 +430,7 @@ mod tests {
             origin: "https://attacker.com",
             user_name: "alice@example.com",
             user_handle_base64url: "dXNlci0x",
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
         }) {
@@ -389,6 +446,59 @@ mod tests {
     }
 
     #[test]
+    fn registration_rejects_non_origin_origin() {
+        for origin in ["https://example.com/path", " https://example.com"] {
+            let client_data_json = URL_SAFE_NO_PAD.encode(
+                format!(
+                    r#"{{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTE","origin":"{origin}","crossOrigin":false}}"#
+                ),
+            );
+
+            let error = match create_registration(PasskeyRegistrationRequest {
+                relying_party: "example.com",
+                origin,
+                user_name: "alice@example.com",
+                user_handle_base64url: "dXNlci0x",
+                public_key_algorithm: -7,
+                related_origin_verified: false,
+                client_data_json_base64url: &client_data_json,
+            }) {
+                Ok(_) => panic!("non-origin passkey origin must be rejected: {origin:?}"),
+                Err(error) => error,
+            };
+
+            assert!(error.to_string().contains("invalid passkey origin"));
+        }
+    }
+
+    #[test]
+    fn registration_rejects_whitespace_padded_relying_party() {
+        let client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTE","origin":"https://login.example.com","crossOrigin":false}"#,
+        );
+
+        for relying_party in [" example.com", "Example.COM"] {
+            let error = match create_registration(PasskeyRegistrationRequest {
+                relying_party,
+                origin: "https://login.example.com",
+                user_name: "alice@example.com",
+                user_handle_base64url: "dXNlci0x",
+                public_key_algorithm: -7,
+                related_origin_verified: false,
+                client_data_json_base64url: &client_data_json,
+            }) {
+                Ok(_) => panic!("non-canonical passkey relying party must be rejected"),
+                Err(error) => error,
+            };
+
+            assert!(
+                error.to_string().contains("invalid passkey relying party"),
+                "unexpected error for {relying_party:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn registration_accepts_verified_related_origin() {
         let client_data_json = URL_SAFE_NO_PAD.encode(
             br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.co.uk","crossOrigin":false}"#,
@@ -399,6 +509,7 @@ mod tests {
             origin: "https://example.co.uk",
             user_name: "alice@example.com",
             user_handle_base64url: "dXNlci0x",
+            public_key_algorithm: -7,
             related_origin_verified: true,
             client_data_json_base64url: &client_data_json,
         })
@@ -418,6 +529,7 @@ mod tests {
             origin: "https://example.com",
             user_name: "alice@example.com",
             user_handle_base64url: "dXNlci0x",
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
         })
@@ -435,5 +547,232 @@ mod tests {
                 | super::AUTH_DATA_FLAG_BACKUP_STATE
                 | super::AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA
         );
+    }
+
+    #[test]
+    fn registration_uses_none_attestation_and_zero_aaguid() {
+        let client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
+        );
+
+        let registration = create_registration(PasskeyRegistrationRequest {
+            relying_party: "example.com",
+            origin: "https://example.com",
+            user_name: "alice@example.com",
+            user_handle_base64url: "dXNlci0x",
+            public_key_algorithm: -7,
+            related_origin_verified: false,
+            client_data_json_base64url: &client_data_json,
+        })
+        .expect("registration");
+        let authenticator_data = URL_SAFE_NO_PAD
+            .decode(&registration.dto.authenticator_data_base64url)
+            .expect("decode auth data");
+        let attestation_object = URL_SAFE_NO_PAD
+            .decode(&registration.dto.attestation_object_base64url)
+            .expect("decode attestation object");
+
+        assert_eq!(&authenticator_data[37..53], [0_u8; 16]);
+        assert!(attestation_object.starts_with(&[
+            0xa3, 0x63, b'f', b'm', b't', 0x64, b'n', b'o', b'n', b'e', 0x67, b'a', b't', b't',
+            b'S', b't', b'm', b't', 0xa0, 0x68, b'a', b'u', b't', b'h', b'D', b'a', b't', b'a',
+        ]));
+        assert_eq!(
+            auth_data_from_attestation_object(&attestation_object)
+                .expect("attestation object must be valid CBOR without trailing bytes"),
+            authenticator_data
+        );
+    }
+
+    #[test]
+    fn registration_rejects_user_handle_longer_than_64_bytes() {
+        let client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
+        );
+        let oversized_user_handle = URL_SAFE_NO_PAD.encode([7_u8; 65]);
+
+        let error = match create_registration(PasskeyRegistrationRequest {
+            relying_party: "example.com",
+            origin: "https://example.com",
+            user_name: "alice@example.com",
+            user_handle_base64url: &oversized_user_handle,
+            public_key_algorithm: -7,
+            related_origin_verified: false,
+            client_data_json_base64url: &client_data_json,
+        }) {
+            Ok(_) => panic!("oversized passkey user handle must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("passkey user handle must be 1 to 64 bytes")
+        );
+    }
+
+    #[test]
+    fn registration_rejects_empty_user_handle() {
+        let client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
+        );
+
+        let error = match create_registration(PasskeyRegistrationRequest {
+            relying_party: "example.com",
+            origin: "https://example.com",
+            user_name: "alice@example.com",
+            user_handle_base64url: "",
+            public_key_algorithm: -7,
+            related_origin_verified: false,
+            client_data_json_base64url: &client_data_json,
+        }) {
+            Ok(_) => panic!("empty passkey user handle must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("passkey user handle must be 1 to 64 bytes")
+        );
+    }
+
+    #[test]
+    fn assertion_flags_never_set_backup_state_without_backup_eligible() {
+        let passkey = PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "Y3JlZGVudGlhbA".into(),
+            generated_user_id: None,
+            private_key_pem: String::new(),
+            relying_party: "example.com".into(),
+            user_handle: Some("dXNlci0x".into()),
+            backup_eligible: false,
+            backup_state: true,
+        };
+
+        let flags = super::assertion_flags(&passkey);
+
+        assert_ne!(flags & super::AUTH_DATA_FLAG_BACKUP_STATE, 0);
+        assert_ne!(flags & super::AUTH_DATA_FLAG_BACKUP_ELIGIBLE, 0);
+    }
+
+    #[test]
+    fn assertion_flags_do_not_set_extension_data_by_default() {
+        const AUTH_DATA_FLAG_EXTENSION_DATA: u8 = 0x80;
+        let passkey = PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "Y3JlZGVudGlhbA".into(),
+            generated_user_id: None,
+            private_key_pem: String::new(),
+            relying_party: "example.com".into(),
+            user_handle: Some("dXNlci0x".into()),
+            backup_eligible: true,
+            backup_state: true,
+        };
+
+        let flags = super::assertion_flags(&passkey);
+
+        assert_eq!(flags & AUTH_DATA_FLAG_EXTENSION_DATA, 0);
+    }
+
+    #[test]
+    fn assertion_flags_do_not_set_user_verified() {
+        const AUTH_DATA_FLAG_USER_VERIFIED: u8 = 0x04;
+        let passkey = PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "Y3JlZGVudGlhbA".into(),
+            generated_user_id: None,
+            private_key_pem: String::new(),
+            relying_party: "example.com".into(),
+            user_handle: Some("dXNlci0x".into()),
+            backup_eligible: true,
+            backup_state: true,
+        };
+
+        let flags = super::assertion_flags(&passkey);
+
+        assert_eq!(flags & AUTH_DATA_FLAG_USER_VERIFIED, 0);
+    }
+
+    fn auth_data_from_attestation_object(bytes: &[u8]) -> Option<Vec<u8>> {
+        let mut cursor = 0;
+        if read_len(bytes, &mut cursor, 5)? != 3 {
+            return None;
+        }
+        if !expect_text(bytes, &mut cursor, "fmt") {
+            return None;
+        }
+        if !expect_text(bytes, &mut cursor, "none") {
+            return None;
+        }
+        if !expect_text(bytes, &mut cursor, "attStmt") {
+            return None;
+        }
+        if read_len(bytes, &mut cursor, 5)? != 0 {
+            return None;
+        }
+        if !expect_text(bytes, &mut cursor, "authData") {
+            return None;
+        }
+        let auth_data = read_bytes(bytes, &mut cursor)?.to_vec();
+        if cursor != bytes.len() {
+            return None;
+        }
+        Some(auth_data)
+    }
+
+    fn expect_text(bytes: &[u8], cursor: &mut usize, expected: &str) -> bool {
+        let Some(len) = read_len(bytes, cursor, 3) else {
+            return false;
+        };
+        let Some(value) = bytes.get(*cursor..cursor.saturating_add(len)) else {
+            return false;
+        };
+        *cursor += len;
+        value == expected.as_bytes()
+    }
+
+    fn read_bytes<'a>(bytes: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
+        let len = read_len(bytes, cursor, 2)?;
+        let value = bytes.get(*cursor..cursor.saturating_add(len))?;
+        *cursor += len;
+        Some(value)
+    }
+
+    fn read_len(bytes: &[u8], cursor: &mut usize, expected_major: u8) -> Option<usize> {
+        let initial = *bytes.get(*cursor)?;
+        *cursor += 1;
+        if initial >> 5 != expected_major {
+            return None;
+        }
+        match initial & 0x1f {
+            value @ 0..=23 => Some(value.into()),
+            24 => {
+                let value = *bytes.get(*cursor)?;
+                *cursor += 1;
+                Some(value.into())
+            }
+            25 => {
+                let value = u16::from_be_bytes(
+                    bytes
+                        .get(*cursor..cursor.saturating_add(2))?
+                        .try_into()
+                        .ok()?,
+                );
+                *cursor += 2;
+                Some(value.into())
+            }
+            26 => {
+                let value = u32::from_be_bytes(
+                    bytes
+                        .get(*cursor..cursor.saturating_add(4))?
+                        .try_into()
+                        .ok()?,
+                );
+                *cursor += 4;
+                usize::try_from(value).ok()
+            }
+            _ => None,
+        }
     }
 }

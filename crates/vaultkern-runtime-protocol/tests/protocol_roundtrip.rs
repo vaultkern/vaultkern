@@ -5,10 +5,14 @@ use vaultkern_runtime_protocol::{
     EntryAttachmentContentDto, EntryDetailDto, EntryHistoryDetailDto, EntryHistoryItemDto,
     EntryHistoryListDto, EntryPasskeyDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto,
     GroupTreeDto, MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
-    OneDriveItemListDto, PasskeyAssertionDto, PasskeyCredentialCandidateDto,
-    PasskeyCredentialListDto, PasskeyCredentialStatusDto, PasskeyRegistrationDto, ProtocolEnvelope,
-    RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
-    VaultHandleDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
+    OneDriveItemListDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
+    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
+    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
+    PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto,
+    PasskeyCredentialListDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
+    PasskeyRegistrationDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
+    SaveVaultStatusDto, SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
+    VaultSourceStatusDto,
 };
 
 #[test]
@@ -795,10 +799,13 @@ fn protocol_roundtrips_entry_attachment_commands() {
 #[test]
 fn protocol_roundtrips_passkey_assertion_command_and_response() {
     let command = ProtocolEnvelope::new(RuntimeCommand::CreatePasskeyAssertion {
+        ceremony_token: "ceremony-token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
         vault_id: "vault-1".into(),
         relying_party: "example.com".into(),
         origin: "https://example.com".into(),
         credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+        discoverable: true,
         user_presence_verified: true,
         related_origin_verified: false,
         client_data_json_base64url: "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0".into(),
@@ -818,13 +825,47 @@ fn protocol_roundtrips_passkey_assertion_command_and_response() {
         serde_json::json!("eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0")
     );
     assert_eq!(
+        command_json["command"]["ceremony_token"],
+        serde_json::json!("ceremony-token-1")
+    );
+    assert_eq!(
+        command_json["command"]["expected_phase"],
+        serde_json::json!("s4_completion_and_mutation")
+    );
+    assert_eq!(
         command_json["command"]["user_presence_verified"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        command_json["command"]["discoverable"],
         serde_json::json!(true)
     );
     assert_eq!(
         serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
         command
     );
+
+    let legacy_assertion_json = serde_json::json!({
+        "version": 1,
+        "command": {
+            "type": "create_passkey_assertion",
+            "ceremony_token": "ceremony-token-1",
+            "expected_phase": "s4_completion_and_mutation",
+            "vault_id": "vault-1",
+            "relying_party": "example.com",
+            "origin": "https://example.com",
+            "credential_id": "Y3JlZGVudGlhbC0x",
+            "user_presence_verified": true,
+            "client_data_json_base64url": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0"
+        }
+    });
+    let legacy_assertion = serde_json::from_value::<ProtocolEnvelope>(legacy_assertion_json)
+        .expect("legacy assertion command");
+    let RuntimeCommand::CreatePasskeyAssertion { discoverable, .. } = legacy_assertion.command
+    else {
+        panic!("expected passkey assertion command");
+    };
+    assert!(!discoverable);
 
     let response = RuntimeResponse::PasskeyAssertion(PasskeyAssertionDto {
         credential_id: "Y3JlZGVudGlhbC0x".into(),
@@ -853,17 +894,34 @@ fn protocol_roundtrips_passkey_assertion_command_and_response() {
         serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
         response
     );
+
+    let missing_token_assertion_json = serde_json::json!({
+        "version": 1,
+        "command": {
+            "type": "create_passkey_assertion",
+            "vault_id": "vault-1",
+            "relying_party": "example.com",
+            "origin": "https://example.com",
+            "credential_id": "Y3JlZGVudGlhbC0x",
+            "user_presence_verified": true,
+            "client_data_json_base64url": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0"
+        }
+    });
+    assert!(serde_json::from_value::<ProtocolEnvelope>(missing_token_assertion_json).is_err());
 }
 
 #[test]
 fn protocol_roundtrips_passkey_registration_command_and_response() {
     let command = ProtocolEnvelope::new(RuntimeCommand::CreatePasskeyRegistration {
+        ceremony_token: "ceremony-token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
         vault_id: "vault-1".into(),
         relying_party: "example.com".into(),
         origin: "https://example.com".into(),
         user_name: "alice@example.com".into(),
         user_display_name: Some("Alice".into()),
         user_handle_base64url: "dXNlci0x".into(),
+        public_key_algorithm: -7,
         related_origin_verified: false,
         client_data_json_base64url: "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIn0".into(),
     });
@@ -878,26 +936,61 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
         serde_json::json!("alice@example.com")
     );
     assert_eq!(
+        command_json["command"]["ceremony_token"],
+        serde_json::json!("ceremony-token-1")
+    );
+    assert_eq!(
+        command_json["command"]["expected_phase"],
+        serde_json::json!("s4_completion_and_mutation")
+    );
+    assert_eq!(
+        command_json["command"]["public_key_algorithm"],
+        serde_json::json!(-7)
+    );
+    assert_eq!(
         serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
         command
     );
-
-    let rollback = ProtocolEnvelope::new(RuntimeCommand::RollbackPasskeyRegistration {
+    let save = ProtocolEnvelope::new(RuntimeCommand::SavePasskeyRegistration {
+        ceremony_token: "ceremony-token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
         vault_id: "vault-1".into(),
-        entry_id: "entry-1".into(),
-        credential_id: Some("Y3JlZGVudGlhbC0x".into()),
-        created: false,
     });
-    let rollback_json = serde_json::to_value(&rollback).unwrap();
+    let save_json = serde_json::to_value(&save).unwrap();
     assert_eq!(
-        rollback_json["command"]["type"],
-        serde_json::json!("rollback_passkey_registration")
+        save_json["command"]["type"],
+        serde_json::json!("save_passkey_registration")
     );
     assert_eq!(
-        serde_json::from_value::<ProtocolEnvelope>(rollback_json).unwrap(),
-        rollback
+        save_json["command"]["expected_phase"],
+        serde_json::json!("s4_completion_and_mutation")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(save_json).unwrap(),
+        save
+    );
+
+    let abort = ProtocolEnvelope::new(RuntimeCommand::AbortPasskeyRegistration {
+        ceremony_token: "ceremony-token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+        closed_phase: PasskeyCeremonyPhaseDto::ClosedFailed,
+    });
+    let abort_json = serde_json::to_value(&abort).unwrap();
+    assert_eq!(
+        abort_json["command"]["type"],
+        serde_json::json!("abort_passkey_registration")
+    );
+    assert_eq!(
+        abort_json["command"]["ceremony_token"],
+        serde_json::json!("ceremony-token-1")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(abort_json).unwrap(),
+        abort
     );
     let commit = ProtocolEnvelope::new(RuntimeCommand::CommitPasskeyRegistration {
+        ceremony_token: "ceremony-token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
         vault_id: "vault-1".into(),
         entry_id: "entry-1".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
@@ -911,24 +1004,31 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
         serde_json::from_value::<ProtocolEnvelope>(commit_json).unwrap(),
         commit
     );
-    let legacy_rollback_json = serde_json::json!({
+    let missing_token_commit_json = serde_json::json!({
         "version": 1,
         "command": {
-            "type": "rollback_passkey_registration",
+            "type": "commit_passkey_registration",
             "vault_id": "vault-1",
             "entry_id": "entry-1",
-            "created": false
+            "credential_id": "Y3JlZGVudGlhbC0x"
         }
     });
-    assert_eq!(
-        serde_json::from_value::<ProtocolEnvelope>(legacy_rollback_json).unwrap(),
-        ProtocolEnvelope::new(RuntimeCommand::RollbackPasskeyRegistration {
-            vault_id: "vault-1".into(),
-            entry_id: "entry-1".into(),
-            credential_id: None,
-            created: false,
-        })
-    );
+    assert!(serde_json::from_value::<ProtocolEnvelope>(missing_token_commit_json).is_err());
+
+    let missing_token_registration_json = serde_json::json!({
+        "version": 1,
+        "command": {
+            "type": "create_passkey_registration",
+            "vault_id": "vault-1",
+            "relying_party": "example.com",
+            "origin": "https://example.com",
+            "user_name": "alice@example.com",
+            "user_display_name": "Alice",
+            "user_handle_base64url": "dXNlci0x",
+            "client_data_json_base64url": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIn0"
+        }
+    });
+    assert!(serde_json::from_value::<ProtocolEnvelope>(missing_token_registration_json).is_err());
 
     let response = RuntimeResponse::PasskeyRegistration(PasskeyRegistrationDto {
         entry_id: "entry-1".into(),
@@ -959,11 +1059,32 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
 }
 
 #[test]
+fn protocol_rejects_legacy_passkey_rollback_command() {
+    let legacy_rollback_json = serde_json::json!({
+        "version": 1,
+        "command": {
+            "type": "rollback_passkey_registration",
+            "ceremony_token": "ceremony-token-1",
+            "expected_phase": "s4_completion_and_mutation",
+            "closed_phase": "closed_failed",
+            "vault_id": "vault-1",
+            "entry_id": "entry-1",
+            "credential_id": "Y3JlZGVudGlhbC0x",
+            "created": false
+        }
+    });
+
+    assert!(serde_json::from_value::<ProtocolEnvelope>(legacy_rollback_json).is_err());
+}
+
+#[test]
 fn protocol_roundtrips_passkey_credential_status_command_and_response() {
     let command = ProtocolEnvelope::new(RuntimeCommand::PasskeyCredentialStatus {
+        ceremony_token: "token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
         vault_id: "vault-1".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
-        relying_party: Some("example.com".into()),
+        relying_party: "example.com".into(),
     });
 
     let command_json = serde_json::to_value(&command).unwrap();
@@ -974,6 +1095,14 @@ fn protocol_roundtrips_passkey_credential_status_command_and_response() {
     assert_eq!(
         command_json["command"]["credential_id"],
         serde_json::json!("Y3JlZGVudGlhbC0x")
+    );
+    assert_eq!(
+        command_json["command"]["ceremony_token"],
+        serde_json::json!("token-1")
+    );
+    assert_eq!(
+        command_json["command"]["expected_phase"],
+        serde_json::json!("s3_credential_resolution")
     );
     assert_eq!(
         command_json["command"]["relying_party"],
@@ -1002,8 +1131,27 @@ fn protocol_roundtrips_passkey_credential_status_command_and_response() {
 }
 
 #[test]
+fn protocol_rejects_passkey_credential_status_without_relying_party() {
+    let command_json = serde_json::json!({
+        "version": 1,
+        "command": {
+            "type": "passkey_credential_status",
+            "ceremony_token": "token-1",
+            "expected_phase": "s3_credential_resolution",
+            "vault_id": "vault-1",
+            "credential_id": "Y3JlZGVudGlhbC0x"
+        }
+    });
+
+    let error = serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap_err();
+    assert!(error.to_string().contains("relying_party"));
+}
+
+#[test]
 fn protocol_roundtrips_passkey_credential_list_command_and_response() {
     let command = ProtocolEnvelope::new(RuntimeCommand::ListPasskeyCredentials {
+        ceremony_token: "token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
         vault_id: "vault-1".into(),
         relying_party: "example.com".into(),
     });
@@ -1016,6 +1164,14 @@ fn protocol_roundtrips_passkey_credential_list_command_and_response() {
     assert_eq!(
         command_json["command"]["relying_party"],
         serde_json::json!("example.com")
+    );
+    assert_eq!(
+        command_json["command"]["ceremony_token"],
+        serde_json::json!("token-1")
+    );
+    assert_eq!(
+        command_json["command"]["expected_phase"],
+        serde_json::json!("s3_credential_resolution")
     );
     assert_eq!(
         serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
@@ -1049,6 +1205,195 @@ fn protocol_roundtrips_passkey_credential_list_command_and_response() {
     assert_eq!(
         serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
         response
+    );
+}
+
+#[test]
+fn protocol_roundtrips_passkey_ceremony_ledger_commands_and_responses() {
+    let register = ProtocolEnvelope::new(RuntimeCommand::RegisterPasskeyCeremony {
+        ceremony_token: "token-1".into(),
+        connection_id: "connection-1".into(),
+        origin: "https://login.example.com".into(),
+        top_origin: Some("https://login.example.com".into()),
+        ancestor_origins: vec![],
+        relying_party: "example.com".into(),
+        ceremony: PasskeyCeremonyKindDto::Get,
+        discoverable: true,
+        challenge_base64url: "Y2hhbGxlbmdl".into(),
+        request_id: 42,
+        tab_id: 7,
+        frame_id: 0,
+        frame_kind: PasskeyFrameKindDto::Top,
+        registered_at_epoch_ms: 1_000,
+        expires_at_epoch_ms: 301_000,
+    });
+    let register_json = serde_json::to_value(&register).unwrap();
+    assert_eq!(
+        register_json["command"]["type"],
+        serde_json::json!("register_passkey_ceremony")
+    );
+    assert_eq!(
+        register_json["command"]["ceremony_token"],
+        serde_json::json!("token-1")
+    );
+    assert_eq!(
+        register_json["command"]["discoverable"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        register_json["command"]["frame_kind"],
+        serde_json::json!("top")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(register_json).unwrap(),
+        register
+    );
+
+    let advance = ProtocolEnvelope::new(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+        ceremony_token: "token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+        next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+        related_origin_verified: false,
+    });
+    let advance_json = serde_json::to_value(&advance).unwrap();
+    assert_eq!(
+        advance_json["command"]["type"],
+        serde_json::json!("advance_passkey_ceremony_phase")
+    );
+    assert_eq!(
+        advance_json["command"]["expected_phase"],
+        serde_json::json!("s0_pre_authorization")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(advance_json).unwrap(),
+        advance
+    );
+
+    let bind_vault = ProtocolEnvelope::new(RuntimeCommand::BindPasskeyCeremonyVault {
+        ceremony_token: "token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+        vault_id: "vault-1".into(),
+    });
+    let bind_vault_json = serde_json::to_value(&bind_vault).unwrap();
+    assert_eq!(
+        bind_vault_json["command"]["type"],
+        serde_json::json!("bind_passkey_ceremony_vault")
+    );
+    assert_eq!(
+        bind_vault_json["command"]["vault_id"],
+        serde_json::json!("vault-1")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(bind_vault_json).unwrap(),
+        bind_vault
+    );
+
+    let query = ProtocolEnvelope::new(RuntimeCommand::QueryPasskeyCeremonyLedger {
+        ceremony_token: "token-1".into(),
+    });
+    let query_json = serde_json::to_value(&query).unwrap();
+    assert_eq!(
+        query_json["command"]["type"],
+        serde_json::json!("query_passkey_ceremony_ledger")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(query_json).unwrap(),
+        query
+    );
+
+    let reconcile = ProtocolEnvelope::new(RuntimeCommand::ReconcilePasskeyCeremonyLedger {
+        active_connection_id: "connection-1".into(),
+    });
+    let reconcile_json = serde_json::to_value(&reconcile).unwrap();
+    assert_eq!(
+        reconcile_json["command"]["type"],
+        serde_json::json!("reconcile_passkey_ceremony_ledger")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(reconcile_json).unwrap(),
+        reconcile
+    );
+
+    let unknown_delivery =
+        ProtocolEnvelope::new(RuntimeCommand::MarkPasskeyCeremonyUnknownDelivery {
+            ceremony_token: "token-1".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+        });
+    let unknown_delivery_json = serde_json::to_value(&unknown_delivery).unwrap();
+    assert_eq!(
+        unknown_delivery_json["command"]["type"],
+        serde_json::json!("mark_passkey_ceremony_unknown_delivery")
+    );
+    assert_eq!(
+        unknown_delivery_json["command"]["expected_phase"],
+        serde_json::json!("s4_completion_and_mutation")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(unknown_delivery_json).unwrap(),
+        unknown_delivery
+    );
+
+    let registered = RuntimeResponse::PasskeyCeremonyRegistered(PasskeyCeremonyRegisteredDto {
+        registered: true,
+    });
+    assert_eq!(
+        serde_json::to_value(&registered).unwrap()["type"],
+        serde_json::json!("passkey_ceremony_registered")
+    );
+
+    let advanced =
+        RuntimeResponse::PasskeyCeremonyAdvanced(PasskeyCeremonyAdvancedDto { advanced: true });
+    assert_eq!(
+        serde_json::to_value(&advanced).unwrap()["type"],
+        serde_json::json!("passkey_ceremony_advanced")
+    );
+
+    let unknown = RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+        known: false,
+        phase: None,
+        durable_state: None,
+        delivery_state: None,
+    });
+    let unknown_json = serde_json::to_value(&unknown).unwrap();
+    assert_eq!(
+        unknown_json["type"],
+        serde_json::json!("passkey_ceremony_ledger")
+    );
+    assert_eq!(unknown_json["known"], serde_json::json!(false));
+    assert!(unknown_json.get("phase").is_none());
+
+    let known = RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+        known: true,
+        phase: Some(PasskeyCeremonyPhaseDto::CompletionAndMutation),
+        durable_state: Some(PasskeyCeremonyDurableStateDto::Committed),
+        delivery_state: Some(PasskeyCeremonyDeliveryStateDto::UnknownDelivery),
+    });
+    let known_json = serde_json::to_value(&known).unwrap();
+    assert_eq!(known_json["known"], serde_json::json!(true));
+    assert_eq!(
+        known_json["deliveryState"],
+        serde_json::json!("unknown_delivery")
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(known_json).unwrap(),
+        known
+    );
+
+    let reconciliation =
+        RuntimeResponse::PasskeyCeremonyReconciliation(PasskeyCeremonyReconciliationDto {
+            reconciled: vec![PasskeyCeremonyReconciledDto {
+                ceremony_token: "token-1".into(),
+                delivery_state: PasskeyCeremonyDeliveryStateDto::UnknownDelivery,
+            }],
+        });
+    let reconciliation_json = serde_json::to_value(&reconciliation).unwrap();
+    assert_eq!(
+        reconciliation_json["type"],
+        serde_json::json!("passkey_ceremony_reconciliation")
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(reconciliation_json).unwrap(),
+        reconciliation
     );
 }
 

@@ -5,10 +5,13 @@ import {
 } from "./extensionSettings";
 import {
   attachWebAuthnProxy,
+  currentPasskeyLedgerConnectionId,
   detachWebAuthnProxy,
   recordWebAuthnDebug,
   recordWebAuthnPageRequest,
-  registerWebAuthnProxyRequestHandlers
+  reconcilePersistedPasskeyCeremonies,
+  registerWebAuthnProxyRequestHandlers,
+  resetPasskeyLedgerConnectionId
 } from "./webauthnProxy";
 
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
@@ -62,7 +65,10 @@ const nativeBridge =
   chromeApi?.runtime?.connectNative && chromeApi?.runtime?.onMessage
     ? createNativeMessagingBridge(
         chromeApi.runtime.connectNative.bind(chromeApi.runtime),
-        "com.vaultkern.runtime"
+        "com.vaultkern.runtime",
+        {
+          onPortDetached: resetPasskeyLedgerConnectionId
+        }
       )
     : null;
 
@@ -163,6 +169,8 @@ async function syncWebAuthnProxyOnce() {
     );
     webAuthnProxyAttached = status.status === "attached";
     if (webAuthnProxyAttached) {
+      await reconcilePasskeyCeremonyLedger();
+      await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
       await registerWebAuthnPageHook();
     }
     return;
@@ -351,6 +359,24 @@ function disableVaultKernWebAuthnPageHook() {
 
 function sendRuntimeCommand(command: unknown) {
   return sendRuntimeMessage({ version: 1, command });
+}
+
+async function reconcilePasskeyCeremonyLedger() {
+  if (!nativeBridge) {
+    return;
+  }
+
+  try {
+    await sendRuntimeCommand({
+      type: "reconcile_passkey_ceremony_ledger",
+      active_connection_id: currentPasskeyLedgerConnectionId()
+    });
+  } catch (error) {
+    await recordWebAuthnDebug(chromeApi, {
+      event: "passkey_ceremony_reconcile_error",
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 
 async function sendRuntimeMessage(message: unknown) {

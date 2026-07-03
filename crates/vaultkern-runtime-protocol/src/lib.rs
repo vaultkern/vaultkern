@@ -124,15 +124,61 @@ pub enum RuntimeCommand {
         entry_id: String,
     },
     ListPasskeyCredentials {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
         vault_id: String,
         relying_party: String,
     },
+    RegisterPasskeyCeremony {
+        ceremony_token: String,
+        connection_id: String,
+        origin: String,
+        top_origin: Option<String>,
+        ancestor_origins: Vec<String>,
+        relying_party: String,
+        ceremony: PasskeyCeremonyKindDto,
+        #[serde(default)]
+        discoverable: bool,
+        challenge_base64url: String,
+        request_id: u64,
+        tab_id: i64,
+        frame_id: i64,
+        frame_kind: PasskeyFrameKindDto,
+        registered_at_epoch_ms: u64,
+        expires_at_epoch_ms: u64,
+    },
+    AdvancePasskeyCeremonyPhase {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        next_phase: PasskeyCeremonyPhaseDto,
+        #[serde(default)]
+        related_origin_verified: bool,
+    },
+    BindPasskeyCeremonyVault {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: String,
+    },
+    QueryPasskeyCeremonyLedger {
+        ceremony_token: String,
+    },
+    ReconcilePasskeyCeremonyLedger {
+        active_connection_id: String,
+    },
+    MarkPasskeyCeremonyUnknownDelivery {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
+    },
     CreatePasskeyAssertion {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
         vault_id: String,
         relying_party: String,
         origin: String,
         #[serde(default)]
         credential_id: Option<String>,
+        #[serde(default)]
+        discoverable: bool,
         #[serde(default)]
         user_presence_verified: bool,
         #[serde(default)]
@@ -140,33 +186,42 @@ pub enum RuntimeCommand {
         client_data_json_base64url: String,
     },
     CreatePasskeyRegistration {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
         vault_id: String,
         relying_party: String,
         origin: String,
         user_name: String,
         user_display_name: Option<String>,
         user_handle_base64url: String,
+        public_key_algorithm: i32,
         #[serde(default)]
         related_origin_verified: bool,
         client_data_json_base64url: String,
     },
-    RollbackPasskeyRegistration {
+    SavePasskeyRegistration {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
         vault_id: String,
-        entry_id: String,
-        #[serde(default)]
-        credential_id: Option<String>,
-        created: bool,
+    },
+    AbortPasskeyRegistration {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        closed_phase: PasskeyCeremonyPhaseDto,
     },
     CommitPasskeyRegistration {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
         vault_id: String,
         entry_id: String,
         credential_id: String,
     },
     PasskeyCredentialStatus {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
         vault_id: String,
         credential_id: String,
-        #[serde(default)]
-        relying_party: Option<String>,
+        relying_party: String,
     },
     DeleteEntry {
         vault_id: String,
@@ -249,6 +304,11 @@ pub enum RuntimeResponse {
     PasskeyRegistration(PasskeyRegistrationDto),
     PasskeyCredentialStatus(PasskeyCredentialStatusDto),
     PasskeyCredentialList(PasskeyCredentialListDto),
+    PasskeyCeremonyRegistered(PasskeyCeremonyRegisteredDto),
+    PasskeyCeremonyAdvanced(PasskeyCeremonyAdvancedDto),
+    PasskeyCeremonyVaultBound(PasskeyCeremonyVaultBoundDto),
+    PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto),
+    PasskeyCeremonyReconciliation(PasskeyCeremonyReconciliationDto),
     DatabaseSettings(DatabaseSettingsDto),
     Saved,
     SaveVaultResult(SaveVaultResultDto),
@@ -542,6 +602,103 @@ pub struct PasskeyCredentialCandidateDto {
     pub credential_id: String,
     pub username: String,
     pub user_handle: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasskeyCeremonyKindDto {
+    Get,
+    Create,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasskeyFrameKindDto {
+    Top,
+    Subframe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PasskeyCeremonyPhaseDto {
+    #[serde(rename = "s0_pre_authorization")]
+    PreAuthorization,
+    #[serde(rename = "s1_user_authorization")]
+    UserAuthorization,
+    #[serde(rename = "s2_network_validation")]
+    NetworkValidation,
+    #[serde(rename = "s3_credential_resolution")]
+    CredentialResolution,
+    #[serde(rename = "s3b_user_selection")]
+    UserSelection,
+    #[serde(rename = "s4_completion_and_mutation")]
+    CompletionAndMutation,
+    #[serde(rename = "closed_aborted")]
+    ClosedAborted,
+    #[serde(rename = "closed_delivered")]
+    ClosedDelivered,
+    #[serde(rename = "closed_failed")]
+    ClosedFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasskeyCeremonyDurableStateDto {
+    None,
+    Snapshot,
+    Mutated,
+    Saved,
+    Committed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasskeyCeremonyDeliveryStateDto {
+    NotDelivered,
+    Delivered,
+    UnknownDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCeremonyRegisteredDto {
+    pub registered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCeremonyAdvancedDto {
+    pub advanced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCeremonyVaultBoundDto {
+    pub bound: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCeremonyLedgerDto {
+    pub known: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<PasskeyCeremonyPhaseDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durable_state: Option<PasskeyCeremonyDurableStateDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_state: Option<PasskeyCeremonyDeliveryStateDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCeremonyReconciledDto {
+    pub ceremony_token: String,
+    pub delivery_state: PasskeyCeremonyDeliveryStateDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCeremonyReconciliationDto {
+    pub reconciled: Vec<PasskeyCeremonyReconciledDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

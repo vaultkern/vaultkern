@@ -3986,13 +3986,26 @@ mod compatibility_tests {
     fn partial_passkey_fields_roundtrip_as_custom_fields() {
         let mut vault = Vault::empty("PartialPasskey");
         let mut entry = Entry::new("Example");
-        entry.attributes.insert(
-            PasskeyRecord::CREDENTIAL_ID_KEY.into(),
-            CustomField {
-                value: "partial-credential".into(),
-                protected: true,
-            },
-        );
+        for (key, value, protected) in [
+            (
+                PasskeyRecord::USERNAME_KEY,
+                "partial-user@example.com",
+                false,
+            ),
+            (PasskeyRecord::CREDENTIAL_ID_KEY, "partial-credential", true),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com", false),
+            (PasskeyRecord::USER_HANDLE_KEY, "partial-user-handle", true),
+            (PasskeyRecord::FLAG_BE_KEY, "1", false),
+            (PasskeyRecord::FLAG_BS_KEY, "0", false),
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected,
+                },
+            );
+        }
         vault.root.entries.push(entry);
 
         let key = test_key("partial-passkey");
@@ -4001,25 +4014,37 @@ mod compatibility_tests {
         let loaded_entry = loaded.root.entries.first().expect("loaded entry");
 
         assert!(loaded_entry.passkey.is_none());
-        assert_eq!(
-            loaded_entry
-                .attributes
-                .get(PasskeyRecord::CREDENTIAL_ID_KEY)
-                .map(|field| (field.value.as_str(), field.protected)),
-            Some(("partial-credential", true))
-        );
+        assert_partial_passkey_fields_preserved(loaded_entry);
 
         let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("save kdbx");
         let reloaded = load_kdbx(&rewritten, &key).expect("reload kdbx");
         let reloaded_entry = reloaded.root.entries.first().expect("reloaded entry");
 
-        assert_eq!(
-            reloaded_entry
-                .attributes
-                .get(PasskeyRecord::CREDENTIAL_ID_KEY)
-                .map(|field| (field.value.as_str(), field.protected)),
-            Some(("partial-credential", true))
-        );
+        assert_partial_passkey_fields_preserved(reloaded_entry);
+    }
+
+    fn assert_partial_passkey_fields_preserved(entry: &Entry) {
+        for (key, expected_value, expected_protected) in [
+            (
+                PasskeyRecord::USERNAME_KEY,
+                "partial-user@example.com",
+                false,
+            ),
+            (PasskeyRecord::CREDENTIAL_ID_KEY, "partial-credential", true),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com", false),
+            (PasskeyRecord::USER_HANDLE_KEY, "partial-user-handle", true),
+            (PasskeyRecord::FLAG_BE_KEY, "1", false),
+            (PasskeyRecord::FLAG_BS_KEY, "0", false),
+        ] {
+            assert_eq!(
+                entry
+                    .attributes
+                    .get(key)
+                    .map(|field| (field.value.as_str(), field.protected)),
+                Some((expected_value, expected_protected)),
+                "partial passkey field should roundtrip as a custom field: {key}"
+            );
+        }
     }
 
     #[test]

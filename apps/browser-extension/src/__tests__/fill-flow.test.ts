@@ -1212,26 +1212,27 @@ describe("PopupShell fill flow", () => {
   });
 
   it("sends the selected passkey credential when approving a discoverable WebAuthn request", async () => {
-    const credentialOptions = encodeURIComponent(
-      JSON.stringify([
-        {
-          credentialId: "Y3JlZGVudGlhbC0x",
-          username: "alice@example.com",
-          userHandle: "dXNlci0x"
-        },
-        {
-          credentialId: "Y3JlZGVudGlhbC0y",
-          username: "bob@example.com",
-          userHandle: "dXNlci0y"
-        }
-      ])
-    );
+    const credentialOptions = [
+      {
+        credentialId: "Y3JlZGVudGlhbC0x",
+        username: "alice@example.com"
+      },
+      {
+        credentialId: "Y3JlZGVudGlhbC0y",
+        username: "bob@example.com"
+      }
+    ];
     window.history.replaceState(
       null,
       "",
-      `/popup.html?webauthn=approve&requestId=43&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&credentialOptions=${credentialOptions}`
+      "/popup.html?webauthn=approve&requestId=43&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-43"
     );
-    const sendMessage = vi.fn(async () => undefined);
+    const sendMessage = vi.fn(async (message: unknown) =>
+      (message as { type?: unknown } | null)?.type ===
+      "vaultkern_presence_options_request"
+        ? { credentialOptions }
+        : undefined
+    );
     const closeWindow = vi.fn();
     Object.defineProperty(window, "close", {
       configurable: true,
@@ -1269,7 +1270,85 @@ describe("PopupShell fill flow", () => {
         requestId: 43,
         origin: "https://example.com",
         relyingParty: "example.com",
-        credentialId: "Y3JlZGVudGlhbC0y"
+        credentialId: "Y3JlZGVudGlhbC0y",
+        nonce: "nonce-43"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("ignores passkey credential options that contain non-UI fields", async () => {
+    const credentialOptions = [
+      {
+        credentialId: "Y3JlZGVudGlhbC0x",
+        username: "alice@example.com",
+        privateKeyPem: "-----BEGIN PRIVATE KEY-----",
+        userHandle: "user-handle",
+        generatedUserId: "generated-user",
+        entryId: "entry-1",
+        ceremonyToken: "page-controlled-token"
+      }
+    ];
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=approve&requestId=44&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-44"
+    );
+    const sendMessage = vi.fn(async (message: unknown) =>
+      (message as { type?: unknown } | null)?.type ===
+      "vaultkern_presence_options_request"
+        ? { credentialOptions }
+        : undefined
+    );
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Confirm passkey request")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_presence_options_request",
+        requestId: 44,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-44"
+      });
+    });
+    expect(screen.queryByText("alice@example.com")).not.toBeInTheDocument();
+    expect(screen.queryByText("user-handle")).not.toBeInTheDocument();
+    expect(screen.queryByText("generated-user")).not.toBeInTheDocument();
+    expect(screen.queryByText("entry-1")).not.toBeInTheDocument();
+    expect(screen.queryByText("page-controlled-token")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Continue passkey request" })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_presence_complete",
+        requestId: 44,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-44"
       });
       expect(closeWindow).toHaveBeenCalledTimes(1);
     });
@@ -2242,7 +2321,8 @@ describe("content script fill message", () => {
       type: "vaultkern_webauthn_page_request",
       ceremony: "create",
       origin: window.location.origin,
-      topOrigin: window.location.origin,
+      topOrigin: undefined,
+      ancestorOrigins: [],
       relyingParty: "localhost",
       challenge: "cmVnaXN0ZXItMQ",
       allowCredentialIds: undefined,
@@ -2250,6 +2330,113 @@ describe("content script fill message", () => {
       mediation: "conditional",
       observedAt: expect.any(Number)
     });
+  });
+
+  it("forwards the full WebAuthn ancestor origin chain", async () => {
+    const sendMessage = vi.fn();
+    const originalAncestorOrigins = Object.getOwnPropertyDescriptor(
+      window.location,
+      "ancestorOrigins"
+    );
+    Object.defineProperty(window.location, "ancestorOrigins", {
+      configurable: true,
+      value: ["https://middle.example", "https://top.example"]
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+
+    try {
+      await import("../webauthnContentScript");
+
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          source: window,
+          origin: window.location.origin,
+          data: {
+            type: "vaultkern_webauthn_page_request",
+            ceremony: "get",
+            relyingParty: "example.com",
+            challenge: "Y2hhbGxlbmdlLTE"
+          }
+        })
+      );
+    } finally {
+      if (originalAncestorOrigins) {
+        Object.defineProperty(
+          window.location,
+          "ancestorOrigins",
+          originalAncestorOrigins
+        );
+      } else {
+        delete (window.location as Location & { ancestorOrigins?: unknown })
+          .ancestorOrigins;
+      }
+    }
+
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "vaultkern_webauthn_page_request",
+      ceremony: "get",
+      origin: window.location.origin,
+      topOrigin: "https://top.example",
+      ancestorOrigins: ["https://middle.example", "https://top.example"],
+      relyingParty: "example.com",
+      challenge: "Y2hhbGxlbmdlLTE",
+      allowCredentialIds: undefined,
+      excludeCredentialIds: undefined,
+      mediation: undefined,
+      observedAt: expect.any(Number)
+    });
+  });
+
+  it("does not forward page-supplied ceremony tokens in WebAuthn observations", async () => {
+    const sendMessage = vi.fn();
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+
+    await import("../webauthnContentScript");
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "get",
+          relyingParty: "example.com",
+          challenge: "Y2hhbGxlbmdlLTE",
+          allowCredentialIds: [
+            "Y3JlZGVudGlhbC0x",
+            { ceremonyToken: "page-controlled-token" }
+          ],
+          excludeCredentialIds: [
+            { ceremony_token: "page-controlled-token" },
+            "Y3JlZGVudGlhbC0y"
+          ],
+          ceremonyToken: "page-controlled-token",
+          ceremony_token: "page-controlled-token"
+        }
+      })
+    );
+
+    const forwarded = sendMessage.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(forwarded).toMatchObject({
+      type: "vaultkern_webauthn_page_request",
+      ceremony: "get",
+      origin: window.location.origin,
+      relyingParty: "example.com",
+      challenge: "Y2hhbGxlbmdlLTE",
+      allowCredentialIds: ["Y3JlZGVudGlhbC0x"],
+      excludeCredentialIds: ["Y3JlZGVudGlhbC0y"]
+    });
+    expect(forwarded.ceremonyToken).toBeUndefined();
+    expect(forwarded.ceremony_token).toBeUndefined();
+    expect(JSON.stringify(forwarded)).not.toContain("page-controlled-token");
   });
 
   it("forwards WebAuthn observations from about:blank frames with the inherited origin", async () => {
@@ -2293,7 +2480,8 @@ describe("content script fill message", () => {
       type: "vaultkern_webauthn_page_request",
       ceremony: "get",
       origin: "https://parent.example",
-      topOrigin: "https://parent.example",
+      topOrigin: undefined,
+      ancestorOrigins: [],
       relyingParty: "parent.example",
       challenge: "Y2hhbGxlbmdlLTE",
       allowCredentialIds: ["Y3JlZGVudGlhbC0x"],

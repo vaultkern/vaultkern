@@ -10,7 +10,9 @@ use vaultkern_core::{
 };
 use vaultkern_runtime::Runtime;
 use vaultkern_runtime_protocol::{
-    DatabaseCredentialsUpdateDto, DatabaseSettingsUpdateDto, RuntimeCommand, RuntimeResponse,
+    DatabaseCredentialsUpdateDto, DatabaseSettingsUpdateDto, PasskeyCeremonyDeliveryStateDto,
+    PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
+    PasskeyCeremonyPhaseDto, PasskeyFrameKindDto, RuntimeCommand, RuntimeResponse,
 };
 
 const TEST_PASSKEY_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgCrpkgmenhRkrdg3Y\n7G0+YmeyFRGgpisH5R5e75gwVHGhRANCAASOCmJegf0Fo1V7ixK+W5u/Jx8bpbIq\nCY0G7WFVp5KD6xMSKPekuRmz+kxK2wiZrN6MrH8kbCDmwLZRxnM73nXs\n-----END PRIVATE KEY-----\n";
@@ -175,7 +177,7 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
 
     let fill = runtime
         .handle(RuntimeCommand::FindFillCandidates {
-            vault_id: handle.vault_id,
+            vault_id: handle.vault_id.clone(),
             url: "https://example.com/dashboard".into(),
         })
         .unwrap();
@@ -632,7 +634,7 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
 
     let fill = runtime
         .handle(RuntimeCommand::FindFillCandidates {
-            vault_id: handle.vault_id,
+            vault_id: handle.vault_id.clone(),
             url: "https://app.example.com/login/reset?next=%2Fdashboard#section".into(),
         })
         .unwrap();
@@ -1246,12 +1248,16 @@ fn runtime_creates_passkey_assertion_for_matching_relying_party() {
 
     let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#;
     let client_data_json_base64url = URL_SAFE_NO_PAD.encode(client_data_json);
+    register_get_ceremony_at_s4(&mut runtime, "assertion-token-1", "Y2hhbGxlbmdlLTE");
     let response = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
-            vault_id: handle.vault_id,
+            ceremony_token: "assertion-token-1".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: client_data_json_base64url.clone(),
@@ -1266,7 +1272,7 @@ fn runtime_creates_passkey_assertion_for_matching_relying_party() {
         assertion.client_data_json_base64url,
         client_data_json_base64url
     );
-    assert_eq!(assertion.user_handle_base64url, Some("dXNlci0x".into()));
+    assert_eq!(assertion.user_handle_base64url, None);
     assert!(assertion.backup_eligible);
     assert!(!assertion.backup_state);
 
@@ -1295,6 +1301,236 @@ fn runtime_creates_passkey_assertion_for_matching_relying_party() {
         .verifying_key()
         .verify(&signed_payload, &signature)
         .unwrap();
+
+    register_get_ceremony_at_s4(&mut runtime, "assertion-token-1-upgrade", "Y2hhbGxlbmdlLTE");
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-1-upgrade".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: true,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url,
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected discoverable mismatch error, got {response:?}");
+    };
+    assert!(
+        error
+            .message
+            .contains("passkey ceremony discoverable mismatch"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn runtime_rejects_passkey_assertion_when_ceremony_switches_vault_after_binding() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut first_vault = Vault::empty("first");
+    let mut first_entry = Entry::new("First");
+    first_entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Zmlyc3QtY3JlZGVudGlhbA".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("Zmlyc3QtdXNlcg".into()),
+        backup_eligible: true,
+        backup_state: true,
+    });
+    first_vault.root.entries.push(first_entry);
+
+    let mut second_vault = Vault::empty("second");
+    let mut second_entry = Entry::new("Second");
+    second_entry.passkey = Some(PasskeyRecord {
+        username: "mallory@example.com".into(),
+        credential_id: "c2Vjb25kLWNyZWRlbnRpYWw".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("c2Vjb25kLXVzZXI".into()),
+        backup_eligible: true,
+        backup_state: true,
+    });
+    second_vault.root.entries.push(second_entry);
+
+    let dir = tempfile::tempdir().unwrap();
+    let first_path = dir.path().join("first.kdbx");
+    let second_path = dir.path().join("second.kdbx");
+    std::fs::write(
+        &first_path,
+        core.save_kdbx(&first_vault, &key, SaveProfile::recommended())
+            .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &second_path,
+        core.save_kdbx(&second_vault, &key, SaveProfile::recommended())
+            .unwrap(),
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let first_handle = runtime
+        .open_local_vault(first_path.to_str().unwrap())
+        .unwrap();
+    runtime
+        .unlock_with_password(&first_handle.vault_id, "demo-password")
+        .unwrap();
+    let second_handle = runtime
+        .open_local_vault(second_path.to_str().unwrap())
+        .unwrap();
+    runtime
+        .unlock_with_password(&second_handle.vault_id, "demo-password")
+        .unwrap();
+
+    runtime
+        .handle(RuntimeCommand::RegisterPasskeyCeremony {
+            ceremony_token: "assertion-vault-binding-token".into(),
+            connection_id: "connection-1".into(),
+            origin: "https://example.com".into(),
+            top_origin: None,
+            ancestor_origins: vec![],
+            relying_party: "example.com".into(),
+            ceremony: PasskeyCeremonyKindDto::Get,
+            discoverable: false,
+            challenge_base64url: "Y2hhbGxlbmdl".into(),
+            request_id: 42,
+            tab_id: 7,
+            frame_id: 0,
+            frame_kind: PasskeyFrameKindDto::Top,
+            registered_at_epoch_ms: 1_000,
+            expires_at_epoch_ms: 301_000,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "assertion-vault-binding-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            related_origin_verified: false,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::BindPasskeyCeremonyVault {
+            ceremony_token: "assertion-vault-binding-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            vault_id: first_handle.vault_id,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "assertion-vault-binding-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            related_origin_verified: false,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "assertion-vault-binding-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            next_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            related_origin_verified: false,
+        })
+        .unwrap();
+
+    let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdl","origin":"https://example.com","crossOrigin":false}"#;
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-vault-binding-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: second_handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("c2Vjb25kLWNyZWRlbnRpYWw".into()),
+            discoverable: false,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data_json),
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected vault mismatch error, got {response:?}");
+    };
+    assert!(
+        error.message.contains("passkey ceremony vault mismatch"),
+        "unexpected error: {}",
+        error.message
+    );
+}
+
+#[test]
+fn runtime_rejects_duplicate_active_passkey_credentials_for_allowed_credential() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    for username in ["alice@example.com", "bob@example.com"] {
+        let mut entry = Entry::new(username);
+        entry.passkey = Some(PasskeyRecord {
+            username: username.into(),
+            credential_id: "ZHVwbGljYXRlLWNyZWRlbnRpYWw".into(),
+            generated_user_id: None,
+            private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+            relying_party: "example.com".into(),
+            user_handle: Some("dXNlci0x".into()),
+            backup_eligible: true,
+            backup_state: true,
+        });
+        vault.root.entries.push(entry);
+    }
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#;
+    register_get_ceremony_at_s4(&mut runtime, "assertion-token-duplicate", "Y2hhbGxlbmdlLTE");
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-duplicate".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("ZHVwbGljYXRlLWNyZWRlbnRpYWw".into()),
+            discoverable: false,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data_json),
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected duplicate credential error, got {response:?}");
+    };
+    assert!(
+        error
+            .message
+            .contains("multiple passkey credentials found for credential id")
+    );
 }
 
 #[test]
@@ -1331,12 +1567,16 @@ fn runtime_rejects_passkey_assertion_without_user_presence() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    register_get_ceremony_at_s4(&mut runtime, "assertion-token-2", "Y2hhbGxlbmdlLTE");
     let response = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-2".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
             user_presence_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
@@ -1386,12 +1626,22 @@ fn runtime_rejects_passkey_assertion_for_relying_party_mismatch() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    register_get_ceremony_at_s4_for(
+        &mut runtime,
+        "assertion-token-3",
+        "https://evil.example.net",
+        "evil.example.net",
+        "Y2hhbGxlbmdlLTE",
+    );
     let response = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-3".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id,
             relying_party: "evil.example.net".into(),
             origin: "https://evil.example.net".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
@@ -1438,12 +1688,16 @@ fn runtime_rejects_passkey_assertion_when_vault_is_locked() {
     let mut runtime = Runtime::for_tests_at(59);
     let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
 
+    register_get_ceremony_at_s4(&mut runtime, "assertion-token-4", "Y2hhbGxlbmdlLTE");
     let response = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-4".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
@@ -1457,6 +1711,57 @@ fn runtime_rejects_passkey_assertion_when_vault_is_locked() {
     };
     assert_eq!(error.code, "invalid_request");
     assert!(error.message.contains("vault is locked"));
+}
+
+#[test]
+fn runtime_rejects_missing_passkey_assertion_credential_id_before_vault_access() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let bytes = core
+        .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+
+    register_discoverable_get_ceremony_at_s4(
+        &mut runtime,
+        "assertion-token-missing-selected-id",
+        "Y2hhbGxlbmdlLTE",
+    );
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-missing-selected-id".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: None,
+            discoverable: true,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(
+                br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://example.com","crossOrigin":false}"#,
+            ),
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected error, got {response:?}");
+    };
+    assert_eq!(error.code, "invalid_request");
+    assert!(
+        error
+            .message
+            .contains("passkey assertion credential id is required"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -1493,12 +1798,16 @@ fn runtime_rejects_passkey_assertion_for_unknown_credential() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    register_get_ceremony_at_s4(&mut runtime, "assertion-token-5", "Y2hhbGxlbmdlLTE");
     let response = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-5".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: Some("dW5rbm93bg".into()),
+            discoverable: false,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
@@ -1549,12 +1858,22 @@ fn runtime_allows_loopback_http_origin_for_passkey_assertion_smoke_tests() {
         .unwrap();
 
     let origin = "http://127.0.0.1:58777";
+    register_get_ceremony_at_s4_for(
+        &mut runtime,
+        "assertion-token-loopback",
+        origin,
+        "127.0.0.1",
+        "Y2hhbGxlbmdlLTE",
+    );
     let response = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-loopback".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id,
             relying_party: "127.0.0.1".into(),
             origin: origin.into(),
             credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
@@ -1567,6 +1886,81 @@ fn runtime_allows_loopback_http_origin_for_passkey_assertion_smoke_tests() {
         .unwrap();
 
     assert!(matches!(response, RuntimeResponse::PasskeyAssertion(_)));
+}
+
+#[test]
+fn runtime_rejects_passkey_assertion_when_client_data_frame_context_mismatches_ledger() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: None,
+        backup_eligible: false,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    for (token, client_data_json, expected_error) in [
+        (
+            "assertion-token-cross-origin-false",
+            br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://login.example.com","crossOrigin":false}"#
+                .as_slice(),
+            "passkey ceremony clientDataJSON crossOrigin mismatch",
+        ),
+        (
+            "assertion-token-missing-top-origin",
+            br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"https://login.example.com","crossOrigin":true}"#
+                .as_slice(),
+            "passkey ceremony clientDataJSON topOrigin mismatch",
+        ),
+    ] {
+        register_get_subframe_ceremony_at_s4(&mut runtime, token, "Y2hhbGxlbmdlLTE");
+        let response = runtime
+            .handle(RuntimeCommand::CreatePasskeyAssertion {
+                ceremony_token: token.into(),
+                expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                vault_id: handle.vault_id.clone(),
+                relying_party: "example.com".into(),
+                origin: "https://login.example.com".into(),
+                credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+                discoverable: false,
+                user_presence_verified: true,
+                related_origin_verified: false,
+                client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data_json),
+            })
+            .unwrap();
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected frame context mismatch error, got {response:?}");
+        };
+        assert!(
+            error.message.contains(expected_error),
+            "unexpected error for {token}: {}",
+            error.message
+        );
+    }
 }
 
 #[test]
@@ -1591,14 +1985,18 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
         .unwrap();
 
     let create_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "registration-token-1", "cmVnaXN0ZXItMQ");
     let registration = runtime
         .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-1".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             user_name: "alice@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(create_client_data),
         })
@@ -1639,12 +2037,16 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
     assert!(passkey.private_key_pem.contains("BEGIN PRIVATE KEY"));
 
     let get_client_data = br#"{"type":"webauthn.get","challenge":"bG9naW4tMQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_get_ceremony_at_s4(&mut runtime, "assertion-token-6", "bG9naW4tMQ");
     let assertion = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-6".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: Some(registration.credential_id),
+            discoverable: false,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(get_client_data),
@@ -1657,6 +2059,86 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
         .decode(&assertion.authenticator_data_base64url)
         .expect("decode assertion authenticator data");
     assert_eq!(assertion_authenticator_data[32], 0x19);
+}
+
+#[test]
+fn runtime_rejects_passkey_registration_when_generated_credential_id_collides() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let colliding_credential_id = "Y29sbGlkaW5nLWNyZWRlbnRpYWw";
+    let mut vault = Vault::empty("demo");
+    let mut existing = Entry::new("Existing");
+    existing.passkey = Some(PasskeyRecord {
+        username: "existing@example.net".into(),
+        credential_id: colliding_credential_id.into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "other.example".into(),
+        user_handle: Some("b3RoZXItdXNlcg".into()),
+        backup_eligible: true,
+        backup_state: true,
+    });
+    vault.root.entries.push(existing);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime =
+        Runtime::for_tests_with_passkey_credential_ids(vec![colliding_credential_id.into()]);
+    runtime.set_test_unix_time(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let create_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(
+        &mut runtime,
+        "registration-token-collision",
+        "cmVnaXN0ZXItMQ",
+    );
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-collision".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_display_name: Some("Alice".into()),
+            user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(create_client_data),
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected collision error, got {response:?}");
+    };
+    assert_eq!(error.code, "invalid_request");
+    assert!(error.message.contains("passkey credential id collision"));
+
+    register_get_ceremony_at_s3(&mut runtime, "list-after-collision-token");
+    let credentials = runtime
+        .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-after-collision-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialList(credentials) = credentials else {
+        panic!("expected credential list, got {credentials:?}");
+    };
+    assert!(credentials.credentials.is_empty());
 }
 
 #[test]
@@ -1681,14 +2163,18 @@ fn runtime_reregisters_passkey_by_overwriting_matching_rp_and_user_handle() {
         .unwrap();
 
     let first_registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "registration-token-2", "cmVnaXN0ZXItMQ");
     let first_registration = runtime
         .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-2".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             user_name: "alice@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(first_registration_client_data),
         })
@@ -1699,14 +2185,18 @@ fn runtime_reregisters_passkey_by_overwriting_matching_rp_and_user_handle() {
     assert!(first_registration.created);
 
     let second_registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMg","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "registration-token-3", "cmVnaXN0ZXItMg");
     let second_registration = runtime
         .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-3".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             user_name: "alice-renamed@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(second_registration_client_data),
         })
@@ -1722,8 +2212,11 @@ fn runtime_reregisters_passkey_by_overwriting_matching_rp_and_user_handle() {
         first_registration.credential_id
     );
 
+    register_get_ceremony_at_s3(&mut runtime, "list-after-reregister-token");
     let credentials = runtime
         .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-after-reregister-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
         })
@@ -1756,12 +2249,16 @@ fn runtime_reregisters_passkey_by_overwriting_matching_rp_and_user_handle() {
     );
 
     let get_client_data = br#"{"type":"webauthn.get","challenge":"bG9naW4tMQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_discoverable_get_ceremony_at_s4(&mut runtime, "assertion-token-7", "bG9naW4tMQ");
     let assertion = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-7".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
-            credential_id: None,
+            credential_id: Some(second_registration.credential_id.clone()),
+            discoverable: true,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(get_client_data),
@@ -1810,14 +2307,22 @@ fn runtime_reregisters_moved_live_passkey_without_creating_duplicate() {
         .unwrap();
 
     let registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItbW92ZWQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(
+        &mut runtime,
+        "registration-token-moved",
+        "cmVnaXN0ZXItbW92ZWQ",
+    );
     let registration = runtime
         .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-moved".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             user_name: "alice@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(registration_client_data),
         })
@@ -1828,8 +2333,11 @@ fn runtime_reregisters_moved_live_passkey_without_creating_duplicate() {
     assert!(!registration.created);
     assert_eq!(registration.entry_id, entry_id);
 
+    register_get_ceremony_at_s3(&mut runtime, "list-after-moved-reregister-token");
     let credentials = runtime
         .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-after-moved-reregister-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
         })
@@ -1867,14 +2375,18 @@ fn runtime_reregistration_preserves_user_fields_and_enforces_history_limit() {
         .unwrap();
 
     let first_registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "registration-token-4", "cmVnaXN0ZXItMQ");
     let first_registration = runtime
         .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-4".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             user_name: "alice@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(first_registration_client_data),
         })
@@ -1901,17 +2413,22 @@ fn runtime_reregistration_preserves_user_fields_and_enforces_history_limit() {
         ("cmVnaXN0ZXItMg", "rp-updated-1@example.com"),
         ("cmVnaXN0ZXItMw", "rp-updated-2@example.com"),
     ] {
+        let ceremony_token = format!("registration-token-{challenge}");
+        register_create_ceremony_at_s4(&mut runtime, &ceremony_token, challenge);
         let client_data = format!(
             r#"{{"type":"webauthn.create","challenge":"{challenge}","origin":"https://example.com","crossOrigin":false}}"#
         );
         let response = runtime
             .handle(RuntimeCommand::CreatePasskeyRegistration {
+                ceremony_token,
+                expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
                 vault_id: handle.vault_id.clone(),
                 relying_party: "example.com".into(),
                 origin: "https://example.com".into(),
                 user_name: user_name.into(),
                 user_display_name: None,
                 user_handle_base64url: "dXNlci0x".into(),
+                public_key_algorithm: -7,
                 related_origin_verified: false,
                 client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data.as_bytes()),
             })
@@ -1988,7 +2505,7 @@ fn runtime_rolls_back_overwritten_passkey_registration_from_history() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("passkey-rollback.kdbx");
     std::fs::write(&path, bytes).unwrap();
-    let mut runtime = Runtime::for_tests();
+    let mut runtime = Runtime::for_tests_at(59);
     let handle = runtime
         .open_local_vault(path.to_str().unwrap())
         .expect("open vault");
@@ -1997,14 +2514,18 @@ fn runtime_rolls_back_overwritten_passkey_registration_from_history() {
         .unwrap();
 
     let first_registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "registration-token-5", "cmVnaXN0ZXItMQ");
     let first_registration = runtime
         .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-5".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             user_name: "alice@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(first_registration_client_data),
         })
@@ -2014,14 +2535,18 @@ fn runtime_rolls_back_overwritten_passkey_registration_from_history() {
     };
 
     let second_registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMg","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "registration-token-6", "cmVnaXN0ZXItMg");
     let second_registration = runtime
         .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-6".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             user_name: "alice@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(second_registration_client_data),
         })
@@ -2039,16 +2564,18 @@ fn runtime_rolls_back_overwritten_passkey_registration_from_history() {
     assert!(matches!(saved, RuntimeResponse::SaveVaultResult(_)));
 
     runtime
-        .handle(RuntimeCommand::RollbackPasskeyRegistration {
-            vault_id: handle.vault_id.clone(),
-            entry_id: second_registration.entry_id,
-            credential_id: Some(second_registration.credential_id),
-            created: false,
+        .handle(RuntimeCommand::AbortPasskeyRegistration {
+            ceremony_token: "registration-token-6".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            closed_phase: PasskeyCeremonyPhaseDto::ClosedFailed,
         })
         .unwrap();
 
+    register_get_ceremony_at_s3(&mut runtime, "list-after-rollback-token");
     let credentials = runtime
         .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-after-rollback-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
         })
@@ -2076,7 +2603,7 @@ fn runtime_commits_overwritten_passkey_registration_by_dropping_pending_rollback
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("passkey-commit.kdbx");
     std::fs::write(&path, bytes).unwrap();
-    let mut runtime = Runtime::for_tests();
+    let mut runtime = Runtime::for_tests_at(59);
     let handle = runtime
         .open_local_vault(path.to_str().unwrap())
         .expect("open vault");
@@ -2085,28 +2612,36 @@ fn runtime_commits_overwritten_passkey_registration_by_dropping_pending_rollback
         .unwrap();
 
     let first_registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "registration-token-7", "cmVnaXN0ZXItMQ");
     runtime
         .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-7".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             user_name: "alice@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(first_registration_client_data),
         })
         .unwrap();
 
     let second_registration_client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItMg","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "registration-token-8", "cmVnaXN0ZXItMg");
     let second_registration = runtime
         .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-8".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             user_name: "alice@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(second_registration_client_data),
         })
@@ -2117,24 +2652,39 @@ fn runtime_commits_overwritten_passkey_registration_by_dropping_pending_rollback
     assert!(!second_registration.created);
 
     runtime
+        .handle(RuntimeCommand::SavePasskeyRegistration {
+            ceremony_token: "registration-token-8".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
+        })
+        .unwrap();
+    runtime
         .handle(RuntimeCommand::CommitPasskeyRegistration {
+            ceremony_token: "registration-token-8".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             entry_id: second_registration.entry_id.clone(),
             credential_id: second_registration.credential_id.clone(),
         })
         .unwrap();
 
-    runtime
-        .handle(RuntimeCommand::RollbackPasskeyRegistration {
-            vault_id: handle.vault_id.clone(),
-            entry_id: second_registration.entry_id,
-            credential_id: Some(second_registration.credential_id.clone()),
-            created: false,
+    let abort_after_commit = runtime
+        .handle(RuntimeCommand::AbortPasskeyRegistration {
+            ceremony_token: "registration-token-8".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            closed_phase: PasskeyCeremonyPhaseDto::ClosedFailed,
         })
         .unwrap();
+    let RuntimeResponse::Error(error) = abort_after_commit else {
+        panic!("expected post-commit abort error, got {abort_after_commit:?}");
+    };
+    assert!(error.message.contains("passkey ceremony already committed"));
 
+    register_get_ceremony_at_s3(&mut runtime, "list-after-commit-token");
     let credentials = runtime
         .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-after-commit-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
         })
@@ -2150,6 +2700,336 @@ fn runtime_commits_overwritten_passkey_registration_by_dropping_pending_rollback
 }
 
 #[test]
+fn runtime_rejects_passkey_registration_commit_when_rollback_identity_differs() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("passkey-commit-mismatch");
+    let vault = Vault::empty("Passkey Commit Mismatch");
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .expect("save seed vault");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("passkey-commit-mismatch.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("open vault");
+    runtime
+        .unlock_with_password(&handle.vault_id, "passkey-commit-mismatch")
+        .unwrap();
+
+    let challenge = "cmVnaXN0ZXItY29tbWl0LW1pc21hdGNo";
+    let client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItY29tbWl0LW1pc21hdGNo","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "commit-mismatch-token", challenge);
+    let registration = runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "commit-mismatch-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_display_name: Some("Alice".into()),
+            user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyRegistration(registration) = registration else {
+        panic!("expected passkey registration, got {registration:?}");
+    };
+
+    let mismatched_commit = runtime
+        .handle(RuntimeCommand::CommitPasskeyRegistration {
+            ceremony_token: "commit-mismatch-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
+            entry_id: "wrong-entry".into(),
+            credential_id: registration.credential_id,
+        })
+        .unwrap();
+    let RuntimeResponse::Error(error) = mismatched_commit else {
+        panic!("expected commit mismatch error, got {mismatched_commit:?}");
+    };
+    assert!(
+        error
+            .message
+            .contains("passkey registration rollback identity mismatch")
+    );
+
+    let aborted = runtime
+        .handle(RuntimeCommand::AbortPasskeyRegistration {
+            ceremony_token: "commit-mismatch-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            closed_phase: PasskeyCeremonyPhaseDto::ClosedFailed,
+        })
+        .unwrap();
+    assert_eq!(aborted, RuntimeResponse::Saved);
+
+    register_get_ceremony_at_s3(&mut runtime, "list-after-commit-mismatch-token");
+    let credentials = runtime
+        .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-after-commit-mismatch-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialList(credentials) = credentials else {
+        panic!("expected passkey credential list, got {credentials:?}");
+    };
+    assert!(credentials.credentials.is_empty());
+}
+
+#[test]
+fn runtime_rejects_passkey_registration_commit_before_durable_save() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("passkey-commit-before-save");
+    let vault = Vault::empty("Passkey Commit Before Save");
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .expect("save seed vault");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("passkey-commit-before-save.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("open vault");
+    runtime
+        .unlock_with_password(&handle.vault_id, "passkey-commit-before-save")
+        .unwrap();
+
+    let challenge = "cmVnaXN0ZXItY29tbWl0LWJlZm9yZS1zYXZl";
+    let client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItY29tbWl0LWJlZm9yZS1zYXZl","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "commit-before-save-token", challenge);
+    let registration = runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "commit-before-save-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_display_name: Some("Alice".into()),
+            user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyRegistration(registration) = registration else {
+        panic!("expected passkey registration, got {registration:?}");
+    };
+
+    let early_commit = runtime
+        .handle(RuntimeCommand::CommitPasskeyRegistration {
+            ceremony_token: "commit-before-save-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
+            entry_id: registration.entry_id,
+            credential_id: registration.credential_id,
+        })
+        .unwrap();
+    let RuntimeResponse::Error(error) = early_commit else {
+        panic!("expected early commit error, got {early_commit:?}");
+    };
+    assert!(
+        error
+            .message
+            .contains("passkey ceremony must be saved before commit")
+    );
+    assert_eq!(
+        runtime
+            .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+                ceremony_token: "commit-before-save-token".into(),
+            })
+            .unwrap(),
+        RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+            known: true,
+            phase: Some(PasskeyCeremonyPhaseDto::CompletionAndMutation),
+            durable_state: Some(PasskeyCeremonyDurableStateDto::Mutated),
+            delivery_state: Some(PasskeyCeremonyDeliveryStateDto::NotDelivered),
+        })
+    );
+}
+
+#[test]
+fn runtime_aborts_uncommitted_passkey_registration_by_ceremony_token() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("passkey-abort");
+    let vault = Vault::empty("Passkey Abort");
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .expect("save seed vault");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("passkey-abort.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("open vault");
+    runtime
+        .unlock_with_password(&handle.vault_id, "passkey-abort")
+        .unwrap();
+
+    let challenge = "cmVnaXN0ZXItYWJvcnQ";
+    let client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItYWJvcnQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "abort-token-1", challenge);
+    let registration = runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "abort-token-1".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_display_name: Some("Alice".into()),
+            user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyRegistration(registration) = registration else {
+        panic!("expected passkey registration, got {registration:?}");
+    };
+    assert!(registration.created);
+
+    let aborted = runtime
+        .handle(RuntimeCommand::AbortPasskeyRegistration {
+            ceremony_token: "abort-token-1".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            closed_phase: PasskeyCeremonyPhaseDto::ClosedFailed,
+        })
+        .unwrap();
+    assert_eq!(aborted, RuntimeResponse::Saved);
+
+    register_get_ceremony_at_s3(&mut runtime, "list-after-abort-token");
+    let credentials = runtime
+        .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-after-abort-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialList(credentials) = credentials else {
+        panic!("expected passkey credential list, got {credentials:?}");
+    };
+    assert!(credentials.credentials.is_empty());
+
+    let ledger = runtime
+        .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+            ceremony_token: "abort-token-1".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        ledger,
+        RuntimeResponse::PasskeyCeremonyLedger(
+            vaultkern_runtime_protocol::PasskeyCeremonyLedgerDto {
+                known: true,
+                phase: Some(PasskeyCeremonyPhaseDto::ClosedFailed),
+                durable_state: Some(
+                    vaultkern_runtime_protocol::PasskeyCeremonyDurableStateDto::None
+                ),
+                delivery_state: Some(
+                    vaultkern_runtime_protocol::PasskeyCeremonyDeliveryStateDto::NotDelivered
+                ),
+            }
+        )
+    );
+}
+
+#[test]
+fn runtime_aborts_saved_uncommitted_passkey_registration_by_ceremony_token() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("passkey-saved-abort");
+    let vault = Vault::empty("Passkey Saved Abort");
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .expect("save seed vault");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("passkey-saved-abort.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("open vault");
+    runtime
+        .unlock_with_password(&handle.vault_id, "passkey-saved-abort")
+        .unwrap();
+
+    let challenge = "cmVnaXN0ZXItc2F2ZWQtYWJvcnQ";
+    let client_data = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItc2F2ZWQtYWJvcnQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_create_ceremony_at_s4(&mut runtime, "saved-abort-token-1", challenge);
+    let registration = runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "saved-abort-token-1".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_display_name: Some("Alice".into()),
+            user_handle_base64url: "dXNlci0x".into(),
+            public_key_algorithm: -7,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data),
+        })
+        .unwrap();
+    assert!(matches!(
+        registration,
+        RuntimeResponse::PasskeyRegistration(_)
+    ));
+
+    let saved = runtime
+        .handle(RuntimeCommand::SavePasskeyRegistration {
+            ceremony_token: "saved-abort-token-1".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
+        })
+        .unwrap();
+    assert!(matches!(saved, RuntimeResponse::SaveVaultResult(_)));
+
+    let aborted = runtime
+        .handle(RuntimeCommand::AbortPasskeyRegistration {
+            ceremony_token: "saved-abort-token-1".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            closed_phase: PasskeyCeremonyPhaseDto::ClosedFailed,
+        })
+        .unwrap();
+    assert_eq!(aborted, RuntimeResponse::Saved);
+    drop(runtime);
+
+    let mut reopened = Runtime::for_tests_at(59);
+    let reopened_handle = reopened
+        .open_local_vault(path.to_str().unwrap())
+        .expect("reopen vault");
+    reopened
+        .unlock_with_password(&reopened_handle.vault_id, "passkey-saved-abort")
+        .unwrap();
+    register_get_ceremony_at_s3(&mut reopened, "list-after-saved-abort-token");
+    let credentials = reopened
+        .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-after-saved-abort-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            vault_id: reopened_handle.vault_id,
+            relying_party: "example.com".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialList(credentials) = credentials else {
+        panic!("expected passkey credential list, got {credentials:?}");
+    };
+    assert!(credentials.credentials.is_empty());
+}
+
+#[test]
 fn runtime_ignores_stale_passkey_registration_rollback_for_newer_credentials() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
@@ -2161,7 +3041,7 @@ fn runtime_ignores_stale_passkey_registration_rollback_for_newer_credentials() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("passkey-rollback.kdbx");
     std::fs::write(&path, bytes).unwrap();
-    let mut runtime = Runtime::for_tests();
+    let mut runtime = Runtime::for_tests_at(59);
     let handle = runtime
         .open_local_vault(path.to_str().unwrap())
         .expect("open vault");
@@ -2171,17 +3051,22 @@ fn runtime_ignores_stale_passkey_registration_rollback_for_newer_credentials() {
 
     let mut registrations = Vec::new();
     for challenge in ["cmVnaXN0ZXItMQ", "cmVnaXN0ZXItMg", "cmVnaXN0ZXItMw"] {
+        let ceremony_token = format!("registration-token-rollback-{challenge}");
+        register_create_ceremony_at_s4(&mut runtime, &ceremony_token, challenge);
         let client_data = format!(
             r#"{{"type":"webauthn.create","challenge":"{challenge}","origin":"https://example.com","crossOrigin":false}}"#
         );
         let response = runtime
             .handle(RuntimeCommand::CreatePasskeyRegistration {
+                ceremony_token,
+                expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
                 vault_id: handle.vault_id.clone(),
                 relying_party: "example.com".into(),
                 origin: "https://example.com".into(),
                 user_name: "alice@example.com".into(),
                 user_display_name: Some("Alice".into()),
                 user_handle_base64url: "dXNlci0x".into(),
+                public_key_algorithm: -7,
                 related_origin_verified: false,
                 client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data.as_bytes()),
             })
@@ -2193,16 +3078,18 @@ fn runtime_ignores_stale_passkey_registration_rollback_for_newer_credentials() {
     }
 
     runtime
-        .handle(RuntimeCommand::RollbackPasskeyRegistration {
-            vault_id: handle.vault_id.clone(),
-            entry_id: registrations[1].entry_id.clone(),
-            credential_id: Some(registrations[1].credential_id.clone()),
-            created: false,
+        .handle(RuntimeCommand::AbortPasskeyRegistration {
+            ceremony_token: "registration-token-rollback-cmVnaXN0ZXItMg".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            closed_phase: PasskeyCeremonyPhaseDto::ClosedFailed,
         })
         .unwrap();
 
+    register_get_ceremony_at_s3(&mut runtime, "list-after-second-rollback-token");
     let credentials = runtime
         .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-after-second-rollback-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
         })
@@ -2251,11 +3138,14 @@ fn runtime_reports_passkey_credential_status() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    register_create_ceremony_at_s3(&mut runtime, "status-token-example");
     let existing = runtime
         .handle(RuntimeCommand::PasskeyCredentialStatus {
+            ceremony_token: "status-token-example".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id.clone(),
             credential_id: "Y3JlZGVudGlhbC0x".into(),
-            relying_party: Some("example.com".into()),
+            relying_party: "example.com".into(),
         })
         .unwrap();
     let RuntimeResponse::PasskeyCredentialStatus(existing) = existing else {
@@ -2266,9 +3156,11 @@ fn runtime_reports_passkey_credential_status() {
 
     let missing = runtime
         .handle(RuntimeCommand::PasskeyCredentialStatus {
+            ceremony_token: "status-token-example".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id,
             credential_id: "bWlzc2luZw".into(),
-            relying_party: Some("example.com".into()),
+            relying_party: "example.com".into(),
         })
         .unwrap();
     let RuntimeResponse::PasskeyCredentialStatus(missing) = missing else {
@@ -2312,11 +3204,14 @@ fn runtime_scopes_passkey_credential_status_to_relying_party() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    register_create_ceremony_at_s3(&mut runtime, "status-token-example-scope");
     let scoped_missing = runtime
         .handle(RuntimeCommand::PasskeyCredentialStatus {
+            ceremony_token: "status-token-example-scope".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id.clone(),
             credential_id: "c2hhcmVkLWNyZWRlbnRpYWw".into(),
-            relying_party: Some("example.com".into()),
+            relying_party: "example.com".into(),
         })
         .unwrap();
     let RuntimeResponse::PasskeyCredentialStatus(scoped_missing) = scoped_missing else {
@@ -2324,17 +3219,80 @@ fn runtime_scopes_passkey_credential_status_to_relying_party() {
     };
     assert!(!scoped_missing.exists);
 
+    register_ceremony_at_s3(
+        &mut runtime,
+        "status-token-other-scope",
+        PasskeyCeremonyKindDto::Create,
+        "https://other.example",
+        "other.example",
+        "Y2hhbGxlbmdl",
+    );
     let scoped_existing = runtime
         .handle(RuntimeCommand::PasskeyCredentialStatus {
+            ceremony_token: "status-token-other-scope".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id,
             credential_id: "c2hhcmVkLWNyZWRlbnRpYWw".into(),
-            relying_party: Some("other.example".into()),
+            relying_party: "other.example".into(),
         })
         .unwrap();
     let RuntimeResponse::PasskeyCredentialStatus(scoped_existing) = scoped_existing else {
         panic!("expected passkey credential status, got {scoped_existing:?}");
     };
     assert!(scoped_existing.exists);
+}
+
+#[test]
+fn runtime_rejects_structurally_invalid_passkey_list_relying_party_before_vault_read() {
+    let mut runtime = Runtime::for_tests_at(59);
+
+    for relying_party in ["", "com", "https://example.com", "example.com/login"] {
+        let response = runtime
+            .handle(RuntimeCommand::ListPasskeyCredentials {
+                ceremony_token: "invalid-list-rp-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+                vault_id: "missing-vault".into(),
+                relying_party: relying_party.into(),
+            })
+            .unwrap();
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected error for invalid relying party {relying_party:?}, got {response:?}");
+        };
+        assert_eq!(error.code, "invalid_request");
+        assert!(
+            error.message.contains("invalid passkey relying party id"),
+            "unexpected error for {relying_party:?}: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn runtime_rejects_structurally_invalid_passkey_status_relying_party_before_vault_read() {
+    let mut runtime = Runtime::for_tests_at(59);
+
+    for relying_party in ["", "com", "https://example.com", "example.com/login"] {
+        let response = runtime
+            .handle(RuntimeCommand::PasskeyCredentialStatus {
+                ceremony_token: "invalid-status-rp-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+                vault_id: "missing-vault".into(),
+                credential_id: "Y3JlZGVudGlhbC0x".into(),
+                relying_party: relying_party.into(),
+            })
+            .unwrap();
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected error for invalid relying party {relying_party:?}, got {response:?}");
+        };
+        assert_eq!(error.code, "invalid_request");
+        assert!(
+            error.message.contains("invalid passkey relying party id"),
+            "unexpected error for {relying_party:?}: {}",
+            error.message
+        );
+    }
 }
 
 #[test]
@@ -2372,22 +3330,62 @@ fn runtime_creates_discoverable_passkey_assertion_for_relying_party() {
         .unwrap();
 
     let get_client_data = br#"{"type":"webauthn.get","challenge":"bG9naW4tMQ","origin":"https://example.com","crossOrigin":false}"#;
-    let assertion = runtime
+    register_discoverable_get_ceremony_at_s4(
+        &mut runtime,
+        "assertion-token-discoverable",
+        "bG9naW4tMQ",
+    );
+    let missing_selection = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
-            vault_id: handle.vault_id,
+            ceremony_token: "assertion-token-discoverable".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: None,
+            discoverable: true,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(get_client_data),
         })
         .unwrap();
-    let RuntimeResponse::PasskeyAssertion(assertion) = assertion else {
-        panic!("expected passkey assertion, got {assertion:?}");
+    let RuntimeResponse::Error(error) = missing_selection else {
+        panic!("expected missing selection error, got {missing_selection:?}");
     };
-    assert_eq!(assertion.credential_id, "ZGlzY292ZXJhYmxlLTE");
-    assert_eq!(assertion.user_handle_base64url, Some("dXNlci0x".into()));
+    assert!(
+        error
+            .message
+            .contains("passkey assertion credential id is required"),
+        "{error:?}"
+    );
+
+    let selected_client_data = br#"{"type":"webauthn.get","challenge":"bG9naW4tMg","origin":"https://example.com","crossOrigin":false}"#;
+    register_discoverable_get_ceremony_at_s4(
+        &mut runtime,
+        "assertion-token-selected-discoverable",
+        "bG9naW4tMg",
+    );
+    let selected_assertion = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-selected-discoverable".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("ZGlzY292ZXJhYmxlLTE".into()),
+            discoverable: true,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(selected_client_data),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyAssertion(selected_assertion) = selected_assertion else {
+        panic!("expected selected passkey assertion, got {selected_assertion:?}");
+    };
+    assert_eq!(
+        selected_assertion.user_handle_base64url,
+        Some("dXNlci0x".into())
+    );
 }
 
 #[test]
@@ -2440,8 +3438,11 @@ fn runtime_lists_passkey_credentials_for_relying_party_selection() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    register_get_ceremony_at_s3(&mut runtime, "list-selection-token");
     let response = runtime
         .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-selection-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
         })
@@ -2543,8 +3544,11 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    register_get_ceremony_at_s3(&mut runtime, "list-active-recycle-token");
     let credential_list = runtime
         .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-active-recycle-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
         })
@@ -2558,11 +3562,14 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
         "YWN0aXZlLWNyZWRlbnRpYWw"
     );
 
+    register_create_ceremony_at_s3(&mut runtime, "status-deleted-recycle-token");
     let status = runtime
         .handle(RuntimeCommand::PasskeyCredentialStatus {
+            ceremony_token: "status-deleted-recycle-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id.clone(),
             credential_id: "ZGVsZXRlZC1jcmVkZW50aWFs".into(),
-            relying_party: Some("example.com".into()),
+            relying_party: "example.com".into(),
         })
         .unwrap();
     let RuntimeResponse::PasskeyCredentialStatus(status) = status else {
@@ -2570,11 +3577,21 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
     };
     assert!(!status.exists);
 
+    register_ceremony_at_s3(
+        &mut runtime,
+        "status-moved-group-recycle-token",
+        PasskeyCeremonyKindDto::Create,
+        "https://moved-group.example.com",
+        "moved-group.example.com",
+        "Y2hhbGxlbmdl",
+    );
     let moved_group_status = runtime
         .handle(RuntimeCommand::PasskeyCredentialStatus {
+            ceremony_token: "status-moved-group-recycle-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id.clone(),
             credential_id: "bW92ZWQtZ3JvdXAtY3JlZGVudGlhbA".into(),
-            relying_party: Some("moved-group.example.com".into()),
+            relying_party: "moved-group.example.com".into(),
         })
         .unwrap();
     let RuntimeResponse::PasskeyCredentialStatus(moved_group_status) = moved_group_status else {
@@ -2582,11 +3599,21 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
     };
     assert!(moved_group_status.exists);
 
+    register_ceremony_at_s3(
+        &mut runtime,
+        "status-moved-recycle-token",
+        PasskeyCeremonyKindDto::Create,
+        "https://moved.example.com",
+        "moved.example.com",
+        "Y2hhbGxlbmdl",
+    );
     let moved_status = runtime
         .handle(RuntimeCommand::PasskeyCredentialStatus {
+            ceremony_token: "status-moved-recycle-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id.clone(),
             credential_id: "bW92ZWQtbGl2ZS1jcmVkZW50aWFs".into(),
-            relying_party: Some("moved.example.com".into()),
+            relying_party: "moved.example.com".into(),
         })
         .unwrap();
     let RuntimeResponse::PasskeyCredentialStatus(moved_status) = moved_status else {
@@ -2594,12 +3621,22 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
     };
     assert!(moved_status.exists);
 
+    register_get_ceremony_at_s4_for(
+        &mut runtime,
+        "assertion-token-moved-group",
+        "https://moved-group.example.com",
+        "moved-group.example.com",
+        "bG9naW4tMQ",
+    );
     let moved_group_assertion = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-moved-group".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "moved-group.example.com".into(),
             origin: "https://moved-group.example.com".into(),
             credential_id: Some("bW92ZWQtZ3JvdXAtY3JlZGVudGlhbA".into()),
+            discoverable: false,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
@@ -2615,12 +3652,16 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
         "bW92ZWQtZ3JvdXAtY3JlZGVudGlhbA"
     );
 
+    register_get_ceremony_at_s4(&mut runtime, "assertion-token-deleted", "bG9naW4tMQ");
     let deleted_assertion = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-deleted".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: Some("ZGVsZXRlZC1jcmVkZW50aWFs".into()),
+            discoverable: false,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
@@ -2633,12 +3674,20 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
     };
     assert!(error.message.contains("passkey credential not found"));
 
+    register_discoverable_get_ceremony_at_s4(
+        &mut runtime,
+        "assertion-token-active-discoverable",
+        "bG9naW4tMQ",
+    );
     let discoverable_assertion = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-active-discoverable".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
-            credential_id: None,
+            credential_id: Some("YWN0aXZlLWNyZWRlbnRpYWw".into()),
+            discoverable: true,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
@@ -2703,8 +3752,11 @@ fn runtime_keeps_group_named_recycle_bin_live_without_uuid_metadata() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    register_get_ceremony_at_s3(&mut runtime, "list-named-recycle-token");
     let credential_list = runtime
         .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-named-recycle-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id.clone(),
             relying_party: "example.com".into(),
         })
@@ -2722,11 +3774,14 @@ fn runtime_keeps_group_named_recycle_bin_live_without_uuid_metadata() {
         "ZGVsZXRlZC1jcmVkZW50aWFs"
     );
 
+    register_create_ceremony_at_s3(&mut runtime, "status-named-recycle-token");
     let deleted_status = runtime
         .handle(RuntimeCommand::PasskeyCredentialStatus {
+            ceremony_token: "status-named-recycle-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id,
             credential_id: "ZGVsZXRlZC1jcmVkZW50aWFs".into(),
-            relying_party: Some("example.com".into()),
+            relying_party: "example.com".into(),
         })
         .unwrap();
     let RuntimeResponse::PasskeyCredentialStatus(deleted_status) = deleted_status else {
@@ -2773,8 +3828,11 @@ fn runtime_does_not_skip_active_group_named_recycle_bin_when_recycle_bin_is_disa
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    register_get_ceremony_at_s3(&mut runtime, "list-disabled-recycle-token");
     let credential_list = runtime
         .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-disabled-recycle-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
         })
@@ -2790,7 +3848,80 @@ fn runtime_does_not_skip_active_group_named_recycle_bin_when_recycle_bin_is_disa
 }
 
 #[test]
-fn runtime_rejects_discoverable_passkey_assertion_when_multiple_accounts_match() {
+fn runtime_does_not_skip_recycle_bin_uuid_group_when_recycle_bin_is_disabled() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut active_entry = Entry::new("Active");
+    active_entry.passkey = Some(PasskeyRecord {
+        username: "active@example.com".into(),
+        credential_id: "YWN0aXZlLXV1aWQtZGlzYWJsZWQ".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("YWN0aXZlLXV1aWQtdXNlcg".into()),
+        backup_eligible: false,
+        backup_state: false,
+    });
+    let mut recycle_group = Group::new("Recycle Bin");
+    let recycle_group_id = recycle_group.id;
+    recycle_group.entries.push(active_entry);
+    vault.recycle_bin_enabled = Some(false);
+    vault.recycle_bin_group = Some(recycle_group_id);
+    vault.root.children.push(recycle_group);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    register_get_ceremony_at_s3(&mut runtime, "list-disabled-uuid-recycle-token");
+    let credential_list = runtime
+        .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-disabled-uuid-recycle-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            vault_id: handle.vault_id.clone(),
+            relying_party: "example.com".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialList(credential_list) = credential_list else {
+        panic!("expected credential list, got {credential_list:?}");
+    };
+    assert_eq!(credential_list.credentials.len(), 1);
+    assert_eq!(
+        credential_list.credentials[0].credential_id,
+        "YWN0aXZlLXV1aWQtZGlzYWJsZWQ"
+    );
+
+    register_create_ceremony_at_s3(&mut runtime, "status-disabled-uuid-recycle-token");
+    let status = runtime
+        .handle(RuntimeCommand::PasskeyCredentialStatus {
+            ceremony_token: "status-disabled-uuid-recycle-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            vault_id: handle.vault_id,
+            credential_id: "YWN0aXZlLXV1aWQtZGlzYWJsZWQ".into(),
+            relying_party: "example.com".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialStatus(status) = status else {
+        panic!("expected credential status, got {status:?}");
+    };
+    assert!(status.exists);
+}
+
+#[test]
+fn runtime_rejects_discoverable_passkey_assertion_without_selected_credential() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("demo-password");
@@ -2828,12 +3959,20 @@ fn runtime_rejects_discoverable_passkey_assertion_when_multiple_accounts_match()
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    register_discoverable_get_ceremony_at_s4(
+        &mut runtime,
+        "assertion-token-multiple-discoverable",
+        "bG9naW4tMQ",
+    );
     let response = runtime
         .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-multiple-discoverable".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: handle.vault_id,
             relying_party: "example.com".into(),
             origin: "https://example.com".into(),
             credential_id: None,
+            discoverable: true,
             user_presence_verified: true,
             related_origin_verified: false,
             client_data_json_base64url: URL_SAFE_NO_PAD.encode(
@@ -2849,7 +3988,7 @@ fn runtime_rejects_discoverable_passkey_assertion_when_multiple_accounts_match()
     assert!(
         error
             .message
-            .contains("multiple passkey credentials found for relying party")
+            .contains("passkey assertion credential id is required")
     );
 }
 
@@ -3137,4 +4276,260 @@ fn runtime_updates_entry_modified_time_after_manager_mutations() {
         .project_entry_times(&loaded, &created.id)
         .expect("project entry times");
     assert_eq!(times.modified_at, 1234);
+}
+
+fn register_create_ceremony_at_s4(runtime: &mut Runtime, token: &str, challenge_base64url: &str) {
+    register_ceremony_at_s4(
+        runtime,
+        token,
+        PasskeyCeremonyKindDto::Create,
+        "https://example.com",
+        "example.com",
+        challenge_base64url,
+    );
+}
+
+fn register_create_ceremony_at_s3(runtime: &mut Runtime, token: &str) {
+    register_ceremony_at_s3(
+        runtime,
+        token,
+        PasskeyCeremonyKindDto::Create,
+        "https://example.com",
+        "example.com",
+        "Y2hhbGxlbmdl",
+    );
+}
+
+fn register_get_ceremony_at_s4(runtime: &mut Runtime, token: &str, challenge_base64url: &str) {
+    register_get_ceremony_at_s4_for(
+        runtime,
+        token,
+        "https://example.com",
+        "example.com",
+        challenge_base64url,
+    );
+}
+
+fn register_get_subframe_ceremony_at_s4(
+    runtime: &mut Runtime,
+    token: &str,
+    challenge_base64url: &str,
+) {
+    let request_id = test_id_from_token(token);
+    runtime
+        .handle(RuntimeCommand::RegisterPasskeyCeremony {
+            ceremony_token: token.into(),
+            connection_id: "connection-1".into(),
+            origin: "https://login.example.com".into(),
+            top_origin: Some("https://container.example.net".into()),
+            ancestor_origins: vec!["https://container.example.net".into()],
+            relying_party: "example.com".into(),
+            ceremony: PasskeyCeremonyKindDto::Get,
+            discoverable: false,
+            challenge_base64url: challenge_base64url.into(),
+            request_id,
+            tab_id: request_id as i64,
+            frame_id: 1,
+            frame_kind: PasskeyFrameKindDto::Subframe,
+            registered_at_epoch_ms: 1_000,
+            expires_at_epoch_ms: 301_000,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            related_origin_verified: false,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            related_origin_verified: false,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            next_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            related_origin_verified: false,
+        })
+        .unwrap();
+}
+
+fn register_discoverable_get_ceremony_at_s4(
+    runtime: &mut Runtime,
+    token: &str,
+    challenge_base64url: &str,
+) {
+    register_ceremony_at_s4_with_discoverable(
+        runtime,
+        token,
+        PasskeyCeremonyKindDto::Get,
+        "https://example.com",
+        "example.com",
+        challenge_base64url,
+        true,
+    );
+}
+
+fn register_get_ceremony_at_s3(runtime: &mut Runtime, token: &str) {
+    register_get_ceremony_at_s3_for(runtime, token, "https://example.com", "example.com");
+}
+
+fn register_get_ceremony_at_s3_for(
+    runtime: &mut Runtime,
+    token: &str,
+    origin: &str,
+    relying_party: &str,
+) {
+    register_ceremony_at_s3(
+        runtime,
+        token,
+        PasskeyCeremonyKindDto::Get,
+        origin,
+        relying_party,
+        "Y2hhbGxlbmdl",
+    );
+}
+
+fn register_get_ceremony_at_s4_for(
+    runtime: &mut Runtime,
+    token: &str,
+    origin: &str,
+    relying_party: &str,
+    challenge_base64url: &str,
+) {
+    register_ceremony_at_s4(
+        runtime,
+        token,
+        PasskeyCeremonyKindDto::Get,
+        origin,
+        relying_party,
+        challenge_base64url,
+    );
+}
+
+fn register_ceremony_at_s4(
+    runtime: &mut Runtime,
+    token: &str,
+    ceremony: PasskeyCeremonyKindDto,
+    origin: &str,
+    relying_party: &str,
+    challenge_base64url: &str,
+) {
+    register_ceremony_at_s4_with_discoverable(
+        runtime,
+        token,
+        ceremony,
+        origin,
+        relying_party,
+        challenge_base64url,
+        false,
+    );
+}
+
+fn register_ceremony_at_s4_with_discoverable(
+    runtime: &mut Runtime,
+    token: &str,
+    ceremony: PasskeyCeremonyKindDto,
+    origin: &str,
+    relying_party: &str,
+    challenge_base64url: &str,
+    discoverable: bool,
+) {
+    register_ceremony_at_s3_with_discoverable(
+        runtime,
+        token,
+        ceremony,
+        origin,
+        relying_party,
+        challenge_base64url,
+        discoverable,
+    );
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            next_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            related_origin_verified: false,
+        })
+        .unwrap();
+}
+
+fn register_ceremony_at_s3(
+    runtime: &mut Runtime,
+    token: &str,
+    ceremony: PasskeyCeremonyKindDto,
+    origin: &str,
+    relying_party: &str,
+    challenge_base64url: &str,
+) {
+    register_ceremony_at_s3_with_discoverable(
+        runtime,
+        token,
+        ceremony,
+        origin,
+        relying_party,
+        challenge_base64url,
+        false,
+    );
+}
+
+fn register_ceremony_at_s3_with_discoverable(
+    runtime: &mut Runtime,
+    token: &str,
+    ceremony: PasskeyCeremonyKindDto,
+    origin: &str,
+    relying_party: &str,
+    challenge_base64url: &str,
+    discoverable: bool,
+) {
+    let request_id = test_id_from_token(token);
+    runtime
+        .handle(RuntimeCommand::RegisterPasskeyCeremony {
+            ceremony_token: token.into(),
+            connection_id: "connection-1".into(),
+            origin: origin.into(),
+            top_origin: None,
+            ancestor_origins: vec![],
+            relying_party: relying_party.into(),
+            ceremony,
+            discoverable,
+            challenge_base64url: challenge_base64url.into(),
+            request_id,
+            tab_id: request_id as i64,
+            frame_id: 0,
+            frame_kind: PasskeyFrameKindDto::Top,
+            registered_at_epoch_ms: 1_000,
+            expires_at_epoch_ms: 301_000,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            related_origin_verified: false,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            related_origin_verified: false,
+        })
+        .unwrap();
+}
+
+fn test_id_from_token(token: &str) -> u64 {
+    let hash = token.bytes().fold(17_u64, |value, byte| {
+        value.wrapping_mul(131).wrapping_add(u64::from(byte))
+    });
+    1_000 + (hash % 1_000_000)
 }

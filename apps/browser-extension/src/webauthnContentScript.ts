@@ -8,7 +8,10 @@ if (!globalState.__vaultkernWebAuthnContentScriptInstalled && chromeApi?.runtime
   globalState.__vaultkernWebAuthnContentScriptInstalled = true;
   window.addEventListener("message", (event) => {
     const frameOrigin = originFromFrame(event);
+    const ancestorOrigins = ancestorOriginsFromWindow();
     if (
+      !frameOrigin ||
+      !ancestorOrigins ||
       event.source !== window ||
       event.origin !== frameOrigin ||
       !isWebAuthnPageRequest(event.data)
@@ -20,12 +23,13 @@ if (!globalState.__vaultkernWebAuthnContentScriptInstalled && chromeApi?.runtime
       type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
       ceremony: event.data.ceremony,
       origin: frameOrigin,
-      topOrigin: topOriginFromWindow(),
-      relyingParty: event.data.relyingParty,
-      challenge: event.data.challenge,
-      allowCredentialIds: event.data.allowCredentialIds,
-      excludeCredentialIds: event.data.excludeCredentialIds,
-      mediation: event.data.mediation,
+      topOrigin: topOriginFromAncestorOrigins(ancestorOrigins),
+      ancestorOrigins,
+      relyingParty: optionalStringFrom(event.data.relyingParty),
+      challenge: optionalStringFrom(event.data.challenge),
+      allowCredentialIds: stringArrayFrom(event.data.allowCredentialIds),
+      excludeCredentialIds: stringArrayFrom(event.data.excludeCredentialIds),
+      mediation: optionalStringFrom(event.data.mediation),
       observedAt: Date.now()
     });
     if (sendResult && typeof sendResult.catch === "function") {
@@ -36,33 +40,83 @@ if (!globalState.__vaultkernWebAuthnContentScriptInstalled && chromeApi?.runtime
 
 function originFromFrame(event?: MessageEvent) {
   const globalOrigin = (globalThis as typeof globalThis & { origin?: unknown }).origin;
-  if (typeof globalOrigin === "string" && validOrigin(globalOrigin)) {
-    return globalOrigin;
+  if (typeof globalOrigin === "string") {
+    const origin = strictOriginFromString(globalOrigin);
+    if (origin) {
+      return origin;
+    }
   }
 
-  if (validOrigin(window.location.origin)) {
-    return window.location.origin;
+  const windowOrigin = strictOriginFromString(window.location.origin);
+  if (windowOrigin) {
+    return windowOrigin;
   }
 
-  if (event && validOrigin(event.origin)) {
-    return event.origin;
+  if (event) {
+    const eventOrigin = strictOriginFromString(event.origin);
+    if (eventOrigin) {
+      return eventOrigin;
+    }
   }
 
-  return window.location.origin;
+  return null;
 }
 
-function validOrigin(origin: string) {
-  return origin.trim() !== "" && origin !== "null";
+function strictOriginFromString(value: string) {
+  if (value.trim() === "" || value !== value.trim() || value === "null") {
+    return null;
+  }
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.pathname !== "/" ||
+      parsed.search !== "" ||
+      parsed.hash !== ""
+    ) {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
 }
 
-function topOriginFromWindow() {
+function ancestorOriginsFromWindow() {
   const ancestorOrigins = window.location.ancestorOrigins;
-  const topOrigin = ancestorOrigins?.[ancestorOrigins.length - 1];
-  if (typeof topOrigin === "string" && topOrigin.trim() !== "") {
-    return topOrigin;
+  if (!ancestorOrigins || typeof ancestorOrigins.length !== "number") {
+    return [];
   }
 
-  return originFromFrame();
+  const origins: string[] = [];
+  for (const value of Array.from(ancestorOrigins as ArrayLike<unknown>)) {
+    if (typeof value !== "string") {
+      return null;
+    }
+    const origin = strictOriginFromString(value);
+    if (!origin) {
+      return null;
+    }
+    origins.push(origin);
+  }
+  return origins;
+}
+
+function topOriginFromAncestorOrigins(ancestorOrigins: string[]) {
+  const topOrigin = ancestorOrigins[ancestorOrigins.length - 1];
+  return typeof topOrigin === "string" ? topOrigin : undefined;
+}
+
+function optionalStringFrom(value: unknown) {
+  return typeof value === "string" ? value : undefined;
+}
+
+function stringArrayFrom(value: unknown) {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 function isWebAuthnPageRequest(message: unknown): message is {

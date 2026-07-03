@@ -130,7 +130,11 @@ function shouldCancelActivePreload(
 export function createNativeMessagingBridge(
   connectNative: (hostName: string) => NativePort,
   hostName: string,
-  options?: { timeoutMs?: number; interactiveTimeoutMs?: number }
+  options?: {
+    timeoutMs?: number;
+    interactiveTimeoutMs?: number;
+    onPortDetached?: () => void;
+  }
 ) {
   const timeoutMs = options?.timeoutMs ?? 30_000;
   const interactiveTimeoutMs = options?.interactiveTimeoutMs ?? 5 * 60_000;
@@ -156,8 +160,9 @@ export function createNativeMessagingBridge(
         command.type === "unlock_current_vault_with_quick_unlock" ||
         command.type === "create_passkey_assertion" ||
         command.type === "create_passkey_registration" ||
+        command.type === "save_passkey_registration" ||
         command.type === "save_vault" ||
-        command.type === "rollback_passkey_registration" ||
+        command.type === "abort_passkey_registration" ||
         command.type === "commit_passkey_registration"
       ) {
         return interactiveTimeoutMs;
@@ -189,7 +194,15 @@ export function createNativeMessagingBridge(
   }
 
   function detachPort() {
+    const hadPort = port !== null;
     port = null;
+    if (hadPort) {
+      try {
+        options?.onPortDetached?.();
+      } catch {
+        // Detach observers must not mask native messaging failures.
+      }
+    }
   }
 
   function cancelActivePreload() {

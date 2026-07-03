@@ -70,6 +70,59 @@ function createPort() {
   };
 }
 
+async function completePasskeyLedgerReconciliation(
+  port: ReturnType<typeof createPort>
+) {
+  await vi.waitFor(() => {
+    expect(port.postMessage).toHaveBeenCalledWith({
+      version: 1,
+      command: {
+        type: "reconcile_passkey_ceremony_ledger",
+        active_connection_id: expect.any(String)
+      }
+    });
+  });
+  port.emitMessage({
+    type: "passkey_ceremony_reconciliation",
+    reconciled: []
+  });
+  await flushMicrotasks();
+}
+
+function passkeyCeremonyStorage(ceremonies: Record<string, unknown>) {
+  return {
+    version: 1,
+    ceremonies,
+    checksum: passkeyCeremonyStorageChecksum(ceremonies)
+  };
+}
+
+function passkeyCeremonyStorageChecksum(value: unknown) {
+  let hash = 0x811c9dc5;
+  const input = stableJson(value);
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `passkey-ceremonies-v1:${hash.toString(16).padStart(8, "0")}`;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item ?? null)).join(",")}]`;
+  }
+
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
+}
+
 describe("background bridge", () => {
   it("keeps the native session alive after an unlocked session response", async () => {
     vi.useFakeTimers();
@@ -114,6 +167,20 @@ describe("background bridge", () => {
     await import("../background");
     await flushMicrotasks();
     expect(attach).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        version: 1,
+        command: {
+          type: "reconcile_passkey_ceremony_ledger",
+          active_connection_id: expect.any(String)
+        }
+      });
+    });
+    port.emitMessage({
+      type: "passkey_ceremony_reconciliation",
+      reconciled: []
+    });
+    await flushMicrotasks();
 
     if (listeners.length === 0) {
       throw new Error("background listener was not registered");
@@ -145,7 +212,7 @@ describe("background bridge", () => {
       version: 1,
       command: { type: "get_session_state" }
     });
-    expect(port.postMessage).toHaveBeenCalledTimes(2);
+    expect(port.postMessage).toHaveBeenCalledTimes(3);
 
     vi.useRealTimers();
   });
@@ -418,6 +485,7 @@ describe("background bridge", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(attach).toHaveBeenCalledTimes(1);
+    await completePasskeyLedgerReconciliation(port);
     expect(registerContentScripts).toHaveBeenCalledWith([
       {
         id: "vaultkern-webauthn-page-hook",
@@ -434,7 +502,9 @@ describe("background bridge", () => {
     expect(query).toHaveBeenCalledWith({
       url: ["http://*/*", "https://*/*"]
     });
-    expect(executeScript).toHaveBeenCalledTimes(4);
+    await vi.waitFor(() => {
+      expect(executeScript).toHaveBeenCalledTimes(4);
+    });
     expect(executeScript).toHaveBeenNthCalledWith(1, {
       target: { tabId: 7, allFrames: true },
       files: ["webauthnContentScript.js"],
@@ -523,11 +593,14 @@ describe("background bridge", () => {
 
     await import("../background");
     await new Promise((resolve) => setTimeout(resolve, 0));
+    await completePasskeyLedgerReconciliation(port);
 
-    expect(executeScript).toHaveBeenCalledWith({
-      target: { tabId: 7, allFrames: true },
-      files: ["webauthnPageHook.js"],
-      world: "MAIN"
+    await vi.waitFor(() => {
+      expect(executeScript).toHaveBeenCalledWith({
+        target: { tabId: 7, allFrames: true },
+        files: ["webauthnPageHook.js"],
+        world: "MAIN"
+      });
     });
   });
 
@@ -597,12 +670,349 @@ describe("background bridge", () => {
     await vi.waitFor(() => {
       expect(attach).toHaveBeenCalledTimes(1);
     });
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        version: 1,
+        command: {
+          type: "reconcile_passkey_ceremony_ledger",
+          active_connection_id: expect.any(String)
+        }
+      });
+    });
+    port.emitMessage({
+      type: "passkey_ceremony_reconciliation",
+      reconciled: []
+    });
 
     remoteSessionListener?.();
 
     await vi.waitFor(() => {
       expect(attach).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it("rotates the passkey ledger connection id after native port reconnect", async () => {
+    const firstPort = createPort();
+    const secondPort = createPort();
+    const connectNative = vi.fn(() =>
+      connectNative.mock.calls.length === 1 ? firstPort : secondPort
+    );
+    const attach = vi.fn(async () => undefined);
+    let remoteSessionListener: (() => void) | undefined;
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+            const items = {
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: true
+              }
+            };
+            if (callback) {
+              callback(items);
+              return undefined;
+            }
+            return Promise.resolve(items);
+          },
+          set(_items: Record<string, unknown>, callback?: () => void) {
+            callback?.();
+            return Promise.resolve();
+          }
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      scripting: {
+        executeScript: vi.fn(async () => undefined),
+        registerContentScripts: vi.fn(async () => undefined)
+      },
+      tabs: {
+        query: vi.fn(async () => [])
+      },
+      webAuthenticationProxy: {
+        attach,
+        onRemoteSessionStateChange: {
+          addListener(listener: () => void) {
+            remoteSessionListener = listener;
+          }
+        }
+      }
+    };
+
+    await import("../background");
+    await vi.waitFor(() => {
+      expect(firstPort.postMessage).toHaveBeenCalledWith({
+        version: 1,
+        command: {
+          type: "reconcile_passkey_ceremony_ledger",
+          active_connection_id: expect.any(String)
+        }
+      });
+    });
+    const firstConnectionId = (
+      firstPort.postMessage.mock.calls[0][0] as {
+        command: { active_connection_id: string };
+      }
+    ).command.active_connection_id;
+    firstPort.emitMessage({
+      type: "passkey_ceremony_reconciliation",
+      reconciled: []
+    });
+    await flushMicrotasks();
+
+    firstPort.emitDisconnect();
+    remoteSessionListener?.();
+
+    await vi.waitFor(() => {
+      expect(secondPort.postMessage).toHaveBeenCalledWith({
+        version: 1,
+        command: {
+          type: "reconcile_passkey_ceremony_ledger",
+          active_connection_id: expect.any(String)
+        }
+      });
+    });
+    const secondConnectionId = (
+      secondPort.postMessage.mock.calls[0][0] as {
+        command: { active_connection_id: string };
+      }
+    ).command.active_connection_id;
+
+    expect(secondConnectionId).not.toBe(firstConnectionId);
+  });
+
+  it("asks the native ledger to reconcile passkey ceremonies when attaching the proxy", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+            const items = {
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: true
+              }
+            };
+            if (callback) {
+              callback(items);
+              return undefined;
+            }
+            return Promise.resolve(items);
+          },
+          set(_items: Record<string, unknown>, callback?: () => void) {
+            callback?.();
+            return Promise.resolve();
+          }
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      scripting: {
+        executeScript: vi.fn(async () => undefined),
+        registerContentScripts: vi.fn(async () => undefined)
+      },
+      tabs: {
+        query: vi.fn(async () => [])
+      },
+      webAuthenticationProxy: {
+        attach
+      }
+    };
+
+    await import("../background");
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        version: 1,
+        command: {
+          type: "reconcile_passkey_ceremony_ledger",
+          active_connection_id: expect.any(String)
+        }
+      });
+    });
+  });
+
+  it("reconciles the native ledger before rehydrating persisted passkey ceremonies", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+    let sessionItems: Record<string, unknown> = {
+      vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
+        "token-pre-s4": {
+          version: 1,
+          ceremonyToken: "token-pre-s4",
+          ceremony: "get",
+          phase: "s1_user_authorization",
+          origin: "https://example.com",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          challengeBase64url: "Y2hhbGxlbmdlLTE",
+          requestId: 107,
+          tabId: 101,
+          frameId: 0,
+          frameKind: "top",
+          getCredentialIds: ["Y3JlZGVudGlhbC0x"],
+          getClientExtensionResults: {},
+          registeredAtEpochMs: 1_000,
+          expiresAtEpochMs: Date.now() + 300_000
+        }
+      })
+    };
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+            const items = {
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: true
+              }
+            };
+            if (callback) {
+              callback(items);
+              return undefined;
+            }
+            return Promise.resolve(items);
+          },
+          set(_items: Record<string, unknown>, callback?: () => void) {
+            callback?.();
+            return Promise.resolve();
+          }
+        },
+        session: {
+          setAccessLevel: vi.fn(async () => undefined),
+          get(_keys?: unknown) {
+            return Promise.resolve({ ...sessionItems });
+          },
+          set(items: Record<string, unknown>) {
+            sessionItems = { ...sessionItems, ...items };
+            return Promise.resolve();
+          },
+          remove(keys: unknown) {
+            for (const key of Array.isArray(keys) ? keys : [keys]) {
+              delete sessionItems[String(key)];
+            }
+            return Promise.resolve();
+          }
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      scripting: {
+        executeScript: vi.fn(async () => undefined),
+        registerContentScripts: vi.fn(async () => undefined)
+      },
+      tabs: {
+        query: vi.fn(async () => [])
+      },
+      webAuthenticationProxy: {
+        attach
+      }
+    };
+
+    await import("../background");
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        version: 1,
+        command: {
+          type: "reconcile_passkey_ceremony_ledger",
+          active_connection_id: expect.any(String)
+        }
+      });
+    });
+    port.emitMessage({
+      type: "passkey_ceremony_reconciliation",
+      reconciled: []
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        version: 1,
+        command: {
+          type: "query_passkey_ceremony_ledger",
+          ceremony_token: "token-pre-s4"
+        }
+      });
+    });
+    port.emitMessage({ type: "passkey_ceremony_ledger", known: false });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        version: 1,
+        command: expect.objectContaining({
+          type: "register_passkey_ceremony",
+          ceremony_token: "token-pre-s4",
+          connection_id: expect.any(String)
+        })
+      });
+    });
+    port.emitMessage({ type: "passkey_ceremony_registered", registered: true });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        version: 1,
+        command: {
+          type: "advance_passkey_ceremony_phase",
+          ceremony_token: "token-pre-s4",
+          expected_phase: "s0_pre_authorization",
+          next_phase: "s1_user_authorization"
+        }
+      });
+    });
+    port.emitMessage({ type: "passkey_ceremony_advanced", advanced: true });
+
+    const commandTypes = port.postMessage.mock.calls.map(
+      ([message]) =>
+        (
+          message as {
+            command?: { type?: unknown };
+          }
+        ).command?.type
+    );
+    expect(commandTypes.indexOf("reconcile_passkey_ceremony_ledger")).toBeLessThan(
+      commandTypes.indexOf("query_passkey_ceremony_ledger")
+    );
+    expect(commandTypes.indexOf("query_passkey_ceremony_ledger")).toBeLessThan(
+      commandTypes.indexOf("register_passkey_ceremony")
+    );
+    expect(commandTypes.indexOf("register_passkey_ceremony")).toBeLessThan(
+      commandTypes.indexOf("advance_passkey_ceremony_phase")
+    );
   });
 
   it("unregisters the WebAuthn page hook when the provider is disabled", async () => {
@@ -850,6 +1260,7 @@ describe("background bridge", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(attach).toHaveBeenCalledTimes(1);
+    await completePasskeyLedgerReconciliation(port);
 
     passkeyProviderEnabled = false;
     storageListener?.({ vaultkernExtensionSettings: {} }, "local");
@@ -916,6 +1327,7 @@ describe("background bridge", () => {
     };
 
     await import("../background");
+    await completePasskeyLedgerReconciliation(port);
     await vi.waitFor(() => {
       expect(executeScript).toHaveBeenCalledWith({
         target: { tabId: 7, allFrames: true },
@@ -1015,6 +1427,7 @@ describe("background bridge", () => {
     passkeyProviderEnabled = false;
     storageListener?.({ vaultkernExtensionSettings: {} }, "local");
     resolveAttach();
+    await completePasskeyLedgerReconciliation(port);
 
     await vi.waitFor(() => {
       expect(detach).toHaveBeenCalledTimes(1);

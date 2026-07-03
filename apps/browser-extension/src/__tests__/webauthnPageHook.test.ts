@@ -77,6 +77,32 @@ describe("WebAuthn page hook", () => {
     );
   });
 
+  it("does not include ceremony tokens in page hook observations", async () => {
+    installCredentialMocks();
+    const postMessage = vi
+      .spyOn(window, "postMessage")
+      .mockImplementation(() => undefined);
+
+    await import("../webauthnPageHook");
+
+    await navigator.credentials.get({
+      publicKey: {
+        challenge: new Uint8Array([3, 2, 1]),
+        ceremonyToken: "page-controlled-token",
+        ceremony_token: "page-controlled-token"
+      }
+    } as CredentialRequestOptions);
+
+    const payload = postMessage.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      type: "vaultkern_webauthn_page_request",
+      ceremony: "get"
+    });
+    expect(payload.ceremonyToken).toBeUndefined();
+    expect(payload.ceremony_token).toBeUndefined();
+    expect(JSON.stringify(payload)).not.toContain("page-controlled-token");
+  });
+
   it("does not let observation postMessage failures break WebAuthn calls", async () => {
     const { originalGet } = installCredentialMocks();
     vi.spyOn(window, "postMessage").mockImplementation(() => {
