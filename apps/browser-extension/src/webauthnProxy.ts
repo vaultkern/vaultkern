@@ -5777,7 +5777,7 @@ function userDisplayNameFromCreateOptions(options: {
 function userHandleFromCreateOptions(options: { user?: { id?: unknown } }) {
   const userHandle = options.user?.id;
   if (typeof userHandle !== "string") {
-    throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn user id");
+    throw new WebAuthnRequestError("TypeError", "missing WebAuthn user id");
   }
   validateWebAuthnUserHandleLength(userHandle);
   return userHandle;
@@ -5808,7 +5808,7 @@ function publicKeyAlgorithmFromCreateOptions(options: { pubKeyCredParams?: unkno
 function validateCreateUserHandleOption(options: { user?: { id?: unknown } }) {
   const userHandle = options.user?.id;
   if (typeof userHandle !== "string") {
-    throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn user id");
+    throw new WebAuthnRequestError("TypeError", "missing WebAuthn user id");
   }
   validateWebAuthnUserHandleLength(userHandle);
 }

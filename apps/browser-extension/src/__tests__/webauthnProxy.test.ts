@@ -13783,7 +13783,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("returns NotAllowedError when WebAuthn create user id is missing", async () => {
+  it("returns TypeError when WebAuthn create user id is missing", async () => {
     let createListener: ((request: unknown) => void) | undefined;
     const completeCreateRequest = vi.fn(async () => undefined);
     const sendRuntimeCommand = runtimeCommandMock();
@@ -13825,7 +13825,7 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(completeCreateRequest).toHaveBeenCalledWith({
       requestId: 234,
       error: {
-        name: "NotAllowedError",
+        name: "TypeError",
         message: "missing WebAuthn user id"
       }
     });
