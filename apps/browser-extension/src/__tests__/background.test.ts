@@ -259,6 +259,98 @@ describe("background bridge", () => {
     vi.useRealTimers();
   });
 
+  it("stops native keep-alive and clears attach state when disabling fails to detach the proxy", async () => {
+    vi.useFakeTimers();
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const attach = vi.fn(async () => undefined);
+    const detach = vi.fn(async () => "detach failed");
+    const listeners: RuntimeMessageListener[] = [];
+    let passkeyProviderEnabled = true;
+    let storageListener:
+      | ((changes: Record<string, unknown>, areaName: string) => void)
+      | undefined;
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        onMessage: {
+          addListener(fn: RuntimeMessageListener) {
+            listeners.push(fn);
+          }
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled
+              }
+            });
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener(
+            listener: (changes: Record<string, unknown>, areaName: string) => void
+          ) {
+            storageListener = listener;
+          }
+        }
+      },
+      webAuthenticationProxy: {
+        attach,
+        detach
+      }
+    };
+
+    await import("../background");
+    await flushMicrotasks();
+    expect(attach).toHaveBeenCalledTimes(1);
+    await completePasskeyLedgerReconciliation(port);
+
+    const response = sendRuntimeMessage(listeners, {
+      version: 1,
+      command: { type: "get_session_state" }
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    await expect(response.response()).resolves.toMatchObject({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+
+    passkeyProviderEnabled = false;
+    storageListener?.({ vaultkernExtensionSettings: {} }, "local");
+    await vi.waitFor(() => {
+      expect(detach).toHaveBeenCalledTimes(1);
+    });
+    const postedAfterDisable = port.postMessage.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    expect(port.postMessage).toHaveBeenCalledTimes(postedAfterDisable);
+
+    passkeyProviderEnabled = true;
+    storageListener?.({ vaultkernExtensionSettings: {} }, "local");
+    await vi.waitFor(() => {
+      expect(attach).toHaveBeenCalledTimes(2);
+    });
+
+    vi.useRealTimers();
+  });
+
   it("does not keep the native session alive when passkeys are disabled", async () => {
     vi.useFakeTimers();
     const port = createPort();

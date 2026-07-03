@@ -209,12 +209,10 @@ async function syncWebAuthnProxyOnce() {
     return;
   }
 
+  webAuthnProxyAttached = false;
+  stopNativeKeepAlive();
   await unregisterWebAuthnPageHook();
-  const status = await detachWebAuthnProxy(chromeApi);
-  if (status.status === "detached" || status.status === "unsupported") {
-    webAuthnProxyAttached = false;
-    stopNativeKeepAlive();
-  }
+  await detachWebAuthnProxy(chromeApi);
 }
 
 async function registerWebAuthnPageHook() {

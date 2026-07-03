@@ -296,6 +296,33 @@ describe("createNativeMessagingBridge", () => {
     expect(port.postMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("does not retry unrelated disconnected post failures as stale ports", async () => {
+    const port = createPort();
+    port.postMessage.mockImplementation(() => {
+      throw new Error("database disconnected while serializing message");
+    });
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    await expect(
+      bridge.send({
+        version: 1,
+        command: { type: "create_passkey_assertion" }
+      })
+    ).rejects.toMatchObject({
+      code: "native_unknown",
+      message: "database disconnected while serializing message"
+    });
+    expect(connectNative).toHaveBeenCalledTimes(1);
+    expect(port.postMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a silent request after a timeout and continues with queued requests", async () => {
     vi.useFakeTimers();
 

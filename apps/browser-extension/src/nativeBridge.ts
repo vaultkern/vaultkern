@@ -59,8 +59,7 @@ function classifyNativeMessagingError(
     normalized.includes("host has exited") ||
     normalized.includes("port closed") ||
     normalized.includes("port disconnected") ||
-    normalized.includes("native port disconnected") ||
-    normalized.includes("disconnected")
+    normalized.includes("native port disconnected")
   ) {
     return "native_port_disconnected";
   }
