@@ -183,6 +183,16 @@ type PasskeyCredentialListItem = PasskeyCredentialOption & {
   userHandle: string | null;
 };
 
+type PasskeyPromptMirrorPersistence = {
+  persistPresencePromptState: (
+    nonce: string,
+    credentialOptions?: PasskeyCredentialOption[]
+  ) => Promise<void>;
+  persistUnlockPromptState: (nonce: string) => Promise<void>;
+  persistUserVerificationPromptState: (nonce: string) => Promise<void>;
+  persistPromptWindowId: (windowId: number) => Promise<void>;
+};
+
 type UnlockCompleteSignal = {
   userVerificationProof?: UnlockUserVerificationProof;
 };
@@ -1278,58 +1288,18 @@ async function handleGetRequest(
     },
     missingCeremonyMessage: "passkey ceremony is not registered"
   });
-  const persistPresencePromptState = async (
-    nonce: string,
-    credentialOptions: PasskeyCredentialOption[] = []
-  ) => {
-    if (!ceremonyMirror) {
-      return;
+  const {
+    persistPresencePromptState,
+    persistPromptWindowId,
+    persistUnlockPromptState,
+    persistUserVerificationPromptState
+  } = createPasskeyPromptMirrorPersistence(
+    chromeApi,
+    () => ceremonyMirror,
+    (nextMirror) => {
+      ceremonyMirror = nextMirror;
     }
-    ceremonyMirror = {
-      ...ceremonyMirror,
-      popupNonce: nonce,
-      promptMode: "approve",
-      promptWindowId: undefined,
-      promptCredentialOptions: credentialOptions
-    };
-    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-  };
-  const persistUnlockPromptState = async (nonce: string) => {
-    if (!ceremonyMirror) {
-      return;
-    }
-    ceremonyMirror = {
-      ...ceremonyMirror,
-      popupNonce: nonce,
-      promptMode: "unlock",
-      promptWindowId: undefined,
-      promptCredentialOptions: []
-    };
-    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-  };
-  const persistUserVerificationPromptState = async (nonce: string) => {
-    if (!ceremonyMirror) {
-      return;
-    }
-    ceremonyMirror = {
-      ...ceremonyMirror,
-      popupNonce: nonce,
-      promptMode: "verify",
-      promptWindowId: undefined,
-      promptCredentialOptions: []
-    };
-    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-  };
-  const persistPromptWindowId = async (windowId: number) => {
-    if (!ceremonyMirror) {
-      return;
-    }
-    ceremonyMirror = {
-      ...ceremonyMirror,
-      promptWindowId: windowId
-    };
-    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-  };
+  );
   await recordWebAuthnDebug(chromeApi, {
     event: "get_received",
     requestId,
@@ -1866,6 +1836,17 @@ async function resumePasskeyGetAfterPromptComplete(
   let requestCancelKey: string | null = null;
   const throwIfRequestCanceled = () =>
     throwIfWebAuthnRequestCanceled(canceledRequests, requestId, requestCancelKey);
+  const {
+    persistPresencePromptState,
+    persistPromptWindowId,
+    persistUserVerificationPromptState
+  } = createPasskeyPromptMirrorPersistence(
+    chromeApi,
+    () => mirror,
+    (nextMirror) => {
+      mirror = nextMirror;
+    }
+  );
 
   try {
     const mirrors = await loadPasskeyCeremonyMirrorsQueued(chromeApi);
@@ -1940,29 +1921,8 @@ async function resumePasskeyGetAfterPromptComplete(
           canceledRequests,
           requestCancelKey,
           {
-            onPromptPrepared: async (nonce) => {
-              if (!mirror) {
-                return;
-              }
-              mirror = {
-                ...mirror,
-                popupNonce: nonce,
-                promptMode: "verify",
-                promptWindowId: undefined,
-                promptCredentialOptions: []
-              };
-              await persistPasskeyCeremonyMirror(chromeApi, mirror);
-            },
-            onPromptOpened: async (windowId) => {
-              if (!mirror) {
-                return;
-              }
-              mirror = {
-                ...mirror,
-                promptWindowId: windowId
-              };
-              await persistPasskeyCeremonyMirror(chromeApi, mirror);
-            }
+            onPromptPrepared: persistUserVerificationPromptState,
+            onPromptOpened: persistPromptWindowId
           }
         );
       }
@@ -2078,29 +2038,9 @@ async function resumePasskeyGetAfterPromptComplete(
           canceledRequests,
           requestCancelKey,
           {
-            onPromptPrepared: async (nonce) => {
-              if (!mirror) {
-                return;
-              }
-              mirror = {
-                ...mirror,
-                popupNonce: nonce,
-                promptMode: "approve",
-                promptWindowId: undefined,
-                promptCredentialOptions: credentialSelection.promptOptions
-              };
-              await persistPasskeyCeremonyMirror(chromeApi, mirror);
-            },
-            onPromptOpened: async (windowId) => {
-              if (!mirror) {
-                return;
-              }
-              mirror = {
-                ...mirror,
-                promptWindowId: windowId
-              };
-              await persistPasskeyCeremonyMirror(chromeApi, mirror);
-            }
+            onPromptPrepared: (nonce) =>
+              persistPresencePromptState(nonce, credentialSelection.promptOptions),
+            onPromptOpened: persistPromptWindowId
           }
         );
         if (!approved) {
@@ -2231,6 +2171,14 @@ async function resumePasskeyCreateAfterPromptComplete(
     throwIfWebAuthnRequestCanceled(canceledRequests, requestId, requestCancelKey);
   const requestIsCanceled = () =>
     webAuthnRequestIsCanceled(canceledRequests, requestId, requestCancelKey);
+  const { persistPromptWindowId, persistUserVerificationPromptState } =
+    createPasskeyPromptMirrorPersistence(
+      chromeApi,
+      () => mirror,
+      (nextMirror) => {
+        mirror = nextMirror;
+      }
+    );
 
   try {
     const mirrors = await loadPasskeyCeremonyMirrorsQueued(chromeApi);
@@ -2303,29 +2251,8 @@ async function resumePasskeyCreateAfterPromptComplete(
           canceledRequests,
           requestCancelKey,
           {
-            onPromptPrepared: async (nonce) => {
-              if (!mirror) {
-                return;
-              }
-              mirror = {
-                ...mirror,
-                popupNonce: nonce,
-                promptMode: "verify",
-                promptWindowId: undefined,
-                promptCredentialOptions: []
-              };
-              await persistPasskeyCeremonyMirror(chromeApi, mirror);
-            },
-            onPromptOpened: async (windowId) => {
-              if (!mirror) {
-                return;
-              }
-              mirror = {
-                ...mirror,
-                promptWindowId: windowId
-              };
-              await persistPasskeyCeremonyMirror(chromeApi, mirror);
-            }
+            onPromptPrepared: persistUserVerificationPromptState,
+            onPromptOpened: persistPromptWindowId
           }
         );
       }
@@ -4252,55 +4179,18 @@ async function handleCreateRequest(
     },
     missingCeremonyMessage: "passkey ceremony is not registered"
   });
-  const persistPresencePromptState = async (nonce: string) => {
-    if (!ceremonyMirror) {
-      return;
+  const {
+    persistPresencePromptState,
+    persistPromptWindowId,
+    persistUnlockPromptState,
+    persistUserVerificationPromptState
+  } = createPasskeyPromptMirrorPersistence(
+    chromeApi,
+    () => ceremonyMirror,
+    (nextMirror) => {
+      ceremonyMirror = nextMirror;
     }
-    ceremonyMirror = {
-      ...ceremonyMirror,
-      popupNonce: nonce,
-      promptMode: "approve",
-      promptWindowId: undefined,
-      promptCredentialOptions: []
-    };
-    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-  };
-  const persistUnlockPromptState = async (nonce: string) => {
-    if (!ceremonyMirror) {
-      return;
-    }
-    ceremonyMirror = {
-      ...ceremonyMirror,
-      popupNonce: nonce,
-      promptMode: "unlock",
-      promptWindowId: undefined,
-      promptCredentialOptions: []
-    };
-    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-  };
-  const persistUserVerificationPromptState = async (nonce: string) => {
-    if (!ceremonyMirror) {
-      return;
-    }
-    ceremonyMirror = {
-      ...ceremonyMirror,
-      popupNonce: nonce,
-      promptMode: "verify",
-      promptWindowId: undefined,
-      promptCredentialOptions: []
-    };
-    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-  };
-  const persistPromptWindowId = async (windowId: number) => {
-    if (!ceremonyMirror) {
-      return;
-    }
-    ceremonyMirror = {
-      ...ceremonyMirror,
-      promptWindowId: windowId
-    };
-    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-  };
+  );
   await recordWebAuthnDebug(chromeApi, {
     event: "create_received",
     requestId,
@@ -5962,6 +5852,60 @@ async function completeGetRequest(chromeApi: ChromeLike, details: unknown) {
 
 async function completeCreateRequest(chromeApi: ChromeLike, details: unknown) {
   await chromeApi.webAuthenticationProxy?.completeCreateRequest?.(details);
+}
+
+function createPasskeyPromptMirrorPersistence(
+  chromeApi: ChromeLike,
+  getMirror: () => PasskeyCeremonyContext | null,
+  updateMirror: (mirror: PasskeyCeremonyContext) => void
+): PasskeyPromptMirrorPersistence {
+  const persistPromptMirror = async (
+    patch: Pick<
+      PasskeyCeremonyContext,
+      "popupNonce" | "promptMode" | "promptWindowId" | "promptCredentialOptions"
+    >
+  ) => {
+    const mirror = getMirror();
+    if (!mirror) {
+      return;
+    }
+    const nextMirror = {
+      ...mirror,
+      ...patch
+    };
+    updateMirror(nextMirror);
+    await persistPasskeyCeremonyMirror(chromeApi, nextMirror);
+  };
+
+  return {
+    persistPresencePromptState(nonce, credentialOptions = []) {
+      return persistPromptMirror({
+        popupNonce: nonce,
+        promptMode: "approve",
+        promptWindowId: undefined,
+        promptCredentialOptions: credentialOptions
+      });
+    },
+    persistUnlockPromptState(nonce) {
+      return persistPromptMirror({
+        popupNonce: nonce,
+        promptMode: "unlock",
+        promptWindowId: undefined,
+        promptCredentialOptions: []
+      });
+    },
+    persistUserVerificationPromptState(nonce) {
+      return persistPromptMirror({
+        popupNonce: nonce,
+        promptMode: "verify",
+        promptWindowId: undefined,
+        promptCredentialOptions: []
+      });
+    },
+    persistPromptWindowId(windowId) {
+      return persistPromptMirror({ promptWindowId: windowId });
+    }
+  };
 }
 
 async function activeVaultForRequest(

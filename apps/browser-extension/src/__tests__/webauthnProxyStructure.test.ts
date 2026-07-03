@@ -148,4 +148,19 @@ describe("webauthn proxy structure", () => {
     expect(source.match(/await delayPublicWebAuthnError/g) ?? []).toHaveLength(1);
     expect(source.match(/error: webAuthnError/g) ?? []).toHaveLength(1);
   });
+
+  it("persists passkey prompt mirror state through one helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("function createPasskeyPromptMirrorPersistence");
+    expect(
+      source.match(/popupNonce: nonce,\n\s+promptMode: "(?:approve|unlock|verify)"/g) ??
+        []
+    ).toHaveLength(3);
+    expect(source.match(/promptWindowId: windowId/g) ?? []).toHaveLength(1);
+  });
 });
