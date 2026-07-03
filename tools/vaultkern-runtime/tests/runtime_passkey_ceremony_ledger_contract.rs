@@ -299,6 +299,7 @@ fn runtime_rejects_passkey_ceremony_registration_with_public_suffix_rp_id() {
                 origin,
                 relying_party,
                 "Y2hhbGxlbmdl",
+                1_000,
                 301_000,
             ))
             .unwrap_err();
@@ -323,6 +324,7 @@ fn runtime_rejects_passkey_ceremony_registration_with_insecure_origin() {
             "http://example.com",
             "example.com",
             "Y2hhbGxlbmdl",
+            1_000,
             301_000,
         ))
         .unwrap_err();
@@ -341,6 +343,7 @@ fn runtime_rejects_passkey_ceremony_registration_with_ip_relying_party_mismatch(
             "https://127.0.0.1",
             "192.0.2.1",
             "Y2hhbGxlbmdl",
+            1_000,
             301_000,
         ))
         .unwrap_err();
@@ -363,6 +366,7 @@ fn runtime_allows_https_loopback_ceremony_to_skip_network_validation() {
             "https://localhost",
             "localhost",
             "Y2hhbGxlbmdl",
+            1_000,
             301_000,
         ))
         .unwrap();
@@ -378,6 +382,40 @@ fn runtime_allows_https_loopback_ceremony_to_skip_network_validation() {
     runtime
         .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
             ceremony_token: "token-https-localhost".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            related_origin_verified: false,
+        })
+        .unwrap();
+}
+
+#[test]
+fn runtime_allows_bracketed_ipv6_loopback_ceremony_to_skip_network_validation() {
+    let mut runtime = Runtime::for_tests_at(100);
+
+    runtime
+        .handle(register_command_with(
+            "token-http-ipv6-loopback",
+            PasskeyCeremonyKindDto::Get,
+            "http://[::1]:8877",
+            "::1",
+            "Y2hhbGxlbmdl",
+            1_000,
+            301_000,
+        ))
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "token-http-ipv6-loopback".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            related_origin_verified: false,
+        })
+        .unwrap();
+
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "token-http-ipv6-loopback".into(),
             expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
             next_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
             related_origin_verified: false,
@@ -546,6 +584,7 @@ fn runtime_requires_network_validation_before_cross_origin_credential_resolution
             "https://login.example.net",
             "example.com",
             "Y2hhbGxlbmdl",
+            1_000,
             301_000,
         ))
         .unwrap();
@@ -909,6 +948,7 @@ fn runtime_rejects_passkey_ceremony_registration_with_malformed_challenge() {
                 "https://login.example.com",
                 "example.com",
                 challenge,
+                1_000,
                 301_000,
             ))
             .unwrap_err();
@@ -941,6 +981,7 @@ fn runtime_rejects_passkey_ceremony_registration_with_non_origin_origin() {
                 origin,
                 "example.com",
                 "Y2hhbGxlbmdl",
+                1_000,
                 301_000,
             ))
             .unwrap_err();
@@ -3100,13 +3141,97 @@ fn runtime_marks_get_ceremony_unknown_delivery_without_commit_or_vault_lookup() 
     );
 }
 
+#[test]
+fn runtime_prunes_expired_pre_completion_passkey_ceremonies_before_registration() {
+    let mut runtime = Runtime::for_tests_at(100);
+    register_and_advance_to_s3(
+        &mut runtime,
+        "token-expired-s3-prune",
+        PasskeyCeremonyKindDto::Get,
+        "https://login.example.com",
+        "example.com",
+        "Y2hhbGxlbmdl",
+    );
+    runtime.set_test_unix_time_ms(302_000);
+
+    runtime
+        .handle(register_command_at(
+            "token-new-after-expired-s3",
+            "https://login.example.com",
+            302_000,
+            602_000,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        runtime
+            .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+                ceremony_token: "token-expired-s3-prune".into(),
+            })
+            .unwrap(),
+        RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+            known: false,
+            phase: None,
+            durable_state: None,
+            delivery_state: None,
+        })
+    );
+}
+
+#[test]
+fn runtime_prunes_expired_get_s4_passkey_ceremonies_before_registration() {
+    let mut runtime = Runtime::for_tests_at(100);
+    register_and_advance_to_s4(
+        &mut runtime,
+        "token-expired-get-s4-prune",
+        PasskeyCeremonyKindDto::Get,
+        "https://login.example.com",
+        "example.com",
+        "Y2hhbGxlbmdl",
+    );
+    runtime.set_test_unix_time_ms(302_000);
+
+    runtime
+        .handle(register_command_at(
+            "token-new-after-expired-get-s4",
+            "https://login.example.com",
+            302_000,
+            602_000,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        runtime
+            .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+                ceremony_token: "token-expired-get-s4-prune".into(),
+            })
+            .unwrap(),
+        RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+            known: false,
+            phase: None,
+            durable_state: None,
+            delivery_state: None,
+        })
+    );
+}
+
 fn register_command(token: &str, origin: &str, expires_at_epoch_ms: u64) -> RuntimeCommand {
+    register_command_at(token, origin, 1_000, expires_at_epoch_ms)
+}
+
+fn register_command_at(
+    token: &str,
+    origin: &str,
+    registered_at_epoch_ms: u64,
+    expires_at_epoch_ms: u64,
+) -> RuntimeCommand {
     register_command_with(
         token,
         PasskeyCeremonyKindDto::Get,
         origin,
         "example.com",
         "Y2hhbGxlbmdl",
+        registered_at_epoch_ms,
         expires_at_epoch_ms,
     )
 }
@@ -3117,6 +3242,7 @@ fn register_command_with(
     origin: &str,
     relying_party: &str,
     challenge_base64url: &str,
+    registered_at_epoch_ms: u64,
     expires_at_epoch_ms: u64,
 ) -> RuntimeCommand {
     register_command_with_frame(
@@ -3127,6 +3253,7 @@ fn register_command_with(
         vec![],
         relying_party,
         challenge_base64url,
+        registered_at_epoch_ms,
         expires_at_epoch_ms,
     )
 }
@@ -3139,6 +3266,7 @@ fn register_command_with_frame(
     ancestor_origins: Vec<String>,
     relying_party: &str,
     challenge_base64url: &str,
+    registered_at_epoch_ms: u64,
     expires_at_epoch_ms: u64,
 ) -> RuntimeCommand {
     RuntimeCommand::RegisterPasskeyCeremony {
@@ -3160,7 +3288,7 @@ fn register_command_with_frame(
         } else {
             PasskeyFrameKindDto::Subframe
         },
-        registered_at_epoch_ms: 1_000,
+        registered_at_epoch_ms,
         expires_at_epoch_ms,
     }
 }
@@ -3388,6 +3516,7 @@ fn register_and_advance_to_s3_with_frame(
             ancestor_origins,
             relying_party,
             challenge_base64url,
+            1_000,
             301_000,
         ))
         .unwrap();

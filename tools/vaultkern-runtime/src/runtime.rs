@@ -1733,14 +1733,18 @@ impl Runtime {
         let _ = self.loaded_vault(vault_id)?;
         self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
         let vault = self.loaded_vault(vault_id)?;
-        let mut credentials = Vec::new();
+        let mut candidates = Vec::new();
+        let mut credential_counts = BTreeMap::<String, usize>::new();
         visit_passkeys(
             &vault.root,
             vault.recycle_bin_group,
             vault.recycle_bin_enabled.unwrap_or(true),
             &mut |passkey| {
                 if passkey.relying_party == relying_party {
-                    credentials.push(PasskeyCredentialCandidateDto {
+                    *credential_counts
+                        .entry(passkey.credential_id.clone())
+                        .or_insert(0) += 1;
+                    candidates.push(PasskeyCredentialCandidateDto {
                         credential_id: passkey.credential_id.clone(),
                         username: passkey.username.clone(),
                         user_handle: passkey.user_handle.clone(),
@@ -1748,6 +1752,10 @@ impl Runtime {
                 }
             },
         );
+        let credentials = candidates
+            .into_iter()
+            .filter(|candidate| credential_counts[&candidate.credential_id] == 1)
+            .collect();
 
         Ok(PasskeyCredentialListDto { credentials })
     }
@@ -1789,7 +1797,7 @@ impl Runtime {
         identity: PasskeyCeremonyIdentity,
     ) -> Result<PasskeyCeremonyRegisteredDto> {
         let now_epoch_ms = self.current_unix_time_ms();
-        self.prune_expired_closed_passkey_ceremonies(now_epoch_ms);
+        self.prune_expired_passkey_ceremonies(now_epoch_ms);
         validate_passkey_ceremony_ttl(
             identity.registered_at_epoch_ms,
             identity.expires_at_epoch_ms,
@@ -2039,10 +2047,14 @@ impl Runtime {
         Ok(PasskeyCeremonyReconciliationDto { reconciled })
     }
 
-    fn prune_expired_closed_passkey_ceremonies(&mut self, now_epoch_ms: u64) {
+    fn prune_expired_passkey_ceremonies(&mut self, now_epoch_ms: u64) {
         self.passkey_ceremonies.retain(|_, entry| {
-            !is_closed_passkey_ceremony_phase(entry.phase)
-                || entry.identity.expires_at_epoch_ms > now_epoch_ms
+            if entry.identity.expires_at_epoch_ms > now_epoch_ms {
+                return true;
+            }
+            entry.phase == PasskeyCeremonyPhaseDto::CompletionAndMutation
+                && entry.identity.ceremony == PasskeyCeremonyKindDto::Create
+                && entry.durable_state != PasskeyCeremonyDurableStateDto::None
         });
     }
 
@@ -4926,7 +4938,7 @@ fn passkey_ceremony_origin_matches_relying_party(origin: &str, relying_party: &s
     let Some(host) = parsed.host_str() else {
         return false;
     };
-    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host = normalize_passkey_origin_host(host);
     let relying_party = relying_party
         .trim()
         .trim_end_matches('.')
@@ -4968,12 +4980,11 @@ fn validate_passkey_ceremony_origin_value(value: &str, label: &str) -> Result<()
     }
     let parsed = url::Url::parse(value)
         .with_context(|| format!("invalid passkey ceremony {label} origin"))?;
-    let host = parsed
-        .host_str()
-        .with_context(|| format!("invalid passkey ceremony {label} origin"))?
-        .trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
+    let host = normalize_passkey_origin_host(
+        parsed
+            .host_str()
+            .with_context(|| format!("invalid passkey ceremony {label} origin"))?,
+    );
     if parsed.username() != ""
         || parsed.password().is_some()
         || parsed.path() != "/"
@@ -5000,12 +5011,11 @@ fn validate_passkey_ceremony_origin_and_relying_party_for_s0(
         anyhow::bail!("invalid passkey origin");
     }
     let parsed = url::Url::parse(origin).context("invalid passkey origin")?;
-    let host = parsed
-        .host_str()
-        .context("passkey origin is missing a host")?
-        .trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
+    let host = normalize_passkey_origin_host(
+        parsed
+            .host_str()
+            .context("passkey origin is missing a host")?,
+    );
     if parsed.username() != ""
         || parsed.password().is_some()
         || parsed.path() != "/"
@@ -5095,6 +5105,15 @@ fn validate_passkey_relying_party_id(relying_party: &str) -> Result<()> {
 
 fn is_passkey_loopback_host(host: &str) -> bool {
     host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+fn normalize_passkey_origin_host(host: &str) -> String {
+    let canonical = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    canonical
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(&canonical)
+        .to_owned()
 }
 
 fn validate_passkey_ceremony_client_data(

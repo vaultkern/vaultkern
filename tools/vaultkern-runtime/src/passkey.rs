@@ -301,7 +301,12 @@ fn can_accept_verified_related_origin(host: &str, relying_party: &str) -> bool {
 }
 
 fn normalize_host(host: &str) -> String {
-    host.trim().trim_end_matches('.').to_ascii_lowercase()
+    let canonical = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    canonical
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(&canonical)
+        .to_owned()
 }
 
 fn is_ip_address(host: &str) -> bool {
@@ -636,6 +641,30 @@ mod tests {
         .expect("verified related origins are allowed");
 
         assert_eq!(registration.passkey.relying_party, "example.com");
+    }
+
+    #[test]
+    fn registration_accepts_bracketed_ipv6_loopback_origin() {
+        let client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTE","origin":"http://[::1]:8877","crossOrigin":false}"#,
+        );
+
+        let registration = create_registration(PasskeyRegistrationRequest {
+            relying_party: "::1",
+            origin: "http://[::1]:8877",
+            user_name: "alice@example.com",
+            user_handle_base64url: "dXNlci0x",
+            public_key_algorithm: -7,
+            user_verified: false,
+            related_origin_verified: false,
+            client_data_json_base64url: &client_data_json,
+            challenge_base64url: "Y2hhbGxlbmdlLTE",
+            top_origin: None,
+            ancestor_origins: &[],
+        })
+        .expect("bracketed IPv6 loopback origin should be allowed for local smoke tests");
+
+        assert_eq!(registration.passkey.relying_party, "::1");
     }
 
     #[test]

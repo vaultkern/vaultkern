@@ -2069,6 +2069,71 @@ fn runtime_allows_loopback_http_origin_for_passkey_assertion_smoke_tests() {
 }
 
 #[test]
+fn runtime_allows_bracketed_ipv6_loopback_http_origin_for_passkey_assertion_smoke_tests() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "::1".into(),
+        user_handle: None,
+        backup_eligible: false,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let origin = "http://[::1]:58777";
+    register_get_ceremony_at_s4_for(
+        &mut runtime,
+        "assertion-token-ipv6-loopback",
+        origin,
+        "::1",
+        "Y2hhbGxlbmdlLTE",
+    );
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-ipv6-loopback".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: handle.vault_id,
+            relying_party: "::1".into(),
+            origin: origin.into(),
+            credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(
+                format!(
+                    r#"{{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTE","origin":"{origin}","crossOrigin":false}}"#
+                )
+                .as_bytes(),
+            ),
+        })
+        .unwrap();
+
+    assert!(matches!(response, RuntimeResponse::PasskeyAssertion(_)));
+}
+
+#[test]
 fn runtime_rejects_passkey_assertion_when_client_data_frame_context_mismatches_ledger() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
@@ -2448,6 +2513,78 @@ fn runtime_reregisters_passkey_by_overwriting_matching_rp_and_user_handle() {
         panic!("expected passkey assertion, got {assertion:?}");
     };
     assert_eq!(assertion.credential_id, second_registration.credential_id);
+}
+
+#[test]
+fn runtime_omits_duplicate_passkey_credential_ids_from_discoverable_list() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let duplicate_credential_id = "ZHVwbGljYXRlLWNyZWRlbnRpYWw";
+    for (title, username, user_handle) in [
+        ("Duplicate A", "alice-a@example.com", "ZHVwbGljYXRlLWE"),
+        ("Duplicate B", "alice-b@example.com", "ZHVwbGljYXRlLWI"),
+    ] {
+        let mut entry = Entry::new(title);
+        entry.passkey = Some(PasskeyRecord {
+            username: username.into(),
+            credential_id: duplicate_credential_id.into(),
+            generated_user_id: None,
+            private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+            relying_party: "example.com".into(),
+            user_handle: Some(user_handle.into()),
+            backup_eligible: false,
+            backup_state: false,
+        });
+        vault.root.entries.push(entry);
+    }
+    let mut unique_entry = Entry::new("Unique");
+    unique_entry.passkey = Some(PasskeyRecord {
+        username: "unique@example.com".into(),
+        credential_id: "dW5pcXVlLWNyZWRlbnRpYWw".into(),
+        generated_user_id: None,
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("dW5pcXVlLXVzZXI".into()),
+        backup_eligible: false,
+        backup_state: false,
+    });
+    vault.root.entries.push(unique_entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    register_get_ceremony_at_s3(&mut runtime, "list-duplicate-credentials-token");
+    let credentials = runtime
+        .handle(RuntimeCommand::ListPasskeyCredentials {
+            ceremony_token: "list-duplicate-credentials-token".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            vault_id: handle.vault_id,
+            relying_party: "example.com".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyCredentialList(credentials) = credentials else {
+        panic!("expected passkey credential list, got {credentials:?}");
+    };
+
+    assert_eq!(credentials.credentials.len(), 1);
+    assert_eq!(
+        credentials.credentials[0].credential_id,
+        "dW5pcXVlLWNyZWRlbnRpYWw"
+    );
 }
 
 #[test]
