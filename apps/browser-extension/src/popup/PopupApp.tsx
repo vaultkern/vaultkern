@@ -685,6 +685,28 @@ export function PopupApp({
     webAuthnUnlockPrompt
   ]);
 
+  useEffect(() => {
+    if (
+      !webAuthnVerifyPrompt ||
+      webAuthnQuickUnlockAttempted.current ||
+      submitting ||
+      recentVaultsLoading ||
+      !session?.unlocked ||
+      !canQuickUnlockVault(currentVaultForSession())
+    ) {
+      return;
+    }
+
+    webAuthnQuickUnlockAttempted.current = true;
+    void handleWebAuthnUserVerification("quick_unlock");
+  }, [
+    recentVaults,
+    recentVaultsLoading,
+    session,
+    submitting,
+    webAuthnVerifyPrompt
+  ]);
+
   async function handleOpenManager() {
     const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
     const runtime = chromeApi?.runtime;
@@ -897,7 +919,7 @@ export function PopupApp({
           siteLabel={siteLabel}
           unlocked
           onLock={undefined}
-          onOpenManager={handleOpenManager}
+          onOpenManager={undefined}
         />
         <section style={passkeyPromptStyle} aria-live="polite">
           <strong>{passkeyPromptTitle}</strong>
@@ -981,7 +1003,7 @@ export function PopupApp({
           siteLabel={siteLabel}
           unlocked
           onLock={undefined}
-          onOpenManager={handleOpenManager}
+          onOpenManager={undefined}
         />
         <section style={passkeyPromptStyle} aria-live="polite">
           <strong>{passkeyPromptTitle}</strong>

@@ -15408,6 +15408,305 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
+  it("waits briefly for a passkey unlock proof when session polling observes the unlocked vault first", async () => {
+    vi.useFakeTimers();
+    let getListener: ((request: unknown) => void) | undefined;
+    let unlockMessageListener:
+      | ((message: unknown, sender: unknown, sendResponse: unknown) => void)
+      | undefined;
+    let sessionStateCalls = 0;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = runtimeCommandMock(async (command) => {
+      if (command.type === "get_session_state") {
+        sessionStateCalls += 1;
+        return sessionStateCalls === 1
+          ? {
+              type: "session_state",
+              unlocked: false,
+              activeVaultId: null
+            }
+          : {
+              type: "session_state",
+              unlocked: true,
+              activeVaultId: "vault-1"
+            };
+      }
+      if (command.type === "verify_passkey_user") {
+        return {
+          type: "passkey_user_verified",
+          verified: true,
+          method: "quick_unlock",
+          verified_at_epoch_ms: 1_783_000_000_000
+        };
+      }
+      if (command.type === "create_passkey_assertion") {
+        return {
+          type: "passkey_assertion",
+          credentialId: "Y3JlZGVudGlhbC0x",
+          authenticatorDataBase64url: "auth-data",
+          clientDataJsonBase64url: "client-data",
+          signatureBase64url: "signature",
+          userHandleBase64url: null
+        };
+      }
+      throw new Error(`unexpected command: ${String(command.type)}`);
+    });
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`),
+        onMessage: {
+          addListener(
+            listener: (message: unknown, sender: unknown, sendResponse: unknown) => void
+          ) {
+            unlockMessageListener = listener;
+          }
+        }
+      },
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      windows: {
+        create: vi.fn(async () => ({ id: 42 }))
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 35,
+      tabId: 101,
+      frameId: 0,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        userVerification: "required",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+    });
+    const unlockPromptUrl = (chromeApi.windows.create.mock.calls[0][0] as {
+      url: string;
+    }).url;
+    const unlockPromptParams = new URL(
+      unlockPromptUrl,
+      "chrome-extension://id/"
+    ).searchParams;
+    const unlockNonce = unlockPromptParams.get("nonce");
+    const ceremonyToken = (
+      sendRuntimeCommand.mock.calls
+        .map(([command]) => command as Record<string, unknown>)
+        .find((command) => command.type === "register_passkey_ceremony") as {
+        ceremony_token: string;
+      }
+    ).ceremony_token;
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(sendRuntimeCommand).toHaveBeenCalledWith({
+        type: "get_session_state"
+      });
+    });
+    expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+
+    unlockMessageListener?.(
+      {
+        type: "vaultkern_unlock_complete",
+        requestId: 35,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: unlockNonce,
+        method: "quick_unlock"
+      },
+      { url: unlockPromptUrl },
+      vi.fn()
+    );
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+    expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "get_passkey_user_verification_capability" })
+    );
+    expectBusinessRuntimeCommand(sendRuntimeCommand, 3, {
+      type: "verify_passkey_user",
+      ceremony_token: ceremonyToken,
+      expected_phase: "s1_user_authorization",
+      vault_id: "vault-1",
+      method: "quick_unlock"
+    });
+  });
+
+  it("keeps the active unlock flow authoritative when unlock completes during session polling", async () => {
+    vi.useFakeTimers();
+    let getListener: ((request: unknown) => void) | undefined;
+    let unlockMessageListener:
+      | ((message: unknown, sender: unknown, sendResponse: unknown) => void)
+      | undefined;
+    let sessionStateCalls = 0;
+    let resolvePolledSession:
+      | ((session: {
+          type: "session_state";
+          unlocked: boolean;
+          activeVaultId: string | null;
+        }) => void)
+      | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = runtimeCommandMock(async (command) => {
+      if (command.type === "get_session_state") {
+        sessionStateCalls += 1;
+        if (sessionStateCalls === 1) {
+          return {
+            type: "session_state",
+            unlocked: false,
+            activeVaultId: null
+          };
+        }
+        if (sessionStateCalls === 2) {
+          return new Promise((resolve) => {
+            resolvePolledSession = resolve;
+          });
+        }
+        throw new Error(`unexpected session poll ${sessionStateCalls}`);
+      }
+      if (command.type === "verify_passkey_user") {
+        return {
+          type: "passkey_user_verified",
+          verified: true,
+          method: "quick_unlock",
+          verified_at_epoch_ms: 1_783_000_000_000
+        };
+      }
+      if (command.type === "create_passkey_assertion") {
+        return {
+          type: "passkey_assertion",
+          credentialId: "Y3JlZGVudGlhbC0x",
+          authenticatorDataBase64url: "auth-data",
+          clientDataJsonBase64url: "client-data",
+          signatureBase64url: "signature",
+          userHandleBase64url: null
+        };
+      }
+      throw new Error(`unexpected command: ${String(command.type)}`);
+    });
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`),
+        onMessage: {
+          addListener(
+            listener: (message: unknown, sender: unknown, sendResponse: unknown) => void
+          ) {
+            unlockMessageListener = listener;
+          }
+        }
+      },
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      windows: {
+        create: vi.fn(async () => ({ id: 42 }))
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 36,
+      tabId: 101,
+      frameId: 0,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        userVerification: "required",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+    });
+    const unlockPromptUrl = (chromeApi.windows.create.mock.calls[0][0] as {
+      url: string;
+    }).url;
+    const unlockPromptParams = new URL(
+      unlockPromptUrl,
+      "chrome-extension://id/"
+    ).searchParams;
+    const unlockNonce = unlockPromptParams.get("nonce");
+    const ceremonyToken = (
+      sendRuntimeCommand.mock.calls
+        .map(([command]) => command as Record<string, unknown>)
+        .find((command) => command.type === "register_passkey_ceremony") as {
+        ceremony_token: string;
+      }
+    ).ceremony_token;
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(resolvePolledSession).toBeDefined();
+    });
+
+    unlockMessageListener?.(
+      {
+        type: "vaultkern_unlock_complete",
+        requestId: 36,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: unlockNonce,
+        method: "quick_unlock"
+      },
+      { url: unlockPromptUrl },
+      vi.fn()
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessionStateCalls).toBe(2);
+    expect(completeGetRequest).not.toHaveBeenCalled();
+
+    resolvePolledSession?.({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+    expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "get_passkey_user_verification_capability" })
+    );
+    expectBusinessRuntimeCommand(sendRuntimeCommand, 3, {
+      type: "verify_passkey_user",
+      ceremony_token: ceremonyToken,
+      expected_phase: "s1_user_authorization",
+      vault_id: "vault-1",
+      method: "quick_unlock"
+    });
+  });
+
   it("rechecks session state while waiting for an out-of-band vault unlock", async () => {
     vi.useFakeTimers();
     let getListener: ((request: unknown) => void) | undefined;
@@ -15475,6 +15774,10 @@ describe("webAuthenticationProxy wrapper", () => {
       expectBusinessRuntimeCommand(sendRuntimeCommand, 2, {
         type: "get_session_state"
       });
+      expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.waitFor(() => {
       expect(chromeApi.windows.create).toHaveBeenCalledTimes(2);
     });
     await presencePrompt.approve();

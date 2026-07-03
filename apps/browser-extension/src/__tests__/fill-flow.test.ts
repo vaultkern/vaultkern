@@ -1264,6 +1264,9 @@ describe("PopupShell fill flow", () => {
       screen.getByText("Approve this passkey request for example.com.")
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Lock" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Open Manager" })
+    ).not.toBeInTheDocument();
     expect(runtimeClientMocks.listEntries).not.toHaveBeenCalled();
     expect(runtimeClientMocks.findFillCandidates).not.toHaveBeenCalled();
     fireEvent.click(
@@ -1276,6 +1279,126 @@ describe("PopupShell fill flow", () => {
         requestId: 42,
         origin: "https://example.com",
         relyingParty: "example.com"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("hides manager access while verifying a WebAuthn request", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=verify&requestId=45&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-45"
+    );
+    const sendMessage = vi.fn(async () => ({ ok: true }));
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Verify passkey request")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Open Manager" })
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Verify and continue" }));
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_user_verification_complete",
+        requestId: 45,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-45",
+        method: "master_password",
+        password: "demo-password"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("auto verifies the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=verify&requestId=46&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-46"
+    );
+    const sendMessage = vi.fn(async () => ({ ok: true }));
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Verify passkey request")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_user_verification_complete",
+        requestId: 46,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-46",
+        method: "quick_unlock"
       });
       expect(closeWindow).toHaveBeenCalledTimes(1);
     });

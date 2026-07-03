@@ -5418,6 +5418,33 @@ async function activeVaultForRequest(
         hasActiveVault: Boolean(session.activeVaultId)
       });
       if (session.activeVaultId) {
+        const lateUnlockSignal = waitForUnlockSignal(
+          promptKey,
+          Math.min(1_500, Math.max(0, deadline - Date.now()))
+        );
+        const existingProof = takeUnlockUserVerificationProof(promptKey);
+        if (existingProof) {
+          clearUnlockPromptState(promptKey);
+          return {
+            activeVaultId: session.activeVaultId,
+            userPresenceVerified: true,
+            unlockUserVerificationProof: existingProof
+          };
+        }
+        const lateSignal = await lateUnlockSignal;
+        if (lateSignal === "dismissed") {
+          throw new WebAuthnRequestError(
+            "NotAllowedError",
+            "VaultKern vault unlock was dismissed"
+          );
+        }
+        if (lateSignal === "complete") {
+          return {
+            activeVaultId: session.activeVaultId,
+            userPresenceVerified: true,
+            unlockUserVerificationProof: takeUnlockUserVerificationProof(promptKey)
+          };
+        }
         clearUnlockPromptState(promptKey);
         return {
           activeVaultId: session.activeVaultId,

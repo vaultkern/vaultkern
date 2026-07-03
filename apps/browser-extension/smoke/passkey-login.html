@@ -11,6 +11,8 @@
       <output id="vaultkern-passkey-result"></output>
     </main>
     <script>
+      const SMOKE_CREDENTIAL_STORAGE_KEY = "vaultkern-smoke-passkey-credential-id";
+
       function bytes(value) {
         return Uint8Array.from(value, (character) => character.charCodeAt(0));
       }
@@ -21,9 +23,23 @@
         return bytes(atob(base64));
       }
 
+      function credentialId() {
+        return (
+          new URLSearchParams(location.search).get("credential") ??
+          localStorage.getItem(SMOKE_CREDENTIAL_STORAGE_KEY)
+        );
+      }
+
       function credentialIdBytes() {
-        const value = new URLSearchParams(location.search).get("credential");
-        return value ? base64urlBytes(value) : bytes("credential-1");
+        const value = credentialId();
+        return value ? base64urlBytes(value) : null;
+      }
+
+      function userVerificationRequirement() {
+        const value = new URLSearchParams(location.search).get("uv");
+        return ["discouraged", "preferred", "required"].includes(value)
+          ? value
+          : "discouraged";
       }
 
       document
@@ -31,18 +47,23 @@
         .addEventListener("click", async () => {
           const result = document.querySelector("#vaultkern-passkey-result");
           try {
+            const selectedCredentialId = credentialIdBytes();
+            if (!selectedCredentialId) {
+              result.value = "error:NotFoundError:Register a passkey first";
+              return;
+            }
             const credential = await navigator.credentials.get({
               publicKey: {
                 challenge: bytes("challenge-1"),
                 allowCredentials: [
                   {
                     type: "public-key",
-                    id: credentialIdBytes()
+                    id: selectedCredentialId
                   }
                 ],
                 timeout: 60000,
                 rpId: location.hostname,
-                userVerification: "discouraged"
+                userVerification: userVerificationRequirement()
               }
             });
             result.value = credential ? `credential:${credential.id}` : "credential:null";
