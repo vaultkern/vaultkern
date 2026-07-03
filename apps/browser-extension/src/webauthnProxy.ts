@@ -1870,63 +1870,23 @@ async function resumePasskeyGetAfterPromptComplete(
     }
     requestCancelKey = webAuthnRequestCancelKeyFromMirror(mirror);
     ceremonyPhase = mirror.phase;
-    if (promptMode === "unlock") {
-      const session = (await sendRuntimeCommand({
-        type: "get_session_state"
-      })) as { activeVaultId?: string | null };
-      if (session.activeVaultId) {
-        mirror = { ...mirror, activeVaultId: session.activeVaultId };
-        await persistPasskeyCeremonyMirror(chromeApi, mirror);
-      }
-    }
-    if (typeof mirror.activeVaultId !== "string" || mirror.activeVaultId === "") {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "VaultKern passkey ceremony is missing its vault binding"
-      );
-    }
-    await bindPasskeyCeremonyVault(
+    mirror = await restorePasskeyCeremonyVaultAuthorization({
+      chromeApi,
       sendRuntimeCommand,
-      mirror.ceremonyToken,
-      mirror.phase,
-      mirror.activeVaultId
-    );
-    if (promptMode === "unlock") {
-      let userVerified = await verifyPasskeyUserFromUnlockProof(
-        chromeApi,
-        sendRuntimeCommand,
-        requestId,
-        mirror.ceremonyToken,
-        mirror.activeVaultId,
-        mirror.userVerification,
-        takePendingUnlockCompleteSignal(mirror.ceremonyToken)
-          ?.userVerificationProof ?? null
-      );
-      if (!userVerified) {
-        const promptContext = promptContextFromMirror(mirror);
-        if (!promptContext) {
-          throw new WebAuthnRequestError(
-            "NotAllowedError",
-            "VaultKern passkey ceremony is missing its prompt context"
-          );
-        }
-        userVerified = await userVerificationForRequest(
-          chromeApi,
-          sendRuntimeCommand,
-          requestId,
-          mirror.ceremonyToken,
-          mirror.activeVaultId,
-          mirror.userVerification,
-          promptContext,
-          canceledRequests,
-          requestCancelKey,
-          {
-            onPromptPrepared: persistUserVerificationPromptState,
-            onPromptOpened: persistPromptWindowId
-          }
-        );
+      requestId,
+      promptMode,
+      mirror,
+      getMirror: () => mirror,
+      updateMirror: (nextMirror) => {
+        mirror = nextMirror;
+      },
+      canceledRequests,
+      requestCancelKey,
+      promptPersistence: {
+        persistPromptWindowId,
+        persistUserVerificationPromptState
       }
-    }
+    });
 
     const advanceCeremony = createPasskeyCeremonyAdvancer({
       chromeApi,
@@ -2200,63 +2160,23 @@ async function resumePasskeyCreateAfterPromptComplete(
     }
     requestCancelKey = webAuthnRequestCancelKeyFromMirror(mirror);
     ceremonyPhase = mirror.phase;
-    if (promptMode === "unlock") {
-      const session = (await sendRuntimeCommand({
-        type: "get_session_state"
-      })) as { activeVaultId?: string | null };
-      if (session.activeVaultId) {
-        mirror = { ...mirror, activeVaultId: session.activeVaultId };
-        await persistPasskeyCeremonyMirror(chromeApi, mirror);
-      }
-    }
-    if (typeof mirror.activeVaultId !== "string" || mirror.activeVaultId === "") {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "VaultKern passkey ceremony is missing its vault binding"
-      );
-    }
-    await bindPasskeyCeremonyVault(
+    mirror = await restorePasskeyCeremonyVaultAuthorization({
+      chromeApi,
       sendRuntimeCommand,
-      mirror.ceremonyToken,
-      mirror.phase,
-      mirror.activeVaultId
-    );
-    if (promptMode === "unlock") {
-      let userVerified = await verifyPasskeyUserFromUnlockProof(
-        chromeApi,
-        sendRuntimeCommand,
-        requestId,
-        mirror.ceremonyToken,
-        mirror.activeVaultId,
-        mirror.userVerification,
-        takePendingUnlockCompleteSignal(mirror.ceremonyToken)
-          ?.userVerificationProof ?? null
-      );
-      if (!userVerified) {
-        const promptContext = promptContextFromMirror(mirror);
-        if (!promptContext) {
-          throw new WebAuthnRequestError(
-            "NotAllowedError",
-            "VaultKern passkey ceremony is missing its prompt context"
-          );
-        }
-        userVerified = await userVerificationForRequest(
-          chromeApi,
-          sendRuntimeCommand,
-          requestId,
-          mirror.ceremonyToken,
-          mirror.activeVaultId,
-          mirror.userVerification,
-          promptContext,
-          canceledRequests,
-          requestCancelKey,
-          {
-            onPromptPrepared: persistUserVerificationPromptState,
-            onPromptOpened: persistPromptWindowId
-          }
-        );
+      requestId,
+      promptMode,
+      mirror,
+      getMirror: () => mirror,
+      updateMirror: (nextMirror) => {
+        mirror = nextMirror;
+      },
+      canceledRequests,
+      requestCancelKey,
+      promptPersistence: {
+        persistPromptWindowId,
+        persistUserVerificationPromptState
       }
-    }
+    });
 
     const createRequest = passkeyCreateRequestFromMirror(mirror);
     if (!createRequest) {
@@ -5906,6 +5826,105 @@ function createPasskeyPromptMirrorPersistence(
       return persistPromptMirror({ promptWindowId: windowId });
     }
   };
+}
+
+async function restorePasskeyCeremonyVaultAuthorization({
+  chromeApi,
+  sendRuntimeCommand,
+  requestId,
+  promptMode,
+  mirror,
+  getMirror,
+  updateMirror,
+  canceledRequests,
+  requestCancelKey,
+  promptPersistence
+}: {
+  chromeApi: ChromeLike;
+  sendRuntimeCommand: RuntimeCommandSender;
+  requestId: number;
+  promptMode: "approve" | "unlock" | "verify";
+  mirror: PasskeyCeremonyContext;
+  getMirror: () => PasskeyCeremonyContext | null;
+  updateMirror: (mirror: PasskeyCeremonyContext) => void;
+  canceledRequests: CanceledWebAuthnRequests;
+  requestCancelKey: string | null;
+  promptPersistence: Pick<
+    PasskeyPromptMirrorPersistence,
+    "persistPromptWindowId" | "persistUserVerificationPromptState"
+  >;
+}) {
+  let currentMirror = mirror;
+  const persistCurrentMirror = async (nextMirror: PasskeyCeremonyContext) => {
+    currentMirror = nextMirror;
+    updateMirror(nextMirror);
+    await persistPasskeyCeremonyMirror(chromeApi, nextMirror);
+  };
+
+  if (promptMode === "unlock") {
+    const session = (await sendRuntimeCommand({
+      type: "get_session_state"
+    })) as { activeVaultId?: string | null };
+    if (session.activeVaultId) {
+      await persistCurrentMirror({
+        ...currentMirror,
+        activeVaultId: session.activeVaultId
+      });
+    }
+  }
+  if (
+    typeof currentMirror.activeVaultId !== "string" ||
+    currentMirror.activeVaultId === ""
+  ) {
+    throw new WebAuthnRequestError(
+      "NotAllowedError",
+      "VaultKern passkey ceremony is missing its vault binding"
+    );
+  }
+  await bindPasskeyCeremonyVault(
+    sendRuntimeCommand,
+    currentMirror.ceremonyToken,
+    currentMirror.phase,
+    currentMirror.activeVaultId
+  );
+  if (promptMode === "unlock") {
+    let userVerified = await verifyPasskeyUserFromUnlockProof(
+      chromeApi,
+      sendRuntimeCommand,
+      requestId,
+      currentMirror.ceremonyToken,
+      currentMirror.activeVaultId,
+      currentMirror.userVerification,
+      takePendingUnlockCompleteSignal(currentMirror.ceremonyToken)
+        ?.userVerificationProof ?? null
+    );
+    if (!userVerified) {
+      const promptContext = promptContextFromMirror(currentMirror);
+      if (!promptContext) {
+        throw new WebAuthnRequestError(
+          "NotAllowedError",
+          "VaultKern passkey ceremony is missing its prompt context"
+        );
+      }
+      userVerified = await userVerificationForRequest(
+        chromeApi,
+        sendRuntimeCommand,
+        requestId,
+        currentMirror.ceremonyToken,
+        currentMirror.activeVaultId,
+        currentMirror.userVerification,
+        promptContext,
+        canceledRequests,
+        requestCancelKey,
+        {
+          onPromptPrepared: promptPersistence.persistUserVerificationPromptState,
+          onPromptOpened: promptPersistence.persistPromptWindowId
+        }
+      );
+    }
+  }
+
+  return getMirror() ?? currentMirror;
 }
 
 async function activeVaultForRequest(

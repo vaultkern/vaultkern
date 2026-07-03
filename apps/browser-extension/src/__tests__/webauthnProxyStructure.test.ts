@@ -163,4 +163,22 @@ describe("webauthn proxy structure", () => {
     ).toHaveLength(3);
     expect(source.match(/promptWindowId: windowId/g) ?? []).toHaveLength(1);
   });
+
+  it("restores resumed vault binding and unlock verification through one helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("async function restorePasskeyCeremonyVaultAuthorization");
+    expect(
+      source.match(/VaultKern passkey ceremony is missing its vault binding/g) ??
+        []
+    ).toHaveLength(1);
+    expect(
+      source.match(/VaultKern passkey ceremony is missing its prompt context/g) ??
+        []
+    ).toHaveLength(1);
+  });
 });
