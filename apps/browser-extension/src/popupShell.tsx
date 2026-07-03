@@ -192,8 +192,11 @@ async function sendWebAuthnPromptMessage(
   window.close();
 }
 
-function notifyUnlockComplete() {
-  notifyWebAuthnPromptComplete("vaultkern_unlock_complete", "unlock");
+function notifyUnlockComplete(
+  _session: unknown,
+  options?: { method: "master_password" | "quick_unlock"; password?: string }
+) {
+  notifyWebAuthnPromptComplete("vaultkern_unlock_complete", "unlock", options);
 }
 
 function notifyPresenceComplete(

@@ -147,7 +147,10 @@ export function PopupApp({
   activeSite: () => Promise<string>;
   extensionSettingsStore?: ExtensionSettingsStore;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
-  onUnlockComplete?: (session: SessionStateLike) => void | Promise<void>;
+  onUnlockComplete?: (
+    session: SessionStateLike,
+    options?: { method: "master_password" | "quick_unlock"; password?: string }
+  ) => void | Promise<void>;
   onWebAuthnPresenceComplete?: (
     session: SessionStateLike,
     options?: { credentialId?: string }
@@ -210,7 +213,10 @@ export function PopupApp({
     );
   }
 
-  function notifyWebAuthnUnlockCompleteOnce(nextSession: SessionStateLike) {
+  function notifyWebAuthnUnlockCompleteOnce(
+    nextSession: SessionStateLike,
+    options?: { method: "master_password" | "quick_unlock"; password?: string }
+  ) {
     if (
       !webAuthnUnlockPrompt ||
       webAuthnUnlockCompletionSent.current ||
@@ -221,7 +227,9 @@ export function PopupApp({
     }
 
     webAuthnUnlockCompletionSent.current = true;
-    void Promise.resolve(onUnlockComplete?.(nextSession)).catch(() => undefined);
+    void Promise.resolve(onUnlockComplete?.(nextSession, options)).catch(
+      () => undefined
+    );
   }
 
   function startCurrentVaultPreload() {
@@ -524,6 +532,7 @@ export function PopupApp({
       if (preload) {
         await preload;
       }
+      const unlockPassword = password;
       const nextSession = await client.unlockCurrentVault({
         password,
         keyFilePath
@@ -531,7 +540,12 @@ export function PopupApp({
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");
-      notifyWebAuthnUnlockCompleteOnce(nextSession);
+      notifyWebAuthnUnlockCompleteOnce(
+        nextSession,
+        unlockPassword !== ""
+          ? { method: "master_password", password: unlockPassword }
+          : undefined
+      );
     } catch (unlockFailure) {
       setUnlockError(
         popupErrorMessage(
@@ -567,7 +581,7 @@ export function PopupApp({
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");
-      notifyWebAuthnUnlockCompleteOnce(nextSession);
+      notifyWebAuthnUnlockCompleteOnce(nextSession, { method: "quick_unlock" });
     } catch (unlockFailure) {
       setUnlockError(
         popupErrorMessage(

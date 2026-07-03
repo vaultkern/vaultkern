@@ -184,6 +184,7 @@ pub struct Runtime {
     secure_storage: Box<dyn SecureStorageProvider>,
     loaded: BTreeMap<String, LoadedVault>,
     passkey_ceremonies: BTreeMap<String, PasskeyCeremonyLedgerEntry>,
+    recent_unlock_user_verification: Option<PasskeyUserVerificationProof>,
     passkey_credential_id_generator: Box<dyn FnMut() -> String>,
     fixed_unix_time: Option<u64>,
 }
@@ -233,6 +234,7 @@ impl Runtime {
             secure_storage,
             loaded: BTreeMap::new(),
             passkey_ceremonies: BTreeMap::new(),
+            recent_unlock_user_verification: None,
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
         }
@@ -253,6 +255,7 @@ impl Runtime {
             secure_storage: Box::new(UnsupportedSecureStorageProvider),
             loaded: BTreeMap::new(),
             passkey_ceremonies: BTreeMap::new(),
+            recent_unlock_user_verification: None,
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
         }
@@ -758,6 +761,7 @@ impl Runtime {
         loaded.vault = Some(database.vault);
         self.session
             .unlock(vault_id.to_owned(), current_vault_ref_id);
+        self.recent_unlock_user_verification = None;
         Ok(())
     }
 
@@ -801,6 +805,7 @@ impl Runtime {
         for loaded in self.loaded.values_mut() {
             loaded.clear_unlock_secrets();
         }
+        self.recent_unlock_user_verification = None;
         self.session.lock();
     }
 
@@ -859,7 +864,16 @@ impl Runtime {
             credentials.password.as_deref(),
             credentials.key_file_path.as_deref(),
         ) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                let active_vault_id = self.session.active_vault_id().map(ToOwned::to_owned);
+                if let Some(active_vault_id) = active_vault_id {
+                    self.record_recent_unlock_user_verification(
+                        &active_vault_id,
+                        PasskeyUserVerificationMethodDto::QuickUnlock,
+                    );
+                }
+                Ok(())
+            }
             Err(error) => {
                 if is_unlock_credentials_error(&error) {
                     self.secure_storage.delete(&storage_key)?;
@@ -940,7 +954,7 @@ impl Runtime {
             anyhow::bail!("passkey user verification vault mismatch");
         }
         let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
-        {
+        let recent_unlock_verified = {
             let entry = self
                 .passkey_ceremonies
                 .get(ceremony_token)
@@ -950,16 +964,21 @@ impl Runtime {
             }
             validate_passkey_ceremony_not_expired(entry, now_epoch_ms)?;
             validate_passkey_ceremony_vault_binding(entry, vault_id)?;
-        }
+            self.recent_unlock_user_verification_matches(entry, vault_id, method, now_epoch_ms)
+        };
 
         match method {
             PasskeyUserVerificationMethodDto::MasterPassword => {
-                let password =
-                    password.context("passkey user verification password is required")?;
-                self.verify_passkey_user_with_master_password(vault_id, password)?;
+                if !recent_unlock_verified {
+                    let password =
+                        password.context("passkey user verification password is required")?;
+                    self.verify_passkey_user_with_master_password(vault_id, password)?;
+                }
             }
             PasskeyUserVerificationMethodDto::QuickUnlock => {
-                self.verify_passkey_user_with_quick_unlock(vault_id)?;
+                if !recent_unlock_verified {
+                    self.verify_passkey_user_with_quick_unlock(vault_id)?;
+                }
             }
         }
 
@@ -978,6 +997,37 @@ impl Runtime {
             method,
             verified_at_epoch_ms: now_epoch_ms as i64,
         })
+    }
+
+    fn record_recent_unlock_user_verification(
+        &mut self,
+        vault_id: &str,
+        method: PasskeyUserVerificationMethodDto,
+    ) {
+        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        self.recent_unlock_user_verification = Some(PasskeyUserVerificationProof {
+            vault_id: vault_id.to_owned(),
+            method,
+            verified_at_epoch_ms: now_epoch_ms,
+        });
+    }
+
+    fn recent_unlock_user_verification_matches(
+        &self,
+        entry: &PasskeyCeremonyLedgerEntry,
+        vault_id: &str,
+        method: PasskeyUserVerificationMethodDto,
+        now_epoch_ms: u64,
+    ) -> bool {
+        self.recent_unlock_user_verification
+            .as_ref()
+            .is_some_and(|proof| {
+                proof.vault_id == vault_id
+                    && proof.method == method
+                    && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
+                    && proof.verified_at_epoch_ms <= now_epoch_ms
+                    && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
+            })
     }
 
     fn verify_passkey_user_with_master_password(
@@ -5428,6 +5478,96 @@ mod tests {
 
         runtime.unlock_current_vault_with_quick_unlock().unwrap();
 
+        assert_eq!(
+            authorizations.borrow().as_slice(),
+            [
+                "Enable quick unlock for this vault".to_owned(),
+                "Unlock this vault".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn passkey_quick_unlock_user_verification_reuses_same_ceremony_unlock() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests_at(100);
+        runtime.biometric = Box::new(CountingBiometricProvider {
+            authorizations: authorizations.clone(),
+        });
+        runtime.secure_storage = Box::new(MemorySecureStorageProvider::new());
+
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "quick-unlock-uv-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Required,
+                challenge_base64url: "Y2hhbGxlbmdlLTE".into(),
+                request_id: 42,
+                tab_id: 42,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms: 100_000,
+                expires_at_epoch_ms: 400_000,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "quick-unlock-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                related_origin_verified: false,
+            })
+            .unwrap();
+
+        runtime.set_test_unix_time(120);
+        runtime.unlock_current_vault_with_quick_unlock().unwrap();
+        runtime
+            .handle(RuntimeCommand::BindPasskeyCeremonyVault {
+                ceremony_token: "quick-unlock-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id.clone(),
+            })
+            .unwrap();
+
+        let verified = runtime
+            .handle(RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token: "quick-unlock-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id,
+                method: PasskeyUserVerificationMethodDto::QuickUnlock,
+                password: None,
+            })
+            .unwrap();
+
+        let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+            panic!("expected passkey UV proof, got {verified:?}");
+        };
+        assert!(verified.verified);
         assert_eq!(
             authorizations.borrow().as_slice(),
             [

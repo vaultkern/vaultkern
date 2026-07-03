@@ -1423,6 +1423,35 @@ fn runtime_sets_assertion_uv_flag_after_master_password_user_verification() {
 }
 
 #[test]
+fn runtime_does_not_reuse_plain_unlock_as_passkey_user_verification() {
+    let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
+    register_ceremony_at_s1_with_user_verification(
+        &mut runtime,
+        "assertion-token-plain-unlock-uv",
+        PasskeyCeremonyKindDto::Get,
+        "Y2hhbGxlbmdlLXV2",
+        PasskeyUserVerificationRequirementDto::Required,
+    );
+
+    runtime.lock_session();
+    runtime
+        .unlock_with_password(&vault_id, "demo-password")
+        .unwrap();
+
+    let error = runtime
+        .handle(RuntimeCommand::VerifyPasskeyUser {
+            ceremony_token: "assertion-token-plain-unlock-uv".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            vault_id,
+            method: PasskeyUserVerificationMethodDto::MasterPassword,
+            password: None,
+        })
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("passkey user verification password is required"));
+}
+
+#[test]
 fn runtime_does_not_reuse_user_verification_across_ceremony_tokens() {
     let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
     let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLXV2LTI","origin":"https://example.com","crossOrigin":false}"#;

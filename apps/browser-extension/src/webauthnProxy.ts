@@ -103,6 +103,13 @@ type PasskeyUserVerificationRequirement =
   | "preferred"
   | "required";
 
+type PasskeyUserVerificationMethod = "master_password" | "quick_unlock";
+
+type UnlockUserVerificationProof = {
+  method: PasskeyUserVerificationMethod;
+  password?: string;
+};
+
 type PasskeyCeremonyBaseContext = {
   version: 1;
   ceremonyToken: string;
@@ -168,7 +175,7 @@ type PresenceSignal =
   | null;
 
 type UserVerificationSignal =
-  | { type: "complete"; method: "master_password" | "quick_unlock" }
+  | { type: "complete"; method: PasskeyUserVerificationMethod }
   | { type: "dismissed" }
   | null;
 
@@ -185,6 +192,7 @@ const unlockPromptNonces = new Map<string, string>();
 const unlockPromptRequestIds = new Map<string, number>();
 const unlockPromptRequestKeys = new Map<string, string>();
 const unlockPromptRemovalCleanups = new Map<string, () => void>();
+const unlockUserVerificationProofs = new Map<string, UnlockUserVerificationProof>();
 const presencePromptWindowIds = new Map<string, number>();
 const presenceCompleteWaiters = new Map<
   string,
@@ -694,8 +702,13 @@ function registerUnlockCompleteHandler(
         event: "unlock_complete_message",
         requestId
       });
+      const unlockUserVerificationProof =
+        unlockUserVerificationProofFromMessage(message);
       const waiters = [...(unlockCompleteWaiters.get(promptKey) ?? [])];
       clearUnlockPromptState(promptKey);
+      if (unlockUserVerificationProof) {
+        unlockUserVerificationProofs.set(promptKey, unlockUserVerificationProof);
+      }
       for (const waiter of waiters) {
         waiter();
       }
@@ -1002,6 +1015,23 @@ function userVerificationPasswordFromMessage(message: unknown) {
   return typeof password === "string" ? password : null;
 }
 
+function unlockUserVerificationProofFromMessage(
+  message: unknown
+): UnlockUserVerificationProof | null {
+  const method = userVerificationMethodFromMessage(message);
+  if (!method) {
+    return null;
+  }
+  if (method === "quick_unlock") {
+    return { method };
+  }
+
+  const password = userVerificationPasswordFromMessage(message);
+  return typeof password === "string" && password !== ""
+    ? { method, password }
+    : null;
+}
+
 async function handleIsUvpaaRequest(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender,
@@ -1229,18 +1259,29 @@ async function handleGetRequest(
       activeVault.activeVaultId
     );
     let userPresenceVerified = activeVault.userPresenceVerified;
-    const userVerified = await userVerificationForRequest(
+    let userVerified = await verifyPasskeyUserFromUnlockProof(
       chromeApi,
       sendRuntimeCommand,
       requestId,
       ceremonyContext.ceremonyToken,
       activeVault.activeVaultId,
       userVerification,
-      promptContextFrom(originContext, relyingParty),
-      canceledRequests,
-      requestCancelKey,
-      { onPromptOpened: persistUserVerificationPromptState }
+      activeVault.unlockUserVerificationProof
     );
+    if (!userVerified) {
+      userVerified = await userVerificationForRequest(
+        chromeApi,
+        sendRuntimeCommand,
+        requestId,
+        ceremonyContext.ceremonyToken,
+        activeVault.activeVaultId,
+        userVerification,
+        promptContextFrom(originContext, relyingParty),
+        canceledRequests,
+        requestCancelKey,
+        { onPromptOpened: persistUserVerificationPromptState }
+      );
+    }
     if (userVerified) {
       userPresenceVerified = true;
     }
@@ -1613,6 +1654,51 @@ async function resumePasskeyGetAfterPromptComplete(
       mirror.phase,
       mirror.activeVaultId
     );
+    if (promptMode === "unlock") {
+      let userVerified = await verifyPasskeyUserFromUnlockProof(
+        chromeApi,
+        sendRuntimeCommand,
+        requestId,
+        mirror.ceremonyToken,
+        mirror.activeVaultId,
+        mirror.userVerification,
+        takeUnlockUserVerificationProof(mirror.ceremonyToken)
+      );
+      if (!userVerified) {
+        const promptContext = promptContextFromMirror(mirror);
+        if (!promptContext) {
+          throw new WebAuthnRequestError(
+            "NotAllowedError",
+            "VaultKern passkey ceremony is missing its prompt context"
+          );
+        }
+        userVerified = await userVerificationForRequest(
+          chromeApi,
+          sendRuntimeCommand,
+          requestId,
+          mirror.ceremonyToken,
+          mirror.activeVaultId,
+          mirror.userVerification,
+          promptContext,
+          canceledRequests,
+          requestCancelKey,
+          {
+            onPromptOpened: async (nonce) => {
+              if (!mirror) {
+                return;
+              }
+              mirror = {
+                ...mirror,
+                popupNonce: nonce,
+                promptMode: "verify",
+                promptCredentialOptions: []
+              };
+              await persistPasskeyCeremonyMirror(chromeApi, mirror);
+            }
+          }
+        );
+      }
+    }
 
     const advanceCeremony = async (
       expectedPhase: string,
@@ -1965,6 +2051,51 @@ async function resumePasskeyCreateAfterPromptComplete(
       mirror.phase,
       mirror.activeVaultId
     );
+    if (promptMode === "unlock") {
+      let userVerified = await verifyPasskeyUserFromUnlockProof(
+        chromeApi,
+        sendRuntimeCommand,
+        requestId,
+        mirror.ceremonyToken,
+        mirror.activeVaultId,
+        mirror.userVerification,
+        takeUnlockUserVerificationProof(mirror.ceremonyToken)
+      );
+      if (!userVerified) {
+        const promptContext = promptContextFromMirror(mirror);
+        if (!promptContext) {
+          throw new WebAuthnRequestError(
+            "NotAllowedError",
+            "VaultKern passkey ceremony is missing its prompt context"
+          );
+        }
+        userVerified = await userVerificationForRequest(
+          chromeApi,
+          sendRuntimeCommand,
+          requestId,
+          mirror.ceremonyToken,
+          mirror.activeVaultId,
+          mirror.userVerification,
+          promptContext,
+          canceledRequests,
+          requestCancelKey,
+          {
+            onPromptOpened: async (nonce) => {
+              if (!mirror) {
+                return;
+              }
+              mirror = {
+                ...mirror,
+                popupNonce: nonce,
+                promptMode: "verify",
+                promptCredentialOptions: []
+              };
+              await persistPasskeyCeremonyMirror(chromeApi, mirror);
+            }
+          }
+        );
+      }
+    }
 
     const createRequest = passkeyCreateRequestFromMirror(mirror);
     if (!createRequest) {
@@ -3772,18 +3903,29 @@ async function handleCreateRequest(
       activeVault.activeVaultId
     );
     let userPresenceVerified = activeVault.userPresenceVerified;
-    const userVerified = await userVerificationForRequest(
+    let userVerified = await verifyPasskeyUserFromUnlockProof(
       chromeApi,
       sendRuntimeCommand,
       requestId,
       ceremonyContext.ceremonyToken,
       activeVault.activeVaultId,
       userVerification,
-      promptContextFrom(originContext, relyingParty),
-      canceledRequests,
-      requestCancelKey,
-      { onPromptOpened: persistUserVerificationPromptState }
+      activeVault.unlockUserVerificationProof
     );
+    if (!userVerified) {
+      userVerified = await userVerificationForRequest(
+        chromeApi,
+        sendRuntimeCommand,
+        requestId,
+        ceremonyContext.ceremonyToken,
+        activeVault.activeVaultId,
+        userVerification,
+        promptContextFrom(originContext, relyingParty),
+        canceledRequests,
+        requestCancelKey,
+        { onPromptOpened: persistUserVerificationPromptState }
+      );
+    }
     if (userVerified) {
       userPresenceVerified = true;
     }
@@ -5306,10 +5448,12 @@ async function activeVaultForRequest(
     if (session.activeVaultId) {
       return {
         activeVaultId: session.activeVaultId,
-        userPresenceVerified: true
+        userPresenceVerified: true,
+        unlockUserVerificationProof: takeUnlockUserVerificationProof(promptKey)
       };
     }
 
+    takeUnlockUserVerificationProof(promptKey);
     unlockSignal = waitForUnlockSignal(
       promptKey,
       Math.min(1_000, Math.max(0, deadline - Date.now()))
@@ -5318,10 +5462,54 @@ async function activeVaultForRequest(
   }
 
   clearUnlockPromptState(promptKey);
+  takeUnlockUserVerificationProof(promptKey);
   throw new WebAuthnRequestError(
     "NotAllowedError",
     "VaultKern vault unlock timed out"
   );
+}
+
+function takeUnlockUserVerificationProof(promptKey: string) {
+  const proof = unlockUserVerificationProofs.get(promptKey) ?? null;
+  unlockUserVerificationProofs.delete(promptKey);
+  return proof;
+}
+
+async function verifyPasskeyUserFromUnlockProof(
+  chromeApi: ChromeLike,
+  sendRuntimeCommand: RuntimeCommandSender,
+  requestId: number,
+  ceremonyToken: string,
+  activeVaultId: string,
+  userVerification: PasskeyUserVerificationRequirement,
+  unlockUserVerificationProof: UnlockUserVerificationProof | null | undefined
+) {
+  if (userVerification === "discouraged" || !unlockUserVerificationProof) {
+    return false;
+  }
+
+  const response = await sendRuntimeCommand({
+    type: "verify_passkey_user",
+    ceremony_token: ceremonyToken,
+    expected_phase: "s1_user_authorization",
+    vault_id: activeVaultId,
+    method: unlockUserVerificationProof.method,
+    ...(unlockUserVerificationProof.method === "master_password"
+      ? { password: unlockUserVerificationProof.password }
+      : {})
+  });
+  requireRuntimeResponseType(
+    response,
+    "passkey_user_verified",
+    "passkey user verification failed",
+    "verified"
+  );
+  await recordWebAuthnDebug(chromeApi, {
+    event: "unlock_user_verification_complete",
+    requestId,
+    method: unlockUserVerificationProof.method
+  });
+  return true;
 }
 
 async function userPresenceForRequest(
@@ -5940,6 +6128,7 @@ function clearUnlockPromptState(promptKey: string) {
   unlockPromptNonces.delete(promptKey);
   unlockPromptRequestIds.delete(promptKey);
   unlockPromptRequestKeys.delete(promptKey);
+  unlockUserVerificationProofs.delete(promptKey);
 }
 
 function clearPresencePromptState(promptKey: string) {
