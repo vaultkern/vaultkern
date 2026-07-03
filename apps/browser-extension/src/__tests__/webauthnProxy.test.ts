@@ -4912,6 +4912,9 @@ describe("webAuthenticationProxy wrapper", () => {
       storage: {
         session: sessionStorage
       },
+      windows: {
+        create: vi.fn(async () => ({ id: 52 }))
+      },
       webAuthenticationProxy: {
         attach: vi.fn(async () => undefined),
         completeGetRequest
@@ -4958,6 +4961,14 @@ describe("webAuthenticationProxy wrapper", () => {
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
     await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
+
+    expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+    const restoredUnlockUrl = (chromeApi.windows.create.mock.calls[0][0] as {
+      url: string;
+    }).url;
+    expect(restoredUnlockUrl).toContain("webauthn=unlock");
+    expect(restoredUnlockUrl).toContain("nonce=nonce-unlock");
+    expect(restoredUnlockUrl).not.toContain("token-unlock");
 
     messageListener?.(
       {
@@ -15224,6 +15235,12 @@ describe("webAuthenticationProxy wrapper", () => {
     let sessionStateCalls = 0;
     const sessionStorage = createSessionStorage();
     const completeGetRequest = vi.fn(async () => undefined);
+    let resolveWindowCreate:
+      | ((value: { id: number } | PromiseLike<{ id: number }>) => void)
+      | undefined;
+    const windowCreateResult = new Promise<{ id: number }>((resolve) => {
+      resolveWindowCreate = resolve;
+    });
     const sendRuntimeCommand = runtimeCommandMock(async (command) => {
       if (command.type === "get_session_state") {
         sessionStateCalls += 1;
@@ -15269,7 +15286,7 @@ describe("webAuthenticationProxy wrapper", () => {
         query: vi.fn(async () => [{ url: "https://example.com/login" }])
       },
       windows: {
-        create: vi.fn(async () => ({ id: 42 }))
+        create: vi.fn(() => windowCreateResult)
       },
       webAuthenticationProxy: {
         attach: vi.fn(async () => undefined),
@@ -15313,17 +15330,17 @@ describe("webAuthenticationProxy wrapper", () => {
         ceremony_token: string;
       }
     ).ceremony_token;
-    await vi.waitFor(() => {
-      const mirror = passkeyCeremoniesFromStorageSnapshot(
-        sessionStorage.snapshot()
-      )?.[ceremonyToken] as Record<string, unknown> | undefined;
-      expect(mirror).toMatchObject({
-        ceremonyToken,
-        phase: "s1_user_authorization",
-        promptMode: "unlock",
-        popupNonce: unlockNonce
-      });
+    const mirrorBeforeWindowCreateResolves = passkeyCeremoniesFromStorageSnapshot(
+      sessionStorage.snapshot()
+    )?.[ceremonyToken] as Record<string, unknown> | undefined;
+    expect(mirrorBeforeWindowCreateResolves).toMatchObject({
+      ceremonyToken,
+      phase: "s1_user_authorization",
+      promptMode: "unlock",
+      popupNonce: unlockNonce
     });
+    resolveWindowCreate?.({ id: 42 });
+    await Promise.resolve();
 
     unlockMessageListener?.(
       {

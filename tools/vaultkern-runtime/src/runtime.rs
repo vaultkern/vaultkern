@@ -1995,11 +1995,16 @@ impl Runtime {
         }
 
         for ceremony_token in rollback_tokens {
-            self.abort_passkey_registration(
-                &ceremony_token,
-                PasskeyCeremonyPhaseDto::CompletionAndMutation,
-                PasskeyCeremonyPhaseDto::ClosedFailed,
-            )?;
+            if self
+                .abort_passkey_registration(
+                    &ceremony_token,
+                    PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                    PasskeyCeremonyPhaseDto::ClosedFailed,
+                )
+                .is_err()
+            {
+                continue;
+            }
             reconciled.push(PasskeyCeremonyReconciledDto {
                 ceremony_token,
                 delivery_state: PasskeyCeremonyDeliveryStateDto::NotDelivered,

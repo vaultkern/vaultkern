@@ -328,169 +328,179 @@ export async function reconcilePersistedPasskeyCeremonies(
   sendRuntimeCommand: RuntimeCommandSender
 ) {
   const candidate = chromeApi as ChromeLike | null | undefined;
-  const mirrors = await loadPasskeyCeremonyMirrors(candidate);
-  let changed = false;
-  const now = Date.now();
+  await enqueuePasskeyCeremonyMirrorMutation(async () => {
+    const mirrors = await loadPasskeyCeremonyMirrors(candidate);
+    let changed = false;
+    const now = Date.now();
 
-  for (const [token, mirror] of Object.entries(mirrors)) {
-    if (!isPasskeyCeremonyMirror(mirror) || mirror.expiresAtEpochMs <= now) {
-      delete mirrors[token];
-      changed = true;
-      continue;
-    }
-
-    let ledger: unknown;
-    try {
-      ledger = await sendRuntimeCommand({
-        type: "query_passkey_ceremony_ledger",
-        ceremony_token: token
-      });
-    } catch {
-      delete mirrors[token];
-      changed = true;
-      continue;
-    }
-
-    if (!passkeyCeremonyLedgerKnown(ledger)) {
-      if (!passkeyCeremonyLedgerUnknown(ledger)) {
-        delete mirrors[token];
-        changed = true;
-        continue;
-      }
-      if (isCompletionOrLaterPhase(mirror.phase)) {
-        delete mirrors[token];
-        changed = true;
-        continue;
-      }
-      if (!passkeyCeremonyReplayTransitions(mirror)) {
+    for (const [token, mirror] of Object.entries(mirrors)) {
+      if (!isPasskeyCeremonyMirror(mirror) || mirror.expiresAtEpochMs <= now) {
         delete mirrors[token];
         changed = true;
         continue;
       }
 
-      let response: unknown;
+      let ledger: unknown;
       try {
-        response = await sendRuntimeCommand({
-          type: "register_passkey_ceremony",
-          ceremony_token: mirror.ceremonyToken,
-          connection_id: currentPasskeyLedgerConnectionId(),
-          origin: mirror.origin,
-          top_origin: mirror.topOrigin,
-          ancestor_origins: mirror.ancestorOrigins,
-          relying_party: mirror.relyingParty,
-          ceremony: mirror.ceremony,
-          discoverable:
-            mirror.ceremony === "get" &&
-            passkeyGetCredentialIdsAreDiscoverable(mirror.getCredentialIds),
-          user_verification: mirror.userVerification,
-          challenge_base64url: mirror.challengeBase64url,
-          request_id: mirror.requestId,
-          tab_id: mirror.tabId,
-          frame_id: mirror.frameId,
-          frame_kind: mirror.frameKind,
-          registered_at_epoch_ms: mirror.registeredAtEpochMs,
-          expires_at_epoch_ms: mirror.expiresAtEpochMs
+        ledger = await sendRuntimeCommand({
+          type: "query_passkey_ceremony_ledger",
+          ceremony_token: token
         });
       } catch {
         delete mirrors[token];
         changed = true;
         continue;
       }
-      try {
-        requireRuntimeResponseType(
-          response,
-          "passkey_ceremony_registered",
-          "passkey ceremony re-registration did not return success",
-          "registered"
+
+      if (!passkeyCeremonyLedgerKnown(ledger)) {
+        if (!passkeyCeremonyLedgerUnknown(ledger)) {
+          delete mirrors[token];
+          changed = true;
+          continue;
+        }
+        if (isCompletionOrLaterPhase(mirror.phase)) {
+          delete mirrors[token];
+          changed = true;
+          continue;
+        }
+        if (!passkeyCeremonyReplayTransitions(mirror)) {
+          delete mirrors[token];
+          changed = true;
+          continue;
+        }
+
+        let response: unknown;
+        try {
+          response = await sendRuntimeCommand({
+            type: "register_passkey_ceremony",
+            ceremony_token: mirror.ceremonyToken,
+            connection_id: currentPasskeyLedgerConnectionId(),
+            origin: mirror.origin,
+            top_origin: mirror.topOrigin,
+            ancestor_origins: mirror.ancestorOrigins,
+            relying_party: mirror.relyingParty,
+            ceremony: mirror.ceremony,
+            discoverable:
+              mirror.ceremony === "get" &&
+              passkeyGetCredentialIdsAreDiscoverable(mirror.getCredentialIds),
+            user_verification: mirror.userVerification,
+            challenge_base64url: mirror.challengeBase64url,
+            request_id: mirror.requestId,
+            tab_id: mirror.tabId,
+            frame_id: mirror.frameId,
+            frame_kind: mirror.frameKind,
+            registered_at_epoch_ms: mirror.registeredAtEpochMs,
+            expires_at_epoch_ms: mirror.expiresAtEpochMs
+          });
+        } catch {
+          delete mirrors[token];
+          changed = true;
+          continue;
+        }
+        try {
+          requireRuntimeResponseType(
+            response,
+            "passkey_ceremony_registered",
+            "passkey ceremony re-registration did not return success",
+            "registered"
+          );
+        } catch {
+          delete mirrors[token];
+          changed = true;
+          continue;
+        }
+        const replay = await replayPasskeyCeremonyMirrorPhase(
+          sendRuntimeCommand,
+          mirror
         );
-      } catch {
+        if (replay.replayedPhase) {
+          const restoredMirror = {
+            ...mirror,
+            phase: replay.replayedPhase
+          };
+          mirrors[token] = restoredMirror;
+          await restorePasskeyCeremonyPrompt(candidate, restoredMirror);
+        } else {
+          if (replay.lastNativePhase) {
+            await closePersistedNativePasskeyCeremony(
+              sendRuntimeCommand,
+              token,
+              replay.lastNativePhase
+            );
+          }
+          delete mirrors[token];
+        }
+        changed = true;
+        continue;
+      }
+
+      const ledgerPhase = passkeyCeremonyLedgerPhase(ledger);
+      if (!ledgerPhase) {
         delete mirrors[token];
         changed = true;
         continue;
       }
-      const replay = await replayPasskeyCeremonyMirrorPhase(
-        sendRuntimeCommand,
-        mirror
-      );
-      if (replay.replayedPhase) {
-        const restoredMirror = {
-          ...mirror,
-          phase: replay.replayedPhase
-        };
-        mirrors[token] = restoredMirror;
-        restorePasskeyCeremonyPromptState(restoredMirror);
-      } else {
-        if (replay.lastNativePhase) {
-          await closePersistedNativePasskeyCeremony(
-            sendRuntimeCommand,
-            token,
-            replay.lastNativePhase
-          );
-        }
-        delete mirrors[token];
-      }
-      changed = true;
-      continue;
-    }
-
-    const ledgerPhase = passkeyCeremonyLedgerPhase(ledger);
-    if (!ledgerPhase) {
-      delete mirrors[token];
-      changed = true;
-      continue;
-    }
-    if (
-      ledgerPhase === "s4_completion_and_mutation" &&
-      mirror.phase === "s4_completion_and_mutation"
-    ) {
-      const deliveryState = passkeyCeremonyLedgerDeliveryState(ledger);
-      if (mirror.ceremony === "get") {
-        if (!passkeyCeremonyLedgerDeliveryIsClosed(deliveryState)) {
-          const marked = await markPasskeyCeremonyUnknownDelivery(sendRuntimeCommand, token);
-          if (!marked) {
-            continue;
-          }
-        }
-      } else {
-        const durableState = passkeyCeremonyLedgerDurableState(ledger);
-        if (durableState === "committed") {
+      if (
+        ledgerPhase === "s4_completion_and_mutation" &&
+        mirror.phase === "s4_completion_and_mutation"
+      ) {
+        const deliveryState = passkeyCeremonyLedgerDeliveryState(ledger);
+        if (mirror.ceremony === "get") {
           if (!passkeyCeremonyLedgerDeliveryIsClosed(deliveryState)) {
-            const marked = await markPasskeyCeremonyUnknownDelivery(
-              sendRuntimeCommand,
-              token
-            );
+            const marked = await markPasskeyCeremonyUnknownDelivery(sendRuntimeCommand, token);
             if (!marked) {
               continue;
             }
           }
         } else {
-          const aborted = await abortPasskeyRegistration(
-            sendRuntimeCommand,
-            token,
-            "closed_failed"
-          );
-          if (!aborted) {
-            continue;
+          const durableState = passkeyCeremonyLedgerDurableState(ledger);
+          if (durableState === "committed") {
+            if (!passkeyCeremonyLedgerDeliveryIsClosed(deliveryState)) {
+              const marked = await markPasskeyCeremonyUnknownDelivery(
+                sendRuntimeCommand,
+                token
+              );
+              if (!marked) {
+                continue;
+              }
+            }
+          } else {
+            const aborted = await abortPasskeyRegistration(
+              sendRuntimeCommand,
+              token,
+              "closed_failed"
+            );
+            if (!aborted) {
+              continue;
+            }
           }
         }
+        delete mirrors[token];
+        changed = true;
+        continue;
       }
-      delete mirrors[token];
-      changed = true;
-      continue;
-    }
-    if (ledgerPhase.startsWith("closed_")) {
-      delete mirrors[token];
-      changed = true;
-    } else if (ledgerPhase === mirror.phase) {
-      restorePasskeyCeremonyPromptState(mirror);
-      continue;
-    } else if (passkeyCeremonyCanAdvanceMirrorPhase(mirror.phase, ledgerPhase)) {
-      const advancedMirror = passkeyCeremonyMirrorForPhase(
-        { ...mirror, phase: ledgerPhase as PasskeyCeremonyPhase },
-        ledgerPhase as PasskeyCeremonyPhase
-      );
-      if (isPasskeyCeremonyMirror(advancedMirror)) {
-        mirrors[token] = advancedMirror;
+      if (ledgerPhase.startsWith("closed_")) {
+        delete mirrors[token];
+        changed = true;
+      } else if (ledgerPhase === mirror.phase) {
+        await restorePasskeyCeremonyPrompt(candidate, mirror);
+        continue;
+      } else if (passkeyCeremonyCanAdvanceMirrorPhase(mirror.phase, ledgerPhase)) {
+        const advancedMirror = passkeyCeremonyMirrorForPhase(
+          { ...mirror, phase: ledgerPhase as PasskeyCeremonyPhase },
+          ledgerPhase as PasskeyCeremonyPhase
+        );
+        if (isPasskeyCeremonyMirror(advancedMirror)) {
+          mirrors[token] = advancedMirror;
+        } else {
+          await closePersistedNativePasskeyCeremony(
+            sendRuntimeCommand,
+            token,
+            ledgerPhase
+          );
+          delete mirrors[token];
+        }
+        changed = true;
       } else {
         await closePersistedNativePasskeyCeremony(
           sendRuntimeCommand,
@@ -498,22 +508,14 @@ export async function reconcilePersistedPasskeyCeremonies(
           ledgerPhase
         );
         delete mirrors[token];
+        changed = true;
       }
-      changed = true;
-    } else {
-      await closePersistedNativePasskeyCeremony(
-        sendRuntimeCommand,
-        token,
-        ledgerPhase
-      );
-      delete mirrors[token];
-      changed = true;
     }
-  }
 
-  if (changed) {
-    await storePasskeyCeremonyMirrors(candidate, mirrors);
-  }
+    if (changed) {
+      await storePasskeyCeremonyMirrors(candidate, mirrors);
+    }
+  });
 }
 
 export function registerWebAuthnProxyRequestHandlers(
@@ -1256,7 +1258,7 @@ async function handleGetRequest(
       promptContextFrom(originContext, relyingParty),
       canceledRequests,
       requestCancelKey,
-      { onPromptOpened: persistUnlockPromptState }
+      { onPromptPrepared: persistUnlockPromptState }
     );
     if (!activeVault) {
       throwIfRequestCanceled();
@@ -1296,7 +1298,7 @@ async function handleGetRequest(
         promptContextFrom(originContext, relyingParty),
         canceledRequests,
         requestCancelKey,
-        { onPromptOpened: persistUserVerificationPromptState }
+        { onPromptPrepared: persistUserVerificationPromptState }
       );
     }
     if (userVerified) {
@@ -1310,7 +1312,7 @@ async function handleGetRequest(
         promptContextFrom(originContext, relyingParty),
         canceledRequests,
         requestCancelKey,
-        { onPromptOpened: persistPresencePromptState }
+        { onPromptPrepared: persistPresencePromptState }
       );
       if (!approved) {
         throwIfRequestCanceled();
@@ -1365,7 +1367,7 @@ async function handleGetRequest(
         canceledRequests,
         requestCancelKey,
         {
-          onPromptOpened: (nonce) =>
+          onPromptPrepared: (nonce) =>
             persistPresencePromptState(nonce, credentialSelection.promptOptions)
         }
       );
@@ -1629,7 +1631,7 @@ async function resumePasskeyGetAfterPromptComplete(
     throwIfWebAuthnRequestCanceled(canceledRequests, requestId, requestCancelKey);
 
   try {
-    const mirrors = await loadPasskeyCeremonyMirrors(chromeApi);
+    const mirrors = await loadPasskeyCeremonyMirrorsQueued(chromeApi);
     const candidates = Object.values(mirrors).filter(
       (candidate) =>
         candidate.requestId === requestId &&
@@ -1700,7 +1702,7 @@ async function resumePasskeyGetAfterPromptComplete(
           canceledRequests,
           requestCancelKey,
           {
-            onPromptOpened: async (nonce) => {
+            onPromptPrepared: async (nonce) => {
               if (!mirror) {
                 return;
               }
@@ -1853,7 +1855,7 @@ async function resumePasskeyGetAfterPromptComplete(
           canceledRequests,
           requestCancelKey,
           {
-            onPromptOpened: async (nonce) => {
+            onPromptPrepared: async (nonce) => {
               if (!mirror) {
                 return;
               }
@@ -2028,7 +2030,7 @@ async function resumePasskeyCreateAfterPromptComplete(
     webAuthnRequestIsCanceled(canceledRequests, requestId, requestCancelKey);
 
   try {
-    const mirrors = await loadPasskeyCeremonyMirrors(chromeApi);
+    const mirrors = await loadPasskeyCeremonyMirrorsQueued(chromeApi);
     const candidates = Object.values(mirrors).filter(
       (candidate) =>
         candidate.requestId === requestId &&
@@ -2097,7 +2099,7 @@ async function resumePasskeyCreateAfterPromptComplete(
           canceledRequests,
           requestCancelKey,
           {
-            onPromptOpened: async (nonce) => {
+            onPromptPrepared: async (nonce) => {
               if (!mirror) {
                 return;
               }
@@ -2610,6 +2612,12 @@ function enqueuePasskeyCeremonyMirrorMutation<T>(mutation: () => Promise<T>) {
   return run;
 }
 
+async function loadPasskeyCeremonyMirrorsQueued(chromeApi: ChromeLike) {
+  return enqueuePasskeyCeremonyMirrorMutation(() =>
+    loadPasskeyCeremonyMirrors(chromeApi)
+  );
+}
+
 async function persistPasskeyCeremonyMirror(
   chromeApi: ChromeLike,
   mirror: PasskeyCeremonyContext
@@ -2816,6 +2824,65 @@ function passkeyCeremonyMirrorPhaseOriginIsConsistent(
   return true;
 }
 
+async function restorePasskeyCeremonyPrompt(
+  chromeApi: ChromeLike | null | undefined,
+  mirror: PasskeyCeremonyContext
+) {
+  if (!restorePasskeyCeremonyPromptState(mirror)) {
+    return;
+  }
+  const promptContext = promptContextFromMirror(mirror);
+  if (!promptContext) {
+    return;
+  }
+  const requestCancelKey = webAuthnRequestCancelKeyFromMirror(mirror);
+  try {
+    if (mirror.promptMode === "approve") {
+      await openPresencePrompt(
+        chromeApi ?? {},
+        mirror.requestId,
+        mirror.ceremonyToken,
+        promptContext,
+        requestCancelKey,
+        mirror.popupNonce
+      );
+      return;
+    }
+
+    if (mirror.promptMode === "verify") {
+      if (!passkeyNonemptyString(mirror.activeVaultId)) {
+        return;
+      }
+      await openUserVerificationPrompt(
+        chromeApi ?? {},
+        mirror.requestId,
+        mirror.ceremonyToken,
+        {
+          ...promptContext,
+          ceremonyToken: mirror.ceremonyToken,
+          activeVaultId: mirror.activeVaultId
+        },
+        requestCancelKey,
+        mirror.popupNonce
+      );
+      return;
+    }
+
+    await openUnlockPrompt(
+      chromeApi ?? {},
+      mirror.requestId,
+      mirror.ceremonyToken,
+      promptContext,
+      requestCancelKey,
+      mirror.popupNonce
+    );
+  } catch {
+    // A restored popup may already exist outside this service worker, or the
+    // browser may not expose windows in tests. The nonce-bound message state
+    // remains authoritative, so resumption can still fail closed later.
+  }
+}
+
 function restorePasskeyCeremonyPromptState(mirror: PasskeyCeremonyContext) {
   if (
     typeof mirror.popupNonce !== "string" ||
@@ -2826,12 +2893,12 @@ function restorePasskeyCeremonyPromptState(mirror: PasskeyCeremonyContext) {
     !passkeyCeremonyPhaseCanRestorePrompt(mirror.phase, mirror.promptMode) ||
     !passkeyCeremonyMirrorCanRestorePrompt(mirror)
   ) {
-    return;
+    return false;
   }
 
   const promptContext = promptContextFromMirror(mirror);
   if (!promptContext) {
-    return;
+    return false;
   }
 
   if (mirror.promptMode === "approve") {
@@ -2842,12 +2909,12 @@ function restorePasskeyCeremonyPromptState(mirror: PasskeyCeremonyContext) {
       mirror.ceremonyToken,
       webAuthnRequestCancelKeyFromMirror(mirror)
     );
-    return;
+    return true;
   }
 
   if (mirror.promptMode === "verify") {
     if (!passkeyNonemptyString(mirror.activeVaultId)) {
-      return;
+      return false;
     }
     userVerificationPromptContexts.set(mirror.ceremonyToken, {
       ...promptContext,
@@ -2860,7 +2927,7 @@ function restorePasskeyCeremonyPromptState(mirror: PasskeyCeremonyContext) {
       mirror.ceremonyToken,
       webAuthnRequestCancelKeyFromMirror(mirror)
     );
-    return;
+    return true;
   }
 
   unlockPromptContexts.set(mirror.ceremonyToken, promptContext);
@@ -2870,6 +2937,7 @@ function restorePasskeyCeremonyPromptState(mirror: PasskeyCeremonyContext) {
     mirror.ceremonyToken,
     webAuthnRequestCancelKeyFromMirror(mirror)
   );
+  return true;
 }
 
 function passkeyCeremonyMirrorForPhase(
@@ -3933,7 +4001,7 @@ async function handleCreateRequest(
       promptContextFrom(originContext, relyingParty),
       canceledRequests,
       requestCancelKey,
-      { onPromptOpened: persistUnlockPromptState }
+      { onPromptPrepared: persistUnlockPromptState }
     );
     if (!activeVault) {
       throwIfRequestCanceled();
@@ -3973,7 +4041,7 @@ async function handleCreateRequest(
         promptContextFrom(originContext, relyingParty),
         canceledRequests,
         requestCancelKey,
-        { onPromptOpened: persistUserVerificationPromptState }
+        { onPromptPrepared: persistUserVerificationPromptState }
       );
     }
     if (userVerified) {
@@ -3987,7 +4055,7 @@ async function handleCreateRequest(
         promptContextFrom(originContext, relyingParty),
         canceledRequests,
         requestCancelKey,
-        { onPromptOpened: persistPresencePromptState }
+        { onPromptPrepared: persistPresencePromptState }
       );
       if (!approved) {
         throwIfRequestCanceled();
@@ -5431,7 +5499,7 @@ async function activeVaultForRequest(
   canceledRequests: CanceledWebAuthnRequests,
   requestCancelKey: string | null,
   options: {
-    onPromptOpened?: (nonce: string) => Promise<void> | void;
+    onPromptPrepared?: (nonce: string) => Promise<void> | void;
   } = {}
 ) {
   if (initialSession.activeVaultId) {
@@ -5450,14 +5518,16 @@ async function activeVaultForRequest(
     promptKey,
     Math.min(1_000, Math.max(0, deadline - Date.now()))
   );
-  const nonce = await openUnlockPrompt(
+  const nonce = promptNonceFor(unlockPromptNonces, promptKey);
+  await options.onPromptPrepared?.(nonce);
+  await openUnlockPrompt(
     chromeApi,
     requestId,
     promptKey,
     promptContext,
-    requestCancelKey
+    requestCancelKey,
+    nonce
   );
-  await options.onPromptOpened?.(nonce);
 
   while (Date.now() < deadline) {
     if (webAuthnRequestIsCanceled(canceledRequests, requestId, requestCancelKey)) {
@@ -5609,21 +5679,23 @@ async function userPresenceForRequest(
   canceledRequests: CanceledWebAuthnRequests,
   requestCancelKey: string | null,
   options: {
-    onPromptOpened?: (nonce: string) => Promise<void> | void;
+    onPromptPrepared?: (nonce: string) => Promise<void> | void;
   } = {}
 ) {
   await recordWebAuthnDebug(chromeApi, {
     event: "presence_prompt_opening",
     requestId
   });
-  const nonce = await openPresencePrompt(
+  const nonce = promptNonceFor(presencePromptNonces, promptKey);
+  await options.onPromptPrepared?.(nonce);
+  await openPresencePrompt(
     chromeApi,
     requestId,
     promptKey,
     promptContext,
-    requestCancelKey
+    requestCancelKey,
+    nonce
   );
-  await options.onPromptOpened?.(nonce);
 
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
@@ -5673,7 +5745,7 @@ async function userVerificationForRequest(
   canceledRequests: CanceledWebAuthnRequests,
   requestCancelKey: string | null,
   options: {
-    onPromptOpened?: (nonce: string) => Promise<void> | void;
+    onPromptPrepared?: (nonce: string) => Promise<void> | void;
   } = {}
 ) {
   if (userVerification === "discouraged") {
@@ -5715,7 +5787,9 @@ async function userVerificationForRequest(
     requestId,
     methods
   });
-  const nonce = await openUserVerificationPrompt(
+  const nonce = promptNonceFor(userVerificationPromptNonces, promptKey);
+  await options.onPromptPrepared?.(nonce);
+  await openUserVerificationPrompt(
     chromeApi,
     requestId,
     promptKey,
@@ -5724,9 +5798,9 @@ async function userVerificationForRequest(
       ceremonyToken: promptKey,
       activeVaultId
     },
-    requestCancelKey
+    requestCancelKey,
+    nonce
   );
-  await options.onPromptOpened?.(nonce);
 
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
@@ -5920,7 +5994,8 @@ async function openUnlockPrompt(
   requestId: number,
   promptKey: string,
   promptContext: WebAuthnPromptContext,
-  requestCancelKey: string | null
+  requestCancelKey: string | null,
+  preparedNonce?: string
 ): Promise<string> {
   if (!chromeApi.windows?.create) {
     throw new WebAuthnRequestError(
@@ -5943,7 +6018,7 @@ async function openUnlockPrompt(
     }
   }
 
-  const nonce = generatePromptNonce();
+  const nonce = preparedNonce ?? generatePromptNonce();
   unlockPromptContexts.set(promptKey, promptContext);
   unlockPromptNonces.set(promptKey, nonce);
   unlockPromptRequestIds.set(promptKey, requestId);
@@ -5979,7 +6054,8 @@ async function openPresencePrompt(
   requestId: number,
   promptKey: string,
   promptContext: WebAuthnPromptContext,
-  requestCancelKey: string | null
+  requestCancelKey: string | null,
+  preparedNonce?: string
 ): Promise<string> {
   if (!chromeApi.windows?.create) {
     throw new WebAuthnRequestError(
@@ -6002,7 +6078,7 @@ async function openPresencePrompt(
     }
   }
 
-  const nonce = generatePromptNonce();
+  const nonce = preparedNonce ?? generatePromptNonce();
   presencePromptContexts.set(promptKey, promptContext);
   presencePromptNonces.set(promptKey, nonce);
   presencePromptRequestIds.set(promptKey, requestId);
@@ -6038,7 +6114,8 @@ async function openUserVerificationPrompt(
   requestId: number,
   promptKey: string,
   promptContext: WebAuthnUserVerificationPromptContext,
-  requestCancelKey: string | null
+  requestCancelKey: string | null,
+  preparedNonce?: string
 ): Promise<string> {
   if (!chromeApi.windows?.create) {
     throw new WebAuthnRequestError(
@@ -6061,7 +6138,7 @@ async function openUserVerificationPrompt(
     }
   }
 
-  const nonce = generatePromptNonce();
+  const nonce = preparedNonce ?? generatePromptNonce();
   userVerificationPromptContexts.set(promptKey, promptContext);
   userVerificationPromptNonces.set(promptKey, nonce);
   userVerificationPromptRequestIds.set(promptKey, requestId);
@@ -6209,6 +6286,16 @@ function popupPathForWebAuthnPrompt(
     params.set("topOrigin", promptContext.topOrigin);
   }
   return `popup.html?${params.toString()}`;
+}
+
+function promptNonceFor(nonces: Map<string, string>, promptKey: string) {
+  const existingNonce = nonces.get(promptKey);
+  if (typeof existingNonce === "string") {
+    return existingNonce;
+  }
+  const nonce = generatePromptNonce();
+  nonces.set(promptKey, nonce);
+  return nonce;
 }
 
 function generatePromptNonce() {

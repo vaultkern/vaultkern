@@ -1582,6 +1582,64 @@ fn runtime_reconciliation_rolls_back_expired_saved_uncommitted_passkey_ceremonie
 }
 
 #[test]
+fn runtime_reconciliation_reports_committed_ceremonies_when_a_later_rollback_fails() {
+    let mut runtime = Runtime::for_tests_at(100);
+    create_committed_passkey_registration(&mut runtime, "token-committed", "Y2hhbGxlbmdlMQ");
+    create_mutated_passkey_registration_with_origin(
+        &mut runtime,
+        "token-uncommitted-locked",
+        "Y2hhbGxlbmdlMg",
+        "https://login2.example.com",
+    );
+    runtime.set_test_unix_time(400);
+    runtime.lock_session();
+
+    let response = runtime
+        .handle(RuntimeCommand::ReconcilePasskeyCeremonyLedger {
+            active_connection_id: "connection-1".into(),
+        })
+        .unwrap();
+
+    assert_eq!(
+        response,
+        RuntimeResponse::PasskeyCeremonyReconciliation(
+            vaultkern_runtime_protocol::PasskeyCeremonyReconciliationDto {
+                reconciled: vec![vaultkern_runtime_protocol::PasskeyCeremonyReconciledDto {
+                    ceremony_token: "token-committed".into(),
+                    delivery_state: PasskeyCeremonyDeliveryStateDto::UnknownDelivery,
+                }],
+            }
+        )
+    );
+    assert_eq!(
+        runtime
+            .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+                ceremony_token: "token-committed".into(),
+            })
+            .unwrap(),
+        RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+            known: true,
+            phase: Some(PasskeyCeremonyPhaseDto::ClosedDelivered),
+            durable_state: Some(PasskeyCeremonyDurableStateDto::Committed),
+            delivery_state: Some(PasskeyCeremonyDeliveryStateDto::UnknownDelivery),
+        })
+    );
+    assert_eq!(
+        runtime
+            .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+                ceremony_token: "token-uncommitted-locked".into(),
+            })
+            .unwrap(),
+        RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+            known: true,
+            phase: Some(PasskeyCeremonyPhaseDto::CompletionAndMutation),
+            durable_state: Some(PasskeyCeremonyDurableStateDto::Mutated),
+            delivery_state: Some(PasskeyCeremonyDeliveryStateDto::NotDelivered),
+        })
+    );
+}
+
+#[test]
 fn runtime_reconciliation_preserves_expired_delivered_passkey_ceremonies() {
     let mut runtime = Runtime::for_tests_at(100);
     create_committed_passkey_registration(&mut runtime, "token-1", "Y2hhbGxlbmdl");
@@ -3137,17 +3195,31 @@ fn create_mutated_passkey_registration(
     token: &str,
     challenge_base64url: &str,
 ) -> (String, String, String) {
+    create_mutated_passkey_registration_with_origin(
+        runtime,
+        token,
+        challenge_base64url,
+        "https://login.example.com",
+    )
+}
+
+fn create_mutated_passkey_registration_with_origin(
+    runtime: &mut Runtime,
+    token: &str,
+    challenge_base64url: &str,
+    origin: &str,
+) -> (String, String, String) {
     let vault_id = open_unlocked_test_vault(runtime, token);
     register_and_advance_to_s4(
         runtime,
         token,
         PasskeyCeremonyKindDto::Create,
-        "https://login.example.com",
+        origin,
         "example.com",
         challenge_base64url,
     );
     let client_data = format!(
-        r#"{{"type":"webauthn.create","challenge":"{challenge_base64url}","origin":"https://login.example.com","crossOrigin":false}}"#
+        r#"{{"type":"webauthn.create","challenge":"{challenge_base64url}","origin":"{origin}","crossOrigin":false}}"#
     );
     let response = runtime
         .handle(RuntimeCommand::CreatePasskeyRegistration {
@@ -3155,7 +3227,7 @@ fn create_mutated_passkey_registration(
             expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             vault_id: vault_id.clone(),
             relying_party: "example.com".into(),
-            origin: "https://login.example.com".into(),
+            origin: origin.into(),
             user_name: "alice@example.com".into(),
             user_display_name: Some("Alice".into()),
             user_handle_base64url: "dXNlci0x".into(),

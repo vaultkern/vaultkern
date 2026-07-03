@@ -507,26 +507,28 @@ describe("background bridge", () => {
 
     expect(attach).toHaveBeenCalledTimes(1);
     await completePasskeyLedgerReconciliation(port);
-    expect(registerContentScripts).toHaveBeenCalledWith([
-      {
-        id: "vaultkern-webauthn-content-bridge",
-        matches: ["<all_urls>"],
-        js: ["webauthnContentScript.js"],
-        runAt: "document_start",
-        allFrames: true,
-        persistAcrossSessions: false
-      },
-      {
-        id: "vaultkern-webauthn-page-hook",
-        matches: ["<all_urls>"],
-        js: ["webauthnPageHook.js"],
-        runAt: "document_start",
-        world: "MAIN",
-        allFrames: true,
-        matchOriginAsFallback: true,
-        persistAcrossSessions: false
-      }
-    ]);
+    await vi.waitFor(() => {
+      expect(registerContentScripts).toHaveBeenCalledWith([
+        {
+          id: "vaultkern-webauthn-content-bridge",
+          matches: ["<all_urls>"],
+          js: ["webauthnContentScript.js"],
+          runAt: "document_start",
+          allFrames: true,
+          persistAcrossSessions: false
+        },
+        {
+          id: "vaultkern-webauthn-page-hook",
+          matches: ["<all_urls>"],
+          js: ["webauthnPageHook.js"],
+          runAt: "document_start",
+          world: "MAIN",
+          allFrames: true,
+          matchOriginAsFallback: true,
+          persistAcrossSessions: false
+        }
+      ]);
+    });
     expect(query).toHaveBeenCalledWith({
       url: ["http://*/*", "https://*/*"]
     });
