@@ -7136,7 +7136,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("rejects page-observed conditional mediation when Chrome supplies the request origin", async () => {
+  it("rejects trusted conditional mediation when Chrome supplies it in request details", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     const completeGetRequest = vi.fn(async () => undefined);
     const sendRuntimeCommand = runtimeCommandMock(async (command) => {
@@ -7163,8 +7163,7 @@ describe("webAuthenticationProxy wrapper", () => {
         origin: "https://example.com",
         relyingParty: "example.com",
         challenge: "Y29uZGl0aW9uYWwtZGlyZWN0",
-        allowCredentialIds: ["Y3JlZGVudGlhbC0x"],
-        mediation: "conditional"
+        allowCredentialIds: ["Y3JlZGVudGlhbC0x"]
       })
     ).toBe(true);
 
@@ -7176,6 +7175,7 @@ describe("webAuthenticationProxy wrapper", () => {
       requestDetailsJson: JSON.stringify({
         rpId: "example.com",
         challenge: "Y29uZGl0aW9uYWwtZGlyZWN0",
+        mediation: "conditional",
         allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
       })
     });
@@ -8818,15 +8818,29 @@ describe("webAuthenticationProxy wrapper", () => {
   });
 
   it.each(["conditional", "immediate"] as const)(
-    "rejects page-observed %s mediation instead of opening a modal prompt",
+    "treats page-observed %s mediation as a modal proxy request",
     async (mediation) => {
       let getListener: ((request: unknown) => void) | undefined;
       const completeGetRequest = vi.fn(async () => undefined);
-      const sendRuntimeCommand = runtimeCommandMock(async (command) => {
-        throw new Error(`unexpected command: ${String(command.type)}`);
-      });
+      const sendRuntimeCommand = runtimeCommandMock()
+        .mockResolvedValueOnce({
+          type: "session_state",
+          unlocked: true,
+          activeVaultId: "vault-1"
+        })
+        .mockResolvedValueOnce({
+          type: "passkey_assertion",
+          credentialId: "Y3JlZGVudGlhbC0x",
+          authenticatorDataBase64url: "auth-data",
+          clientDataJsonBase64url: "client-data",
+          signatureBase64url: "signature",
+          userHandleBase64url: null
+        });
       const chromeApi = {
         runtime: {},
+        tabs: {
+          query: vi.fn(async () => [{ url: "https://example.com/login" }])
+        },
         webAuthenticationProxy: {
           attach: vi.fn(async () => undefined),
           completeGetRequest,
@@ -8837,6 +8851,7 @@ describe("webAuthenticationProxy wrapper", () => {
           }
         }
       };
+      const presencePrompt = installPresencePrompt(chromeApi);
       const challenge =
         mediation === "conditional" ? "Y29uZGl0aW9uYWwtMQ" : "aW1tZWRpYXRlLTE";
 
@@ -8864,17 +8879,21 @@ describe("webAuthenticationProxy wrapper", () => {
           allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
         })
       });
+      await presencePrompt.approve();
 
       await vi.waitFor(() => {
         expect(completeGetRequest).toHaveBeenCalledTimes(1);
       });
-      expectBusinessRuntimeCommandCount(sendRuntimeCommand, 0);
       expect(completeGetRequest).toHaveBeenCalledWith({
         requestId: mediation === "conditional" ? 31 : 58,
-        error: {
-          name: "NotAllowedError",
-          message: `VaultKern passkey provider does not support ${mediation} mediation`
-        }
+        responseJson: expect.any(String)
+      });
+      expectBusinessRuntimeCommand(sendRuntimeCommand, 1, {
+        type: "get_session_state"
+      });
+      expectBusinessRuntimeCommand(sendRuntimeCommand, 2, {
+        type: "create_passkey_assertion",
+        credential_id: "Y3JlZGVudGlhbC0x"
       });
     }
   );
@@ -13367,14 +13386,34 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("rejects page-observed conditional mediation for WebAuthn create before session lookup", async () => {
+  it("treats page-observed conditional mediation for WebAuthn create as modal", async () => {
     let createListener: ((request: unknown) => void) | undefined;
     const completeCreateRequest = vi.fn(async () => undefined);
-    const sendRuntimeCommand = runtimeCommandMock(async (command) => {
-      throw new Error(`unexpected command: ${String(command.type)}`);
-    });
+    const sendRuntimeCommand = runtimeCommandMock()
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1"
+      })
+      .mockResolvedValueOnce({
+        type: "passkey_registration",
+        entryId: "entry-1",
+        credentialId: "Y3JlZGVudGlhbC0x",
+        created: true,
+        authenticatorDataBase64url: "auth-data",
+        attestationObjectBase64url: "attestation-object",
+        clientDataJsonBase64url: "client-data",
+        publicKeyBase64url: "public-key",
+        publicKeyAlgorithm: -7,
+        userHandleBase64url: "dXNlci0x"
+      })
+      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "saved" });
     const chromeApi = {
       runtime: {},
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/register" }])
+      },
       webAuthenticationProxy: {
         attach: vi.fn(async () => undefined),
         completeCreateRequest,
@@ -13385,6 +13424,7 @@ describe("webAuthenticationProxy wrapper", () => {
         }
       }
     };
+    const presencePrompt = installPresencePrompt(chromeApi);
 
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
     expect(
@@ -13415,17 +13455,26 @@ describe("webAuthenticationProxy wrapper", () => {
         pubKeyCredParams: [{ type: "public-key", alg: -7 }]
       })
     });
+    await presencePrompt.approve();
 
     await vi.waitFor(() => {
       expect(completeCreateRequest).toHaveBeenCalledTimes(1);
     });
-    expectBusinessRuntimeCommandCount(sendRuntimeCommand, 0);
     expect(completeCreateRequest).toHaveBeenCalledWith({
       requestId: 201,
-      error: {
-        name: "NotAllowedError",
-        message: "VaultKern passkey provider does not support conditional mediation"
-      }
+      responseJson: expect.any(String)
+    });
+    expectBusinessRuntimeCommand(sendRuntimeCommand, 1, {
+      type: "get_session_state"
+    });
+    expectBusinessRuntimeCommand(sendRuntimeCommand, 2, {
+      type: "create_passkey_registration",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.com",
+      user_name: "alice@example.com",
+      user_display_name: "Alice",
+      user_handle_base64url: "dXNlci0x"
     });
   });
 
