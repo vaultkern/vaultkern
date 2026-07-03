@@ -1061,17 +1061,12 @@ impl Runtime {
         if loaded.vault.is_none() {
             anyhow::bail!("vault is locked: {vault_id}");
         }
-        if loaded.password.is_none() {
+        let Some(expected_password) = loaded.password.as_deref() else {
             anyhow::bail!("passkey master password verification is unavailable");
-        }
-        let credentials = VaultCredentials {
-            password: Some(password.to_owned()),
-            key_file_path: loaded.key_file_path.clone(),
         };
-        let key = composite_key_from_credentials(&credentials)?;
-        self.core
-            .load_database(&loaded.bytes, &key)
-            .with_context(|| format!("failed to verify passkey user for vault: {vault_id}"))?;
+        if !constant_time_bytes_eq(password.as_bytes(), expected_password.as_bytes()) {
+            anyhow::bail!("passkey master password verification failed");
+        }
         Ok(())
     }
 
@@ -4805,6 +4800,17 @@ fn composite_key_from_credentials(credentials: &VaultCredentials) -> Result<Comp
     Ok(key)
 }
 
+fn constant_time_bytes_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        diff |= (left_byte ^ right_byte) as usize;
+    }
+    diff == 0
+}
+
 fn quick_unlock_storage_key(vault_ref_id: &str) -> String {
     let digest = Sha256::digest(vault_ref_id.as_bytes());
     let mut key = String::from("quick_unlock_");
@@ -5634,6 +5640,65 @@ mod tests {
             panic!("expected passkey UV proof, got {verified:?}");
         };
         assert!(verified.verified_at_epoch_ms >= 100_500);
+    }
+
+    #[test]
+    fn passkey_master_password_user_verification_does_not_redecrypt_loaded_vault() {
+        let mut runtime = Runtime::for_tests_at(100);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "password-uv-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Required,
+                challenge_base64url: "Y2hhbGxlbmdlLTE".into(),
+                request_id: 42,
+                tab_id: 42,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms: 100_000,
+                expires_at_epoch_ms: 400_000,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "password-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                related_origin_verified: false,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::BindPasskeyCeremonyVault {
+                ceremony_token: "password-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id.clone(),
+            })
+            .unwrap();
+
+        runtime.loaded.get_mut(&opened.vault_id).unwrap().bytes = b"not a kdbx".to_vec();
+
+        let verified = runtime
+            .handle(RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token: "password-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id,
+                method: PasskeyUserVerificationMethodDto::MasterPassword,
+                password: Some("demo-password".into()),
+            })
+            .unwrap();
+
+        let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+            panic!("expected passkey UV proof, got {verified:?}");
+        };
+        assert!(verified.verified);
     }
 
     #[test]
