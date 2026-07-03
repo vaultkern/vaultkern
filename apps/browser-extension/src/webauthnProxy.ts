@@ -98,6 +98,11 @@ type PasskeyCeremonyPhase =
   | "closed_delivered"
   | "closed_failed";
 
+type PasskeyCeremonyActivePhase = Exclude<
+  PasskeyCeremonyPhase,
+  "closed_aborted" | "closed_delivered" | "closed_failed"
+>;
+
 type PasskeyUserVerificationRequirement =
   | "discouraged"
   | "preferred"
@@ -261,6 +266,26 @@ const PASSKEY_CEREMONY_PHASES = new Set<PasskeyCeremonyPhase>([
   "closed_delivered",
   "closed_failed"
 ]);
+const PASSKEY_CEREMONY_ACTIVE_PHASES: readonly PasskeyCeremonyActivePhase[] = [
+  "s0_pre_authorization",
+  "s1_user_authorization",
+  "s2_network_validation",
+  "s3_credential_resolution",
+  "s3b_user_selection",
+  "s4_completion_and_mutation"
+];
+const PASSKEY_CEREMONY_TRANSITION_EDGES: readonly (readonly [
+  PasskeyCeremonyActivePhase,
+  PasskeyCeremonyActivePhase
+])[] = [
+  ["s0_pre_authorization", "s1_user_authorization"],
+  ["s1_user_authorization", "s2_network_validation"],
+  ["s1_user_authorization", "s3_credential_resolution"],
+  ["s2_network_validation", "s3_credential_resolution"],
+  ["s3_credential_resolution", "s3b_user_selection"],
+  ["s3_credential_resolution", "s4_completion_and_mutation"],
+  ["s3b_user_selection", "s4_completion_and_mutation"]
+];
 const RELATED_ORIGIN_LABEL_LIMIT = 5;
 const RELATED_ORIGIN_FETCH_TIMEOUT_MS = 5_000;
 const GENERIC_PASSKEY_REQUEST_ERROR_MESSAGE = "VaultKern passkey request failed";
@@ -468,10 +493,7 @@ export async function reconcilePersistedPasskeyCeremonies(
         changed = true;
         continue;
       }
-      if (
-        ledgerPhase === "s4_completion_and_mutation" &&
-        mirror.phase === "s4_completion_and_mutation"
-      ) {
+      if (ledgerPhase === "s4_completion_and_mutation") {
         const deliveryState = passkeyCeremonyLedgerDeliveryState(ledger);
         if (mirror.ceremony === "get") {
           if (!passkeyCeremonyLedgerDeliveryIsClosed(deliveryState)) {
@@ -513,7 +535,7 @@ export async function reconcilePersistedPasskeyCeremonies(
       } else if (ledgerPhase === mirror.phase) {
         restorePasskeyCeremonyPromptState(chromeApi, sendRuntimeCommand, mirror);
         continue;
-      } else if (passkeyCeremonyCanAdvanceMirrorPhase(mirror.phase, ledgerPhase)) {
+      } else if (passkeyCeremonyCanAdvanceMirrorPhase(mirror, ledgerPhase)) {
         const advancedMirror = passkeyCeremonyMirrorForPhase(
           { ...mirror, phase: ledgerPhase as PasskeyCeremonyPhase },
           ledgerPhase as PasskeyCeremonyPhase
@@ -3458,23 +3480,76 @@ function isCompletionOrLaterPhase(phase: string) {
 }
 
 function passkeyCeremonyCanAdvanceMirrorPhase(
-  mirrorPhase: string,
+  mirror: PasskeyCeremonyContext,
   ledgerPhase: string
 ) {
-  const mirrorIndex = passkeyCeremonyActivePhaseIndex(mirrorPhase);
-  const ledgerIndex = passkeyCeremonyActivePhaseIndex(ledgerPhase);
-  return mirrorIndex >= 0 && ledgerIndex >= 0 && ledgerIndex > mirrorIndex;
+  if (ledgerPhase === "s4_completion_and_mutation") {
+    return false;
+  }
+  if (!passkeyCeremonyCanReachActivePhase(mirror.phase, ledgerPhase)) {
+    return false;
+  }
+
+  const advancedMirror = passkeyCeremonyMirrorForPhase(
+    { ...mirror, phase: ledgerPhase as PasskeyCeremonyPhase },
+    ledgerPhase as PasskeyCeremonyPhase
+  );
+  return passkeyCeremonyMirrorCanRepresentNativeAheadPhase(
+    advancedMirror,
+    ledgerPhase
+  );
+}
+
+function passkeyCeremonyMirrorCanRepresentNativeAheadPhase(
+  mirror: PasskeyCeremonyContext,
+  ledgerPhase: string
+) {
+  if (ledgerPhase === "s3b_user_selection") {
+    return passkeyCeremonyMirrorCanRestorePrompt(mirror);
+  }
+  return isPasskeyCeremonyMirror(mirror);
+}
+
+function passkeyCeremonyCanReachActivePhase(from: string, to: string) {
+  const start = passkeyCeremonyActivePhaseFrom(from);
+  const target = passkeyCeremonyActivePhaseFrom(to);
+  if (!start || !target || start === target) {
+    return false;
+  }
+
+  const seen = new Set<PasskeyCeremonyActivePhase>([start]);
+  const queue: PasskeyCeremonyActivePhase[] = [start];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) {
+      break;
+    }
+    for (const [edgeStart, edgeEnd] of PASSKEY_CEREMONY_TRANSITION_EDGES) {
+      if (edgeStart !== current || seen.has(edgeEnd)) {
+        continue;
+      }
+      if (edgeEnd === target) {
+        return true;
+      }
+      seen.add(edgeEnd);
+      queue.push(edgeEnd);
+    }
+  }
+
+  return false;
 }
 
 function passkeyCeremonyActivePhaseIndex(phase: string) {
-  return [
-    "s0_pre_authorization",
-    "s1_user_authorization",
-    "s2_network_validation",
-    "s3_credential_resolution",
-    "s3b_user_selection",
-    "s4_completion_and_mutation"
-  ].indexOf(phase);
+  const activePhase = passkeyCeremonyActivePhaseFrom(phase);
+  return activePhase ? PASSKEY_CEREMONY_ACTIVE_PHASES.indexOf(activePhase) : -1;
+}
+
+function passkeyCeremonyActivePhaseFrom(
+  phase: string
+): PasskeyCeremonyActivePhase | null {
+  return (PASSKEY_CEREMONY_ACTIVE_PHASES as readonly string[]).includes(phase)
+    ? (phase as PasskeyCeremonyActivePhase)
+    : null;
 }
 
 async function closePersistedNativePasskeyCeremony(

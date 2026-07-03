@@ -3309,6 +3309,66 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
   });
 
+  it("reconciles native-ahead committed S4 create ceremonies during rehydrate", async () => {
+    const sessionStorage = createSessionStorage({
+      vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
+        "token-native-ahead-s4": {
+          version: 1,
+          ceremonyToken: "token-native-ahead-s4",
+          ceremony: "create",
+          phase: "s3_credential_resolution",
+          origin: "https://example.com",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          challengeBase64url: "cmVnaXN0ZXItMQ",
+          requestId: 214,
+          tabId: 101,
+          frameId: 0,
+          frameKind: "top",
+          activeVaultId: "vault-1",
+          createUserName: "alice@example.com",
+          createUserDisplayName: null,
+          createUserHandleBase64url: "dXNlci0x",
+          createPublicKeyAlgorithm: -7,
+          createExcludeCredentialIds: [],
+          createClientExtensionResults: {},
+          registeredAtEpochMs: 1_000,
+          expiresAtEpochMs: Date.now() + 300_000
+        }
+      })
+    });
+    const chromeApi = {
+      storage: {
+        session: sessionStorage
+      }
+    };
+    const sendRuntimeCommand = vi.fn(async (command: Record<string, unknown>) => {
+      if (command.type === "query_passkey_ceremony_ledger") {
+        return {
+          type: "passkey_ceremony_ledger",
+          known: true,
+          phase: "s4_completion_and_mutation",
+          durableState: "committed",
+          deliveryState: "not_delivered"
+        };
+      }
+      if (command.type === "mark_passkey_ceremony_unknown_delivery") {
+        return { type: "passkey_ceremony_advanced", advanced: true };
+      }
+
+      throw new Error(`unexpected command: ${command.type}`);
+    });
+
+    await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
+
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "mark_passkey_ceremony_unknown_delivery",
+      ceremony_token: "token-native-ahead-s4",
+      expected_phase: "s4_completion_and_mutation"
+    });
+    expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
+  });
+
   it("does not rehydrate unsealed passkey ceremony mirrors", async () => {
     const sessionStorage = createSessionStorage({
       vaultkernPasskeyCeremonies: {
@@ -4102,6 +4162,63 @@ describe("webAuthenticationProxy wrapper", () => {
       type: "advance_passkey_ceremony_phase",
       ceremony_token: "token-native-ahead-incomplete",
       expected_phase: "s3_credential_resolution",
+      next_phase: "closed_failed"
+    });
+    expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
+  });
+
+  it("fails closed instead of accepting native-ahead S3B without selection options", async () => {
+    const sessionStorage = createSessionStorage({
+      vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
+        "token-native-ahead-s3b": {
+          version: 1,
+          ceremonyToken: "token-native-ahead-s3b",
+          ceremony: "get",
+          phase: "s1_user_authorization",
+          origin: "https://example.com",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          challengeBase64url: "Y2hhbGxlbmdlLTE",
+          requestId: 213,
+          tabId: 101,
+          frameId: 0,
+          frameKind: "top",
+          activeVaultId: "vault-1",
+          getCredentialIds: [null],
+          getClientExtensionResults: {},
+          registeredAtEpochMs: 1_000,
+          expiresAtEpochMs: Date.now() + 300_000
+        }
+      })
+    });
+    const chromeApi = {
+      storage: {
+        session: sessionStorage
+      }
+    };
+    const sendRuntimeCommand = vi.fn(async (command: Record<string, unknown>) => {
+      if (command.type === "query_passkey_ceremony_ledger") {
+        return {
+          type: "passkey_ceremony_ledger",
+          known: true,
+          phase: "s3b_user_selection",
+          durableState: "none",
+          deliveryState: "not_delivered"
+        };
+      }
+      if (command.type === "advance_passkey_ceremony_phase") {
+        return { type: "passkey_ceremony_advanced", advanced: true };
+      }
+
+      throw new Error(`unexpected command: ${command.type}`);
+    });
+
+    await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
+
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "advance_passkey_ceremony_phase",
+      ceremony_token: "token-native-ahead-s3b",
+      expected_phase: "s3b_user_selection",
       next_phase: "closed_failed"
     });
     expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
