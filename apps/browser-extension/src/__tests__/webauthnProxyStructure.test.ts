@@ -258,4 +258,17 @@ describe("webauthn proxy structure", () => {
     expect(source).toContain("async function commitPendingPasskeyCreateRegistration");
     expect(source.match(/await commitPasskeyRegistration\(/g) ?? []).toHaveLength(1);
   });
+
+  it("finalizes committed create registration delivery through one helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("async function finishCommittedPasskeyCreateRegistration");
+    expect(source.match(/await deliverPasskeyCreateRegistration\(/g) ?? [])
+      .toHaveLength(1);
+    expect(source).not.toContain("const markCommittedUnknownDelivery = async");
+  });
 });

@@ -2251,41 +2251,27 @@ async function resumePasskeyCreateAfterPromptComplete(
       registration
     );
     ceremonyCommitted = true;
-    if (requestIsCanceled()) {
-      const marked = await markCommittedPasskeyCreateUnknownDelivery(
-        chromeApi,
-        sendRuntimeCommand,
-        mirror.ceremonyToken
-      );
-      if (marked) {
-        ceremonyPhase = "closed_delivered";
-      }
-      return;
-    }
-
-    const delivered = await deliverPasskeyCreateRegistration(
+    const closedPhase = await finishCommittedPasskeyCreateRegistration(
       chromeApi,
       sendRuntimeCommand,
       requestId,
       mirror.ceremonyToken,
       registration,
       createRequest.clientExtensionResults,
+      requestIsCanceled,
       {
         completeError: "create_resume_complete_error",
         completed: "create_resumed_after_prompt_complete"
+      },
+      {
+        deliveryFailureClearMirror: "always",
+        deliveryFailureClosePhase: "always"
       }
     );
-    if (!delivered) {
-      await markCommittedPasskeyCreateUnknownDelivery(
-        chromeApi,
-        sendRuntimeCommand,
-        mirror.ceremonyToken,
-        { clearMirror: "always" }
-      );
-      ceremonyPhase = "closed_delivered";
-      return;
+    if (closedPhase) {
+      ceremonyPhase = closedPhase;
     }
-    ceremonyPhase = "closed_delivered";
+    return;
   } catch (error) {
     await recordWebAuthnDebug(chromeApi, {
       event: "create_resume_after_prompt_complete_error",
@@ -3946,6 +3932,55 @@ async function markCommittedPasskeyCreateUnknownDelivery(
   return marked;
 }
 
+async function finishCommittedPasskeyCreateRegistration(
+  chromeApi: ChromeLike,
+  sendRuntimeCommand: RuntimeCommandSender,
+  requestId: number,
+  ceremonyToken: string,
+  registration: PasskeyRegistrationResponse,
+  clientExtensionResults: Record<string, unknown>,
+  requestIsCanceled: () => boolean,
+  events: { completeError: string; completed: string },
+  options: {
+    deliveryFailureClearMirror?: "whenMarked" | "always";
+    deliveryFailureClosePhase?: "whenMarked" | "always";
+  } = {}
+) {
+  if (requestIsCanceled()) {
+    const marked = await markCommittedPasskeyCreateUnknownDelivery(
+      chromeApi,
+      sendRuntimeCommand,
+      ceremonyToken
+    );
+    return marked ? "closed_delivered" : null;
+  }
+
+  const delivered = await deliverPasskeyCreateRegistration(
+    chromeApi,
+    sendRuntimeCommand,
+    requestId,
+    ceremonyToken,
+    registration,
+    clientExtensionResults,
+    events
+  );
+  if (!delivered) {
+    const marked = await markCommittedPasskeyCreateUnknownDelivery(
+      chromeApi,
+      sendRuntimeCommand,
+      ceremonyToken,
+      {
+        clearMirror: options.deliveryFailureClearMirror ?? "whenMarked"
+      }
+    );
+    return marked || options.deliveryFailureClosePhase === "always"
+      ? "closed_delivered"
+      : null;
+  }
+
+  return "closed_delivered";
+}
+
 async function closePasskeyCeremony(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender,
@@ -4307,16 +4342,6 @@ async function handleCreateRequest(
         clientDataJsonBase64url
       }
     );
-    const markCommittedUnknownDelivery = async () => {
-      const marked = await markCommittedPasskeyCreateUnknownDelivery(
-        chromeApi,
-        sendRuntimeCommand,
-        ceremonyContext.ceremonyToken
-      );
-      if (marked) {
-        ceremonyPhase = "closed_delivered";
-      }
-    };
     await recordWebAuthnDebug(chromeApi, {
       event: "create_runtime_registration",
       requestId,
@@ -4364,27 +4389,23 @@ async function handleCreateRequest(
       registration
     );
     ceremonyCommitted = true;
-    if (requestIsCanceled()) {
-      await markCommittedUnknownDelivery();
-      return;
-    }
-    const delivered = await deliverPasskeyCreateRegistration(
+    const closedPhase = await finishCommittedPasskeyCreateRegistration(
       chromeApi,
       sendRuntimeCommand,
       requestId,
       ceremonyContext.ceremonyToken,
       registration,
       clientExtensionResultsForCreateOptions(options),
+      requestIsCanceled,
       {
         completeError: "create_complete_error",
         completed: "create_completed"
       }
     );
-    if (!delivered) {
-      await markCommittedUnknownDelivery();
-      return;
+    if (closedPhase) {
+      ceremonyPhase = closedPhase;
     }
-    ceremonyPhase = "closed_delivered";
+    return;
   } catch (error) {
     await recordWebAuthnDebug(chromeApi, {
       event: "create_error",
