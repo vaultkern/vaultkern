@@ -47,6 +47,11 @@ function createPort() {
         listener(response);
       }
     },
+    emitRawMessage(message: unknown) {
+      for (const listener of messageListeners) {
+        listener(message);
+      }
+    },
     emitDisconnect() {
       for (const listener of disconnectListeners) {
         listener();
@@ -162,6 +167,38 @@ describe("createNativeMessagingBridge", () => {
     port.emitMessage({ requestId: firstRequestId, type: "first_response" });
 
     await expect(first).resolves.toEqual({ type: "first_response" });
+  });
+
+  it("settles an uncorrelated native error response against the active request and continues", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    const first = bridge.send({ version: 1, command: { type: "first" } });
+    const second = bridge.send({ version: 1, command: { type: "second" } });
+
+    port.emitRawMessage({
+      type: "error",
+      code: "invalid_request",
+      message: "native message exceeds maximum length: 67108865 > 67108864"
+    });
+
+    await expect(first).resolves.toMatchObject({
+      type: "error",
+      code: "invalid_request",
+      message: "native message exceeds maximum length: 67108865 > 67108864"
+    });
+    expect(port.postMessage).toHaveBeenCalledTimes(2);
+
+    port.emitMessage({ type: "second_response" });
+
+    await expect(second).resolves.toEqual({ type: "second_response" });
   });
 
   it("reconnects once when posting to a stale native port fails before delivery", async () => {
