@@ -266,7 +266,9 @@ const RELATED_ORIGIN_FETCH_TIMEOUT_MS = 5_000;
 const GENERIC_PASSKEY_REQUEST_ERROR_MESSAGE = "VaultKern passkey request failed";
 const PASSKEY_PUBLIC_ERROR_MIN_DELAY_MS = 75;
 const MAX_KNOWN_PASSKEY_CEREMONY_TOKENS = 512;
+const WEB_AUTHN_DEBUG_DISABLED_CACHE_MS = 1_000;
 const webAuthnDebugWriteChains = new WeakMap<object, Promise<void>>();
+const webAuthnDebugDisabledUntil = new WeakMap<object, number>();
 let passkeyCeremonyMirrorMutationQueue: Promise<void> = Promise.resolve();
 let passkeyLedgerConnectionId: string | null = null;
 
@@ -6790,6 +6792,12 @@ export function recordWebAuthnDebug(
   event: Record<string, unknown>
 ) {
   const chainKey = chromeApi.storage?.local ?? chromeApi;
+  if (
+    typeof chainKey === "object" &&
+    (webAuthnDebugDisabledUntil.get(chainKey) ?? 0) > Date.now()
+  ) {
+    return Promise.resolve();
+  }
   const previous =
     typeof chainKey === "object"
       ? webAuthnDebugWriteChains.get(chainKey) ?? Promise.resolve()
@@ -6854,12 +6862,27 @@ async function persistWebAuthnDebug(
     if (!storage?.get || !storage.set) {
       return;
     }
+    if (
+      typeof storage === "object" &&
+      (webAuthnDebugDisabledUntil.get(storage) ?? 0) > Date.now()
+    ) {
+      return;
+    }
     const existing = await storage.get([
       WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY,
       WEB_AUTHN_DEBUG_STORAGE_KEY
     ]);
     if (existing[WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY] !== true) {
+      if (typeof storage === "object") {
+        webAuthnDebugDisabledUntil.set(
+          storage,
+          Date.now() + WEB_AUTHN_DEBUG_DISABLED_CACHE_MS
+        );
+      }
       return;
+    }
+    if (typeof storage === "object") {
+      webAuthnDebugDisabledUntil.delete(storage);
     }
     const redactedEvent = redactKnownPasskeyCeremonyTokens(event) as Record<
       string,

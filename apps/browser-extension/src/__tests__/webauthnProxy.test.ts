@@ -17627,11 +17627,12 @@ describe("webAuthenticationProxy wrapper", () => {
   it("does not persist WebAuthn diagnostics unless debug storage is enabled", async () => {
     let cancelListener: ((request: unknown) => void) | undefined;
     const storageSet = vi.fn(async () => undefined);
+    const storageGet = vi.fn(async () => ({}));
     const chromeApi = {
       runtime: {},
       storage: {
         local: {
-          get: vi.fn(async () => ({})),
+          get: storageGet,
           set: storageSet
         }
       },
@@ -17658,8 +17659,10 @@ describe("webAuthenticationProxy wrapper", () => {
     await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
 
     cancelListener?.(10);
+    cancelListener?.(11);
     await new Promise((resolve) => setTimeout(resolve, 20));
 
+    expect(storageGet).toHaveBeenCalledTimes(1);
     expect(storageSet).not.toHaveBeenCalled();
   });
 
