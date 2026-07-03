@@ -77,6 +77,31 @@ describe("WebAuthn page hook", () => {
     );
   });
 
+  it("forwards conditional mediation on create observations", async () => {
+    installCredentialMocks();
+    const postMessage = vi
+      .spyOn(window, "postMessage")
+      .mockImplementation(() => undefined);
+
+    await import("../webauthnPageHook");
+
+    await navigator.credentials.create({
+      mediation: "conditional",
+      publicKey: {
+        challenge: new Uint8Array([1, 3, 5])
+      }
+    } as CredentialCreationOptions);
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "vaultkern_webauthn_page_request",
+        ceremony: "create",
+        mediation: "conditional"
+      }),
+      window.location.origin
+    );
+  });
+
   it("does not include ceremony tokens in page hook observations", async () => {
     installCredentialMocks();
     const postMessage = vi

@@ -84,7 +84,7 @@ function observeWebAuthnRequest(
       challenge: base64urlFrom(publicKey.challenge),
       allowCredentialIds: credentialIdsFrom(publicKey.allowCredentials),
       excludeCredentialIds: credentialIdsFrom(publicKey.excludeCredentials),
-      mediation: mediationFrom(ceremony, credentialOptions?.mediation)
+      mediation: mediationFrom(credentialOptions?.mediation)
     };
     window.dispatchEvent(
       new CustomEvent(WEB_AUTHN_PAGE_REQUEST_EVENT, { detail: observation })
@@ -111,10 +111,8 @@ function nextBridgeRequestId() {
   return null;
 }
 
-function mediationFrom(ceremony: "create" | "get", value: unknown) {
-  return ceremony === "get" && typeof value === "string" && value !== ""
-    ? value
-    : undefined;
+function mediationFrom(value: unknown) {
+  return typeof value === "string" && value !== "" ? value : undefined;
 }
 
 function relyingPartyFromOptions(options: PublicKeyCredentialOptionsLike) {
