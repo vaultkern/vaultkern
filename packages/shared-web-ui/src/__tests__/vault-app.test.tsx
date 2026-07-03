@@ -1131,7 +1131,7 @@ it("manages an entry passkey from the detail pane", async () => {
   });
   expect(savePasskeyButton).toBeDisabled();
   fireEvent.change(privateKeyPemField, {
-    target: { value: originalPasskey.privateKeyPem }
+    target: { value: `  ${originalPasskey.privateKeyPem}\n\n` }
   });
   expect(savePasskeyButton).not.toBeDisabled();
   fireEvent.click(screen.getByLabelText("Backup state"));
@@ -1141,7 +1141,10 @@ it("manages an entry passkey from the detail pane", async () => {
     expect(setEntryPasskey).toHaveBeenCalledWith(
       "vault-1",
       "entry-1",
-      editedPasskey
+      {
+        ...editedPasskey,
+        privateKeyPem: originalPasskey.privateKeyPem
+      }
     );
   });
   expect(saveVault).toHaveBeenCalledWith("vault-1");

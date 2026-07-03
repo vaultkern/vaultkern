@@ -837,7 +837,7 @@ function PasskeySection({
       username: draft.username.trim(),
       credentialId: draft.credentialId.trim(),
       generatedUserId: emptyStringAsNull(draft.generatedUserId),
-      privateKeyPem: draft.privateKeyPem,
+      privateKeyPem: draft.privateKeyPem.trim(),
       relyingParty: draft.relyingParty.trim(),
       userHandle: emptyStringAsNull(draft.userHandle)
     };

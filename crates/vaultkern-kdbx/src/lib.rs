@@ -2864,6 +2864,12 @@ fn parse_entry(
     let has_complete_passkey = entry.passkey.is_some();
     entry.attributes = raw_fields
         .into_iter()
+        .map(|(key, mut field)| {
+            if !has_complete_passkey && is_sensitive_passkey_attribute_key(&key) {
+                field.protected = true;
+            }
+            (key, field)
+        })
         .filter(|(key, _)| {
             !is_totp_attribute_key(key) && !(has_complete_passkey && is_passkey_attribute_key(key))
         })
@@ -2890,6 +2896,16 @@ fn is_passkey_attribute_key(key: &str) -> bool {
             | PasskeyRecord::USER_HANDLE_KEY
             | PasskeyRecord::FLAG_BE_KEY
             | PasskeyRecord::FLAG_BS_KEY
+    )
+}
+
+fn is_sensitive_passkey_attribute_key(key: &str) -> bool {
+    matches!(
+        key,
+        PasskeyRecord::CREDENTIAL_ID_KEY
+            | PasskeyRecord::GENERATED_USER_ID_KEY
+            | PasskeyRecord::PRIVATE_KEY_PEM_KEY
+            | PasskeyRecord::USER_HANDLE_KEY
     )
 }
 
@@ -4045,6 +4061,56 @@ mod compatibility_tests {
                 "partial passkey field should roundtrip as a custom field: {key}"
             );
         }
+    }
+
+    #[test]
+    fn incomplete_passkey_private_key_roundtrips_as_protected_custom_field() {
+        let mut vault = Vault::empty("PartialPasskeyPrivateKey");
+        let mut entry = Entry::new("Example");
+        for (key, value, protected) in [
+            (PasskeyRecord::CREDENTIAL_ID_KEY, "partial-credential", true),
+            (
+                PasskeyRecord::PRIVATE_KEY_PEM_KEY,
+                "-----BEGIN PRIVATE KEY-----\npartial\n-----END PRIVATE KEY-----",
+                false,
+            ),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com", false),
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected,
+                },
+            );
+        }
+        vault.root.entries.push(entry);
+
+        let key = test_key("partial-passkey-private-key");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save kdbx");
+        let loaded = load_kdbx(&bytes, &key).expect("load kdbx");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert!(loaded_entry.passkey.is_none());
+        assert_eq!(
+            loaded_entry
+                .attributes
+                .get(PasskeyRecord::PRIVATE_KEY_PEM_KEY)
+                .map(|field| field.protected),
+            Some(true)
+        );
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("save kdbx");
+        let reloaded = load_kdbx(&rewritten, &key).expect("reload kdbx");
+        let reloaded_entry = reloaded.root.entries.first().expect("reloaded entry");
+
+        assert_eq!(
+            reloaded_entry
+                .attributes
+                .get(PasskeyRecord::PRIVATE_KEY_PEM_KEY)
+                .map(|field| field.protected),
+            Some(true)
+        );
     }
 
     #[test]

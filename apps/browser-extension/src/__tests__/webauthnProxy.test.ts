@@ -10915,6 +10915,92 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
+  it.each(["merged", "saved_to_cache"] as const)(
+    "treats %s passkey registration saves as durable before completing create",
+    async (saveStatus) => {
+      let createListener: ((request: unknown) => void) | undefined;
+      const completeCreateRequest = vi.fn(async () => undefined);
+      const sendRuntimeCommand = runtimeCommandMock()
+        .mockResolvedValueOnce({
+          type: "session_state",
+          unlocked: true,
+          activeVaultId: "vault-1"
+        })
+        .mockResolvedValueOnce({
+          type: "passkey_registration",
+          entryId: "entry-1",
+          credentialId: "Y3JlZGVudGlhbC0x",
+          authenticatorDataBase64url: "auth-data",
+          attestationObjectBase64url: "attestation-object",
+          clientDataJsonBase64url: "client-data",
+          publicKeyBase64url: "public-key",
+          publicKeyAlgorithm: -7,
+          userHandleBase64url: "dXNlci0x"
+        })
+        .mockResolvedValueOnce({ type: "save_vault_result", status: saveStatus })
+        .mockResolvedValueOnce({ type: "saved" });
+      const chromeApi = {
+        runtime: {},
+        storage: {
+          session: createSessionStorage()
+        },
+        tabs: {
+          query: vi.fn(async () => [{ url: "https://example.com/register" }])
+        },
+        webAuthenticationProxy: {
+          attach: vi.fn(async () => undefined),
+          completeCreateRequest,
+          onCreateRequest: {
+            addListener(listener: (request: unknown) => void) {
+              createListener = listener;
+            }
+          }
+        }
+      };
+      const presencePrompt = installPresencePrompt(chromeApi);
+
+      await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+      createListener?.({
+        requestId: 11,
+        tabId: 101,
+        frameId: 0,
+        origin: "https://example.com",
+        requestDetailsJson: JSON.stringify({
+          rp: { id: "example.com", name: "Example" },
+          user: {
+            id: "dXNlci0x",
+            name: "alice@example.com",
+            displayName: "Alice"
+          },
+          challenge: "cmVnaXN0ZXItMQ",
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }]
+        })
+      });
+      await presencePrompt.approve();
+
+      await vi.waitFor(() => {
+        expect(completeCreateRequest).toHaveBeenCalledTimes(1);
+      });
+      expectBusinessRuntimeCommand(sendRuntimeCommand, 3, {
+        type: "save_passkey_registration",
+        vault_id: "vault-1"
+      });
+      expectBusinessRuntimeCommand(sendRuntimeCommand, 4, {
+        type: "commit_passkey_registration",
+        vault_id: "vault-1",
+        entry_id: "entry-1",
+        credential_id: "Y3JlZGVudGlhbC0x"
+      });
+      expect(
+        sendRuntimeCommand.mock.calls.some(
+          ([command]) =>
+            (command as { type?: unknown }).type === "abort_passkey_registration"
+        )
+      ).toBe(false);
+    }
+  );
+
   it("durably commits WebAuthn create registrations before handing them to Chrome", async () => {
     let createListener: ((request: unknown) => void) | undefined;
     const events: string[] = [];
@@ -16111,6 +16197,167 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(chromeApi.windows.onRemoved.removeListener).toHaveBeenCalled();
     expect(completeGetRequest).toHaveBeenCalledWith({
       requestId: 45,
+      error: {
+        name: "NotAllowedError",
+        message: "VaultKern passkey request failed"
+      }
+    });
+  });
+
+  it("does not miss unlock dismissal while polling the locked session", async () => {
+    vi.useFakeTimers();
+
+    let getListener: ((request: unknown) => void) | undefined;
+    let removedListener: ((windowId: number) => void) | undefined;
+    let resolvePoll: (() => void) | undefined;
+    let sessionStateRequests = 0;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = runtimeCommandMock(async (command) => {
+      if (command.type !== "get_session_state") {
+        throw new Error(`unexpected command: ${command.type}`);
+      }
+      sessionStateRequests += 1;
+      if (sessionStateRequests === 1) {
+        return {
+          type: "session_state",
+          unlocked: false,
+          activeVaultId: null
+        };
+      }
+      return new Promise((resolve) => {
+        resolvePoll = () =>
+          resolve({
+            type: "session_state",
+            unlocked: false,
+            activeVaultId: null
+          });
+      });
+    });
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`)
+      },
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      windows: {
+        create: vi.fn(async () => ({ id: 43 })),
+        onRemoved: {
+          addListener(listener: (windowId: number) => void) {
+            removedListener = listener;
+          },
+          removeListener: vi.fn()
+        }
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 46,
+      tabId: 101,
+      frameId: 0,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+      expect(removedListener).toBeDefined();
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(resolvePoll).toBeDefined();
+    });
+    removedListener?.(43);
+    resolvePoll?.();
+
+    await vi.advanceTimersByTimeAsync(75);
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 46,
+      error: {
+        name: "NotAllowedError",
+        message: "VaultKern passkey request failed"
+      }
+    });
+  });
+
+  it("closes an unlock popup that is still open when the prompt times out", async () => {
+    vi.useFakeTimers();
+
+    let getListener: ((request: unknown) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = runtimeCommandMock(async () => ({
+      type: "session_state",
+      unlocked: false,
+      activeVaultId: null
+    }));
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`)
+      },
+      tabs: {
+        query: vi.fn(async () => [{ url: "https://example.com/login" }])
+      },
+      windows: {
+        create: vi.fn(async () => ({ id: 44 })),
+        remove: vi.fn(async () => undefined),
+        onRemoved: {
+          addListener: vi.fn(),
+          removeListener: vi.fn()
+        }
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    getListener?.({
+      requestId: 47,
+      tabId: 101,
+      frameId: 0,
+      origin: "https://example.com",
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "Y2hhbGxlbmdlLTE",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(chromeApi.windows.create).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(120_100);
+
+    await vi.waitFor(() => {
+      expect(chromeApi.windows.remove).toHaveBeenCalledWith(44);
+    });
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 47,
       error: {
         name: "NotAllowedError",
         message: "VaultKern passkey request failed"

@@ -187,6 +187,7 @@ type CanceledWebAuthnRequests = {
 const unlockPromptWindowIds = new Map<string, number>();
 const unlockCompleteWaiters = new Map<string, Set<() => void>>();
 const unlockDismissWaiters = new Map<string, Set<() => void>>();
+const unlockDismissedPromptKeys = new Set<string>();
 const unlockPromptContexts = new Map<string, WebAuthnPromptContext>();
 const unlockPromptNonces = new Map<string, string>();
 const unlockPromptRequestIds = new Map<string, number>();
@@ -199,6 +200,7 @@ const presenceCompleteWaiters = new Map<
   Set<(credentialId?: string) => void>
 >();
 const presenceDismissWaiters = new Map<string, Set<() => void>>();
+const presenceDismissedPromptKeys = new Set<string>();
 const presencePromptContexts = new Map<string, WebAuthnPromptContext>();
 const presencePromptNonces = new Map<string, string>();
 const presencePromptRequestIds = new Map<string, number>();
@@ -210,6 +212,7 @@ const userVerificationCompleteWaiters = new Map<
   Set<(method: "master_password" | "quick_unlock") => void>
 >();
 const userVerificationDismissWaiters = new Map<string, Set<() => void>>();
+const userVerificationDismissedPromptKeys = new Set<string>();
 const userVerificationPromptContexts = new Map<
   string,
   WebAuthnUserVerificationPromptContext
@@ -2456,13 +2459,17 @@ function requirePasskeySaveSuccess(response: unknown) {
     typeof response === "object" &&
     response !== null &&
     (response as { type?: unknown }).type === "save_vault_result" &&
-    (response as { status?: unknown }).status === "saved"
+    isDurablePasskeySaveStatus((response as { status?: unknown }).status)
   ) {
     return;
   }
   throw new InternalPasskeyRequestError(
     "passkey registration save did not return durable success"
   );
+}
+
+function isDurablePasskeySaveStatus(status: unknown) {
+  return status === "saved" || status === "merged" || status === "saved_to_cache";
 }
 
 async function loadPasskeyCeremonyMirrors(chromeApi: ChromeLike | null | undefined) {
@@ -5561,7 +5568,6 @@ async function activeVaultForRequest(
     await delay(500);
   }
 
-  clearUnlockPromptState(promptKey);
   takeUnlockUserVerificationProof(promptKey);
   throw new WebAuthnRequestError(
     "NotAllowedError",
@@ -5668,7 +5674,6 @@ async function userPresenceForRequest(
     }
   }
 
-  clearPresencePromptState(promptKey);
   throw new WebAuthnRequestError(
     "NotAllowedError",
     "VaultKern passkey approval timed out"
@@ -5769,7 +5774,6 @@ async function userVerificationForRequest(
     }
   }
 
-  clearUserVerificationPromptState(promptKey);
   throw new WebAuthnRequestError(
     "NotAllowedError",
     "VaultKern passkey user verification timed out"
@@ -5800,6 +5804,10 @@ function selectedCredentialIdForPrompt(
 }
 
 function waitForUnlockSignal(promptKey: string, timeoutMs: number) {
+  if (unlockDismissedPromptKeys.delete(promptKey)) {
+    return Promise.resolve<"dismissed">("dismissed");
+  }
+
   return new Promise<"complete" | "dismissed" | null>((resolve) => {
     let settled = false;
     const timeoutId = setTimeout(() => {
@@ -5842,6 +5850,10 @@ function waitForUnlockSignal(promptKey: string, timeoutMs: number) {
 }
 
 function waitForPresenceSignal(promptKey: string, timeoutMs: number) {
+  if (presenceDismissedPromptKeys.delete(promptKey)) {
+    return Promise.resolve<PresenceSignal>({ type: "dismissed" });
+  }
+
   return new Promise<PresenceSignal>((resolve) => {
     let settled = false;
     const timeoutId = setTimeout(() => {
@@ -5886,6 +5898,10 @@ function waitForPresenceSignal(promptKey: string, timeoutMs: number) {
 }
 
 function waitForUserVerificationSignal(promptKey: string, timeoutMs: number) {
+  if (userVerificationDismissedPromptKeys.delete(promptKey)) {
+    return Promise.resolve<UserVerificationSignal>({ type: "dismissed" });
+  }
+
   return new Promise<UserVerificationSignal>((resolve) => {
     let settled = false;
     const timeoutId = setTimeout(() => {
@@ -5960,6 +5976,7 @@ async function openUnlockPrompt(
   }
 
   const nonce = preparedNonce ?? generatePromptNonce();
+  unlockDismissedPromptKeys.delete(promptKey);
   unlockPromptContexts.set(promptKey, promptContext);
   unlockPromptNonces.set(promptKey, nonce);
   unlockPromptRequestIds.set(promptKey, requestId);
@@ -6020,6 +6037,7 @@ async function openPresencePrompt(
   }
 
   const nonce = preparedNonce ?? generatePromptNonce();
+  presenceDismissedPromptKeys.delete(promptKey);
   presencePromptContexts.set(promptKey, promptContext);
   presencePromptNonces.set(promptKey, nonce);
   presencePromptRequestIds.set(promptKey, requestId);
@@ -6080,6 +6098,7 @@ async function openUserVerificationPrompt(
   }
 
   const nonce = preparedNonce ?? generatePromptNonce();
+  userVerificationDismissedPromptKeys.delete(promptKey);
   userVerificationPromptContexts.set(promptKey, promptContext);
   userVerificationPromptNonces.set(promptKey, nonce);
   userVerificationPromptRequestIds.set(promptKey, requestId);
@@ -6125,7 +6144,8 @@ function watchPresencePromptWindow(
       return;
     }
 
-    clearPresencePromptState(promptKey);
+    clearPresencePromptState(promptKey, { preserveDismissed: true });
+    presenceDismissedPromptKeys.add(promptKey);
     void recordWebAuthnDebug(chromeApi, {
       event: "presence_prompt_dismissed",
       requestId,
@@ -6159,7 +6179,8 @@ function watchUserVerificationPromptWindow(
       return;
     }
 
-    clearUserVerificationPromptState(promptKey);
+    clearUserVerificationPromptState(promptKey, { preserveDismissed: true });
+    userVerificationDismissedPromptKeys.add(promptKey);
     void recordWebAuthnDebug(chromeApi, {
       event: "user_verification_prompt_dismissed",
       requestId,
@@ -6193,7 +6214,8 @@ function watchUnlockPromptWindow(
       return;
     }
 
-    clearUnlockPromptState(promptKey);
+    clearUnlockPromptState(promptKey, { preserveDismissed: true });
+    unlockDismissedPromptKeys.add(promptKey);
     void recordWebAuthnDebug(chromeApi, {
       event: "unlock_prompt_dismissed",
       requestId,
@@ -6243,7 +6265,10 @@ function generatePromptNonce() {
   return secureRandomBase64url(16);
 }
 
-function clearUnlockPromptState(promptKey: string) {
+function clearUnlockPromptState(
+  promptKey: string,
+  options: { preserveDismissed?: boolean } = {}
+) {
   unlockPromptRemovalCleanups.get(promptKey)?.();
   unlockPromptWindowIds.delete(promptKey);
   unlockPromptContexts.delete(promptKey);
@@ -6251,24 +6276,39 @@ function clearUnlockPromptState(promptKey: string) {
   unlockPromptRequestIds.delete(promptKey);
   unlockPromptRequestKeys.delete(promptKey);
   unlockUserVerificationProofs.delete(promptKey);
+  if (!options.preserveDismissed) {
+    unlockDismissedPromptKeys.delete(promptKey);
+  }
 }
 
-function clearPresencePromptState(promptKey: string) {
+function clearPresencePromptState(
+  promptKey: string,
+  options: { preserveDismissed?: boolean } = {}
+) {
   presencePromptRemovalCleanups.get(promptKey)?.();
   presencePromptWindowIds.delete(promptKey);
   presencePromptContexts.delete(promptKey);
   presencePromptNonces.delete(promptKey);
   presencePromptRequestIds.delete(promptKey);
   presencePromptRequestKeys.delete(promptKey);
+  if (!options.preserveDismissed) {
+    presenceDismissedPromptKeys.delete(promptKey);
+  }
 }
 
-function clearUserVerificationPromptState(promptKey: string) {
+function clearUserVerificationPromptState(
+  promptKey: string,
+  options: { preserveDismissed?: boolean } = {}
+) {
   userVerificationPromptRemovalCleanups.get(promptKey)?.();
   userVerificationPromptWindowIds.delete(promptKey);
   userVerificationPromptContexts.delete(promptKey);
   userVerificationPromptNonces.delete(promptKey);
   userVerificationPromptRequestIds.delete(promptKey);
   userVerificationPromptRequestKeys.delete(promptKey);
+  if (!options.preserveDismissed) {
+    userVerificationDismissedPromptKeys.delete(promptKey);
+  }
 }
 
 async function closePromptWindowsForCeremony(

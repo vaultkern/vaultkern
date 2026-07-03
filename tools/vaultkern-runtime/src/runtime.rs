@@ -194,6 +194,7 @@ pub struct Runtime {
     recent_unlock_user_verification: Option<PasskeyUserVerificationProof>,
     passkey_credential_id_generator: Box<dyn FnMut() -> String>,
     fixed_unix_time: Option<u64>,
+    fixed_unix_time_ms: Option<u64>,
 }
 
 impl Runtime {
@@ -244,6 +245,7 @@ impl Runtime {
             recent_unlock_user_verification: None,
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
+            fixed_unix_time_ms: None,
         }
     }
 
@@ -265,17 +267,25 @@ impl Runtime {
             recent_unlock_user_verification: None,
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
+            fixed_unix_time_ms: None,
         }
     }
 
     pub fn for_tests_at(unix_time: u64) -> Self {
         let mut runtime = Self::for_tests();
         runtime.fixed_unix_time = Some(unix_time);
+        runtime.fixed_unix_time_ms = Some(unix_time.saturating_mul(1000));
         runtime
     }
 
     pub fn set_test_unix_time(&mut self, unix_time: u64) {
         self.fixed_unix_time = Some(unix_time);
+        self.fixed_unix_time_ms = Some(unix_time.saturating_mul(1000));
+    }
+
+    pub fn set_test_unix_time_ms(&mut self, unix_time_ms: u64) {
+        self.fixed_unix_time = Some(unix_time_ms / 1000);
+        self.fixed_unix_time_ms = Some(unix_time_ms);
     }
 
     pub fn for_tests_with_passkey_credential_ids(credential_ids: Vec<String>) -> Self {
@@ -344,6 +354,7 @@ impl Runtime {
         let mut runtime =
             Self::for_tests_with_onedrive_item(drive_id, item_id, name, account_label, bytes);
         runtime.fixed_unix_time = Some(unix_time);
+        runtime.fixed_unix_time_ms = Some(unix_time.saturating_mul(1000));
         runtime
     }
 
@@ -960,7 +971,7 @@ impl Runtime {
         if self.session.active_vault_id() != Some(vault_id) {
             anyhow::bail!("passkey user verification vault mismatch");
         }
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         let recent_unlock_verified = {
             let entry = self
                 .passkey_ceremonies
@@ -1011,7 +1022,7 @@ impl Runtime {
         vault_id: &str,
         method: PasskeyUserVerificationMethodDto,
     ) {
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         self.recent_unlock_user_verification = Some(PasskeyUserVerificationProof {
             vault_id: vault_id.to_owned(),
             method,
@@ -1512,9 +1523,9 @@ impl Runtime {
                 .vault
                 .as_mut()
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
+            let passkey = dto_to_passkey_record(passkey)?;
             self.core.snapshot_entry_to_history(vault, entry_id)?;
-            self.core
-                .set_entry_passkey(vault, entry_id, dto_to_passkey_record(passkey))?;
+            self.core.set_entry_passkey(vault, entry_id, passkey)?;
             touch_entry_modified_at(&self.core, vault, entry_id, modified_at)?;
             enforce_history_limits(vault);
         }
@@ -1616,7 +1627,7 @@ impl Runtime {
         if expected_phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
             anyhow::bail!("passkey ceremony expected phase must be s4_completion_and_mutation");
         }
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         let entry = self
             .passkey_ceremonies
             .get(ceremony_token)
@@ -1656,7 +1667,7 @@ impl Runtime {
     }
 
     fn passkey_ceremony_user_verified(&self, ceremony_token: &str, vault_id: &str) -> Result<bool> {
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         let entry = self
             .passkey_ceremonies
             .get(ceremony_token)
@@ -1753,7 +1764,7 @@ impl Runtime {
         if expected_phase != PasskeyCeremonyPhaseDto::CredentialResolution {
             anyhow::bail!("passkey ceremony expected phase must be s3_credential_resolution");
         }
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         let entry = self
             .passkey_ceremonies
             .get(ceremony_token)
@@ -1777,7 +1788,7 @@ impl Runtime {
         ceremony_token: &str,
         identity: PasskeyCeremonyIdentity,
     ) -> Result<PasskeyCeremonyRegisteredDto> {
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         self.prune_expired_closed_passkey_ceremonies(now_epoch_ms);
         validate_passkey_ceremony_ttl(
             identity.registered_at_epoch_ms,
@@ -1869,7 +1880,7 @@ impl Runtime {
         next_phase: PasskeyCeremonyPhaseDto,
         related_origin_verified: bool,
     ) -> Result<PasskeyCeremonyAdvancedDto> {
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         let entry = self
             .passkey_ceremonies
             .get_mut(ceremony_token)
@@ -1916,7 +1927,7 @@ impl Runtime {
         expected_phase: PasskeyCeremonyPhaseDto,
         vault_id: &str,
     ) -> Result<PasskeyCeremonyVaultBoundDto> {
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         {
             let entry = self
                 .passkey_ceremonies
@@ -1974,7 +1985,7 @@ impl Runtime {
         active_connection_id: &str,
     ) -> Result<PasskeyCeremonyReconciliationDto> {
         validate_passkey_ceremony_connection_id(active_connection_id)?;
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         let mut reconciled = Vec::new();
         let mut rollback_tokens = Vec::new();
         for (ceremony_token, entry) in &mut self.passkey_ceremonies {
@@ -2367,7 +2378,7 @@ impl Runtime {
         if expected_phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
             anyhow::bail!("passkey ceremony expected phase must be s4_completion_and_mutation");
         }
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         {
             let entry = self
                 .passkey_ceremonies
@@ -2488,7 +2499,7 @@ impl Runtime {
         if expected_phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
             anyhow::bail!("passkey ceremony expected phase must be s4_completion_and_mutation");
         }
-        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let now_epoch_ms = self.current_unix_time_ms();
         let entry = self
             .passkey_ceremonies
             .get_mut(ceremony_token)
@@ -3681,6 +3692,10 @@ impl Runtime {
         self.fixed_unix_time.unwrap_or_else(current_unix_time)
     }
 
+    fn current_unix_time_ms(&self) -> u64 {
+        self.fixed_unix_time_ms.unwrap_or_else(current_unix_time_ms)
+    }
+
     fn current_source_status(&self) -> Option<VaultSourceStatusDto> {
         if let Some(active_vault_id) = self.session.active_vault_id() {
             return self
@@ -3876,8 +3891,13 @@ fn entry_passkey_to_dto(passkey: vaultkern_core::EntryPasskeyView) -> EntryPassk
     }
 }
 
-fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> PasskeyRecord {
-    PasskeyRecord {
+fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> Result<PasskeyRecord> {
+    validate_passkey_credential_id(&passkey.credential_id)?;
+    if let Some(user_handle) = &passkey.user_handle {
+        validate_passkey_user_handle(user_handle)?;
+    }
+
+    Ok(PasskeyRecord {
         username: passkey.username,
         credential_id: passkey.credential_id,
         generated_user_id: passkey.generated_user_id,
@@ -3886,7 +3906,27 @@ fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> PasskeyRecord {
         user_handle: passkey.user_handle,
         backup_eligible: passkey.backup_eligible,
         backup_state: passkey.backup_state,
+    })
+}
+
+fn validate_passkey_credential_id(credential_id_base64url: &str) -> Result<()> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(credential_id_base64url)
+        .context("invalid passkey credential id base64url")?;
+    if bytes.is_empty() {
+        anyhow::bail!("passkey credential id must not be empty");
     }
+    Ok(())
+}
+
+fn validate_passkey_user_handle(user_handle_base64url: &str) -> Result<()> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(user_handle_base64url)
+        .context("invalid passkey user handle base64url")?;
+    if bytes.is_empty() || bytes.len() > 64 {
+        anyhow::bail!("passkey user handle must be 1 to 64 bytes");
+    }
+    Ok(())
 }
 
 fn find_passkey_by_credential_id_and_relying_party<'a>(
@@ -4617,6 +4657,13 @@ fn current_unix_time() -> u64 {
         .unwrap_or(0)
 }
 
+fn current_unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
 fn fingerprint_for_cached_bytes(bytes: &[u8], cached_at: i64) -> VaultSourceFingerprint {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -5276,6 +5323,42 @@ mod tests {
         }
     }
 
+    fn open_unlocked_demo_vault(runtime: &mut Runtime) -> (tempfile::TempDir, VaultHandleDto) {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        (dir, opened)
+    }
+
+    fn create_demo_entry(runtime: &mut Runtime, vault_id: &str) -> EntryDetailDto {
+        let root_group_id = runtime.list_groups(vault_id).unwrap().root.id;
+        runtime
+            .create_entry(
+                vault_id,
+                &root_group_id,
+                "Example".into(),
+                "alice".into(),
+                "secret".into(),
+                "https://example.com".into(),
+                "".into(),
+                None,
+            )
+            .unwrap()
+    }
+
     #[test]
     fn locking_clears_decrypted_vault_and_keeps_encrypted_snapshot_for_reunlock() {
         let core = KeepassCore::new();
@@ -5338,6 +5421,64 @@ mod tests {
     }
 
     #[test]
+    fn set_entry_passkey_rejects_invalid_user_handle() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+
+        let error = runtime
+            .set_entry_passkey(
+                &opened.vault_id,
+                &entry.id,
+                EntryPasskeyDto {
+                    username: "alice@example.com".into(),
+                    credential_id: "Y3JlZC0x".into(),
+                    generated_user_id: None,
+                    private_key_pem: "pem".into(),
+                    relying_party: "example.com".into(),
+                    user_handle: Some("alice@example.com".into()),
+                    backup_eligible: true,
+                    backup_state: true,
+                },
+            )
+            .unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("invalid passkey user handle base64url"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn set_entry_passkey_rejects_invalid_credential_id() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+
+        let error = runtime
+            .set_entry_passkey(
+                &opened.vault_id,
+                &entry.id,
+                EntryPasskeyDto {
+                    username: "alice@example.com".into(),
+                    credential_id: "not base64url!".into(),
+                    generated_user_id: None,
+                    private_key_pem: "pem".into(),
+                    relying_party: "example.com".into(),
+                    user_handle: Some("dXNlci0x".into()),
+                    backup_eligible: true,
+                    backup_state: true,
+                },
+            )
+            .unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("invalid passkey credential id base64url"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn passkey_user_verification_capability_reports_master_password_for_unlocked_vault() {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
@@ -5370,6 +5511,64 @@ mod tests {
                 }
             )
         );
+    }
+
+    #[test]
+    fn passkey_user_verification_timestamp_is_not_before_same_second_registration() {
+        let mut runtime = Runtime::for_tests_at(100);
+        runtime.set_test_unix_time_ms(100_750);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "same-second-uv-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Required,
+                challenge_base64url: "Y2hhbGxlbmdlLTE".into(),
+                request_id: 42,
+                tab_id: 42,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms: 100_500,
+                expires_at_epoch_ms: 400_000,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "same-second-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                related_origin_verified: false,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::BindPasskeyCeremonyVault {
+                ceremony_token: "same-second-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id.clone(),
+            })
+            .unwrap();
+
+        let verified = runtime
+            .handle(RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token: "same-second-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id,
+                method: PasskeyUserVerificationMethodDto::MasterPassword,
+                password: Some("demo-password".into()),
+            })
+            .unwrap();
+
+        let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+            panic!("expected passkey UV proof, got {verified:?}");
+        };
+        assert!(verified.verified_at_epoch_ms >= 100_500);
     }
 
     #[test]

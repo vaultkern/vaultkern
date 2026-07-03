@@ -1057,7 +1057,7 @@ fn runtime_sets_and_clears_entry_passkey() {
         generated_user_id: Some("generated-user".into()),
         private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
         relying_party: "example.com".into(),
-        user_handle: Some("user-handle".into()),
+        user_handle: Some("dXNlci0x".into()),
         backup_eligible: true,
         backup_state: false,
     };
@@ -1163,7 +1163,7 @@ fn runtime_set_and_clear_entry_passkey_enforces_history_limit() {
         generated_user_id: Some("generated-user".into()),
         private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
         relying_party: "example.com".into(),
-        user_handle: Some("user-handle".into()),
+        user_handle: Some("dXNlci0x".into()),
         backup_eligible: true,
         backup_state: false,
     };

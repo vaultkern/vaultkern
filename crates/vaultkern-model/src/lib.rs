@@ -189,6 +189,8 @@ impl PasskeyRecord {
     pub const FLAG_BS_KEY: &'static str = "KPEX_PASSKEY_FLAG_BS";
 
     pub fn write_to_attributes(&self, attributes: &mut BTreeMap<String, CustomField>) {
+        attributes.remove(Self::GENERATED_USER_ID_KEY);
+        attributes.remove(Self::USER_HANDLE_KEY);
         attributes.insert(
             Self::USERNAME_KEY.into(),
             CustomField {
@@ -870,6 +872,42 @@ mod tests {
             attributes.get("custom").map(|field| field.value.as_str()),
             Some("kept")
         );
+    }
+
+    #[test]
+    fn passkey_attributes_clear_optional_kpex_fields_when_absent() {
+        let passkey = PasskeyRecord {
+            username: "alice".into(),
+            credential_id: "cred-123".into(),
+            generated_user_id: None,
+            private_key_pem: "pem".into(),
+            relying_party: "example.com".into(),
+            user_handle: None,
+            backup_eligible: false,
+            backup_state: false,
+        };
+
+        let mut attributes = BTreeMap::from([
+            (
+                PasskeyRecord::GENERATED_USER_ID_KEY.into(),
+                CustomField {
+                    value: "stale-generated-user".into(),
+                    protected: false,
+                },
+            ),
+            (
+                PasskeyRecord::USER_HANDLE_KEY.into(),
+                CustomField {
+                    value: "stale-user-handle".into(),
+                    protected: true,
+                },
+            ),
+        ]);
+
+        passkey.write_to_attributes(&mut attributes);
+
+        assert!(!attributes.contains_key(PasskeyRecord::GENERATED_USER_ID_KEY));
+        assert!(!attributes.contains_key(PasskeyRecord::USER_HANDLE_KEY));
     }
 
     #[test]

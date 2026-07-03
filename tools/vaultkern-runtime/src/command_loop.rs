@@ -41,6 +41,16 @@ fn run_loop_with_io_with_limit(
                 let response = handle_command_response(&mut runtime, envelope.command);
                 write_native_message(stdout, &response, request_id.as_deref())?;
             }
+            NativeMessage::DecodeError {
+                message,
+                request_id,
+            } => {
+                write_native_message(
+                    stdout,
+                    &invalid_native_message_response(message),
+                    request_id.as_deref(),
+                )?;
+            }
             NativeMessage::Oversized { length, max_length } => {
                 write_native_message(
                     stdout,
@@ -95,7 +105,14 @@ pub(crate) fn format_error_chain(error: &anyhow::Error) -> String {
 enum NativeMessage<T> {
     Eof,
     Message(T),
-    Oversized { length: usize, max_length: usize },
+    DecodeError {
+        message: String,
+        request_id: Option<String>,
+    },
+    Oversized {
+        length: usize,
+        max_length: usize,
+    },
 }
 
 fn read_native_message_or_eof_with_limit<T: serde::de::DeserializeOwned>(
@@ -131,9 +148,13 @@ fn read_native_message_or_eof_with_limit<T: serde::de::DeserializeOwned>(
     reader
         .read_exact(&mut payload)
         .context("failed to read message payload")?;
-    serde_json::from_slice(&payload)
-        .context("failed to decode native message")
-        .map(NativeMessage::Message)
+    match serde_json::from_slice(&payload) {
+        Ok(message) => Ok(NativeMessage::Message(message)),
+        Err(error) => Ok(NativeMessage::DecodeError {
+            message: format!("failed to decode native message: {error}"),
+            request_id: request_id_from_native_payload(&payload),
+        }),
+    }
 }
 
 fn discard_native_message_payload(reader: &mut impl Read, length: usize) -> Result<()> {
@@ -150,6 +171,21 @@ fn oversized_native_message_response(length: usize, max_length: usize) -> Runtim
         code: "invalid_request".into(),
         message: format!("native message exceeds maximum length: {length} > {max_length}"),
     })
+}
+
+fn invalid_native_message_response(message: String) -> RuntimeResponse {
+    RuntimeResponse::Error(ErrorDto {
+        code: "invalid_request".into(),
+        message,
+    })
+}
+
+fn request_id_from_native_payload(payload: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(payload).ok()?;
+    value
+        .get("requestId")
+        .and_then(|request_id| request_id.as_str())
+        .map(str::to_owned)
 }
 
 fn write_native_message(
@@ -308,6 +344,42 @@ mod tests {
                 .message
                 .contains("failed to resolve vault path: /definitely/missing/demo.kdbx")
         );
+    }
+
+    #[test]
+    fn native_message_loop_serializes_decode_errors_without_exiting_the_host() {
+        let invalid_command = serde_json::json!({
+            "version": 1,
+            "requestId": "future-command",
+            "command": { "type": "future_runtime_command" }
+        });
+        let invalid_payload = serde_json::to_vec(&invalid_command).unwrap();
+        let valid_command =
+            vaultkern_runtime_protocol::ProtocolEnvelope::new(RuntimeCommand::GetSessionState);
+        let valid_payload = serde_json::to_vec(&valid_command).unwrap();
+        let mut input = Vec::new();
+        input.extend_from_slice(&(invalid_payload.len() as u32).to_le_bytes());
+        input.extend_from_slice(&invalid_payload);
+        input.extend_from_slice(&(valid_payload.len() as u32).to_le_bytes());
+        input.extend_from_slice(&valid_payload);
+        let mut input = std::io::Cursor::new(input);
+        let mut output = Vec::new();
+
+        run_loop_with_io(Runtime::for_tests(), &mut input, &mut output)
+            .expect("native loop should continue after invalid command");
+
+        let mut output = std::io::Cursor::new(output);
+        let first = read_response_value_from(&mut output);
+        let second = read_response_value_from(&mut output);
+        assert_eq!(first["type"], "error");
+        assert_eq!(first["code"], "invalid_request");
+        assert!(
+            first["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("failed to decode native message")
+        );
+        assert_eq!(second["type"], "session_state");
     }
 
     #[test]

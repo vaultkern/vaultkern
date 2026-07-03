@@ -579,6 +579,53 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
+  it("uses the interactive timeout while verifying a passkey user", async () => {
+    vi.useFakeTimers();
+
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 25,
+      interactiveTimeoutMs: 1_000
+    });
+
+    const request = bridge.send({
+      version: 1,
+      command: {
+        type: "verify_passkey_user",
+        ceremony_token: "ceremony-token-1",
+        expected_phase: "s1_user_authorization",
+        vault_id: "vault-1",
+        method: "quick_unlock"
+      }
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(port.disconnect).not.toHaveBeenCalled();
+
+    port.emitMessage({
+      type: "passkey_user_verified",
+      verified: true,
+      method: "quick_unlock",
+      verifiedAtEpochMs: 100_500
+    });
+
+    await expect(request).resolves.toMatchObject({
+      type: "passkey_user_verified",
+      verified: true,
+      method: "quick_unlock"
+    });
+
+    vi.useRealTimers();
+  });
+
   it("uses the interactive timeout while aborting a passkey registration", async () => {
     vi.useFakeTimers();
 
