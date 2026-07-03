@@ -288,18 +288,9 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
   const tabIds = tabs
     .map((tab) => tab.id)
     .filter((tabId): tabId is number => typeof tabId === "number");
-  const bridgeResults = await Promise.all(
-    tabIds.map((tabId) =>
-      injectWebAuthnScriptIntoTab(tabId, WEB_AUTHN_CONTENT_SCRIPT_FILE, "ISOLATED")
-    )
-  );
-  const bridgeReadyTabIds = tabIds.filter((_tabId, index) => bridgeResults[index]);
-  const hookResults = await Promise.all(
-    bridgeReadyTabIds.map((tabId) =>
-      injectWebAuthnScriptIntoTab(tabId, WEB_AUTHN_PAGE_HOOK_SCRIPT_FILE, "MAIN")
-    )
-  );
-  const injectedCount = hookResults.filter(Boolean).length;
+  const injectedCount = (
+    await Promise.all(tabIds.map((tabId) => injectWebAuthnPageHookIntoTab(tabId)))
+  ).filter(Boolean).length;
   const failedCount = tabIds.length - injectedCount;
 
   await recordWebAuthnDebug(chromeApi, {

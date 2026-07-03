@@ -751,7 +751,7 @@ describe("background bridge", () => {
     });
   });
 
-  it("injects isolated WebAuthn bridges in open tabs before MAIN-world hooks", async () => {
+  it("injects each open tab bridge before its MAIN-world hook without blocking other tabs", async () => {
     const port = createPort();
     const attach = vi.fn(async () => undefined);
     const registerContentScripts = vi.fn(async () => undefined);
@@ -825,8 +825,9 @@ describe("background bridge", () => {
     await vi.waitFor(() => {
       expect(resolveSlowBridge).toBeTypeOf("function");
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(pageHookCalls).toEqual([]);
+    await vi.waitFor(() => {
+      expect(pageHookCalls).toEqual([8]);
+    });
 
     resolveSlowBridge?.();
     await vi.waitFor(() => {
