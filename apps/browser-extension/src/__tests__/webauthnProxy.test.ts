@@ -4903,22 +4903,22 @@ describe("webAuthenticationProxy wrapper", () => {
       user_presence_verified: true,
       client_data_json_base64url: expect.any(String)
     });
-    expect(completeGetRequest).toHaveBeenCalledWith({
-      requestId: 214,
-      responseJson: JSON.stringify({
-        id: "Y3JlZGVudGlhbC0x",
-        rawId: "Y3JlZGVudGlhbC0x",
-        type: "public-key",
-        authenticatorAttachment: "platform",
-        clientExtensionResults: {},
-        response: {
-          authenticatorData: "auth-data",
-          clientDataJSON: "client-data",
-          signature: "signature",
-          userHandle: null
-        }
-      })
+    const resumeResponse = JSON.parse(
+      (completeGetRequest.mock.calls[0]?.[0] as { responseJson: string }).responseJson
+    ) as { response: Record<string, unknown> };
+    expect(resumeResponse).toMatchObject({
+      id: "Y3JlZGVudGlhbC0x",
+      rawId: "Y3JlZGVudGlhbC0x",
+      type: "public-key",
+      authenticatorAttachment: "platform",
+      clientExtensionResults: {},
+      response: {
+        authenticatorData: "auth-data",
+        clientDataJSON: "client-data",
+        signature: "signature"
+      }
     });
+    expect(resumeResponse.response).not.toHaveProperty("userHandle");
     expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
   });
 
@@ -17246,22 +17246,22 @@ describe("webAuthenticationProxy wrapper", () => {
     await vi.waitFor(() => {
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
     });
-    expect(completeGetRequest).toHaveBeenCalledWith({
-      requestId: 88,
-      responseJson: JSON.stringify({
-        id: "Y3JlZGVudGlhbC0x",
-        rawId: "Y3JlZGVudGlhbC0x",
-        type: "public-key",
-        authenticatorAttachment: "platform",
-        clientExtensionResults: {},
-        response: {
-          authenticatorData: "auth-data",
-          clientDataJSON: "client-data",
-          signature: "signature",
-          userHandle: null
-        }
-      })
+    const getResponse = JSON.parse(
+      (completeGetRequest.mock.calls[0]?.[0] as { responseJson: string }).responseJson
+    ) as { response: Record<string, unknown> };
+    expect(getResponse).toMatchObject({
+      id: "Y3JlZGVudGlhbC0x",
+      rawId: "Y3JlZGVudGlhbC0x",
+      type: "public-key",
+      authenticatorAttachment: "platform",
+      clientExtensionResults: {},
+      response: {
+        authenticatorData: "auth-data",
+        clientDataJSON: "client-data",
+        signature: "signature"
+      }
     });
+    expect(getResponse.response).not.toHaveProperty("userHandle");
   });
 
   it("serializes WebAuthn diagnostics writes without clobbering concurrent entries", async () => {

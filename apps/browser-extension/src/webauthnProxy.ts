@@ -1364,7 +1364,9 @@ async function handleGetRequest(
             authenticatorData: assertion.authenticatorDataBase64url,
             clientDataJSON: assertion.clientDataJsonBase64url,
             signature: assertion.signatureBase64url,
-            userHandle: assertion.userHandleBase64url ?? null
+            ...(typeof assertion.userHandleBase64url === "string"
+              ? { userHandle: assertion.userHandleBase64url }
+              : {})
           }
         })
       });
@@ -1819,7 +1821,9 @@ async function resumePasskeyGetAfterPromptComplete(
             authenticatorData: assertion.authenticatorDataBase64url,
             clientDataJSON: assertion.clientDataJsonBase64url,
             signature: assertion.signatureBase64url,
-            userHandle: assertion.userHandleBase64url ?? null
+            ...(typeof assertion.userHandleBase64url === "string"
+              ? { userHandle: assertion.userHandleBase64url }
+              : {})
           }
         })
       });
