@@ -9180,7 +9180,9 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("rejects unauthorized related-origin get requests after user approval without enumeration", async () => {
+  it("delays unauthorized related-origin get errors after approval without enumeration", async () => {
+    vi.useFakeTimers();
+
     let getListener: ((request: unknown) => void) | undefined;
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: false
@@ -9232,9 +9234,9 @@ describe("webAuthenticationProxy wrapper", () => {
 
     await presencePrompt.approve();
 
-    await vi.waitFor(() => {
-      expect(completeGetRequest).toHaveBeenCalledTimes(1);
-    });
+    for (let microtask = 0; microtask < 10; microtask += 1) {
+      await Promise.resolve();
+    }
     expect(fetch).toHaveBeenCalledWith(
       "https://victim.com/.well-known/webauthn",
       expect.objectContaining({
@@ -9249,6 +9251,14 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "create_passkey_assertion" })
     );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(completeGetRequest).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(74);
+    expect(completeGetRequest).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
     expect(completeGetRequest).toHaveBeenCalledWith({
       requestId: 63,
       error: {
@@ -12179,7 +12189,9 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("rejects related-origin create requests when well-known does not authorize the origin", async () => {
+  it("delays unauthorized related-origin create errors without mutation", async () => {
+    vi.useFakeTimers();
+
     let createListener: ((request: unknown) => void) | undefined;
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: false
@@ -12233,9 +12245,9 @@ describe("webAuthenticationProxy wrapper", () => {
 
     await presencePrompt.approve();
 
-    await vi.waitFor(() => {
-      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
-    });
+    for (let microtask = 0; microtask < 10; microtask += 1) {
+      await Promise.resolve();
+    }
     expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
       expect.objectContaining({
         type: "create_passkey_registration"
@@ -12249,6 +12261,14 @@ describe("webAuthenticationProxy wrapper", () => {
         redirect: "error"
       })
     );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(completeCreateRequest).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(74);
+    expect(completeCreateRequest).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => {
+      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
+    });
     expect(completeCreateRequest).toHaveBeenCalledWith({
       requestId: 62,
       error: {
@@ -14174,7 +14194,9 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(completeCreateRequest).not.toHaveBeenCalled();
   });
 
-  it("returns a WebAuthn error when passkey registration fails", async () => {
+  it("delays WebAuthn create errors when passkey registration fails", async () => {
+    vi.useFakeTimers();
+
     let createListener: ((request: unknown) => void) | undefined;
     const completeCreateRequest = vi.fn(async () => undefined);
     const sendRuntimeCommand = runtimeCommandMock()
@@ -14225,9 +14247,10 @@ describe("webAuthenticationProxy wrapper", () => {
     });
     await presencePrompt.approve();
 
-    await vi.waitFor(() => {
-      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
-    });
+    await flushMicrotasksUntilRuntimeCommand(
+      sendRuntimeCommand,
+      (command) => command.type === "abort_passkey_registration"
+    );
     expect(sendRuntimeCommand).not.toHaveBeenCalledWith({
       type: "save_passkey_registration",
       ceremony_token: expect.any(String),
@@ -14239,6 +14262,14 @@ describe("webAuthenticationProxy wrapper", () => {
       ceremony_token: expect.any(String),
       expected_phase: "s4_completion_and_mutation",
       closed_phase: "closed_failed"
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(completeCreateRequest).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(74);
+    expect(completeCreateRequest).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => {
+      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
     });
     expect(completeCreateRequest).toHaveBeenCalledWith({
       requestId: 16,
