@@ -1553,44 +1553,22 @@ async function handleGetRequest(
     });
     throwIfRequestCanceled();
 
-    try {
-      await completeGetRequest(chromeApi, {
-        requestId,
-        responseJson: passkeyGetCredentialResponseJson(
-          assertion,
-          clientExtensionResultsForGetOptions(options)
-        )
-      });
-    } catch (error) {
-      await recordWebAuthnDebug(chromeApi, {
-        event: "get_complete_error",
-        requestId,
-        error: errorSummary(error)
-      });
-      await markPasskeyCeremonyUnknownDelivery(
-        sendRuntimeCommand,
-        ceremonyContext.ceremonyToken
-      );
-      ceremonyPhase = "closed_delivered";
-      await clearPasskeyCeremonyMirror(chromeApi, ceremonyContext.ceremonyToken);
+    const delivered = await deliverPasskeyGetAssertion(
+      chromeApi,
+      sendRuntimeCommand,
+      requestId,
+      ceremonyContext.ceremonyToken,
+      assertion,
+      clientExtensionResultsForGetOptions(options),
+      {
+        completeError: "get_complete_error",
+        completed: "get_completed"
+      }
+    );
+    ceremonyPhase = "closed_delivered";
+    if (!delivered) {
       return;
     }
-    const deliveryConfirmed = await markPasskeyCeremonyDelivered(
-      sendRuntimeCommand,
-      ceremonyContext.ceremonyToken
-    );
-    if (!deliveryConfirmed) {
-      await markPasskeyCeremonyUnknownDelivery(
-        sendRuntimeCommand,
-        ceremonyContext.ceremonyToken
-      );
-    }
-    ceremonyPhase = "closed_delivered";
-    await clearPasskeyCeremonyMirror(chromeApi, ceremonyContext.ceremonyToken);
-    await recordWebAuthnDebug(chromeApi, {
-      event: "get_completed",
-      requestId
-    });
   } catch (error) {
     await recordWebAuthnDebug(chromeApi, {
       event: "get_error",
@@ -1655,6 +1633,49 @@ type PasskeyCredentialStatusBatchResponse = {
 type PasskeyCredentialListResponse = {
   credentials: PasskeyCredentialListItem[];
 };
+
+async function deliverPasskeyGetAssertion(
+  chromeApi: ChromeLike,
+  sendRuntimeCommand: RuntimeCommandSender,
+  requestId: number,
+  ceremonyToken: string,
+  assertion: PasskeyAssertionResponse,
+  clientExtensionResults: Record<string, unknown>,
+  events: { completeError: string; completed: string }
+) {
+  try {
+    await completeGetRequest(chromeApi, {
+      requestId,
+      responseJson: passkeyGetCredentialResponseJson(
+        assertion,
+        clientExtensionResults
+      )
+    });
+  } catch (error) {
+    await recordWebAuthnDebug(chromeApi, {
+      event: events.completeError,
+      requestId,
+      error: errorSummary(error)
+    });
+    await markPasskeyCeremonyUnknownDelivery(sendRuntimeCommand, ceremonyToken);
+    await clearPasskeyCeremonyMirror(chromeApi, ceremonyToken);
+    return false;
+  }
+
+  const deliveryConfirmed = await markPasskeyCeremonyDelivered(
+    sendRuntimeCommand,
+    ceremonyToken
+  );
+  if (!deliveryConfirmed) {
+    await markPasskeyCeremonyUnknownDelivery(sendRuntimeCommand, ceremonyToken);
+  }
+  await clearPasskeyCeremonyMirror(chromeApi, ceremonyToken);
+  await recordWebAuthnDebug(chromeApi, {
+    event: events.completed,
+    requestId
+  });
+  return true;
+}
 
 async function credentialSelectionForGetRequest(
   sendRuntimeCommand: RuntimeCommandSender,
@@ -2083,44 +2104,22 @@ async function resumePasskeyGetAfterPromptComplete(
       return;
     }
 
-    try {
-      await completeGetRequest(chromeApi, {
-        requestId,
-        responseJson: passkeyGetCredentialResponseJson(
-          assertion,
-          getClientExtensionResultsFromMirror(mirror)
-        )
-      });
-    } catch (error) {
-      await recordWebAuthnDebug(chromeApi, {
-        event: "get_resume_complete_error",
-        requestId,
-        error: errorSummary(error)
-      });
-      await markPasskeyCeremonyUnknownDelivery(
-        sendRuntimeCommand,
-        mirror.ceremonyToken
-      );
-      ceremonyPhase = "closed_delivered";
-      await clearPasskeyCeremonyMirror(chromeApi, mirror.ceremonyToken);
+    const delivered = await deliverPasskeyGetAssertion(
+      chromeApi,
+      sendRuntimeCommand,
+      requestId,
+      mirror.ceremonyToken,
+      assertion,
+      getClientExtensionResultsFromMirror(mirror),
+      {
+        completeError: "get_resume_complete_error",
+        completed: "get_resumed_after_presence_complete"
+      }
+    );
+    ceremonyPhase = "closed_delivered";
+    if (!delivered) {
       return;
     }
-    const deliveryConfirmed = await markPasskeyCeremonyDelivered(
-      sendRuntimeCommand,
-      mirror.ceremonyToken
-    );
-    if (!deliveryConfirmed) {
-      await markPasskeyCeremonyUnknownDelivery(
-        sendRuntimeCommand,
-        mirror.ceremonyToken
-      );
-    }
-    ceremonyPhase = "closed_delivered";
-    await clearPasskeyCeremonyMirror(chromeApi, mirror.ceremonyToken);
-    await recordWebAuthnDebug(chromeApi, {
-      event: "get_resumed_after_presence_complete",
-      requestId
-    });
   } catch (error) {
     await recordWebAuthnDebug(chromeApi, {
       event: "get_resume_after_presence_complete_error",
