@@ -38,8 +38,11 @@ fn run_loop_with_io_with_limit(
             NativeMessage::Eof => return Ok(()),
             NativeMessage::Message(envelope) => {
                 let request_id = envelope.request_id;
-                let response = handle_command_response(&mut runtime, envelope.command);
-                write_native_message(stdout, &response, request_id.as_deref())?;
+                let outcome = handle_command_response(&mut runtime, envelope.command);
+                write_native_message(stdout, &outcome.response, request_id.as_deref())?;
+                if outcome.fatal {
+                    return Ok(());
+                }
             }
             NativeMessage::DecodeError {
                 message,
@@ -62,24 +65,38 @@ fn run_loop_with_io_with_limit(
     }
 }
 
-fn handle_command_response(runtime: &mut Runtime, command: RuntimeCommand) -> RuntimeResponse {
+struct CommandOutcome {
+    response: RuntimeResponse,
+    fatal: bool,
+}
+
+fn handle_command_response(runtime: &mut Runtime, command: RuntimeCommand) -> CommandOutcome {
     command_response_from_result(|| runtime.handle(command))
 }
 
-fn command_response_from_result(run: impl FnOnce() -> Result<RuntimeResponse>) -> RuntimeResponse {
+fn command_response_from_result(run: impl FnOnce() -> Result<RuntimeResponse>) -> CommandOutcome {
     match catch_unwind(AssertUnwindSafe(run)) {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => RuntimeResponse::Error(ErrorDto {
-            code: "invalid_request".into(),
-            message: format_error_chain(&error),
-        }),
-        Err(payload) => RuntimeResponse::Error(ErrorDto {
-            code: "panic".into(),
-            message: format!(
-                "runtime command panicked: {}",
-                panic_payload_message(payload.as_ref())
-            ),
-        }),
+        Ok(Ok(response)) => CommandOutcome {
+            response,
+            fatal: false,
+        },
+        Ok(Err(error)) => CommandOutcome {
+            response: RuntimeResponse::Error(ErrorDto {
+                code: "invalid_request".into(),
+                message: format_error_chain(&error),
+            }),
+            fatal: false,
+        },
+        Err(payload) => CommandOutcome {
+            response: RuntimeResponse::Error(ErrorDto {
+                code: "panic".into(),
+                message: format!(
+                    "runtime command panicked: {}",
+                    panic_payload_message(payload.as_ref())
+                ),
+            }),
+            fatal: true,
+        },
     }
 }
 
@@ -433,14 +450,15 @@ mod tests {
     fn command_errors_are_serialized_without_exiting_the_host() {
         let mut runtime = Runtime::for_tests();
 
-        let response = handle_command_response(
+        let outcome = handle_command_response(
             &mut runtime,
             RuntimeCommand::AddLocalVaultReference {
                 path: Some("/definitely/missing/demo.kdbx".into()),
             },
         );
 
-        let RuntimeResponse::Error(error) = response else {
+        assert!(!outcome.fatal);
+        let RuntimeResponse::Error(error) = outcome.response else {
             panic!("expected error response");
         };
         assert_eq!(error.code, "invalid_request");
@@ -456,18 +474,19 @@ mod tests {
     }
 
     #[test]
-    fn command_response_converts_panics_to_protocol_errors() {
-        let response = command_response_from_result(|| -> anyhow::Result<RuntimeResponse> {
+    fn command_response_converts_panics_to_fatal_protocol_errors() {
+        let outcome = command_response_from_result(|| -> anyhow::Result<RuntimeResponse> {
             panic!("passkey assertion panic");
         });
 
         assert_eq!(
-            response,
+            outcome.response,
             RuntimeResponse::Error(vaultkern_runtime_protocol::ErrorDto {
                 code: "panic".into(),
                 message: "runtime command panicked: passkey assertion panic".into(),
             })
         );
+        assert!(outcome.fatal);
     }
 
     #[test]
