@@ -623,14 +623,6 @@ describe("background bridge", () => {
     await vi.waitFor(() => {
       expect(registerContentScripts).toHaveBeenCalledWith([
         {
-          id: "vaultkern-webauthn-content-bridge",
-          matches: ["<all_urls>"],
-          js: ["webauthnContentScript.js"],
-          runAt: "document_start",
-          allFrames: true,
-          persistAcrossSessions: false
-        },
-        {
           id: "vaultkern-webauthn-page-hook",
           matches: ["<all_urls>"],
           js: ["webauthnPageHook.js"],
@@ -660,7 +652,7 @@ describe("background bridge", () => {
       expect(callsByTab.get(tabId)).toEqual([
         {
           target: { tabId, allFrames: true },
-          func: expect.any(Function),
+          files: ["webauthnContentScript.js"],
           world: "ISOLATED"
         },
         {
@@ -743,7 +735,7 @@ describe("background bridge", () => {
     await vi.waitFor(() => {
       expect(executeScript).toHaveBeenCalledWith({
         target: { tabId: 7, allFrames: true },
-        func: expect.any(Function),
+        files: ["webauthnContentScript.js"],
         world: "ISOLATED"
       });
     });
@@ -1203,10 +1195,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(unregisterContentScripts).toHaveBeenCalledWith({
-        ids: [
-          "vaultkern-webauthn-content-bridge",
-          "vaultkern-webauthn-page-hook"
-        ]
+        ids: ["vaultkern-webauthn-page-hook"]
       });
     });
   });
@@ -1512,10 +1501,7 @@ describe("background bridge", () => {
     delete (globalThis as Record<string, unknown>)
       .__vaultkernWebAuthnPageHookEnabled;
     expect(unregisterContentScripts).toHaveBeenCalledWith({
-      ids: [
-        "vaultkern-webauthn-content-bridge",
-        "vaultkern-webauthn-page-hook"
-      ]
+      ids: ["vaultkern-webauthn-page-hook"]
     });
   });
 
