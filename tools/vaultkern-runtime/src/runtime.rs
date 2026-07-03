@@ -973,7 +973,7 @@ impl Runtime {
         if self.session.active_vault_id() != Some(vault_id) {
             anyhow::bail!("passkey user verification vault mismatch");
         }
-        let now_epoch_ms = self.current_unix_time_ms();
+        let validation_epoch_ms = self.current_unix_time_ms();
         let recent_unlock_verified = {
             let entry = self
                 .passkey_ceremonies
@@ -982,9 +982,14 @@ impl Runtime {
             if entry.phase != expected_phase {
                 anyhow::bail!("passkey ceremony phase mismatch");
             }
-            validate_passkey_ceremony_not_expired(entry, now_epoch_ms)?;
+            validate_passkey_ceremony_not_expired(entry, validation_epoch_ms)?;
             validate_passkey_ceremony_vault_binding(entry, vault_id)?;
-            self.recent_unlock_user_verification_matches(entry, vault_id, method, now_epoch_ms)
+            self.recent_unlock_user_verification_matches(
+                entry,
+                vault_id,
+                method,
+                validation_epoch_ms,
+            )
         };
 
         match method {
@@ -1002,20 +1007,25 @@ impl Runtime {
             }
         }
 
+        let verified_at_epoch_ms = self.current_unix_time_ms();
         let entry = self
             .passkey_ceremonies
             .get_mut(ceremony_token)
             .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        if entry.phase != expected_phase {
+            anyhow::bail!("passkey ceremony phase mismatch");
+        }
+        validate_passkey_ceremony_not_expired(entry, verified_at_epoch_ms)?;
         bind_passkey_ceremony_vault(entry, vault_id)?;
         entry.user_verification = Some(PasskeyUserVerificationProof {
             vault_id: vault_id.to_owned(),
             method,
-            verified_at_epoch_ms: now_epoch_ms,
+            verified_at_epoch_ms,
         });
         Ok(PasskeyUserVerifiedDto {
             verified: true,
             method,
-            verified_at_epoch_ms: now_epoch_ms as i64,
+            verified_at_epoch_ms: verified_at_epoch_ms as i64,
         })
     }
 
@@ -5459,6 +5469,22 @@ mod tests {
         }
     }
 
+    struct RecordingBiometricProvider {
+        authorized_at_epoch_ms: std::rc::Rc<RefCell<Option<u64>>>,
+    }
+
+    impl BiometricProvider for RecordingBiometricProvider {
+        fn supports_quick_unlock(&self) -> bool {
+            true
+        }
+
+        fn authorize(&self, _reason: &str) -> Result<()> {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            *self.authorized_at_epoch_ms.borrow_mut() = Some(current_unix_time_ms());
+            Ok(())
+        }
+    }
+
     fn open_unlocked_demo_vault(runtime: &mut Runtime) -> (tempfile::TempDir, VaultHandleDto) {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
@@ -5764,6 +5790,73 @@ mod tests {
             panic!("expected passkey UV proof, got {verified:?}");
         };
         assert!(verified.verified);
+    }
+
+    #[test]
+    fn passkey_quick_unlock_user_verification_records_completion_time() {
+        let authorized_at_epoch_ms = std::rc::Rc::new(RefCell::new(None));
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        runtime.biometric = Box::new(RecordingBiometricProvider {
+            authorized_at_epoch_ms: authorized_at_epoch_ms.clone(),
+        });
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        *authorized_at_epoch_ms.borrow_mut() = None;
+        let registered_at_epoch_ms = runtime.current_unix_time_ms();
+
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "quick-uv-time-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Required,
+                challenge_base64url: "Y2hhbGxlbmdlLTE".into(),
+                request_id: 42,
+                tab_id: 42,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms,
+                expires_at_epoch_ms: registered_at_epoch_ms + 300_000,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "quick-uv-time-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                related_origin_verified: false,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::BindPasskeyCeremonyVault {
+                ceremony_token: "quick-uv-time-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id.clone(),
+            })
+            .unwrap();
+
+        let verified = runtime
+            .handle(RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token: "quick-uv-time-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id,
+                method: PasskeyUserVerificationMethodDto::QuickUnlock,
+                password: None,
+            })
+            .unwrap();
+
+        let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+            panic!("expected passkey UV proof, got {verified:?}");
+        };
+        let authorized_at = authorized_at_epoch_ms
+            .borrow()
+            .expect("quick unlock authorization timestamp");
+        assert!(verified.verified_at_epoch_ms as u64 >= authorized_at);
     }
 
     #[test]
