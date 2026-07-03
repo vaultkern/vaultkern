@@ -4236,6 +4236,72 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
   });
 
+  it("fails closed instead of accepting native-ahead ROR S3B without related-origin evidence", async () => {
+    const sessionStorage = createSessionStorage({
+      vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
+        "token-native-ahead-ror-s3b": {
+          version: 1,
+          ceremonyToken: "token-native-ahead-ror-s3b",
+          ceremony: "get",
+          phase: "s1_user_authorization",
+          origin: "https://login.example",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          challengeBase64url: "Y2hhbGxlbmdlLTE",
+          requestId: 214,
+          tabId: 101,
+          frameId: 0,
+          frameKind: "top",
+          activeVaultId: "vault-1",
+          popupNonce: "nonce-native-ahead-ror-s3b",
+          promptMode: "approve",
+          promptWindowId: 42,
+          promptCredentialOptions: [
+            {
+              credentialId: "Y3JlZGVudGlhbC0x",
+              username: "alice@example.com"
+            }
+          ],
+          getCredentialIds: [null],
+          getClientExtensionResults: {},
+          registeredAtEpochMs: 1_000,
+          expiresAtEpochMs: Date.now() + 300_000
+        }
+      })
+    });
+    const chromeApi = {
+      storage: {
+        session: sessionStorage
+      }
+    };
+    const sendRuntimeCommand = vi.fn(async (command: Record<string, unknown>) => {
+      if (command.type === "query_passkey_ceremony_ledger") {
+        return {
+          type: "passkey_ceremony_ledger",
+          known: true,
+          phase: "s3b_user_selection",
+          durableState: "none",
+          deliveryState: "not_delivered"
+        };
+      }
+      if (command.type === "advance_passkey_ceremony_phase") {
+        return { type: "passkey_ceremony_advanced", advanced: true };
+      }
+
+      throw new Error(`unexpected command: ${command.type}`);
+    });
+
+    await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
+
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "advance_passkey_ceremony_phase",
+      ceremony_token: "token-native-ahead-ror-s3b",
+      expected_phase: "s3b_user_selection",
+      next_phase: "closed_failed"
+    });
+    expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
+  });
+
   it("restores known equal-phase S3B prompt options without replaying side effects", async () => {
     let messageListener:
       | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void)

@@ -3487,7 +3487,7 @@ function passkeyCeremonyCanAdvanceMirrorPhase(
   if (ledgerPhase === "s4_completion_and_mutation") {
     return false;
   }
-  if (!passkeyCeremonyCanReachActivePhase(mirror.phase, ledgerPhase)) {
+  if (!passkeyCeremonyCanReachActivePhase(mirror, ledgerPhase)) {
     return false;
   }
 
@@ -3511,8 +3511,11 @@ function passkeyCeremonyMirrorCanRepresentNativeAheadPhase(
   return isPasskeyCeremonyMirror(mirror);
 }
 
-function passkeyCeremonyCanReachActivePhase(from: string, to: string) {
-  const start = passkeyCeremonyActivePhaseFrom(from);
+function passkeyCeremonyCanReachActivePhase(
+  mirror: PasskeyCeremonyContext,
+  to: string
+) {
+  const start = passkeyCeremonyActivePhaseFrom(mirror.phase);
   const target = passkeyCeremonyActivePhaseFrom(to);
   if (!start || !target || start === target) {
     return false;
@@ -3526,7 +3529,11 @@ function passkeyCeremonyCanReachActivePhase(from: string, to: string) {
       break;
     }
     for (const [edgeStart, edgeEnd] of PASSKEY_CEREMONY_TRANSITION_EDGES) {
-      if (edgeStart !== current || seen.has(edgeEnd)) {
+      if (
+        edgeStart !== current ||
+        seen.has(edgeEnd) ||
+        !passkeyCeremonyTransitionEdgeAllowed(mirror, edgeStart, edgeEnd)
+      ) {
         continue;
       }
       if (edgeEnd === target) {
@@ -3538,6 +3545,26 @@ function passkeyCeremonyCanReachActivePhase(from: string, to: string) {
   }
 
   return false;
+}
+
+function passkeyCeremonyTransitionEdgeAllowed(
+  mirror: PasskeyCeremonyContext,
+  from: PasskeyCeremonyActivePhase,
+  to: PasskeyCeremonyActivePhase
+) {
+  if (from === "s1_user_authorization" && to === "s2_network_validation") {
+    return (
+      !originMatchesRelyingParty(mirror.origin, mirror.relyingParty) &&
+      originCanUseRelatedOriginVerification(mirror.origin, mirror.relyingParty)
+    );
+  }
+  if (from === "s1_user_authorization" && to === "s3_credential_resolution") {
+    return originMatchesRelyingParty(mirror.origin, mirror.relyingParty);
+  }
+  if (from === "s2_network_validation" && to === "s3_credential_resolution") {
+    return mirror.relatedOriginVerified === true;
+  }
+  return true;
 }
 
 function passkeyCeremonyActivePhaseIndex(phase: string) {
