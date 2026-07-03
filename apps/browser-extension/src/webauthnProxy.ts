@@ -2262,13 +2262,13 @@ async function resumePasskeyCreateAfterPromptComplete(
     );
     ceremonyCommitted = true;
     if (requestIsCanceled()) {
-      const marked = await markPasskeyCeremonyUnknownDelivery(
+      const marked = await markCommittedPasskeyCreateUnknownDelivery(
+        chromeApi,
         sendRuntimeCommand,
         mirror.ceremonyToken
       );
       if (marked) {
         ceremonyPhase = "closed_delivered";
-        await clearPasskeyCeremonyMirror(chromeApi, mirror.ceremonyToken);
       }
       return;
     }
@@ -2286,12 +2286,13 @@ async function resumePasskeyCreateAfterPromptComplete(
       }
     );
     if (!delivered) {
-      await markPasskeyCeremonyUnknownDelivery(
+      await markCommittedPasskeyCreateUnknownDelivery(
+        chromeApi,
         sendRuntimeCommand,
-        mirror.ceremonyToken
+        mirror.ceremonyToken,
+        { clearMirror: "always" }
       );
       ceremonyPhase = "closed_delivered";
-      await clearPasskeyCeremonyMirror(chromeApi, mirror.ceremonyToken);
       return;
     }
     ceremonyPhase = "closed_delivered";
@@ -2314,11 +2315,12 @@ async function resumePasskeyCreateAfterPromptComplete(
         // Preserve the original WebAuthn failure.
       }
     } else if (ceremonyCommitted && mirror) {
-      await markPasskeyCeremonyUnknownDelivery(
+      await markCommittedPasskeyCreateUnknownDelivery(
+        chromeApi,
         sendRuntimeCommand,
-        mirror.ceremonyToken
+        mirror.ceremonyToken,
+        { clearMirror: "always" }
       );
-      await clearPasskeyCeremonyMirror(chromeApi, mirror.ceremonyToken);
     } else {
       await closePasskeyCeremonyForError(
         chromeApi,
@@ -3881,6 +3883,24 @@ async function abortS4PasskeyCreateCeremony(
   return true;
 }
 
+async function markCommittedPasskeyCreateUnknownDelivery(
+  chromeApi: ChromeLike,
+  sendRuntimeCommand: RuntimeCommandSender,
+  ceremonyToken: string | null | undefined,
+  options: { clearMirror: "whenMarked" | "always" } = {
+    clearMirror: "whenMarked"
+  }
+) {
+  const marked = await markPasskeyCeremonyUnknownDelivery(
+    sendRuntimeCommand,
+    ceremonyToken ?? null
+  );
+  if (marked || options.clearMirror === "always") {
+    await clearPasskeyCeremonyMirror(chromeApi, ceremonyToken ?? null);
+  }
+  return marked;
+}
+
 async function closePasskeyCeremony(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender,
@@ -4253,14 +4273,14 @@ async function handleCreateRequest(
       ceremonyPhase = closedPhase;
       await clearPasskeyCeremonyMirror(chromeApi, ceremonyContext.ceremonyToken);
     };
-    const markCommittedRegistrationUnknownDelivery = async () => {
-      const marked = await markPasskeyCeremonyUnknownDelivery(
+    const markCommittedUnknownDelivery = async () => {
+      const marked = await markCommittedPasskeyCreateUnknownDelivery(
+        chromeApi,
         sendRuntimeCommand,
         ceremonyContext.ceremonyToken
       );
       if (marked) {
         ceremonyPhase = "closed_delivered";
-        await clearPasskeyCeremonyMirror(chromeApi, ceremonyContext.ceremonyToken);
       }
     };
     await recordWebAuthnDebug(chromeApi, {
@@ -4303,7 +4323,7 @@ async function handleCreateRequest(
     );
     ceremonyCommitted = true;
     if (requestIsCanceled()) {
-      await markCommittedRegistrationUnknownDelivery();
+      await markCommittedUnknownDelivery();
       return;
     }
     const delivered = await deliverPasskeyCreateRegistration(
@@ -4319,7 +4339,7 @@ async function handleCreateRequest(
       }
     );
     if (!delivered) {
-      await markCommittedRegistrationUnknownDelivery();
+      await markCommittedUnknownDelivery();
       return;
     }
     ceremonyPhase = "closed_delivered";
@@ -4349,11 +4369,12 @@ async function handleCreateRequest(
           );
         }
       } else {
-        await markPasskeyCeremonyUnknownDelivery(
+        await markCommittedPasskeyCreateUnknownDelivery(
+          chromeApi,
           sendRuntimeCommand,
-          ceremonyToken
+          ceremonyToken,
+          { clearMirror: "always" }
         );
-        await clearPasskeyCeremonyMirror(chromeApi, ceremonyToken);
       }
       return;
     }

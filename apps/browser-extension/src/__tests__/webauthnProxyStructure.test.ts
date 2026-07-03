@@ -210,4 +210,19 @@ describe("webauthn proxy structure", () => {
       1
     );
   });
+
+  it("marks committed create registrations unknown-delivery through one helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain(
+      "async function markCommittedPasskeyCreateUnknownDelivery"
+    );
+    expect(source).not.toContain(
+      "const markCommittedRegistrationUnknownDelivery"
+    );
+  });
 });
