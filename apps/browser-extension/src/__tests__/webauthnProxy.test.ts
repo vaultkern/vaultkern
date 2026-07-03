@@ -5167,6 +5167,101 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
   });
 
+  it("fails closed when a restored approval prompt window no longer exists", async () => {
+    vi.useFakeTimers();
+
+    let removedListener: ((windowId: number) => void) | undefined;
+    const sessionStorage = createSessionStorage({
+      vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
+        "token-restored-missing-window": {
+          version: 1,
+          ceremonyToken: "token-restored-missing-window",
+          ceremony: "get",
+          phase: "s1_user_authorization",
+          origin: "https://example.com",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          challengeBase64url: "Y2hhbGxlbmdlLTE",
+          requestId: 217,
+          tabId: 101,
+          frameId: 0,
+          frameKind: "top",
+          activeVaultId: "vault-1",
+          getCredentialIds: ["Y3JlZGVudGlhbC0x"],
+          popupNonce: "nonce-missing-window",
+          promptMode: "approve",
+          promptWindowId: 52,
+          getClientExtensionResults: {},
+          registeredAtEpochMs: 1_000,
+          expiresAtEpochMs: Date.now() + 300_000
+        }
+      })
+    });
+    const completeGetRequest = vi.fn(async () => undefined);
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`)
+      },
+      storage: {
+        session: sessionStorage
+      },
+      windows: {
+        get: vi.fn(async () => {
+          throw new Error("No window with id: 52");
+        }),
+        onRemoved: {
+          addListener(listener: (windowId: number) => void) {
+            removedListener = listener;
+          },
+          removeListener: vi.fn()
+        }
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest
+      }
+    };
+    const sendRuntimeCommand = vi.fn(async (command: Record<string, unknown>) => {
+      if (command.type === "query_passkey_ceremony_ledger") {
+        return {
+          type: "passkey_ceremony_ledger",
+          known: true,
+          phase: "s1_user_authorization",
+          durableState: "none",
+          deliveryState: "not_delivered"
+        };
+      }
+      if (command.type === "advance_passkey_ceremony_phase") {
+        return { type: "passkey_ceremony_advanced", advanced: true };
+      }
+      throw new Error(`unexpected command: ${command.type}`);
+    });
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+    await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
+
+    expect(removedListener).toBeDefined();
+    await vi.waitFor(() => {
+      expect(chromeApi.windows.get).toHaveBeenCalledWith(52);
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "advance_passkey_ceremony_phase",
+      ceremony_token: "token-restored-missing-window",
+      expected_phase: "s1_user_authorization",
+      next_phase: "closed_aborted"
+    });
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 217,
+      error: {
+        name: "NotAllowedError",
+        message: "VaultKern passkey request failed"
+      }
+    });
+    expect(chromeApi.windows.onRemoved.removeListener).toHaveBeenCalled();
+    expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
+  });
+
   it("resumes a known equal-phase S1 get request when the restored unlock prompt completes", async () => {
     let messageListener:
       | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void)

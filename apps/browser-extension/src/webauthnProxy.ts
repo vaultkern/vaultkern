@@ -42,6 +42,7 @@ type ChromeLike = {
   };
   windows?: {
     create?: (createData: Record<string, unknown>) => Promise<{ id?: number }> | void;
+    get?: (windowId: number) => Promise<unknown> | unknown;
     update?: (windowId: number, updateInfo: Record<string, unknown>) => Promise<unknown> | void;
     remove?: (windowId: number) => Promise<unknown> | void;
     onRemoved?: {
@@ -2985,6 +2986,43 @@ function restorePromptWindow<
       );
     }
   );
+  void verifyRestoredPromptWindow(
+    chromeApi,
+    sendRuntimeCommand,
+    state,
+    clearPromptState,
+    mirror
+  );
+}
+
+async function verifyRestoredPromptWindow<
+  TContext extends WebAuthnPromptContext,
+  TCompleteSignal
+>(
+  chromeApi: ChromeLike,
+  sendRuntimeCommand: RuntimeCommandSender,
+  state: PromptState<TContext, TCompleteSignal>,
+  clearPromptState: PromptClearState,
+  mirror: PasskeyCeremonyContext
+) {
+  if (typeof mirror.promptWindowId !== "number" || !chromeApi.windows?.get) {
+    return;
+  }
+
+  try {
+    await chromeApi.windows.get(mirror.promptWindowId);
+  } catch {
+    if (state.windowIds.get(mirror.ceremonyToken) !== mirror.promptWindowId) {
+      return;
+    }
+    clearPromptState(mirror.ceremonyToken, { preserveDismissed: true });
+    state.dismissedPromptKeys.add(mirror.ceremonyToken);
+    await completeRestoredPasskeyPromptDismissal(
+      chromeApi,
+      sendRuntimeCommand,
+      mirror
+    );
+  }
 }
 
 async function completeRestoredPasskeyPromptDismissal(
