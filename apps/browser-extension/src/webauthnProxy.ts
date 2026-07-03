@@ -2244,12 +2244,11 @@ async function resumePasskeyCreateAfterPromptComplete(
       return;
     }
 
-    await commitPasskeyRegistration(
+    await commitPendingPasskeyCreateRegistration(
       sendRuntimeCommand,
       mirror.ceremonyToken,
       activeVaultId,
-      registration.entryId,
-      registration.credentialId
+      registration
     );
     ceremonyCommitted = true;
     if (requestIsCanceled()) {
@@ -3914,6 +3913,21 @@ async function savePendingPasskeyCreateRegistration(
   }
 }
 
+async function commitPendingPasskeyCreateRegistration(
+  sendRuntimeCommand: RuntimeCommandSender,
+  ceremonyToken: string,
+  activeVaultId: string,
+  registration: PasskeyRegistrationResponse
+) {
+  await commitPasskeyRegistration(
+    sendRuntimeCommand,
+    ceremonyToken,
+    activeVaultId,
+    registration.entryId,
+    registration.credentialId
+  );
+}
+
 async function markCommittedPasskeyCreateUnknownDelivery(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender,
@@ -4343,12 +4357,11 @@ async function handleCreateRequest(
       return;
     }
 
-    await commitPasskeyRegistration(
+    await commitPendingPasskeyCreateRegistration(
       sendRuntimeCommand,
       ceremonyContext.ceremonyToken,
       activeVaultId,
-      registration.entryId,
-      registration.credentialId
+      registration
     );
     ceremonyCommitted = true;
     if (requestIsCanceled()) {
