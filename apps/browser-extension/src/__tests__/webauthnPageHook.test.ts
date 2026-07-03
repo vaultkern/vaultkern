@@ -139,6 +139,39 @@ describe("WebAuthn page hook", () => {
     expect(postPayload?.bridgeRequestId).toBe(eventPayload?.bridgeRequestId);
   });
 
+  it("does not use predictable sequential internal observation ids", async () => {
+    installCredentialMocks();
+    const dispatchedEvents: CustomEvent[] = [];
+    const originalDispatchEvent = window.dispatchEvent.bind(window);
+    vi.spyOn(window, "dispatchEvent").mockImplementation((event: Event) => {
+      if (event instanceof CustomEvent) {
+        dispatchedEvents.push(event);
+      }
+      return originalDispatchEvent(event);
+    });
+    vi.spyOn(window, "postMessage").mockImplementation(() => undefined);
+
+    await import("../webauthnPageHook");
+
+    await navigator.credentials.get({
+      publicKey: {
+        challenge: new Uint8Array([5, 4, 3])
+      }
+    } as CredentialRequestOptions);
+    await navigator.credentials.get({
+      publicKey: {
+        challenge: new Uint8Array([6, 5, 4])
+      }
+    } as CredentialRequestOptions);
+
+    const bridgeRequestIds = dispatchedEvents
+      .filter((event) => event.type === "vaultkern_webauthn_page_request_event")
+      .map((event) => (event.detail as { bridgeRequestId?: unknown }).bridgeRequestId);
+
+    expect(bridgeRequestIds).toHaveLength(2);
+    expect(bridgeRequestIds).not.toEqual(["1", "2"]);
+  });
+
   it("does not let observation postMessage failures break WebAuthn calls", async () => {
     const { originalGet } = installCredentialMocks();
     vi.spyOn(window, "postMessage").mockImplementation(() => {

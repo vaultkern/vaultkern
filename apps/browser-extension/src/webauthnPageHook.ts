@@ -3,7 +3,6 @@
   const WEB_AUTHN_PAGE_REQUEST_EVENT = "vaultkern_webauthn_page_request_event";
   const HOOK_ENABLED_MARKER = "__vaultkernWebAuthnPageHookEnabled";
   const HOOK_MARKER = "__vaultkernWebAuthnHookInstalled";
-  const HOOK_REQUEST_SEQUENCE = "__vaultkernWebAuthnPageHookRequestSequence";
 
   type PublicKeyCredentialOptionsLike = {
     challenge?: unknown;
@@ -20,11 +19,6 @@
 
   type CredentialsContainerWithMarker = CredentialsContainer & {
     [HOOK_MARKER]?: boolean;
-  };
-
-  type PageHookState = typeof globalThis & {
-    [HOOK_ENABLED_MARKER]?: boolean;
-    [HOOK_REQUEST_SEQUENCE]?: number;
   };
 
 installWebAuthnPageHook();
@@ -101,13 +95,16 @@ function observeWebAuthnRequest(
 }
 
 function nextBridgeRequestId() {
-  const hookState = globalThis as PageHookState;
-  const next =
-    (typeof hookState[HOOK_REQUEST_SEQUENCE] === "number"
-      ? hookState[HOOK_REQUEST_SEQUENCE]
-      : 0) + 1;
-  hookState[HOOK_REQUEST_SEQUENCE] = next;
-  return String(next);
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === "function") {
+    return cryptoApi.randomUUID();
+  }
+  if (typeof cryptoApi?.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    cryptoApi.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function mediationFrom(ceremony: "create" | "get", value: unknown) {
