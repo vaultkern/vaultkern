@@ -36,5 +36,9 @@ describe("webauthn proxy structure", () => {
     expect(source).not.toMatch(/function\s+closePresencePromptWindow\b/);
     expect(source).not.toMatch(/function\s+closeUserVerificationPromptWindow\b/);
     expect(source).toContain("async function closePromptWindowForRequest");
+    expect(source).not.toMatch(/function\s+waitForUnlockSignal\b/);
+    expect(source).not.toMatch(/function\s+waitForPresenceSignal\b/);
+    expect(source).not.toMatch(/function\s+waitForUserVerificationSignal\b/);
+    expect(source).toContain("function waitForPromptSignal");
   });
 });
