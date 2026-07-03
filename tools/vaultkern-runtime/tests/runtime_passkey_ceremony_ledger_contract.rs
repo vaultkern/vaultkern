@@ -9,6 +9,15 @@ use vaultkern_runtime_protocol::{
 };
 
 #[test]
+fn runtime_phase_graph_uses_shared_active_transition_contract() {
+    let runtime_source = include_str!("../src/runtime.rs");
+    assert!(
+        runtime_source.contains("passkey_ceremony_transitions.json"),
+        "runtime phase graph must include the shared active transition contract"
+    );
+}
+
+#[test]
 fn runtime_registers_and_queries_passkey_ceremony_ledger() {
     let mut runtime = Runtime::for_tests_at(100);
 

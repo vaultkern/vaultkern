@@ -1,3 +1,4 @@
+import passkeyCeremonyTransitions from "../../../tools/vaultkern-runtime/src/passkey_ceremony_transitions.json";
 import psl from "psl";
 
 export type WebAuthnProxyStatus =
@@ -102,6 +103,13 @@ type PasskeyCeremonyActivePhase = Exclude<
   PasskeyCeremonyPhase,
   "closed_aborted" | "closed_delivered" | "closed_failed"
 >;
+
+type PasskeyCeremonyTransitionContract = {
+  active_phases: PasskeyCeremonyActivePhase[];
+  active_edges: Array<
+    readonly [PasskeyCeremonyActivePhase, PasskeyCeremonyActivePhase]
+  >;
+};
 
 type PasskeyUserVerificationRequirement =
   | "discouraged"
@@ -330,26 +338,12 @@ const PASSKEY_CEREMONY_PHASES = new Set<PasskeyCeremonyPhase>([
   "closed_delivered",
   "closed_failed"
 ]);
-const PASSKEY_CEREMONY_ACTIVE_PHASES: readonly PasskeyCeremonyActivePhase[] = [
-  "s0_pre_authorization",
-  "s1_user_authorization",
-  "s2_network_validation",
-  "s3_credential_resolution",
-  "s3b_user_selection",
-  "s4_completion_and_mutation"
-];
-const PASSKEY_CEREMONY_TRANSITION_EDGES: readonly (readonly [
-  PasskeyCeremonyActivePhase,
-  PasskeyCeremonyActivePhase
-])[] = [
-  ["s0_pre_authorization", "s1_user_authorization"],
-  ["s1_user_authorization", "s2_network_validation"],
-  ["s1_user_authorization", "s3_credential_resolution"],
-  ["s2_network_validation", "s3_credential_resolution"],
-  ["s3_credential_resolution", "s3b_user_selection"],
-  ["s3_credential_resolution", "s4_completion_and_mutation"],
-  ["s3b_user_selection", "s4_completion_and_mutation"]
-];
+const PASSKEY_CEREMONY_TRANSITION_CONTRACT =
+  passkeyCeremonyTransitions as PasskeyCeremonyTransitionContract;
+const PASSKEY_CEREMONY_ACTIVE_PHASES =
+  PASSKEY_CEREMONY_TRANSITION_CONTRACT.active_phases;
+const PASSKEY_CEREMONY_TRANSITION_EDGES =
+  PASSKEY_CEREMONY_TRANSITION_CONTRACT.active_edges;
 const RELATED_ORIGIN_LABEL_LIMIT = 5;
 const RELATED_ORIGIN_FETCH_TIMEOUT_MS = 5_000;
 const GENERIC_PASSKEY_REQUEST_ERROR_MESSAGE = "VaultKern passkey request failed";

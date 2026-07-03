@@ -53,4 +53,17 @@ describe("webauthn proxy structure", () => {
     expect(source).not.toMatch(/function\s+restoreUserVerificationPromptWindow\b/);
     expect(source).toContain("function restorePromptWindow");
   });
+
+  it("loads active ceremony transitions from the runtime contract", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("passkey_ceremony_transitions.json");
+    expect(source).not.toMatch(
+      /const\s+PASSKEY_CEREMONY_TRANSITION_EDGES[\s\S]*?=\s*\[\s*\[/
+    );
+  });
 });

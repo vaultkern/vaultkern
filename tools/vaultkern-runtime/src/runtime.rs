@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -4935,19 +4936,16 @@ fn is_legal_passkey_ceremony_transition(
         return false;
     }
 
+    if passkey_ceremony_active_transition_edges().contains(&(expected_phase, next_phase)) {
+        return passkey_ceremony_active_transition_edge_allowed(
+            expected_phase,
+            next_phase,
+            identity,
+            related_origin_verified,
+        );
+    }
+
     match (expected_phase, next_phase) {
-        (PreAuthorization, UserAuthorization) => true,
-        (UserAuthorization, NetworkValidation) => !passkey_ceremony_origin_matches_relying_party(
-            &identity.origin,
-            &identity.relying_party,
-        ),
-        (UserAuthorization, CredentialResolution) => {
-            passkey_ceremony_origin_matches_relying_party(&identity.origin, &identity.relying_party)
-        }
-        (NetworkValidation, CredentialResolution) => related_origin_verified,
-        (CredentialResolution, UserSelection) => true,
-        (CredentialResolution, CompletionAndMutation) => true,
-        (UserSelection, CompletionAndMutation) => true,
         (CompletionAndMutation, ClosedDelivered) => true,
         (PreAuthorization, ClosedAborted | ClosedFailed)
         | (UserAuthorization, ClosedAborted | ClosedFailed)
@@ -4956,6 +4954,72 @@ fn is_legal_passkey_ceremony_transition(
         | (UserSelection, ClosedAborted | ClosedFailed)
         | (CompletionAndMutation, ClosedAborted | ClosedFailed) => true,
         _ => false,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PasskeyCeremonyTransitionContract {
+    active_edges: Vec<[String; 2]>,
+}
+
+type PasskeyCeremonyActiveTransitionEdge = (PasskeyCeremonyPhaseDto, PasskeyCeremonyPhaseDto);
+
+static PASSKEY_CEREMONY_ACTIVE_TRANSITION_EDGES: OnceLock<
+    Vec<PasskeyCeremonyActiveTransitionEdge>,
+> = OnceLock::new();
+
+fn passkey_ceremony_active_transition_edges() -> &'static [PasskeyCeremonyActiveTransitionEdge] {
+    PASSKEY_CEREMONY_ACTIVE_TRANSITION_EDGES
+        .get_or_init(|| {
+            let contract: PasskeyCeremonyTransitionContract =
+                serde_json::from_str(include_str!("passkey_ceremony_transitions.json"))
+                    .expect("passkey ceremony transition contract must parse");
+            contract
+                .active_edges
+                .into_iter()
+                .map(|[from, to]| {
+                    (
+                        passkey_ceremony_phase_from_contract_id(&from)
+                            .expect("passkey transition from phase must be known"),
+                        passkey_ceremony_phase_from_contract_id(&to)
+                            .expect("passkey transition to phase must be known"),
+                    )
+                })
+                .collect()
+        })
+        .as_slice()
+}
+
+fn passkey_ceremony_phase_from_contract_id(value: &str) -> Option<PasskeyCeremonyPhaseDto> {
+    match value {
+        "s0_pre_authorization" => Some(PasskeyCeremonyPhaseDto::PreAuthorization),
+        "s1_user_authorization" => Some(PasskeyCeremonyPhaseDto::UserAuthorization),
+        "s2_network_validation" => Some(PasskeyCeremonyPhaseDto::NetworkValidation),
+        "s3_credential_resolution" => Some(PasskeyCeremonyPhaseDto::CredentialResolution),
+        "s3b_user_selection" => Some(PasskeyCeremonyPhaseDto::UserSelection),
+        "s4_completion_and_mutation" => Some(PasskeyCeremonyPhaseDto::CompletionAndMutation),
+        _ => None,
+    }
+}
+
+fn passkey_ceremony_active_transition_edge_allowed(
+    expected_phase: PasskeyCeremonyPhaseDto,
+    next_phase: PasskeyCeremonyPhaseDto,
+    identity: &PasskeyCeremonyIdentity,
+    related_origin_verified: bool,
+) -> bool {
+    use PasskeyCeremonyPhaseDto::*;
+
+    match (expected_phase, next_phase) {
+        (UserAuthorization, NetworkValidation) => !passkey_ceremony_origin_matches_relying_party(
+            &identity.origin,
+            &identity.relying_party,
+        ),
+        (UserAuthorization, CredentialResolution) => {
+            passkey_ceremony_origin_matches_relying_party(&identity.origin, &identity.relying_party)
+        }
+        (NetworkValidation, CredentialResolution) => related_origin_verified,
+        _ => true,
     }
 }
 
