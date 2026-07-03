@@ -12,7 +12,8 @@ use vaultkern_runtime::Runtime;
 use vaultkern_runtime_protocol::{
     DatabaseCredentialsUpdateDto, DatabaseSettingsUpdateDto, PasskeyCeremonyDeliveryStateDto,
     PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
-    PasskeyCeremonyPhaseDto, PasskeyFrameKindDto, RuntimeCommand, RuntimeResponse,
+    PasskeyCeremonyPhaseDto, PasskeyFrameKindDto, PasskeyUserVerificationMethodDto,
+    PasskeyUserVerificationRequirementDto, RuntimeCommand, RuntimeResponse,
 };
 
 const TEST_PASSKEY_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgCrpkgmenhRkrdg3Y\n7G0+YmeyFRGgpisH5R5e75gwVHGhRANCAASOCmJegf0Fo1V7ixK+W5u/Jx8bpbIq\nCY0G7WFVp5KD6xMSKPekuRmz+kxK2wiZrN6MrH8kbCDmwLZRxnM73nXs\n-----END PRIVATE KEY-----\n";
@@ -1330,6 +1331,155 @@ fn runtime_creates_passkey_assertion_for_matching_relying_party() {
 }
 
 #[test]
+fn runtime_rejects_required_user_verification_without_token_bound_proof() {
+    let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
+    let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLXJlcXVpcmVk","origin":"https://example.com","crossOrigin":false}"#;
+    let client_data_json_base64url = URL_SAFE_NO_PAD.encode(client_data_json);
+    register_ceremony_at_s4_with_user_verification(
+        &mut runtime,
+        "assertion-token-required-missing",
+        PasskeyCeremonyKindDto::Get,
+        "https://example.com",
+        "example.com",
+        "Y2hhbGxlbmdlLXJlcXVpcmVk",
+        false,
+        PasskeyUserVerificationRequirementDto::Required,
+    );
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-required-missing".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url,
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected required UV error, got {response:?}");
+    };
+    assert!(
+        error
+            .message
+            .contains("passkey user verification was not verified")
+    );
+}
+
+#[test]
+fn runtime_sets_assertion_uv_flag_after_master_password_user_verification() {
+    let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
+    let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLXV2","origin":"https://example.com","crossOrigin":false}"#;
+    let client_data_json_base64url = URL_SAFE_NO_PAD.encode(client_data_json);
+    register_ceremony_at_s1_with_user_verification(
+        &mut runtime,
+        "assertion-token-uv",
+        PasskeyCeremonyKindDto::Get,
+        "Y2hhbGxlbmdlLXV2",
+        PasskeyUserVerificationRequirementDto::Required,
+    );
+    let verified = runtime
+        .handle(RuntimeCommand::VerifyPasskeyUser {
+            ceremony_token: "assertion-token-uv".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            vault_id: vault_id.clone(),
+            method: PasskeyUserVerificationMethodDto::MasterPassword,
+            password: Some("demo-password".into()),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+        panic!("expected UV proof, got {verified:?}");
+    };
+    assert!(verified.verified);
+    advance_ceremony_from_s1_to_s4(&mut runtime, "assertion-token-uv");
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-uv".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url,
+        })
+        .unwrap();
+
+    let RuntimeResponse::PasskeyAssertion(assertion) = response else {
+        panic!("expected passkey assertion, got {response:?}");
+    };
+    let authenticator_data = URL_SAFE_NO_PAD
+        .decode(assertion.authenticator_data_base64url)
+        .unwrap();
+    assert_ne!(authenticator_data[32] & 0x04, 0);
+}
+
+#[test]
+fn runtime_does_not_reuse_user_verification_across_ceremony_tokens() {
+    let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
+    let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLXV2LTI","origin":"https://example.com","crossOrigin":false}"#;
+    let client_data_json_base64url = URL_SAFE_NO_PAD.encode(client_data_json);
+    register_ceremony_at_s1_with_user_verification(
+        &mut runtime,
+        "assertion-token-uv-source",
+        PasskeyCeremonyKindDto::Get,
+        "Y2hhbGxlbmdlLXV2",
+        PasskeyUserVerificationRequirementDto::Required,
+    );
+    runtime
+        .handle(RuntimeCommand::VerifyPasskeyUser {
+            ceremony_token: "assertion-token-uv-source".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            vault_id: vault_id.clone(),
+            method: PasskeyUserVerificationMethodDto::MasterPassword,
+            password: Some("demo-password".into()),
+        })
+        .unwrap();
+    register_ceremony_at_s4_with_user_verification(
+        &mut runtime,
+        "assertion-token-uv-target",
+        PasskeyCeremonyKindDto::Get,
+        "https://example.com",
+        "example.com",
+        "Y2hhbGxlbmdlLXV2LTI",
+        false,
+        PasskeyUserVerificationRequirementDto::Required,
+    );
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-uv-target".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url,
+        })
+        .unwrap();
+
+    let RuntimeResponse::Error(error) = response else {
+        panic!("expected required UV error, got {response:?}");
+    };
+    assert!(
+        error
+            .message
+            .contains("passkey user verification was not verified")
+    );
+}
+
+#[test]
 fn runtime_rejects_passkey_assertion_when_ceremony_switches_vault_after_binding() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
@@ -1403,6 +1553,7 @@ fn runtime_rejects_passkey_assertion_when_ceremony_switches_vault_after_binding(
             relying_party: "example.com".into(),
             ceremony: PasskeyCeremonyKindDto::Get,
             discoverable: false,
+            user_verification: PasskeyUserVerificationRequirementDto::Preferred,
             challenge_base64url: "Y2hhbGxlbmdl".into(),
             request_id: 42,
             tab_id: 7,
@@ -4326,6 +4477,7 @@ fn register_get_subframe_ceremony_at_s4(
             relying_party: "example.com".into(),
             ceremony: PasskeyCeremonyKindDto::Get,
             discoverable: false,
+            user_verification: PasskeyUserVerificationRequirementDto::Preferred,
             challenge_base64url: challenge_base64url.into(),
             request_id,
             tab_id: request_id as i64,
@@ -4442,7 +4594,7 @@ fn register_ceremony_at_s4_with_discoverable(
     challenge_base64url: &str,
     discoverable: bool,
 ) {
-    register_ceremony_at_s3_with_discoverable(
+    register_ceremony_at_s4_with_user_verification(
         runtime,
         token,
         ceremony,
@@ -4450,6 +4602,29 @@ fn register_ceremony_at_s4_with_discoverable(
         relying_party,
         challenge_base64url,
         discoverable,
+        PasskeyUserVerificationRequirementDto::Preferred,
+    );
+}
+
+fn register_ceremony_at_s4_with_user_verification(
+    runtime: &mut Runtime,
+    token: &str,
+    ceremony: PasskeyCeremonyKindDto,
+    origin: &str,
+    relying_party: &str,
+    challenge_base64url: &str,
+    discoverable: bool,
+    user_verification: PasskeyUserVerificationRequirementDto,
+) {
+    register_ceremony_at_s3_with_discoverable_and_user_verification(
+        runtime,
+        token,
+        ceremony,
+        origin,
+        relying_party,
+        challenge_base64url,
+        discoverable,
+        user_verification,
     );
     runtime
         .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
@@ -4489,6 +4664,28 @@ fn register_ceremony_at_s3_with_discoverable(
     challenge_base64url: &str,
     discoverable: bool,
 ) {
+    register_ceremony_at_s3_with_discoverable_and_user_verification(
+        runtime,
+        token,
+        ceremony,
+        origin,
+        relying_party,
+        challenge_base64url,
+        discoverable,
+        PasskeyUserVerificationRequirementDto::Preferred,
+    );
+}
+
+fn register_ceremony_at_s3_with_discoverable_and_user_verification(
+    runtime: &mut Runtime,
+    token: &str,
+    ceremony: PasskeyCeremonyKindDto,
+    origin: &str,
+    relying_party: &str,
+    challenge_base64url: &str,
+    discoverable: bool,
+    user_verification: PasskeyUserVerificationRequirementDto,
+) {
     let request_id = test_id_from_token(token);
     runtime
         .handle(RuntimeCommand::RegisterPasskeyCeremony {
@@ -4500,6 +4697,7 @@ fn register_ceremony_at_s3_with_discoverable(
             relying_party: relying_party.into(),
             ceremony,
             discoverable,
+            user_verification,
             challenge_base64url: challenge_base64url.into(),
             request_id,
             tab_id: request_id as i64,
@@ -4527,9 +4725,100 @@ fn register_ceremony_at_s3_with_discoverable(
         .unwrap();
 }
 
-fn test_id_from_token(token: &str) -> u64 {
+fn register_ceremony_at_s1_with_user_verification(
+    runtime: &mut Runtime,
+    token: &str,
+    ceremony: PasskeyCeremonyKindDto,
+    challenge_base64url: &str,
+    user_verification: PasskeyUserVerificationRequirementDto,
+) {
+    let request_id = test_id_from_token(token);
+    runtime
+        .handle(RuntimeCommand::RegisterPasskeyCeremony {
+            ceremony_token: token.into(),
+            connection_id: "connection-1".into(),
+            origin: "https://example.com".into(),
+            top_origin: None,
+            ancestor_origins: vec![],
+            relying_party: "example.com".into(),
+            ceremony,
+            discoverable: false,
+            user_verification,
+            challenge_base64url: challenge_base64url.into(),
+            request_id,
+            tab_id: request_id,
+            frame_id: 0,
+            frame_kind: PasskeyFrameKindDto::Top,
+            registered_at_epoch_ms: 1_000,
+            expires_at_epoch_ms: 301_000,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            related_origin_verified: false,
+        })
+        .unwrap();
+}
+
+fn advance_ceremony_from_s1_to_s4(runtime: &mut Runtime, token: &str) {
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            related_origin_verified: false,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            next_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            related_origin_verified: false,
+        })
+        .unwrap();
+}
+
+fn runtime_with_example_passkey() -> (Runtime, tempfile::TempDir, String) {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Example");
+    entry.passkey = Some(PasskeyRecord {
+        username: "alice@example.com".into(),
+        credential_id: "Y3JlZGVudGlhbC0x".into(),
+        generated_user_id: Some("generated-user".into()),
+        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("dXNlci0x".into()),
+        backup_eligible: true,
+        backup_state: false,
+    });
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests_at(59);
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+    (runtime, dir, handle.vault_id)
+}
+
+fn test_id_from_token(token: &str) -> i64 {
     let hash = token.bytes().fold(17_u64, |value, byte| {
         value.wrapping_mul(131).wrapping_add(u64::from(byte))
     });
-    1_000 + (hash % 1_000_000)
+    (1_000 + (hash % 1_000_000)) as i64
 }

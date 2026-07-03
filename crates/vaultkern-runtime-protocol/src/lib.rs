@@ -123,6 +123,14 @@ pub enum RuntimeCommand {
         vault_id: String,
         entry_id: String,
     },
+    GetPasskeyUserVerificationCapability,
+    VerifyPasskeyUser {
+        ceremony_token: String,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: String,
+        method: PasskeyUserVerificationMethodDto,
+        password: Option<String>,
+    },
     ListPasskeyCredentials {
         ceremony_token: String,
         expected_phase: PasskeyCeremonyPhaseDto,
@@ -139,8 +147,10 @@ pub enum RuntimeCommand {
         ceremony: PasskeyCeremonyKindDto,
         #[serde(default)]
         discoverable: bool,
+        #[serde(default)]
+        user_verification: PasskeyUserVerificationRequirementDto,
         challenge_base64url: String,
-        request_id: u64,
+        request_id: i64,
         tab_id: i64,
         frame_id: i64,
         frame_kind: PasskeyFrameKindDto,
@@ -304,6 +314,8 @@ pub enum RuntimeResponse {
     PasskeyRegistration(PasskeyRegistrationDto),
     PasskeyCredentialStatus(PasskeyCredentialStatusDto),
     PasskeyCredentialList(PasskeyCredentialListDto),
+    PasskeyUserVerificationCapability(PasskeyUserVerificationCapabilityDto),
+    PasskeyUserVerified(PasskeyUserVerifiedDto),
     PasskeyCeremonyRegistered(PasskeyCeremonyRegisteredDto),
     PasskeyCeremonyAdvanced(PasskeyCeremonyAdvancedDto),
     PasskeyCeremonyVaultBound(PasskeyCeremonyVaultBoundDto),
@@ -602,6 +614,37 @@ pub struct PasskeyCredentialCandidateDto {
     pub credential_id: String,
     pub username: String,
     pub user_handle: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasskeyUserVerificationMethodDto {
+    MasterPassword,
+    QuickUnlock,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasskeyUserVerificationRequirementDto {
+    Discouraged,
+    #[default]
+    Preferred,
+    Required,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyUserVerificationCapabilityDto {
+    pub available: bool,
+    pub methods: Vec<PasskeyUserVerificationMethodDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyUserVerifiedDto {
+    pub verified: bool,
+    pub method: PasskeyUserVerificationMethodDto,
+    pub verified_at_epoch_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

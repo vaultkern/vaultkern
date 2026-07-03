@@ -91,7 +91,7 @@ The manifest should contain:
 Open:
 
 ```text
-http://127.0.0.1:4174/basic-login.html
+http://localhost:4174/basic-login.html
 ```
 
 Expected result:

@@ -111,6 +111,42 @@ describe("createNativeMessagingBridge", () => {
     await expect(second).resolves.toEqual({ type: "second_response" });
   });
 
+  it("reconnects once when posting to a stale native port fails before delivery", async () => {
+    const firstPort = createPort();
+    firstPort.postMessage.mockImplementation(() => {
+      throw new Error("Native host has exited.");
+    });
+    const secondPort = createPort();
+    const connectNative = vi.fn(() =>
+      connectNative.mock.calls.length === 1 ? firstPort : secondPort
+    );
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+    const request = bridge.send({
+      version: 1,
+      command: { type: "create_passkey_assertion" }
+    });
+
+    expect(connectNative).toHaveBeenCalledTimes(2);
+    expect(firstPort.postMessage).toHaveBeenCalledTimes(1);
+    expect(secondPort.postMessage).toHaveBeenCalledWith({
+      version: 1,
+      command: { type: "create_passkey_assertion" }
+    });
+
+    secondPort.emitMessage({ type: "passkey_assertion", credentialId: "credential-1" });
+
+    await expect(request).resolves.toEqual({
+      type: "passkey_assertion",
+      credentialId: "credential-1"
+    });
+  });
+
   it("rejects a silent request after a timeout and continues with queued requests", async () => {
     vi.useFakeTimers();
 

@@ -54,6 +54,66 @@ describe("WebAuthn content script bridge", () => {
     );
   });
 
+  it("forwards page observations delivered through the same-document custom event bridge", async () => {
+    const sendMessage = vi.fn();
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: { sendMessage }
+    };
+    setAncestorOrigins([]);
+
+    await import("../webauthnContentScript");
+
+    window.dispatchEvent(
+      new CustomEvent("vaultkern_webauthn_page_request_event", {
+        detail: {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "create",
+          relyingParty: "localhost",
+          challenge: "cmVnaXN0ZXItMQ"
+        }
+      })
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "vaultkern_webauthn_page_request",
+        ceremony: "create",
+        origin: window.location.origin,
+        relyingParty: "localhost",
+        challenge: "cmVnaXN0ZXItMQ"
+      })
+    );
+  });
+
+  it("installs the bridge before chrome.runtime is available and sends once it appears", async () => {
+    const sendMessage = vi.fn();
+    setAncestorOrigins([]);
+
+    await import("../webauthnContentScript");
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: { sendMessage }
+    };
+
+    window.dispatchEvent(
+      new CustomEvent("vaultkern_webauthn_page_request_event", {
+        detail: {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "create",
+          relyingParty: "localhost",
+          challenge: "cmVnaXN0ZXItMQ"
+        }
+      })
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "vaultkern_webauthn_page_request",
+        ceremony: "create",
+        relyingParty: "localhost"
+      })
+    );
+  });
+
   it("drops page observations when ancestor origins contain an opaque origin", async () => {
     const sendMessage = vi.fn();
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {

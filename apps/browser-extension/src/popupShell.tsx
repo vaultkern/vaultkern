@@ -145,6 +145,53 @@ function notifyWebAuthnPromptComplete(
     .finally(closePrompt);
 }
 
+async function sendWebAuthnPromptMessage(
+  type: string,
+  closeMode: string,
+  options: Record<string, unknown> = {}
+) {
+  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+  const sendMessage = chromeApi?.runtime?.sendMessage;
+  const promptParams =
+    typeof window === "undefined"
+      ? null
+      : new URLSearchParams(window.location.search);
+  if (promptParams?.get("webauthn") !== closeMode) {
+    return;
+  }
+  if (typeof sendMessage !== "function") {
+    window.close();
+    return;
+  }
+
+  const requestIdValue = promptParams.get("requestId");
+  const requestId =
+    requestIdValue && requestIdValue.trim() !== "" ? Number(requestIdValue) : null;
+  const message: Record<string, unknown> =
+    typeof requestId === "number" && Number.isFinite(requestId)
+      ? { type, requestId }
+      : { type };
+  for (const key of ["origin", "relyingParty", "topOrigin", "nonce"] as const) {
+    const value = promptParams.get(key);
+    if (value) {
+      message[key] = value;
+    }
+  }
+  Object.assign(message, options);
+  const response = await Promise.resolve(
+    sendMessage.call(chromeApi.runtime, message)
+  );
+  if (
+    response &&
+    typeof response === "object" &&
+    (response as { ok?: unknown }).ok === false
+  ) {
+    const error = (response as { error?: unknown }).error;
+    throw new Error(typeof error === "string" ? error : "Passkey verification failed");
+  }
+  window.close();
+}
+
 function notifyUnlockComplete() {
   notifyWebAuthnPromptComplete("vaultkern_unlock_complete", "unlock");
 }
@@ -160,6 +207,17 @@ function notifyPresenceComplete(
   );
 }
 
+async function notifyUserVerificationComplete(
+  _session: unknown,
+  options: { method: "master_password" | "quick_unlock"; password?: string }
+) {
+  await sendWebAuthnPromptMessage(
+    "vaultkern_user_verification_complete",
+    "verify",
+    options
+  );
+}
+
 export function PopupShell() {
   return (
     <PopupApp
@@ -171,6 +229,7 @@ export function PopupShell() {
       fillEntry={fillSelectedEntry}
       onUnlockComplete={notifyUnlockComplete}
       onWebAuthnPresenceComplete={notifyPresenceComplete}
+      onWebAuthnUserVerificationComplete={notifyUserVerificationComplete}
     />
   );
 }

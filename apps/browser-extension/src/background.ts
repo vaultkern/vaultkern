@@ -22,7 +22,12 @@ let webAuthnProxySyncRequested = false;
 let passkeyProviderEnabled = false;
 let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
+const WEB_AUTHN_CONTENT_SCRIPT_ID = "vaultkern-webauthn-content-bridge";
 const WEB_AUTHN_PAGE_HOOK_SCRIPT_ID = "vaultkern-webauthn-page-hook";
+const WEB_AUTHN_DYNAMIC_SCRIPT_IDS = [
+  WEB_AUTHN_CONTENT_SCRIPT_ID,
+  WEB_AUTHN_PAGE_HOOK_SCRIPT_ID
+];
 let webAuthnPageHookRegistered = false;
 
 function isRuntimeCommand(message: unknown): message is { version: number; command: unknown } {
@@ -67,7 +72,16 @@ const nativeBridge =
         chromeApi.runtime.connectNative.bind(chromeApi.runtime),
         "com.vaultkern.runtime",
         {
-          onPortDetached: resetPasskeyLedgerConnectionId
+          onPortDetached: resetPasskeyLedgerConnectionId,
+          onEvent(event) {
+            void recordWebAuthnDebug(chromeApi, {
+              event: "native_bridge",
+              bridgeEvent: event.event,
+              commandType: event.commandType,
+              code: event.code,
+              message: event.message
+            });
+          }
         }
       )
     : null;
@@ -76,12 +90,12 @@ if (chromeApi?.runtime?.onMessage && nativeBridge) {
   chromeApi.runtime.onMessage.addListener(
     (
       message: unknown,
-      _sender: unknown,
+      sender: unknown,
       sendResponse: (response: unknown) => void
     ) => {
       if (isWebAuthnPageRequest(message)) {
         if (webAuthnProxyAttached || webAuthnProxySyncPromise) {
-          recordWebAuthnPageRequest(message, chromeApi);
+          recordWebAuthnPageRequest(message, chromeApi, sender);
         }
         return false;
       }
@@ -119,6 +133,25 @@ if (chromeApi?.webAuthenticationProxy) {
       }
 
       void syncWebAuthnProxy();
+    }
+  );
+
+  chromeApi.tabs?.onUpdated?.addListener?.(
+    (tabId: number, changeInfo: { status?: string }) => {
+      void recordWebAuthnDebug(chromeApi, {
+        event: "page_hook_tab_updated",
+        tabId,
+        status: changeInfo.status,
+        enabled: passkeyProviderEnabled,
+        registered: webAuthnPageHookRegistered
+      });
+      if (
+        webAuthnPageHookRegistered &&
+        passkeyProviderEnabled &&
+        changeInfo.status === "complete"
+      ) {
+        void injectWebAuthnPageHookIntoTab(tabId);
+      }
     }
   );
 }
@@ -191,7 +224,7 @@ async function registerWebAuthnPageHook() {
 
   try {
     await chromeApi.scripting.unregisterContentScripts?.({
-      ids: [WEB_AUTHN_PAGE_HOOK_SCRIPT_ID]
+      ids: WEB_AUTHN_DYNAMIC_SCRIPT_IDS
     });
   } catch {
     // The script may not have been registered in this browser session.
@@ -200,13 +233,20 @@ async function registerWebAuthnPageHook() {
   try {
     await chromeApi.scripting.registerContentScripts([
       {
+        id: WEB_AUTHN_CONTENT_SCRIPT_ID,
+        matches: ["<all_urls>"],
+        js: ["webauthnContentScript.js"],
+        runAt: "document_start",
+        allFrames: true,
+        persistAcrossSessions: false
+      },
+      {
         id: WEB_AUTHN_PAGE_HOOK_SCRIPT_ID,
         matches: ["<all_urls>"],
         js: ["webauthnPageHook.js"],
         runAt: "document_start",
         world: "MAIN",
         allFrames: true,
-        matchAboutBlank: true,
         matchOriginAsFallback: true,
         persistAcrossSessions: false
       }
@@ -250,31 +290,10 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
       continue;
     }
 
-    let tabHadFailure = false;
-    try {
-      await chromeApi.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: true },
-        files: ["webauthnContentScript.js"],
-        world: "ISOLATED"
-      });
-    } catch {
-      tabHadFailure = true;
-    }
-
-    try {
-      await chromeApi.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: true },
-        files: ["webauthnPageHook.js"],
-        world: "MAIN"
-      });
-    } catch {
-      tabHadFailure = true;
-    }
-
-    if (tabHadFailure) {
-      failedCount += 1;
-    } else {
+    if (await injectWebAuthnPageHookIntoTab(tab.id)) {
       injectedCount += 1;
+    } else {
+      failedCount += 1;
     }
   }
 
@@ -283,6 +302,207 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
     injectedCount,
     failedCount
   });
+}
+
+async function injectWebAuthnPageHookIntoTab(tabId: number) {
+  if (!chromeApi?.scripting?.executeScript) {
+    return false;
+  }
+
+  let tabHadFailure = false;
+  try {
+    await chromeApi.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: installVaultKernWebAuthnInlineBridge,
+      world: "ISOLATED"
+    });
+  } catch {
+    tabHadFailure = true;
+  }
+
+  try {
+    await chromeApi.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ["webauthnPageHook.js"],
+      world: "MAIN"
+    });
+  } catch {
+    tabHadFailure = true;
+  }
+
+  return !tabHadFailure;
+}
+
+function installVaultKernWebAuthnInlineBridge() {
+  const pageRequestMessageType = "vaultkern_webauthn_page_request";
+  const pageRequestEventType = "vaultkern_webauthn_page_request_event";
+  const bridgeVersion = 1;
+  const globalState = globalThis as typeof globalThis & {
+    __vaultkernWebAuthnInlineBridgeVersion?: number;
+    __vaultkernWebAuthnInlineBridgeInstallId?: number;
+    chrome?: any;
+    origin?: unknown;
+  };
+
+  if (globalState.__vaultkernWebAuthnInlineBridgeVersion === bridgeVersion) {
+    return;
+  }
+
+  const installId = (globalState.__vaultkernWebAuthnInlineBridgeInstallId ?? 0) + 1;
+  globalState.__vaultkernWebAuthnInlineBridgeInstallId = installId;
+  globalState.__vaultkernWebAuthnInlineBridgeVersion = bridgeVersion;
+
+  window.addEventListener(pageRequestEventType, (event: Event) => {
+    if (globalState.__vaultkernWebAuthnInlineBridgeInstallId !== installId) {
+      return;
+    }
+    forwardWebAuthnPageRequest((event as CustomEvent).detail);
+  });
+  window.addEventListener("message", (event: MessageEvent) => {
+    if (globalState.__vaultkernWebAuthnInlineBridgeInstallId !== installId) {
+      return;
+    }
+    if (event.source !== window) {
+      return;
+    }
+    forwardWebAuthnPageRequest(event.data, event);
+  });
+
+  function forwardWebAuthnPageRequest(data: unknown, event?: MessageEvent) {
+    const frameOrigin = originFromFrame(event);
+    const ancestorOrigins = ancestorOriginsFromWindow();
+    if (
+      !frameOrigin ||
+      !ancestorOrigins ||
+      (event && event.origin !== frameOrigin) ||
+      !isWebAuthnPageRequest(data)
+    ) {
+      return;
+    }
+
+    const chromeApi = globalState.chrome;
+    if (!chromeApi?.runtime?.sendMessage) {
+      return;
+    }
+
+    const sendResult = chromeApi.runtime.sendMessage({
+      type: pageRequestMessageType,
+      ceremony: data.ceremony,
+      origin: frameOrigin,
+      topOrigin: topOriginFromAncestorOrigins(ancestorOrigins),
+      ancestorOrigins,
+      relyingParty: optionalStringFrom(data.relyingParty),
+      challenge: optionalStringFrom(data.challenge),
+      allowCredentialIds: stringArrayFrom(data.allowCredentialIds),
+      excludeCredentialIds: stringArrayFrom(data.excludeCredentialIds),
+      mediation: optionalStringFrom(data.mediation),
+      observedAt: Date.now()
+    });
+    if (sendResult && typeof sendResult.catch === "function") {
+      sendResult.catch(() => undefined);
+    }
+  }
+
+  function originFromFrame(event?: MessageEvent) {
+    const windowOrigin = strictOriginFromString(window.location.origin);
+    if (windowOrigin) {
+      return windowOrigin;
+    }
+
+    if (typeof globalState.origin === "string") {
+      const globalOrigin = strictOriginFromString(globalState.origin);
+      if (globalOrigin) {
+        return globalOrigin;
+      }
+    }
+
+    if (event) {
+      const eventOrigin = strictOriginFromString(event.origin);
+      if (eventOrigin) {
+        return eventOrigin;
+      }
+    }
+
+    return null;
+  }
+
+  function strictOriginFromString(value: string) {
+    if (value.trim() === "" || value !== value.trim() || value === "null") {
+      return null;
+    }
+    try {
+      const parsed = new URL(value);
+      if (
+        parsed.username !== "" ||
+        parsed.password !== "" ||
+        parsed.pathname !== "/" ||
+        parsed.search !== "" ||
+        parsed.hash !== ""
+      ) {
+        return null;
+      }
+      return parsed.origin;
+    } catch {
+      return null;
+    }
+  }
+
+  function ancestorOriginsFromWindow() {
+    const ancestorOrigins = window.location.ancestorOrigins;
+    if (!ancestorOrigins || typeof ancestorOrigins.length !== "number") {
+      return [];
+    }
+
+    const origins: string[] = [];
+    for (const value of Array.from(ancestorOrigins as ArrayLike<unknown>)) {
+      if (typeof value !== "string") {
+        return null;
+      }
+      const origin = strictOriginFromString(value);
+      if (!origin) {
+        return null;
+      }
+      origins.push(origin);
+    }
+    return origins;
+  }
+
+  function topOriginFromAncestorOrigins(ancestorOrigins: string[]) {
+    const topOrigin = ancestorOrigins[ancestorOrigins.length - 1];
+    return typeof topOrigin === "string" ? topOrigin : undefined;
+  }
+
+  function optionalStringFrom(value: unknown) {
+    return typeof value === "string" ? value : undefined;
+  }
+
+  function stringArrayFrom(value: unknown) {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    return value.filter((item): item is string => typeof item === "string");
+  }
+
+  function isWebAuthnPageRequest(message: unknown): message is {
+    type: string;
+    ceremony: "create" | "get";
+    relyingParty?: string;
+    challenge?: string;
+    allowCredentialIds?: string[];
+    excludeCredentialIds?: string[];
+    mediation?: string;
+  } {
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      (message as { type?: unknown }).type !== pageRequestMessageType
+    ) {
+      return false;
+    }
+
+    const ceremony = (message as { ceremony?: unknown }).ceremony;
+    return ceremony === "create" || ceremony === "get";
+  }
 }
 
 async function unregisterWebAuthnPageHook() {
@@ -295,7 +515,7 @@ async function unregisterWebAuthnPageHook() {
 
   try {
     await chromeApi.scripting.unregisterContentScripts({
-      ids: [WEB_AUTHN_PAGE_HOOK_SCRIPT_ID]
+      ids: WEB_AUTHN_DYNAMIC_SCRIPT_IDS
     });
   } catch {
     // Disabling is idempotent even when there is no dynamic hook.

@@ -29,9 +29,10 @@ use vaultkern_runtime_protocol::{
     PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto,
     PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto, PasskeyCredentialCandidateDto,
     PasskeyCredentialListDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
-    PasskeyRegistrationDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-    SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
-    VaultSourceStatusDto,
+    PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
+    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse,
+    SaveVaultResultDto, SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto,
+    VaultReferenceListDto, VaultSourceStatusDto,
 };
 
 use crate::command_loop::format_error_chain;
@@ -101,8 +102,9 @@ struct PasskeyCeremonyIdentity {
     relying_party: String,
     ceremony: PasskeyCeremonyKindDto,
     discoverable: bool,
+    user_verification: PasskeyUserVerificationRequirementDto,
     challenge_base64url: String,
-    request_id: u64,
+    request_id: i64,
     tab_id: i64,
     frame_id: i64,
     frame_kind: PasskeyFrameKindDto,
@@ -117,7 +119,15 @@ struct PasskeyCeremonyLedgerEntry {
     vault_id: Option<String>,
     durable_state: PasskeyCeremonyDurableStateDto,
     delivery_state: PasskeyCeremonyDeliveryStateDto,
+    user_verification: Option<PasskeyUserVerificationProof>,
     registration_rollback: Option<PasskeyRegistrationRollbackState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PasskeyUserVerificationProof {
+    vault_id: String,
+    method: PasskeyUserVerificationMethodDto,
+    verified_at_epoch_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -875,6 +885,150 @@ impl Runtime {
         dto
     }
 
+    pub fn passkey_user_verification_capability(&self) -> PasskeyUserVerificationCapabilityDto {
+        let mut methods = Vec::new();
+        let Some(active_vault_id) = self.session.active_vault_id() else {
+            return PasskeyUserVerificationCapabilityDto {
+                available: false,
+                methods,
+            };
+        };
+        let Some(loaded) = self.loaded.get(active_vault_id) else {
+            return PasskeyUserVerificationCapabilityDto {
+                available: false,
+                methods,
+            };
+        };
+        if loaded.vault.is_none() {
+            return PasskeyUserVerificationCapabilityDto {
+                available: false,
+                methods,
+            };
+        }
+
+        if loaded.password.is_some() {
+            methods.push(PasskeyUserVerificationMethodDto::MasterPassword);
+        }
+
+        if self.biometric.supports_quick_unlock() {
+            if let Some(vault_ref_id) = self.session.current_vault_ref_id() {
+                let storage_key = quick_unlock_storage_key(vault_ref_id);
+                if self.secure_storage.contains(&storage_key).unwrap_or(false) {
+                    methods.push(PasskeyUserVerificationMethodDto::QuickUnlock);
+                }
+            }
+        }
+
+        PasskeyUserVerificationCapabilityDto {
+            available: !methods.is_empty(),
+            methods,
+        }
+    }
+
+    pub fn verify_passkey_user(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+        method: PasskeyUserVerificationMethodDto,
+        password: Option<&str>,
+    ) -> Result<PasskeyUserVerifiedDto> {
+        if expected_phase != PasskeyCeremonyPhaseDto::UserAuthorization {
+            anyhow::bail!("passkey user verification expected phase must be s1_user_authorization");
+        }
+        if self.session.active_vault_id() != Some(vault_id) {
+            anyhow::bail!("passkey user verification vault mismatch");
+        }
+        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        {
+            let entry = self
+                .passkey_ceremonies
+                .get(ceremony_token)
+                .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+            if entry.phase != expected_phase {
+                anyhow::bail!("passkey ceremony phase mismatch");
+            }
+            validate_passkey_ceremony_not_expired(entry, now_epoch_ms)?;
+            validate_passkey_ceremony_vault_binding(entry, vault_id)?;
+        }
+
+        match method {
+            PasskeyUserVerificationMethodDto::MasterPassword => {
+                let password =
+                    password.context("passkey user verification password is required")?;
+                self.verify_passkey_user_with_master_password(vault_id, password)?;
+            }
+            PasskeyUserVerificationMethodDto::QuickUnlock => {
+                self.verify_passkey_user_with_quick_unlock(vault_id)?;
+            }
+        }
+
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        bind_passkey_ceremony_vault(entry, vault_id)?;
+        entry.user_verification = Some(PasskeyUserVerificationProof {
+            vault_id: vault_id.to_owned(),
+            method,
+            verified_at_epoch_ms: now_epoch_ms,
+        });
+        Ok(PasskeyUserVerifiedDto {
+            verified: true,
+            method,
+            verified_at_epoch_ms: now_epoch_ms as i64,
+        })
+    }
+
+    fn verify_passkey_user_with_master_password(
+        &self,
+        vault_id: &str,
+        password: &str,
+    ) -> Result<()> {
+        let loaded = self
+            .loaded
+            .get(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        if loaded.vault.is_none() {
+            anyhow::bail!("vault is locked: {vault_id}");
+        }
+        if loaded.password.is_none() {
+            anyhow::bail!("passkey master password verification is unavailable");
+        }
+        let credentials = VaultCredentials {
+            password: Some(password.to_owned()),
+            key_file_path: loaded.key_file_path.clone(),
+        };
+        let key = composite_key_from_credentials(&credentials)?;
+        self.core
+            .load_database(&loaded.bytes, &key)
+            .with_context(|| format!("failed to verify passkey user for vault: {vault_id}"))?;
+        Ok(())
+    }
+
+    fn verify_passkey_user_with_quick_unlock(&self, vault_id: &str) -> Result<()> {
+        if !self.biometric.supports_quick_unlock() {
+            anyhow::bail!("passkey quick unlock verification is unavailable");
+        }
+        let current_vault_ref_id = self
+            .session
+            .current_vault_ref_id()
+            .context("no current vault selected")?;
+        let loaded = self
+            .loaded
+            .get(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        if loaded.vault.is_none() {
+            anyhow::bail!("vault is locked: {vault_id}");
+        }
+        let storage_key = quick_unlock_storage_key(current_vault_ref_id);
+        if !self.secure_storage.contains(&storage_key).unwrap_or(false) {
+            anyhow::bail!("quick unlock is not enabled for the current vault");
+        }
+        self.biometric.authorize("Verify user for passkey")?;
+        Ok(())
+    }
+
     pub fn list_groups(&self, vault_id: &str) -> Result<GroupTreeDto> {
         let vault = self.loaded_vault(vault_id)?;
         let view = self.core.project_vault(vault);
@@ -1358,8 +1512,9 @@ impl Runtime {
             Some(discoverable),
             client_data_json_base64url,
         )?;
+        let user_verified = self.passkey_ceremony_user_verified(ceremony_token, vault_id)?;
         let credential_id = credential_id.context("passkey assertion credential id is required")?;
-        if !user_presence_verified {
+        if !user_presence_verified && !user_verified {
             anyhow::bail!("passkey user presence was not verified");
         }
         let _ = self.loaded_vault(vault_id)?;
@@ -1380,6 +1535,7 @@ impl Runtime {
                 credential_id: Some(credential_id),
                 discoverable,
                 user_presence_verified,
+                user_verified,
                 related_origin_verified,
                 client_data_json_base64url,
             },
@@ -1433,6 +1589,25 @@ impl Runtime {
             &entry.identity.ancestor_origins,
         )?;
         Ok(())
+    }
+
+    fn passkey_ceremony_user_verified(&self, ceremony_token: &str, vault_id: &str) -> Result<bool> {
+        let now_epoch_ms = self.current_unix_time().saturating_mul(1000);
+        let entry = self
+            .passkey_ceremonies
+            .get(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        let verified = entry.user_verification.as_ref().is_some_and(|proof| {
+            proof.vault_id == vault_id
+                && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
+                && proof.verified_at_epoch_ms <= now_epoch_ms
+        });
+        if entry.identity.user_verification == PasskeyUserVerificationRequirementDto::Required
+            && !verified
+        {
+            anyhow::bail!("passkey user verification was not verified");
+        }
+        Ok(verified)
     }
 
     pub fn passkey_credential_status(
@@ -1615,6 +1790,7 @@ impl Runtime {
                 vault_id: None,
                 durable_state: PasskeyCeremonyDurableStateDto::None,
                 delivery_state: PasskeyCeremonyDeliveryStateDto::NotDelivered,
+                user_verification: None,
                 registration_rollback: None,
             },
         );
@@ -1867,6 +2043,7 @@ impl Runtime {
             None,
             client_data_json_base64url,
         )?;
+        let user_verified = self.passkey_ceremony_user_verified(ceremony_token, vault_id)?;
         let modified_at = self.current_unix_time();
         let credential_id = (self.passkey_credential_id_generator)();
         let registration = create_registration_with_credential_id(
@@ -1876,6 +2053,7 @@ impl Runtime {
                 user_name,
                 user_handle_base64url,
                 public_key_algorithm,
+                user_verified,
                 related_origin_verified,
                 client_data_json_base64url,
             },
@@ -2549,6 +2727,26 @@ impl Runtime {
             RuntimeCommand::ClearEntryPasskey { vault_id, entry_id } => self
                 .clear_entry_passkey(&vault_id, &entry_id)
                 .map(RuntimeResponse::EntryDetail),
+            RuntimeCommand::GetPasskeyUserVerificationCapability => {
+                Ok(RuntimeResponse::PasskeyUserVerificationCapability(
+                    self.passkey_user_verification_capability(),
+                ))
+            }
+            RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                method,
+                password,
+            } => self
+                .verify_passkey_user(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    method,
+                    password.as_deref(),
+                )
+                .map(RuntimeResponse::PasskeyUserVerified),
             RuntimeCommand::DeleteEntry { vault_id, entry_id } => self
                 .delete_entry(&vault_id, &entry_id)
                 .map(|_| RuntimeResponse::Saved),
@@ -2672,6 +2870,7 @@ impl Runtime {
                 relying_party,
                 ceremony,
                 discoverable,
+                user_verification,
                 challenge_base64url,
                 request_id,
                 tab_id,
@@ -2690,6 +2889,7 @@ impl Runtime {
                         relying_party,
                         ceremony,
                         discoverable,
+                        user_verification,
                         challenge_base64url,
                         request_id,
                         tab_id,
@@ -5007,6 +5207,100 @@ mod tests {
         assert_eq!(
             session.active_vault_id.as_deref(),
             Some(opened.vault_id.as_str())
+        );
+    }
+
+    #[test]
+    fn passkey_user_verification_capability_requires_an_unlocked_vault() {
+        let mut runtime = Runtime::for_tests();
+
+        let response = runtime
+            .handle(RuntimeCommand::GetPasskeyUserVerificationCapability)
+            .unwrap();
+
+        assert_eq!(
+            response,
+            RuntimeResponse::PasskeyUserVerificationCapability(
+                PasskeyUserVerificationCapabilityDto {
+                    available: false,
+                    methods: vec![],
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn passkey_user_verification_capability_reports_master_password_for_unlocked_vault() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests();
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+
+        let response = runtime
+            .handle(RuntimeCommand::GetPasskeyUserVerificationCapability)
+            .unwrap();
+
+        assert_eq!(
+            response,
+            RuntimeResponse::PasskeyUserVerificationCapability(
+                PasskeyUserVerificationCapabilityDto {
+                    available: true,
+                    methods: vec![PasskeyUserVerificationMethodDto::MasterPassword],
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn passkey_user_verification_capability_reports_quick_unlock_without_loading_secret() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        runtime.secure_storage = Box::new(LoadRejectingSecureStorageProvider::new());
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+
+        let response = runtime
+            .handle(RuntimeCommand::GetPasskeyUserVerificationCapability)
+            .unwrap();
+
+        assert_eq!(
+            response,
+            RuntimeResponse::PasskeyUserVerificationCapability(
+                PasskeyUserVerificationCapabilityDto {
+                    available: true,
+                    methods: vec![
+                        PasskeyUserVerificationMethodDto::MasterPassword,
+                        PasskeyUserVerificationMethodDto::QuickUnlock,
+                    ],
+                }
+            )
         );
     }
 

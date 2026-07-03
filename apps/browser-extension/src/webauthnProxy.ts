@@ -18,7 +18,7 @@ type ChromeLike = {
           message: unknown,
           sender: unknown,
           sendResponse: unknown
-        ) => void
+        ) => boolean | void
       ) => void;
     };
   };
@@ -74,11 +74,17 @@ type WebAuthnOriginContext = {
   topOrigin?: string;
   ancestorOrigins: string[];
   mediation?: string;
+  trustedFrame?: { tabId: number; frameId: number };
 };
 
 type WebAuthnPromptContext = WebAuthnOriginContext & {
   relyingParty: string;
   credentialOptions?: PasskeyCredentialOption[];
+};
+
+type WebAuthnUserVerificationPromptContext = WebAuthnPromptContext & {
+  ceremonyToken: string;
+  activeVaultId: string;
 };
 
 type PasskeyCeremonyPhase =
@@ -92,6 +98,11 @@ type PasskeyCeremonyPhase =
   | "closed_delivered"
   | "closed_failed";
 
+type PasskeyUserVerificationRequirement =
+  | "discouraged"
+  | "preferred"
+  | "required";
+
 type PasskeyCeremonyBaseContext = {
   version: 1;
   ceremonyToken: string;
@@ -101,6 +112,7 @@ type PasskeyCeremonyBaseContext = {
   ancestorOrigins: string[];
   relyingParty: string;
   ceremony: "get" | "create";
+  userVerification: PasskeyUserVerificationRequirement;
   challengeBase64url: string;
   requestId: number;
   tabId: number;
@@ -109,7 +121,7 @@ type PasskeyCeremonyBaseContext = {
   relatedOriginVerified?: boolean;
   activeVaultId?: string;
   popupNonce?: string;
-  promptMode?: "approve" | "unlock";
+  promptMode?: "approve" | "unlock" | "verify";
   promptCredentialOptions?: PasskeyCredentialOption[];
   registeredAtEpochMs: number;
   expiresAtEpochMs: number;
@@ -155,6 +167,11 @@ type PresenceSignal =
   | { type: "dismissed" }
   | null;
 
+type UserVerificationSignal =
+  | { type: "complete"; method: "master_password" | "quick_unlock" }
+  | { type: "dismissed" }
+  | null;
+
 type CanceledWebAuthnRequests = {
   legacyRequestIds: Set<number>;
   requestKeys: Set<string>;
@@ -179,11 +196,27 @@ const presencePromptNonces = new Map<string, string>();
 const presencePromptRequestIds = new Map<string, number>();
 const presencePromptRequestKeys = new Map<string, string>();
 const presencePromptRemovalCleanups = new Map<string, () => void>();
+const userVerificationPromptWindowIds = new Map<string, number>();
+const userVerificationCompleteWaiters = new Map<
+  string,
+  Set<(method: "master_password" | "quick_unlock") => void>
+>();
+const userVerificationDismissWaiters = new Map<string, Set<() => void>>();
+const userVerificationPromptContexts = new Map<
+  string,
+  WebAuthnUserVerificationPromptContext
+>();
+const userVerificationPromptNonces = new Map<string, string>();
+const userVerificationPromptRequestIds = new Map<string, number>();
+const userVerificationPromptRequestKeys = new Map<string, string>();
+const userVerificationPromptRemovalCleanups = new Map<string, () => void>();
 const knownPasskeyCeremonyTokens = new Set<string>();
 const observedPageRequests: ObservedWebAuthnPageRequest[] = [];
 const registeredUnlockMessageSources = new WeakSet<object>();
 const registeredRequestHandlerSources = new WeakSet<object>();
 const OBSERVED_PAGE_REQUEST_MAX_AGE_MS = 120_000;
+const OBSERVED_PAGE_REQUEST_WAIT_MS = 100;
+const OBSERVED_PAGE_REQUEST_POLL_MS = 5;
 const WEB_AUTHN_DEBUG_STORAGE_KEY = "vaultkernWebAuthnDebug";
 const WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY = "vaultkernWebAuthnDebugEnabled";
 const PASSKEY_CEREMONY_SESSION_STORAGE_KEY = "vaultkernPasskeyCeremonies";
@@ -212,6 +245,8 @@ type ObservedWebAuthnPageRequest = {
   origin: string;
   topOrigin?: string;
   ancestorOrigins: string[];
+  trustedSenderTabId?: number;
+  trustedSenderFrameId?: number;
   relyingParty?: string;
   challenge?: string;
   allowCredentialIds?: string[];
@@ -335,6 +370,7 @@ export async function reconcilePersistedPasskeyCeremonies(
           discoverable:
             mirror.ceremony === "get" &&
             passkeyGetCredentialIdsAreDiscoverable(mirror.getCredentialIds),
+          user_verification: mirror.userVerification,
           challenge_base64url: mirror.challengeBase64url,
           request_id: mirror.requestId,
           tab_id: mirror.tabId,
@@ -482,7 +518,8 @@ export function registerWebAuthnProxyRequestHandlers(
 
 export function recordWebAuthnPageRequest(
   message: unknown,
-  chromeApi?: ChromeLike
+  chromeApi?: ChromeLike,
+  sender?: unknown
 ) {
   if (typeof message !== "object" || message === null) {
     return false;
@@ -502,7 +539,8 @@ export function recordWebAuthnPageRequest(
   if (candidate.ceremony !== "create" && candidate.ceremony !== "get") {
     return false;
   }
-  const origin = originFromUnknown(candidate.origin);
+  const senderContext = trustedWebAuthnMessageSenderContextFrom(sender);
+  const origin = senderContext?.origin ?? originFromUnknown(candidate.origin);
   if (!origin) {
     return false;
   }
@@ -536,6 +574,8 @@ export function recordWebAuthnPageRequest(
     origin,
     topOrigin,
     ancestorOrigins,
+    trustedSenderTabId: senderContext?.tabId,
+    trustedSenderFrameId: senderContext?.frameId,
     relyingParty,
     challenge:
       typeof candidate.challenge === "string" && candidate.challenge.trim() !== ""
@@ -593,10 +633,11 @@ function registerRequestHandlers(
       });
       void closeUnlockPromptWindow(chromeApi, requestId, requestKey);
       void closePresencePromptWindow(chromeApi, requestId, requestKey);
+      void closeUserVerificationPromptWindow(chromeApi, requestId, requestKey);
     }
   });
   chromeApi.webAuthenticationProxy?.onIsUvpaaRequest?.addListener?.((request) => {
-    void handleIsUvpaaRequest(chromeApi, request);
+    void handleIsUvpaaRequest(chromeApi, sendRuntimeCommand, request);
   });
   chromeApi.webAuthenticationProxy?.onGetRequest?.addListener?.((request) => {
     void handleGetRequest(
@@ -712,6 +753,102 @@ function registerUnlockCompleteHandler(
       }
     }
 
+    if (isUserVerificationCompleteMessage(message)) {
+      const requestId = requestIdFromMessage(message);
+      if (typeof requestId !== "number") {
+        return;
+      }
+      const promptKey = matchingPromptKey(
+        userVerificationPromptContexts,
+        userVerificationPromptNonces,
+        userVerificationPromptRequestIds,
+        requestId,
+        message,
+        sender,
+        "verify"
+      );
+      if (!promptKey) {
+        if (typeof sendResponse === "function") {
+          sendResponse({
+            ok: false,
+            error: "VaultKern cannot verify this passkey prompt"
+          });
+        }
+        return true;
+      }
+      const expected = userVerificationPromptContexts.get(promptKey);
+      const method = userVerificationMethodFromMessage(message);
+      const password = userVerificationPasswordFromMessage(message);
+      if (
+        !expected ||
+        !method ||
+        (method === "master_password" && typeof password !== "string")
+      ) {
+        if (typeof sendResponse === "function") {
+          sendResponse({
+            ok: false,
+            error: "VaultKern passkey user verification is incomplete"
+          });
+        }
+        return true;
+      }
+      void (async () => {
+        try {
+          const response = await sendRuntimeCommand({
+            type: "verify_passkey_user",
+            ceremony_token: expected.ceremonyToken,
+            expected_phase: "s1_user_authorization",
+            vault_id: expected.activeVaultId,
+            method,
+            ...(method === "master_password" ? { password } : {})
+          });
+          requireRuntimeResponseType(
+            response,
+            "passkey_user_verified",
+            "passkey user verification failed",
+            "verified"
+          );
+          await recordWebAuthnDebug(chromeApi, {
+            event: "user_verification_complete_message",
+            requestId,
+            method
+          });
+          const waiters = [
+            ...(userVerificationCompleteWaiters.get(promptKey) ?? [])
+          ];
+          clearUserVerificationPromptState(promptKey);
+          for (const waiter of waiters) {
+            waiter(method);
+          }
+          if (typeof sendResponse === "function") {
+            sendResponse({ ok: true });
+          }
+          if (waiters.length === 0) {
+            void resumePasskeyCeremonyAfterPromptComplete(
+              chromeApi,
+              sendRuntimeCommand,
+              requestId,
+              "verify",
+              undefined,
+              canceledRequests,
+              promptKey
+            );
+          }
+        } catch (verificationError) {
+          if (typeof sendResponse === "function") {
+            sendResponse({
+              ok: false,
+              error:
+                verificationError instanceof Error
+                  ? verificationError.message
+                  : String(verificationError)
+            });
+          }
+        }
+      })();
+      return true;
+    }
+
     if (isPresenceOptionsRequestMessage(message)) {
       const requestId = requestIdFromMessage(message);
       if (typeof requestId !== "number") {
@@ -755,6 +892,15 @@ function isPresenceCompleteMessage(message: unknown) {
   );
 }
 
+function isUserVerificationCompleteMessage(message: unknown) {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    (message as { type?: unknown }).type ===
+      "vaultkern_user_verification_complete"
+  );
+}
+
 function isPresenceOptionsRequestMessage(message: unknown) {
   return (
     typeof message === "object" &&
@@ -782,7 +928,7 @@ function matchingPromptKey(
   requestId: number,
   message: unknown,
   sender: unknown,
-  mode: "unlock" | "approve"
+  mode: "unlock" | "approve" | "verify"
 ) {
   const candidate = message as
     | {
@@ -816,7 +962,7 @@ function matchingPromptKey(
 
 function senderMatchesPrompt(
   sender: unknown,
-  mode: "unlock" | "approve",
+  mode: "unlock" | "approve" | "verify",
   requestId: number,
   nonce: string,
   expected?: WebAuthnPromptContext
@@ -844,21 +990,83 @@ function senderMatchesPrompt(
   }
 }
 
-async function handleIsUvpaaRequest(chromeApi: ChromeLike, request: unknown) {
+function userVerificationMethodFromMessage(message: unknown) {
+  const method = (message as { method?: unknown } | null)?.method;
+  return method === "master_password" || method === "quick_unlock"
+    ? method
+    : null;
+}
+
+function userVerificationPasswordFromMessage(message: unknown) {
+  const password = (message as { password?: unknown } | null)?.password;
+  return typeof password === "string" ? password : null;
+}
+
+async function handleIsUvpaaRequest(
+  chromeApi: ChromeLike,
+  sendRuntimeCommand: RuntimeCommandSender,
+  request: unknown
+) {
   const requestId = requestIdFrom(request);
+  let isUvpaa = false;
   await recordWebAuthnDebug(chromeApi, {
     event: "is_uvpaa_received",
     requestId
   });
+  try {
+    isUvpaa = await getPasskeyUserVerificationAvailable(sendRuntimeCommand);
+  } catch (error) {
+    await recordWebAuthnDebug(chromeApi, {
+      event: "is_uvpaa_capability_failed",
+      requestId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
   await chromeApi.webAuthenticationProxy?.completeIsUvpaaRequest?.({
     requestId,
-    isUvpaa: false
+    isUvpaa
   });
   await recordWebAuthnDebug(chromeApi, {
     event: "is_uvpaa_completed",
     requestId,
-    isUvpaa: false
+    isUvpaa
   });
+}
+
+async function getPasskeyUserVerificationAvailable(
+  sendRuntimeCommand: RuntimeCommandSender
+) {
+  const response = await sendRuntimeCommand({
+    type: "get_passkey_user_verification_capability"
+  });
+  return getPasskeyUserVerificationMethodsFromResponse(response).length > 0;
+}
+
+function getPasskeyUserVerificationMethodsFromResponse(response: unknown) {
+  const runtimeError = runtimeErrorFromResponse(response);
+  if (runtimeError) {
+    throw runtimeError;
+  }
+  const candidate =
+    response as
+      | {
+          type?: unknown;
+          available?: unknown;
+          methods?: unknown;
+        }
+      | null;
+  if (
+    candidate?.type !== "passkey_user_verification_capability" ||
+    candidate.available !== true ||
+    !Array.isArray(candidate.methods)
+  ) {
+    return [];
+  }
+  const methods = candidate.methods.filter(
+    (method): method is "master_password" | "quick_unlock" =>
+      method === "master_password" || method === "quick_unlock"
+  );
+  return methods.length === candidate.methods.length ? methods : [];
 }
 
 async function handleGetRequest(
@@ -915,6 +1123,18 @@ async function handleGetRequest(
     };
     await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
   };
+  const persistUserVerificationPromptState = async (nonce: string) => {
+    if (!ceremonyMirror) {
+      return;
+    }
+    ceremonyMirror = {
+      ...ceremonyMirror,
+      popupNonce: nonce,
+      promptMode: "verify",
+      promptCredentialOptions: []
+    };
+    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
+  };
   await recordWebAuthnDebug(chromeApi, {
     event: "get_received",
     requestId,
@@ -922,7 +1142,6 @@ async function handleGetRequest(
   });
   try {
     const options = requestOptionsFrom(request);
-    rejectRequiredUserVerification(options);
     let credentialIds = credentialIdsFromOptions(options);
     const discloseUserHandle = passkeyGetCredentialIdsAreDiscoverable(credentialIds);
     const requestedRpId = relyingPartyIdFromGetOptions(options);
@@ -934,6 +1153,7 @@ async function handleGetRequest(
       );
     }
     rejectUnsupportedMediation(options);
+    const userVerification = userVerificationRequirementFromOptions(options);
     const origin = originContext.origin;
     rejectNonSecureWebAuthnOrigin(origin);
     const relyingParty = relyingPartyFromGetOptions(options, origin);
@@ -959,6 +1179,7 @@ async function handleGetRequest(
       originContext,
       relyingParty,
       discloseUserHandle,
+      userVerification,
       String(options.challenge)
     );
     ceremonyToken = ceremonyContext.ceremonyToken;
@@ -1008,6 +1229,21 @@ async function handleGetRequest(
       activeVault.activeVaultId
     );
     let userPresenceVerified = activeVault.userPresenceVerified;
+    const userVerified = await userVerificationForRequest(
+      chromeApi,
+      sendRuntimeCommand,
+      requestId,
+      ceremonyContext.ceremonyToken,
+      activeVault.activeVaultId,
+      userVerification,
+      promptContextFrom(originContext, relyingParty),
+      canceledRequests,
+      requestCancelKey,
+      { onPromptOpened: persistUserVerificationPromptState }
+    );
+    if (userVerified) {
+      userPresenceVerified = true;
+    }
     if (!userPresenceVerified) {
       const approved = await userPresenceForRequest(
         chromeApi,
@@ -1128,9 +1364,7 @@ async function handleGetRequest(
             authenticatorData: assertion.authenticatorDataBase64url,
             clientDataJSON: assertion.clientDataJsonBase64url,
             signature: assertion.signatureBase64url,
-            userHandle: discloseUserHandle
-              ? assertion.userHandleBase64url ?? null
-              : null
+            userHandle: assertion.userHandleBase64url ?? null
           }
         })
       });
@@ -1323,7 +1557,7 @@ async function resumePasskeyGetAfterPromptComplete(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender,
   requestId: number,
-  promptMode: "approve" | "unlock",
+  promptMode: "approve" | "unlock" | "verify",
   credentialId: string | undefined,
   canceledRequests: CanceledWebAuthnRequests,
   ceremonyToken?: string
@@ -1585,9 +1819,7 @@ async function resumePasskeyGetAfterPromptComplete(
             authenticatorData: assertion.authenticatorDataBase64url,
             clientDataJSON: assertion.clientDataJsonBase64url,
             signature: assertion.signatureBase64url,
-            userHandle: discloseUserHandle
-              ? assertion.userHandleBase64url ?? null
-              : null
+            userHandle: assertion.userHandleBase64url ?? null
           }
         })
       });
@@ -1646,7 +1878,7 @@ async function resumePasskeyCeremonyAfterPromptComplete(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender,
   requestId: number,
-  promptMode: "approve" | "unlock",
+  promptMode: "approve" | "unlock" | "verify",
   credentialId: string | undefined,
   canceledRequests: CanceledWebAuthnRequests,
   ceremonyToken?: string
@@ -1674,7 +1906,7 @@ async function resumePasskeyCreateAfterPromptComplete(
   chromeApi: ChromeLike,
   sendRuntimeCommand: RuntimeCommandSender,
   requestId: number,
-  promptMode: "approve" | "unlock",
+  promptMode: "approve" | "unlock" | "verify",
   canceledRequests: CanceledWebAuthnRequests,
   ceremonyToken?: string
 ) {
@@ -2247,6 +2479,7 @@ function isPasskeyCeremonyMirror(value: unknown): value is PasskeyCeremonyContex
     candidate.ancestorOrigins.every((origin) => typeof origin === "string") &&
     typeof candidate.relyingParty === "string" &&
     (candidate.ceremony === "get" || candidate.ceremony === "create") &&
+    passkeyUserVerificationRequirementIsKnown(candidate.userVerification) &&
     typeof candidate.challengeBase64url === "string" &&
     typeof candidate.requestId === "number" &&
     typeof candidate.tabId === "number" &&
@@ -2282,7 +2515,8 @@ function isPasskeyCeremonyMirror(value: unknown): value is PasskeyCeremonyContex
       typeof candidate.popupNonce === "string") &&
     (candidate.promptMode === undefined ||
       candidate.promptMode === "approve" ||
-      candidate.promptMode === "unlock") &&
+      candidate.promptMode === "unlock" ||
+      candidate.promptMode === "verify") &&
     (candidate.promptCredentialOptions === undefined ||
       passkeyCredentialOptionsAreUiSafe(candidate.promptCredentialOptions)) &&
     typeof candidate.registeredAtEpochMs === "number" &&
@@ -2293,6 +2527,16 @@ function isPasskeyCeremonyMirror(value: unknown): value is PasskeyCeremonyContex
 
 function passkeyCeremonyPhaseIsKnown(phase: unknown): phase is PasskeyCeremonyPhase {
   return typeof phase === "string" && PASSKEY_CEREMONY_PHASES.has(phase);
+}
+
+function passkeyUserVerificationRequirementIsKnown(
+  requirement: unknown
+): requirement is PasskeyUserVerificationRequirement {
+  return (
+    requirement === "discouraged" ||
+    requirement === "preferred" ||
+    requirement === "required"
+  );
 }
 
 function passkeyCeremonyMirrorFrameContextIsSafe(
@@ -2405,7 +2649,9 @@ function restorePasskeyCeremonyPromptState(mirror: PasskeyCeremonyContext) {
   if (
     typeof mirror.popupNonce !== "string" ||
     mirror.popupNonce.trim() === "" ||
-    (mirror.promptMode !== "approve" && mirror.promptMode !== "unlock") ||
+    (mirror.promptMode !== "approve" &&
+      mirror.promptMode !== "unlock" &&
+      mirror.promptMode !== "verify") ||
     !passkeyCeremonyPhaseCanRestorePrompt(mirror.phase, mirror.promptMode) ||
     !passkeyCeremonyMirrorCanRestorePrompt(mirror)
   ) {
@@ -2422,6 +2668,24 @@ function restorePasskeyCeremonyPromptState(mirror: PasskeyCeremonyContext) {
     presencePromptNonces.set(mirror.ceremonyToken, mirror.popupNonce);
     presencePromptRequestIds.set(mirror.ceremonyToken, mirror.requestId);
     presencePromptRequestKeys.set(
+      mirror.ceremonyToken,
+      webAuthnRequestCancelKeyFromMirror(mirror)
+    );
+    return;
+  }
+
+  if (mirror.promptMode === "verify") {
+    if (!passkeyNonemptyString(mirror.activeVaultId)) {
+      return;
+    }
+    userVerificationPromptContexts.set(mirror.ceremonyToken, {
+      ...promptContext,
+      ceremonyToken: mirror.ceremonyToken,
+      activeVaultId: mirror.activeVaultId
+    });
+    userVerificationPromptNonces.set(mirror.ceremonyToken, mirror.popupNonce);
+    userVerificationPromptRequestIds.set(mirror.ceremonyToken, mirror.requestId);
+    userVerificationPromptRequestKeys.set(
       mirror.ceremonyToken,
       webAuthnRequestCancelKeyFromMirror(mirror)
     );
@@ -2454,9 +2718,9 @@ function passkeyCeremonyMirrorForPhase(
 
 function passkeyCeremonyPhaseCanRestorePrompt(
   phase: string,
-  promptMode: "approve" | "unlock"
+  promptMode: "approve" | "unlock" | "verify"
 ) {
-  if (promptMode === "unlock") {
+  if (promptMode === "unlock" || promptMode === "verify") {
     return phase === "s1_user_authorization";
   }
   return phase === "s1_user_authorization" || phase === "s3b_user_selection";
@@ -2477,7 +2741,10 @@ function passkeyCeremonyMirrorCanRestorePrompt(mirror: PasskeyCeremonyContext) {
     return false;
   }
 
-  if (mirror.promptMode === "approve" && !passkeyNonemptyString(mirror.activeVaultId)) {
+  if (
+    (mirror.promptMode === "approve" || mirror.promptMode === "verify") &&
+    !passkeyNonemptyString(mirror.activeVaultId)
+  ) {
     return false;
   }
 
@@ -2863,6 +3130,7 @@ async function registerPasskeyCeremony(
   originContext: WebAuthnOriginContext,
   relyingParty: string,
   discoverable: boolean,
+  userVerification: PasskeyUserVerificationRequirement,
   challengeBase64url: string
 ): Promise<PasskeyCeremonyBaseContext> {
   const frame = frameContextFromRequest(request, originContext);
@@ -2881,6 +3149,7 @@ async function registerPasskeyCeremony(
     relying_party: relyingParty,
     ceremony,
     discoverable,
+    user_verification: userVerification,
     challenge_base64url: challengeBase64url,
     request_id: requestId,
     tab_id: frame.tabId,
@@ -2905,6 +3174,7 @@ async function registerPasskeyCeremony(
     ancestorOrigins: originContext.ancestorOrigins,
     relyingParty,
     ceremony,
+    userVerification,
     challengeBase64url,
     requestId,
     tabId: frame.tabId,
@@ -3263,14 +3533,18 @@ function frameContextFromRequest(
     | { tabId?: unknown; frameId?: unknown }
     | null
     | undefined;
-  if (typeof candidate?.tabId !== "number" || typeof candidate.frameId !== "number") {
+  const frame =
+    typeof candidate?.tabId === "number" && typeof candidate.frameId === "number"
+      ? { tabId: candidate.tabId, frameId: candidate.frameId }
+      : originContext.trustedFrame;
+  if (!frame) {
     throw new WebAuthnRequestError(
       "NotAllowedError",
       "VaultKern cannot identify the WebAuthn request frame"
     );
   }
   if (
-    candidate.frameId === 0 &&
+    frame.frameId === 0 &&
     (originContext.topOrigin || originContext.ancestorOrigins.length > 0)
   ) {
     throw new WebAuthnRequestError(
@@ -3278,13 +3552,13 @@ function frameContextFromRequest(
       "VaultKern cannot identify the WebAuthn request frame"
     );
   }
-  if (candidate.frameId !== 0 && !originContext.topOrigin) {
+  if (frame.frameId !== 0 && !originContext.topOrigin) {
     throw new WebAuthnRequestError(
       "NotAllowedError",
       "VaultKern cannot identify the WebAuthn request frame"
     );
   }
-  if (candidate.frameId !== 0 && originContext.ancestorOrigins.length === 0) {
+  if (frame.frameId !== 0 && originContext.ancestorOrigins.length === 0) {
     throw new WebAuthnRequestError(
       "NotAllowedError",
       "VaultKern cannot identify the WebAuthn request frame"
@@ -3292,9 +3566,9 @@ function frameContextFromRequest(
   }
 
   return {
-    tabId: candidate.tabId,
-    frameId: candidate.frameId,
-    frameKind: candidate.frameId === 0 ? "top" : "subframe"
+    tabId: frame.tabId,
+    frameId: frame.frameId,
+    frameKind: frame.frameId === 0 ? "top" : "subframe"
   };
 }
 
@@ -3386,6 +3660,18 @@ async function handleCreateRequest(
     };
     await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
   };
+  const persistUserVerificationPromptState = async (nonce: string) => {
+    if (!ceremonyMirror) {
+      return;
+    }
+    ceremonyMirror = {
+      ...ceremonyMirror,
+      popupNonce: nonce,
+      promptMode: "verify",
+      promptCredentialOptions: []
+    };
+    await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
+  };
   await recordWebAuthnDebug(chromeApi, {
     event: "create_received",
     requestId,
@@ -3394,7 +3680,7 @@ async function handleCreateRequest(
   try {
     const options = createRequestOptionsFrom(request);
     rejectCrossPlatformOnlyRegistration(options);
-    rejectRequiredUserVerification(options);
+    const userVerification = userVerificationRequirementFromOptions(options);
     const requestedRpId = relyingPartyIdFromCreateOptions(options);
     const originContext = await originContextForRequest(request, "create", options);
     if (!originContext) {
@@ -3428,6 +3714,7 @@ async function handleCreateRequest(
       originContext,
       relyingParty,
       false,
+      userVerification,
       String(options.challenge)
     );
     ceremonyToken = ceremonyContext.ceremonyToken;
@@ -3481,6 +3768,21 @@ async function handleCreateRequest(
       activeVault.activeVaultId
     );
     let userPresenceVerified = activeVault.userPresenceVerified;
+    const userVerified = await userVerificationForRequest(
+      chromeApi,
+      sendRuntimeCommand,
+      requestId,
+      ceremonyContext.ceremonyToken,
+      activeVault.activeVaultId,
+      userVerification,
+      promptContextFrom(originContext, relyingParty),
+      canceledRequests,
+      requestCancelKey,
+      { onPromptOpened: persistUserVerificationPromptState }
+    );
+    if (userVerified) {
+      userPresenceVerified = true;
+    }
     if (!userPresenceVerified) {
       const approved = await userPresenceForRequest(
         chromeApi,
@@ -3783,6 +4085,7 @@ function createRequestOptionsFrom(request: unknown) {
     challenge?: unknown;
     pubKeyCredParams?: unknown;
     excludeCredentials?: unknown;
+    userVerification?: unknown;
     extensions?: {
       credProps?: unknown;
     };
@@ -3864,6 +4167,22 @@ function rejectRequiredUserVerification(options: {
     "NotAllowedError",
     "VaultKern passkey provider does not support required user verification"
   );
+}
+
+function userVerificationRequirementFromOptions(options: {
+  userVerification?: unknown;
+  authenticatorSelection?: { userVerification?: unknown };
+}): PasskeyUserVerificationRequirement {
+  const userVerification =
+    options.userVerification ?? options.authenticatorSelection?.userVerification;
+  if (
+    userVerification === "required" ||
+    userVerification === "discouraged" ||
+    userVerification === "preferred"
+  ) {
+    return userVerification;
+  }
+  return "preferred";
 }
 
 function rejectUnsupportedMediation(options: { mediation?: unknown }) {
@@ -4180,6 +4499,59 @@ function originContextFromRequest(request: unknown) {
   };
 }
 
+function trustedFrameIdsFromWebAuthnRequest(request: unknown) {
+  const candidate = request as
+    | { tabId?: unknown; frameId?: unknown }
+    | null
+    | undefined;
+  return typeof candidate?.tabId === "number" && typeof candidate.frameId === "number"
+    ? { tabId: candidate.tabId, frameId: candidate.frameId }
+    : null;
+}
+
+function trustedWebAuthnMessageSenderContextFrom(sender: unknown) {
+  const candidate = sender as
+    | {
+        origin?: unknown;
+        url?: unknown;
+        tab?: { id?: unknown };
+        frameId?: unknown;
+      }
+    | null
+    | undefined;
+  const origin =
+    originFromUnknown(candidate?.origin) ?? originFromSenderUrl(candidate?.url);
+  if (
+    !origin ||
+    typeof candidate?.tab?.id !== "number" ||
+    typeof candidate.frameId !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    origin,
+    tabId: candidate.tab.id,
+    frameId: candidate.frameId
+  };
+}
+
+function originFromSenderUrl(value: unknown) {
+  if (typeof value !== "string" || value.trim() === "" || value !== value.trim()) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.username !== "" || parsed.password !== "") {
+      return null;
+    }
+    return parsed.origin === "null" ? null : parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
 function mediationFromRequestDetails(requestDetailsJson: unknown) {
   if (typeof requestDetailsJson !== "string") {
     return undefined;
@@ -4232,7 +4604,14 @@ async function originContextForRequest(
       : directOrigin;
   }
 
-  return null;
+  const requestFrame = trustedFrameIdsFromWebAuthnRequest(request);
+  return waitForOriginContextFromPageRequest(
+    ceremony,
+    options,
+    undefined,
+    requestFrame ?? undefined,
+    true
+  );
 }
 
 function originContextFromPageRequest(
@@ -4244,7 +4623,9 @@ function originContextFromPageRequest(
     allowCredentials?: unknown;
     excludeCredentials?: unknown;
   },
-  expectedOrigin?: string
+  expectedOrigin?: string,
+  expectedFrame?: { tabId: number; frameId: number },
+  requireTrustedSender = false
 ) {
   const challenge = typeof options.challenge === "string" ? options.challenge : null;
   if (!challenge) {
@@ -4274,7 +4655,9 @@ function originContextFromPageRequest(
         relyingParty: expectedRelyingParty,
         allowCredentialIds,
         excludeCredentialIds,
-        expectedOrigin
+        expectedOrigin,
+        expectedFrame,
+        requireTrustedSender
       })
     ) {
       observedPageRequests.splice(index, 1);
@@ -4282,12 +4665,52 @@ function originContextFromPageRequest(
         origin: observed.origin,
         topOrigin: observed.topOrigin,
         ancestorOrigins: observed.ancestorOrigins,
-        mediation: observed.mediation
+        mediation: observed.mediation,
+        ...(typeof observed.trustedSenderTabId === "number" &&
+        typeof observed.trustedSenderFrameId === "number"
+          ? {
+              trustedFrame: {
+                tabId: observed.trustedSenderTabId,
+                frameId: observed.trustedSenderFrameId
+              }
+            }
+          : {})
       };
     }
   }
 
   return null;
+}
+
+async function waitForOriginContextFromPageRequest(
+  ceremony: "create" | "get",
+  options: {
+    challenge?: unknown;
+    rpId?: unknown;
+    rp?: { id?: unknown; name?: unknown };
+    allowCredentials?: unknown;
+    excludeCredentials?: unknown;
+  },
+  expectedOrigin?: string,
+  expectedFrame?: { tabId: number; frameId: number },
+  requireTrustedSender = false
+) {
+  const deadline = Date.now() + OBSERVED_PAGE_REQUEST_WAIT_MS;
+  for (;;) {
+    const originContext = originContextFromPageRequest(
+      ceremony,
+      options,
+      expectedOrigin,
+      expectedFrame,
+      requireTrustedSender
+    );
+    if (originContext || Date.now() >= deadline) {
+      return originContext;
+    }
+    await delay(
+      Math.min(OBSERVED_PAGE_REQUEST_POLL_MS, Math.max(0, deadline - Date.now()))
+    );
+  }
 }
 
 function observedPageRequestMatches(
@@ -4299,6 +4722,8 @@ function observedPageRequestMatches(
     allowCredentialIds: string[];
     excludeCredentialIds: string[];
     expectedOrigin?: string;
+    expectedFrame?: { tabId: number; frameId: number };
+    requireTrustedSender?: boolean;
   }
 ) {
   if (observed.ceremony !== expected.ceremony) {
@@ -4308,6 +4733,20 @@ function observedPageRequestMatches(
     return false;
   }
   if (expected.expectedOrigin && observed.origin !== expected.expectedOrigin) {
+    return false;
+  }
+  if (
+    expected.requireTrustedSender &&
+    (typeof observed.trustedSenderTabId !== "number" ||
+      typeof observed.trustedSenderFrameId !== "number")
+  ) {
+    return false;
+  }
+  if (
+    expected.expectedFrame &&
+    (observed.trustedSenderTabId !== expected.expectedFrame.tabId ||
+      observed.trustedSenderFrameId !== expected.expectedFrame.frameId)
+  ) {
     return false;
   }
   if (
@@ -4942,6 +5381,105 @@ async function userPresenceForRequest(
   );
 }
 
+async function userVerificationForRequest(
+  chromeApi: ChromeLike,
+  sendRuntimeCommand: RuntimeCommandSender,
+  requestId: number,
+  promptKey: string,
+  activeVaultId: string,
+  userVerification: PasskeyUserVerificationRequirement,
+  promptContext: WebAuthnPromptContext,
+  canceledRequests: CanceledWebAuthnRequests,
+  requestCancelKey: string | null,
+  options: {
+    onPromptOpened?: (nonce: string) => Promise<void> | void;
+  } = {}
+) {
+  if (userVerification === "discouraged") {
+    return false;
+  }
+  let methods: Array<"master_password" | "quick_unlock">;
+  try {
+    methods = getPasskeyUserVerificationMethodsFromResponse(
+      await sendRuntimeCommand({
+        type: "get_passkey_user_verification_capability"
+      })
+    );
+  } catch (error) {
+    await recordWebAuthnDebug(chromeApi, {
+      event: "user_verification_capability_failed",
+      requestId,
+      error: errorSummary(error)
+    });
+    if (userVerification === "required") {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "VaultKern passkey provider cannot verify the user"
+      );
+    }
+    return false;
+  }
+  if (methods.length === 0) {
+    if (userVerification === "required") {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "VaultKern passkey provider cannot verify the user"
+      );
+    }
+    return false;
+  }
+
+  await recordWebAuthnDebug(chromeApi, {
+    event: "user_verification_prompt_opening",
+    requestId,
+    methods
+  });
+  const nonce = await openUserVerificationPrompt(
+    chromeApi,
+    requestId,
+    promptKey,
+    {
+      ...promptContext,
+      ceremonyToken: promptKey,
+      activeVaultId
+    },
+    requestCancelKey
+  );
+  await options.onPromptOpened?.(nonce);
+
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    if (webAuthnRequestIsCanceled(canceledRequests, requestId, requestCancelKey)) {
+      clearUserVerificationPromptState(promptKey);
+      await recordWebAuthnDebug(chromeApi, {
+        event: "user_verification_wait_canceled",
+        requestId
+      });
+      return false;
+    }
+
+    const signal = await waitForUserVerificationSignal(
+      promptKey,
+      Math.min(1_000, Math.max(0, deadline - Date.now()))
+    );
+    if (signal?.type === "complete") {
+      return true;
+    }
+    if (signal?.type === "dismissed") {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "VaultKern passkey user verification was dismissed"
+      );
+    }
+  }
+
+  clearUserVerificationPromptState(promptKey);
+  throw new WebAuthnRequestError(
+    "NotAllowedError",
+    "VaultKern passkey user verification timed out"
+  );
+}
+
 function selectedCredentialIdForPrompt(
   promptContext: WebAuthnPromptContext,
   credentialId: string | undefined
@@ -5048,6 +5586,51 @@ function waitForPresenceSignal(promptKey: string, timeoutMs: number) {
     const dismissWaiters = presenceDismissWaiters.get(promptKey) ?? new Set<() => void>();
     dismissWaiters.add(dismissWaiter);
     presenceDismissWaiters.set(promptKey, dismissWaiters);
+  });
+}
+
+function waitForUserVerificationSignal(promptKey: string, timeoutMs: number) {
+  return new Promise<UserVerificationSignal>((resolve) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      finish(null);
+    }, timeoutMs);
+    const completeWaiter = (method: "master_password" | "quick_unlock") => {
+      finish({ type: "complete", method });
+    };
+    const dismissWaiter = () => {
+      finish({ type: "dismissed" });
+    };
+
+    function finish(signaled: UserVerificationSignal) {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeoutId);
+      const completeWaiters = userVerificationCompleteWaiters.get(promptKey);
+      completeWaiters?.delete(completeWaiter);
+      if (completeWaiters?.size === 0) {
+        userVerificationCompleteWaiters.delete(promptKey);
+      }
+      const dismissWaiters = userVerificationDismissWaiters.get(promptKey);
+      dismissWaiters?.delete(dismissWaiter);
+      if (dismissWaiters?.size === 0) {
+        userVerificationDismissWaiters.delete(promptKey);
+      }
+      resolve(signaled);
+    }
+
+    const completeWaiters =
+      userVerificationCompleteWaiters.get(promptKey) ??
+      new Set<(method: "master_password" | "quick_unlock") => void>();
+    completeWaiters.add(completeWaiter);
+    userVerificationCompleteWaiters.set(promptKey, completeWaiters);
+    const dismissWaiters =
+      userVerificationDismissWaiters.get(promptKey) ?? new Set<() => void>();
+    dismissWaiters.add(dismissWaiter);
+    userVerificationDismissWaiters.set(promptKey, dismissWaiters);
   });
 }
 
@@ -5164,6 +5747,63 @@ async function openPresencePrompt(
   return nonce;
 }
 
+async function openUserVerificationPrompt(
+  chromeApi: ChromeLike,
+  requestId: number,
+  promptKey: string,
+  promptContext: WebAuthnUserVerificationPromptContext,
+  requestCancelKey: string | null
+): Promise<string> {
+  if (!chromeApi.windows?.create) {
+    throw new WebAuthnRequestError(
+      "NotAllowedError",
+      "VaultKern passkey user verification window is unavailable"
+    );
+  }
+
+  const existingWindowId = userVerificationPromptWindowIds.get(promptKey);
+  if (typeof existingWindowId === "number" && chromeApi.windows.update) {
+    try {
+      await chromeApi.windows.update(existingWindowId, { focused: true });
+      const existingNonce = userVerificationPromptNonces.get(promptKey);
+      if (typeof existingNonce === "string") {
+        return existingNonce;
+      }
+      clearUserVerificationPromptState(promptKey);
+    } catch {
+      clearUserVerificationPromptState(promptKey);
+    }
+  }
+
+  const nonce = generatePromptNonce();
+  userVerificationPromptContexts.set(promptKey, promptContext);
+  userVerificationPromptNonces.set(promptKey, nonce);
+  userVerificationPromptRequestIds.set(promptKey, requestId);
+  if (requestCancelKey) {
+    userVerificationPromptRequestKeys.set(promptKey, requestCancelKey);
+  }
+  const popupPath = popupPathForWebAuthnPrompt("verify", requestId, promptContext, nonce);
+  const url = chromeApi.runtime?.getURL?.(popupPath) ?? popupPath;
+  let created: { id?: number } | undefined;
+  try {
+    created = await chromeApi.windows.create({
+      url,
+      type: "popup",
+      width: 460,
+      height: 520,
+      focused: true
+    });
+  } catch (error) {
+    clearUserVerificationPromptState(promptKey);
+    throw error;
+  }
+  if (created && typeof created.id === "number") {
+    userVerificationPromptWindowIds.set(promptKey, created.id);
+    watchUserVerificationPromptWindow(chromeApi, requestId, promptKey, created.id);
+  }
+  return nonce;
+}
+
 function watchPresencePromptWindow(
   chromeApi: ChromeLike,
   requestId: number,
@@ -5195,6 +5835,40 @@ function watchPresencePromptWindow(
   presencePromptRemovalCleanups.set(promptKey, () => {
     onRemoved.removeListener?.(listener);
     presencePromptRemovalCleanups.delete(promptKey);
+  });
+}
+
+function watchUserVerificationPromptWindow(
+  chromeApi: ChromeLike,
+  requestId: number,
+  promptKey: string,
+  windowId: number
+) {
+  const onRemoved = chromeApi.windows?.onRemoved;
+  if (!onRemoved?.addListener) {
+    return;
+  }
+
+  userVerificationPromptRemovalCleanups.get(promptKey)?.();
+  const listener = (removedWindowId: number) => {
+    if (removedWindowId !== windowId) {
+      return;
+    }
+
+    clearUserVerificationPromptState(promptKey);
+    void recordWebAuthnDebug(chromeApi, {
+      event: "user_verification_prompt_dismissed",
+      requestId,
+      windowId
+    });
+    for (const waiter of [...(userVerificationDismissWaiters.get(promptKey) ?? [])]) {
+      waiter();
+    }
+  };
+  onRemoved.addListener(listener);
+  userVerificationPromptRemovalCleanups.set(promptKey, () => {
+    onRemoved.removeListener?.(listener);
+    userVerificationPromptRemovalCleanups.delete(promptKey);
   });
 }
 
@@ -5233,7 +5907,7 @@ function watchUnlockPromptWindow(
 }
 
 function popupPathForWebAuthnPrompt(
-  mode: "unlock" | "approve",
+  mode: "unlock" | "approve" | "verify",
   requestId: number,
   promptContext: WebAuthnPromptContext,
   nonce: string
@@ -5271,6 +5945,15 @@ function clearPresencePromptState(promptKey: string) {
   presencePromptNonces.delete(promptKey);
   presencePromptRequestIds.delete(promptKey);
   presencePromptRequestKeys.delete(promptKey);
+}
+
+function clearUserVerificationPromptState(promptKey: string) {
+  userVerificationPromptRemovalCleanups.get(promptKey)?.();
+  userVerificationPromptWindowIds.delete(promptKey);
+  userVerificationPromptContexts.delete(promptKey);
+  userVerificationPromptNonces.delete(promptKey);
+  userVerificationPromptRequestIds.delete(promptKey);
+  userVerificationPromptRequestKeys.delete(promptKey);
 }
 
 async function closeUnlockPromptWindow(
@@ -5318,6 +6001,35 @@ async function closePresencePromptWindow(
     .filter((windowId): windowId is number => typeof windowId === "number");
   for (const promptKey of promptKeys) {
     clearPresencePromptState(promptKey);
+  }
+  if (!chromeApi.windows?.remove) {
+    return;
+  }
+  for (const windowId of windowIds) {
+    try {
+      await chromeApi.windows.remove(windowId);
+    } catch {
+      // The user or browser may already have closed the prompt.
+    }
+  }
+}
+
+async function closeUserVerificationPromptWindow(
+  chromeApi: ChromeLike,
+  requestId: number,
+  requestCancelKey: string | null
+) {
+  const promptKeys = promptKeysForCancellation(
+    userVerificationPromptRequestIds,
+    userVerificationPromptRequestKeys,
+    requestId,
+    requestCancelKey
+  );
+  const windowIds = promptKeys
+    .map((promptKey) => userVerificationPromptWindowIds.get(promptKey))
+    .filter((windowId): windowId is number => typeof windowId === "number");
+  for (const promptKey of promptKeys) {
+    clearUserVerificationPromptState(promptKey);
   }
   if (!chromeApi.windows?.remove) {
     return;

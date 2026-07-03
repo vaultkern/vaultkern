@@ -1,41 +1,68 @@
-const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
 const WEB_AUTHN_PAGE_REQUEST_MESSAGE = "vaultkern_webauthn_page_request";
+const WEB_AUTHN_PAGE_REQUEST_EVENT = "vaultkern_webauthn_page_request_event";
 const globalState = globalThis as typeof globalThis & {
   __vaultkernWebAuthnContentScriptInstalled?: boolean;
+  __vaultkernWebAuthnContentScriptInstallId?: number;
 };
 
-if (!globalState.__vaultkernWebAuthnContentScriptInstalled && chromeApi?.runtime?.sendMessage) {
+if (!globalState.__vaultkernWebAuthnContentScriptInstalled) {
   globalState.__vaultkernWebAuthnContentScriptInstalled = true;
+  const installId = (globalState.__vaultkernWebAuthnContentScriptInstallId ?? 0) + 1;
+  globalState.__vaultkernWebAuthnContentScriptInstallId = installId;
+  window.addEventListener(WEB_AUTHN_PAGE_REQUEST_EVENT, (event) => {
+    if (globalState.__vaultkernWebAuthnContentScriptInstallId !== installId) {
+      return;
+    }
+    const detail = (event as CustomEvent).detail;
+    forwardWebAuthnPageRequest(detail);
+  });
   window.addEventListener("message", (event) => {
-    const frameOrigin = originFromFrame(event);
-    const ancestorOrigins = ancestorOriginsFromWindow();
+    if (globalState.__vaultkernWebAuthnContentScriptInstallId !== installId) {
+      return;
+    }
     if (
-      !frameOrigin ||
-      !ancestorOrigins ||
       event.source !== window ||
-      event.origin !== frameOrigin ||
       !isWebAuthnPageRequest(event.data)
     ) {
       return;
     }
 
-    const sendResult = chromeApi.runtime.sendMessage({
-      type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
-      ceremony: event.data.ceremony,
-      origin: frameOrigin,
-      topOrigin: topOriginFromAncestorOrigins(ancestorOrigins),
-      ancestorOrigins,
-      relyingParty: optionalStringFrom(event.data.relyingParty),
-      challenge: optionalStringFrom(event.data.challenge),
-      allowCredentialIds: stringArrayFrom(event.data.allowCredentialIds),
-      excludeCredentialIds: stringArrayFrom(event.data.excludeCredentialIds),
-      mediation: optionalStringFrom(event.data.mediation),
-      observedAt: Date.now()
-    });
-    if (sendResult && typeof sendResult.catch === "function") {
-      sendResult.catch(() => undefined);
-    }
+    forwardWebAuthnPageRequest(event.data, event);
   });
+}
+
+function forwardWebAuthnPageRequest(data: unknown, event?: MessageEvent) {
+  const frameOrigin = originFromFrame(event);
+  const ancestorOrigins = ancestorOriginsFromWindow();
+  if (
+    !frameOrigin ||
+    !ancestorOrigins ||
+    (event && event.origin !== frameOrigin) ||
+    !isWebAuthnPageRequest(data)
+  ) {
+    return;
+  }
+
+  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+  if (!chromeApi?.runtime?.sendMessage) {
+    return;
+  }
+  const sendResult = chromeApi.runtime.sendMessage({
+    type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
+    ceremony: data.ceremony,
+    origin: frameOrigin,
+    topOrigin: topOriginFromAncestorOrigins(ancestorOrigins),
+    ancestorOrigins,
+    relyingParty: optionalStringFrom(data.relyingParty),
+    challenge: optionalStringFrom(data.challenge),
+    allowCredentialIds: stringArrayFrom(data.allowCredentialIds),
+    excludeCredentialIds: stringArrayFrom(data.excludeCredentialIds),
+    mediation: optionalStringFrom(data.mediation),
+    observedAt: Date.now()
+  });
+  if (sendResult && typeof sendResult.catch === "function") {
+    sendResult.catch(() => undefined);
+  }
 }
 
 function originFromFrame(event?: MessageEvent) {

@@ -12,6 +12,14 @@ type PendingRequest = {
   resolve: (response: unknown) => void;
   reject: (error: Error) => void;
   timeoutId: ReturnType<typeof setTimeout> | null;
+  postMessageAttempts: number;
+};
+
+type NativeBridgeEvent = {
+  event: "connect" | "post" | "response" | "disconnect" | "post_error";
+  commandType?: string | null;
+  message?: string;
+  code?: NativeMessagingErrorCode;
 };
 
 export class NativeMessagingError extends Error {
@@ -134,6 +142,7 @@ export function createNativeMessagingBridge(
     timeoutMs?: number;
     interactiveTimeoutMs?: number;
     onPortDetached?: () => void;
+    onEvent?: (event: NativeBridgeEvent) => void;
   }
 ) {
   const timeoutMs = options?.timeoutMs ?? 30_000;
@@ -176,6 +185,14 @@ export function createNativeMessagingBridge(
     if (request?.timeoutId) {
       clearTimeout(request.timeoutId);
       request.timeoutId = null;
+    }
+  }
+
+  function emitEvent(event: NativeBridgeEvent) {
+    try {
+      options?.onEvent?.(event);
+    } catch {
+      // Diagnostics must not affect native messaging behavior.
     }
   }
 
@@ -271,6 +288,10 @@ export function createNativeMessagingBridge(
     }
 
     const request = activeRequest;
+    emitEvent({
+      event: "response",
+      commandType: commandTypeFromMessage(request.message)
+    });
     activeRequest = null;
     clearRequestTimeout(request);
     request.resolve(response);
@@ -283,6 +304,12 @@ export function createNativeMessagingBridge(
     }
 
     const error = disconnectError();
+    emitEvent({
+      event: "disconnect",
+      commandType: commandTypeFromMessage(activeRequest?.message),
+      code: error.code,
+      message: error.message
+    });
     clearRequestTimeout(activeRequest);
     detachPort();
     rejectAll(error);
@@ -294,6 +321,7 @@ export function createNativeMessagingBridge(
     }
 
     port = connectNative(hostName);
+    emitEvent({ event: "connect" });
     const attachedPort = port;
     port.onMessage.addListener((response: unknown) =>
       onNativeMessage(attachedPort, response)
@@ -335,12 +363,33 @@ export function createNativeMessagingBridge(
         request.reject(timeoutError());
         flushQueue();
       }, timeoutForMessage(request.message));
+      request.postMessageAttempts += 1;
+      emitEvent({
+        event: "post",
+        commandType: commandTypeFromMessage(request.message)
+      });
       requestPort.postMessage(request.message);
     } catch (error) {
       clearRequestTimeout(request);
       activeRequest = null;
       detachPort();
-      request.reject(toNativeMessagingError(error, "native_unknown"));
+      const nativeError = toNativeMessagingError(error, "native_port_disconnected");
+      emitEvent({
+        event: "post_error",
+        commandType: commandTypeFromMessage(request.message),
+        code: nativeError.code,
+        message: nativeError.message
+      });
+      if (
+        nativeError.code === "native_port_disconnected" &&
+        request.postMessageAttempts === 1
+      ) {
+        queuedRequests.unshift(request);
+        flushQueue();
+        return;
+      }
+
+      request.reject(nativeError);
 
       if (queuedRequests.length > 0) {
         flushQueue();
@@ -355,7 +404,7 @@ export function createNativeMessagingBridge(
           cancelActivePreload();
         }
         cancelQueuedPreloads(message);
-        enqueueRequest({ message, resolve, reject, timeoutId: null });
+        enqueueRequest({ message, resolve, reject, timeoutId: null, postMessageAttempts: 0 });
         flushQueue();
       });
     }

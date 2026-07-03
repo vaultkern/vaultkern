@@ -90,10 +90,31 @@ async function completePasskeyLedgerReconciliation(
 }
 
 function passkeyCeremonyStorage(ceremonies: Record<string, unknown>) {
+  const normalizedCeremonies = Object.fromEntries(
+    Object.entries(ceremonies).map(([token, ceremony]) => [
+      token,
+      passkeyCeremonyStorageFixture(ceremony)
+    ])
+  );
   return {
     version: 1,
-    ceremonies,
-    checksum: passkeyCeremonyStorageChecksum(ceremonies)
+    ceremonies: normalizedCeremonies,
+    checksum: passkeyCeremonyStorageChecksum(normalizedCeremonies)
+  };
+}
+
+function passkeyCeremonyStorageFixture(ceremony: unknown) {
+  const candidate = ceremony as Record<string, unknown> | null;
+  if (
+    !candidate ||
+    typeof candidate !== "object" ||
+    "userVerification" in candidate
+  ) {
+    return ceremony;
+  }
+  return {
+    ...candidate,
+    userVerification: "preferred"
   };
 }
 
@@ -488,13 +509,20 @@ describe("background bridge", () => {
     await completePasskeyLedgerReconciliation(port);
     expect(registerContentScripts).toHaveBeenCalledWith([
       {
+        id: "vaultkern-webauthn-content-bridge",
+        matches: ["<all_urls>"],
+        js: ["webauthnContentScript.js"],
+        runAt: "document_start",
+        allFrames: true,
+        persistAcrossSessions: false
+      },
+      {
         id: "vaultkern-webauthn-page-hook",
         matches: ["<all_urls>"],
         js: ["webauthnPageHook.js"],
         runAt: "document_start",
         world: "MAIN",
         allFrames: true,
-        matchAboutBlank: true,
         matchOriginAsFallback: true,
         persistAcrossSessions: false
       }
@@ -507,7 +535,7 @@ describe("background bridge", () => {
     });
     expect(executeScript).toHaveBeenNthCalledWith(1, {
       target: { tabId: 7, allFrames: true },
-      files: ["webauthnContentScript.js"],
+      func: expect.any(Function),
       world: "ISOLATED"
     });
     expect(executeScript).toHaveBeenNthCalledWith(2, {
@@ -517,7 +545,7 @@ describe("background bridge", () => {
     });
     expect(executeScript).toHaveBeenNthCalledWith(3, {
       target: { tabId: 8, allFrames: true },
-      files: ["webauthnContentScript.js"],
+      func: expect.any(Function),
       world: "ISOLATED"
     });
     expect(executeScript).toHaveBeenNthCalledWith(4, {
@@ -534,13 +562,13 @@ describe("background bridge", () => {
     });
   });
 
-  it("still injects the WebAuthn page hook when bridge reinjection is already installed", async () => {
+  it("still injects the isolated WebAuthn bridge when page hook reinjection is already installed", async () => {
     const port = createPort();
     const attach = vi.fn(async () => undefined);
     const registerContentScripts = vi.fn(async () => undefined);
     const executeScript = vi.fn(async (details: { files?: string[] }) => {
-      if (details.files?.includes("webauthnContentScript.js")) {
-        throw new Error("Identifier 'WEB_AUTHN_PAGE_REQUEST_MESSAGE' has already been declared");
+      if (details.files?.includes("webauthnPageHook.js")) {
+        throw new Error("page hook was already installed");
       }
     });
     const query = vi.fn(async () => [{ id: 7 }]);
@@ -598,8 +626,8 @@ describe("background bridge", () => {
     await vi.waitFor(() => {
       expect(executeScript).toHaveBeenCalledWith({
         target: { tabId: 7, allFrames: true },
-        files: ["webauthnPageHook.js"],
-        world: "MAIN"
+        func: expect.any(Function),
+        world: "ISOLATED"
       });
     });
   });
@@ -1058,7 +1086,10 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(unregisterContentScripts).toHaveBeenCalledWith({
-        ids: ["vaultkern-webauthn-page-hook"]
+        ids: [
+          "vaultkern-webauthn-content-bridge",
+          "vaultkern-webauthn-page-hook"
+        ]
       });
     });
   });
@@ -1364,7 +1395,10 @@ describe("background bridge", () => {
     delete (globalThis as Record<string, unknown>)
       .__vaultkernWebAuthnPageHookEnabled;
     expect(unregisterContentScripts).toHaveBeenCalledWith({
-      ids: ["vaultkern-webauthn-page-hook"]
+      ids: [
+        "vaultkern-webauthn-content-bridge",
+        "vaultkern-webauthn-page-hook"
+      ]
     });
   });
 

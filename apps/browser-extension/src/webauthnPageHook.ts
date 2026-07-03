@@ -1,4 +1,5 @@
 const WEB_AUTHN_PAGE_REQUEST_MESSAGE = "vaultkern_webauthn_page_request";
+const WEB_AUTHN_PAGE_REQUEST_EVENT = "vaultkern_webauthn_page_request_event";
 const HOOK_ENABLED_MARKER = "__vaultkernWebAuthnPageHookEnabled";
 const HOOK_MARKER = "__vaultkernWebAuthnHookInstalled";
 
@@ -70,16 +71,20 @@ function observeWebAuthnRequest(
   }
 
   try {
+    const observation = {
+      type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
+      ceremony,
+      relyingParty: relyingPartyFromOptions(publicKey),
+      challenge: base64urlFrom(publicKey.challenge),
+      allowCredentialIds: credentialIdsFrom(publicKey.allowCredentials),
+      excludeCredentialIds: credentialIdsFrom(publicKey.excludeCredentials),
+      mediation: mediationFrom(ceremony, credentialOptions?.mediation)
+    };
+    window.dispatchEvent(
+      new CustomEvent(WEB_AUTHN_PAGE_REQUEST_EVENT, { detail: observation })
+    );
     window.postMessage(
-      {
-        type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
-        ceremony,
-        relyingParty: relyingPartyFromOptions(publicKey),
-        challenge: base64urlFrom(publicKey.challenge),
-        allowCredentialIds: credentialIdsFrom(publicKey.allowCredentials),
-        excludeCredentialIds: credentialIdsFrom(publicKey.excludeCredentials),
-        mediation: mediationFrom(ceremony, credentialOptions?.mediation)
-      },
+      observation,
       window.location.origin === "null" ? "*" : window.location.origin
     );
   } catch {

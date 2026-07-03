@@ -10,9 +10,10 @@ use vaultkern_runtime_protocol::{
     PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
     PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto,
     PasskeyCredentialListDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
-    PasskeyRegistrationDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-    SaveVaultStatusDto, SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
-    VaultSourceStatusDto,
+    PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
+    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, ProtocolEnvelope,
+    RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
+    VaultHandleDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
 };
 
 #[test]
@@ -1219,8 +1220,9 @@ fn protocol_roundtrips_passkey_ceremony_ledger_commands_and_responses() {
         relying_party: "example.com".into(),
         ceremony: PasskeyCeremonyKindDto::Get,
         discoverable: true,
+        user_verification: PasskeyUserVerificationRequirementDto::Required,
         challenge_base64url: "Y2hhbGxlbmdl".into(),
-        request_id: 42,
+        request_id: -42,
         tab_id: 7,
         frame_id: 0,
         frame_kind: PasskeyFrameKindDto::Top,
@@ -1243,6 +1245,14 @@ fn protocol_roundtrips_passkey_ceremony_ledger_commands_and_responses() {
     assert_eq!(
         register_json["command"]["frame_kind"],
         serde_json::json!("top")
+    );
+    assert_eq!(
+        register_json["command"]["request_id"],
+        serde_json::json!(-42)
+    );
+    assert_eq!(
+        register_json["command"]["user_verification"],
+        serde_json::json!("required")
     );
     assert_eq!(
         serde_json::from_value::<ProtocolEnvelope>(register_json).unwrap(),
@@ -1394,6 +1404,92 @@ fn protocol_roundtrips_passkey_ceremony_ledger_commands_and_responses() {
     assert_eq!(
         serde_json::from_value::<RuntimeResponse>(reconciliation_json).unwrap(),
         reconciliation
+    );
+}
+
+#[test]
+fn protocol_roundtrips_passkey_user_verification_capability() {
+    let command = ProtocolEnvelope::new(RuntimeCommand::GetPasskeyUserVerificationCapability);
+    let command_json = serde_json::to_value(&command).unwrap();
+    assert_eq!(
+        command_json["command"]["type"],
+        serde_json::json!("get_passkey_user_verification_capability")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
+        command
+    );
+
+    let response =
+        RuntimeResponse::PasskeyUserVerificationCapability(PasskeyUserVerificationCapabilityDto {
+            available: true,
+            methods: vec![
+                PasskeyUserVerificationMethodDto::MasterPassword,
+                PasskeyUserVerificationMethodDto::QuickUnlock,
+            ],
+        });
+    let response_json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        response_json["type"],
+        serde_json::json!("passkey_user_verification_capability")
+    );
+    assert_eq!(response_json["available"], serde_json::json!(true));
+    assert_eq!(
+        response_json["methods"],
+        serde_json::json!(["master_password", "quick_unlock"])
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn protocol_roundtrips_passkey_user_verification_command_and_response() {
+    let command = ProtocolEnvelope::new(RuntimeCommand::VerifyPasskeyUser {
+        ceremony_token: "token-1".into(),
+        expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+        vault_id: "vault-1".into(),
+        method: PasskeyUserVerificationMethodDto::MasterPassword,
+        password: Some("secret".into()),
+    });
+    let command_json = serde_json::to_value(&command).unwrap();
+    assert_eq!(
+        command_json["command"]["type"],
+        serde_json::json!("verify_passkey_user")
+    );
+    assert_eq!(
+        command_json["command"]["expected_phase"],
+        serde_json::json!("s1_user_authorization")
+    );
+    assert_eq!(
+        command_json["command"]["method"],
+        serde_json::json!("master_password")
+    );
+    assert_eq!(
+        serde_json::from_value::<ProtocolEnvelope>(command_json).unwrap(),
+        command
+    );
+
+    let response = RuntimeResponse::PasskeyUserVerified(PasskeyUserVerifiedDto {
+        verified: true,
+        method: PasskeyUserVerificationMethodDto::MasterPassword,
+        verified_at_epoch_ms: 123,
+    });
+    let response_json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        response_json["type"],
+        serde_json::json!("passkey_user_verified")
+    );
+    assert_eq!(response_json["verified"], serde_json::json!(true));
+    assert_eq!(
+        response_json["method"],
+        serde_json::json!("master_password")
+    );
+    assert_eq!(response_json["verifiedAtEpochMs"], serde_json::json!(123));
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(response_json).unwrap(),
+        response
     );
 }
 

@@ -16,6 +16,7 @@ use vaultkern_runtime_protocol::PasskeyRegistrationDto;
 
 const ES256_COSE_ALGORITHM: i32 = -7;
 const AUTH_DATA_FLAG_USER_PRESENT: u8 = 0x01;
+const AUTH_DATA_FLAG_USER_VERIFIED: u8 = 0x04;
 const AUTH_DATA_FLAG_BACKUP_ELIGIBLE: u8 = 0x08;
 const AUTH_DATA_FLAG_BACKUP_STATE: u8 = 0x10;
 const AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA: u8 = 0x40;
@@ -26,6 +27,7 @@ pub struct PasskeyAssertionRequest<'a> {
     pub credential_id: Option<&'a str>,
     pub discoverable: bool,
     pub user_presence_verified: bool,
+    pub user_verified: bool,
     pub related_origin_verified: bool,
     pub client_data_json_base64url: &'a str,
 }
@@ -36,6 +38,7 @@ pub struct PasskeyRegistrationRequest<'a> {
     pub user_name: &'a str,
     pub user_handle_base64url: &'a str,
     pub public_key_algorithm: i32,
+    pub user_verified: bool,
     pub related_origin_verified: bool,
     pub client_data_json_base64url: &'a str,
 }
@@ -76,7 +79,8 @@ pub fn create_assertion(
         .context("invalid passkey clientDataJSON base64url")?;
     validate_client_data(&client_data_json, request.origin)?;
 
-    let authenticator_data = authenticator_data(request.relying_party, passkey);
+    let authenticator_data =
+        authenticator_data(request.relying_party, passkey, request.user_verified);
     let client_data_hash = Sha256::digest(&client_data_json);
     let mut signed_payload = authenticator_data.clone();
     signed_payload.extend_from_slice(&client_data_hash);
@@ -141,6 +145,7 @@ pub fn create_registration_with_credential_id(
         request.relying_party,
         &credential_id_bytes,
         &public_key_cose,
+        request.user_verified,
     );
     let attestation_object = attestation_object(&authenticator_data);
 
@@ -171,15 +176,19 @@ pub fn create_registration_with_credential_id(
     })
 }
 
-fn authenticator_data(relying_party: &str, passkey: &PasskeyRecord) -> Vec<u8> {
+fn authenticator_data(
+    relying_party: &str,
+    passkey: &PasskeyRecord,
+    user_verified: bool,
+) -> Vec<u8> {
     let mut data = Vec::with_capacity(37);
     data.extend_from_slice(&Sha256::digest(relying_party.as_bytes()));
-    data.push(assertion_flags(passkey));
+    data.push(assertion_flags(passkey, user_verified));
     data.extend_from_slice(&0_u32.to_be_bytes());
     data
 }
 
-fn assertion_flags(passkey: &PasskeyRecord) -> u8 {
+fn assertion_flags(passkey: &PasskeyRecord, user_verified: bool) -> u8 {
     let backup_eligible = if passkey.backup_eligible || passkey.backup_state {
         AUTH_DATA_FLAG_BACKUP_ELIGIBLE
     } else {
@@ -190,7 +199,12 @@ fn assertion_flags(passkey: &PasskeyRecord) -> u8 {
     } else {
         0
     };
-    AUTH_DATA_FLAG_USER_PRESENT | backup_eligible | backup_state
+    let user_verified = if user_verified {
+        AUTH_DATA_FLAG_USER_VERIFIED
+    } else {
+        0
+    };
+    AUTH_DATA_FLAG_USER_PRESENT | user_verified | backup_eligible | backup_state
 }
 
 fn validate_origin_for_relying_party(
@@ -320,11 +334,18 @@ fn attested_authenticator_data(
     relying_party: &str,
     credential_id: &[u8],
     public_key_cose: &[u8],
+    user_verified: bool,
 ) -> Vec<u8> {
     let mut auth_data = Vec::new();
     auth_data.extend_from_slice(&Sha256::digest(relying_party.as_bytes()));
+    let user_verified = if user_verified {
+        AUTH_DATA_FLAG_USER_VERIFIED
+    } else {
+        0
+    };
     auth_data.push(
         AUTH_DATA_FLAG_USER_PRESENT
+            | user_verified
             | AUTH_DATA_FLAG_BACKUP_ELIGIBLE
             | AUTH_DATA_FLAG_BACKUP_STATE
             | AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA,
@@ -431,6 +452,7 @@ mod tests {
             user_name: "alice@example.com",
             user_handle_base64url: "dXNlci0x",
             public_key_algorithm: -7,
+            user_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
         }) {
@@ -460,6 +482,7 @@ mod tests {
                 user_name: "alice@example.com",
                 user_handle_base64url: "dXNlci0x",
                 public_key_algorithm: -7,
+                user_verified: false,
                 related_origin_verified: false,
                 client_data_json_base64url: &client_data_json,
             }) {
@@ -484,6 +507,7 @@ mod tests {
                 user_name: "alice@example.com",
                 user_handle_base64url: "dXNlci0x",
                 public_key_algorithm: -7,
+                user_verified: false,
                 related_origin_verified: false,
                 client_data_json_base64url: &client_data_json,
             }) {
@@ -510,6 +534,7 @@ mod tests {
             user_name: "alice@example.com",
             user_handle_base64url: "dXNlci0x",
             public_key_algorithm: -7,
+            user_verified: false,
             related_origin_verified: true,
             client_data_json_base64url: &client_data_json,
         })
@@ -530,6 +555,7 @@ mod tests {
             user_name: "alice@example.com",
             user_handle_base64url: "dXNlci0x",
             public_key_algorithm: -7,
+            user_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
         })
@@ -561,6 +587,7 @@ mod tests {
             user_name: "alice@example.com",
             user_handle_base64url: "dXNlci0x",
             public_key_algorithm: -7,
+            user_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
         })
@@ -597,6 +624,7 @@ mod tests {
             user_name: "alice@example.com",
             user_handle_base64url: &oversized_user_handle,
             public_key_algorithm: -7,
+            user_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
         }) {
@@ -623,6 +651,7 @@ mod tests {
             user_name: "alice@example.com",
             user_handle_base64url: "",
             public_key_algorithm: -7,
+            user_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
         }) {
@@ -650,7 +679,7 @@ mod tests {
             backup_state: true,
         };
 
-        let flags = super::assertion_flags(&passkey);
+        let flags = super::assertion_flags(&passkey, false);
 
         assert_ne!(flags & super::AUTH_DATA_FLAG_BACKUP_STATE, 0);
         assert_ne!(flags & super::AUTH_DATA_FLAG_BACKUP_ELIGIBLE, 0);
@@ -670,7 +699,7 @@ mod tests {
             backup_state: true,
         };
 
-        let flags = super::assertion_flags(&passkey);
+        let flags = super::assertion_flags(&passkey, false);
 
         assert_eq!(flags & AUTH_DATA_FLAG_EXTENSION_DATA, 0);
     }
@@ -689,9 +718,27 @@ mod tests {
             backup_state: true,
         };
 
-        let flags = super::assertion_flags(&passkey);
+        let flags = super::assertion_flags(&passkey, false);
 
         assert_eq!(flags & AUTH_DATA_FLAG_USER_VERIFIED, 0);
+    }
+
+    #[test]
+    fn assertion_flags_set_user_verified_only_when_requested() {
+        let passkey = PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "Y3JlZGVudGlhbA".into(),
+            generated_user_id: None,
+            private_key_pem: String::new(),
+            relying_party: "example.com".into(),
+            user_handle: Some("dXNlci0x".into()),
+            backup_eligible: true,
+            backup_state: true,
+        };
+
+        let flags = super::assertion_flags(&passkey, true);
+
+        assert_ne!(flags & super::AUTH_DATA_FLAG_USER_VERIFIED, 0);
     }
 
     fn auth_data_from_attestation_object(bytes: &[u8]) -> Option<Vec<u8>> {

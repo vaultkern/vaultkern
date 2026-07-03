@@ -54,9 +54,7 @@ describe("manifest build", () => {
         }),
         expect.objectContaining({
           js: ["webauthnContentScript.js"],
-          all_frames: true,
-          match_about_blank: true,
-          match_origin_as_fallback: true
+          all_frames: true
         })
       ])
     );

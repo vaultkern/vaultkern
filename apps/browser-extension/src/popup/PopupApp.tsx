@@ -138,7 +138,8 @@ export function PopupApp({
   extensionSettingsStore,
   renderRuntimeErrorHelp,
   onUnlockComplete,
-  onWebAuthnPresenceComplete
+  onWebAuthnPresenceComplete,
+  onWebAuthnUserVerificationComplete
 }: {
   client: PopupClientLike;
   findCandidates: (vaultId: string) => Promise<EntrySummary[]>;
@@ -150,6 +151,10 @@ export function PopupApp({
   onWebAuthnPresenceComplete?: (
     session: SessionStateLike,
     options?: { credentialId?: string }
+  ) => void | Promise<void>;
+  onWebAuthnUserVerificationComplete?: (
+    session: SessionStateLike,
+    options: { method: "master_password" | "quick_unlock"; password?: string }
   ) => void | Promise<void>;
 }) {
   const [session, setSession] = useState<SessionStateLike | null>(null);
@@ -183,6 +188,7 @@ export function PopupApp({
     new URLSearchParams(window.location.search).get("webauthn");
   const webAuthnUnlockPrompt = webAuthnMode === "unlock";
   const webAuthnApprovePrompt = webAuthnMode === "approve";
+  const webAuthnVerifyPrompt = webAuthnMode === "verify";
   const [passkeyCredentialOptions, setPasskeyCredentialOptions] = useState<
     PasskeyCredentialOption[]
   >([]);
@@ -595,6 +601,47 @@ export function PopupApp({
     }
   }
 
+  async function handleWebAuthnUserVerification(
+    method: "master_password" | "quick_unlock"
+  ) {
+    if (!session?.unlocked || submitting) {
+      return;
+    }
+    if (method === "master_password" && password.trim() === "") {
+      setUnlockError(
+        extensionSettings.language === "zh-CN"
+          ? "请输入主密码"
+          : "Enter your master password"
+      );
+      return;
+    }
+
+    setSubmitting(true);
+    setUnlockError(null);
+    setUnlockErrorCause(null);
+    try {
+      await Promise.resolve(
+        onWebAuthnUserVerificationComplete?.(session, {
+          method,
+          ...(method === "master_password" ? { password } : {})
+        })
+      );
+      setPassword("");
+    } catch (verificationFailure) {
+      setUnlockError(
+        popupErrorMessage(
+          verificationFailure,
+          extensionSettings.language === "zh-CN"
+            ? "用户验证失败"
+            : "User verification failed"
+        )
+      );
+      setUnlockErrorCause(verificationFailure);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   useEffect(() => {
     if (session) {
       notifyWebAuthnUnlockCompleteOnce(session);
@@ -803,6 +850,88 @@ export function PopupApp({
           >
             {text("Manage vaults")}
           </button>
+          {unlockError ? <div role="alert">{unlockError}</div> : null}
+          {unlockError && renderRuntimeErrorHelp
+            ? renderRuntimeErrorHelp(unlockErrorCause)
+            : null}
+        </form>
+      </div>
+      </I18nProvider>
+    );
+  }
+
+  if (webAuthnVerifyPrompt) {
+    const currentVault = currentVaultForSession();
+    const canQuickUnlock = canQuickUnlockVault(currentVault);
+    const passkeyPromptTitle =
+      extensionSettings.language === "zh-CN"
+        ? "验证通行密钥请求"
+        : "Verify passkey request";
+    const passkeyPromptBody =
+      siteLabel === "No active site"
+        ? extensionSettings.language === "zh-CN"
+          ? "请验证主密码以继续当前网站的通行密钥请求。"
+          : "Verify your master password to continue this passkey request."
+        : extensionSettings.language === "zh-CN"
+          ? `请验证主密码以继续 ${siteLabel} 的通行密钥请求。`
+          : `Verify your master password to continue the passkey request for ${siteLabel}.`;
+
+    return (
+      <I18nProvider language={extensionSettings.language}>
+      <div style={shellStyle}>
+        <PopupStatusStrip
+          siteLabel={siteLabel}
+          unlocked
+          onLock={undefined}
+          onOpenManager={handleOpenManager}
+        />
+        <section style={passkeyPromptStyle} aria-live="polite">
+          <strong>{passkeyPromptTitle}</strong>
+          <span>{passkeyPromptBody}</span>
+        </section>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleWebAuthnUserVerification("master_password");
+          }}
+          style={{ display: "grid", gap: popupTheme.spacing.md }}
+        >
+          <label style={labelStyle}>
+            {extensionSettings.language === "zh-CN" ? "主密码" : "Master Password"}
+            <input
+              aria-label={
+                extensionSettings.language === "zh-CN" ? "主密码" : "Master Password"
+              }
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              disabled={submitting}
+              style={fieldStyle}
+            />
+          </label>
+          <button type="submit" disabled={submitting} style={primaryActionStyle}>
+            {submitting
+              ? extensionSettings.language === "zh-CN"
+                ? "验证中..."
+                : "Verifying..."
+              : extensionSettings.language === "zh-CN"
+                ? "验证并继续"
+                : "Verify and continue"}
+          </button>
+          {canQuickUnlock ? (
+            <button
+              type="button"
+              onClick={() => {
+                void handleWebAuthnUserVerification("quick_unlock");
+              }}
+              disabled={submitting}
+              style={primaryActionStyle}
+            >
+              {extensionSettings.language === "zh-CN"
+                ? "使用 Windows Hello 验证"
+                : "Verify with Windows Hello"}
+            </button>
+          ) : null}
           {unlockError ? <div role="alert">{unlockError}</div> : null}
           {unlockError && renderRuntimeErrorHelp
             ? renderRuntimeErrorHelp(unlockErrorCause)
