@@ -725,9 +725,27 @@ function registerRequestHandlers(
         requestId,
         precise: Boolean(requestKey)
       });
-      void closeUnlockPromptWindow(chromeApi, requestId, requestKey);
-      void closePresencePromptWindow(chromeApi, requestId, requestKey);
-      void closeUserVerificationPromptWindow(chromeApi, requestId, requestKey);
+      void closePromptWindowForRequest(
+        chromeApi,
+        promptStates.unlock,
+        clearUnlockPromptState,
+        requestId,
+        requestKey
+      );
+      void closePromptWindowForRequest(
+        chromeApi,
+        promptStates.approve,
+        clearPresencePromptState,
+        requestId,
+        requestKey
+      );
+      void closePromptWindowForRequest(
+        chromeApi,
+        promptStates.verify,
+        clearUserVerificationPromptState,
+        requestId,
+        requestKey
+      );
     }
   });
   chromeApi.webAuthenticationProxy?.onIsUvpaaRequest?.addListener?.((request) => {
@@ -6919,80 +6937,27 @@ async function closePromptWindowsForCeremony(
   }
 }
 
-async function closeUnlockPromptWindow(
+async function closePromptWindowForRequest<
+  TContext extends WebAuthnPromptContext,
+  TCompleteSignal
+>(
   chromeApi: ChromeLike,
+  state: PromptState<TContext, TCompleteSignal>,
+  clearPromptState: (promptKey: string) => void,
   requestId: number,
   requestCancelKey: string | null
 ) {
   const promptKeys = promptKeysForCancellation(
-    promptStates.unlock.requestIds,
-    promptStates.unlock.requestKeys,
+    state.requestIds,
+    state.requestKeys,
     requestId,
     requestCancelKey
   );
   const windowIds = promptKeys
-    .map((promptKey) => promptStates.unlock.windowIds.get(promptKey))
+    .map((promptKey) => state.windowIds.get(promptKey))
     .filter((windowId): windowId is number => typeof windowId === "number");
   for (const promptKey of promptKeys) {
-    clearUnlockPromptState(promptKey);
-  }
-  if (!chromeApi.windows?.remove) {
-    return;
-  }
-  for (const windowId of windowIds) {
-    try {
-      await chromeApi.windows.remove(windowId);
-    } catch {
-      // The user or browser may already have closed the prompt.
-    }
-  }
-}
-
-async function closePresencePromptWindow(
-  chromeApi: ChromeLike,
-  requestId: number,
-  requestCancelKey: string | null
-) {
-  const promptKeys = promptKeysForCancellation(
-    promptStates.approve.requestIds,
-    promptStates.approve.requestKeys,
-    requestId,
-    requestCancelKey
-  );
-  const windowIds = promptKeys
-    .map((promptKey) => promptStates.approve.windowIds.get(promptKey))
-    .filter((windowId): windowId is number => typeof windowId === "number");
-  for (const promptKey of promptKeys) {
-    clearPresencePromptState(promptKey);
-  }
-  if (!chromeApi.windows?.remove) {
-    return;
-  }
-  for (const windowId of windowIds) {
-    try {
-      await chromeApi.windows.remove(windowId);
-    } catch {
-      // The user or browser may already have closed the prompt.
-    }
-  }
-}
-
-async function closeUserVerificationPromptWindow(
-  chromeApi: ChromeLike,
-  requestId: number,
-  requestCancelKey: string | null
-) {
-  const promptKeys = promptKeysForCancellation(
-    promptStates.verify.requestIds,
-    promptStates.verify.requestKeys,
-    requestId,
-    requestCancelKey
-  );
-  const windowIds = promptKeys
-    .map((promptKey) => promptStates.verify.windowIds.get(promptKey))
-    .filter((windowId): windowId is number => typeof windowId === "number");
-  for (const promptKey of promptKeys) {
-    clearUserVerificationPromptState(promptKey);
+    clearPromptState(promptKey);
   }
   if (!chromeApi.windows?.remove) {
     return;

@@ -32,5 +32,9 @@ describe("webauthn proxy structure", () => {
     }
 
     expect(source).toContain("const promptStates = createPromptStateRegistry()");
+    expect(source).not.toMatch(/function\s+closeUnlockPromptWindow\b/);
+    expect(source).not.toMatch(/function\s+closePresencePromptWindow\b/);
+    expect(source).not.toMatch(/function\s+closeUserVerificationPromptWindow\b/);
+    expect(source).toContain("async function closePromptWindowForRequest");
   });
 });
