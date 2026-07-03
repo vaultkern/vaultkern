@@ -172,6 +172,35 @@ describe("WebAuthn page hook", () => {
     expect(bridgeRequestIds).not.toEqual(["1", "2"]);
   });
 
+  it("does not emit observations when bridge id randomness is unavailable", async () => {
+    const { originalGet } = installCredentialMocks();
+    const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: undefined
+    });
+    const postMessage = vi
+      .spyOn(window, "postMessage")
+      .mockImplementation(() => undefined);
+
+    try {
+      await import("../webauthnPageHook");
+
+      await navigator.credentials.get({
+        publicKey: {
+          challenge: new Uint8Array([6, 5, 4])
+        }
+      } as CredentialRequestOptions);
+    } finally {
+      if (cryptoDescriptor) {
+        Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+      }
+    }
+
+    expect(originalGet).toHaveBeenCalledTimes(1);
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
   it("does not let observation postMessage failures break WebAuthn calls", async () => {
     const { originalGet } = installCredentialMocks();
     vi.spyOn(window, "postMessage").mockImplementation(() => {

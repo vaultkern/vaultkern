@@ -72,9 +72,13 @@ function observeWebAuthnRequest(
   }
 
   try {
+    const bridgeRequestId = nextBridgeRequestId();
+    if (!bridgeRequestId) {
+      return;
+    }
     const observation = {
       type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
-      bridgeRequestId: nextBridgeRequestId(),
+      bridgeRequestId,
       ceremony,
       relyingParty: relyingPartyFromOptions(publicKey),
       challenge: base64urlFrom(publicKey.challenge),
@@ -104,7 +108,7 @@ function nextBridgeRequestId() {
     cryptoApi.getRandomValues(bytes);
     return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return null;
 }
 
 function mediationFrom(ceremony: "create" | "get", value: unknown) {
