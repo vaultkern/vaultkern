@@ -9939,7 +9939,7 @@ describe("webAuthenticationProxy wrapper", () => {
 
     await presencePrompt.approve();
 
-    for (let microtask = 0; microtask < 10; microtask += 1) {
+    for (let microtask = 0; microtask < 50; microtask += 1) {
       await Promise.resolve();
     }
     expect(fetch).toHaveBeenCalledWith(
@@ -13233,7 +13233,7 @@ describe("webAuthenticationProxy wrapper", () => {
 
     await presencePrompt.approve();
 
-    for (let microtask = 0; microtask < 10; microtask += 1) {
+    for (let microtask = 0; microtask < 50; microtask += 1) {
       await Promise.resolve();
     }
     expect(sendRuntimeCommand).not.toHaveBeenCalledWith(

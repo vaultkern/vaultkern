@@ -193,6 +193,11 @@ type PasskeyPromptMirrorPersistence = {
   persistPromptWindowId: (windowId: number) => Promise<void>;
 };
 
+type PasskeyCeremonyAdvance = (
+  expectedPhase: PasskeyCeremonyActivePhase,
+  nextPhase: PasskeyCeremonyActivePhase
+) => Promise<void>;
+
 type UnlockCompleteSignal = {
   userVerificationProof?: UnlockUserVerificationProof;
 };
@@ -1365,87 +1370,34 @@ async function handleGetRequest(
       hasActiveVault: Boolean(session.activeVaultId)
     });
     throwIfRequestCanceled();
-    await advanceCeremony("s0_pre_authorization", "s1_user_authorization");
-    const activeVault = await activeVaultForRequest(
+    const authorization = await authorizePasskeyCeremonyUser({
       chromeApi,
       sendRuntimeCommand,
       requestId,
-      ceremonyContext.ceremonyToken,
+      ceremonyToken: ceremonyContext.ceremonyToken,
       session,
-      promptContextFrom(originContext, relyingParty),
+      promptContext: promptContextFrom(originContext, relyingParty),
+      userVerification,
       canceledRequests,
       requestCancelKey,
-      {
-        onPromptPrepared: persistUnlockPromptState,
-        onPromptOpened: persistPromptWindowId
+      advanceCeremony,
+      throwIfRequestCanceled,
+      promptPersistence: {
+        persistPresencePromptState,
+        persistPromptWindowId,
+        persistUnlockPromptState,
+        persistUserVerificationPromptState
+      },
+      getMirror: () => ceremonyMirror,
+      updateMirror: (nextMirror) => {
+        ceremonyMirror = nextMirror;
       }
-    );
-    if (!activeVault) {
-      throwIfRequestCanceled();
+    });
+    if (!authorization) {
       return;
     }
-    if (ceremonyMirror) {
-      ceremonyMirror = {
-        ...ceremonyMirror,
-        activeVaultId: activeVault.activeVaultId
-      };
-      await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-    }
-    await bindPasskeyCeremonyVault(
-      sendRuntimeCommand,
-      ceremonyContext.ceremonyToken,
-      "s1_user_authorization",
-      activeVault.activeVaultId
-    );
-    let userPresenceVerified = activeVault.userPresenceVerified;
-    let userVerified = await verifyPasskeyUserFromUnlockProof(
-      chromeApi,
-      sendRuntimeCommand,
-      requestId,
-      ceremonyContext.ceremonyToken,
-      activeVault.activeVaultId,
-      userVerification,
-      activeVault.unlockUserVerificationProof
-    );
-    if (!userVerified) {
-      userVerified = await userVerificationForRequest(
-        chromeApi,
-        sendRuntimeCommand,
-        requestId,
-        ceremonyContext.ceremonyToken,
-        activeVault.activeVaultId,
-        userVerification,
-        promptContextFrom(originContext, relyingParty),
-        canceledRequests,
-        requestCancelKey,
-        {
-          onPromptPrepared: persistUserVerificationPromptState,
-          onPromptOpened: persistPromptWindowId
-        }
-      );
-    }
-    if (userVerified) {
-      userPresenceVerified = true;
-    }
-    if (!userPresenceVerified) {
-      const approved = await userPresenceForRequest(
-        chromeApi,
-        requestId,
-        ceremonyContext.ceremonyToken,
-        promptContextFrom(originContext, relyingParty),
-        canceledRequests,
-        requestCancelKey,
-        {
-          onPromptPrepared: persistPresencePromptState,
-          onPromptOpened: persistPromptWindowId
-        }
-      );
-      if (!approved) {
-        throwIfRequestCanceled();
-        return;
-      }
-      userPresenceVerified = true;
-    }
+    const activeVaultId = authorization.activeVaultId;
+    let userPresenceVerified = authorization.userPresenceVerified;
     throwIfRequestCanceled();
     relyingPartyValidation = await advanceToCredentialResolution(
       origin,
@@ -1462,7 +1414,7 @@ async function handleGetRequest(
     const credentialSelection = await credentialSelectionForGetRequest(
       sendRuntimeCommand,
       ceremonyContext.ceremonyToken,
-      activeVault.activeVaultId,
+      activeVaultId,
       relyingParty,
       credentialIds
     );
@@ -1499,7 +1451,7 @@ async function handleGetRequest(
       sendRuntimeCommand,
       requestId,
       ceremonyContext.ceremonyToken,
-      activeVault.activeVaultId,
+      activeVaultId,
       relyingParty,
       origin,
       credentialIds,
@@ -4179,87 +4131,33 @@ async function handleCreateRequest(
       hasActiveVault: Boolean(session.activeVaultId)
     });
     throwIfRequestCanceled();
-    await advanceCeremony("s0_pre_authorization", "s1_user_authorization");
-    const activeVault = await activeVaultForRequest(
+    const authorization = await authorizePasskeyCeremonyUser({
       chromeApi,
       sendRuntimeCommand,
       requestId,
-      ceremonyContext.ceremonyToken,
+      ceremonyToken: ceremonyContext.ceremonyToken,
       session,
-      promptContextFrom(originContext, relyingParty),
+      promptContext: promptContextFrom(originContext, relyingParty),
+      userVerification,
       canceledRequests,
       requestCancelKey,
-      {
-        onPromptPrepared: persistUnlockPromptState,
-        onPromptOpened: persistPromptWindowId
+      advanceCeremony,
+      throwIfRequestCanceled,
+      promptPersistence: {
+        persistPresencePromptState,
+        persistPromptWindowId,
+        persistUnlockPromptState,
+        persistUserVerificationPromptState
+      },
+      getMirror: () => ceremonyMirror,
+      updateMirror: (nextMirror) => {
+        ceremonyMirror = nextMirror;
       }
-    );
-    if (!activeVault) {
-      throwIfRequestCanceled();
+    });
+    if (!authorization) {
       return;
     }
-    if (ceremonyMirror) {
-      ceremonyMirror = {
-        ...ceremonyMirror,
-        activeVaultId: activeVault.activeVaultId
-      };
-      await persistPasskeyCeremonyMirror(chromeApi, ceremonyMirror);
-    }
-    await bindPasskeyCeremonyVault(
-      sendRuntimeCommand,
-      ceremonyContext.ceremonyToken,
-      "s1_user_authorization",
-      activeVault.activeVaultId
-    );
-    let userPresenceVerified = activeVault.userPresenceVerified;
-    let userVerified = await verifyPasskeyUserFromUnlockProof(
-      chromeApi,
-      sendRuntimeCommand,
-      requestId,
-      ceremonyContext.ceremonyToken,
-      activeVault.activeVaultId,
-      userVerification,
-      activeVault.unlockUserVerificationProof
-    );
-    if (!userVerified) {
-      userVerified = await userVerificationForRequest(
-        chromeApi,
-        sendRuntimeCommand,
-        requestId,
-        ceremonyContext.ceremonyToken,
-        activeVault.activeVaultId,
-        userVerification,
-        promptContextFrom(originContext, relyingParty),
-        canceledRequests,
-        requestCancelKey,
-        {
-          onPromptPrepared: persistUserVerificationPromptState,
-          onPromptOpened: persistPromptWindowId
-        }
-      );
-    }
-    if (userVerified) {
-      userPresenceVerified = true;
-    }
-    if (!userPresenceVerified) {
-      const approved = await userPresenceForRequest(
-        chromeApi,
-        requestId,
-        ceremonyContext.ceremonyToken,
-        promptContextFrom(originContext, relyingParty),
-        canceledRequests,
-        requestCancelKey,
-        {
-          onPromptPrepared: persistPresencePromptState,
-          onPromptOpened: persistPromptWindowId
-        }
-      );
-      if (!approved) {
-        throwIfRequestCanceled();
-        return;
-      }
-      userPresenceVerified = true;
-    }
+    const activeVaultId = authorization.activeVaultId;
     throwIfRequestCanceled();
     relyingPartyValidation = await advanceToCredentialResolution(
       origin,
@@ -4272,7 +4170,6 @@ async function handleCreateRequest(
         }
       }
     );
-    const activeVaultId = activeVault.activeVaultId;
 
     const excludedCredentialIds = excludedCredentialIdsFromCreateOptions(options);
     throwIfRequestCanceled();
@@ -5925,6 +5822,128 @@ async function restorePasskeyCeremonyVaultAuthorization({
   }
 
   return getMirror() ?? currentMirror;
+}
+
+async function authorizePasskeyCeremonyUser({
+  chromeApi,
+  sendRuntimeCommand,
+  requestId,
+  ceremonyToken,
+  session,
+  promptContext,
+  userVerification,
+  canceledRequests,
+  requestCancelKey,
+  advanceCeremony,
+  throwIfRequestCanceled,
+  promptPersistence,
+  getMirror,
+  updateMirror
+}: {
+  chromeApi: ChromeLike;
+  sendRuntimeCommand: RuntimeCommandSender;
+  requestId: number;
+  ceremonyToken: string;
+  session: { activeVaultId?: string | null };
+  promptContext: WebAuthnPromptContext;
+  userVerification: PasskeyUserVerificationRequirement;
+  canceledRequests: CanceledWebAuthnRequests;
+  requestCancelKey: string | null;
+  advanceCeremony: PasskeyCeremonyAdvance;
+  throwIfRequestCanceled: () => void;
+  promptPersistence: PasskeyPromptMirrorPersistence;
+  getMirror: () => PasskeyCeremonyContext | null;
+  updateMirror: (mirror: PasskeyCeremonyContext) => void;
+}): Promise<{ activeVaultId: string; userPresenceVerified: boolean } | null> {
+  await advanceCeremony("s0_pre_authorization", "s1_user_authorization");
+  const activeVault = await activeVaultForRequest(
+    chromeApi,
+    sendRuntimeCommand,
+    requestId,
+    ceremonyToken,
+    session,
+    promptContext,
+    canceledRequests,
+    requestCancelKey,
+    {
+      onPromptPrepared: promptPersistence.persistUnlockPromptState,
+      onPromptOpened: promptPersistence.persistPromptWindowId
+    }
+  );
+  if (!activeVault) {
+    throwIfRequestCanceled();
+    return null;
+  }
+  const mirror = getMirror();
+  if (mirror) {
+    const nextMirror = {
+      ...mirror,
+      activeVaultId: activeVault.activeVaultId
+    };
+    updateMirror(nextMirror);
+    await persistPasskeyCeremonyMirror(chromeApi, nextMirror);
+  }
+  await bindPasskeyCeremonyVault(
+    sendRuntimeCommand,
+    ceremonyToken,
+    "s1_user_authorization",
+    activeVault.activeVaultId
+  );
+
+  let userPresenceVerified = activeVault.userPresenceVerified;
+  let userVerified = await verifyPasskeyUserFromUnlockProof(
+    chromeApi,
+    sendRuntimeCommand,
+    requestId,
+    ceremonyToken,
+    activeVault.activeVaultId,
+    userVerification,
+    activeVault.unlockUserVerificationProof
+  );
+  if (!userVerified) {
+    userVerified = await userVerificationForRequest(
+      chromeApi,
+      sendRuntimeCommand,
+      requestId,
+      ceremonyToken,
+      activeVault.activeVaultId,
+      userVerification,
+      promptContext,
+      canceledRequests,
+      requestCancelKey,
+      {
+        onPromptPrepared: promptPersistence.persistUserVerificationPromptState,
+        onPromptOpened: promptPersistence.persistPromptWindowId
+      }
+    );
+  }
+  if (userVerified) {
+    userPresenceVerified = true;
+  }
+  if (!userPresenceVerified) {
+    const approved = await userPresenceForRequest(
+      chromeApi,
+      requestId,
+      ceremonyToken,
+      promptContext,
+      canceledRequests,
+      requestCancelKey,
+      {
+        onPromptPrepared: promptPersistence.persistPresencePromptState,
+        onPromptOpened: promptPersistence.persistPromptWindowId
+      }
+    );
+    if (!approved) {
+      throwIfRequestCanceled();
+      return null;
+    }
+    userPresenceVerified = true;
+  }
+
+  return {
+    activeVaultId: activeVault.activeVaultId,
+    userPresenceVerified
+  };
 }
 
 async function activeVaultForRequest(

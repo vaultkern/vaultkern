@@ -181,4 +181,20 @@ describe("webauthn proxy structure", () => {
         []
     ).toHaveLength(1);
   });
+
+  it("authorizes live passkey ceremonies through one helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("async function authorizePasskeyCeremonyUser");
+    expect(source.match(/const activeVault = await activeVaultForRequest/g) ?? [])
+      .toHaveLength(1);
+    expect(
+      source.match(/let userPresenceVerified = activeVault\.userPresenceVerified/g) ??
+        []
+    ).toHaveLength(1);
+  });
 });
