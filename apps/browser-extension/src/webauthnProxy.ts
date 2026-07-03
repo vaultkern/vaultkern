@@ -1324,7 +1324,7 @@ async function handleGetRequest(
     }
     const userVerification = userVerificationRequirementFromOptions(options);
     const origin = originContext.origin;
-    rejectUnsupportedMediation(options.mediation);
+    rejectUnsupportedMediation(options.mediation ?? originContext.mediation);
     rejectNonSecureWebAuthnOrigin(origin);
     const relyingParty = relyingPartyFromGetOptions(options, origin);
     let relyingPartyValidation = requestedRpId
@@ -4184,7 +4184,7 @@ async function handleCreateRequest(
       );
     }
     const origin = originContext.origin;
-    rejectUnsupportedMediation(options.mediation);
+    rejectUnsupportedMediation(options.mediation ?? originContext.mediation);
     rejectNonSecureWebAuthnOrigin(origin);
     const relyingParty = relyingPartyFromCreateOptions(options, origin);
     let relyingPartyValidation = requestedRpId
