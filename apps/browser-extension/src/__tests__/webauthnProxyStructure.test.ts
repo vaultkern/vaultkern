@@ -1,0 +1,32 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { describe, expect, it } from "vitest";
+
+describe("webauthn proxy structure", () => {
+  it("keeps shared prompt state in one registry instead of per-mode parallel maps", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    for (const field of [
+      "PromptWindowIds",
+      "PromptContexts",
+      "PromptNonces",
+      "PromptRequestIds",
+      "PromptRequestKeys",
+      "PromptRemovalCleanups"
+    ]) {
+      expect(source).not.toMatch(new RegExp(`const\\s+unlock${field}\\b`));
+      expect(source).not.toMatch(new RegExp(`const\\s+presence${field}\\b`));
+      expect(source).not.toMatch(
+        new RegExp(`const\\s+userVerification${field}\\b`)
+      );
+    }
+
+    expect(source).toContain("const promptStates = createPromptStateRegistry()");
+  });
+});
