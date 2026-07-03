@@ -30,6 +30,9 @@ pub struct PasskeyAssertionRequest<'a> {
     pub user_verified: bool,
     pub related_origin_verified: bool,
     pub client_data_json_base64url: &'a str,
+    pub challenge_base64url: &'a str,
+    pub top_origin: Option<&'a str>,
+    pub ancestor_origins: &'a [String],
 }
 
 pub struct PasskeyRegistrationRequest<'a> {
@@ -41,6 +44,9 @@ pub struct PasskeyRegistrationRequest<'a> {
     pub user_verified: bool,
     pub related_origin_verified: bool,
     pub client_data_json_base64url: &'a str,
+    pub challenge_base64url: &'a str,
+    pub top_origin: Option<&'a str>,
+    pub ancestor_origins: &'a [String],
 }
 
 pub struct PasskeyRegistration {
@@ -77,7 +83,13 @@ pub fn create_assertion(
     let client_data_json = URL_SAFE_NO_PAD
         .decode(request.client_data_json_base64url)
         .context("invalid passkey clientDataJSON base64url")?;
-    validate_client_data(&client_data_json, request.origin)?;
+    validate_client_data(
+        &client_data_json,
+        request.origin,
+        request.challenge_base64url,
+        request.top_origin,
+        request.ancestor_origins,
+    )?;
 
     let authenticator_data =
         authenticator_data(request.relying_party, passkey, request.user_verified);
@@ -123,7 +135,14 @@ pub fn create_registration_with_credential_id(
     let client_data_json = URL_SAFE_NO_PAD
         .decode(request.client_data_json_base64url)
         .context("invalid passkey clientDataJSON base64url")?;
-    validate_client_data_type(&client_data_json, request.origin, "webauthn.create")?;
+    validate_client_data_type(
+        &client_data_json,
+        request.origin,
+        "webauthn.create",
+        request.challenge_base64url,
+        request.top_origin,
+        request.ancestor_origins,
+    )?;
     validate_public_key_algorithm(request.public_key_algorithm)?;
     validate_user_handle(request.user_handle_base64url)?;
 
@@ -293,14 +312,30 @@ fn is_loopback_host(host: &str) -> bool {
     host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-fn validate_client_data(client_data_json: &[u8], origin: &str) -> Result<()> {
-    validate_client_data_type(client_data_json, origin, "webauthn.get")
+fn validate_client_data(
+    client_data_json: &[u8],
+    origin: &str,
+    challenge_base64url: &str,
+    top_origin: Option<&str>,
+    ancestor_origins: &[String],
+) -> Result<()> {
+    validate_client_data_type(
+        client_data_json,
+        origin,
+        "webauthn.get",
+        challenge_base64url,
+        top_origin,
+        ancestor_origins,
+    )
 }
 
 fn validate_client_data_type(
     client_data_json: &[u8],
     origin: &str,
     expected_type: &str,
+    challenge_base64url: &str,
+    top_origin: Option<&str>,
+    ancestor_origins: &[String],
 ) -> Result<()> {
     let value: Value =
         serde_json::from_slice(client_data_json).context("invalid passkey clientDataJSON")?;
@@ -310,7 +345,53 @@ fn validate_client_data_type(
     if value.get("origin").and_then(Value::as_str) != Some(origin) {
         anyhow::bail!("passkey clientDataJSON origin mismatch");
     }
+    if value.get("challenge").and_then(Value::as_str) != Some(challenge_base64url) {
+        anyhow::bail!("passkey clientDataJSON challenge mismatch");
+    }
+    let expected_cross_origin = top_origin
+        .is_some_and(|top_origin| !origins_are_same_origin(top_origin, origin))
+        || ancestor_origins
+            .iter()
+            .any(|ancestor_origin| !origins_are_same_origin(ancestor_origin, origin));
+    if value.get("crossOrigin").and_then(Value::as_bool) != Some(expected_cross_origin) {
+        anyhow::bail!("passkey clientDataJSON crossOrigin mismatch");
+    }
+    let client_top_origin = value.get("topOrigin").and_then(Value::as_str);
+    if expected_cross_origin {
+        if !matches!(
+            (client_top_origin, top_origin),
+            (Some(client_top_origin), Some(top_origin))
+                if origins_are_same_origin(client_top_origin, top_origin)
+        ) {
+            anyhow::bail!("passkey clientDataJSON topOrigin mismatch");
+        }
+    } else if value.get("topOrigin").is_some() {
+        anyhow::bail!("passkey clientDataJSON topOrigin mismatch");
+    }
     Ok(())
+}
+
+fn origins_are_same_origin(left: &str, right: &str) -> bool {
+    let (Some(left), Some(right)) = (origin_url(left), origin_url(right)) else {
+        return false;
+    };
+    left.scheme() == right.scheme()
+        && left.host_str().map(|host| host.to_ascii_lowercase())
+            == right.host_str().map(|host| host.to_ascii_lowercase())
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn origin_url(value: &str) -> Option<Url> {
+    let parsed = Url::parse(value).ok()?;
+    if parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    Some(parsed)
 }
 
 fn validate_user_handle(user_handle_base64url: &str) -> Result<()> {
@@ -436,7 +517,9 @@ fn cbor_major(output: &mut Vec<u8>, major: u8, value: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{PasskeyRegistrationRequest, create_registration};
+    use super::{
+        PasskeyAssertionRequest, PasskeyRegistrationRequest, create_assertion, create_registration,
+    };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use vaultkern_core::PasskeyRecord;
 
@@ -455,6 +538,9 @@ mod tests {
             user_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
+            challenge_base64url: "Y2hhbGxlbmdlLTE",
+            top_origin: None,
+            ancestor_origins: &[],
         }) {
             Ok(_) => panic!("public suffix RP ID must be rejected"),
             Err(error) => error,
@@ -485,6 +571,9 @@ mod tests {
                 user_verified: false,
                 related_origin_verified: false,
                 client_data_json_base64url: &client_data_json,
+                challenge_base64url: "Y2hhbGxlbmdlLTE",
+                top_origin: None,
+                ancestor_origins: &[],
             }) {
                 Ok(_) => panic!("non-origin passkey origin must be rejected: {origin:?}"),
                 Err(error) => error,
@@ -510,6 +599,9 @@ mod tests {
                 user_verified: false,
                 related_origin_verified: false,
                 client_data_json_base64url: &client_data_json,
+                challenge_base64url: "Y2hhbGxlbmdlLTE",
+                top_origin: None,
+                ancestor_origins: &[],
             }) {
                 Ok(_) => panic!("non-canonical passkey relying party must be rejected"),
                 Err(error) => error,
@@ -537,6 +629,9 @@ mod tests {
             user_verified: false,
             related_origin_verified: true,
             client_data_json_base64url: &client_data_json,
+            challenge_base64url: "Y2hhbGxlbmdlLTE",
+            top_origin: None,
+            ancestor_origins: &[],
         })
         .expect("verified related origins are allowed");
 
@@ -558,6 +653,9 @@ mod tests {
             user_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
+            challenge_base64url: "Y2hhbGxlbmdlLTE",
+            top_origin: None,
+            ancestor_origins: &[],
         })
         .expect("registration");
         let authenticator_data = URL_SAFE_NO_PAD
@@ -590,6 +688,9 @@ mod tests {
             user_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
+            challenge_base64url: "Y2hhbGxlbmdlLTE",
+            top_origin: None,
+            ancestor_origins: &[],
         })
         .expect("registration");
         let authenticator_data = URL_SAFE_NO_PAD
@@ -627,6 +728,9 @@ mod tests {
             user_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
+            challenge_base64url: "Y2hhbGxlbmdlLTE",
+            top_origin: None,
+            ancestor_origins: &[],
         }) {
             Ok(_) => panic!("oversized passkey user handle must be rejected"),
             Err(error) => error,
@@ -654,6 +758,9 @@ mod tests {
             user_verified: false,
             related_origin_verified: false,
             client_data_json_base64url: &client_data_json,
+            challenge_base64url: "Y2hhbGxlbmdlLTE",
+            top_origin: None,
+            ancestor_origins: &[],
         }) {
             Ok(_) => panic!("empty passkey user handle must be rejected"),
             Err(error) => error,
@@ -663,6 +770,86 @@ mod tests {
             error
                 .to_string()
                 .contains("passkey user handle must be 1 to 64 bytes")
+        );
+    }
+
+    #[test]
+    fn registration_rejects_client_data_challenge_mismatch_at_signer_boundary() {
+        let client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"d3JvbmctY2hhbGxlbmdl","origin":"https://example.com","crossOrigin":false}"#,
+        );
+
+        let error = match create_registration(PasskeyRegistrationRequest {
+            relying_party: "example.com",
+            origin: "https://example.com",
+            user_name: "alice@example.com",
+            user_handle_base64url: "dXNlci0x",
+            public_key_algorithm: -7,
+            user_verified: false,
+            related_origin_verified: false,
+            client_data_json_base64url: &client_data_json,
+            challenge_base64url: "Y2hhbGxlbmdlLTE",
+            top_origin: None,
+            ancestor_origins: &[],
+        }) {
+            Ok(_) => panic!("mismatched passkey challenge must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("passkey clientDataJSON challenge mismatch")
+        );
+    }
+
+    #[test]
+    fn assertion_rejects_client_data_cross_origin_mismatch_at_signer_boundary() {
+        let create_client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"Y3JlYXRlLWNoYWxsZW5nZQ","origin":"https://example.com","crossOrigin":false}"#,
+        );
+        let registration = create_registration(PasskeyRegistrationRequest {
+            relying_party: "example.com",
+            origin: "https://example.com",
+            user_name: "alice@example.com",
+            user_handle_base64url: "dXNlci0x",
+            public_key_algorithm: -7,
+            user_verified: false,
+            related_origin_verified: false,
+            client_data_json_base64url: &create_client_data_json,
+            challenge_base64url: "Y3JlYXRlLWNoYWxsZW5nZQ",
+            top_origin: None,
+            ancestor_origins: &[],
+        })
+        .expect("registration");
+        let get_client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.get","challenge":"Z2V0LWNoYWxsZW5nZQ","origin":"https://example.com","crossOrigin":false}"#,
+        );
+
+        let error = match create_assertion(
+            &registration.passkey,
+            PasskeyAssertionRequest {
+                relying_party: "example.com",
+                origin: "https://example.com",
+                credential_id: Some(&registration.passkey.credential_id),
+                discoverable: false,
+                user_presence_verified: true,
+                user_verified: false,
+                related_origin_verified: false,
+                client_data_json_base64url: &get_client_data_json,
+                challenge_base64url: "Z2V0LWNoYWxsZW5nZQ",
+                top_origin: Some("https://embedder.example.net"),
+                ancestor_origins: &[],
+            },
+        ) {
+            Ok(_) => panic!("mismatched passkey crossOrigin must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("passkey clientDataJSON crossOrigin mismatch")
         );
     }
 

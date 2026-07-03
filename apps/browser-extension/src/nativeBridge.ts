@@ -9,6 +9,8 @@ type NativeMessagingErrorCode =
 
 type PendingRequest = {
   message: unknown;
+  wireMessage: unknown;
+  requestId: string;
   resolve: (response: unknown) => void;
   reject: (error: Error) => void;
   timeoutId: ReturnType<typeof setTimeout> | null;
@@ -118,6 +120,32 @@ function commandTypeFromMessage(message: unknown) {
   return typeof command.type === "string" ? command.type : null;
 }
 
+function attachRequestId(message: unknown, requestId: string) {
+  if (typeof message === "object" && message !== null && !Array.isArray(message)) {
+    return { ...message, requestId };
+  }
+
+  return { requestId, payload: message };
+}
+
+function requestIdFromResponse(response: unknown) {
+  if (typeof response !== "object" || response === null || !("requestId" in response)) {
+    return null;
+  }
+
+  const requestId = (response as { requestId?: unknown }).requestId;
+  return typeof requestId === "string" ? requestId : null;
+}
+
+function stripResponseRequestId(response: unknown) {
+  if (typeof response !== "object" || response === null || !("requestId" in response)) {
+    return response;
+  }
+
+  const { requestId: _requestId, ...rest } = response as Record<string, unknown>;
+  return rest;
+}
+
 function isStartupCommand(message: unknown) {
   const type = commandTypeFromMessage(message);
   return type === "get_session_state" || type === "list_recent_vaults";
@@ -160,6 +188,7 @@ export function createNativeMessagingBridge(
   let port: NativePort | null = null;
   let activeRequest: PendingRequest | null = null;
   const queuedRequests: PendingRequest[] = [];
+  let nextRequestId = 0;
 
   function timeoutForMessage(message: unknown) {
     if (
@@ -232,12 +261,24 @@ export function createNativeMessagingBridge(
     }
   }
 
-  function cancelActivePreload() {
-    if (!activeRequest) {
+  function interruptActivePreload() {
+    const request = activeRequest;
+    const requestPort = port;
+    if (!request) {
       return;
     }
 
-    cancelActiveRequest(preloadCanceledError());
+    activeRequest = null;
+    request.postMessageAttempts = 0;
+    clearRequestTimeout(request);
+    detachPort();
+    queuedRequests.unshift(request);
+
+    try {
+      requestPort?.disconnect();
+    } catch {
+      // The interrupted read will be retried on the next native port.
+    }
   }
 
   function cancelActiveRequest(error: Error) {
@@ -298,13 +339,25 @@ export function createNativeMessagingBridge(
     }
 
     const request = activeRequest;
+    const responseRequestId = requestIdFromResponse(response);
+    if (responseRequestId !== request.requestId) {
+      if (responseRequestId === null) {
+        cancelActiveRequest(
+          new NativeMessagingError(
+            "native_unknown",
+            "native response did not include a matching request id"
+          )
+        );
+      }
+      return;
+    }
     emitEvent({
       event: "response",
       commandType: commandTypeFromMessage(request.message)
     });
     activeRequest = null;
     clearRequestTimeout(request);
-    request.resolve(response);
+    request.resolve(stripResponseRequestId(response));
     flushQueue();
   }
 
@@ -378,7 +431,7 @@ export function createNativeMessagingBridge(
         event: "post",
         commandType: commandTypeFromMessage(request.message)
       });
-      requestPort.postMessage(request.message);
+      requestPort.postMessage(request.wireMessage);
     } catch (error) {
       clearRequestTimeout(request);
       activeRequest = null;
@@ -410,11 +463,20 @@ export function createNativeMessagingBridge(
   return {
     send(message: unknown) {
       return new Promise<unknown>((resolve, reject) => {
-        if (shouldCancelActivePreload(activeRequest, message)) {
-          cancelActivePreload();
-        }
         cancelQueuedPreloads(message);
-        enqueueRequest({ message, resolve, reject, timeoutId: null, postMessageAttempts: 0 });
+        if (shouldCancelActivePreload(activeRequest, message)) {
+          interruptActivePreload();
+        }
+        const requestId = `native-${++nextRequestId}`;
+        enqueueRequest({
+          message,
+          wireMessage: attachRequestId(message, requestId),
+          requestId,
+          resolve,
+          reject,
+          timeoutId: null,
+          postMessageAttempts: 0
+        });
         flushQueue();
       });
     }

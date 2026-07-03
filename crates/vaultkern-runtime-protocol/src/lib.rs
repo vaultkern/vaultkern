@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolEnvelope {
     pub version: u32,
+    #[serde(default, rename = "requestId", skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub command: RuntimeCommand,
 }
 
@@ -10,6 +12,7 @@ impl ProtocolEnvelope {
     pub fn new(command: RuntimeCommand) -> Self {
         Self {
             version: 1,
+            request_id: None,
             command,
         }
     }

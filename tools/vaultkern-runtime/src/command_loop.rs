@@ -37,13 +37,15 @@ fn run_loop_with_io_with_limit(
         match read_native_message_or_eof_with_limit::<ProtocolEnvelope>(stdin, max_message_bytes)? {
             NativeMessage::Eof => return Ok(()),
             NativeMessage::Message(envelope) => {
+                let request_id = envelope.request_id;
                 let response = handle_command_response(&mut runtime, envelope.command);
-                write_native_message(stdout, &response)?;
+                write_native_message(stdout, &response, request_id.as_deref())?;
             }
             NativeMessage::Oversized { length, max_length } => {
                 write_native_message(
                     stdout,
                     &oversized_native_message_response(length, max_length),
+                    None,
                 )?;
             }
         };
@@ -150,8 +152,13 @@ fn oversized_native_message_response(length: usize, max_length: usize) -> Runtim
     })
 }
 
-fn write_native_message(writer: &mut impl Write, response: &RuntimeResponse) -> Result<()> {
-    let payload = serde_json::to_vec(response).context("failed to encode native message")?;
+fn write_native_message(
+    writer: &mut impl Write,
+    response: &RuntimeResponse,
+    request_id: Option<&str>,
+) -> Result<()> {
+    let payload =
+        encode_native_response(response, request_id).context("failed to encode native message")?;
     let length = (payload.len() as u32).to_le_bytes();
     writer
         .write_all(&length)
@@ -160,6 +167,22 @@ fn write_native_message(writer: &mut impl Write, response: &RuntimeResponse) -> 
         .write_all(&payload)
         .context("failed to write message payload")?;
     writer.flush().context("failed to flush native message")
+}
+
+fn encode_native_response(response: &RuntimeResponse, request_id: Option<&str>) -> Result<Vec<u8>> {
+    let Some(request_id) = request_id else {
+        return serde_json::to_vec(response).context("failed to encode native response");
+    };
+
+    let mut value = serde_json::to_value(response).context("failed to encode native response")?;
+    let serde_json::Value::Object(fields) = &mut value else {
+        anyhow::bail!("native response must encode as a JSON object");
+    };
+    fields.insert(
+        "requestId".into(),
+        serde_json::Value::String(request_id.to_owned()),
+    );
+    serde_json::to_vec(&value).context("failed to encode native response")
 }
 
 #[cfg(not(windows))]
@@ -287,7 +310,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_message_loop_echoes_request_id_in_response() {
+        let command = serde_json::json!({
+            "version": 1,
+            "requestId": "request-1",
+            "command": { "type": "get_session_state" }
+        });
+        let command_payload = serde_json::to_vec(&command).unwrap();
+        let mut input = Vec::new();
+        input.extend_from_slice(&(command_payload.len() as u32).to_le_bytes());
+        input.extend_from_slice(&command_payload);
+        let mut input = std::io::Cursor::new(input);
+        let mut output = Vec::new();
+
+        run_loop_with_io(Runtime::for_tests(), &mut input, &mut output)
+            .expect("native loop should handle request id envelope");
+
+        let mut output = std::io::Cursor::new(output);
+        let response = read_response_value_from(&mut output);
+        assert_eq!(response["requestId"], "request-1");
+        assert_eq!(response["type"], "session_state");
+    }
+
     fn read_response_from(reader: &mut impl std::io::Read) -> RuntimeResponse {
+        let mut length = [0_u8; 4];
+        reader
+            .read_exact(&mut length)
+            .expect("read native response length");
+        let mut payload = vec![0_u8; u32::from_le_bytes(length) as usize];
+        reader
+            .read_exact(&mut payload)
+            .expect("read native response payload");
+        serde_json::from_slice(&payload).expect("decode native response")
+    }
+
+    fn read_response_value_from(reader: &mut impl std::io::Read) -> serde_json::Value {
         let mut length = [0_u8; 4];
         reader
             .read_exact(&mut length)

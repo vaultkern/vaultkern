@@ -124,6 +124,13 @@ struct PasskeyCeremonyLedgerEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct PasskeyClientDataExpectations {
+    challenge_base64url: String,
+    top_origin: Option<String>,
+    ancestor_origins: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PasskeyUserVerificationProof {
     vault_id: String,
     method: PasskeyUserVerificationMethodDto,
@@ -1552,7 +1559,7 @@ impl Runtime {
         related_origin_verified: bool,
         client_data_json_base64url: &str,
     ) -> Result<PasskeyAssertionDto> {
-        self.validate_passkey_ceremony_for_s4(
+        let client_data_expectations = self.validate_passkey_ceremony_for_s4(
             ceremony_token,
             expected_phase,
             PasskeyCeremonyKindDto::Get,
@@ -1588,6 +1595,9 @@ impl Runtime {
                 user_verified,
                 related_origin_verified,
                 client_data_json_base64url,
+                challenge_base64url: &client_data_expectations.challenge_base64url,
+                top_origin: client_data_expectations.top_origin.as_deref(),
+                ancestor_origins: &client_data_expectations.ancestor_origins,
             },
         )
     }
@@ -1602,7 +1612,7 @@ impl Runtime {
         relying_party: &str,
         discoverable: Option<bool>,
         client_data_json_base64url: &str,
-    ) -> Result<()> {
+    ) -> Result<PasskeyClientDataExpectations> {
         if expected_phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
             anyhow::bail!("passkey ceremony expected phase must be s4_completion_and_mutation");
         }
@@ -1638,7 +1648,11 @@ impl Runtime {
             entry.identity.top_origin.as_deref(),
             &entry.identity.ancestor_origins,
         )?;
-        Ok(())
+        Ok(PasskeyClientDataExpectations {
+            challenge_base64url: entry.identity.challenge_base64url.clone(),
+            top_origin: entry.identity.top_origin.clone(),
+            ancestor_origins: entry.identity.ancestor_origins.clone(),
+        })
     }
 
     fn passkey_ceremony_user_verified(&self, ceremony_token: &str, vault_id: &str) -> Result<bool> {
@@ -2119,7 +2133,7 @@ impl Runtime {
         related_origin_verified: bool,
         client_data_json_base64url: &str,
     ) -> Result<PasskeyRegistrationDto> {
-        self.validate_passkey_ceremony_for_s4(
+        let client_data_expectations = self.validate_passkey_ceremony_for_s4(
             ceremony_token,
             expected_phase,
             PasskeyCeremonyKindDto::Create,
@@ -2142,6 +2156,9 @@ impl Runtime {
                 user_verified,
                 related_origin_verified,
                 client_data_json_base64url,
+                challenge_base64url: &client_data_expectations.challenge_base64url,
+                top_origin: client_data_expectations.top_origin.as_deref(),
+                ancestor_origins: &client_data_expectations.ancestor_origins,
             },
             credential_id,
         )?;

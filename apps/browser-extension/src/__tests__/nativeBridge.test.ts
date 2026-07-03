@@ -7,10 +7,21 @@ type Listener<T> = (value: T) => void;
 function createPort() {
   const messageListeners: Listener<unknown>[] = [];
   const disconnectListeners: Listener<void>[] = [];
+  const postedMessages: unknown[] = [];
+
+  function latestPostedRequestId() {
+    const message = postedMessages.at(-1);
+    return typeof message === "object" &&
+      message !== null &&
+      "requestId" in message &&
+      typeof (message as { requestId?: unknown }).requestId === "string"
+      ? (message as { requestId: string }).requestId
+      : null;
+  }
 
   return {
     postMessage: vi.fn((message: unknown) => {
-      void message;
+      postedMessages.push(message);
     }),
     onMessage: {
       addListener(listener: Listener<unknown>) {
@@ -24,8 +35,16 @@ function createPort() {
     },
     disconnect: vi.fn(),
     emitMessage(message: unknown) {
+      const requestId = latestPostedRequestId();
+      const response =
+        requestId !== null &&
+        typeof message === "object" &&
+        message !== null &&
+        !("requestId" in message)
+          ? { ...message, requestId }
+          : message;
       for (const listener of messageListeners) {
-        listener(message);
+        listener(response);
       }
     },
     emitDisconnect() {
@@ -34,6 +53,17 @@ function createPort() {
       }
     }
   };
+}
+
+function postedRequestId(port: ReturnType<typeof createPort>, index = -1) {
+  const calls = port.postMessage.mock.calls;
+  const message = calls[index < 0 ? calls.length + index : index]?.[0];
+  return typeof message === "object" &&
+    message !== null &&
+    "requestId" in message &&
+    typeof (message as { requestId?: unknown }).requestId === "string"
+    ? (message as { requestId: string }).requestId
+    : null;
 }
 
 afterEach(() => {
@@ -92,23 +122,46 @@ describe("createNativeMessagingBridge", () => {
 
     expect(connectNative).toHaveBeenCalledTimes(1);
     expect(port.postMessage).toHaveBeenCalledTimes(1);
-    expect(port.postMessage).toHaveBeenCalledWith({
+    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "first" }
-    });
+    }));
 
     port.emitMessage({ type: "first_response" });
 
     await expect(first).resolves.toEqual({ type: "first_response" });
     expect(port.postMessage).toHaveBeenCalledTimes(2);
-    expect(port.postMessage).toHaveBeenLastCalledWith({
+    expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "second" }
-    });
+    }));
 
     port.emitMessage({ type: "second_response" });
 
     await expect(second).resolves.toEqual({ type: "second_response" });
+  });
+
+  it("ignores native responses whose request id does not match the active request", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    const first = bridge.send({ version: 1, command: { type: "first" } });
+    const firstRequestId = postedRequestId(port);
+
+    expect(firstRequestId).toEqual(expect.any(String));
+
+    port.emitMessage({ requestId: "different-request", type: "second_response" });
+    await Promise.resolve();
+    port.emitMessage({ requestId: firstRequestId, type: "first_response" });
+
+    await expect(first).resolves.toEqual({ type: "first_response" });
   });
 
   it("reconnects once when posting to a stale native port fails before delivery", async () => {
@@ -134,10 +187,10 @@ describe("createNativeMessagingBridge", () => {
 
     expect(connectNative).toHaveBeenCalledTimes(2);
     expect(firstPort.postMessage).toHaveBeenCalledTimes(1);
-    expect(secondPort.postMessage).toHaveBeenCalledWith({
+    expect(secondPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "create_passkey_assertion" }
-    });
+    }));
 
     secondPort.emitMessage({ type: "passkey_assertion", credentialId: "credential-1" });
 
@@ -239,10 +292,10 @@ describe("createNativeMessagingBridge", () => {
     });
     expect(connectNative).toHaveBeenCalledTimes(2);
     expect(secondPort.postMessage).toHaveBeenCalledTimes(1);
-    expect(secondPort.postMessage).toHaveBeenCalledWith({
+    expect(secondPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "second" }
-    });
+    }));
 
     secondPort.emitMessage({ type: "second_response" });
 
@@ -579,7 +632,7 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
-  it("cancels stale preload before serving a new startup session request", async () => {
+  it("interrupts active preload for a startup session request and restores it after startup", async () => {
     const firstPort = createPort();
     const secondPort = createPort();
     const connectNative = vi.fn(() =>
@@ -597,28 +650,23 @@ describe("createNativeMessagingBridge", () => {
       version: 1,
       command: { type: "preload_current_vault" }
     });
-    const preloadFailure = preload.catch((error: unknown) => error);
 
-    expect(firstPort.postMessage).toHaveBeenCalledWith({
+    expect(firstPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "preload_current_vault" }
-    });
+    }));
 
     const session = bridge.send({
       version: 1,
       command: { type: "get_session_state" }
     });
 
-    await expect(preloadFailure).resolves.toMatchObject({
-      code: "native_port_disconnected",
-      message: "preload canceled by startup request"
-    });
     expect(firstPort.disconnect).toHaveBeenCalledTimes(1);
     expect(connectNative).toHaveBeenCalledTimes(2);
-    expect(secondPort.postMessage).toHaveBeenCalledWith({
+    expect(secondPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "get_session_state" }
-    });
+    }));
 
     secondPort.emitMessage({
       type: "session_state",
@@ -630,6 +678,18 @@ describe("createNativeMessagingBridge", () => {
     await expect(session).resolves.toMatchObject({
       type: "session_state",
       currentVaultRefId: "vault-ref-1"
+    });
+    expect(secondPort.postMessage).toHaveBeenCalledTimes(2);
+    expect(secondPort.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      version: 1,
+      command: { type: "preload_current_vault" }
+    }));
+
+    secondPort.emitMessage({ type: "session_state", unlocked: true, activeVaultId: "vault-1" });
+
+    await expect(preload).resolves.toMatchObject({
+      type: "session_state",
+      activeVaultId: "vault-1"
     });
   });
 
@@ -656,10 +716,10 @@ describe("createNativeMessagingBridge", () => {
     });
 
     expect(port.postMessage).toHaveBeenCalledTimes(1);
-    expect(port.postMessage).toHaveBeenLastCalledWith({
+    expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "first" }
-    });
+    }));
     await expect(preloadFailure).resolves.toMatchObject({
       code: "native_port_disconnected",
       message: "preload canceled by startup request"
@@ -669,10 +729,10 @@ describe("createNativeMessagingBridge", () => {
 
     await expect(first).resolves.toEqual({ type: "first_response" });
     expect(port.postMessage).toHaveBeenCalledTimes(2);
-    expect(port.postMessage).toHaveBeenLastCalledWith({
+    expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "get_session_state" }
-    });
+    }));
 
     port.emitMessage({
       type: "session_state",
@@ -712,10 +772,10 @@ describe("createNativeMessagingBridge", () => {
     });
 
     expect(port.postMessage).toHaveBeenCalledTimes(1);
-    expect(port.postMessage).toHaveBeenLastCalledWith({
+    expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "list_entries", vault_id: "vault-1" }
-    });
+    }));
     expect(port.disconnect).not.toHaveBeenCalled();
     expect(connectNative).toHaveBeenCalledTimes(1);
 
@@ -726,10 +786,10 @@ describe("createNativeMessagingBridge", () => {
       entries: []
     });
     expect(port.postMessage).toHaveBeenCalledTimes(2);
-    expect(port.postMessage).toHaveBeenLastCalledWith({
+    expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "get_session_state" }
-    });
+    }));
 
     port.emitMessage({
       type: "session_state",
@@ -743,10 +803,10 @@ describe("createNativeMessagingBridge", () => {
       activeVaultId: "vault-1"
     });
     expect(port.postMessage).toHaveBeenCalledTimes(3);
-    expect(port.postMessage).toHaveBeenLastCalledWith({
+    expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "find_fill_candidates", vault_id: "vault-1", url: "https://example.com" }
-    });
+    }));
 
     port.emitMessage({ type: "entry_list", entries: [] });
 
@@ -781,14 +841,14 @@ describe("createNativeMessagingBridge", () => {
     });
 
     expect(port.postMessage).toHaveBeenCalledTimes(1);
-    expect(port.postMessage).toHaveBeenLastCalledWith({
+    expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
       version: 1,
       command: {
         type: "find_fill_candidates",
         vault_id: "vault-1",
         url: "https://accounts.google.com"
       }
-    });
+    }));
 
     port.emitMessage({ type: "entry_list", entries: [] });
 
@@ -799,10 +859,10 @@ describe("createNativeMessagingBridge", () => {
     expect(port.disconnect).not.toHaveBeenCalled();
     expect(connectNative).toHaveBeenCalledTimes(1);
     expect(port.postMessage).toHaveBeenCalledTimes(2);
-    expect(port.postMessage).toHaveBeenLastCalledWith({
+    expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "get_session_state" }
-    });
+    }));
 
     port.emitMessage({
       type: "session_state",

@@ -44,9 +44,22 @@ function sendRuntimeMessage(
 function createPort() {
   const messageListeners: Array<(message: unknown) => void> = [];
   const disconnectListeners: Array<() => void> = [];
+  const postedMessages: unknown[] = [];
+
+  function latestPostedRequestId() {
+    const message = postedMessages.at(-1);
+    return typeof message === "object" &&
+      message !== null &&
+      "requestId" in message &&
+      typeof (message as { requestId?: unknown }).requestId === "string"
+      ? (message as { requestId: string }).requestId
+      : null;
+  }
 
   return {
-    postMessage: vi.fn(),
+    postMessage: vi.fn((message: unknown) => {
+      postedMessages.push(message);
+    }),
     onMessage: {
       addListener(listener: (message: unknown) => void) {
         messageListeners.push(listener);
@@ -58,8 +71,16 @@ function createPort() {
       }
     },
     emitMessage(message: unknown) {
+      const requestId = latestPostedRequestId();
+      const response =
+        requestId !== null &&
+        typeof message === "object" &&
+        message !== null &&
+        !("requestId" in message)
+          ? { ...message, requestId }
+          : message;
       for (const listener of messageListeners) {
-        listener(message);
+        listener(response);
       }
     },
     emitDisconnect() {
@@ -74,13 +95,13 @@ async function completePasskeyLedgerReconciliation(
   port: ReturnType<typeof createPort>
 ) {
   await vi.waitFor(() => {
-    expect(port.postMessage).toHaveBeenCalledWith({
+    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: {
         type: "reconcile_passkey_ceremony_ledger",
         active_connection_id: expect.any(String)
       }
-    });
+    }));
   });
   port.emitMessage({
     type: "passkey_ceremony_reconciliation",
@@ -189,13 +210,13 @@ describe("background bridge", () => {
     await flushMicrotasks();
     expect(attach).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith({
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
         }
-      });
+      }));
     });
     port.emitMessage({
       type: "passkey_ceremony_reconciliation",
@@ -229,10 +250,10 @@ describe("background bridge", () => {
 
     await vi.advanceTimersByTimeAsync(20_000);
 
-    expect(port.postMessage).toHaveBeenCalledWith({
+    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "get_session_state" }
-    });
+    }));
     expect(port.postMessage).toHaveBeenCalledTimes(3);
 
     vi.useRealTimers();
@@ -347,10 +368,10 @@ describe("background bridge", () => {
     });
 
     expect(connectNative).toHaveBeenCalledTimes(1);
-    expect(port.postMessage).toHaveBeenCalledWith({
+    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "get_session_state" }
-    });
+    }));
 
     port.emitMessage({
       type: "session_state",
@@ -703,13 +724,13 @@ describe("background bridge", () => {
       expect(attach).toHaveBeenCalledTimes(1);
     });
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith({
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
         }
-      });
+      }));
     });
     port.emitMessage({
       type: "passkey_ceremony_reconciliation",
@@ -785,13 +806,13 @@ describe("background bridge", () => {
 
     await import("../background");
     await vi.waitFor(() => {
-      expect(firstPort.postMessage).toHaveBeenCalledWith({
+      expect(firstPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
         }
-      });
+      }));
     });
     const firstConnectionId = (
       firstPort.postMessage.mock.calls[0][0] as {
@@ -808,13 +829,13 @@ describe("background bridge", () => {
     remoteSessionListener?.();
 
     await vi.waitFor(() => {
-      expect(secondPort.postMessage).toHaveBeenCalledWith({
+      expect(secondPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
         }
-      });
+      }));
     });
     const secondConnectionId = (
       secondPort.postMessage.mock.calls[0][0] as {
@@ -878,13 +899,13 @@ describe("background bridge", () => {
     await import("../background");
 
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith({
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
         }
-      });
+      }));
     });
   });
 
@@ -979,13 +1000,13 @@ describe("background bridge", () => {
     await import("../background");
 
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith({
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
         }
-      });
+      }));
     });
     port.emitMessage({
       type: "passkey_ceremony_reconciliation",
@@ -993,30 +1014,30 @@ describe("background bridge", () => {
     });
 
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith({
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: {
           type: "query_passkey_ceremony_ledger",
           ceremony_token: "token-pre-s4"
         }
-      });
+      }));
     });
     port.emitMessage({ type: "passkey_ceremony_ledger", known: false });
 
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith({
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: expect.objectContaining({
           type: "register_passkey_ceremony",
           ceremony_token: "token-pre-s4",
           connection_id: expect.any(String)
         })
-      });
+      }));
     });
     port.emitMessage({ type: "passkey_ceremony_registered", registered: true });
 
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith({
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: {
           type: "advance_passkey_ceremony_phase",
@@ -1024,7 +1045,7 @@ describe("background bridge", () => {
           expected_phase: "s0_pre_authorization",
           next_phase: "s1_user_authorization"
         }
-      });
+      }));
     });
     port.emitMessage({ type: "passkey_ceremony_advanced", advanced: true });
 
