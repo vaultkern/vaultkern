@@ -91,10 +91,16 @@ function webAuthnPromptSiteLabel() {
   }
 }
 
+type WebAuthnPromptCompleteOptions = {
+  credentialId?: string;
+  method?: "master_password" | "quick_unlock";
+  password?: string;
+};
+
 function notifyWebAuthnPromptComplete(
   type: string,
   closeMode: string,
-  options: { credentialId?: string } = {}
+  options: WebAuthnPromptCompleteOptions = {}
 ) {
   const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
   const sendMessage = chromeApi?.runtime?.sendMessage;
@@ -132,6 +138,12 @@ function notifyWebAuthnPromptComplete(
   }
   if (options.credentialId) {
     message.credentialId = options.credentialId;
+  }
+  if (options.method) {
+    message.method = options.method;
+  }
+  if (options.password) {
+    message.password = options.password;
   }
   const nonce = promptParams?.get("nonce");
   if (nonce) {

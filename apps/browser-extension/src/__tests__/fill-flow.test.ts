@@ -965,7 +965,77 @@ describe("PopupShell fill flow", () => {
         type: "vaultkern_unlock_complete",
         requestId: 12,
         origin: "https://example.com",
-        relyingParty: "example.com"
+        relyingParty: "example.com",
+        method: "master_password",
+        password: "demo-password"
+      });
+    });
+  });
+
+  it("notifies the background page that a WebAuthn unlock used quick unlock", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=14&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-14"
+    );
+    const sendMessage = vi.fn(async () => undefined);
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: vi.fn()
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Unlock with Windows Hello" })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_unlock_complete",
+        requestId: 14,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-14",
+        method: "quick_unlock"
       });
     });
   });
@@ -1425,7 +1495,8 @@ describe("PopupShell fill flow", () => {
         type: "vaultkern_unlock_complete",
         requestId: 24,
         origin: "https://example.com",
-        relyingParty: "example.com"
+        relyingParty: "example.com",
+        method: "quick_unlock"
       });
       expect(closeWindow).toHaveBeenCalledTimes(1);
     });
