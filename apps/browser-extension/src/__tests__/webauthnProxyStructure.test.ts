@@ -90,4 +90,15 @@ describe("webauthn proxy structure", () => {
       0
     );
   });
+
+  it("builds WebAuthn create success responses through one helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("function passkeyCreateCredentialResponseJson");
+    expect(source.match(/attestationObject:/g) ?? []).toHaveLength(1);
+  });
 });

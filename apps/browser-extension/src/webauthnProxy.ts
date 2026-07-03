@@ -2461,21 +2461,10 @@ async function resumePasskeyCreateAfterPromptComplete(
     try {
       await completeCreateRequest(chromeApi, {
         requestId,
-        responseJson: JSON.stringify({
-          id: registration.credentialId,
-          rawId: registration.credentialId,
-          type: "public-key",
-          authenticatorAttachment: "platform",
-          clientExtensionResults: createRequest.clientExtensionResults,
-          response: {
-            authenticatorData: registration.authenticatorDataBase64url,
-            attestationObject: registration.attestationObjectBase64url,
-            clientDataJSON: registration.clientDataJsonBase64url,
-            publicKey: registration.publicKeyBase64url,
-            publicKeyAlgorithm: registration.publicKeyAlgorithm,
-            transports: ["internal"]
-          }
-        })
+        responseJson: passkeyCreateCredentialResponseJson(
+          registration,
+          createRequest.clientExtensionResults
+        )
       });
     } catch (error) {
       await recordWebAuthnDebug(chromeApi, {
@@ -4572,21 +4561,10 @@ async function handleCreateRequest(
     try {
       await completeCreateRequest(chromeApi, {
         requestId,
-        responseJson: JSON.stringify({
-          id: registration.credentialId,
-          rawId: registration.credentialId,
-          type: "public-key",
-          authenticatorAttachment: "platform",
-          clientExtensionResults: clientExtensionResultsForCreateOptions(options),
-          response: {
-            authenticatorData: registration.authenticatorDataBase64url,
-            attestationObject: registration.attestationObjectBase64url,
-            clientDataJSON: registration.clientDataJsonBase64url,
-            publicKey: registration.publicKeyBase64url,
-            publicKeyAlgorithm: registration.publicKeyAlgorithm,
-            transports: ["internal"]
-          }
-        })
+        responseJson: passkeyCreateCredentialResponseJson(
+          registration,
+          clientExtensionResultsForCreateOptions(options)
+        )
       });
     } catch (error) {
       await recordWebAuthnDebug(chromeApi, {
@@ -4776,6 +4754,27 @@ function clientExtensionResultsForCreateOptions(options: {
   }
 
   return {};
+}
+
+function passkeyCreateCredentialResponseJson(
+  registration: PasskeyRegistrationResponse,
+  clientExtensionResults: Record<string, unknown>
+) {
+  return JSON.stringify({
+    id: registration.credentialId,
+    rawId: registration.credentialId,
+    type: "public-key",
+    authenticatorAttachment: "platform",
+    clientExtensionResults,
+    response: {
+      authenticatorData: registration.authenticatorDataBase64url,
+      attestationObject: registration.attestationObjectBase64url,
+      clientDataJSON: registration.clientDataJsonBase64url,
+      publicKey: registration.publicKeyBase64url,
+      publicKeyAlgorithm: registration.publicKeyAlgorithm,
+      transports: ["internal"]
+    }
+  });
 }
 
 function rejectCrossPlatformOnlyRegistration(options: {
