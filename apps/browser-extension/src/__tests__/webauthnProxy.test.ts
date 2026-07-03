@@ -2675,7 +2675,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("does not re-register persisted ceremonies when queryLedger returns a runtime error", async () => {
+  it("preserves persisted ceremonies when queryLedger returns a runtime error", async () => {
     const sessionStorage = createSessionStorage({
       vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
         "token-query-error": {
@@ -2727,7 +2727,13 @@ describe("webAuthenticationProxy wrapper", () => {
         type: "register_passkey_ceremony"
       })
     );
-    expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
+    expect(passkeyCeremoniesFromStorageSnapshot(sessionStorage.snapshot())).toEqual({
+      "token-query-error": expect.objectContaining({
+        ceremonyToken: "token-query-error",
+        phase: "s1_user_authorization",
+        expiresAtEpochMs: expect.any(Number)
+      })
+    });
   });
 
   it("drops native-missing persisted ceremonies when registration response is malformed", async () => {
@@ -2858,7 +2864,7 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
   });
 
-  it("drops persisted ceremonies when queryLedger cannot be reached", async () => {
+  it("preserves persisted ceremonies when queryLedger cannot be reached", async () => {
     const sessionStorage = createSessionStorage({
       vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
         "token-query-throws": {
@@ -2906,7 +2912,13 @@ describe("webAuthenticationProxy wrapper", () => {
         type: "register_passkey_ceremony"
       })
     );
-    expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
+    expect(passkeyCeremoniesFromStorageSnapshot(sessionStorage.snapshot())).toEqual({
+      "token-query-throws": expect.objectContaining({
+        ceremonyToken: "token-query-throws",
+        phase: "s1_user_authorization",
+        expiresAtEpochMs: expect.any(Number)
+      })
+    });
   });
 
   it("does not rehydrate expired native-missing passkey ceremony mirrors", async () => {

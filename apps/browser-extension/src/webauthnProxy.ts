@@ -396,12 +396,13 @@ export async function reconcilePersistedPasskeyCeremonies(
           ceremony_token: token
         });
       } catch {
-        delete mirrors[token];
-        changed = true;
         continue;
       }
 
       if (!passkeyCeremonyLedgerKnown(ledger)) {
+        if (runtimeErrorFromResponse(ledger)) {
+          continue;
+        }
         if (!passkeyCeremonyLedgerUnknown(ledger)) {
           delete mirrors[token];
           changed = true;
