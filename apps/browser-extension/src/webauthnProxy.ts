@@ -1556,21 +1556,10 @@ async function handleGetRequest(
     try {
       await completeGetRequest(chromeApi, {
         requestId,
-        responseJson: JSON.stringify({
-          id: assertion.credentialId,
-          rawId: assertion.credentialId,
-          type: "public-key",
-          authenticatorAttachment: "platform",
-          clientExtensionResults: clientExtensionResultsForGetOptions(options),
-          response: {
-            authenticatorData: assertion.authenticatorDataBase64url,
-            clientDataJSON: assertion.clientDataJsonBase64url,
-            signature: assertion.signatureBase64url,
-            ...(typeof assertion.userHandleBase64url === "string"
-              ? { userHandle: assertion.userHandleBase64url }
-              : {})
-          }
-        })
+        responseJson: passkeyGetCredentialResponseJson(
+          assertion,
+          clientExtensionResultsForGetOptions(options)
+        )
       });
     } catch (error) {
       await recordWebAuthnDebug(chromeApi, {
@@ -2097,21 +2086,10 @@ async function resumePasskeyGetAfterPromptComplete(
     try {
       await completeGetRequest(chromeApi, {
         requestId,
-        responseJson: JSON.stringify({
-          id: assertion.credentialId,
-          rawId: assertion.credentialId,
-          type: "public-key",
-          authenticatorAttachment: "platform",
-          clientExtensionResults: getClientExtensionResultsFromMirror(mirror),
-          response: {
-            authenticatorData: assertion.authenticatorDataBase64url,
-            clientDataJSON: assertion.clientDataJsonBase64url,
-            signature: assertion.signatureBase64url,
-            ...(typeof assertion.userHandleBase64url === "string"
-              ? { userHandle: assertion.userHandleBase64url }
-              : {})
-          }
-        })
+        responseJson: passkeyGetCredentialResponseJson(
+          assertion,
+          getClientExtensionResultsFromMirror(mirror)
+        )
       });
     } catch (error) {
       await recordWebAuthnDebug(chromeApi, {
@@ -4773,6 +4751,27 @@ function passkeyCreateCredentialResponseJson(
       publicKey: registration.publicKeyBase64url,
       publicKeyAlgorithm: registration.publicKeyAlgorithm,
       transports: ["internal"]
+    }
+  });
+}
+
+function passkeyGetCredentialResponseJson(
+  assertion: PasskeyAssertionResponse,
+  clientExtensionResults: Record<string, unknown>
+) {
+  return JSON.stringify({
+    id: assertion.credentialId,
+    rawId: assertion.credentialId,
+    type: "public-key",
+    authenticatorAttachment: "platform",
+    clientExtensionResults,
+    response: {
+      authenticatorData: assertion.authenticatorDataBase64url,
+      clientDataJSON: assertion.clientDataJsonBase64url,
+      signature: assertion.signatureBase64url,
+      ...(typeof assertion.userHandleBase64url === "string"
+        ? { userHandle: assertion.userHandleBase64url }
+        : {})
     }
   });
 }

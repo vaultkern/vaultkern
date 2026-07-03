@@ -101,4 +101,15 @@ describe("webauthn proxy structure", () => {
     expect(source).toContain("function passkeyCreateCredentialResponseJson");
     expect(source.match(/attestationObject:/g) ?? []).toHaveLength(1);
   });
+
+  it("builds WebAuthn get success responses through one helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("function passkeyGetCredentialResponseJson");
+    expect(source.match(/signature:/g) ?? []).toHaveLength(1);
+  });
 });
