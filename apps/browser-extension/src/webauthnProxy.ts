@@ -1672,6 +1672,12 @@ async function credentialSelectionForGetRequest(
       "VaultKern passkey credential not found"
     );
   }
+  if (credentials.length === 1) {
+    return {
+      credentialIds: [credentials[0].credentialId],
+      promptOptions: [] as PasskeyCredentialOption[]
+    };
+  }
 
   return {
     credentialIds,

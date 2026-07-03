@@ -690,13 +690,6 @@ async function main() {
     );
     await discoverablePasskeyPage.click("#vaultkern-passkey-login");
     await discoverablePasskeyApproval;
-    const discoverablePasskeySelection = approvePasskeyPrompt(
-      context,
-      extensionPage,
-      discoverablePasskeyPage,
-      "discoverable selection"
-    );
-    await discoverablePasskeySelection;
     const discoverablePasskeyResult = await waitForPasskeyLoginResult(
       extensionPage,
       discoverablePasskeyPage,

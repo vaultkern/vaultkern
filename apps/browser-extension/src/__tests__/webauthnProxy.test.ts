@@ -7672,7 +7672,10 @@ describe("webAuthenticationProxy wrapper", () => {
           authenticatorDataBase64url: "auth-data",
           clientDataJsonBase64url: "client-data",
           signatureBase64url: "signature",
-          userHandleBase64url: "dXNlci0x"
+          userHandleBase64url:
+            command.credential_id === "ZGlzY292ZXJhYmxlLTI"
+              ? "dXNlci0y"
+              : "dXNlci0x"
         };
       }
       throw new Error(`unexpected command: ${String(command.type)}`);
@@ -7769,6 +7772,11 @@ describe("webAuthenticationProxy wrapper", () => {
               credentialId: "ZGlzY292ZXJhYmxlLTE",
               username: "alice@example.com",
               userHandle: "dXNlci0x"
+            },
+            {
+              credentialId: "ZGlzY292ZXJhYmxlLTI",
+              username: "bob@example.com",
+              userHandle: "dXNlci0y"
             }
           ]
         };
@@ -7780,7 +7788,10 @@ describe("webAuthenticationProxy wrapper", () => {
           authenticatorDataBase64url: "auth-data",
           clientDataJsonBase64url: "client-data",
           signatureBase64url: "signature",
-          userHandleBase64url: "dXNlci0x"
+          userHandleBase64url:
+            command.credential_id === "ZGlzY292ZXJhYmxlLTI"
+              ? "dXNlci0y"
+              : "dXNlci0x"
         };
       }
       throw new Error(`unexpected command: ${String(command.type)}`);
@@ -7834,6 +7845,10 @@ describe("webAuthenticationProxy wrapper", () => {
         {
           credentialId: "ZGlzY292ZXJhYmxlLTE",
           username: "alice@example.com"
+        },
+        {
+          credentialId: "ZGlzY292ZXJhYmxlLTI",
+          username: "bob@example.com"
         }
       ]
     });
@@ -7843,7 +7858,7 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(completeGetRequest).not.toHaveBeenCalled();
 
     await presencePrompt.approve(undefined, {
-      credentialId: "ZGlzY292ZXJhYmxlLTE"
+      credentialId: "ZGlzY292ZXJhYmxlLTI"
     });
 
     await vi.waitFor(() => {
@@ -7859,16 +7874,16 @@ describe("webAuthenticationProxy wrapper", () => {
       vault_id: "vault-1",
       relying_party: "example.com",
       origin: "https://example.com",
-      credential_id: "ZGlzY292ZXJhYmxlLTE",
+      credential_id: "ZGlzY292ZXJhYmxlLTI",
       discoverable: true,
       user_presence_verified: true,
       client_data_json_base64url: expect.any(String)
     });
     expect(JSON.parse(completeGetRequest.mock.calls[0][0].responseJson)).toMatchObject({
-      id: "ZGlzY292ZXJhYmxlLTE",
-      rawId: "ZGlzY292ZXJhYmxlLTE",
+      id: "ZGlzY292ZXJhYmxlLTI",
+      rawId: "ZGlzY292ZXJhYmxlLTI",
       response: {
-        userHandle: "dXNlci0x"
+        userHandle: "dXNlci0y"
       }
     });
   });
@@ -8203,7 +8218,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("allows discoverable WebAuthn get requests without allowed credentials", async () => {
+  it("uses the only discoverable credential without opening a second selection prompt", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     const completeGetRequest = vi.fn(async () => undefined);
     const sendRuntimeCommand = runtimeCommandMock()
@@ -8263,25 +8278,9 @@ describe("webAuthenticationProxy wrapper", () => {
     await presencePrompt.approve();
 
     await vi.waitFor(() => {
-      expect(presencePrompt.create).toHaveBeenCalledTimes(2);
-    });
-    expect(presencePrompt.requestOptions()).toEqual({
-      credentialOptions: [
-        {
-          credentialId: "ZGlzY292ZXJhYmxlLTE",
-          username: "alice@example.com"
-        }
-      ]
-    });
-    expect(completeGetRequest).not.toHaveBeenCalled();
-
-    await presencePrompt.approve(undefined, {
-      credentialId: "ZGlzY292ZXJhYmxlLTE"
-    });
-
-    await vi.waitFor(() => {
       expect(completeGetRequest).toHaveBeenCalledTimes(1);
     });
+    expect(presencePrompt.create).toHaveBeenCalledTimes(1);
     expectBusinessRuntimeCommand(sendRuntimeCommand, 2, {
       type: "list_passkey_credentials",
       vault_id: "vault-1",
@@ -8299,102 +8298,6 @@ describe("webAuthenticationProxy wrapper", () => {
     });
     const response = JSON.parse(completeGetRequest.mock.calls[0][0].responseJson);
     expect(response.id).toBe("ZGlzY292ZXJhYmxlLTE");
-  });
-
-  it("requires S3B account selection for single-credential discoverable WebAuthn get requests", async () => {
-    let getListener: ((request: unknown) => void) | undefined;
-    const completeGetRequest = vi.fn(async () => undefined);
-    const sendRuntimeCommand = runtimeCommandMock()
-      .mockResolvedValueOnce({
-        type: "session_state",
-        unlocked: true,
-        activeVaultId: "vault-1"
-      })
-      .mockResolvedValueOnce({
-        type: "passkey_credential_list",
-        credentials: [
-          {
-            credentialId: "ZGlzY292ZXJhYmxlLXNpbmdsZQ",
-            username: "alice@example.com",
-            userHandle: "dXNlci0x"
-          }
-        ]
-      })
-      .mockResolvedValueOnce({
-        type: "passkey_assertion",
-        credentialId: "ZGlzY292ZXJhYmxlLXNpbmdsZQ",
-        authenticatorDataBase64url: "auth-data",
-        clientDataJsonBase64url: "client-data",
-        signatureBase64url: "signature",
-        userHandleBase64url: "dXNlci0x"
-      });
-    const chromeApi = {
-      runtime: {},
-      tabs: {
-        query: vi.fn(async () => [{ url: "https://example.com/login" }])
-      },
-      webAuthenticationProxy: {
-        attach: vi.fn(async () => undefined),
-        completeGetRequest,
-        onGetRequest: {
-          addListener(listener: (request: unknown) => void) {
-            getListener = listener;
-          }
-        }
-      }
-    };
-    const presencePrompt = installPresencePrompt(chromeApi);
-
-    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
-
-    getListener?.({
-      requestId: 1820,
-      tabId: 101,
-      frameId: 0,
-      origin: "https://example.com",
-      requestDetailsJson: JSON.stringify({
-        rpId: "example.com",
-        challenge: "Y2hhbGxlbmdlLXNpbmdsZS1kaXNjb3ZlcmFibGU",
-        allowCredentials: []
-      })
-    });
-
-    await vi.waitFor(() => {
-      expect(presencePrompt.create).toHaveBeenCalledTimes(1);
-    });
-    await presencePrompt.approve();
-
-    await vi.waitFor(() => {
-      expect(presencePrompt.create).toHaveBeenCalledTimes(2);
-    });
-    expect(presencePrompt.requestOptions()).toEqual({
-      credentialOptions: [
-        {
-          credentialId: "ZGlzY292ZXJhYmxlLXNpbmdsZQ",
-          username: "alice@example.com"
-        }
-      ]
-    });
-    expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "create_passkey_assertion" })
-    );
-
-    await presencePrompt.approve(undefined, {
-      credentialId: "ZGlzY292ZXJhYmxlLXNpbmdsZQ"
-    });
-
-    await vi.waitFor(() => {
-      expect(completeGetRequest).toHaveBeenCalledTimes(1);
-    });
-    expectBusinessRuntimeCommand(sendRuntimeCommand, 3, {
-      type: "create_passkey_assertion",
-      credential_id: "ZGlzY292ZXJhYmxlLXNpbmdsZQ",
-      discoverable: true,
-      user_presence_verified: true
-    });
-    const response = JSON.parse(completeGetRequest.mock.calls[0][0].responseJson);
-    expect(response.id).toBe("ZGlzY292ZXJhYmxlLXNpbmdsZQ");
-    expect(response.response.userHandle).toBe("dXNlci0x");
   });
 
   it("delays discoverable WebAuthn get enumeration errors before completing the request", async () => {
