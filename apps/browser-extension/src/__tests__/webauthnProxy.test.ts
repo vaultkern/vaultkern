@@ -18193,6 +18193,73 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
+  it("does not trust page-observed origin from a different challenge", async () => {
+    let getListener: ((request: unknown) => void) | undefined;
+    const completeGetRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = runtimeCommandMock(async () => ({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    }));
+    const chromeApi = {
+      runtime: {},
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest,
+        onGetRequest: {
+          addListener(listener: (request: unknown) => void) {
+            getListener = listener;
+          }
+        }
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+    expect(
+      recordWebAuthnPageRequest(
+        {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "get",
+          origin: "https://example.com",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          challenge: "b2xkLWNoYWxsZW5nZQ",
+          allowCredentialIds: ["Y3JlZGVudGlhbC0x"]
+        },
+        chromeApi,
+        {
+          origin: "https://example.com",
+          url: "https://example.com/login",
+          tab: { id: 101 },
+          frameId: 0
+        }
+      )
+    ).toBe(true);
+
+    getListener?.({
+      requestId: 262,
+      tabId: 101,
+      frameId: 0,
+      requestDetailsJson: JSON.stringify({
+        rpId: "example.com",
+        challenge: "bmV3LWNoYWxsZW5nZQ",
+        allowCredentials: [{ type: "public-key", id: "Y3JlZGVudGlhbC0x" }]
+      })
+    });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expectBusinessRuntimeCommandCount(sendRuntimeCommand, 0);
+    expect(completeGetRequest).toHaveBeenCalledWith({
+      requestId: 262,
+      error: {
+        name: "NotAllowedError",
+        message: "VaultKern cannot identify the WebAuthn request origin"
+      }
+    });
+  });
+
   it("records Chrome numeric WebAuthn cancellation request ids", async () => {
     let cancelListener: ((request: unknown) => void) | undefined;
     let debugLog: unknown[] = [];
