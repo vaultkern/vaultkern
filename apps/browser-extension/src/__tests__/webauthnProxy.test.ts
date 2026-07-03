@@ -1889,6 +1889,7 @@ describe("webAuthenticationProxy wrapper", () => {
         );
       })
     ).toBe(true);
+    expect(sessionStorage.get).toHaveBeenCalledTimes(1);
   });
 
   it("serializes concurrent passkey ceremony mirror writes without losing ceremonies", async () => {

@@ -268,6 +268,10 @@ const PASSKEY_PUBLIC_ERROR_MIN_DELAY_MS = 75;
 const MAX_KNOWN_PASSKEY_CEREMONY_TOKENS = 512;
 const WEB_AUTHN_DEBUG_DISABLED_CACHE_MS = 1_000;
 const webAuthnDebugWriteChains = new WeakMap<object, Promise<void>>();
+let passkeyCeremonyMirrorCache = new WeakMap<
+  object,
+  Record<string, PasskeyCeremonyContext>
+>();
 const webAuthnDebugDisabledUntil = new WeakMap<object, number>();
 let passkeyCeremonyMirrorMutationQueue: Promise<void> = Promise.resolve();
 let passkeyLedgerConnectionId: string | null = null;
@@ -2610,10 +2614,19 @@ async function loadPasskeyCeremonyMirrors(chromeApi: ChromeLike | null | undefin
     if (!(await ensurePasskeyCeremonySessionStorageTrusted(chromeApi))) {
       return {};
     }
+    if (typeof storage === "object") {
+      const cached = passkeyCeremonyMirrorCache.get(storage);
+      if (cached) {
+        return clonePasskeyCeremonyMirrors(cached);
+      }
+    }
     const result = await storage.get([PASSKEY_CEREMONY_SESSION_STORAGE_KEY]);
     const value = result[PASSKEY_CEREMONY_SESSION_STORAGE_KEY];
     const envelope = passkeyCeremonyMirrorEnvelopeFrom(value);
     if (!envelope) {
+      if (typeof storage === "object") {
+        passkeyCeremonyMirrorCache.set(storage, {});
+      }
       return {};
     }
     const mirrors: Record<string, PasskeyCeremonyContext> = {};
@@ -2623,7 +2636,10 @@ async function loadPasskeyCeremonyMirrors(chromeApi: ChromeLike | null | undefin
         mirrors[token] = mirror;
       }
     }
-    return mirrors;
+    if (typeof storage === "object") {
+      passkeyCeremonyMirrorCache.set(storage, clonePasskeyCeremonyMirrors(mirrors));
+    }
+    return clonePasskeyCeremonyMirrors(mirrors);
   } catch {
     return {};
   }
@@ -2641,16 +2657,23 @@ async function storePasskeyCeremonyMirrors(
   const keys = Object.keys(mirrors);
   try {
     if (keys.length === 0 && storage.remove) {
+      if (typeof storage === "object") {
+        passkeyCeremonyMirrorCache.set(storage, {});
+      }
       await storage.remove(PASSKEY_CEREMONY_SESSION_STORAGE_KEY);
       return;
     }
     if (!(await ensurePasskeyCeremonySessionStorageTrusted(chromeApi))) {
       return;
     }
+    const normalizedMirrors = clonePasskeyCeremonyMirrors(mirrors);
+    if (typeof storage === "object") {
+      passkeyCeremonyMirrorCache.set(storage, clonePasskeyCeremonyMirrors(normalizedMirrors));
+    }
     const envelope: PasskeyCeremonyMirrorEnvelope = {
       version: PASSKEY_CEREMONY_MIRROR_ENVELOPE_VERSION,
-      ceremonies: mirrors,
-      checksum: passkeyCeremonyMirrorChecksum(mirrors)
+      ceremonies: normalizedMirrors,
+      checksum: passkeyCeremonyMirrorChecksum(normalizedMirrors)
     };
     await storage.set({
       [PASSKEY_CEREMONY_SESSION_STORAGE_KEY]: envelope
@@ -2714,6 +2737,57 @@ function stableJson(value: unknown): string {
     .sort()
     .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
     .join(",")}}`;
+}
+
+function clonePasskeyCeremonyMirrors(
+  mirrors: Record<string, PasskeyCeremonyContext>
+) {
+  return Object.fromEntries(
+    Object.entries(mirrors).map(([token, mirror]) => [
+      token,
+      clonePasskeyCeremonyMirror(mirror)
+    ])
+  ) as Record<string, PasskeyCeremonyContext>;
+}
+
+function clonePasskeyCeremonyMirror(
+  mirror: PasskeyCeremonyContext
+): PasskeyCeremonyContext {
+  const common = {
+    ...mirror,
+    ancestorOrigins: [...mirror.ancestorOrigins],
+    ...(mirror.promptCredentialOptions
+      ? {
+          promptCredentialOptions: mirror.promptCredentialOptions.map((option) => ({
+            ...option
+          }))
+        }
+      : {})
+  };
+
+  if (mirror.ceremony === "get") {
+    return {
+      ...common,
+      ceremony: "get",
+      ...(Array.isArray(mirror.getCredentialIds)
+        ? { getCredentialIds: [...mirror.getCredentialIds] }
+        : {}),
+      ...(mirror.getClientExtensionResults
+        ? { getClientExtensionResults: { ...mirror.getClientExtensionResults } }
+        : {})
+    };
+  }
+
+  return {
+    ...common,
+    ceremony: "create",
+    ...(Array.isArray(mirror.createExcludeCredentialIds)
+      ? { createExcludeCredentialIds: [...mirror.createExcludeCredentialIds] }
+      : {}),
+    ...(mirror.createClientExtensionResults
+      ? { createClientExtensionResults: { ...mirror.createClientExtensionResults } }
+      : {})
+  };
 }
 
 async function ensurePasskeyCeremonySessionStorageTrusted(
@@ -4034,6 +4108,7 @@ export function resetPasskeyLedgerConnectionId() {
 
 export function resetObservedWebAuthnPageRequestsForTest() {
   observedPageRequests.length = 0;
+  passkeyCeremonyMirrorCache = new WeakMap();
 }
 
 function secureRandomBase64url(byteLength: number) {
