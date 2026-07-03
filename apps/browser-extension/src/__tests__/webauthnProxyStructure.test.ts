@@ -66,4 +66,15 @@ describe("webauthn proxy structure", () => {
       /const\s+PASSKEY_CEREMONY_TRANSITION_EDGES[\s\S]*?=\s*\[\s*\[/
     );
   });
+
+  it("routes related-origin credential-resolution phase changes through one helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("function advanceToCredentialResolution");
+    expect(source.match(/completeRelyingPartyValidation\(/g)).toHaveLength(2);
+  });
 });

@@ -1488,31 +1488,16 @@ async function handleGetRequest(
       userPresenceVerified = true;
     }
     throwIfRequestCanceled();
-    const credentialResolutionExpectedPhase =
-      relyingPartyValidation.needsRelatedOriginVerification
-        ? "s2_network_validation"
-        : "s1_user_authorization";
-    if (relyingPartyValidation.needsRelatedOriginVerification) {
-      await advanceCeremony("s1_user_authorization", "s2_network_validation");
-    }
-    relyingPartyValidation = await completeRelyingPartyValidation(
+    relyingPartyValidation = await advanceToCredentialResolution(
       origin,
-      requestedRpId,
-      relyingPartyValidation
-    );
-    if (!relyingPartyValidation.allowed) {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "WebAuthn request origin does not match relying party"
-      );
-    }
-    if (relyingPartyValidation.relatedOriginVerified && ceremonyMirror) {
-      ceremonyMirror = { ...ceremonyMirror, relatedOriginVerified: true };
-    }
-    await advanceCeremony(
-      credentialResolutionExpectedPhase,
-      "s3_credential_resolution",
-      relyingPartyValidation.relatedOriginVerified === true
+      relyingParty,
+      relyingPartyValidation,
+      advanceCeremony,
+      () => {
+        if (ceremonyMirror) {
+          ceremonyMirror = { ...ceremonyMirror, relatedOriginVerified: true };
+        }
+      }
     );
     throwIfRequestCanceled();
     const credentialSelection = await credentialSelectionForGetRequest(
@@ -2022,33 +2007,19 @@ async function resumePasskeyGetAfterPromptComplete(
         );
       }
 
-      let credentialResolutionExpectedPhase = "s1_user_authorization";
-      if (relyingPartyValidation.needsRelatedOriginVerification) {
-        await advanceCeremony("s1_user_authorization", "s2_network_validation");
-        relyingPartyValidation = await completeRelyingPartyValidation(
-          mirror.origin,
-          mirror.relyingParty,
-          relyingPartyValidation
-        );
-        if (!relyingPartyValidation.allowed) {
-          throw new WebAuthnRequestError(
-            "NotAllowedError",
-            "WebAuthn request origin does not match relying party"
-          );
-        }
-        relatedOriginVerified = relyingPartyValidation.relatedOriginVerified;
-        if (relatedOriginVerified) {
+      relyingPartyValidation = await advanceToCredentialResolution(
+        mirror.origin,
+        mirror.relyingParty,
+        relyingPartyValidation,
+        advanceCeremony,
+        () => {
+          if (!mirror) {
+            return;
+          }
           mirror = { ...mirror, relatedOriginVerified: true };
-          await persistPasskeyCeremonyMirror(chromeApi, mirror);
         }
-        credentialResolutionExpectedPhase = "s2_network_validation";
-      }
-
-      await advanceCeremony(
-        credentialResolutionExpectedPhase,
-        "s3_credential_resolution",
-        relatedOriginVerified === true
       );
+      relatedOriginVerified = relyingPartyValidation.relatedOriginVerified;
       const credentialSelection = await credentialSelectionForGetRequest(
         sendRuntimeCommand,
         mirror.ceremonyToken,
@@ -2406,31 +2377,17 @@ async function resumePasskeyCreateAfterPromptComplete(
       );
     }
 
-    let credentialResolutionExpectedPhase = "s1_user_authorization";
-    if (relyingPartyValidation.needsRelatedOriginVerification) {
-      await advanceCeremony("s1_user_authorization", "s2_network_validation");
-      relyingPartyValidation = await completeRelyingPartyValidation(
-        mirror.origin,
-        mirror.relyingParty,
-        relyingPartyValidation
-      );
-      if (!relyingPartyValidation.allowed) {
-        throw new WebAuthnRequestError(
-          "NotAllowedError",
-          "WebAuthn request origin does not match relying party"
-        );
-      }
-      if (relyingPartyValidation.relatedOriginVerified) {
+    relyingPartyValidation = await advanceToCredentialResolution(
+      mirror.origin,
+      mirror.relyingParty,
+      relyingPartyValidation,
+      advanceCeremony,
+      () => {
+        if (!mirror) {
+          return;
+        }
         mirror = { ...mirror, relatedOriginVerified: true };
-        await persistPasskeyCeremonyMirror(chromeApi, mirror);
       }
-      credentialResolutionExpectedPhase = "s2_network_validation";
-    }
-
-    await advanceCeremony(
-      credentialResolutionExpectedPhase,
-      "s3_credential_resolution",
-      relyingPartyValidation.relatedOriginVerified === true
     );
     const activeVaultId = mirror.activeVaultId;
     throwIfRequestCanceled();
@@ -4546,31 +4503,16 @@ async function handleCreateRequest(
       userPresenceVerified = true;
     }
     throwIfRequestCanceled();
-    const credentialResolutionExpectedPhase =
-      relyingPartyValidation.needsRelatedOriginVerification
-        ? "s2_network_validation"
-        : "s1_user_authorization";
-    if (relyingPartyValidation.needsRelatedOriginVerification) {
-      await advanceCeremony("s1_user_authorization", "s2_network_validation");
-    }
-    relyingPartyValidation = await completeRelyingPartyValidation(
+    relyingPartyValidation = await advanceToCredentialResolution(
       origin,
-      requestedRpId,
-      relyingPartyValidation
-    );
-    if (!relyingPartyValidation.allowed) {
-      throw new WebAuthnRequestError(
-        "NotAllowedError",
-        "WebAuthn request origin does not match relying party"
-      );
-    }
-    if (relyingPartyValidation.relatedOriginVerified && ceremonyMirror) {
-      ceremonyMirror = { ...ceremonyMirror, relatedOriginVerified: true };
-    }
-    await advanceCeremony(
-      credentialResolutionExpectedPhase,
-      "s3_credential_resolution",
-      relyingPartyValidation.relatedOriginVerified === true
+      relyingParty,
+      relyingPartyValidation,
+      advanceCeremony,
+      () => {
+        if (ceremonyMirror) {
+          ceremonyMirror = { ...ceremonyMirror, relatedOriginVerified: true };
+        }
+      }
     );
     const activeVaultId = activeVault.activeVaultId;
 
@@ -5561,6 +5503,12 @@ type RelyingPartyValidation = {
   needsRelatedOriginVerification?: boolean;
 };
 
+type AdvancePasskeyCeremony = (
+  expectedPhase: string,
+  nextPhase: string,
+  relatedOriginVerified?: boolean
+) => Promise<void>;
+
 function validateOriginForRelyingParty(
   origin: string,
   relyingParty: string
@@ -5615,6 +5563,43 @@ async function completeRelyingPartyValidation(
     return { allowed: true, relatedOriginVerified: true };
   }
   return { allowed: false, relatedOriginVerified: false };
+}
+
+async function advanceToCredentialResolution(
+  origin: string,
+  relyingParty: string,
+  validation: RelyingPartyValidation,
+  advanceCeremony: AdvancePasskeyCeremony,
+  onRelatedOriginVerified?: () => void
+) {
+  const expectedPhase = validation.needsRelatedOriginVerification
+    ? "s2_network_validation"
+    : "s1_user_authorization";
+  if (validation.needsRelatedOriginVerification) {
+    await advanceCeremony("s1_user_authorization", "s2_network_validation");
+  }
+
+  const completedValidation = await completeRelyingPartyValidation(
+    origin,
+    relyingParty,
+    validation
+  );
+  if (!completedValidation.allowed) {
+    throw new WebAuthnRequestError(
+      "NotAllowedError",
+      "WebAuthn request origin does not match relying party"
+    );
+  }
+  if (completedValidation.relatedOriginVerified) {
+    onRelatedOriginVerified?.();
+  }
+  await advanceCeremony(
+    expectedPhase,
+    "s3_credential_resolution",
+    completedValidation.relatedOriginVerified === true
+  );
+
+  return completedValidation;
 }
 
 function originMatchesRelyingParty(origin: string, relyingParty: string) {
