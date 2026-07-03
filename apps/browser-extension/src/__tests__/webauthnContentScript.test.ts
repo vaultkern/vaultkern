@@ -85,6 +85,48 @@ describe("WebAuthn content script bridge", () => {
     );
   });
 
+  it("deduplicates page observations delivered through both bridge channels", async () => {
+    const sendMessage = vi.fn();
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: { sendMessage }
+    };
+    setAncestorOrigins([]);
+
+    await import("../webauthnContentScript");
+
+    const observation = {
+      type: "vaultkern_webauthn_page_request",
+      ceremony: "get",
+      relyingParty: "example.com",
+      challenge: "bG9naW4tMQ",
+      bridgeRequestId: "observation-1"
+    };
+
+    window.dispatchEvent(
+      new CustomEvent("vaultkern_webauthn_page_request_event", {
+        detail: observation
+      })
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: window,
+        origin: window.location.origin,
+        data: observation
+      })
+    );
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "vaultkern_webauthn_page_request",
+        ceremony: "get",
+        relyingParty: "example.com",
+        challenge: "bG9naW4tMQ"
+      })
+    );
+    expect(sendMessage.mock.calls[0]?.[0]).not.toHaveProperty("bridgeRequestId");
+  });
+
   it("installs the bridge before chrome.runtime is available and sends once it appears", async () => {
     const sendMessage = vi.fn();
     setAncestorOrigins([]);

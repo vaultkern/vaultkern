@@ -3,6 +3,7 @@
   const WEB_AUTHN_PAGE_REQUEST_EVENT = "vaultkern_webauthn_page_request_event";
   const HOOK_ENABLED_MARKER = "__vaultkernWebAuthnPageHookEnabled";
   const HOOK_MARKER = "__vaultkernWebAuthnHookInstalled";
+  const HOOK_REQUEST_SEQUENCE = "__vaultkernWebAuthnPageHookRequestSequence";
 
   type PublicKeyCredentialOptionsLike = {
     challenge?: unknown;
@@ -19,6 +20,11 @@
 
   type CredentialsContainerWithMarker = CredentialsContainer & {
     [HOOK_MARKER]?: boolean;
+  };
+
+  type PageHookState = typeof globalThis & {
+    [HOOK_ENABLED_MARKER]?: boolean;
+    [HOOK_REQUEST_SEQUENCE]?: number;
   };
 
 installWebAuthnPageHook();
@@ -74,6 +80,7 @@ function observeWebAuthnRequest(
   try {
     const observation = {
       type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
+      bridgeRequestId: nextBridgeRequestId(),
       ceremony,
       relyingParty: relyingPartyFromOptions(publicKey),
       challenge: base64urlFrom(publicKey.challenge),
@@ -91,6 +98,16 @@ function observeWebAuthnRequest(
   } catch {
     // Page observations are advisory; never change the page's WebAuthn behavior.
   }
+}
+
+function nextBridgeRequestId() {
+  const hookState = globalThis as PageHookState;
+  const next =
+    (typeof hookState[HOOK_REQUEST_SEQUENCE] === "number"
+      ? hookState[HOOK_REQUEST_SEQUENCE]
+      : 0) + 1;
+  hookState[HOOK_REQUEST_SEQUENCE] = next;
+  return String(next);
 }
 
 function mediationFrom(ceremony: "create" | "get", value: unknown) {

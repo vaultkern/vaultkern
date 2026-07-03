@@ -1,10 +1,13 @@
 (() => {
   const WEB_AUTHN_PAGE_REQUEST_MESSAGE = "vaultkern_webauthn_page_request";
   const WEB_AUTHN_PAGE_REQUEST_EVENT = "vaultkern_webauthn_page_request_event";
+  const MAX_FORWARDED_BRIDGE_REQUEST_IDS = 128;
   const globalState = globalThis as typeof globalThis & {
     __vaultkernWebAuthnContentScriptInstalled?: boolean;
     __vaultkernWebAuthnContentScriptInstallId?: number;
   };
+  const forwardedBridgeRequestIds = new Set<string>();
+  const forwardedBridgeRequestIdQueue: string[] = [];
 
 if (!globalState.__vaultkernWebAuthnContentScriptInstalled) {
   globalState.__vaultkernWebAuthnContentScriptInstalled = true;
@@ -48,6 +51,9 @@ function forwardWebAuthnPageRequest(data: unknown, event?: MessageEvent) {
   if (!chromeApi?.runtime?.sendMessage) {
     return;
   }
+  if (isDuplicateBridgeRequest(data)) {
+    return;
+  }
   const sendResult = chromeApi.runtime.sendMessage({
     type: WEB_AUTHN_PAGE_REQUEST_MESSAGE,
     ceremony: data.ceremony,
@@ -64,6 +70,36 @@ function forwardWebAuthnPageRequest(data: unknown, event?: MessageEvent) {
   if (sendResult && typeof sendResult.catch === "function") {
     sendResult.catch(() => undefined);
   }
+}
+
+function isDuplicateBridgeRequest(data: unknown) {
+  const bridgeRequestId = bridgeRequestIdFrom(data);
+  if (!bridgeRequestId) {
+    return false;
+  }
+  if (forwardedBridgeRequestIds.has(bridgeRequestId)) {
+    return true;
+  }
+  forwardedBridgeRequestIds.add(bridgeRequestId);
+  forwardedBridgeRequestIdQueue.push(bridgeRequestId);
+  while (forwardedBridgeRequestIdQueue.length > MAX_FORWARDED_BRIDGE_REQUEST_IDS) {
+    const expired = forwardedBridgeRequestIdQueue.shift();
+    if (expired) {
+      forwardedBridgeRequestIds.delete(expired);
+    }
+  }
+  return false;
+}
+
+function bridgeRequestIdFrom(data: unknown) {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+  const value = (data as { bridgeRequestId?: unknown }).bridgeRequestId;
+  if (typeof value !== "string" || value.trim() === "" || value.length > 128) {
+    return null;
+  }
+  return value;
 }
 
 function originFromFrame(event?: MessageEvent) {
