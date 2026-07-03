@@ -1,9 +1,10 @@
-const WEB_AUTHN_PAGE_REQUEST_MESSAGE = "vaultkern_webauthn_page_request";
-const WEB_AUTHN_PAGE_REQUEST_EVENT = "vaultkern_webauthn_page_request_event";
-const globalState = globalThis as typeof globalThis & {
-  __vaultkernWebAuthnContentScriptInstalled?: boolean;
-  __vaultkernWebAuthnContentScriptInstallId?: number;
-};
+(() => {
+  const WEB_AUTHN_PAGE_REQUEST_MESSAGE = "vaultkern_webauthn_page_request";
+  const WEB_AUTHN_PAGE_REQUEST_EVENT = "vaultkern_webauthn_page_request_event";
+  const globalState = globalThis as typeof globalThis & {
+    __vaultkernWebAuthnContentScriptInstalled?: boolean;
+    __vaultkernWebAuthnContentScriptInstallId?: number;
+  };
 
 if (!globalState.__vaultkernWebAuthnContentScriptInstalled) {
   globalState.__vaultkernWebAuthnContentScriptInstalled = true;
@@ -166,5 +167,6 @@ function isWebAuthnPageRequest(message: unknown): message is {
   const ceremony = (message as { ceremony?: unknown }).ceremony;
   return ceremony === "create" || ceremony === "get";
 }
+})();
 
 export {};

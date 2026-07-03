@@ -24,8 +24,12 @@ let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
 const WEB_AUTHN_CONTENT_SCRIPT_FILE = "webauthnContentScript.js";
 const WEB_AUTHN_PAGE_HOOK_SCRIPT_FILE = "webauthnPageHook.js";
+const WEB_AUTHN_CONTENT_SCRIPT_ID = "vaultkern-webauthn-content-bridge";
 const WEB_AUTHN_PAGE_HOOK_SCRIPT_ID = "vaultkern-webauthn-page-hook";
-const WEB_AUTHN_DYNAMIC_SCRIPT_IDS = [WEB_AUTHN_PAGE_HOOK_SCRIPT_ID];
+const WEB_AUTHN_DYNAMIC_SCRIPT_IDS = [
+  WEB_AUTHN_CONTENT_SCRIPT_ID,
+  WEB_AUTHN_PAGE_HOOK_SCRIPT_ID
+];
 let webAuthnPageHookRegistered = false;
 
 function isRuntimeCommand(message: unknown): message is { version: number; command: unknown } {
@@ -228,6 +232,16 @@ async function registerWebAuthnPageHook() {
 
   try {
     await chromeApi.scripting.registerContentScripts([
+      {
+        id: WEB_AUTHN_CONTENT_SCRIPT_ID,
+        matches: ["<all_urls>"],
+        js: [WEB_AUTHN_CONTENT_SCRIPT_FILE],
+        runAt: "document_start",
+        world: "ISOLATED",
+        allFrames: true,
+        matchOriginAsFallback: true,
+        persistAcrossSessions: false
+      },
       {
         id: WEB_AUTHN_PAGE_HOOK_SCRIPT_ID,
         matches: ["<all_urls>"],

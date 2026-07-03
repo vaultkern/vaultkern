@@ -1,24 +1,25 @@
-const WEB_AUTHN_PAGE_REQUEST_MESSAGE = "vaultkern_webauthn_page_request";
-const WEB_AUTHN_PAGE_REQUEST_EVENT = "vaultkern_webauthn_page_request_event";
-const HOOK_ENABLED_MARKER = "__vaultkernWebAuthnPageHookEnabled";
-const HOOK_MARKER = "__vaultkernWebAuthnHookInstalled";
+(() => {
+  const WEB_AUTHN_PAGE_REQUEST_MESSAGE = "vaultkern_webauthn_page_request";
+  const WEB_AUTHN_PAGE_REQUEST_EVENT = "vaultkern_webauthn_page_request_event";
+  const HOOK_ENABLED_MARKER = "__vaultkernWebAuthnPageHookEnabled";
+  const HOOK_MARKER = "__vaultkernWebAuthnHookInstalled";
 
-type PublicKeyCredentialOptionsLike = {
-  challenge?: unknown;
-  rpId?: unknown;
-  rp?: { id?: unknown };
-  allowCredentials?: unknown;
-  excludeCredentials?: unknown;
-};
+  type PublicKeyCredentialOptionsLike = {
+    challenge?: unknown;
+    rpId?: unknown;
+    rp?: { id?: unknown };
+    allowCredentials?: unknown;
+    excludeCredentials?: unknown;
+  };
 
-type CredentialOptionsLike = {
-  publicKey?: PublicKeyCredentialOptionsLike;
-  mediation?: unknown;
-};
+  type CredentialOptionsLike = {
+    publicKey?: PublicKeyCredentialOptionsLike;
+    mediation?: unknown;
+  };
 
-type CredentialsContainerWithMarker = CredentialsContainer & {
-  [HOOK_MARKER]?: boolean;
-};
+  type CredentialsContainerWithMarker = CredentialsContainer & {
+    [HOOK_MARKER]?: boolean;
+  };
 
 installWebAuthnPageHook();
 
@@ -150,3 +151,4 @@ function bytesFrom(value: unknown) {
 
   return null;
 }
+})();
