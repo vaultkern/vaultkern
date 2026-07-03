@@ -197,4 +197,17 @@ describe("webauthn proxy structure", () => {
         []
     ).toHaveLength(1);
   });
+
+  it("creates passkey registration runtime requests through one helper", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("async function createPasskeyRegistrationForCeremony");
+    expect(source.match(/type: "create_passkey_registration"/g) ?? []).toHaveLength(
+      1
+    );
+  });
 });

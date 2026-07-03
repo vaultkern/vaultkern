@@ -2203,24 +2203,18 @@ async function resumePasskeyCreateAfterPromptComplete(
         ancestorOrigins: mirror.ancestorOrigins
       }
     );
-    registration = passkeyRegistrationFromResponse(
-      await sendRuntimeCommand({
-        type: "create_passkey_registration",
-        ceremony_token: mirror.ceremonyToken,
-        expected_phase: "s4_completion_and_mutation",
-        vault_id: activeVaultId,
-        relying_party: mirror.relyingParty,
-        origin: mirror.origin,
-        user_name: createRequest.userName,
-        user_display_name: createRequest.userDisplayName,
-        user_handle_base64url: createRequest.userHandleBase64url,
-        public_key_algorithm: createRequest.publicKeyAlgorithm,
-        ...(relyingPartyValidation.relatedOriginVerified
-          ? { related_origin_verified: true }
-          : {}),
-        client_data_json_base64url: clientDataJsonBase64url
-      })
-    );
+    registration = await createPasskeyRegistrationForCeremony(sendRuntimeCommand, {
+      ceremonyToken: mirror.ceremonyToken,
+      activeVaultId,
+      relyingParty: mirror.relyingParty,
+      origin: mirror.origin,
+      userName: createRequest.userName,
+      userDisplayName: createRequest.userDisplayName,
+      userHandleBase64url: createRequest.userHandleBase64url,
+      publicKeyAlgorithm: createRequest.publicKeyAlgorithm,
+      relatedOriginVerified: relyingPartyValidation.relatedOriginVerified,
+      clientDataJsonBase64url
+    });
     if (requestIsCanceled()) {
       await abortPasskeyRegistrationStrict(
         sendRuntimeCommand,
@@ -3454,6 +3448,50 @@ function passkeyRegistrationFromResponse(response: unknown): PasskeyRegistration
   };
 }
 
+async function createPasskeyRegistrationForCeremony(
+  sendRuntimeCommand: RuntimeCommandSender,
+  {
+    ceremonyToken,
+    activeVaultId,
+    relyingParty,
+    origin,
+    userName,
+    userDisplayName,
+    userHandleBase64url,
+    publicKeyAlgorithm,
+    relatedOriginVerified,
+    clientDataJsonBase64url
+  }: {
+    ceremonyToken: string;
+    activeVaultId: string;
+    relyingParty: string;
+    origin: string;
+    userName: string;
+    userDisplayName: string | null;
+    userHandleBase64url: string;
+    publicKeyAlgorithm: number;
+    relatedOriginVerified: boolean;
+    clientDataJsonBase64url: string;
+  }
+) {
+  return passkeyRegistrationFromResponse(
+    await sendRuntimeCommand({
+      type: "create_passkey_registration",
+      ceremony_token: ceremonyToken,
+      expected_phase: "s4_completion_and_mutation",
+      vault_id: activeVaultId,
+      relying_party: relyingParty,
+      origin,
+      user_name: userName,
+      user_display_name: userDisplayName,
+      user_handle_base64url: userHandleBase64url,
+      public_key_algorithm: publicKeyAlgorithm,
+      ...(relatedOriginVerified ? { related_origin_verified: true } : {}),
+      client_data_json_base64url: clientDataJsonBase64url
+    })
+  );
+}
+
 function passkeyCredentialStatusFromResponse(
   response: unknown
 ): PasskeyCredentialStatusResponse {
@@ -4189,23 +4227,21 @@ async function handleCreateRequest(
     }
 
     await advanceCeremony("s3_credential_resolution", "s4_completion_and_mutation");
-    const registrationResponse = await sendRuntimeCommand({
-      type: "create_passkey_registration",
-      ceremony_token: ceremonyContext.ceremonyToken,
-      expected_phase: "s4_completion_and_mutation",
-      vault_id: activeVaultId,
-      relying_party: relyingParty,
-      origin,
-      user_name: userNameFromCreateOptions(options),
-      user_display_name: userDisplayNameFromCreateOptions(options),
-      user_handle_base64url: userHandleFromCreateOptions(options),
-      public_key_algorithm: publicKeyAlgorithmFromCreateOptions(options),
-      ...(relyingPartyValidation.relatedOriginVerified
-        ? { related_origin_verified: true }
-        : {}),
-      client_data_json_base64url: clientDataJsonBase64url
-    });
-    const registration = passkeyRegistrationFromResponse(registrationResponse);
+    const registration = await createPasskeyRegistrationForCeremony(
+      sendRuntimeCommand,
+      {
+        ceremonyToken: ceremonyContext.ceremonyToken,
+        activeVaultId,
+        relyingParty,
+        origin,
+        userName: userNameFromCreateOptions(options),
+        userDisplayName: userDisplayNameFromCreateOptions(options),
+        userHandleBase64url: userHandleFromCreateOptions(options),
+        publicKeyAlgorithm: publicKeyAlgorithmFromCreateOptions(options),
+        relatedOriginVerified: relyingPartyValidation.relatedOriginVerified,
+        clientDataJsonBase64url
+      }
+    );
     const abortRegistration = async (
       closedPhase: "closed_aborted" | "closed_failed"
     ) => {
