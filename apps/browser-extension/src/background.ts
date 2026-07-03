@@ -288,11 +288,19 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
   const tabIds = tabs
     .map((tab) => tab.id)
     .filter((tabId): tabId is number => typeof tabId === "number");
-  const injectionResults = await Promise.all(
-    tabIds.map((tabId) => injectWebAuthnPageHookIntoTab(tabId))
+  const bridgeResults = await Promise.all(
+    tabIds.map((tabId) =>
+      injectWebAuthnScriptIntoTab(tabId, WEB_AUTHN_CONTENT_SCRIPT_FILE, "ISOLATED")
+    )
   );
-  const injectedCount = injectionResults.filter(Boolean).length;
-  const failedCount = injectionResults.length - injectedCount;
+  const bridgeReadyTabIds = tabIds.filter((_tabId, index) => bridgeResults[index]);
+  const hookResults = await Promise.all(
+    bridgeReadyTabIds.map((tabId) =>
+      injectWebAuthnScriptIntoTab(tabId, WEB_AUTHN_PAGE_HOOK_SCRIPT_FILE, "MAIN")
+    )
+  );
+  const injectedCount = hookResults.filter(Boolean).length;
+  const failedCount = tabIds.length - injectedCount;
 
   await recordWebAuthnDebug(chromeApi, {
     event: "page_hook_open_tabs_injected",
@@ -302,32 +310,38 @@ async function injectWebAuthnPageHookIntoOpenTabs() {
 }
 
 async function injectWebAuthnPageHookIntoTab(tabId: number) {
+  if (
+    !(await injectWebAuthnScriptIntoTab(
+      tabId,
+      WEB_AUTHN_CONTENT_SCRIPT_FILE,
+      "ISOLATED"
+    ))
+  ) {
+    return false;
+  }
+
+  return injectWebAuthnScriptIntoTab(tabId, WEB_AUTHN_PAGE_HOOK_SCRIPT_FILE, "MAIN");
+}
+
+async function injectWebAuthnScriptIntoTab(
+  tabId: number,
+  file: string,
+  world: "ISOLATED" | "MAIN"
+) {
   if (!chromeApi?.scripting?.executeScript) {
     return false;
   }
 
-  let tabHadFailure = false;
   try {
     await chromeApi.scripting.executeScript({
       target: { tabId, allFrames: true },
-      files: [WEB_AUTHN_CONTENT_SCRIPT_FILE],
-      world: "ISOLATED"
+      files: [file],
+      world
     });
+    return true;
   } catch {
-    tabHadFailure = true;
+    return false;
   }
-
-  try {
-    await chromeApi.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      files: [WEB_AUTHN_PAGE_HOOK_SCRIPT_FILE],
-      world: "MAIN"
-    });
-  } catch {
-    tabHadFailure = true;
-  }
-
-  return !tabHadFailure;
 }
 
 async function unregisterWebAuthnPageHook() {

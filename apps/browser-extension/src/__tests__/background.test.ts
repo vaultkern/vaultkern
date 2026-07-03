@@ -751,6 +751,89 @@ describe("background bridge", () => {
     });
   });
 
+  it("injects isolated WebAuthn bridges in open tabs before MAIN-world hooks", async () => {
+    const port = createPort();
+    const attach = vi.fn(async () => undefined);
+    const registerContentScripts = vi.fn(async () => undefined);
+    const pageHookCalls: number[] = [];
+    let resolveSlowBridge: (() => void) | undefined;
+    const executeScript = vi.fn(
+      async (details: { target?: { tabId?: number }; files?: string[] }) => {
+        const tabId = details.target?.tabId;
+        if (details.files?.includes("webauthnContentScript.js") && tabId === 7) {
+          await new Promise<void>((resolve) => {
+            resolveSlowBridge = resolve;
+          });
+          return;
+        }
+        if (details.files?.includes("webauthnPageHook.js") && typeof tabId === "number") {
+          pageHookCalls.push(tabId);
+        }
+      }
+    );
+    const query = vi.fn(async () => [{ id: 7 }, { id: 8 }]);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative: vi.fn(() => port),
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+            const items = {
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: true
+              }
+            };
+            if (callback) {
+              callback(items);
+              return undefined;
+            }
+            return Promise.resolve(items);
+          },
+          set(_items: Record<string, unknown>, callback?: () => void) {
+            callback?.();
+            return Promise.resolve();
+          }
+        },
+        onChanged: {
+          addListener() {}
+        }
+      },
+      scripting: {
+        executeScript,
+        registerContentScripts
+      },
+      tabs: {
+        query
+      },
+      webAuthenticationProxy: {
+        attach
+      }
+    };
+
+    await import("../background");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await completePasskeyLedgerReconciliation(port);
+    await vi.waitFor(() => {
+      expect(resolveSlowBridge).toBeTypeOf("function");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pageHookCalls).toEqual([]);
+
+    resolveSlowBridge?.();
+    await vi.waitFor(() => {
+      expect(pageHookCalls.sort()).toEqual([7, 8]);
+    });
+  });
+
   it("reattaches the WebAuthn proxy when Chrome wakes the worker for remote session changes", async () => {
     const port = createPort();
     const attach = vi.fn(async () => undefined);
