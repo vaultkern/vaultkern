@@ -2439,24 +2439,20 @@ async function resumePasskeyCreateAfterPromptComplete(
       relyingPartyValidation.relatedOriginVerified === true
     );
     const activeVaultId = mirror.activeVaultId;
-    for (const excludedCredentialId of createRequest.excludeCredentialIds) {
-      throwIfRequestCanceled();
-      const status = passkeyCredentialStatusFromResponse(
-        await sendRuntimeCommand({
-          type: "passkey_credential_status",
-          ceremony_token: mirror.ceremonyToken,
-          expected_phase: "s3_credential_resolution",
-          vault_id: activeVaultId,
-          credential_id: excludedCredentialId,
-          relying_party: mirror.relyingParty
-        })
+    throwIfRequestCanceled();
+    const excludedCredentialStatuses = await excludedCredentialStatusesForCreateRequest(
+      sendRuntimeCommand,
+      mirror.ceremonyToken,
+      activeVaultId,
+      mirror.relyingParty,
+      createRequest.excludeCredentialIds
+    );
+    throwIfRequestCanceled();
+    if (excludedCredentialStatuses.some((status) => status.exists)) {
+      throw new WebAuthnRequestError(
+        "InvalidStateError",
+        "VaultKern passkey credential is already registered"
       );
-      if (status.exists) {
-        throw new WebAuthnRequestError(
-          "InvalidStateError",
-          "VaultKern passkey credential is already registered"
-        );
-      }
     }
 
     throwIfRequestCanceled();

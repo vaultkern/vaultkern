@@ -6067,6 +6067,152 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
   });
 
+  it("checks resumed WebAuthn create excludeCredentials with one native batch command", async () => {
+    let messageListener:
+      | ((message: unknown, sender: unknown, sendResponse: unknown) => void)
+      | undefined;
+    const sessionStorage = createSessionStorage({
+      vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
+        "token-resume-create-batch": {
+          version: 1,
+          ceremonyToken: "token-resume-create-batch",
+          phase: "s1_user_authorization",
+          origin: "https://example.com",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          ceremony: "create",
+          userVerification: "preferred",
+          challengeBase64url: "cmVzdW1lLWJhdGNo",
+          requestId: 219,
+          tabId: 101,
+          frameId: 0,
+          frameKind: "top",
+          activeVaultId: "vault-1",
+          createUserName: "alice@example.com",
+          createUserDisplayName: "Alice",
+          createUserHandleBase64url: "dXNlci0x",
+          createPublicKeyAlgorithm: -7,
+          createExcludeCredentialIds: ["Y3JlZGVudGlhbC0x", "Y3JlZGVudGlhbC0y"],
+          createClientExtensionResults: {},
+          popupNonce: "nonce-resume-create-batch",
+          promptMode: "approve",
+          registeredAtEpochMs: 1_000,
+          expiresAtEpochMs: Date.now() + 300_000
+        }
+      })
+    });
+    const completeCreateRequest = vi.fn(async () => undefined);
+    const sendRuntimeCommand = vi.fn(async (command: Record<string, unknown>) => {
+      if (command.type === "query_passkey_ceremony_ledger") {
+        return {
+          type: "passkey_ceremony_ledger",
+          known: true,
+          phase: "s1_user_authorization",
+          durableState: "none",
+          deliveryState: "not_delivered"
+        };
+      }
+      if (command.type === "bind_passkey_ceremony_vault") {
+        return { type: "passkey_ceremony_vault_bound", bound: true };
+      }
+      if (command.type === "advance_passkey_ceremony_phase") {
+        return { type: "passkey_ceremony_advanced", advanced: true };
+      }
+      if (command.type === "passkey_credential_status") {
+        throw new Error("resumed exclude status lookup must be batched");
+      }
+      if (command.type === "passkey_credential_status_batch") {
+        return {
+          type: "passkey_credential_status_batch",
+          statuses: [
+            { credentialId: "Y3JlZGVudGlhbC0x", exists: false },
+            { credentialId: "Y3JlZGVudGlhbC0y", exists: false }
+          ]
+        };
+      }
+      if (command.type === "create_passkey_registration") {
+        return {
+          type: "passkey_registration",
+          entryId: "entry-1",
+          credentialId: "bmV3LWNyZWRlbnRpYWw",
+          created: true,
+          authenticatorDataBase64url: "auth-data",
+          attestationObjectBase64url: "attestation-object",
+          clientDataJsonBase64url: "client-data",
+          publicKeyBase64url: "public-key",
+          publicKeyAlgorithm: -7
+        };
+      }
+      if (command.type === "save_passkey_registration") {
+        return { type: "save_vault_result", status: "saved" };
+      }
+      if (command.type === "commit_passkey_registration") {
+        return { type: "saved" };
+      }
+
+      throw new Error(`unexpected command: ${command.type}`);
+    });
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`),
+        onMessage: {
+          addListener(
+            listener: (
+              message: unknown,
+              sender: unknown,
+              sendResponse: (response: unknown) => void
+            ) => void
+          ) {
+            messageListener = listener;
+          }
+        }
+      },
+      storage: {
+        session: sessionStorage
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeCreateRequest
+      }
+    };
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+    await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
+
+    messageListener?.(
+      {
+        type: "vaultkern_presence_complete",
+        requestId: 219,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-resume-create-batch"
+      },
+      {
+        url: "chrome-extension://id/popup.html?webauthn=approve&requestId=219&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-resume-create-batch"
+      },
+      vi.fn()
+    );
+
+    await vi.waitFor(() => {
+      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "passkey_credential_status" })
+    );
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "passkey_credential_status_batch",
+      ceremony_token: "token-resume-create-batch",
+      expected_phase: "s3_credential_resolution",
+      vault_id: "vault-1",
+      credential_ids: ["Y3JlZGVudGlhbC0x", "Y3JlZGVudGlhbC0y"],
+      relying_party: "example.com"
+    });
+    expect(completeCreateRequest).toHaveBeenCalledWith({
+      requestId: 219,
+      responseJson: expect.any(String)
+    });
+  });
+
   it("only resumes the WebAuthn request that matches the approved prompt", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     const completeGetRequest = vi.fn(async () => undefined);
