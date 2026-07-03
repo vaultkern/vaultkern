@@ -1244,9 +1244,9 @@ async function handleGetRequest(
         "VaultKern cannot identify the WebAuthn request origin"
       );
     }
-    rejectUnsupportedMediation(options);
     const userVerification = userVerificationRequirementFromOptions(options);
     const origin = originContext.origin;
+    rejectUnsupportedMediation(originContext.mediation ?? options.mediation);
     rejectNonSecureWebAuthnOrigin(origin);
     const relyingParty = relyingPartyFromGetOptions(options, origin);
     let relyingPartyValidation = requestedRpId
@@ -4099,6 +4099,7 @@ async function handleCreateRequest(
       );
     }
     const origin = originContext.origin;
+    rejectUnsupportedMediation(originContext.mediation ?? options.mediation);
     rejectNonSecureWebAuthnOrigin(origin);
     const relyingParty = relyingPartyFromCreateOptions(options, origin);
     let relyingPartyValidation = requestedRpId
@@ -4518,6 +4519,7 @@ function createRequestOptionsFrom(request: unknown) {
     pubKeyCredParams?: unknown;
     excludeCredentials?: unknown;
     userVerification?: unknown;
+    mediation?: unknown;
     extensions?: {
       credProps?: unknown;
     };
@@ -4617,9 +4619,9 @@ function userVerificationRequirementFromOptions(options: {
   return "preferred";
 }
 
-function rejectUnsupportedMediation(options: { mediation?: unknown }) {
-  const mediation = typeof options.mediation === "string" ? options.mediation : undefined;
-  if (!mediation || mediation === "optional") {
+function rejectUnsupportedMediation(value: unknown) {
+  const mediation = typeof value === "string" ? value : undefined;
+  if (!mediation || mediation === "optional" || mediation === "required") {
     return;
   }
 
