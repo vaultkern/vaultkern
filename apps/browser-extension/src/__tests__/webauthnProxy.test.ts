@@ -18504,6 +18504,81 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(storageSet).not.toHaveBeenCalled();
   });
 
+  it("keeps disabled WebAuthn diagnostics cached until the debug setting changes", async () => {
+    let now = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let debugEnabled = false;
+    let debugLog: unknown[] = [];
+    let storageChangeListener:
+      | ((
+          changes: Record<string, { newValue?: unknown; oldValue?: unknown }>,
+          areaName: string
+        ) => void)
+      | undefined;
+    const storageSet = vi.fn(async (items: Record<string, unknown>) => {
+      debugLog = items.vaultkernWebAuthnDebug as unknown[];
+    });
+    const storageGet = vi.fn(async () =>
+      debugEnabled
+        ? {
+            vaultkernWebAuthnDebugEnabled: true,
+            vaultkernWebAuthnDebug: debugLog
+          }
+        : {}
+    );
+    const chromeApi = {
+      runtime: {},
+      storage: {
+        local: {
+          get: storageGet,
+          set: storageSet
+        },
+        onChanged: {
+          addListener(
+            listener: (
+              changes: Record<string, { newValue?: unknown; oldValue?: unknown }>,
+              areaName: string
+            ) => void
+          ) {
+            storageChangeListener = listener;
+          }
+        }
+      }
+    };
+    const drainDebugWrites = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    recordWebAuthnDebug(chromeApi, { event: "first" });
+    await drainDebugWrites();
+    expect(storageGet).toHaveBeenCalledTimes(1);
+    expect(storageSet).not.toHaveBeenCalled();
+
+    now = 60_000;
+    recordWebAuthnDebug(chromeApi, { event: "second" });
+    await drainDebugWrites();
+    expect(storageGet).toHaveBeenCalledTimes(1);
+
+    debugEnabled = true;
+    storageChangeListener?.(
+      {
+        vaultkernWebAuthnDebugEnabled: {
+          oldValue: false,
+          newValue: true
+        }
+      },
+      "local"
+    );
+    recordWebAuthnDebug(chromeApi, { event: "third" });
+    await drainDebugWrites();
+
+    expect(storageGet).toHaveBeenCalledTimes(2);
+    expect(storageSet).toHaveBeenCalledTimes(1);
+    expect(debugLog).toEqual([
+      expect.objectContaining({
+        event: "third"
+      })
+    ]);
+  });
+
   it("does not record allowed credential counts in pre-authorization get diagnostics", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     let debugLog: unknown[] = [];

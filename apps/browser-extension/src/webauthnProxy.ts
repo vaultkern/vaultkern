@@ -28,6 +28,14 @@ type ChromeLike = {
       get?: (keys?: unknown) => Promise<Record<string, unknown>>;
       set?: (items: Record<string, unknown>) => Promise<void>;
     };
+    onChanged?: {
+      addListener?: (
+        listener: (
+          changes: Record<string, { newValue?: unknown; oldValue?: unknown }>,
+          areaName: string
+        ) => void
+      ) => void;
+    };
     session?: {
       get?: (keys?: unknown) => Promise<Record<string, unknown>>;
       set?: (items: Record<string, unknown>) => Promise<void>;
@@ -373,6 +381,8 @@ let passkeyCeremonyMirrorCache = new WeakMap<
   Record<string, PasskeyCeremonyContext>
 >();
 const webAuthnDebugDisabledUntil = new WeakMap<object, number>();
+const webAuthnDebugDisabledUntilChanged = new WeakSet<object>();
+const webAuthnDebugChangeWatchers = new WeakSet<object>();
 let passkeyCeremonyMirrorMutationQueue: Promise<void> = Promise.resolve();
 let passkeyLedgerConnectionId: string | null = null;
 
@@ -7000,7 +7010,8 @@ export function recordWebAuthnDebug(
   const chainKey = chromeApi.storage?.local ?? chromeApi;
   if (
     typeof chainKey === "object" &&
-    (webAuthnDebugDisabledUntil.get(chainKey) ?? 0) > Date.now()
+    (webAuthnDebugDisabledUntilChanged.has(chainKey) ||
+      (webAuthnDebugDisabledUntil.get(chainKey) ?? 0) > Date.now())
   ) {
     return Promise.resolve();
   }
@@ -7070,7 +7081,8 @@ async function persistWebAuthnDebug(
     }
     if (
       typeof storage === "object" &&
-      (webAuthnDebugDisabledUntil.get(storage) ?? 0) > Date.now()
+      (webAuthnDebugDisabledUntilChanged.has(storage) ||
+        (webAuthnDebugDisabledUntil.get(storage) ?? 0) > Date.now())
     ) {
       return;
     }
@@ -7080,15 +7092,21 @@ async function persistWebAuthnDebug(
     ]);
     if (existing[WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY] !== true) {
       if (typeof storage === "object") {
-        webAuthnDebugDisabledUntil.set(
-          storage,
-          Date.now() + WEB_AUTHN_DEBUG_DISABLED_CACHE_MS
-        );
+        if (watchWebAuthnDebugEnabledChanges(chromeApi, storage)) {
+          webAuthnDebugDisabledUntilChanged.add(storage);
+          webAuthnDebugDisabledUntil.delete(storage);
+        } else {
+          webAuthnDebugDisabledUntil.set(
+            storage,
+            Date.now() + WEB_AUTHN_DEBUG_DISABLED_CACHE_MS
+          );
+        }
       }
       return;
     }
     if (typeof storage === "object") {
       webAuthnDebugDisabledUntil.delete(storage);
+      webAuthnDebugDisabledUntilChanged.delete(storage);
     }
     const redactedEvent = redactKnownPasskeyCeremonyTokens(event) as Record<
       string,
@@ -7112,6 +7130,35 @@ async function persistWebAuthnDebug(
   } catch {
     // Best-effort diagnostics must never break WebAuthn handling.
   }
+}
+
+function watchWebAuthnDebugEnabledChanges(
+  chromeApi: ChromeLike,
+  storage: object
+) {
+  const onChanged = chromeApi.storage?.onChanged;
+  if (!onChanged?.addListener) {
+    return false;
+  }
+  if (webAuthnDebugChangeWatchers.has(storage)) {
+    return true;
+  }
+
+  onChanged.addListener((changes, areaName) => {
+    if (
+      areaName !== "local" ||
+      !Object.prototype.hasOwnProperty.call(
+        changes,
+        WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY
+      )
+    ) {
+      return;
+    }
+    webAuthnDebugDisabledUntil.delete(storage);
+    webAuthnDebugDisabledUntilChanged.delete(storage);
+  });
+  webAuthnDebugChangeWatchers.add(storage);
+  return true;
 }
 
 function requestSummaryFrom(request: unknown) {
