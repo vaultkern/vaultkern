@@ -5676,6 +5676,78 @@ mod tests {
     }
 
     #[test]
+    fn expired_pre_completion_passkey_ceremony_does_not_block_matching_registration() {
+        let mut runtime = Runtime::for_tests_at(100);
+
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "expired-pre-completion-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Preferred,
+                challenge_base64url: "Y2hhbGxlbmdlLTE".into(),
+                request_id: 42,
+                tab_id: 7,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms: 100_000,
+                expires_at_epoch_ms: 101_000,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "expired-pre-completion-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                related_origin_verified: false,
+            })
+            .unwrap();
+
+        runtime.set_test_unix_time_ms(102_000);
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "replacement-pre-completion-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Preferred,
+                challenge_base64url: "Y2hhbGxlbmdlLTI".into(),
+                request_id: 43,
+                tab_id: 7,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms: 102_000,
+                expires_at_epoch_ms: 103_000,
+            })
+            .unwrap();
+
+        let response = runtime
+            .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+                ceremony_token: "expired-pre-completion-token".into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            response,
+            RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+                known: false,
+                phase: None,
+                durable_state: None,
+                delivery_state: None,
+            })
+        );
+    }
+
+    #[test]
     fn passkey_user_verification_timestamp_is_not_before_same_second_registration() {
         let mut runtime = Runtime::for_tests_at(100);
         runtime.set_test_unix_time_ms(100_750);
