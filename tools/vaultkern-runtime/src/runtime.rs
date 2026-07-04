@@ -967,8 +967,11 @@ impl Runtime {
         method: PasskeyUserVerificationMethodDto,
         password: Option<&str>,
     ) -> Result<PasskeyUserVerifiedDto> {
-        if expected_phase != PasskeyCeremonyPhaseDto::UserAuthorization {
-            anyhow::bail!("passkey user verification expected phase must be s1_user_authorization");
+        if !matches!(
+            expected_phase,
+            PasskeyCeremonyPhaseDto::UserAuthorization | PasskeyCeremonyPhaseDto::UserSelection
+        ) {
+            anyhow::bail!("passkey user verification expected phase must allow user verification");
         }
         if self.session.active_vault_id() != Some(vault_id) {
             anyhow::bail!("passkey user verification vault mismatch");

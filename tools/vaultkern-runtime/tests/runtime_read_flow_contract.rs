@@ -1423,6 +1423,75 @@ fn runtime_sets_assertion_uv_flag_after_master_password_user_verification() {
 }
 
 #[test]
+fn runtime_sets_assertion_uv_flag_after_user_selection_user_verification() {
+    let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
+    let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLXMzYi11dg","origin":"https://example.com","crossOrigin":false}"#;
+    let client_data_json_base64url = URL_SAFE_NO_PAD.encode(client_data_json);
+    register_ceremony_at_s3_with_discoverable_and_user_verification(
+        &mut runtime,
+        "assertion-token-s3b-uv",
+        PasskeyCeremonyKindDto::Get,
+        "https://example.com",
+        "example.com",
+        "Y2hhbGxlbmdlLXMzYi11dg",
+        true,
+        PasskeyUserVerificationRequirementDto::Required,
+    );
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "assertion-token-s3b-uv".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            next_phase: PasskeyCeremonyPhaseDto::UserSelection,
+            related_origin_verified: false,
+        })
+        .unwrap();
+    let verified = runtime
+        .handle(RuntimeCommand::VerifyPasskeyUser {
+            ceremony_token: "assertion-token-s3b-uv".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserSelection,
+            vault_id: vault_id.clone(),
+            method: PasskeyUserVerificationMethodDto::MasterPassword,
+            password: Some("demo-password".into()),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+        panic!("expected UV proof, got {verified:?}");
+    };
+    assert!(verified.verified);
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: "assertion-token-s3b-uv".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserSelection,
+            next_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            related_origin_verified: false,
+        })
+        .unwrap();
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-s3b-uv".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: true,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url,
+        })
+        .unwrap();
+
+    let RuntimeResponse::PasskeyAssertion(assertion) = response else {
+        panic!("expected passkey assertion, got {response:?}");
+    };
+    let authenticator_data = URL_SAFE_NO_PAD
+        .decode(assertion.authenticator_data_base64url)
+        .unwrap();
+    assert_ne!(authenticator_data[32] & 0x04, 0);
+}
+
+#[test]
 fn runtime_treats_user_verification_as_user_presence_for_assertion() {
     let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
     let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLXV2LXVw","origin":"https://example.com","crossOrigin":false}"#;

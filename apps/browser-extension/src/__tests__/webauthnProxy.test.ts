@@ -4783,6 +4783,313 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
   });
 
+  it("re-verifies required-UV S3B get requests after restoring the selection prompt", async () => {
+    let messageListener:
+      | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void)
+      | undefined;
+    const credentialOptions = [
+      {
+        credentialId: "Y3JlZGVudGlhbC0x",
+        username: "alice@example.com"
+      }
+    ];
+    const sessionStorage = createSessionStorage({
+      vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
+        "token-s3b-required-uv": {
+          version: 1,
+          ceremonyToken: "token-s3b-required-uv",
+          ceremony: "get",
+          phase: "s3b_user_selection",
+          origin: "https://example.com",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          challengeBase64url: "Y2hhbGxlbmdlLTE",
+          requestId: 218,
+          tabId: 101,
+          frameId: 0,
+          frameKind: "top",
+          activeVaultId: "vault-1",
+          userVerification: "required",
+          getCredentialIds: [null],
+          popupNonce: "nonce-s3b-required-uv",
+          promptMode: "approve",
+          promptCredentialOptions: credentialOptions,
+          getClientExtensionResults: {},
+          registeredAtEpochMs: 1_000,
+          expiresAtEpochMs: Date.now() + 300_000
+        }
+      })
+    });
+    const completeGetRequest = vi.fn(async () => undefined);
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`),
+        onMessage: {
+          addListener(
+            listener: (
+              message: unknown,
+              sender: unknown,
+              sendResponse: (response: unknown) => void
+            ) => void
+          ) {
+            messageListener = listener;
+          }
+        }
+      },
+      storage: {
+        session: sessionStorage
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest
+      }
+    };
+    const verificationPrompt = installUserVerificationPrompt(chromeApi);
+    const sendRuntimeCommand = vi.fn(async (command: Record<string, unknown>) => {
+      if (command.type === "query_passkey_ceremony_ledger") {
+        return {
+          type: "passkey_ceremony_ledger",
+          known: true,
+          phase: "s3b_user_selection",
+          durableState: "none",
+          deliveryState: "not_delivered"
+        };
+      }
+      if (command.type === "bind_passkey_ceremony_vault") {
+        return { type: "passkey_ceremony_vault_bound", bound: true };
+      }
+      if (command.type === "get_passkey_user_verification_capability") {
+        return {
+          type: "passkey_user_verification_capability",
+          available: true,
+          methods: ["master_password"]
+        };
+      }
+      if (command.type === "verify_passkey_user") {
+        return {
+          type: "passkey_user_verified",
+          verified: true,
+          method: "master_password",
+          verified_at_epoch_ms: 1_783_000_000_000
+        };
+      }
+      if (command.type === "advance_passkey_ceremony_phase") {
+        return { type: "passkey_ceremony_advanced", advanced: true };
+      }
+      if (command.type === "create_passkey_assertion") {
+        return {
+          type: "passkey_assertion",
+          credentialId: "Y3JlZGVudGlhbC0x",
+          authenticatorDataBase64url: "auth-data",
+          clientDataJsonBase64url: "client-data",
+          signatureBase64url: "signature",
+          userHandleBase64url: "dXNlci0x"
+        };
+      }
+
+      throw new Error(`unexpected command: ${command.type}`);
+    });
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+    await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
+
+    messageListener?.(
+      {
+        type: "vaultkern_presence_complete",
+        requestId: 218,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-s3b-required-uv",
+        credentialId: "Y3JlZGVudGlhbC0x"
+      },
+      {
+        url: "chrome-extension://id/popup.html?webauthn=approve&requestId=218&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-s3b-required-uv"
+      },
+      vi.fn()
+    );
+
+    await vi.waitFor(() => {
+      expect(verificationPrompt.create).toHaveBeenCalledWith({
+        url: expect.stringMatching(
+          /^chrome-extension:\/\/id\/popup\.html\?webauthn=verify&requestId=218&relyingParty=example\.com&origin=https%3A%2F%2Fexample\.com&nonce=[A-Za-z0-9_-]+$/
+        ),
+        type: "popup",
+        width: 460,
+        height: 520,
+        focused: true
+      });
+    });
+    expect(completeGetRequest).not.toHaveBeenCalled();
+
+    await expect(
+      verificationPrompt.verify({ password: "database-password" })
+    ).resolves.toEqual({ ok: true });
+
+    await vi.waitFor(() => {
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "verify_passkey_user",
+      ceremony_token: "token-s3b-required-uv",
+      expected_phase: "s3b_user_selection",
+      vault_id: "vault-1",
+      method: "master_password",
+      password: "database-password"
+    });
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "create_passkey_assertion",
+      ceremony_token: "token-s3b-required-uv",
+      expected_phase: "s4_completion_and_mutation",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.com",
+      credential_id: "Y3JlZGVudGlhbC0x",
+      discoverable: true,
+      user_presence_verified: true,
+      client_data_json_base64url: expect.any(String)
+    });
+  });
+
+  it("resumes required-UV S3B get requests after restoring the verification prompt", async () => {
+    let messageListener:
+      | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void)
+      | undefined;
+    const sessionStorage = createSessionStorage({
+      vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
+        "token-s3b-verify-required-uv": {
+          version: 1,
+          ceremonyToken: "token-s3b-verify-required-uv",
+          ceremony: "get",
+          phase: "s3b_user_selection",
+          origin: "https://example.com",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          challengeBase64url: "Y2hhbGxlbmdlLTE",
+          requestId: 219,
+          tabId: 101,
+          frameId: 0,
+          frameKind: "top",
+          activeVaultId: "vault-1",
+          userVerification: "required",
+          getCredentialIds: [null],
+          selectedCredentialId: "Y3JlZGVudGlhbC0x",
+          popupNonce: "nonce-s3b-verify-required-uv",
+          promptMode: "verify",
+          promptCredentialOptions: [],
+          getClientExtensionResults: {},
+          registeredAtEpochMs: 1_000,
+          expiresAtEpochMs: Date.now() + 300_000
+        }
+      })
+    });
+    const completeGetRequest = vi.fn(async () => undefined);
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`),
+        onMessage: {
+          addListener(
+            listener: (
+              message: unknown,
+              sender: unknown,
+              sendResponse: (response: unknown) => void
+            ) => void
+          ) {
+            messageListener = listener;
+          }
+        }
+      },
+      storage: {
+        session: sessionStorage
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeGetRequest
+      }
+    };
+    const sendRuntimeCommand = vi.fn(async (command: Record<string, unknown>) => {
+      if (command.type === "query_passkey_ceremony_ledger") {
+        return {
+          type: "passkey_ceremony_ledger",
+          known: true,
+          phase: "s3b_user_selection",
+          durableState: "none",
+          deliveryState: "not_delivered"
+        };
+      }
+      if (command.type === "bind_passkey_ceremony_vault") {
+        return { type: "passkey_ceremony_vault_bound", bound: true };
+      }
+      if (command.type === "verify_passkey_user") {
+        return {
+          type: "passkey_user_verified",
+          verified: true,
+          method: "master_password",
+          verified_at_epoch_ms: 1_783_000_000_000
+        };
+      }
+      if (command.type === "advance_passkey_ceremony_phase") {
+        return { type: "passkey_ceremony_advanced", advanced: true };
+      }
+      if (command.type === "create_passkey_assertion") {
+        return {
+          type: "passkey_assertion",
+          credentialId: "Y3JlZGVudGlhbC0x",
+          authenticatorDataBase64url: "auth-data",
+          clientDataJsonBase64url: "client-data",
+          signatureBase64url: "signature",
+          userHandleBase64url: "dXNlci0x"
+        };
+      }
+
+      throw new Error(`unexpected command: ${command.type}`);
+    });
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+    await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
+
+    const response = vi.fn();
+    messageListener?.(
+      {
+        type: "vaultkern_user_verification_complete",
+        requestId: 219,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-s3b-verify-required-uv",
+        method: "master_password",
+        password: "database-password"
+      },
+      {
+        url: "chrome-extension://id/popup.html?webauthn=verify&requestId=219&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-s3b-verify-required-uv"
+      },
+      response
+    );
+
+    await vi.waitFor(() => {
+      expect(response).toHaveBeenCalledWith({ ok: true });
+      expect(completeGetRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "verify_passkey_user",
+      ceremony_token: "token-s3b-verify-required-uv",
+      expected_phase: "s3b_user_selection",
+      vault_id: "vault-1",
+      method: "master_password",
+      password: "database-password"
+    });
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "create_passkey_assertion",
+      ceremony_token: "token-s3b-verify-required-uv",
+      expected_phase: "s4_completion_and_mutation",
+      vault_id: "vault-1",
+      relying_party: "example.com",
+      origin: "https://example.com",
+      credential_id: "Y3JlZGVudGlhbC0x",
+      discoverable: true,
+      user_presence_verified: true,
+      client_data_json_base64url: expect.any(String)
+    });
+  });
+
   it("does not send a second resumed get completion when Chrome rejects a delivered assertion", async () => {
     vi.useFakeTimers();
 

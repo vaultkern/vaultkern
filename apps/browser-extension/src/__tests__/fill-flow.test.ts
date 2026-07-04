@@ -1040,7 +1040,7 @@ describe("PopupShell fill flow", () => {
     });
   });
 
-  it("notifies the background page when a WebAuthn unlock popup mounts already unlocked", async () => {
+  it("does not complete a WebAuthn unlock prompt just because the vault is already unlocked", async () => {
     window.history.replaceState(
       null,
       "",
@@ -1087,16 +1087,17 @@ describe("PopupShell fill flow", () => {
 
     render(createElement(PopupShell));
 
-    await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_unlock_complete",
-        requestId: 13,
-        origin: "https://example.com",
-        relyingParty: "example.com",
-        nonce: "nonce-13"
-      });
-      expect(closeWindow).toHaveBeenCalledTimes(1);
+    await screen.findByText("Unlocked");
+    await Promise.resolve();
+
+    expect(sendMessage).not.toHaveBeenCalledWith({
+      type: "vaultkern_unlock_complete",
+      requestId: 13,
+      origin: "https://example.com",
+      relyingParty: "example.com",
+      nonce: "nonce-13"
     });
+    expect(closeWindow).not.toHaveBeenCalled();
     expect(runtimeClientMocks.listEntries).not.toHaveBeenCalled();
     expect(runtimeClientMocks.findFillCandidates).not.toHaveBeenCalled();
     expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();

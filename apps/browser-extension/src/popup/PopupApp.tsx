@@ -714,12 +714,6 @@ export function PopupApp({
   }
 
   useEffect(() => {
-    if (session) {
-      notifyWebAuthnUnlockCompleteOnce(session);
-    }
-  }, [session, webAuthnUnlockPrompt]);
-
-  useEffect(() => {
     if (
       !webAuthnUnlockPrompt ||
       webAuthnQuickUnlockAttempted.current ||

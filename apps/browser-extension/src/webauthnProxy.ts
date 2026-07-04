@@ -98,6 +98,7 @@ type WebAuthnPromptContext = WebAuthnOriginContext & {
 type WebAuthnUserVerificationPromptContext = WebAuthnPromptContext & {
   ceremonyToken: string;
   activeVaultId: string;
+  expectedPhase: PasskeyCeremonyActivePhase;
 };
 
 type PasskeyCeremonyPhase =
@@ -164,6 +165,7 @@ type PasskeyGetCeremonyContext = PasskeyCeremonyBaseContext & {
   ceremony: "get";
   getCredentialIds: Array<string | null>;
   getClientExtensionResults: Record<string, unknown>;
+  selectedCredentialId?: string;
 };
 
 type PasskeyCreateCeremonyContext = PasskeyCeremonyBaseContext & {
@@ -219,7 +221,10 @@ type PasskeyPromptMirrorPersistence = {
     credentialOptions?: PasskeyCredentialOption[]
   ) => Promise<void>;
   persistUnlockPromptState: (nonce: string) => Promise<void>;
-  persistUserVerificationPromptState: (nonce: string) => Promise<void>;
+  persistUserVerificationPromptState: (
+    nonce: string,
+    options?: { selectedCredentialId?: string }
+  ) => Promise<void>;
   persistPromptWindowId: (windowId: number) => Promise<void>;
 };
 
@@ -1050,7 +1055,7 @@ function registerUnlockCompleteHandler(
           const response = await sendRuntimeCommand({
             type: "verify_passkey_user",
             ceremony_token: expected.ceremonyToken,
-            expected_phase: "s1_user_authorization",
+            expected_phase: expected.expectedPhase,
             vault_id: expected.activeVaultId,
             method,
             ...(method === "master_password" ? { password } : {})
@@ -1972,7 +1977,7 @@ async function resumePasskeyGetAfterPromptComplete(
         candidate.requestId === requestId &&
         isPasskeyGetCeremonyContext(candidate) &&
         (candidate.phase === "s1_user_authorization" ||
-          (promptMode === "approve" &&
+          ((promptMode === "approve" || promptMode === "verify") &&
             candidate.phase === "s3b_user_selection")) &&
         candidate.promptMode === promptMode
     );
@@ -2049,17 +2054,50 @@ async function resumePasskeyGetAfterPromptComplete(
           "WebAuthn request origin does not match relying party"
         );
       }
-      const promptContext = promptContextFromMirror(mirror);
-      if (!promptContext || (promptContext.credentialOptions ?? []).length === 0) {
-        throw new WebAuthnRequestError(
-          "NotAllowedError",
-          "VaultKern passkey ceremony is missing its credential selection"
+      let selectedCredentialId: string | undefined;
+      if (promptMode === "verify") {
+        selectedCredentialId = mirror.selectedCredentialId;
+      } else {
+        const promptContext = promptContextFromMirror(mirror);
+        if (!promptContext || (promptContext.credentialOptions ?? []).length === 0) {
+          throw new WebAuthnRequestError(
+            "NotAllowedError",
+            "VaultKern passkey ceremony is missing its credential selection"
+          );
+        }
+        selectedCredentialId = selectedCredentialIdForPrompt(
+          promptContext,
+          credentialId
         );
+        if (selectedCredentialId && mirror.userVerification === "required") {
+          const credentialIdForVerification = selectedCredentialId;
+          const userVerified = await userVerificationForRequest(
+            chromeApi,
+            sendRuntimeCommand,
+            requestId,
+            mirror.ceremonyToken,
+            activeVaultId,
+            mirror.userVerification,
+            promptContext,
+            canceledRequests,
+            requestCancelKey,
+            {
+              expectedPhase: "s3b_user_selection",
+              onPromptPrepared: (nonce) =>
+                persistUserVerificationPromptState(nonce, {
+                  selectedCredentialId: credentialIdForVerification
+                }),
+              onPromptOpened: persistPromptWindowId
+            }
+          );
+          if (!userVerified) {
+            throw new WebAuthnRequestError(
+              "NotAllowedError",
+              "VaultKern passkey provider cannot verify the user"
+            );
+          }
+        }
       }
-      const selectedCredentialId = selectedCredentialIdForPrompt(
-        promptContext,
-        credentialId
-      );
       if (!selectedCredentialId) {
         throw userAbortWebAuthnRequestError(
           "NotAllowedError",
@@ -2759,6 +2797,9 @@ function clonePasskeyCeremonyMirror(
       ...(passkeyGetClientExtensionResultsAreSafe(payload.getClientExtensionResults)
         ? { getClientExtensionResults: { ...payload.getClientExtensionResults } }
         : {}),
+      ...(passkeyNonemptyString(payload.selectedCredentialId)
+        ? { selectedCredentialId: payload.selectedCredentialId }
+        : {}),
       ...promptCredentialOptions
     } as PasskeyCeremonyContext;
   }
@@ -2876,6 +2917,8 @@ function isPasskeyCeremonyMirror(value: unknown): value is PasskeyCeremonyContex
       passkeyGetCredentialIdsAreSafe(candidate.getCredentialIds)) &&
     (candidate.getClientExtensionResults === undefined ||
       passkeyGetClientExtensionResultsAreSafe(candidate.getClientExtensionResults)) &&
+    (candidate.selectedCredentialId === undefined ||
+      passkeyNonemptyString(candidate.selectedCredentialId)) &&
     (candidate.createUserName === undefined ||
       (typeof candidate.createUserName === "string" &&
         candidate.createUserName.trim() !== "")) &&
@@ -3083,7 +3126,11 @@ function restorePasskeyCeremonyPromptState(
       {
         ...promptContext,
         ceremonyToken: mirror.ceremonyToken,
-        activeVaultId: mirror.activeVaultId
+        activeVaultId: mirror.activeVaultId,
+        expectedPhase:
+          mirror.phase === "s3b_user_selection"
+            ? "s3b_user_selection"
+            : "s1_user_authorization"
       }
     );
     return true;
@@ -3238,6 +3285,7 @@ function passkeyCeremonyMirrorForPhase(
   delete nextMirror.promptMode;
   delete nextMirror.promptWindowId;
   delete nextMirror.promptCredentialOptions;
+  delete (nextMirror as Partial<PasskeyGetCeremonyContext>).selectedCredentialId;
   return nextMirror;
 }
 
@@ -3245,14 +3293,25 @@ function passkeyCeremonyPhaseCanRestorePrompt(
   phase: string,
   promptMode: "approve" | "unlock" | "verify"
 ) {
-  if (promptMode === "unlock" || promptMode === "verify") {
+  if (promptMode === "unlock") {
     return phase === "s1_user_authorization";
+  }
+  if (promptMode === "verify") {
+    return phase === "s1_user_authorization" || phase === "s3b_user_selection";
   }
   return phase === "s1_user_authorization" || phase === "s3b_user_selection";
 }
 
 function passkeyCeremonyMirrorCanRestorePrompt(mirror: PasskeyCeremonyContext) {
   if (mirror.phase === "s3b_user_selection") {
+    if (mirror.promptMode === "verify") {
+      return (
+        mirror.ceremony === "get" &&
+        passkeyNonemptyString(mirror.activeVaultId) &&
+        passkeyNonemptyString(mirror.selectedCredentialId) &&
+        passkeyGetClientExtensionResultsAreSafe(mirror.getClientExtensionResults)
+      );
+    }
     return (
       mirror.ceremony === "get" &&
       passkeyNonemptyString(mirror.activeVaultId) &&
@@ -6055,7 +6114,8 @@ function createPasskeyPromptMirrorPersistence(
     patch: Pick<
       PasskeyCeremonyContext,
       "popupNonce" | "promptMode" | "promptWindowId" | "promptCredentialOptions"
-    >
+    > &
+      Partial<Pick<PasskeyGetCeremonyContext, "selectedCredentialId">>
   ) => {
     const mirror = getMirror();
     if (!mirror) {
@@ -6086,12 +6146,18 @@ function createPasskeyPromptMirrorPersistence(
         promptCredentialOptions: []
       });
     },
-    persistUserVerificationPromptState(nonce) {
+    persistUserVerificationPromptState(nonce, options = {}) {
+      const mirror = getMirror();
+      const selectedCredentialPatch =
+        mirror?.ceremony === "get" && passkeyNonemptyString(options.selectedCredentialId)
+          ? { selectedCredentialId: options.selectedCredentialId }
+          : {};
       return persistPromptMirror({
         popupNonce: nonce,
         promptMode: "verify",
         promptWindowId: undefined,
-        promptCredentialOptions: []
+        promptCredentialOptions: [],
+        ...selectedCredentialPatch
       });
     },
     persistPromptWindowId(windowId) {
@@ -6606,6 +6672,7 @@ async function userVerificationForRequest(
   options: {
     onPromptPrepared?: (nonce: string) => Promise<void> | void;
     onPromptOpened?: (windowId: number) => Promise<void> | void;
+    expectedPhase?: PasskeyCeremonyActivePhase;
   } = {}
 ) {
   if (userVerification === "discouraged") {
@@ -6661,7 +6728,8 @@ async function userVerificationForRequest(
       {
         ...promptContext,
         ceremonyToken: promptKey,
-        activeVaultId
+        activeVaultId,
+        expectedPhase: options.expectedPhase ?? "s1_user_authorization"
       },
       requestCancelKey,
       nonce
