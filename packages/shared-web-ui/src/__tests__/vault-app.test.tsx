@@ -10,7 +10,8 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { App, type RuntimeClientLike } from "../App";
-import type { ExtensionSettingsStore } from "../extensionSettings";
+import { DEFAULT_EXTENSION_SETTINGS } from "../extensionSettings";
+import type { ExtensionSettings, ExtensionSettingsStore } from "../extensionSettings";
 import { errorMessage } from "../error";
 import { ManagerShell } from "../layout/ManagerShell";
 import { ManagerTopBar } from "../layout/ManagerTopBar";
@@ -40,12 +41,29 @@ function createVaultSelectionMethods() {
     completePendingOneDriveLogin: vi.fn(),
     listOneDriveChildren: vi.fn(async () => []),
     addOneDriveVaultReference: vi.fn(),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn(),
     createEntry: vi.fn(),
     updateEntryFields: vi.fn(),
     deleteEntry: vi.fn(),
     saveVault: vi.fn(),
     setEntryPasskey: vi.fn(),
     clearEntryPasskey: vi.fn(),
+    getEntryAttachmentContent: vi.fn(),
+    addEntryAttachment: vi.fn(),
+    updateEntryAttachmentMetadata: vi.fn(),
+    replaceEntryAttachmentContent: vi.fn(),
+    deleteEntryAttachment: vi.fn(),
     retryVaultSourceSync: vi.fn(),
     getDatabaseSettings: vi.fn(async () => ({
       type: "database_settings" as const,
@@ -112,15 +130,8 @@ function createVaultSelectionMethods() {
   };
 }
 
-function createSettingsStore(
-  settings = {
-    recentVaultLimit: 10,
-    language: "en" as const,
-    idleLockMinutes: 0,
-    clearClipboardSeconds: 30
-  }
-): ExtensionSettingsStore {
-  let current = settings;
+function createSettingsStore(settings: Partial<ExtensionSettings> = {}): ExtensionSettingsStore {
+  let current: ExtensionSettings = { ...DEFAULT_EXTENSION_SETTINGS, ...settings };
   return {
     load: vi.fn(async () => current),
     save: vi.fn(async (next) => {
@@ -173,6 +184,7 @@ it("renders recent vaults and unlocks the current selection without a path field
       currentVaultRefId: "vault-ref-1"
     })),
     listGroups: vi.fn(async (_vaultId: string) => ({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Demo Vault",
@@ -272,6 +284,7 @@ it("unlocks the current recent vault with Windows Hello when quick unlock is ena
       supportsBiometricUnlock: true
     })),
     listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Demo Vault",
@@ -299,7 +312,7 @@ it("shows browser settings and saves local extension preferences", async () => {
   const settingsStore = createSettingsStore();
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn(async () => ({
       type: "group_tree" as const,
       root: {
@@ -433,7 +446,7 @@ it("renders database and entry workspace labels in Chinese when selected", async
   });
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn(async () => ({
       type: "group_tree" as const,
       root: {
@@ -512,7 +525,9 @@ it("trims recent vaults when the local recent database limit is lower", async ()
         sourceKind: "local" as const,
         sourceSummary: "one.kdbx",
         lastUsedAt: 3,
-        availability: "ready" as const
+        availability: "ready" as const,
+        supportsQuickUnlock: false,
+        isCurrent: true
       },
       {
         vaultRefId: "vault-ref-2",
@@ -520,7 +535,9 @@ it("trims recent vaults when the local recent database limit is lower", async ()
         sourceKind: "local" as const,
         sourceSummary: "two.kdbx",
         lastUsedAt: 2,
-        availability: "ready" as const
+        availability: "ready" as const,
+        supportsQuickUnlock: false,
+        isCurrent: false
       },
       {
         vaultRefId: "vault-ref-3",
@@ -528,7 +545,9 @@ it("trims recent vaults when the local recent database limit is lower", async ()
         sourceKind: "local" as const,
         sourceSummary: "three.kdbx",
         lastUsedAt: 1,
-        availability: "ready" as const
+        availability: "ready" as const,
+        supportsQuickUnlock: false,
+        isCurrent: false
       }
     ]),
     deleteRecentVault: vi.fn(async () => [])
@@ -551,7 +570,7 @@ it("locks an unlocked manager after local idle timeout", async () => {
   });
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: vi.fn(async () => ({ unlocked: true, activeVaultId: "vault-1" })),
+    getSessionState: vi.fn(async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" })),
     listGroups: vi.fn(async () => ({
       type: "group_tree" as const,
       root: {
@@ -609,6 +628,7 @@ it("shows progress while unlocking a recent vault", async () => {
     ]),
     unlockCurrentVault: vi.fn(() => unlock.promise),
     listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Demo Vault",
@@ -647,8 +667,9 @@ it("shows progress while unlocking a recent vault", async () => {
 it("loads and saves database settings from the manager workspace", async () => {
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -816,8 +837,9 @@ it("loads and saves database settings from the manager workspace", async () => {
 it("shows add password action when a database has no password", async () => {
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: { id: "group-root", title: "Archive", entryCount: 0, childCount: 0, children: [] }
     }),
     listEntries: vi.fn().mockResolvedValue([]),
@@ -858,8 +880,9 @@ it("shows add password action when a database has no password", async () => {
 it("shows kdf-specific advanced encryption fields", async () => {
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: { id: "group-root", title: "Archive", entryCount: 0, childCount: 0, children: [] }
     }),
     listEntries: vi.fn().mockResolvedValue([]),
@@ -907,8 +930,9 @@ it("shows kdf-specific advanced encryption fields", async () => {
 it("shows custom fields, attachments, and protected field markers in entry detail", async () => {
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -1039,8 +1063,9 @@ it("manages an entry passkey from the detail pane", async () => {
   const saveVault = vi.fn(async () => undefined);
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -1252,19 +1277,19 @@ it("starts OneDrive setup and adds the selected kdbx file", async () => {
     }),
     listRecentVaults: vi.fn(async () => []),
     beginOneDriveLogin: vi.fn(async () => ({
-      type: "one_drive_auth_session",
+      type: "one_drive_auth_session" as const,
       authUrl: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize",
       redirectUri: "http://127.0.0.1:53121/callback",
       codeVerifier: "verifier",
       expiresInSeconds: 600
     })),
     completeOneDriveLogin: vi.fn(async () => ({
-      type: "one_drive_auth_status",
+      type: "one_drive_auth_status" as const,
       status: "authorized",
       accountLabel: "alice@example.com"
     })),
     completePendingOneDriveLogin: vi.fn(async () => ({
-      type: "one_drive_auth_status",
+      type: "one_drive_auth_status" as const,
       status: "authorized",
       accountLabel: "alice@example.com"
     })),
@@ -1339,19 +1364,19 @@ it("browses OneDrive folders before adding a nested kdbx file", async () => {
     }),
     listRecentVaults: vi.fn(async () => []),
     beginOneDriveLogin: vi.fn(async () => ({
-      type: "one_drive_auth_session",
+      type: "one_drive_auth_session" as const,
       authUrl: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize",
       redirectUri: "http://127.0.0.1:53121/callback",
       codeVerifier: "verifier",
       expiresInSeconds: 600
     })),
     completeOneDriveLogin: vi.fn(async () => ({
-      type: "one_drive_auth_status",
+      type: "one_drive_auth_status" as const,
       status: "authorized",
       accountLabel: "alice@example.com"
     })),
     completePendingOneDriveLogin: vi.fn(async () => ({
-      type: "one_drive_auth_status",
+      type: "one_drive_auth_status" as const,
       status: "authorized",
       accountLabel: "alice@example.com"
     })),
@@ -1558,10 +1583,11 @@ it("clears stale details before showing the newly selected entry", async () => {
   >>();
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     openLocalVault: vi.fn(),
     unlockWithPassword: vi.fn(),
     listGroups: vi.fn(async (_vaultId: string) => ({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Demo Vault",
@@ -1589,7 +1615,7 @@ it("clears stale details before showing the newly selected entry", async () => {
     getEntryDetail: vi.fn(async (_vaultId: string, entryId: string) => {
       if (entryId === "entry-1") {
         return {
-          type: "entry_detail",
+          type: "entry_detail" as const,
           id: "entry-1",
           title: "Example",
           username: "alice",
@@ -1642,10 +1668,11 @@ it("clears stale details before showing the newly selected entry", async () => {
 it("renders the manager workspace with group tree and global search when unlocked", async () => {
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     openLocalVault: vi.fn(),
     unlockWithPassword: vi.fn(),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -1693,8 +1720,9 @@ it("renders the manager workspace with group tree and global search when unlocke
 it("shows each group's own entry count instead of child count", async () => {
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -1749,8 +1777,9 @@ it("edits an entry only after explicit save and confirms unsaved navigation", as
 
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -1871,8 +1900,9 @@ it("shows an animated saving indicator while entry changes are being saved", asy
   const saveVault = vi.fn(async () => undefined);
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -1963,8 +1993,9 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
 
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2057,6 +2088,7 @@ it("shows a pending sync banner when save falls back to local cache", async () =
       }
     }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2128,6 +2160,7 @@ it("shows remote cache warning and retries source sync", async () => {
       }
     }),
     listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2175,6 +2208,7 @@ it("shows remote cache info without failure copy before sync is retried", async 
       }
     }),
     listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2248,8 +2282,9 @@ it("creates a new entry and deletes it after explicit confirmation", async () =>
 
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2334,8 +2369,9 @@ it("generates a password into the entry editor only after explicit use", async (
 
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2433,8 +2469,9 @@ it("manages entry attachments from the detail pane", async () => {
 
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2572,8 +2609,9 @@ it("shows read-only entry history details", async () => {
 
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2631,10 +2669,11 @@ it("filters the entry workspace when a nested group is selected", async () => {
 
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     openLocalVault: vi.fn(),
     unlockWithPassword: vi.fn(),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2769,10 +2808,11 @@ it("switches the primary workspace from list to detail when a record is selected
 
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     openLocalVault: vi.fn(),
     unlockWithPassword: vi.fn(),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2823,10 +2863,11 @@ it("keeps the workspace in split mode until the three columns fit with shell pad
 
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     openLocalVault: vi.fn(),
     unlockWithPassword: vi.fn(),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -2873,10 +2914,11 @@ it("drills from groups to entries to detail in stacked mode", async () => {
 
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     openLocalVault: vi.fn(),
     unlockWithPassword: vi.fn(),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -3038,10 +3080,11 @@ it("renders custom runtime error help for unlock failures", async () => {
 it("shows a visible error when listing entries fails", async () => {
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     openLocalVault: vi.fn(),
     unlockWithPassword: vi.fn(),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -3062,10 +3105,11 @@ it("shows a visible error when listing entries fails", async () => {
 it("shows a visible error when entry detail loading fails", async () => {
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     openLocalVault: vi.fn(),
     unlockWithPassword: vi.fn(),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",
@@ -3096,10 +3140,11 @@ it("shows a visible error when entry detail loading fails", async () => {
 it("shows a visible error when fill candidate loading fails", async () => {
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1" }),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
     openLocalVault: vi.fn(),
     unlockWithPassword: vi.fn(),
     listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
       root: {
         id: "group-root",
         title: "Archive",

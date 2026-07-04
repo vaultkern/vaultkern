@@ -1,6 +1,10 @@
 import { createRoot } from "react-dom/client";
 
-import { App } from "./App";
+import { App, type RuntimeClientLike } from "./App";
+
+const unsupported = async () => {
+  throw new Error("unsupported in standalone demo");
+};
 
 const unsupportedClient = {
   async getSessionState() {
@@ -9,9 +13,14 @@ const unsupportedClient = {
   async listRecentVaults() {
     return [];
   },
-  async addLocalVaultReference() {
-    throw new Error("unsupported in standalone demo");
+  addLocalVaultReference: unsupported,
+  beginOneDriveLogin: unsupported,
+  completeOneDriveLogin: unsupported,
+  completePendingOneDriveLogin: unsupported,
+  async listOneDriveChildren() {
+    return [];
   },
+  addOneDriveVaultReference: unsupported,
   async setCurrentVault() {
     return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
   },
@@ -25,7 +34,28 @@ const unsupportedClient = {
       lastError: null
     };
   },
+  async deleteRecentVault() {
+    return [];
+  },
+  openLocalVault: unsupported,
   async unlockCurrentVaultWithPassword() {
+    return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
+  },
+  async unlockCurrentVault() {
+    return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
+  },
+  async enableQuickUnlockForCurrentVault() {
+    return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
+  },
+  async unlockCurrentVaultWithQuickUnlock() {
+    return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
+  },
+  async disableQuickUnlockForCurrentVault() {
+    return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
+  },
+  unlockWithPassword: unsupported,
+  unlockVault: unsupported,
+  async lockSession() {
     return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
   },
   async listGroups() {
@@ -56,40 +86,26 @@ const unsupportedClient = {
       totpUri: null
     };
   },
-  async createEntry() {
-    throw new Error("unsupported in standalone demo");
-  },
-  async updateEntryFields() {
-    throw new Error("unsupported in standalone demo");
-  },
-  async deleteEntry() {
-    throw new Error("unsupported in standalone demo");
-  },
+  createEntry: unsupported,
+  updateEntryFields: unsupported,
+  setEntryPasskey: unsupported,
+  clearEntryPasskey: unsupported,
+  deleteEntry: unsupported,
   async saveVault() {
     return { type: "save_vault_result" as const, status: "saved" as const };
   },
-  async getEntryAttachmentContent() {
-    throw new Error("unsupported in standalone demo");
-  },
-  async addEntryAttachment() {
-    throw new Error("unsupported in standalone demo");
-  },
-  async updateEntryAttachmentMetadata() {
-    throw new Error("unsupported in standalone demo");
-  },
-  async replaceEntryAttachmentContent() {
-    throw new Error("unsupported in standalone demo");
-  },
-  async deleteEntryAttachment() {
-    throw new Error("unsupported in standalone demo");
-  },
+  getDatabaseSettings: unsupported,
+  updateDatabaseSettings: unsupported,
+  getEntryAttachmentContent: unsupported,
+  addEntryAttachment: unsupported,
+  updateEntryAttachmentMetadata: unsupported,
+  replaceEntryAttachmentContent: unsupported,
+  deleteEntryAttachment: unsupported,
   async listEntryHistory() {
     return [];
   },
-  async getEntryHistoryDetail() {
-    throw new Error("unsupported in standalone demo");
-  }
-};
+  getEntryHistoryDetail: unsupported
+} satisfies RuntimeClientLike;
 
 const container = document.getElementById("root");
 
