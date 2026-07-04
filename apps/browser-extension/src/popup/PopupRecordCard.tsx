@@ -18,6 +18,8 @@ export function PopupRecordCard({
   const text = useText();
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const totp =
+    typeof detail?.totp === "string" && detail.totp !== "" ? detail.totp : null;
 
   useEffect(() => {
     setShowPassword(false);
@@ -100,12 +102,12 @@ export function PopupRecordCard({
                 {showPassword ? text("Hide password") : text("Show password")}
               </button>
             </div>
-            {detail.totp ? (
+            {totp ? (
               <FieldButton
-                label={`Copy TOTP ${detail.totp}`}
+                label={`Copy TOTP ${totp}`}
                 copied={copiedField === "totp"}
-                value={detail.totp}
-                onClick={() => handleCopy("totp", detail.totp)}
+                value={totp}
+                onClick={() => handleCopy("totp", totp)}
               />
             ) : null}
             <div

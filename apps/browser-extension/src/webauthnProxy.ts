@@ -49,7 +49,9 @@ type ChromeLike = {
     query?: (queryInfo: Record<string, unknown>) => Promise<Array<{ url?: string }>>;
   };
   windows?: {
-    create?: (createData: Record<string, unknown>) => Promise<{ id?: number }> | void;
+    create?: (
+      createData: Record<string, unknown>
+    ) => Promise<{ id?: number } | void> | { id?: number } | void;
     get?: (windowId: number) => Promise<unknown> | unknown;
     update?: (windowId: number, updateInfo: Record<string, unknown>) => Promise<unknown> | void;
     remove?: (windowId: number) => Promise<unknown> | void;
@@ -177,6 +179,24 @@ type PasskeyCreateCeremonyContext = PasskeyCeremonyBaseContext & {
 type PasskeyCeremonyContext =
   | PasskeyGetCeremonyContext
   | PasskeyCreateCeremonyContext;
+
+const PASSKEY_CEREMONY_MISSING_VAULT_BINDING_MESSAGE =
+  "VaultKern passkey ceremony is missing its vault binding";
+
+type PasskeyCeremonyMirrorCandidate = Partial<PasskeyCeremonyBaseContext> &
+  Record<string, unknown>;
+
+function isPasskeyGetCeremonyContext(
+  mirror: PasskeyCeremonyContext | null | undefined
+): mirror is PasskeyGetCeremonyContext {
+  return mirror?.ceremony === "get";
+}
+
+function isPasskeyCreateCeremonyContext(
+  mirror: PasskeyCeremonyContext | null | undefined
+): mirror is PasskeyCreateCeremonyContext {
+  return mirror?.ceremony === "create";
+}
 
 type PasskeyCeremonyMirrorEnvelope = {
   version: 1;
@@ -364,7 +384,7 @@ const PASSKEY_CEREMONY_PHASES = new Set<PasskeyCeremonyPhase>([
   "closed_failed"
 ]);
 const PASSKEY_CEREMONY_TRANSITION_CONTRACT =
-  passkeyCeremonyTransitions as PasskeyCeremonyTransitionContract;
+  passkeyCeremonyTransitions as unknown as PasskeyCeremonyTransitionContract;
 const PASSKEY_CEREMONY_ACTIVE_PHASES =
   PASSKEY_CEREMONY_TRANSITION_CONTRACT.active_phases;
 const PASSKEY_CEREMONY_TRANSITION_EDGES =
@@ -417,12 +437,17 @@ export async function attachWebAuthnProxy(
     return { status: "unsupported" };
   }
 
+  const webAuthenticationProxy = chromeApi.webAuthenticationProxy;
+  if (typeof webAuthenticationProxy?.attach !== "function") {
+    return { status: "unsupported" };
+  }
+
   if (options?.sendRuntimeCommand) {
     registerRequestHandlers(chromeApi, options.sendRuntimeCommand);
   }
 
   try {
-    const message = await chromeApi.webAuthenticationProxy.attach?.();
+    const message = await webAuthenticationProxy.attach();
     await recordWebAuthnDebug(chromeApi, {
       event: message ? "attach_error" : "attach_success",
       message
@@ -462,6 +487,9 @@ export async function reconcilePersistedPasskeyCeremonies(
   sendRuntimeCommand: RuntimeCommandSender
 ) {
   const candidate = chromeApi as ChromeLike | null | undefined;
+  if (!candidate) {
+    return;
+  }
   await enqueuePasskeyCeremonyMirrorMutation(async () => {
     const mirrors = await loadPasskeyCeremonyMirrors(candidate);
     let changed = false;
@@ -555,7 +583,7 @@ export async function reconcilePersistedPasskeyCeremonies(
           };
           mirrors[token] = restoredMirror;
           restorePasskeyCeremonyPromptState(
-            chromeApi,
+            candidate,
             sendRuntimeCommand,
             restoredMirror
           );
@@ -619,7 +647,7 @@ export async function reconcilePersistedPasskeyCeremonies(
         delete mirrors[token];
         changed = true;
       } else if (ledgerPhase === mirror.phase) {
-        restorePasskeyCeremonyPromptState(chromeApi, sendRuntimeCommand, mirror);
+        restorePasskeyCeremonyPromptState(candidate, sendRuntimeCommand, mirror);
         continue;
       } else if (passkeyCeremonyCanAdvanceMirrorPhase(mirror, ledgerPhase)) {
         const advancedMirror = passkeyCeremonyMirrorForPhase(
@@ -1339,7 +1367,7 @@ async function handleGetRequest(
   });
   try {
     const options = requestOptionsFrom(request);
-    let credentialIds = credentialIdsFromOptions(options);
+    let credentialIds: Array<string | null> = credentialIdsFromOptions(options);
     const discloseUserHandle = passkeyGetCredentialIdsAreDiscoverable(credentialIds);
     const requestedRpId = relyingPartyIdFromGetOptions(options);
     const originContext = await originContextForRequest(request, "get", options);
@@ -1383,6 +1411,7 @@ async function handleGetRequest(
     ceremonyPhase = "s0_pre_authorization";
     ceremonyMirror = {
       ...ceremonyContext,
+      ceremony: "get",
       getCredentialIds: credentialIds,
       getClientExtensionResults: clientExtensionResultsForGetOptions(options)
     };
@@ -1448,7 +1477,8 @@ async function handleGetRequest(
       credentialIds
     );
     credentialIds = credentialSelection.credentialIds;
-    let assertionExpectedPhase = "s3_credential_resolution";
+    let assertionExpectedPhase: PasskeyCeremonyActivePhase =
+      "s3_credential_resolution";
     if (credentialSelection.promptOptions.length > 0) {
       await advanceCeremony("s3_credential_resolution", "s3b_user_selection");
       const approved = await userPresenceForRequest(
@@ -1839,9 +1869,9 @@ async function resumePasskeyGetAfterPromptComplete(
   try {
     const mirrors = await loadPasskeyCeremonyMirrorsQueued(chromeApi);
     const candidates = Object.values(mirrors).filter(
-      (candidate) =>
+      (candidate): candidate is PasskeyGetCeremonyContext =>
         candidate.requestId === requestId &&
-        candidate.ceremony === "get" &&
+        isPasskeyGetCeremonyContext(candidate) &&
         (candidate.phase === "s1_user_authorization" ||
           (promptMode === "approve" &&
             candidate.phase === "s3b_user_selection")) &&
@@ -1875,6 +1905,12 @@ async function resumePasskeyGetAfterPromptComplete(
         persistUserVerificationPromptState
       }
     });
+    if (!isPasskeyGetCeremonyContext(mirror)) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "VaultKern passkey ceremony is not restored"
+      );
+    }
 
     const advanceCeremony = createPasskeyCeremonyAdvancer({
       chromeApi,
@@ -1891,11 +1927,18 @@ async function resumePasskeyGetAfterPromptComplete(
     });
 
     let credentialIds: Array<string | null>;
-    let assertionExpectedPhase: string;
+    let assertionExpectedPhase: PasskeyCeremonyActivePhase;
     let relatedOriginVerified = mirror.relatedOriginVerified === true;
     const discloseUserHandle = passkeyGetCredentialIdsAreDiscoverable(
       mirror.getCredentialIds
     );
+    const activeVaultId = mirror.activeVaultId;
+    if (!passkeyNonemptyString(activeVaultId)) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        PASSKEY_CEREMONY_MISSING_VAULT_BINDING_MESSAGE
+      );
+    }
 
     if (mirror.phase === "s3b_user_selection") {
       if (
@@ -1961,7 +2004,7 @@ async function resumePasskeyGetAfterPromptComplete(
       const credentialSelection = await credentialSelectionForGetRequest(
         sendRuntimeCommand,
         mirror.ceremonyToken,
-        mirror.activeVaultId,
+        activeVaultId,
         mirror.relyingParty,
         credentialIds
       );
@@ -2019,7 +2062,7 @@ async function resumePasskeyGetAfterPromptComplete(
       sendRuntimeCommand,
       requestId,
       mirror.ceremonyToken,
-      mirror.activeVaultId,
+      activeVaultId,
       mirror.relyingParty,
       mirror.origin,
       credentialIds,
@@ -2131,9 +2174,9 @@ async function resumePasskeyCreateAfterPromptComplete(
   try {
     const mirrors = await loadPasskeyCeremonyMirrorsQueued(chromeApi);
     const candidates = Object.values(mirrors).filter(
-      (candidate) =>
+      (candidate): candidate is PasskeyCreateCeremonyContext =>
         candidate.requestId === requestId &&
-        candidate.ceremony === "create" &&
+        isPasskeyCreateCeremonyContext(candidate) &&
         candidate.phase === "s1_user_authorization" &&
         candidate.promptMode === promptMode
     );
@@ -2165,6 +2208,12 @@ async function resumePasskeyCreateAfterPromptComplete(
         persistUserVerificationPromptState
       }
     });
+    if (!isPasskeyCreateCeremonyContext(mirror)) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        "VaultKern passkey ceremony is not restored"
+      );
+    }
 
     const createRequest = passkeyCreateRequestFromMirror(mirror);
     if (!createRequest) {
@@ -2212,6 +2261,12 @@ async function resumePasskeyCreateAfterPromptComplete(
       }
     );
     const activeVaultId = mirror.activeVaultId;
+    if (!passkeyNonemptyString(activeVaultId)) {
+      throw new WebAuthnRequestError(
+        "NotAllowedError",
+        PASSKEY_CEREMONY_MISSING_VAULT_BINDING_MESSAGE
+      );
+    }
     throwIfRequestCanceled();
     const excludedCredentialStatuses = await excludedCredentialStatusesForCreateRequest(
       sendRuntimeCommand,
@@ -2585,41 +2640,49 @@ function clonePasskeyCeremonyMirrors(
 function clonePasskeyCeremonyMirror(
   mirror: PasskeyCeremonyContext
 ): PasskeyCeremonyContext {
-  const common = {
-    ...mirror,
-    ancestorOrigins: [...mirror.ancestorOrigins],
-    ...(mirror.promptCredentialOptions
-      ? {
-          promptCredentialOptions: mirror.promptCredentialOptions.map((option) => ({
-            ...option
-          }))
-        }
-      : {})
-  };
+  const promptCredentialOptions = mirror.promptCredentialOptions
+    ? {
+        promptCredentialOptions: mirror.promptCredentialOptions.map((option) => ({
+          ...option
+        }))
+      }
+    : {};
 
   if (mirror.ceremony === "get") {
+    const payload = mirror as Partial<PasskeyGetCeremonyContext>;
     return {
-      ...common,
+      ...mirror,
       ceremony: "get",
-      ...(Array.isArray(mirror.getCredentialIds)
-        ? { getCredentialIds: [...mirror.getCredentialIds] }
+      ancestorOrigins: [...mirror.ancestorOrigins],
+      ...(Array.isArray(payload.getCredentialIds)
+        ? { getCredentialIds: [...payload.getCredentialIds] }
         : {}),
-      ...(mirror.getClientExtensionResults
-        ? { getClientExtensionResults: { ...mirror.getClientExtensionResults } }
-        : {})
-    };
+      ...(passkeyGetClientExtensionResultsAreSafe(payload.getClientExtensionResults)
+        ? { getClientExtensionResults: { ...payload.getClientExtensionResults } }
+        : {}),
+      ...promptCredentialOptions
+    } as PasskeyCeremonyContext;
   }
 
+  const payload = mirror as Partial<PasskeyCreateCeremonyContext>;
   return {
-    ...common,
+    ...mirror,
     ceremony: "create",
-    ...(Array.isArray(mirror.createExcludeCredentialIds)
-      ? { createExcludeCredentialIds: [...mirror.createExcludeCredentialIds] }
+    ancestorOrigins: [...mirror.ancestorOrigins],
+    ...(Array.isArray(payload.createExcludeCredentialIds)
+      ? { createExcludeCredentialIds: [...payload.createExcludeCredentialIds] }
       : {}),
-    ...(mirror.createClientExtensionResults
-      ? { createClientExtensionResults: { ...mirror.createClientExtensionResults } }
-      : {})
-  };
+    ...(passkeyCreateClientExtensionResultsAreSafe(
+      payload.createClientExtensionResults
+    )
+      ? {
+          createClientExtensionResults: {
+            ...payload.createClientExtensionResults
+          }
+        }
+      : {}),
+    ...promptCredentialOptions
+  } as PasskeyCeremonyContext;
 }
 
 async function ensurePasskeyCeremonySessionStorageTrusted(
@@ -2688,7 +2751,7 @@ async function clearPasskeyCeremonyMirror(
 }
 
 function isPasskeyCeremonyMirror(value: unknown): value is PasskeyCeremonyContext {
-  const candidate = value as Partial<PasskeyCeremonyContext> | null;
+  const candidate = value as PasskeyCeremonyMirrorCandidate | null;
   return (
     Boolean(candidate) &&
     candidate?.version === 1 &&
@@ -2750,7 +2813,10 @@ function isPasskeyCeremonyMirror(value: unknown): value is PasskeyCeremonyContex
 }
 
 function passkeyCeremonyPhaseIsKnown(phase: unknown): phase is PasskeyCeremonyPhase {
-  return typeof phase === "string" && PASSKEY_CEREMONY_PHASES.has(phase);
+  return (
+    typeof phase === "string" &&
+    PASSKEY_CEREMONY_PHASES.has(phase as PasskeyCeremonyPhase)
+  );
 }
 
 function passkeyUserVerificationRequirementIsKnown(
@@ -2764,7 +2830,7 @@ function passkeyUserVerificationRequirementIsKnown(
 }
 
 function passkeyCeremonyMirrorFrameContextIsSafe(
-  candidate: Partial<PasskeyCeremonyContext>
+  candidate: PasskeyCeremonyMirrorCandidate
 ) {
   if (candidate.frameKind === "top") {
     return (
@@ -2798,7 +2864,7 @@ function originsHaveSameUrlOrigin(left: string, right: string) {
 }
 
 function passkeyCeremonyMirrorHasRequiredPayload(
-  candidate: Partial<PasskeyCeremonyContext>
+  candidate: PasskeyCeremonyMirrorCandidate
 ) {
   if (
     candidate.phase === "s4_completion_and_mutation" ||
@@ -2834,7 +2900,7 @@ function passkeyCeremonyMirrorHasRequiredPayload(
 
   if (candidate.ceremony === "create") {
     return (
-      passkeyCreateRequestFromMirror(candidate as PasskeyCeremonyContext) !== null &&
+      passkeyCreateRequestFromMirror(candidate) !== null &&
       candidate.getCredentialIds === undefined &&
       candidate.getClientExtensionResults === undefined
     );
@@ -3199,13 +3265,15 @@ function passkeyGetClientExtensionResultsAreSafe(
     (record.appid === undefined || record.appid === false);
 }
 
-function getClientExtensionResultsFromMirror(mirror: PasskeyCeremonyContext) {
+function getClientExtensionResultsFromMirror(mirror: PasskeyGetCeremonyContext) {
   return passkeyGetClientExtensionResultsAreSafe(mirror.getClientExtensionResults)
     ? mirror.getClientExtensionResults
     : {};
 }
 
-function passkeyCreateRequestFromMirror(mirror: PasskeyCeremonyContext) {
+function passkeyCreateRequestFromMirror(
+  mirror: PasskeyCreateCeremonyContext | PasskeyCeremonyMirrorCandidate
+) {
   if (
     typeof mirror.createUserName !== "string" ||
     mirror.createUserName.trim() === "" ||
@@ -3254,13 +3322,10 @@ function passkeyCreateClientExtensionResultsAreSafe(
     return false;
   }
   const credProps = record.credProps as { rk?: unknown } | null;
-  return (
-    Boolean(credProps) &&
-    typeof credProps === "object" &&
-    !Array.isArray(credProps) &&
-    credProps.rk === true &&
-    Object.keys(credProps).every((key) => key === "rk")
-  );
+  if (!credProps || typeof credProps !== "object" || Array.isArray(credProps)) {
+    return false;
+  }
+  return credProps.rk === true && Object.keys(credProps).every((key) => key === "rk");
 }
 
 function passkeyCeremonyLedgerKnown(response: unknown) {
@@ -3958,7 +4023,7 @@ async function savePendingPasskeyCreateRegistration(
   sendRuntimeCommand: RuntimeCommandSender,
   ceremonyToken: string,
   activeVaultId: string,
-  setCeremonyPhase: (phase: "closed_failed") => void
+  setCeremonyPhase: (phase: "closed_aborted" | "closed_failed") => void
 ) {
   try {
     await savePasskeyRegistration(
@@ -4158,7 +4223,7 @@ function webAuthnRequestCancelKey(requestId: number, tabId: number, frameId: num
 function frameContextFromRequest(
   request: unknown,
   originContext: WebAuthnOriginContext
-) {
+): { tabId: number; frameId: number; frameKind: "top" | "subframe" } {
   const candidate = request as
     | { tabId?: unknown; frameId?: unknown }
     | null
@@ -4330,6 +4395,7 @@ async function handleCreateRequest(
     ceremonyPhase = "s0_pre_authorization";
     ceremonyMirror = {
       ...ceremonyContext,
+      ceremony: "create",
       createUserName: userNameFromCreateOptions(options),
       createUserDisplayName: userDisplayNameFromCreateOptions(options),
       createUserHandleBase64url: userHandleFromCreateOptions(options),
@@ -5383,8 +5449,8 @@ type RelyingPartyValidation = {
 };
 
 type AdvancePasskeyCeremony = (
-  expectedPhase: string,
-  nextPhase: string,
+  expectedPhase: PasskeyCeremonyActivePhase,
+  nextPhase: PasskeyCeremonyActivePhase,
   relatedOriginVerified?: boolean
 ) => Promise<void>;
 
@@ -5979,7 +6045,7 @@ async function restorePasskeyCeremonyVaultAuthorization({
   ) {
     throw new WebAuthnRequestError(
       "NotAllowedError",
-      "VaultKern passkey ceremony is missing its vault binding"
+      PASSKEY_CEREMONY_MISSING_VAULT_BINDING_MESSAGE
     );
   }
   await bindPasskeyCeremonyVault(
@@ -6693,13 +6759,14 @@ async function openPromptWindow<
   const url = chromeApi.runtime?.getURL?.(popupPath) ?? popupPath;
   let created: { id?: number } | undefined;
   try {
-    created = await chromeApi.windows.create({
-      url,
-      type: "popup",
-      width: config.width,
-      height: config.height,
-      focused: true
-    });
+    created =
+      (await chromeApi.windows.create({
+        url,
+        type: "popup",
+        width: config.width,
+        height: config.height,
+        focused: true
+      })) || undefined;
   } catch (error) {
     clearPromptState(promptKey);
     throw error;

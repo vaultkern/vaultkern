@@ -1,4 +1,13 @@
-type NativePort = chrome.runtime.Port;
+type NativePort = {
+  postMessage: (message: unknown) => void;
+  disconnect: () => void;
+  onMessage: {
+    addListener: (listener: (message: unknown) => void) => void;
+  };
+  onDisconnect: {
+    addListener: (listener: () => void) => void;
+  };
+};
 
 type NativeMessagingErrorCode =
   | "native_host_missing"
@@ -296,6 +305,9 @@ export function createNativeMessagingBridge(
   function cancelActiveRequest(error: Error) {
     const request = activeRequest;
     const requestPort = port;
+    if (!request) {
+      return;
+    }
     activeRequest = null;
     clearRequestTimeout(request);
     detachPort();
