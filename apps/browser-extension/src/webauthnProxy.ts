@@ -3764,48 +3764,54 @@ async function replayPasskeyCeremonyMirrorPhase(
 function passkeyCeremonyReplayTransitions(
   mirror: PasskeyCeremonyContext
 ): Array<[string, string, boolean?]> | null {
-  if (mirror.phase === "s0_pre_authorization") {
+  const target = passkeyCeremonyActivePhaseFrom(mirror.phase);
+  if (!target) {
+    return null;
+  }
+  if (target === "s0_pre_authorization") {
     return [];
   }
-  if (mirror.phase === "s1_user_authorization") {
-    return [["s0_pre_authorization", "s1_user_authorization"]];
-  }
-  if (mirror.phase === "s2_network_validation") {
-    return [
-      ["s0_pre_authorization", "s1_user_authorization"],
-      ["s1_user_authorization", "s2_network_validation"]
-    ];
-  }
-  if (mirror.phase === "s3_credential_resolution") {
-    return passkeyCeremonyCredentialResolutionReplayTransitions(mirror);
-  }
-  if (mirror.phase === "s3b_user_selection") {
-    const transitions = passkeyCeremonyCredentialResolutionReplayTransitions(mirror);
-    return transitions
-      ? [...transitions, ["s3_credential_resolution", "s3b_user_selection"]]
-      : null;
+
+  const start: PasskeyCeremonyActivePhase = "s0_pre_authorization";
+  const seen = new Set<PasskeyCeremonyActivePhase>([start]);
+  const queue: Array<{
+    phase: PasskeyCeremonyActivePhase;
+    path: Array<[string, string, boolean?]>;
+  }> = [{ phase: start, path: [] }];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) {
+      break;
+    }
+    for (const [edgeStart, edgeEnd] of PASSKEY_CEREMONY_TRANSITION_EDGES) {
+      if (
+        edgeStart !== current.phase ||
+        seen.has(edgeEnd) ||
+        !passkeyCeremonyTransitionEdgeAllowed(mirror, edgeStart, edgeEnd)
+      ) {
+        continue;
+      }
+      const edge = passkeyCeremonyReplayEdge(edgeStart, edgeEnd);
+      const path = [...current.path, edge];
+      if (edgeEnd === target) {
+        return path;
+      }
+      seen.add(edgeEnd);
+      queue.push({ phase: edgeEnd, path });
+    }
   }
 
   return null;
 }
 
-function passkeyCeremonyCredentialResolutionReplayTransitions(
-  mirror: PasskeyCeremonyContext
-): Array<[string, string, boolean?]> | null {
-  if (originMatchesRelyingParty(mirror.origin, mirror.relyingParty)) {
-    return [
-      ["s0_pre_authorization", "s1_user_authorization"],
-      ["s1_user_authorization", "s3_credential_resolution"]
-    ];
+function passkeyCeremonyReplayEdge(
+  from: PasskeyCeremonyActivePhase,
+  to: PasskeyCeremonyActivePhase
+): [string, string, boolean?] {
+  if (from === "s2_network_validation" && to === "s3_credential_resolution") {
+    return [from, to, true];
   }
-  if (mirror.relatedOriginVerified === true) {
-    return [
-      ["s0_pre_authorization", "s1_user_authorization"],
-      ["s1_user_authorization", "s2_network_validation"],
-      ["s2_network_validation", "s3_credential_resolution", true]
-    ];
-  }
-  return null;
+  return [from, to];
 }
 
 async function markPasskeyCeremonyDelivered(

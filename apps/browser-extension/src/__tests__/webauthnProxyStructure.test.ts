@@ -67,6 +67,20 @@ describe("webauthn proxy structure", () => {
     );
   });
 
+  it("replays persisted ceremony phases from the shared transition contract", () => {
+    const sourcePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../webauthnProxy.ts"
+    );
+    const source = readFileSync(sourcePath, "utf8");
+
+    expect(source).toContain("function passkeyCeremonyReplayTransitions");
+    expect(source).toContain("PASSKEY_CEREMONY_TRANSITION_EDGES");
+    expect(source).not.toContain(
+      "function passkeyCeremonyCredentialResolutionReplayTransitions"
+    );
+  });
+
   it("routes related-origin credential-resolution phase changes through one helper", () => {
     const sourcePath = resolve(
       dirname(fileURLToPath(import.meta.url)),
