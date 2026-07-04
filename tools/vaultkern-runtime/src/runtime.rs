@@ -2280,7 +2280,7 @@ impl Runtime {
                     entry_id: entry_id.clone(),
                     credential_id: Some(registration.passkey.credential_id.clone()),
                     created: false,
-                    rollback_entry: Some(rollback_entry.clone()),
+                    rollback_entry: Some(rollback_entry),
                 },
                 PasskeyCeremonyDurableStateDto::Snapshot,
             )?;

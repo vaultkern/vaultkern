@@ -5829,7 +5829,7 @@ function userDisplayNameFromCreateOptions(options: {
 function userHandleFromCreateOptions(options: { user?: { id?: unknown } }) {
   const userHandle = options.user?.id;
   if (typeof userHandle !== "string") {
-    throw new WebAuthnRequestError("TypeError", "missing WebAuthn user id");
+    throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn user id");
   }
   validateWebAuthnUserHandleLength(userHandle);
   return userHandle;
@@ -5860,7 +5860,7 @@ function publicKeyAlgorithmFromCreateOptions(options: { pubKeyCredParams?: unkno
 function validateCreateUserHandleOption(options: { user?: { id?: unknown } }) {
   const userHandle = options.user?.id;
   if (typeof userHandle !== "string") {
-    throw new WebAuthnRequestError("TypeError", "missing WebAuthn user id");
+    throw new WebAuthnRequestError("NotAllowedError", "missing WebAuthn user id");
   }
   validateWebAuthnUserHandleLength(userHandle);
 }
@@ -5869,7 +5869,7 @@ function validateWebAuthnUserHandleLength(userHandleBase64url: string) {
   const byteLength = base64urlDecodedByteLength(userHandleBase64url);
   if (byteLength < 1 || byteLength > 64) {
     throw new WebAuthnRequestError(
-      "TypeError",
+      "NotAllowedError",
       "WebAuthn user id must be 1 to 64 bytes"
     );
   }
@@ -5877,14 +5877,20 @@ function validateWebAuthnUserHandleLength(userHandleBase64url: string) {
 
 function base64urlDecodedByteLength(value: string) {
   if (!/^[A-Za-z0-9_-]*$/u.test(value) || value.length % 4 === 1) {
-    throw new WebAuthnRequestError("TypeError", "WebAuthn user id must be base64url encoded");
+    throw new WebAuthnRequestError(
+      "NotAllowedError",
+      "WebAuthn user id must be base64url encoded"
+    );
   }
   const padding = "=".repeat((4 - (value.length % 4)) % 4);
   const base64 = `${value}${padding}`.replace(/-/g, "+").replace(/_/g, "/");
   try {
     return atob(base64).length;
   } catch {
-    throw new WebAuthnRequestError("TypeError", "WebAuthn user id must be base64url encoded");
+    throw new WebAuthnRequestError(
+      "NotAllowedError",
+      "WebAuthn user id must be base64url encoded"
+    );
   }
 }
 

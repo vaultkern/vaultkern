@@ -13987,7 +13987,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it("returns TypeError when WebAuthn create user id is longer than 64 bytes", async () => {
+  it("returns NotAllowedError when WebAuthn create user id is longer than 64 bytes", async () => {
     let createListener: ((request: unknown) => void) | undefined;
     const completeCreateRequest = vi.fn(async () => undefined);
     const sendRuntimeCommand = runtimeCommandMock();
@@ -14030,13 +14030,13 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(completeCreateRequest).toHaveBeenCalledWith({
       requestId: 232,
       error: {
-        name: "TypeError",
+        name: "NotAllowedError",
         message: "WebAuthn user id must be 1 to 64 bytes"
       }
     });
   });
 
-  it("returns TypeError when WebAuthn create user id is empty", async () => {
+  it("returns NotAllowedError when WebAuthn create user id is empty", async () => {
     let createListener: ((request: unknown) => void) | undefined;
     const completeCreateRequest = vi.fn(async () => undefined);
     const sendRuntimeCommand = runtimeCommandMock();
@@ -14079,13 +14079,13 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(completeCreateRequest).toHaveBeenCalledWith({
       requestId: 233,
       error: {
-        name: "TypeError",
+        name: "NotAllowedError",
         message: "WebAuthn user id must be 1 to 64 bytes"
       }
     });
   });
 
-  it("returns TypeError when WebAuthn create user id is missing", async () => {
+  it("returns NotAllowedError when WebAuthn create user id is missing", async () => {
     let createListener: ((request: unknown) => void) | undefined;
     const completeCreateRequest = vi.fn(async () => undefined);
     const sendRuntimeCommand = runtimeCommandMock();
@@ -14127,7 +14127,7 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(completeCreateRequest).toHaveBeenCalledWith({
       requestId: 234,
       error: {
-        name: "TypeError",
+        name: "NotAllowedError",
         message: "missing WebAuthn user id"
       }
     });

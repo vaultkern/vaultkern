@@ -71,7 +71,7 @@ pub fn create_assertion(
     if passkey.relying_party != request.relying_party {
         anyhow::bail!("passkey relying party mismatch");
     }
-    if !request.user_presence_verified {
+    if !request.user_presence_verified && !request.user_verified {
         anyhow::bail!("passkey user presence was not verified");
     }
     validate_origin_for_relying_party(
@@ -954,6 +954,55 @@ mod tests {
 
         let flags = super::assertion_flags(&passkey, true);
 
+        assert_ne!(flags & super::AUTH_DATA_FLAG_USER_VERIFIED, 0);
+    }
+
+    #[test]
+    fn assertion_accepts_user_verification_as_presence() {
+        let create_client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.create","challenge":"Y3JlYXRlLWNoYWxsZW5nZQ","origin":"https://example.com","crossOrigin":false}"#,
+        );
+        let registration = create_registration(PasskeyRegistrationRequest {
+            relying_party: "example.com",
+            origin: "https://example.com",
+            user_name: "alice@example.com",
+            user_handle_base64url: "dXNlci0x",
+            public_key_algorithm: -7,
+            user_verified: false,
+            related_origin_verified: false,
+            client_data_json_base64url: &create_client_data_json,
+            challenge_base64url: "Y3JlYXRlLWNoYWxsZW5nZQ",
+            top_origin: None,
+            ancestor_origins: &[],
+        })
+        .expect("registration");
+        let get_client_data_json = URL_SAFE_NO_PAD.encode(
+            br#"{"type":"webauthn.get","challenge":"Z2V0LWNoYWxsZW5nZQ","origin":"https://example.com","crossOrigin":false}"#,
+        );
+
+        let assertion = create_assertion(
+            &registration.passkey,
+            PasskeyAssertionRequest {
+                relying_party: "example.com",
+                origin: "https://example.com",
+                credential_id: Some(&registration.passkey.credential_id),
+                discoverable: false,
+                user_presence_verified: false,
+                user_verified: true,
+                related_origin_verified: false,
+                client_data_json_base64url: &get_client_data_json,
+                challenge_base64url: "Z2V0LWNoYWxsZW5nZQ",
+                top_origin: None,
+                ancestor_origins: &[],
+            },
+        )
+        .expect("assertion");
+        let authenticator_data = URL_SAFE_NO_PAD
+            .decode(assertion.authenticator_data_base64url)
+            .expect("authenticator data");
+        let flags = authenticator_data[32];
+
+        assert_ne!(flags & super::AUTH_DATA_FLAG_USER_PRESENT, 0);
         assert_ne!(flags & super::AUTH_DATA_FLAG_USER_VERIFIED, 0);
     }
 
