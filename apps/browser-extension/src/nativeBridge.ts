@@ -154,18 +154,6 @@ function stripResponseRequestId(response: unknown) {
   return rest;
 }
 
-function isNativeRuntimeErrorResponse(
-  response: unknown
-): response is { type: "error"; code: string; message: string } {
-  return (
-    typeof response === "object" &&
-    response !== null &&
-    (response as { type?: unknown }).type === "error" &&
-    typeof (response as { code?: unknown }).code === "string" &&
-    typeof (response as { message?: unknown }).message === "string"
-  );
-}
-
 function isStartupCommand(message: unknown) {
   const type = commandTypeFromMessage(message);
   return type === "get_session_state" || type === "list_recent_vaults";
@@ -302,26 +290,6 @@ export function createNativeMessagingBridge(
     }
   }
 
-  function cancelActiveRequest(error: Error) {
-    const request = activeRequest;
-    const requestPort = port;
-    if (!request) {
-      return;
-    }
-    activeRequest = null;
-    clearRequestTimeout(request);
-    detachPort();
-
-    try {
-      requestPort?.disconnect();
-    } catch {
-      // The stale request is already being rejected locally.
-    }
-
-    request.reject(error);
-    flushQueue();
-  }
-
   function cancelQueuedPreloads(nextMessage: unknown) {
     if (!isStartupCommand(nextMessage)) {
       return;
@@ -367,20 +335,15 @@ export function createNativeMessagingBridge(
     const responseRequestId = requestIdFromResponse(response);
     if (responseRequestId !== request.requestId) {
       if (responseRequestId === null) {
-        if (isNativeRuntimeErrorResponse(response)) {
-          activeRequest = null;
-          clearRequestTimeout(request);
-          request.resolve(response);
-          flushQueue();
-          return;
-        }
-
-        cancelActiveRequest(
-          new NativeMessagingError(
-            "native_unknown",
-            "native response did not include a matching request id"
-          )
-        );
+        emitEvent({
+          event: "response",
+          commandType: commandTypeFromMessage(request.message)
+        });
+        activeRequest = null;
+        clearRequestTimeout(request);
+        request.resolve(response);
+        flushQueue();
+        return;
       }
       return;
     }

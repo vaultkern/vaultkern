@@ -5608,6 +5608,132 @@ describe("webAuthenticationProxy wrapper", () => {
     expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
   });
 
+  it("restores a persisted approval prompt when completion arrives before reconcile finishes", async () => {
+    let messageListener:
+      | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void)
+      | undefined;
+    const sessionStorage = createSessionStorage({
+      vaultkernPasskeyCeremonies: passkeyCeremonyStorage({
+        "token-create-early-approval": {
+          version: 1,
+          ceremonyToken: "token-create-early-approval",
+          ceremony: "create",
+          phase: "s1_user_authorization",
+          origin: "https://example.com",
+          ancestorOrigins: [],
+          relyingParty: "example.com",
+          challengeBase64url: "cmVnaXN0ZXItMQ",
+          requestId: 219,
+          tabId: 101,
+          frameId: 0,
+          frameKind: "top",
+          activeVaultId: "vault-1",
+          createUserName: "alice@example.com",
+          createUserDisplayName: "Alice",
+          createUserHandleBase64url: "dXNlci0x",
+          createPublicKeyAlgorithm: -7,
+          createExcludeCredentialIds: [],
+          createClientExtensionResults: {},
+          popupNonce: "nonce-create-early-approval",
+          promptMode: "approve",
+          registeredAtEpochMs: 1_000,
+          expiresAtEpochMs: Date.now() + 300_000
+        }
+      })
+    });
+    const completeCreateRequest = vi.fn(async () => undefined);
+    const chromeApi = {
+      runtime: {
+        getURL: vi.fn((path: string) => `chrome-extension://id/${path}`),
+        onMessage: {
+          addListener(
+            listener: (
+              message: unknown,
+              sender: unknown,
+              sendResponse: (response: unknown) => void
+            ) => void
+          ) {
+            messageListener = listener;
+          }
+        }
+      },
+      storage: {
+        session: sessionStorage
+      },
+      webAuthenticationProxy: {
+        attach: vi.fn(async () => undefined),
+        completeCreateRequest
+      }
+    };
+    const sendRuntimeCommand = vi.fn(async (command: Record<string, unknown>) => {
+      if (command.type === "query_passkey_ceremony_ledger") {
+        return {
+          type: "passkey_ceremony_ledger",
+          known: true,
+          phase: "s1_user_authorization",
+          durableState: "none",
+          deliveryState: "not_delivered"
+        };
+      }
+      if (command.type === "advance_passkey_ceremony_phase") {
+        return { type: "passkey_ceremony_advanced", advanced: true };
+      }
+      if (command.type === "create_passkey_registration") {
+        return {
+          type: "passkey_registration",
+          entryId: "entry-1",
+          credentialId: "Y3JlZGVudGlhbC0x",
+          created: true,
+          authenticatorDataBase64url: "auth-data",
+          attestationObjectBase64url: "attestation-object",
+          clientDataJsonBase64url: "client-data",
+          publicKeyBase64url: "public-key",
+          publicKeyAlgorithm: -7
+        };
+      }
+      if (command.type === "save_passkey_registration") {
+        return { type: "save_vault_result", status: "saved" };
+      }
+      if (command.type === "commit_passkey_registration") {
+        return { type: "saved" };
+      }
+      if (command.type === "bind_passkey_ceremony_vault") {
+        return { type: "passkey_ceremony_vault_bound", bound: true };
+      }
+
+      throw new Error(`unexpected command: ${command.type}`);
+    });
+
+    await attachWebAuthnProxy(chromeApi, { sendRuntimeCommand });
+
+    let response: unknown;
+    messageListener?.(
+      {
+        type: "vaultkern_presence_complete",
+        requestId: 219,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-create-early-approval"
+      },
+      {
+        url: "chrome-extension://id/popup.html?webauthn=approve&requestId=219&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-create-early-approval"
+      },
+      (value: unknown) => {
+        response = value;
+      }
+    );
+
+    await vi.waitFor(() => {
+      expect(response).toEqual({ ok: true });
+      expect(completeCreateRequest).toHaveBeenCalledTimes(1);
+    });
+    expect(sendRuntimeCommand).toHaveBeenCalledWith({
+      type: "query_passkey_ceremony_ledger",
+      ceremony_token: "token-create-early-approval"
+    });
+    expect(sessionStorage.snapshot().vaultkernPasskeyCeremonies).toBeUndefined();
+  });
+
   it("resumes a known equal-phase S1 create request when the restored unlock prompt completes", async () => {
     let messageListener:
       | ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void)

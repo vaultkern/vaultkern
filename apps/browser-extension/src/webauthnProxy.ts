@@ -875,51 +875,64 @@ function registerUnlockCompleteHandler(
       if (typeof requestId !== "number") {
         return;
       }
-      const promptKey = matchingPromptKey(
-        promptStates.unlock.contexts,
-        promptStates.unlock.nonces,
-        promptStates.unlock.requestIds,
-        requestId,
-        message,
-        sender,
-        "unlock"
-      );
-      if (!promptKey) {
-        return;
-      }
-      void recordWebAuthnDebug(chromeApi, {
-        event: "unlock_complete_message",
-        requestId
-      });
-      const unlockUserVerificationProof =
-        unlockUserVerificationProofFromMessage(message);
-      const completeSignal: UnlockCompleteSignal = {
-        ...(unlockUserVerificationProof
-          ? { userVerificationProof: unlockUserVerificationProof }
-          : {})
-      };
-      const waiters = [...(promptStates.unlock.completeWaiters.get(promptKey) ?? [])];
-      clearUnlockPromptState(promptKey);
-      for (const waiter of waiters) {
-        waiter(completeSignal);
-      }
-      if (waiters.length === 0) {
-        promptStates.unlock.pendingCompleteSignals.set(promptKey, completeSignal);
-      }
-      if (waiters.length === 0 && promptStates.unlock.activeDrivers.has(promptKey)) {
-        return;
-      } else if (waiters.length === 0) {
-        void resumePasskeyCeremonyAfterPromptComplete(
+      void (async () => {
+        const promptKey = await matchingPromptKeyAfterPersistedRestore(
           chromeApi,
           sendRuntimeCommand,
+          promptStates.unlock,
           requestId,
-          "unlock",
-          undefined,
-          canceledRequests,
-          promptKey
+          message,
+          sender,
+          "unlock"
         );
-      }
-      return;
+        if (!promptKey) {
+          if (typeof sendResponse === "function") {
+            sendResponse({
+              ok: false,
+              error: "VaultKern cannot restore this passkey prompt"
+            });
+          }
+          return;
+        }
+        void recordWebAuthnDebug(chromeApi, {
+          event: "unlock_complete_message",
+          requestId
+        });
+        const unlockUserVerificationProof =
+          unlockUserVerificationProofFromMessage(message);
+        const completeSignal: UnlockCompleteSignal = {
+          ...(unlockUserVerificationProof
+            ? { userVerificationProof: unlockUserVerificationProof }
+            : {})
+        };
+        const waiters = [
+          ...(promptStates.unlock.completeWaiters.get(promptKey) ?? [])
+        ];
+        clearUnlockPromptState(promptKey);
+        for (const waiter of waiters) {
+          waiter(completeSignal);
+        }
+        if (waiters.length === 0) {
+          promptStates.unlock.pendingCompleteSignals.set(promptKey, completeSignal);
+        }
+        if (typeof sendResponse === "function") {
+          sendResponse({ ok: true });
+        }
+        if (waiters.length === 0 && promptStates.unlock.activeDrivers.has(promptKey)) {
+          return;
+        } else if (waiters.length === 0) {
+          void resumePasskeyCeremonyAfterPromptComplete(
+            chromeApi,
+            sendRuntimeCommand,
+            requestId,
+            "unlock",
+            undefined,
+            canceledRequests,
+            promptKey
+          );
+        }
+      })();
+      return true;
     }
 
     if (isPresenceCompleteMessage(message)) {
@@ -927,59 +940,70 @@ function registerUnlockCompleteHandler(
       if (typeof requestId !== "number") {
         return;
       }
-      const promptKey = matchingPromptKey(
-        promptStates.approve.contexts,
-        promptStates.approve.nonces,
-        promptStates.approve.requestIds,
-        requestId,
-        message,
-        sender,
-        "approve"
-      );
-      if (!promptKey) {
-        return;
-      }
-      void recordWebAuthnDebug(chromeApi, {
-        event: "presence_complete_message",
-        requestId
-      });
-      const credentialId = credentialIdFromMessage(message);
-      const expected = promptStates.approve.contexts.get(promptKey);
-      const keepOpenForCredentialSelection =
-        !credentialId &&
-        expected?.keepOpenForCredentialSelection === true &&
-        (expected.credentialOptions?.length ?? 0) === 0;
-      const completeSignal: PresenceCompleteSignal = {
-        ...(credentialId ? { credentialId } : {})
-      };
-      const waiters = [...(promptStates.approve.completeWaiters.get(promptKey) ?? [])];
-      if (keepOpenForCredentialSelection) {
-        promptStates.approve.completeWaiters.delete(promptKey);
-      } else {
-        clearPresencePromptState(promptKey);
-      }
-      for (const waiter of waiters) {
-        waiter(completeSignal);
-      }
-      if (typeof sendResponse === "function") {
-        sendResponse({
-          ok: true,
-          ...(keepOpenForCredentialSelection ? { keepOpen: true } : {})
-        });
-      }
-      if (waiters.length === 0 && promptStates.approve.activeDrivers.has(promptKey)) {
-        promptStates.approve.pendingCompleteSignals.set(promptKey, completeSignal);
-      } else if (waiters.length === 0) {
-        void resumePasskeyCeremonyAfterPromptComplete(
+      void (async () => {
+        const promptKey = await matchingPromptKeyAfterPersistedRestore(
           chromeApi,
           sendRuntimeCommand,
+          promptStates.approve,
           requestId,
-          "approve",
-          credentialId,
-          canceledRequests,
-          promptKey
+          message,
+          sender,
+          "approve"
         );
-      }
+        if (!promptKey) {
+          if (typeof sendResponse === "function") {
+            sendResponse({
+              ok: false,
+              error: "VaultKern cannot restore this passkey prompt"
+            });
+          }
+          return;
+        }
+        void recordWebAuthnDebug(chromeApi, {
+          event: "presence_complete_message",
+          requestId
+        });
+        const credentialId = credentialIdFromMessage(message);
+        const expected = promptStates.approve.contexts.get(promptKey);
+        const keepOpenForCredentialSelection =
+          !credentialId &&
+          expected?.keepOpenForCredentialSelection === true &&
+          (expected.credentialOptions?.length ?? 0) === 0;
+        const completeSignal: PresenceCompleteSignal = {
+          ...(credentialId ? { credentialId } : {})
+        };
+        const waiters = [
+          ...(promptStates.approve.completeWaiters.get(promptKey) ?? [])
+        ];
+        if (keepOpenForCredentialSelection) {
+          promptStates.approve.completeWaiters.delete(promptKey);
+        } else {
+          clearPresencePromptState(promptKey);
+        }
+        for (const waiter of waiters) {
+          waiter(completeSignal);
+        }
+        if (typeof sendResponse === "function") {
+          sendResponse({
+            ok: true,
+            ...(keepOpenForCredentialSelection ? { keepOpen: true } : {})
+          });
+        }
+        if (waiters.length === 0 && promptStates.approve.activeDrivers.has(promptKey)) {
+          promptStates.approve.pendingCompleteSignals.set(promptKey, completeSignal);
+        } else if (waiters.length === 0) {
+          void resumePasskeyCeremonyAfterPromptComplete(
+            chromeApi,
+            sendRuntimeCommand,
+            requestId,
+            "approve",
+            credentialId,
+            canceledRequests,
+            promptKey
+          );
+        }
+      })();
+      return true;
     }
 
     if (isUserVerificationCompleteMessage(message)) {
@@ -987,41 +1011,41 @@ function registerUnlockCompleteHandler(
       if (typeof requestId !== "number") {
         return;
       }
-      const promptKey = matchingPromptKey(
-        promptStates.verify.contexts,
-        promptStates.verify.nonces,
-        promptStates.verify.requestIds,
-        requestId,
-        message,
-        sender,
-        "verify"
-      );
-      if (!promptKey) {
-        if (typeof sendResponse === "function") {
-          sendResponse({
-            ok: false,
-            error: "VaultKern cannot verify this passkey prompt"
-          });
-        }
-        return true;
-      }
-      const expected = promptStates.verify.contexts.get(promptKey);
-      const method = userVerificationMethodFromMessage(message);
-      const password = userVerificationPasswordFromMessage(message);
-      if (
-        !expected ||
-        !method ||
-        (method === "master_password" && typeof password !== "string")
-      ) {
-        if (typeof sendResponse === "function") {
-          sendResponse({
-            ok: false,
-            error: "VaultKern passkey user verification is incomplete"
-          });
-        }
-        return true;
-      }
       void (async () => {
+        const promptKey = await matchingPromptKeyAfterPersistedRestore(
+          chromeApi,
+          sendRuntimeCommand,
+          promptStates.verify,
+          requestId,
+          message,
+          sender,
+          "verify"
+        );
+        if (!promptKey) {
+          if (typeof sendResponse === "function") {
+            sendResponse({
+              ok: false,
+              error: "VaultKern cannot verify this passkey prompt"
+            });
+          }
+          return;
+        }
+        const expected = promptStates.verify.contexts.get(promptKey);
+        const method = userVerificationMethodFromMessage(message);
+        const password = userVerificationPasswordFromMessage(message);
+        if (
+          !expected ||
+          !method ||
+          (method === "master_password" && typeof password !== "string")
+        ) {
+          if (typeof sendResponse === "function") {
+            sendResponse({
+              ok: false,
+              error: "VaultKern passkey user verification is incomplete"
+            });
+          }
+          return;
+        }
         try {
           const response = await sendRuntimeCommand({
             type: "verify_passkey_user",
@@ -1156,8 +1180,8 @@ function credentialIdFromMessage(message: unknown) {
     : undefined;
 }
 
-function matchingPromptKey(
-  contexts: Map<string, WebAuthnPromptContext>,
+function matchingPromptKey<TContext extends WebAuthnPromptContext>(
+  contexts: Map<string, TContext>,
   nonces: Map<string, string>,
   requestIds: Map<string, number>,
   requestId: number,
@@ -1193,6 +1217,80 @@ function matchingPromptKey(
   }
 
   return null;
+}
+
+async function matchingPromptKeyAfterPersistedRestore<
+  TContext extends WebAuthnPromptContext,
+  TCompleteSignal
+>(
+  chromeApi: ChromeLike,
+  sendRuntimeCommand: RuntimeCommandSender,
+  state: PromptState<TContext, TCompleteSignal>,
+  requestId: number,
+  message: unknown,
+  sender: unknown,
+  mode: WebAuthnPromptMode
+) {
+  const promptKey = matchingPromptKey(
+    state.contexts,
+    state.nonces,
+    state.requestIds,
+    requestId,
+    message,
+    sender,
+    mode
+  );
+  if (promptKey) {
+    return promptKey;
+  }
+  if (!promptCompletionCanAttemptPersistedRestore(message, sender, requestId, mode)) {
+    return null;
+  }
+
+  await reconcilePersistedPasskeyCeremonies(chromeApi, sendRuntimeCommand);
+  return matchingPromptKey(
+    state.contexts,
+    state.nonces,
+    state.requestIds,
+    requestId,
+    message,
+    sender,
+    mode
+  );
+}
+
+function promptCompletionCanAttemptPersistedRestore(
+  message: unknown,
+  sender: unknown,
+  requestId: number,
+  mode: WebAuthnPromptMode
+) {
+  const candidate = message as
+    | {
+        origin?: unknown;
+        relyingParty?: unknown;
+        topOrigin?: unknown;
+        nonce?: unknown;
+      }
+    | null;
+  if (
+    typeof candidate?.nonce !== "string" ||
+    candidate.nonce.trim() === "" ||
+    typeof candidate.origin !== "string" ||
+    candidate.origin.trim() === "" ||
+    typeof candidate.relyingParty !== "string" ||
+    candidate.relyingParty.trim() === "" ||
+    (candidate.topOrigin !== undefined && typeof candidate.topOrigin !== "string")
+  ) {
+    return false;
+  }
+
+  return senderMatchesPrompt(sender, mode, requestId, candidate.nonce, {
+    origin: candidate.origin,
+    relyingParty: candidate.relyingParty,
+    ...(candidate.topOrigin ? { topOrigin: candidate.topOrigin } : {}),
+    ancestorOrigins: []
+  });
 }
 
 function senderMatchesPrompt(

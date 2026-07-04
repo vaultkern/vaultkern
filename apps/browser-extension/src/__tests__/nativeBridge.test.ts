@@ -146,6 +146,31 @@ describe("createNativeMessagingBridge", () => {
     await expect(second).resolves.toEqual({ type: "second_response" });
   });
 
+  it("accepts untagged success responses from a legacy native host", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    const first = bridge.send({ version: 1, command: { type: "first" } });
+    const second = bridge.send({ version: 1, command: { type: "second" } });
+
+    port.emitRawMessage({ type: "first_response" });
+
+    await expect(first).resolves.toEqual({ type: "first_response" });
+    expect(port.disconnect).not.toHaveBeenCalled();
+    expect(port.postMessage).toHaveBeenCalledTimes(2);
+
+    port.emitMessage({ type: "second_response" });
+
+    await expect(second).resolves.toEqual({ type: "second_response" });
+  });
+
   it("ignores native responses whose request id does not match the active request", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
