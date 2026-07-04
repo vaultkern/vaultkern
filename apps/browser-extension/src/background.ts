@@ -233,16 +233,6 @@ async function registerWebAuthnPageHook() {
   try {
     await chromeApi.scripting.registerContentScripts([
       {
-        id: WEB_AUTHN_CONTENT_SCRIPT_ID,
-        matches: ["<all_urls>"],
-        js: [WEB_AUTHN_CONTENT_SCRIPT_FILE],
-        runAt: "document_start",
-        world: "ISOLATED",
-        allFrames: true,
-        matchOriginAsFallback: true,
-        persistAcrossSessions: false
-      },
-      {
         id: WEB_AUTHN_PAGE_HOOK_SCRIPT_ID,
         matches: ["<all_urls>"],
         js: [WEB_AUTHN_PAGE_HOOK_SCRIPT_FILE],

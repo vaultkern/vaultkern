@@ -623,16 +623,6 @@ describe("background bridge", () => {
     await vi.waitFor(() => {
       expect(registerContentScripts).toHaveBeenCalledWith([
         {
-          id: "vaultkern-webauthn-content-bridge",
-          matches: ["<all_urls>"],
-          js: ["webauthnContentScript.js"],
-          runAt: "document_start",
-          world: "ISOLATED",
-          allFrames: true,
-          matchOriginAsFallback: true,
-          persistAcrossSessions: false
-        },
-        {
           id: "vaultkern-webauthn-page-hook",
           matches: ["<all_urls>"],
           js: ["webauthnPageHook.js"],
