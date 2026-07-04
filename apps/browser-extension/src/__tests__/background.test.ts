@@ -10,6 +10,45 @@ type StorageChangeListener = (
   areaName: string
 ) => void;
 
+function createContentScriptRegistry(initialIds: string[] = []) {
+  const registeredIds = new Set(initialIds);
+  const registerContentScripts = vi.fn(
+    async (scripts: Array<{ id?: string }>) => {
+      for (const script of scripts) {
+        if (!script.id) {
+          throw new Error("content script id is required");
+        }
+        if (registeredIds.has(script.id)) {
+          throw new Error(`Duplicate script ID: ${script.id}`);
+        }
+      }
+      for (const script of scripts) {
+        registeredIds.add(script.id as string);
+      }
+    }
+  );
+  const unregisterContentScripts = vi.fn(
+    async (details: { ids?: string[] }) => {
+      const ids = details.ids ?? [];
+      const missingIds = ids.filter((id) => !registeredIds.has(id));
+      if (missingIds.length > 0) {
+        throw new Error(`Nonexistent script ID: ${missingIds.join(", ")}`);
+      }
+      for (const id of ids) {
+        registeredIds.delete(id);
+      }
+    }
+  );
+
+  return {
+    registerContentScripts,
+    unregisterContentScripts,
+    hasRegisteredContentScript(id: string) {
+      return registeredIds.has(id);
+    }
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.resetModules();
@@ -1243,7 +1282,9 @@ describe("background bridge", () => {
   it("unregisters the WebAuthn page hook when the provider is disabled", async () => {
     const port = createPort();
     const detach = vi.fn(async () => undefined);
-    const unregisterContentScripts = vi.fn(async () => undefined);
+    const scriptRegistry = createContentScriptRegistry([
+      "vaultkern-webauthn-page-hook"
+    ]);
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -1272,7 +1313,7 @@ describe("background bridge", () => {
         }
       },
       scripting: {
-        unregisterContentScripts
+        unregisterContentScripts: scriptRegistry.unregisterContentScripts
       },
       webAuthenticationProxy: {
         detach
@@ -1282,10 +1323,13 @@ describe("background bridge", () => {
     await import("../background");
 
     await vi.waitFor(() => {
-      expect(unregisterContentScripts).toHaveBeenCalledWith({
+      expect(scriptRegistry.unregisterContentScripts).toHaveBeenCalledWith({
         ids: ["vaultkern-webauthn-page-hook"]
       });
     });
+    expect(
+      scriptRegistry.hasRegisteredContentScript("vaultkern-webauthn-page-hook")
+    ).toBe(false);
   });
 
   it("registers WebAuthn request listeners before async settings load finishes", async () => {
@@ -1496,8 +1540,7 @@ describe("background bridge", () => {
     const port = createPort();
     const attach = vi.fn(async () => undefined);
     const detach = vi.fn(async () => undefined);
-    const registerContentScripts = vi.fn(async () => undefined);
-    const unregisterContentScripts = vi.fn(async () => undefined);
+    const scriptRegistry = createContentScriptRegistry();
     const executeScript = vi.fn(async () => undefined);
     const query = vi.fn(async () => [{ id: 7 }]);
     let passkeyProviderEnabled = true;
@@ -1533,8 +1576,8 @@ describe("background bridge", () => {
       },
       scripting: {
         executeScript,
-        registerContentScripts,
-        unregisterContentScripts
+        registerContentScripts: scriptRegistry.registerContentScripts,
+        unregisterContentScripts: scriptRegistry.unregisterContentScripts
       },
       tabs: {
         query
@@ -1554,10 +1597,13 @@ describe("background bridge", () => {
         world: "MAIN"
       });
     });
+    expect(
+      scriptRegistry.hasRegisteredContentScript("vaultkern-webauthn-page-hook")
+    ).toBe(true);
 
     executeScript.mockClear();
     query.mockClear();
-    unregisterContentScripts.mockClear();
+    scriptRegistry.unregisterContentScripts.mockClear();
 
     passkeyProviderEnabled = false;
     for (const listener of storageListeners) {
@@ -1584,9 +1630,12 @@ describe("background bridge", () => {
     ).toBe(false);
     delete (globalThis as Record<string, unknown>)
       .__vaultkernWebAuthnPageHookEnabled;
-    expect(unregisterContentScripts).toHaveBeenCalledWith({
+    expect(scriptRegistry.unregisterContentScripts).toHaveBeenCalledWith({
       ids: ["vaultkern-webauthn-page-hook"]
     });
+    expect(
+      scriptRegistry.hasRegisteredContentScript("vaultkern-webauthn-page-hook")
+    ).toBe(false);
   });
 
   it("re-runs WebAuthn proxy sync when settings change during attach", async () => {

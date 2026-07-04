@@ -19,6 +19,8 @@ const repoRoot = resolve(extensionRoot, "../..");
 const extensionPath = join(extensionRoot, "dist");
 const runtimePath = join(repoRoot, "target/debug/vaultkern-runtime");
 const vkdbxArgs = ["run", "-p", "vkdbx", "--", "roundtrip-demo"];
+const PASSKEY_CREDENTIAL_OPTIONS_POLL_MS = 250;
+const PASSKEY_CREDENTIAL_OPTIONS_TIMEOUT_MS = 15_000;
 const password = "smoke-password";
 const username = "smoke-user@example.com";
 const entryPassword = "smoke-secret";
@@ -232,43 +234,82 @@ async function approvePasskeyPromptAndSelectCredential(
   );
   await prompt.waitForLoadState("domcontentloaded");
   await prompt.getByRole("button", { name: "Continue passkey request" }).click();
-  const closed = await prompt.waitForEvent("close", { timeout: 1_000 }).then(
-    () => true,
-    () => false
+  const selection = await waitForPromptCredentialSelectionOrClose(
+    prompt,
+    label,
+    credentialId
   );
-  if (closed) {
+  if (selection.closed) {
     return;
   }
 
-  const credentialIndex = await prompt.evaluate(async (expectedCredentialId) => {
-    const params = new URLSearchParams(window.location.search);
-    const requestIdValue = params.get("requestId");
-    const requestId =
-      requestIdValue && requestIdValue.trim() !== "" ? Number(requestIdValue) : null;
-    if (typeof requestId !== "number" || !Number.isFinite(requestId)) {
-      return -1;
-    }
-
-    const response = await chrome.runtime.sendMessage({
-      type: "vaultkern_presence_options_request",
-      requestId,
-      ...(params.get("origin") ? { origin: params.get("origin") } : {}),
-      ...(params.get("relyingParty") ? { relyingParty: params.get("relyingParty") } : {}),
-      ...(params.get("topOrigin") ? { topOrigin: params.get("topOrigin") } : {}),
-      ...(params.get("nonce") ? { nonce: params.get("nonce") } : {})
-    });
-    const options = Array.isArray(response?.credentialOptions)
-      ? response.credentialOptions
-      : [];
-    return options.findIndex((option) => option?.credentialId === expectedCredentialId);
-  }, credentialId);
-  if (credentialIndex < 0) {
-    throw new Error(`${label} did not expose credential ${credentialId} for selection`);
-  }
-
-  await prompt.getByRole("radio").nth(credentialIndex).check();
+  await prompt.getByRole("radio").nth(selection.credentialIndex).check();
   await prompt.getByRole("button", { name: "Continue passkey request" }).click();
   await prompt.waitForEvent("close", { timeout: 5_000 }).catch(() => {});
+}
+
+async function waitForPromptCredentialSelectionOrClose(prompt, label, credentialId) {
+  const deadline = Date.now() + PASSKEY_CREDENTIAL_OPTIONS_TIMEOUT_MS;
+  let lastCredentialIds = [];
+
+  while (Date.now() < deadline) {
+    if (prompt.isClosed()) {
+      return { closed: true };
+    }
+
+    try {
+      const result = await prompt.evaluate(async (expectedCredentialId) => {
+        const params = new URLSearchParams(window.location.search);
+        const requestIdValue = params.get("requestId");
+        const requestId =
+          requestIdValue && requestIdValue.trim() !== ""
+            ? Number(requestIdValue)
+            : null;
+        if (typeof requestId !== "number" || !Number.isFinite(requestId)) {
+          return { credentialIndex: -1, credentialIds: [] };
+        }
+
+        const response = await chrome.runtime.sendMessage({
+          type: "vaultkern_presence_options_request",
+          requestId,
+          ...(params.get("origin") ? { origin: params.get("origin") } : {}),
+          ...(params.get("relyingParty")
+            ? { relyingParty: params.get("relyingParty") }
+            : {}),
+          ...(params.get("topOrigin") ? { topOrigin: params.get("topOrigin") } : {}),
+          ...(params.get("nonce") ? { nonce: params.get("nonce") } : {})
+        });
+        const options = Array.isArray(response?.credentialOptions)
+          ? response.credentialOptions
+          : [];
+        const credentialIds = options
+          .map((option) => option?.credentialId)
+          .filter((value) => typeof value === "string");
+        return {
+          credentialIndex: credentialIds.indexOf(expectedCredentialId),
+          credentialIds
+        };
+      }, credentialId);
+      lastCredentialIds = result.credentialIds ?? [];
+      if (result.credentialIndex >= 0) {
+        return { closed: false, credentialIndex: result.credentialIndex };
+      }
+    } catch (error) {
+      if (prompt.isClosed() || String(error?.message ?? error).includes("Target page")) {
+        return { closed: true };
+      }
+      throw error;
+    }
+
+    await new Promise((resolve) =>
+      setTimeout(resolve, PASSKEY_CREDENTIAL_OPTIONS_POLL_MS)
+    );
+  }
+
+  throw new Error(
+    `${label} did not expose credential ${credentialId} for selection; ` +
+      `last credential ids: ${JSON.stringify(lastCredentialIds)}`
+  );
 }
 
 async function unlockPasskeyPromptWithPassword(
@@ -458,6 +499,34 @@ async function waitForSimpleWebAuthnVerification(page, label) {
 
   const value = await page.locator("#result").evaluate((node) => node.value);
   return JSON.parse(value);
+}
+
+function assertDiscoverableWebAuthnGetObservation(messages, label) {
+  const getMessages = messages.filter((message) => message?.ceremony === "get");
+  if (getMessages.length === 0) {
+    throw new Error(
+      `${label} did not observe a WebAuthn get request: ${JSON.stringify(
+        messages,
+        null,
+        2
+      )}`
+    );
+  }
+
+  const messagesWithAllowedCredentials = getMessages.filter(
+    (message) =>
+      Array.isArray(message.allowCredentialIds) &&
+      message.allowCredentialIds.length > 0
+  );
+  if (messagesWithAllowedCredentials.length > 0) {
+    throw new Error(
+      `${label} sent allowCredentials: ${JSON.stringify(
+        messagesWithAllowedCredentials,
+        null,
+        2
+      )}`
+    );
+  }
 }
 
 async function main() {
@@ -754,21 +823,10 @@ async function main() {
     const discoverableMessages = await discoverablePasskeyPage.evaluate(
       () => globalThis.__vaultkernWebAuthnMessages ?? []
     );
-    if (
-      !discoverableMessages.some(
-        (message) =>
-          message?.ceremony === "get" &&
-          !Array.isArray(message.allowCredentialIds)
-      )
-    ) {
-      throw new Error(
-        `discoverable assertion sent allowCredentials: ${JSON.stringify(
-          discoverableMessages,
-          null,
-          2
-        )}`
-      );
-    }
+    assertDiscoverableWebAuthnGetObservation(
+      discoverableMessages,
+      "discoverable assertion"
+    );
 
     await sendCommand(extensionPage, { type: "lock_session" });
     await clearWebAuthnDebug(extensionPage);
@@ -923,20 +981,10 @@ async function main() {
     const simpleDiscoverableMessages = await simpleWebAuthnPage.evaluate(
       () => globalThis.__vaultkernWebAuthnMessages ?? []
     );
-    if (
-      simpleDiscoverableMessages.some(
-        (message) =>
-          message?.ceremony === "get" &&
-          Array.isArray(message.allowCredentialIds) &&
-          message.allowCredentialIds.length > 0
-      )
-    ) {
-      throw new Error(
-        `discoverable SimpleWebAuthn authentication sent allowCredentials: ${JSON.stringify(
-          simpleDiscoverableMessages
-        )}`
-      );
-    }
+    assertDiscoverableWebAuthnGetObservation(
+      simpleDiscoverableMessages,
+      "discoverable SimpleWebAuthn authentication"
+    );
 
     console.log(
       JSON.stringify(
