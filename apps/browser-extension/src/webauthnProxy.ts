@@ -403,6 +403,7 @@ let passkeyCeremonyMirrorCache = new WeakMap<
 const webAuthnDebugDisabledUntil = new WeakMap<object, number>();
 const webAuthnDebugDisabledUntilChanged = new WeakSet<object>();
 const webAuthnDebugChangeWatchers = new WeakSet<object>();
+const webAuthnDebugEnableObserved = new WeakSet<object>();
 let passkeyCeremonyMirrorMutationQueue: Promise<void> = Promise.resolve();
 let passkeyLedgerConnectionId: string | null = null;
 
@@ -7152,6 +7153,9 @@ async function persistWebAuthnDebug(
     if (!storage?.get || !storage.set) {
       return;
     }
+    const watcherAvailable =
+      typeof storage === "object" &&
+      watchWebAuthnDebugEnabledChanges(chromeApi, storage);
     if (
       typeof storage === "object" &&
       (webAuthnDebugDisabledUntilChanged.has(storage) ||
@@ -7165,7 +7169,13 @@ async function persistWebAuthnDebug(
     ]);
     if (existing[WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY] !== true) {
       if (typeof storage === "object") {
-        if (watchWebAuthnDebugEnabledChanges(chromeApi, storage)) {
+        if (watcherAvailable) {
+          if (webAuthnDebugEnableObserved.has(storage)) {
+            webAuthnDebugEnableObserved.delete(storage);
+            webAuthnDebugDisabledUntilChanged.delete(storage);
+            webAuthnDebugDisabledUntil.delete(storage);
+            return;
+          }
           webAuthnDebugDisabledUntilChanged.add(storage);
           webAuthnDebugDisabledUntil.delete(storage);
         } else {
@@ -7178,6 +7188,7 @@ async function persistWebAuthnDebug(
       return;
     }
     if (typeof storage === "object") {
+      webAuthnDebugEnableObserved.delete(storage);
       webAuthnDebugDisabledUntil.delete(storage);
       webAuthnDebugDisabledUntilChanged.delete(storage);
     }
@@ -7226,6 +7237,14 @@ function watchWebAuthnDebugEnabledChanges(
       )
     ) {
       return;
+    }
+    const enabledChange = changes[WEB_AUTHN_DEBUG_ENABLED_STORAGE_KEY] as
+      | { newValue?: unknown }
+      | undefined;
+    if (enabledChange?.newValue === true) {
+      webAuthnDebugEnableObserved.add(storage);
+    } else {
+      webAuthnDebugEnableObserved.delete(storage);
     }
     webAuthnDebugDisabledUntil.delete(storage);
     webAuthnDebugDisabledUntilChanged.delete(storage);

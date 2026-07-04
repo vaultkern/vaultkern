@@ -13,6 +13,7 @@ const rpName = "VaultKern SimpleWebAuthn Smoke";
 const userName = "smoke-user@example.com";
 const userDisplayName = "Smoke User";
 const userId = new TextEncoder().encode("vaultkern-smoke-user-1");
+const expectedUserHandle = bufferToBase64url(userId);
 
 export async function createSimpleWebAuthnSmokeServer(options = {}) {
   const hostname = options.hostname ?? "localhost";
@@ -41,6 +42,7 @@ export async function createSimpleWebAuthnSmokeServer(options = {}) {
           rpName,
           origin,
           userName,
+          expectedUserHandle,
           hasCredential: Boolean(state.credential),
           registeredCredentialId: state.credential?.id ?? null
         });
@@ -107,9 +109,10 @@ export async function createSimpleWebAuthnSmokeServer(options = {}) {
           return;
         }
 
+        const discoverable = url.searchParams.get("discoverable") === "1";
         const authenticationOptions = await generateAuthenticationOptions({
           rpID: rpId,
-          allowCredentials: [{ id: state.credential.id }],
+          ...(discoverable ? {} : { allowCredentials: [{ id: state.credential.id }] }),
           timeout: 60_000,
           userVerification
         });
@@ -148,6 +151,9 @@ export async function createSimpleWebAuthnSmokeServer(options = {}) {
           verified: verification.verified,
           credentialId: verification.authenticationInfo.credentialID,
           newCounter: verification.authenticationInfo.newCounter,
+          expectedUserHandle,
+          userHandle: body.response?.userHandle ?? null,
+          userHandleMatchesExpected: body.response?.userHandle === expectedUserHandle,
           userVerified: verification.authenticationInfo.userVerified,
           credentialBackedUp: verification.authenticationInfo.credentialBackedUp,
           credentialDeviceType: verification.authenticationInfo.credentialDeviceType
@@ -317,6 +323,9 @@ function renderPage() {
         <div class="actions">
           <button id="register" type="button">Register Passkey</button>
           <button id="login" type="button" class="secondary">Login With Passkey</button>
+          <button id="login-discoverable" type="button" class="secondary">
+            Discoverable Login With Passkey
+          </button>
           <button id="status" type="button" class="secondary">Refresh Status</button>
         </div>
         <output id="result">Ready.</output>
@@ -333,6 +342,9 @@ function renderPage() {
 
       document.querySelector("#register").addEventListener("click", () => run(registerPasskey));
       document.querySelector("#login").addEventListener("click", () => run(loginWithPasskey));
+      document
+        .querySelector("#login-discoverable")
+        .addEventListener("click", () => run(loginWithDiscoverablePasskey));
       document.querySelector("#status").addEventListener("click", () => run(refreshStatus));
 
       refreshStatus().catch(showError);
@@ -360,8 +372,18 @@ function renderPage() {
       }
 
       async function loginWithPasskey() {
+        return loginWithPasskeyOptions(false);
+      }
+
+      async function loginWithDiscoverablePasskey() {
+        return loginWithPasskeyOptions(true);
+      }
+
+      async function loginWithPasskeyOptions(discoverable) {
         result.value = "Requesting authentication options...";
-        const options = await postJson("/api/authenticate/options");
+        const options = await postJson(
+          discoverable ? "/api/authenticate/options?discoverable=1" : "/api/authenticate/options"
+        );
         const credential = await navigator.credentials.get({
           publicKey: requestOptionsFromJson(options)
         });
@@ -490,6 +512,14 @@ function renderPage() {
     </script>
   </body>
 </html>`;
+}
+
+function bufferToBase64url(buffer) {
+  return Buffer.from(buffer)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/u, "");
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

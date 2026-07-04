@@ -216,6 +216,61 @@ async function approvePasskeyPrompt(context, extensionPage, webAuthnPage, label)
   await prompt.waitForEvent("close", { timeout: 5_000 }).catch(() => {});
 }
 
+async function approvePasskeyPromptAndSelectCredential(
+  context,
+  extensionPage,
+  webAuthnPage,
+  label,
+  credentialId
+) {
+  const prompt = await waitForPasskeyPromptPage(
+    context,
+    extensionPage,
+    webAuthnPage,
+    label,
+    "passkey prompt"
+  );
+  await prompt.waitForLoadState("domcontentloaded");
+  await prompt.getByRole("button", { name: "Continue passkey request" }).click();
+  const closed = await prompt.waitForEvent("close", { timeout: 1_000 }).then(
+    () => true,
+    () => false
+  );
+  if (closed) {
+    return;
+  }
+
+  const credentialIndex = await prompt.evaluate(async (expectedCredentialId) => {
+    const params = new URLSearchParams(window.location.search);
+    const requestIdValue = params.get("requestId");
+    const requestId =
+      requestIdValue && requestIdValue.trim() !== "" ? Number(requestIdValue) : null;
+    if (typeof requestId !== "number" || !Number.isFinite(requestId)) {
+      return -1;
+    }
+
+    const response = await chrome.runtime.sendMessage({
+      type: "vaultkern_presence_options_request",
+      requestId,
+      ...(params.get("origin") ? { origin: params.get("origin") } : {}),
+      ...(params.get("relyingParty") ? { relyingParty: params.get("relyingParty") } : {}),
+      ...(params.get("topOrigin") ? { topOrigin: params.get("topOrigin") } : {}),
+      ...(params.get("nonce") ? { nonce: params.get("nonce") } : {})
+    });
+    const options = Array.isArray(response?.credentialOptions)
+      ? response.credentialOptions
+      : [];
+    return options.findIndex((option) => option?.credentialId === expectedCredentialId);
+  }, credentialId);
+  if (credentialIndex < 0) {
+    throw new Error(`${label} did not expose credential ${credentialId} for selection`);
+  }
+
+  await prompt.getByRole("radio").nth(credentialIndex).check();
+  await prompt.getByRole("button", { name: "Continue passkey request" }).click();
+  await prompt.waitForEvent("close", { timeout: 5_000 }).catch(() => {});
+}
+
 async function unlockPasskeyPromptWithPassword(
   context,
   extensionPage,
@@ -833,12 +888,55 @@ async function main() {
       simpleWebAuthnPage,
       "simplewebauthn authentication"
     );
-    await simpleWebAuthnPage.getByRole("button", { name: "Login With Passkey" }).click();
+    await simpleWebAuthnPage.locator("#login").click();
     await simpleAuthenticationApproval;
     const simpleAuthenticationVerification = await waitForSimpleWebAuthnVerification(
       simpleWebAuthnPage,
       "authentication"
     );
+    const simpleDiscoverableAuthenticationApproval =
+      approvePasskeyPromptAndSelectCredential(
+        context,
+        extensionPage,
+        simpleWebAuthnPage,
+        "simplewebauthn discoverable authentication",
+        simpleRegistrationVerification.credentialId
+      );
+    await simpleWebAuthnPage.evaluate(() => {
+      globalThis.__vaultkernWebAuthnMessages = [];
+    });
+    await simpleWebAuthnPage.locator("#login-discoverable").click();
+    await simpleDiscoverableAuthenticationApproval;
+    const simpleDiscoverableAuthenticationVerification =
+      await waitForSimpleWebAuthnVerification(
+        simpleWebAuthnPage,
+        "discoverable authentication"
+      );
+    if (
+      simpleDiscoverableAuthenticationVerification.userHandleMatchesExpected !== true
+    ) {
+      throw new Error(
+        "discoverable SimpleWebAuthn authentication did not return the registered userHandle: " +
+          JSON.stringify(simpleDiscoverableAuthenticationVerification)
+      );
+    }
+    const simpleDiscoverableMessages = await simpleWebAuthnPage.evaluate(
+      () => globalThis.__vaultkernWebAuthnMessages ?? []
+    );
+    if (
+      simpleDiscoverableMessages.some(
+        (message) =>
+          message?.ceremony === "get" &&
+          Array.isArray(message.allowCredentialIds) &&
+          message.allowCredentialIds.length > 0
+      )
+    ) {
+      throw new Error(
+        `discoverable SimpleWebAuthn authentication sent allowCredentials: ${JSON.stringify(
+          simpleDiscoverableMessages
+        )}`
+      );
+    }
 
     console.log(
       JSON.stringify(
@@ -860,6 +958,10 @@ async function main() {
             simpleRegistrationVerification.verified === true,
           simpleWebAuthnAuthenticationVerified:
             simpleAuthenticationVerification.verified === true,
+          simpleWebAuthnDiscoverableAuthenticationVerified:
+            simpleDiscoverableAuthenticationVerification.verified === true,
+          simpleWebAuthnDiscoverableUserHandle:
+            simpleDiscoverableAuthenticationVerification.userHandle,
           lockedPasskeyRegisterResult,
           lockedPasskeyResult,
           submitResult: submitted

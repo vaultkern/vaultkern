@@ -5,6 +5,10 @@ type RuntimeMessageListener = (
   sender: unknown,
   sendResponse: (response: unknown) => void
 ) => boolean;
+type StorageChangeListener = (
+  changes: Record<string, unknown>,
+  areaName: string
+) => void;
 
 afterEach(() => {
   vi.useRealTimers();
@@ -267,9 +271,7 @@ describe("background bridge", () => {
     const detach = vi.fn(async () => "detach failed");
     const listeners: RuntimeMessageListener[] = [];
     let passkeyProviderEnabled = true;
-    let storageListener:
-      | ((changes: Record<string, unknown>, areaName: string) => void)
-      | undefined;
+    const storageListeners: StorageChangeListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -296,10 +298,8 @@ describe("background bridge", () => {
           set() {}
         },
         onChanged: {
-          addListener(
-            listener: (changes: Record<string, unknown>, areaName: string) => void
-          ) {
-            storageListener = listener;
+          addListener(listener: StorageChangeListener) {
+            storageListeners.push(listener);
           }
         }
       },
@@ -332,7 +332,9 @@ describe("background bridge", () => {
     });
 
     passkeyProviderEnabled = false;
-    storageListener?.({ vaultkernExtensionSettings: {} }, "local");
+    for (const listener of storageListeners) {
+      listener({ vaultkernExtensionSettings: {} }, "local");
+    }
     await vi.waitFor(() => {
       expect(detach).toHaveBeenCalledTimes(1);
     });
@@ -343,7 +345,9 @@ describe("background bridge", () => {
     expect(port.postMessage).toHaveBeenCalledTimes(postedAfterDisable);
 
     passkeyProviderEnabled = true;
-    storageListener?.({ vaultkernExtensionSettings: {} }, "local");
+    for (const listener of storageListeners) {
+      listener({ vaultkernExtensionSettings: {} }, "local");
+    }
     await vi.waitFor(() => {
       expect(attach).toHaveBeenCalledTimes(2);
     });
@@ -1279,7 +1283,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(unregisterContentScripts).toHaveBeenCalledWith({
-        ids: ["vaultkern-webauthn-content-bridge", "vaultkern-webauthn-page-hook"]
+        ids: ["vaultkern-webauthn-page-hook"]
       });
     });
   });
@@ -1437,9 +1441,7 @@ describe("background bridge", () => {
     const attach = vi.fn(async () => undefined);
     const detach = vi.fn(async () => undefined);
     let passkeyProviderEnabled = true;
-    let storageListener:
-      | ((changes: Record<string, unknown>, areaName: string) => void)
-      | undefined;
+    const storageListeners: StorageChangeListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -1464,10 +1466,8 @@ describe("background bridge", () => {
           set() {}
         },
         onChanged: {
-          addListener(
-            listener: (changes: Record<string, unknown>, areaName: string) => void
-          ) {
-            storageListener = listener;
+          addListener(listener: StorageChangeListener) {
+            storageListeners.push(listener);
           }
         }
       },
@@ -1484,7 +1484,9 @@ describe("background bridge", () => {
     await completePasskeyLedgerReconciliation(port);
 
     passkeyProviderEnabled = false;
-    storageListener?.({ vaultkernExtensionSettings: {} }, "local");
+    for (const listener of storageListeners) {
+      listener({ vaultkernExtensionSettings: {} }, "local");
+    }
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(detach).toHaveBeenCalledTimes(1);
@@ -1499,9 +1501,7 @@ describe("background bridge", () => {
     const executeScript = vi.fn(async () => undefined);
     const query = vi.fn(async () => [{ id: 7 }]);
     let passkeyProviderEnabled = true;
-    let storageListener:
-      | ((changes: Record<string, unknown>, areaName: string) => void)
-      | undefined;
+    const storageListeners: StorageChangeListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -1526,10 +1526,8 @@ describe("background bridge", () => {
           set() {}
         },
         onChanged: {
-          addListener(
-            listener: (changes: Record<string, unknown>, areaName: string) => void
-          ) {
-            storageListener = listener;
+          addListener(listener: StorageChangeListener) {
+            storageListeners.push(listener);
           }
         }
       },
@@ -1562,7 +1560,9 @@ describe("background bridge", () => {
     unregisterContentScripts.mockClear();
 
     passkeyProviderEnabled = false;
-    storageListener?.({ vaultkernExtensionSettings: {} }, "local");
+    for (const listener of storageListeners) {
+      listener({ vaultkernExtensionSettings: {} }, "local");
+    }
 
     await vi.waitFor(() => {
       expect(detach).toHaveBeenCalledTimes(1);
@@ -1585,7 +1585,7 @@ describe("background bridge", () => {
     delete (globalThis as Record<string, unknown>)
       .__vaultkernWebAuthnPageHookEnabled;
     expect(unregisterContentScripts).toHaveBeenCalledWith({
-      ids: ["vaultkern-webauthn-content-bridge", "vaultkern-webauthn-page-hook"]
+      ids: ["vaultkern-webauthn-page-hook"]
     });
   });
 
@@ -1600,9 +1600,7 @@ describe("background bridge", () => {
     );
     const detach = vi.fn(async () => undefined);
     let passkeyProviderEnabled = true;
-    let storageListener:
-      | ((changes: Record<string, unknown>, areaName: string) => void)
-      | undefined;
+    const storageListeners: StorageChangeListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -1627,10 +1625,8 @@ describe("background bridge", () => {
           set() {}
         },
         onChanged: {
-          addListener(
-            listener: (changes: Record<string, unknown>, areaName: string) => void
-          ) {
-            storageListener = listener;
+          addListener(listener: StorageChangeListener) {
+            storageListeners.push(listener);
           }
         }
       },
@@ -1646,7 +1642,9 @@ describe("background bridge", () => {
     });
 
     passkeyProviderEnabled = false;
-    storageListener?.({ vaultkernExtensionSettings: {} }, "local");
+    for (const listener of storageListeners) {
+      listener({ vaultkernExtensionSettings: {} }, "local");
+    }
     resolveAttach();
     await completePasskeyLedgerReconciliation(port);
 

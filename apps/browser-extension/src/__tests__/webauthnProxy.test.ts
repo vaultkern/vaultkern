@@ -18579,6 +18579,76 @@ describe("webAuthenticationProxy wrapper", () => {
     ]);
   });
 
+  it("does not miss debug enable changes while the disabled state is loading", async () => {
+    let debugLog: unknown[] = [];
+    let storageChangeListener:
+      | ((
+          changes: Record<string, { newValue?: unknown; oldValue?: unknown }>,
+          areaName: string
+        ) => void)
+      | undefined;
+    let resolveFirstGet: ((value: Record<string, unknown>) => void) | undefined;
+    const storageGet = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<Record<string, unknown>>((resolve) => {
+            resolveFirstGet = resolve;
+          })
+      )
+      .mockImplementation(async () => ({
+        vaultkernWebAuthnDebugEnabled: true,
+        vaultkernWebAuthnDebug: debugLog
+      }));
+    const storageSet = vi.fn(async (items: Record<string, unknown>) => {
+      debugLog = items.vaultkernWebAuthnDebug as unknown[];
+    });
+    const chromeApi = {
+      runtime: {},
+      storage: {
+        local: {
+          get: storageGet,
+          set: storageSet
+        },
+        onChanged: {
+          addListener(
+            listener: (
+              changes: Record<string, { newValue?: unknown; oldValue?: unknown }>,
+              areaName: string
+            ) => void
+          ) {
+            storageChangeListener = listener;
+          }
+        }
+      }
+    };
+    const drainDebugWrites = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    recordWebAuthnDebug(chromeApi, { event: "first" });
+    await vi.waitFor(() => expect(storageGet).toHaveBeenCalledTimes(1));
+    storageChangeListener?.(
+      {
+        vaultkernWebAuthnDebugEnabled: {
+          oldValue: false,
+          newValue: true
+        }
+      },
+      "local"
+    );
+    resolveFirstGet?.({});
+    await drainDebugWrites();
+
+    recordWebAuthnDebug(chromeApi, { event: "second" });
+    await vi.waitFor(() => expect(storageSet).toHaveBeenCalledTimes(1));
+
+    expect(storageGet).toHaveBeenCalledTimes(2);
+    expect(debugLog).toEqual([
+      expect.objectContaining({
+        event: "second"
+      })
+    ]);
+  });
+
   it("does not record allowed credential counts in pre-authorization get diagnostics", async () => {
     let getListener: ((request: unknown) => void) | undefined;
     let debugLog: unknown[] = [];
