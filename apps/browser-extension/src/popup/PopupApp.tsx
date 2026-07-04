@@ -28,6 +28,11 @@ type SessionStateLike = Pick<
   "unlocked" | "activeVaultId" | "currentVaultRefId" | "supportsBiometricUnlock"
 >;
 
+type PasskeyCredentialOption = {
+  credentialId: string;
+  username: string;
+};
+
 export interface PopupClientLike {
   getSessionState(): Promise<SessionStateLike>;
   listRecentVaults(): Promise<VaultReference[]>;
@@ -48,13 +53,101 @@ function limitRecentVaults(vaults: VaultReference[], limit: number) {
     .slice(0, limit);
 }
 
+function passkeyCredentialOptionsFromUnknown(
+  options: unknown
+): PasskeyCredentialOption[] {
+  if (!Array.isArray(options)) {
+    return [];
+  }
+  const parsed = options.map((option) => {
+    const candidate = option as Partial<PasskeyCredentialOption> | null;
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate) ||
+      typeof candidate.credentialId !== "string" ||
+      candidate.credentialId.trim() === "" ||
+      typeof candidate.username !== "string" ||
+      Object.keys(candidate).some(
+        (key) => key !== "credentialId" && key !== "username"
+      )
+    ) {
+      return null;
+    }
+    return {
+      credentialId: candidate.credentialId,
+      username: candidate.username
+    };
+  });
+  if (parsed.some((option) => option === null)) {
+    return [];
+  }
+  return parsed as PasskeyCredentialOption[];
+}
+
+function responseKeepsPasskeyPromptOpen(response: unknown) {
+  return (
+    typeof response === "object" &&
+    response !== null &&
+    (response as { keepOpen?: unknown }).keepOpen === true
+  );
+}
+
+async function loadPasskeyCredentialOptionsFromPrompt() {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("webauthn") !== "approve") {
+    return [];
+  }
+  const requestIdValue = params.get("requestId");
+  const requestId =
+    requestIdValue && requestIdValue.trim() !== "" ? Number(requestIdValue) : null;
+  if (typeof requestId !== "number" || !Number.isFinite(requestId)) {
+    return [];
+  }
+  const runtime = (
+    globalThis as typeof globalThis & {
+      chrome?: {
+        runtime?: {
+          sendMessage?: (message: unknown) => Promise<unknown> | unknown;
+        };
+      };
+    }
+  ).chrome?.runtime;
+  if (typeof runtime?.sendMessage !== "function") {
+    return [];
+  }
+  const nonce = params.get("nonce");
+  const origin = params.get("origin");
+  const relyingParty = params.get("relyingParty");
+  const topOrigin = params.get("topOrigin");
+  const response = await Promise.resolve(
+    runtime.sendMessage({
+      type: "vaultkern_presence_options_request",
+      requestId,
+      ...(origin ? { origin } : {}),
+      ...(relyingParty ? { relyingParty } : {}),
+      ...(topOrigin ? { topOrigin } : {}),
+      ...(nonce ? { nonce } : {})
+    })
+  );
+  return passkeyCredentialOptionsFromUnknown(
+    (response as { credentialOptions?: unknown } | null)?.credentialOptions
+  );
+}
+
 export function PopupApp({
   client,
   findCandidates,
   fillEntry,
   activeSite,
   extensionSettingsStore,
-  renderRuntimeErrorHelp
+  renderRuntimeErrorHelp,
+  onUnlockComplete,
+  onWebAuthnPresenceComplete,
+  onWebAuthnUserVerificationComplete
 }: {
   client: PopupClientLike;
   findCandidates: (vaultId: string) => Promise<EntrySummary[]>;
@@ -62,6 +155,18 @@ export function PopupApp({
   activeSite: () => Promise<string>;
   extensionSettingsStore?: ExtensionSettingsStore;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
+  onUnlockComplete?: (
+    session: SessionStateLike,
+    options?: { method: "master_password" | "quick_unlock"; password?: string }
+  ) => void | Promise<void>;
+  onWebAuthnPresenceComplete?: (
+    session: SessionStateLike,
+    options?: { credentialId?: string }
+  ) => unknown | Promise<unknown>;
+  onWebAuthnUserVerificationComplete?: (
+    session: SessionStateLike,
+    options: { method: "master_password" | "quick_unlock"; password?: string }
+  ) => void | Promise<void>;
 }) {
   const [session, setSession] = useState<SessionStateLike | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -87,6 +192,59 @@ export function PopupApp({
     DEFAULT_EXTENSION_SETTINGS
   );
   const currentVaultPreload = useRef<Promise<void> | null>(null);
+  const webAuthnQuickUnlockAttempted = useRef(false);
+  const webAuthnUnlockCompletionSent = useRef(false);
+  const webAuthnMode =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("webauthn");
+  const webAuthnUnlockPrompt = webAuthnMode === "unlock";
+  const webAuthnApprovePrompt = webAuthnMode === "approve";
+  const webAuthnVerifyPrompt = webAuthnMode === "verify";
+  const webAuthnCeremonyPrompt =
+    webAuthnUnlockPrompt || webAuthnApprovePrompt || webAuthnVerifyPrompt;
+  const [passkeyCredentialOptions, setPasskeyCredentialOptions] = useState<
+    PasskeyCredentialOption[]
+  >([]);
+  const [selectedPasskeyCredentialId, setSelectedPasskeyCredentialId] = useState("");
+  const [
+    waitingForPasskeyCredentialOptions,
+    setWaitingForPasskeyCredentialOptions
+  ] = useState(false);
+
+  function currentVaultForSession() {
+    return (
+      recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
+      recentVaults.find((vault) => vault.isCurrent) ??
+      null
+    );
+  }
+
+  function canQuickUnlockVault(vault: VaultReference | null) {
+    return Boolean(
+      session?.supportsBiometricUnlock &&
+        vault?.supportsQuickUnlock &&
+        vault.availability !== "needs_repair"
+    );
+  }
+
+  function notifyWebAuthnUnlockCompleteOnce(
+    nextSession: SessionStateLike,
+    options?: { method: "master_password" | "quick_unlock"; password?: string }
+  ) {
+    if (
+      !webAuthnUnlockPrompt ||
+      webAuthnUnlockCompletionSent.current ||
+      !nextSession.unlocked ||
+      !nextSession.activeVaultId
+    ) {
+      return;
+    }
+
+    webAuthnUnlockCompletionSent.current = true;
+    void Promise.resolve(onUnlockComplete?.(nextSession, options)).catch(
+      () => undefined
+    );
+  }
 
   function startCurrentVaultPreload() {
     if (currentVaultPreload.current) {
@@ -192,6 +350,73 @@ export function PopupApp({
   }, [recentVaultsLoading, session?.currentVaultRefId, session?.unlocked]);
 
   useEffect(() => {
+    setSelectedPasskeyCredentialId(
+      passkeyCredentialOptions[0]?.credentialId ?? ""
+    );
+  }, [passkeyCredentialOptions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!webAuthnApprovePrompt) {
+      setPasskeyCredentialOptions([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    loadPasskeyCredentialOptionsFromPrompt()
+      .then((options) => {
+        if (!cancelled) {
+          setPasskeyCredentialOptions(options);
+          if (options.length > 0) {
+            setWaitingForPasskeyCredentialOptions(false);
+          }
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPasskeyCredentialOptions([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [webAuthnApprovePrompt]);
+
+  useEffect(() => {
+    if (
+      !webAuthnApprovePrompt ||
+      !waitingForPasskeyCredentialOptions ||
+      passkeyCredentialOptions.length > 0
+    ) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      loadPasskeyCredentialOptionsFromPrompt()
+        .then((options) => {
+          if (cancelled || options.length === 0) {
+            return;
+          }
+          setPasskeyCredentialOptions(options);
+          setWaitingForPasskeyCredentialOptions(false);
+        })
+        .catch(() => undefined);
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    passkeyCredentialOptions.length,
+    waitingForPasskeyCredentialOptions,
+    webAuthnApprovePrompt
+  ]);
+
+  useEffect(() => {
     if (
       typeof window === "undefined" ||
       !session?.unlocked ||
@@ -227,6 +452,15 @@ export function PopupApp({
   }, [client, extensionSettings.idleLockMinutes, session?.unlocked]);
 
   useEffect(() => {
+    if (webAuthnCeremonyPrompt) {
+      setEntries([]);
+      setCandidates([]);
+      setSelectedEntryId(null);
+      setSelectedDetail(null);
+      setDetailError(null);
+      return;
+    }
+
     if (!session?.unlocked || !session.activeVaultId) {
       setEntries([]);
       setCandidates([]);
@@ -280,10 +514,17 @@ export function PopupApp({
     extensionSettings.language,
     findCandidates,
     session?.activeVaultId,
-    session?.unlocked
+    session?.unlocked,
+    webAuthnCeremonyPrompt
   ]);
 
   useEffect(() => {
+    if (webAuthnCeremonyPrompt) {
+      setSelectedDetail(null);
+      setDetailError(null);
+      return;
+    }
+
     if (!session?.activeVaultId || !selectedEntryId) {
       setSelectedDetail(null);
       setDetailError(null);
@@ -314,7 +555,13 @@ export function PopupApp({
     return () => {
       cancelled = true;
     };
-  }, [client, extensionSettings.language, selectedEntryId, session?.activeVaultId]);
+  }, [
+    client,
+    extensionSettings.language,
+    selectedEntryId,
+    session?.activeVaultId,
+    webAuthnCeremonyPrompt
+  ]);
 
   async function handleUnlock() {
     if (submitting) {
@@ -334,6 +581,7 @@ export function PopupApp({
       if (preload) {
         await preload;
       }
+      const unlockPassword = password;
       const nextSession = await client.unlockCurrentVault({
         password,
         keyFilePath
@@ -341,6 +589,12 @@ export function PopupApp({
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");
+      notifyWebAuthnUnlockCompleteOnce(
+        nextSession,
+        unlockPassword !== ""
+          ? { method: "master_password", password: unlockPassword }
+          : undefined
+      );
     } catch (unlockFailure) {
       setUnlockError(
         popupErrorMessage(
@@ -376,6 +630,7 @@ export function PopupApp({
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");
+      notifyWebAuthnUnlockCompleteOnce(nextSession, { method: "quick_unlock" });
     } catch (unlockFailure) {
       setUnlockError(
         popupErrorMessage(
@@ -388,6 +643,120 @@ export function PopupApp({
       setSubmitting(false);
     }
   }
+
+  async function handleWebAuthnPresenceApproval() {
+    if (!session?.unlocked || submitting) {
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const response = await Promise.resolve(
+        onWebAuthnPresenceComplete?.(
+          session,
+          passkeyCredentialOptions.length > 0 && selectedPasskeyCredentialId
+            ? { credentialId: selectedPasskeyCredentialId }
+            : undefined
+        )
+      );
+      if (responseKeepsPasskeyPromptOpen(response)) {
+        setWaitingForPasskeyCredentialOptions(true);
+        const options = await loadPasskeyCredentialOptionsFromPrompt();
+        setPasskeyCredentialOptions(options);
+        if (options.length > 0) {
+          setWaitingForPasskeyCredentialOptions(false);
+        }
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleWebAuthnUserVerification(
+    method: "master_password" | "quick_unlock"
+  ) {
+    if (!session?.unlocked || submitting) {
+      return;
+    }
+    if (method === "master_password" && password.trim() === "") {
+      setUnlockError(
+        extensionSettings.language === "zh-CN"
+          ? "请输入主密码"
+          : "Enter your master password"
+      );
+      return;
+    }
+
+    setSubmitting(true);
+    setUnlockError(null);
+    setUnlockErrorCause(null);
+    try {
+      await Promise.resolve(
+        onWebAuthnUserVerificationComplete?.(session, {
+          method,
+          ...(method === "master_password" ? { password } : {})
+        })
+      );
+      setPassword("");
+    } catch (verificationFailure) {
+      setUnlockError(
+        popupErrorMessage(
+          verificationFailure,
+          extensionSettings.language === "zh-CN"
+            ? "用户验证失败"
+            : "User verification failed"
+        )
+      );
+      setUnlockErrorCause(verificationFailure);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  useEffect(() => {
+    if (
+      !webAuthnUnlockPrompt ||
+      webAuthnQuickUnlockAttempted.current ||
+      submitting ||
+      recentVaultsLoading ||
+      !session ||
+      session.unlocked ||
+      !canQuickUnlockVault(currentVaultForSession())
+    ) {
+      return;
+    }
+
+    webAuthnQuickUnlockAttempted.current = true;
+    void handleQuickUnlock();
+  }, [
+    recentVaults,
+    recentVaultsLoading,
+    session,
+    submitting,
+    webAuthnUnlockPrompt
+  ]);
+
+  useEffect(() => {
+    if (
+      !webAuthnVerifyPrompt ||
+      webAuthnQuickUnlockAttempted.current ||
+      submitting ||
+      recentVaultsLoading ||
+      !session?.unlocked ||
+      !canQuickUnlockVault(currentVaultForSession())
+    ) {
+      return;
+    }
+
+    webAuthnQuickUnlockAttempted.current = true;
+    void handleWebAuthnUserVerification("quick_unlock");
+  }, [
+    recentVaults,
+    recentVaultsLoading,
+    session,
+    submitting,
+    webAuthnVerifyPrompt
+  ]);
 
   async function handleOpenManager() {
     const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
@@ -456,22 +825,33 @@ export function PopupApp({
   if (!session.unlocked) {
     const text = (key: Parameters<typeof translate>[1]) =>
       translate(extensionSettings.language, key);
-    const currentVault =
-      recentVaults.find((vault) => vault.vaultRefId === session.currentVaultRefId) ??
-      recentVaults.find((vault) => vault.isCurrent) ??
-      null;
+    const currentVault = currentVaultForSession();
     const needsRepair = currentVault?.availability === "needs_repair";
     const canUnlockCurrentVault = Boolean(currentVault || session.currentVaultRefId);
-    const canQuickUnlock = Boolean(
-      session.supportsBiometricUnlock &&
-        currentVault?.supportsQuickUnlock &&
-        !needsRepair
-    );
+    const passkeyPromptTitle =
+      extensionSettings.language === "zh-CN"
+        ? "通行密钥请求等待中"
+        : "Passkey request waiting";
+    const passkeyPromptBody =
+      siteLabel === "No active site"
+        ? extensionSettings.language === "zh-CN"
+          ? "请解锁数据库以继续当前网站的通行密钥请求。"
+          : "Unlock your vault to continue the website passkey request."
+        : extensionSettings.language === "zh-CN"
+          ? `请解锁数据库以继续 ${siteLabel} 的通行密钥请求。`
+          : `Unlock your vault to continue the passkey request for ${siteLabel}.`;
+    const canQuickUnlock = canQuickUnlockVault(currentVault);
 
     return (
       <I18nProvider language={extensionSettings.language}>
       <div style={shellStyle}>
         <PopupStatusStrip siteLabel={siteLabel} unlocked={false} />
+        {webAuthnUnlockPrompt ? (
+          <section style={passkeyPromptStyle} aria-live="polite">
+            <strong>{passkeyPromptTitle}</strong>
+            <span>{passkeyPromptBody}</span>
+          </section>
+        ) : null}
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -567,6 +947,164 @@ export function PopupApp({
     );
   }
 
+  if (webAuthnVerifyPrompt) {
+    const currentVault = currentVaultForSession();
+    const canQuickUnlock = canQuickUnlockVault(currentVault);
+    const passkeyPromptTitle =
+      extensionSettings.language === "zh-CN"
+        ? "验证通行密钥请求"
+        : "Verify passkey request";
+    const passkeyPromptBody =
+      siteLabel === "No active site"
+        ? extensionSettings.language === "zh-CN"
+          ? "请验证主密码以继续当前网站的通行密钥请求。"
+          : "Verify your master password to continue this passkey request."
+        : extensionSettings.language === "zh-CN"
+          ? `请验证主密码以继续 ${siteLabel} 的通行密钥请求。`
+          : `Verify your master password to continue the passkey request for ${siteLabel}.`;
+
+    return (
+      <I18nProvider language={extensionSettings.language}>
+      <div style={shellStyle}>
+        <PopupStatusStrip
+          siteLabel={siteLabel}
+          unlocked
+          onLock={undefined}
+          onOpenManager={undefined}
+        />
+        <section style={passkeyPromptStyle} aria-live="polite">
+          <strong>{passkeyPromptTitle}</strong>
+          <span>{passkeyPromptBody}</span>
+        </section>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleWebAuthnUserVerification("master_password");
+          }}
+          style={{ display: "grid", gap: popupTheme.spacing.md }}
+        >
+          <label style={labelStyle}>
+            {extensionSettings.language === "zh-CN" ? "主密码" : "Master Password"}
+            <input
+              aria-label={
+                extensionSettings.language === "zh-CN" ? "主密码" : "Master Password"
+              }
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              disabled={submitting}
+              style={fieldStyle}
+            />
+          </label>
+          <button type="submit" disabled={submitting} style={primaryActionStyle}>
+            {submitting
+              ? extensionSettings.language === "zh-CN"
+                ? "验证中..."
+                : "Verifying..."
+              : extensionSettings.language === "zh-CN"
+                ? "验证并继续"
+                : "Verify and continue"}
+          </button>
+          {canQuickUnlock ? (
+            <button
+              type="button"
+              onClick={() => {
+                void handleWebAuthnUserVerification("quick_unlock");
+              }}
+              disabled={submitting}
+              style={primaryActionStyle}
+            >
+              {extensionSettings.language === "zh-CN"
+                ? "使用 Windows Hello 验证"
+                : "Verify with Windows Hello"}
+            </button>
+          ) : null}
+          {unlockError ? <div role="alert">{unlockError}</div> : null}
+          {unlockError && renderRuntimeErrorHelp
+            ? renderRuntimeErrorHelp(unlockErrorCause)
+            : null}
+        </form>
+      </div>
+      </I18nProvider>
+    );
+  }
+
+  if (webAuthnApprovePrompt) {
+    const passkeyPromptTitle =
+      extensionSettings.language === "zh-CN"
+        ? "确认通行密钥请求"
+        : "Confirm passkey request";
+    const passkeyPromptBody =
+      siteLabel === "No active site"
+        ? extensionSettings.language === "zh-CN"
+          ? "确认后继续当前网站的通行密钥请求。"
+          : "Approve this passkey request to continue."
+        : extensionSettings.language === "zh-CN"
+          ? `确认后继续 ${siteLabel} 的通行密钥请求。`
+          : `Approve this passkey request for ${siteLabel}.`;
+    const passkeyPromptAction = waitingForPasskeyCredentialOptions
+      ? extensionSettings.language === "zh-CN"
+        ? "正在载入通行密钥账号..."
+        : "Loading passkey accounts..."
+      : extensionSettings.language === "zh-CN"
+        ? "继续通行密钥请求"
+        : "Continue passkey request";
+
+    return (
+      <I18nProvider language={extensionSettings.language}>
+      <div style={shellStyle}>
+        <PopupStatusStrip
+          siteLabel={siteLabel}
+          unlocked
+          onLock={undefined}
+          onOpenManager={undefined}
+        />
+        <section style={passkeyPromptStyle} aria-live="polite">
+          <strong>{passkeyPromptTitle}</strong>
+          <span>{passkeyPromptBody}</span>
+        </section>
+        {passkeyCredentialOptions.length > 0 ? (
+          <div
+            role="radiogroup"
+            aria-label={
+              extensionSettings.language === "zh-CN"
+                ? "选择通行密钥账号"
+                : "Choose passkey account"
+            }
+            style={passkeyCredentialListStyle}
+          >
+            {passkeyCredentialOptions.map((option) => (
+              <label key={option.credentialId} style={passkeyCredentialOptionStyle}>
+                <input
+                  type="radio"
+                  aria-label={option.username || option.credentialId}
+                  checked={selectedPasskeyCredentialId === option.credentialId}
+                  onChange={() => setSelectedPasskeyCredentialId(option.credentialId)}
+                />
+                <span>{option.username || option.credentialId}</span>
+              </label>
+            ))}
+          </div>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => {
+            void handleWebAuthnPresenceApproval();
+          }}
+          disabled={
+            submitting ||
+            waitingForPasskeyCredentialOptions ||
+            (passkeyCredentialOptions.length > 0 && !selectedPasskeyCredentialId)
+          }
+          style={primaryActionStyle}
+        >
+          {passkeyPromptAction}
+        </button>
+      </div>
+      </I18nProvider>
+    );
+  }
+
   return (
     <I18nProvider language={extensionSettings.language}>
     <div style={shellStyle}>
@@ -655,6 +1193,37 @@ const secondaryActionStyle = {
   color: popupTheme.colors.text,
   fontFamily: popupTheme.font.body,
   cursor: "pointer"
+};
+
+const passkeyPromptStyle = {
+  display: "grid",
+  gap: popupTheme.spacing.xs,
+  border: `1px solid ${popupTheme.colors.accentStrong}`,
+  borderRadius: popupTheme.radius.panel,
+  padding: popupTheme.spacing.sm,
+  background: popupTheme.colors.surface,
+  color: popupTheme.colors.text,
+  fontFamily: popupTheme.font.body,
+  lineHeight: 1.45
+};
+
+const passkeyCredentialListStyle = {
+  display: "grid",
+  gap: popupTheme.spacing.xs,
+  minWidth: 0
+};
+
+const passkeyCredentialOptionStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: popupTheme.spacing.sm,
+  border: `1px solid ${popupTheme.colors.line}`,
+  borderRadius: popupTheme.radius.field,
+  padding: popupTheme.spacing.sm,
+  background: popupTheme.colors.surface,
+  color: popupTheme.colors.text,
+  fontFamily: popupTheme.font.body,
+  overflowWrap: "anywhere" as const
 };
 
 const messagePanelStyle = {

@@ -49,7 +49,11 @@ afterEach(() => {
 
 beforeEach(() => {
   document.body.innerHTML = "";
+  window.history.replaceState(null, "", "/");
   delete (globalThis as typeof globalThis & { chrome?: unknown }).chrome;
+  delete (globalThis as typeof globalThis & {
+    __vaultkernWebAuthnContentScriptInstalled?: boolean;
+  }).__vaultkernWebAuthnContentScriptInstalled;
   runtimeClientMocks.getSessionState.mockReset();
   runtimeClientMocks.listRecentVaults.mockReset();
   runtimeClientMocks.preloadCurrentVault.mockReset();
@@ -807,6 +811,50 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("shows a passkey unlock prompt when opened for a WebAuthn request", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=9&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+    );
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(
+      await screen.findByText("Passkey request waiting")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Unlock your vault to continue the passkey request for example.com.")
+    ).toBeInTheDocument();
+  });
+
   it("unlocks the locked popup with Windows Hello when quick unlock is enabled", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       tabs: {
@@ -853,6 +901,790 @@ describe("PopupShell fill flow", () => {
       expect(runtimeClientMocks.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
     });
     expect(await screen.findByText("Select a record to inspect fields.")).toBeInTheDocument();
+  });
+
+  it("notifies the background page after unlocking for a WebAuthn request", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=12&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+    );
+    const sendMessage = vi.fn(async () => undefined);
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: vi.fn()
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.change(await screen.findByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_unlock_complete",
+        requestId: 12,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        method: "master_password",
+        password: "demo-password"
+      });
+    });
+  });
+
+  it("notifies the background page that a WebAuthn unlock used quick unlock", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=14&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-14"
+    );
+    const sendMessage = vi.fn(async () => undefined);
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: vi.fn()
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Unlock with Windows Hello" })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_unlock_complete",
+        requestId: 14,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-14",
+        method: "quick_unlock"
+      });
+    });
+  });
+
+  it("does not complete a WebAuthn unlock prompt just because the vault is already unlocked", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=13&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-13"
+    );
+    const sendMessage = vi.fn(async () => undefined);
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    await screen.findByText("Unlocked");
+    await Promise.resolve();
+
+    expect(sendMessage).not.toHaveBeenCalledWith({
+      type: "vaultkern_unlock_complete",
+      requestId: 13,
+      origin: "https://example.com",
+      relyingParty: "example.com",
+      nonce: "nonce-13"
+    });
+    expect(closeWindow).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.listEntries).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.findFillCandidates).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
+  });
+
+  it("does not notify WebAuthn waiters after unlocking in the regular popup", async () => {
+    window.history.replaceState(null, "", "/popup.html");
+    const sendMessage = vi.fn(async () => undefined);
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: vi.fn()
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.change(await screen.findByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Master Password")).not.toBeInTheDocument();
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(window.close).not.toHaveBeenCalled();
+  });
+
+  it("closes the temporary WebAuthn unlock window after unlocking", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=24&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+    );
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: vi.fn(async () => undefined)
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.change(await screen.findByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    await waitFor(() => {
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("notifies the background page after approving an unlocked WebAuthn request", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=approve&requestId=42&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+    );
+    const sendMessage = vi.fn(async () => undefined);
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Confirm passkey request")).toBeInTheDocument();
+    expect(
+      screen.getByText("Approve this passkey request for example.com.")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Lock" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Open Manager" })
+    ).not.toBeInTheDocument();
+    expect(runtimeClientMocks.listEntries).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.findFillCandidates).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Continue passkey request" })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_presence_complete",
+        requestId: 42,
+        origin: "https://example.com",
+        relyingParty: "example.com"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("hides manager access while verifying a WebAuthn request", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=verify&requestId=45&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-45"
+    );
+    const sendMessage = vi.fn(async () => ({ ok: true }));
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Verify passkey request")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Open Manager" })
+    ).not.toBeInTheDocument();
+    expect(runtimeClientMocks.listEntries).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.findFillCandidates).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Verify and continue" }));
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_user_verification_complete",
+        requestId: 45,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-45",
+        method: "master_password",
+        password: "demo-password"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("auto verifies the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=verify&requestId=46&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-46"
+    );
+    const sendMessage = vi.fn(async () => ({ ok: true }));
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Verify passkey request")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_user_verification_complete",
+        requestId: 46,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-46",
+        method: "quick_unlock"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("sends the selected passkey credential when approving a discoverable WebAuthn request", async () => {
+    const credentialOptions = [
+      {
+        credentialId: "Y3JlZGVudGlhbC0x",
+        username: "alice@example.com"
+      },
+      {
+        credentialId: "Y3JlZGVudGlhbC0y",
+        username: "bob@example.com"
+      }
+    ];
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=approve&requestId=43&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-43"
+    );
+    const sendMessage = vi.fn(async (message: unknown) =>
+      (message as { type?: unknown } | null)?.type ===
+      "vaultkern_presence_options_request"
+        ? { credentialOptions }
+        : undefined
+    );
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    const chromeApi = {
+      runtime: {
+        sendMessage
+      }
+    };
+    (globalThis as typeof globalThis & { chrome: unknown }).chrome = chromeApi;
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Confirm passkey request")).toBeInTheDocument();
+    expect(screen.getByText("alice@example.com")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("bob@example.com"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Continue passkey request" })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_presence_complete",
+        requestId: 43,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        credentialId: "Y3JlZGVudGlhbC0y",
+        nonce: "nonce-43"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("keeps the passkey approval popup open while background prepares credential selection", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=approve&requestId=47&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-47"
+    );
+    const sendMessage = vi.fn(async (message: unknown) => {
+      if (
+        (message as { type?: unknown } | null)?.type ===
+        "vaultkern_presence_complete"
+      ) {
+        return { ok: true, keepOpen: true };
+      }
+      return { credentialOptions: [] };
+    });
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Confirm passkey request")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Continue passkey request" })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_presence_complete",
+        requestId: 47,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-47"
+      });
+    });
+    expect(closeWindow).not.toHaveBeenCalled();
+  });
+
+  it("ignores passkey credential options that contain non-UI fields", async () => {
+    const credentialOptions = [
+      {
+        credentialId: "Y3JlZGVudGlhbC0x",
+        username: "alice@example.com",
+        privateKeyPem: "-----BEGIN PRIVATE KEY-----",
+        userHandle: "user-handle",
+        generatedUserId: "generated-user",
+        entryId: "entry-1",
+        ceremonyToken: "page-controlled-token"
+      }
+    ];
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=approve&requestId=44&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-44"
+    );
+    const sendMessage = vi.fn(async (message: unknown) =>
+      (message as { type?: unknown } | null)?.type ===
+      "vaultkern_presence_options_request"
+        ? { credentialOptions }
+        : undefined
+    );
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Confirm passkey request")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_presence_options_request",
+        requestId: 44,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-44"
+      });
+    });
+    expect(screen.queryByText("alice@example.com")).not.toBeInTheDocument();
+    expect(screen.queryByText("user-handle")).not.toBeInTheDocument();
+    expect(screen.queryByText("generated-user")).not.toBeInTheDocument();
+    expect(screen.queryByText("entry-1")).not.toBeInTheDocument();
+    expect(screen.queryByText("page-controlled-token")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Continue passkey request" })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_presence_complete",
+        requestId: 44,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-44"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("auto unlocks the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/popup.html?webauthn=unlock&requestId=24&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+    );
+    const sendMessage = vi.fn(async () => undefined);
+    const closeWindow = vi.fn();
+    Object.defineProperty(window, "close", {
+      configurable: true,
+      value: closeWindow
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Work",
+        sourceKind: "local",
+        sourceSummary: "work.kdbx",
+        lastUsedAt: 1776500010,
+        availability: "ready",
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ]);
+    const quickUnlock = createDeferred<{
+      unlocked: boolean;
+      activeVaultId: string | null;
+      currentVaultRefId: string | null;
+      supportsBiometricUnlock: boolean;
+    }>();
+    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockReturnValue(
+      quickUnlock.promise
+    );
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Passkey request waiting")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(runtimeClientMocks.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
+    });
+    quickUnlock.resolve({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_unlock_complete",
+        requestId: 24,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        method: "quick_unlock"
+      });
+      expect(closeWindow).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("waits for on-demand preload when unlocking before recent vaults finish loading", async () => {
@@ -1709,5 +2541,238 @@ describe("content script fill message", () => {
     expect(
       (document.querySelector('input[name="password"]') as HTMLInputElement).value
     ).toBe("root-secret");
+  });
+
+  it("forwards WebAuthn page observations with the actual page origin", async () => {
+    const sendMessage = vi.fn();
+    const addListener = vi.fn();
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    await import("../webauthnContentScript");
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "create",
+          origin: "https://forged.example",
+          relyingParty: "localhost",
+          challenge: "cmVnaXN0ZXItMQ",
+          excludeCredentialIds: ["Y3JlZGVudGlhbC0x"],
+          mediation: "conditional"
+        }
+      })
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "vaultkern_webauthn_page_request",
+      ceremony: "create",
+      origin: window.location.origin,
+      topOrigin: undefined,
+      ancestorOrigins: [],
+      relyingParty: "localhost",
+      challenge: "cmVnaXN0ZXItMQ",
+      allowCredentialIds: undefined,
+      excludeCredentialIds: ["Y3JlZGVudGlhbC0x"],
+      mediation: "conditional",
+      observedAt: expect.any(Number)
+    });
+  });
+
+  it("forwards the full WebAuthn ancestor origin chain", async () => {
+    const sendMessage = vi.fn();
+    const originalAncestorOrigins = Object.getOwnPropertyDescriptor(
+      window.location,
+      "ancestorOrigins"
+    );
+    Object.defineProperty(window.location, "ancestorOrigins", {
+      configurable: true,
+      value: ["https://middle.example", "https://top.example"]
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+
+    try {
+      await import("../webauthnContentScript");
+
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          source: window,
+          origin: window.location.origin,
+          data: {
+            type: "vaultkern_webauthn_page_request",
+            ceremony: "get",
+            relyingParty: "example.com",
+            challenge: "Y2hhbGxlbmdlLTE"
+          }
+        })
+      );
+    } finally {
+      if (originalAncestorOrigins) {
+        Object.defineProperty(
+          window.location,
+          "ancestorOrigins",
+          originalAncestorOrigins
+        );
+      } else {
+        delete (window.location as Location & { ancestorOrigins?: unknown })
+          .ancestorOrigins;
+      }
+    }
+
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "vaultkern_webauthn_page_request",
+      ceremony: "get",
+      origin: window.location.origin,
+      topOrigin: "https://top.example",
+      ancestorOrigins: ["https://middle.example", "https://top.example"],
+      relyingParty: "example.com",
+      challenge: "Y2hhbGxlbmdlLTE",
+      allowCredentialIds: undefined,
+      excludeCredentialIds: undefined,
+      mediation: undefined,
+      observedAt: expect.any(Number)
+    });
+  });
+
+  it("does not forward page-supplied ceremony tokens in WebAuthn observations", async () => {
+    const sendMessage = vi.fn();
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+
+    await import("../webauthnContentScript");
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "get",
+          relyingParty: "example.com",
+          challenge: "Y2hhbGxlbmdlLTE",
+          allowCredentialIds: [
+            "Y3JlZGVudGlhbC0x",
+            { ceremonyToken: "page-controlled-token" }
+          ],
+          excludeCredentialIds: [
+            { ceremony_token: "page-controlled-token" },
+            "Y3JlZGVudGlhbC0y"
+          ],
+          ceremonyToken: "page-controlled-token",
+          ceremony_token: "page-controlled-token"
+        }
+      })
+    );
+
+    const forwarded = sendMessage.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(forwarded).toMatchObject({
+      type: "vaultkern_webauthn_page_request",
+      ceremony: "get",
+      origin: window.location.origin,
+      relyingParty: "example.com",
+      challenge: "Y2hhbGxlbmdlLTE",
+      allowCredentialIds: ["Y3JlZGVudGlhbC0x"],
+      excludeCredentialIds: ["Y3JlZGVudGlhbC0y"]
+    });
+    expect(forwarded.ceremonyToken).toBeUndefined();
+    expect(forwarded.ceremony_token).toBeUndefined();
+    expect(JSON.stringify(forwarded)).not.toContain("page-controlled-token");
+  });
+
+  it("forwards WebAuthn observations from about:blank frames with the inherited origin", async () => {
+    const sendMessage = vi.fn();
+    const originalOrigin = Object.getOwnPropertyDescriptor(globalThis, "origin");
+    Object.defineProperty(globalThis, "origin", {
+      configurable: true,
+      value: "https://parent.example"
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+
+    try {
+      await import("../webauthnContentScript");
+
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          source: window,
+          origin: "https://parent.example",
+          data: {
+            type: "vaultkern_webauthn_page_request",
+            ceremony: "get",
+            relyingParty: "parent.example",
+            challenge: "Y2hhbGxlbmdlLTE",
+            allowCredentialIds: ["Y3JlZGVudGlhbC0x"]
+          }
+        })
+      );
+    } finally {
+      if (originalOrigin) {
+        Object.defineProperty(globalThis, "origin", originalOrigin);
+      } else {
+        delete (globalThis as typeof globalThis & { origin?: unknown }).origin;
+      }
+    }
+
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "vaultkern_webauthn_page_request",
+      ceremony: "get",
+      origin: "https://parent.example",
+      topOrigin: undefined,
+      ancestorOrigins: [],
+      relyingParty: "parent.example",
+      challenge: "Y2hhbGxlbmdlLTE",
+      allowCredentialIds: ["Y3JlZGVudGlhbC0x"],
+      excludeCredentialIds: undefined,
+      mediation: undefined,
+      observedAt: expect.any(Number)
+    });
+  });
+
+  it("installs the WebAuthn page observation bridge only once when reinjected", async () => {
+    const sendMessage = vi.fn();
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage
+      }
+    };
+
+    await import("../webauthnContentScript");
+    vi.resetModules();
+    await import("../webauthnContentScript");
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          type: "vaultkern_webauthn_page_request",
+          ceremony: "get",
+          relyingParty: "example.com",
+          challenge: "Y2hhbGxlbmdlLTE",
+          allowCredentialIds: ["Y3JlZGVudGlhbC0x"]
+        }
+      })
+    );
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 });

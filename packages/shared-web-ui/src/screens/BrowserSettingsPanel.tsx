@@ -49,7 +49,8 @@ export function BrowserSettingsPanel({
             0,
             3600,
             30
-          )
+          ),
+          passkeyProviderEnabled: draft.passkeyProviderEnabled
         });
       }}
     >
@@ -127,6 +128,20 @@ export function BrowserSettingsPanel({
             </button>
           </div>
         </div>
+        <label style={checkboxFieldStyle}>
+          <input
+            aria-label={text("VaultKern passkey provider")}
+            type="checkbox"
+            checked={draft.passkeyProviderEnabled}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                passkeyProviderEnabled: event.target.checked
+              })
+            }
+          />
+          {text("VaultKern passkey provider")}
+        </label>
       </div>
       <label style={toggleRowStyle}>
         <input
@@ -152,7 +167,8 @@ function toDraft(settings: ExtensionSettings) {
     recentVaultLimit: String(settings.recentVaultLimit),
     language: settings.language,
     idleLockMinutes: String(settings.idleLockMinutes),
-    clearClipboardSeconds: String(settings.clearClipboardSeconds)
+    clearClipboardSeconds: String(settings.clearClipboardSeconds),
+    passkeyProviderEnabled: settings.passkeyProviderEnabled
   };
 }
 
@@ -209,6 +225,15 @@ const gridStyle: CSSProperties = {
 const fieldStyle: CSSProperties = {
   display: "grid",
   gap: archiveTheme.spacing.xs,
+  color: archiveTheme.colors.text,
+  fontFamily: archiveTheme.font.body
+};
+
+const checkboxFieldStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: archiveTheme.spacing.sm,
+  minHeight: "44px",
   color: archiveTheme.colors.text,
   fontFamily: archiveTheme.font.body
 };

@@ -12,6 +12,7 @@ import type {
   EntryDraft,
   EntryHistoryDetail,
   EntryHistoryItem,
+  EntryPasskey,
   EntrySummary,
   GroupNode,
   GroupTree,
@@ -84,6 +85,12 @@ export interface RuntimeClientLike {
   getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
   createEntry(vaultId: string, input: EntryDraft & { parentGroupId: string }): Promise<EntryDetail>;
   updateEntryFields(vaultId: string, entryId: string, input: EntryDraft): Promise<EntryDetail>;
+  setEntryPasskey(
+    vaultId: string,
+    entryId: string,
+    passkey: EntryPasskey
+  ): Promise<EntryDetail>;
+  clearEntryPasskey(vaultId: string, entryId: string): Promise<EntryDetail>;
   deleteEntry(vaultId: string, entryId: string): Promise<void>;
   saveVault(vaultId: string): Promise<SaveVaultResult | void>;
   getDatabaseSettings(vaultId: string): Promise<DatabaseSettings>;
@@ -819,6 +826,63 @@ export function App({
     } finally {
       setEntryActionBusy(false);
       setDialogState(null);
+    }
+  }
+
+  async function handleSetEntryPasskey(passkey: EntryPasskey) {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      return;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      const detail = await client.setEntryPasskey(
+        session.activeVaultId,
+        selectedEntryId,
+        passkey
+      );
+      handleSaveResult(await client.saveVault(session.activeVaultId));
+      setEntryDetail(detail);
+      setWorkspaceReloadKey((current) => current + 1);
+    } catch (passkeyError) {
+      setEntryActionError(
+        errorMessage(
+          passkeyError,
+          translate(extensionSettings.language, "Failed to save entry passkey")
+        )
+      );
+    } finally {
+      setEntryActionBusy(false);
+    }
+  }
+
+  async function handleClearEntryPasskey() {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      return;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      const detail = await client.clearEntryPasskey(
+        session.activeVaultId,
+        selectedEntryId
+      );
+      handleSaveResult(await client.saveVault(session.activeVaultId));
+      setEntryDetail(detail);
+      setWorkspaceReloadKey((current) => current + 1);
+    } catch (passkeyError) {
+      setEntryActionError(
+        errorMessage(
+          passkeyError,
+          translate(extensionSettings.language, "Failed to save entry passkey")
+        )
+      );
+    } finally {
+      setEntryActionBusy(false);
     }
   }
 
@@ -1705,6 +1769,12 @@ export function App({
               }}
               onSelectHistoryItem={(historyIndex) => {
                 void handleSelectHistoryItem(historyIndex);
+              }}
+              onSetPasskey={(passkey) => {
+                void handleSetEntryPasskey(passkey);
+              }}
+              onClearPasskey={() => {
+                void handleClearEntryPasskey();
               }}
               onSave={() => {
                 void saveDraft();

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VaultKern Passkey Smoke Register</title>
+  </head>
+  <body>
+    <main>
+      <h1>VaultKern Passkey Smoke Register</h1>
+      <button id="vaultkern-passkey-register" type="button">Create passkey</button>
+      <output id="vaultkern-passkey-register-result"></output>
+    </main>
+    <script>
+      const SMOKE_CREDENTIAL_STORAGE_KEY = "vaultkern-smoke-passkey-credential-id";
+
+      function bytes(value) {
+        return Uint8Array.from(value, (character) => character.charCodeAt(0));
+      }
+
+      function userName() {
+        return new URLSearchParams(location.search).get("user") ?? "smoke-user@example.com";
+      }
+
+      function userVerificationRequirement() {
+        const value = new URLSearchParams(location.search).get("uv");
+        return ["discouraged", "preferred", "required"].includes(value)
+          ? value
+          : "discouraged";
+      }
+
+      document
+        .querySelector("#vaultkern-passkey-register")
+        .addEventListener("click", async () => {
+          const result = document.querySelector("#vaultkern-passkey-register-result");
+          try {
+            const credential = await navigator.credentials.create({
+              publicKey: {
+                rp: {
+                  id: location.hostname,
+                  name: "VaultKern Smoke"
+                },
+                user: {
+                  id: bytes(userName()),
+                  name: userName(),
+                  displayName: "Smoke User"
+                },
+                challenge: bytes("register-1"),
+                pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+                timeout: 60000,
+                authenticatorSelection: {
+                  authenticatorAttachment: "platform",
+                  userVerification: userVerificationRequirement(),
+                  residentKey: "discouraged"
+                },
+                attestation: "none"
+              }
+            });
+            if (credential) {
+              localStorage.setItem(SMOKE_CREDENTIAL_STORAGE_KEY, credential.id);
+              result.value = `credential:${credential.id}`;
+            } else {
+              result.value = "credential:null";
+            }
+          } catch (error) {
+            result.value =
+              error instanceof Error
+                ? `error:${error.name}:${error.message}`
+                : "error:unknown";
+          }
+        });
+    </script>
+  </body>
+</html>

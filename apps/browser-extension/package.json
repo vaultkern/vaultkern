@@ -3,12 +3,16 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@vaultkern/shared-web-ui": "file:../../packages/shared-web-ui"
+    "@simplewebauthn/server": "^13.3.2",
+    "@vaultkern/shared-web-ui": "file:../../packages/shared-web-ui",
+    "psl": "^1.15.0"
   },
   "scripts": {
     "build": "vite build && node scripts/writeManifest.mjs",
     "build:e2e": "vite build && node scripts/writeManifest.mjs --fixed-key",
     "smoke:e2e": "npm run build:e2e && cargo build -p vaultkern-runtime && node smoke/run-chrome-e2e.mjs",
+    "smoke:simplewebauthn": "node smoke/simplewebauthn-server.mjs",
+    "test:simplewebauthn-smoke": "node --test smoke/simplewebauthn-server.node-test.mjs",
     "test": "vitest run"
   }
 }

@@ -179,7 +179,7 @@ pub struct PasskeyRecord {
 }
 
 impl PasskeyRecord {
-    pub const USERNAME_KEY: &'static str = "Passkey Username";
+    pub const USERNAME_KEY: &'static str = "KPEX_PASSKEY_USERNAME";
     pub const CREDENTIAL_ID_KEY: &'static str = "KPEX_PASSKEY_CREDENTIAL_ID";
     pub const GENERATED_USER_ID_KEY: &'static str = "KPEX_PASSKEY_GENERATED_USER_ID";
     pub const PRIVATE_KEY_PEM_KEY: &'static str = "KPEX_PASSKEY_PRIVATE_KEY_PEM";
@@ -189,6 +189,8 @@ impl PasskeyRecord {
     pub const FLAG_BS_KEY: &'static str = "KPEX_PASSKEY_FLAG_BS";
 
     pub fn write_to_attributes(&self, attributes: &mut BTreeMap<String, CustomField>) {
+        attributes.remove(Self::GENERATED_USER_ID_KEY);
+        attributes.remove(Self::USER_HANDLE_KEY);
         attributes.insert(
             Self::USERNAME_KEY.into(),
             CustomField {
@@ -720,8 +722,46 @@ mod tests {
         let mut attributes = BTreeMap::new();
         passkey.write_to_attributes(&mut attributes);
 
+        assert!(attributes.contains_key("KPEX_PASSKEY_USERNAME"));
+        assert!(!attributes.contains_key("Passkey Username"));
         let restored = PasskeyRecord::from_attributes(&attributes).expect("restore passkey");
         assert_eq!(restored, passkey);
+    }
+
+    #[test]
+    fn passkey_record_requires_kpex_username_attribute() {
+        let attributes = BTreeMap::from([
+            (
+                "Passkey Username".into(),
+                CustomField {
+                    value: "alice".into(),
+                    protected: false,
+                },
+            ),
+            (
+                PasskeyRecord::CREDENTIAL_ID_KEY.into(),
+                CustomField {
+                    value: "cred-123".into(),
+                    protected: true,
+                },
+            ),
+            (
+                PasskeyRecord::PRIVATE_KEY_PEM_KEY.into(),
+                CustomField {
+                    value: "pem".into(),
+                    protected: true,
+                },
+            ),
+            (
+                PasskeyRecord::RELYING_PARTY_KEY.into(),
+                CustomField {
+                    value: "example.com".into(),
+                    protected: false,
+                },
+            ),
+        ]);
+
+        assert!(PasskeyRecord::from_attributes(&attributes).is_none());
     }
 
     #[test]
@@ -832,6 +872,42 @@ mod tests {
             attributes.get("custom").map(|field| field.value.as_str()),
             Some("kept")
         );
+    }
+
+    #[test]
+    fn passkey_attributes_clear_optional_kpex_fields_when_absent() {
+        let passkey = PasskeyRecord {
+            username: "alice".into(),
+            credential_id: "cred-123".into(),
+            generated_user_id: None,
+            private_key_pem: "pem".into(),
+            relying_party: "example.com".into(),
+            user_handle: None,
+            backup_eligible: false,
+            backup_state: false,
+        };
+
+        let mut attributes = BTreeMap::from([
+            (
+                PasskeyRecord::GENERATED_USER_ID_KEY.into(),
+                CustomField {
+                    value: "stale-generated-user".into(),
+                    protected: false,
+                },
+            ),
+            (
+                PasskeyRecord::USER_HANDLE_KEY.into(),
+                CustomField {
+                    value: "stale-user-handle".into(),
+                    protected: true,
+                },
+            ),
+        ]);
+
+        passkey.write_to_attributes(&mut attributes);
+
+        assert!(!attributes.contains_key(PasskeyRecord::GENERATED_USER_ID_KEY));
+        assert!(!attributes.contains_key(PasskeyRecord::USER_HANDLE_KEY));
     }
 
     #[test]

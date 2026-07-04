@@ -1,31 +1,48 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::form_urlencoded::byte_serialize;
+use uuid::Uuid;
 use vaultkern_core::{
-    AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError,
+    AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError, Entry,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    KdbxCipher, KdbxError, KeepassCore, SaveKdf, SaveProfile, TotpSpec, Vault,
+    KdbxCipher, KdbxError, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, TotpSpec, Vault,
 };
 use vaultkern_runtime_protocol::{
     DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseKdfSettingsDto,
     DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
     DatabaseSettingsDto, DatabaseSettingsUpdateDto, EntryAttachmentContentDto, EntryAttachmentDto,
     EntryCustomFieldDto, EntryDetailDto, EntryFieldProtectionDto, EntryHistoryDetailDto,
-    EntryHistoryItemDto, EntryHistoryListDto, EntryListDto, EntrySummaryDto, ErrorDto,
-    FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto, RuntimeCommand,
-    RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto,
-    VaultReferenceListDto, VaultSourceStatusDto,
+    EntryHistoryItemDto, EntryHistoryListDto, EntryListDto, EntryPasskeyDto, EntrySummaryDto,
+    ErrorDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto,
+    PasskeyAssertionDto, PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto,
+    PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
+    PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto,
+    PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto, PasskeyCredentialCandidateDto,
+    PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto,
+    PasskeyFrameKindDto, PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto,
+    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto,
+    PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
+    SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
+    VaultSourceStatusDto,
 };
 
 use crate::command_loop::format_error_chain;
 use crate::match_fill::{FillMatchScore, score_entry_match};
+use crate::passkey::{
+    PasskeyAssertionRequest, PasskeyRegistrationRequest, create_assertion,
+    create_registration_with_credential_id, generate_passkey_credential_id,
+};
 use crate::providers::biometric::{
     BiometricProvider, TestBiometricProvider, UnsupportedBiometricProvider,
     default_biometric_provider,
@@ -78,6 +95,59 @@ struct LoadedSourceSnapshot {
     one_drive_etag: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PasskeyCeremonyIdentity {
+    connection_id: String,
+    origin: String,
+    top_origin: Option<String>,
+    ancestor_origins: Vec<String>,
+    relying_party: String,
+    ceremony: PasskeyCeremonyKindDto,
+    discoverable: bool,
+    user_verification: PasskeyUserVerificationRequirementDto,
+    challenge_base64url: String,
+    request_id: i64,
+    tab_id: i64,
+    frame_id: i64,
+    frame_kind: PasskeyFrameKindDto,
+    registered_at_epoch_ms: u64,
+    expires_at_epoch_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PasskeyCeremonyLedgerEntry {
+    identity: PasskeyCeremonyIdentity,
+    phase: PasskeyCeremonyPhaseDto,
+    vault_id: Option<String>,
+    durable_state: PasskeyCeremonyDurableStateDto,
+    delivery_state: PasskeyCeremonyDeliveryStateDto,
+    user_verification: Option<PasskeyUserVerificationProof>,
+    registration_rollback: Option<PasskeyRegistrationRollbackState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PasskeyClientDataExpectations {
+    challenge_base64url: String,
+    top_origin: Option<String>,
+    ancestor_origins: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PasskeyUserVerificationProof {
+    vault_id: String,
+    method: PasskeyUserVerificationMethodDto,
+    verified_at_epoch_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PasskeyRegistrationRollbackState {
+    vault_id: String,
+    entry_id: String,
+    credential_id: Option<String>,
+    created: bool,
+    rollback_entry: Option<Entry>,
+}
+
 impl VaultSource {
     fn vault_id(&self) -> String {
         match self {
@@ -122,7 +192,11 @@ pub struct Runtime {
     biometric: Box<dyn BiometricProvider>,
     secure_storage: Box<dyn SecureStorageProvider>,
     loaded: BTreeMap<String, LoadedVault>,
+    passkey_ceremonies: BTreeMap<String, PasskeyCeremonyLedgerEntry>,
+    recent_unlock_user_verification: Option<PasskeyUserVerificationProof>,
+    passkey_credential_id_generator: Box<dyn FnMut() -> String>,
     fixed_unix_time: Option<u64>,
+    fixed_unix_time_ms: Option<u64>,
 }
 
 impl Runtime {
@@ -169,7 +243,11 @@ impl Runtime {
             biometric: default_biometric_provider(),
             secure_storage,
             loaded: BTreeMap::new(),
+            passkey_ceremonies: BTreeMap::new(),
+            recent_unlock_user_verification: None,
+            passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
+            fixed_unix_time_ms: None,
         }
     }
 
@@ -187,13 +265,39 @@ impl Runtime {
             biometric: Box::new(UnsupportedBiometricProvider),
             secure_storage: Box::new(UnsupportedSecureStorageProvider),
             loaded: BTreeMap::new(),
+            passkey_ceremonies: BTreeMap::new(),
+            recent_unlock_user_verification: None,
+            passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
+            fixed_unix_time_ms: None,
         }
     }
 
     pub fn for_tests_at(unix_time: u64) -> Self {
         let mut runtime = Self::for_tests();
         runtime.fixed_unix_time = Some(unix_time);
+        runtime.fixed_unix_time_ms = Some(unix_time.saturating_mul(1000));
+        runtime
+    }
+
+    pub fn set_test_unix_time(&mut self, unix_time: u64) {
+        self.fixed_unix_time = Some(unix_time);
+        self.fixed_unix_time_ms = Some(unix_time.saturating_mul(1000));
+    }
+
+    pub fn set_test_unix_time_ms(&mut self, unix_time_ms: u64) {
+        self.fixed_unix_time = Some(unix_time_ms / 1000);
+        self.fixed_unix_time_ms = Some(unix_time_ms);
+    }
+
+    pub fn for_tests_with_passkey_credential_ids(credential_ids: Vec<String>) -> Self {
+        let mut runtime = Self::for_tests();
+        let mut credential_ids = credential_ids.into_iter();
+        runtime.passkey_credential_id_generator = Box::new(move || {
+            credential_ids
+                .next()
+                .unwrap_or_else(generate_passkey_credential_id)
+        });
         runtime
     }
 
@@ -252,6 +356,7 @@ impl Runtime {
         let mut runtime =
             Self::for_tests_with_onedrive_item(drive_id, item_id, name, account_label, bytes);
         runtime.fixed_unix_time = Some(unix_time);
+        runtime.fixed_unix_time_ms = Some(unix_time.saturating_mul(1000));
         runtime
     }
 
@@ -676,6 +781,7 @@ impl Runtime {
         loaded.vault = Some(database.vault);
         self.session
             .unlock(vault_id.to_owned(), current_vault_ref_id);
+        self.recent_unlock_user_verification = None;
         Ok(())
     }
 
@@ -719,6 +825,7 @@ impl Runtime {
         for loaded in self.loaded.values_mut() {
             loaded.clear_unlock_secrets();
         }
+        self.recent_unlock_user_verification = None;
         self.session.lock();
     }
 
@@ -777,7 +884,16 @@ impl Runtime {
             credentials.password.as_deref(),
             credentials.key_file_path.as_deref(),
         ) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                let active_vault_id = self.session.active_vault_id().map(ToOwned::to_owned);
+                if let Some(active_vault_id) = active_vault_id {
+                    self.record_recent_unlock_user_verification(
+                        &active_vault_id,
+                        PasskeyUserVerificationMethodDto::QuickUnlock,
+                    );
+                }
+                Ok(())
+            }
             Err(error) => {
                 if is_unlock_credentials_error(&error) {
                     self.secure_storage.delete(&storage_key)?;
@@ -801,6 +917,194 @@ impl Runtime {
         let mut dto = self.session.to_dto(self.biometric.supports_quick_unlock());
         dto.source_status = self.current_source_status();
         dto
+    }
+
+    pub fn passkey_user_verification_capability(&self) -> PasskeyUserVerificationCapabilityDto {
+        let mut methods = Vec::new();
+        let Some(active_vault_id) = self.session.active_vault_id() else {
+            return PasskeyUserVerificationCapabilityDto {
+                available: false,
+                methods,
+            };
+        };
+        let Some(loaded) = self.loaded.get(active_vault_id) else {
+            return PasskeyUserVerificationCapabilityDto {
+                available: false,
+                methods,
+            };
+        };
+        if loaded.vault.is_none() {
+            return PasskeyUserVerificationCapabilityDto {
+                available: false,
+                methods,
+            };
+        }
+
+        if loaded.password.is_some() {
+            methods.push(PasskeyUserVerificationMethodDto::MasterPassword);
+        }
+
+        if self.biometric.supports_quick_unlock() {
+            if let Some(vault_ref_id) = self.session.current_vault_ref_id() {
+                let storage_key = quick_unlock_storage_key(vault_ref_id);
+                if self.secure_storage.contains(&storage_key).unwrap_or(false) {
+                    methods.push(PasskeyUserVerificationMethodDto::QuickUnlock);
+                }
+            }
+        }
+
+        PasskeyUserVerificationCapabilityDto {
+            available: !methods.is_empty(),
+            methods,
+        }
+    }
+
+    pub fn verify_passkey_user(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+        method: PasskeyUserVerificationMethodDto,
+        password: Option<&str>,
+    ) -> Result<PasskeyUserVerifiedDto> {
+        if !matches!(
+            expected_phase,
+            PasskeyCeremonyPhaseDto::UserAuthorization | PasskeyCeremonyPhaseDto::UserSelection
+        ) {
+            anyhow::bail!("passkey user verification expected phase must allow user verification");
+        }
+        if self.session.active_vault_id() != Some(vault_id) {
+            anyhow::bail!("passkey user verification vault mismatch");
+        }
+        let validation_epoch_ms = self.current_unix_time_ms();
+        let recent_unlock_verified = {
+            let entry = self
+                .passkey_ceremonies
+                .get(ceremony_token)
+                .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+            if entry.phase != expected_phase {
+                anyhow::bail!("passkey ceremony phase mismatch");
+            }
+            validate_passkey_ceremony_not_expired(entry, validation_epoch_ms)?;
+            validate_passkey_ceremony_vault_binding(entry, vault_id)?;
+            self.recent_unlock_user_verification_matches(
+                entry,
+                vault_id,
+                method,
+                validation_epoch_ms,
+            )
+        };
+
+        match method {
+            PasskeyUserVerificationMethodDto::MasterPassword => {
+                if !recent_unlock_verified {
+                    let password =
+                        password.context("passkey user verification password is required")?;
+                    self.verify_passkey_user_with_master_password(vault_id, password)?;
+                }
+            }
+            PasskeyUserVerificationMethodDto::QuickUnlock => {
+                if !recent_unlock_verified {
+                    self.verify_passkey_user_with_quick_unlock(vault_id)?;
+                }
+            }
+        }
+
+        let verified_at_epoch_ms = self.current_unix_time_ms();
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        if entry.phase != expected_phase {
+            anyhow::bail!("passkey ceremony phase mismatch");
+        }
+        validate_passkey_ceremony_not_expired(entry, verified_at_epoch_ms)?;
+        bind_passkey_ceremony_vault(entry, vault_id)?;
+        entry.user_verification = Some(PasskeyUserVerificationProof {
+            vault_id: vault_id.to_owned(),
+            method,
+            verified_at_epoch_ms,
+        });
+        Ok(PasskeyUserVerifiedDto {
+            verified: true,
+            method,
+            verified_at_epoch_ms: verified_at_epoch_ms as i64,
+        })
+    }
+
+    fn record_recent_unlock_user_verification(
+        &mut self,
+        vault_id: &str,
+        method: PasskeyUserVerificationMethodDto,
+    ) {
+        let now_epoch_ms = self.current_unix_time_ms();
+        self.recent_unlock_user_verification = Some(PasskeyUserVerificationProof {
+            vault_id: vault_id.to_owned(),
+            method,
+            verified_at_epoch_ms: now_epoch_ms,
+        });
+    }
+
+    fn recent_unlock_user_verification_matches(
+        &self,
+        entry: &PasskeyCeremonyLedgerEntry,
+        vault_id: &str,
+        method: PasskeyUserVerificationMethodDto,
+        now_epoch_ms: u64,
+    ) -> bool {
+        self.recent_unlock_user_verification
+            .as_ref()
+            .is_some_and(|proof| {
+                proof.vault_id == vault_id
+                    && proof.method == method
+                    && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
+                    && proof.verified_at_epoch_ms <= now_epoch_ms
+                    && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
+            })
+    }
+
+    fn verify_passkey_user_with_master_password(
+        &self,
+        vault_id: &str,
+        password: &str,
+    ) -> Result<()> {
+        let loaded = self
+            .loaded
+            .get(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        if loaded.vault.is_none() {
+            anyhow::bail!("vault is locked: {vault_id}");
+        }
+        let Some(expected_password) = loaded.password.as_deref() else {
+            anyhow::bail!("passkey master password verification is unavailable");
+        };
+        if !constant_time_bytes_eq(password.as_bytes(), expected_password.as_bytes()) {
+            anyhow::bail!("passkey master password verification failed");
+        }
+        Ok(())
+    }
+
+    fn verify_passkey_user_with_quick_unlock(&self, vault_id: &str) -> Result<()> {
+        if !self.biometric.supports_quick_unlock() {
+            anyhow::bail!("passkey quick unlock verification is unavailable");
+        }
+        let current_vault_ref_id = self
+            .session
+            .current_vault_ref_id()
+            .context("no current vault selected")?;
+        let loaded = self
+            .loaded
+            .get(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        if loaded.vault.is_none() {
+            anyhow::bail!("vault is locked: {vault_id}");
+        }
+        let storage_key = quick_unlock_storage_key(current_vault_ref_id);
+        if !self.secure_storage.contains(&storage_key).unwrap_or(false) {
+            anyhow::bail!("quick unlock is not enabled for the current vault");
+        }
+        self.biometric.authorize("Verify user for passkey")?;
+        Ok(())
     }
 
     pub fn list_groups(&self, vault_id: &str) -> Result<GroupTreeDto> {
@@ -834,6 +1138,10 @@ impl Runtime {
             .map(|value| totp_to_uri(&detail.title, &detail.username, value));
         let custom_fields = self.core.list_entry_custom_fields(vault, entry_id)?;
         let attachments = self.core.list_entry_attachments(vault, entry_id)?;
+        let passkey = self
+            .core
+            .project_entry_passkey(vault, entry_id)?
+            .map(entry_passkey_to_dto);
         Ok(EntryDetailDto {
             id: detail.id,
             title: detail.title,
@@ -844,6 +1152,7 @@ impl Runtime {
             modified_at: detail.modified_at,
             totp: totp_code,
             totp_uri,
+            passkey,
             field_protection: EntryFieldProtectionDto {
                 protect_title: detail.field_protection.protect_title,
                 protect_username: detail.field_protection.protect_username,
@@ -958,18 +1267,18 @@ impl Runtime {
     }
 
     pub fn find_fill_candidates(&self, vault_id: &str, url: &str) -> Result<FillCandidateListDto> {
-        let mut entries = self
-            .list_entries(vault_id)?
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                score_entry_match(url, &entry.url).map(|score| RankedFillCandidate {
-                    index,
-                    entry,
-                    score,
-                })
-            })
-            .collect::<Vec<_>>();
+        let vault = self.loaded_vault(vault_id)?;
+        let mut entries = Vec::new();
+        let mut index = 0;
+        collect_fill_candidates(
+            &vault.root,
+            vault.recycle_bin_group,
+            vault.recycle_bin_enabled.unwrap_or(true),
+            false,
+            url,
+            &mut index,
+            &mut entries,
+        );
 
         entries.sort_by(|left, right| {
             left.score
@@ -1206,6 +1515,1075 @@ impl Runtime {
         }
 
         self.get_entry_detail(vault_id, entry_id)
+    }
+
+    pub fn set_entry_passkey(
+        &mut self,
+        vault_id: &str,
+        entry_id: &str,
+        passkey: EntryPasskeyDto,
+    ) -> Result<EntryDetailDto> {
+        let modified_at = self.current_unix_time();
+        {
+            let loaded = self
+                .loaded
+                .get_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_mut()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            let passkey = dto_to_passkey_record(passkey)?;
+            self.core.snapshot_entry_to_history(vault, entry_id)?;
+            self.core.set_entry_passkey(vault, entry_id, passkey)?;
+            touch_entry_modified_at(&self.core, vault, entry_id, modified_at)?;
+            enforce_history_limits(vault);
+        }
+
+        self.get_entry_detail(vault_id, entry_id)
+    }
+
+    pub fn clear_entry_passkey(
+        &mut self,
+        vault_id: &str,
+        entry_id: &str,
+    ) -> Result<EntryDetailDto> {
+        let modified_at = self.current_unix_time();
+        {
+            let loaded = self
+                .loaded
+                .get_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_mut()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            self.core.snapshot_entry_to_history(vault, entry_id)?;
+            self.core.clear_entry_passkey(vault, entry_id)?;
+            touch_entry_modified_at(&self.core, vault, entry_id, modified_at)?;
+            enforce_history_limits(vault);
+        }
+
+        self.get_entry_detail(vault_id, entry_id)
+    }
+
+    pub fn create_passkey_assertion(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+        relying_party: &str,
+        origin: &str,
+        credential_id: Option<&str>,
+        discoverable: bool,
+        user_presence_verified: bool,
+        related_origin_verified: bool,
+        client_data_json_base64url: &str,
+    ) -> Result<PasskeyAssertionDto> {
+        let client_data_expectations = self.validate_passkey_ceremony_for_s4(
+            ceremony_token,
+            expected_phase,
+            PasskeyCeremonyKindDto::Get,
+            vault_id,
+            origin,
+            relying_party,
+            Some(discoverable),
+            client_data_json_base64url,
+        )?;
+        let user_verified = self.passkey_ceremony_user_verified(ceremony_token, vault_id)?;
+        let credential_id = credential_id.context("passkey assertion credential id is required")?;
+        let effective_user_presence_verified = user_presence_verified || user_verified;
+        if !effective_user_presence_verified {
+            anyhow::bail!("passkey user presence was not verified");
+        }
+        let _ = self.loaded_vault(vault_id)?;
+        self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
+        let vault = self.loaded_vault(vault_id)?;
+        let passkey = find_unique_passkey_by_credential_id_and_relying_party(
+            &vault.root,
+            vault.recycle_bin_group,
+            vault.recycle_bin_enabled.unwrap_or(true),
+            credential_id,
+            Some(relying_party),
+        )?;
+        create_assertion(
+            passkey,
+            PasskeyAssertionRequest {
+                relying_party,
+                origin,
+                credential_id: Some(credential_id),
+                discoverable,
+                user_presence_verified: effective_user_presence_verified,
+                user_verified,
+                related_origin_verified,
+                client_data_json_base64url,
+                challenge_base64url: &client_data_expectations.challenge_base64url,
+                top_origin: client_data_expectations.top_origin.as_deref(),
+                ancestor_origins: &client_data_expectations.ancestor_origins,
+            },
+        )
+    }
+
+    fn validate_passkey_ceremony_for_s4(
+        &self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        expected_ceremony: PasskeyCeremonyKindDto,
+        vault_id: &str,
+        origin: &str,
+        relying_party: &str,
+        discoverable: Option<bool>,
+        client_data_json_base64url: &str,
+    ) -> Result<PasskeyClientDataExpectations> {
+        if expected_phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
+            anyhow::bail!("passkey ceremony expected phase must be s4_completion_and_mutation");
+        }
+        let now_epoch_ms = self.current_unix_time_ms();
+        let entry = self
+            .passkey_ceremonies
+            .get(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        if entry.phase != expected_phase {
+            anyhow::bail!("passkey ceremony phase mismatch");
+        }
+        if entry.identity.ceremony != expected_ceremony {
+            anyhow::bail!("passkey ceremony type mismatch");
+        }
+        if entry.identity.origin != origin {
+            anyhow::bail!("passkey ceremony origin mismatch");
+        }
+        if entry.identity.relying_party != relying_party {
+            anyhow::bail!("passkey ceremony relying party mismatch");
+        }
+        if let Some(discoverable) = discoverable {
+            if entry.identity.discoverable != discoverable {
+                anyhow::bail!("passkey ceremony discoverable mismatch");
+            }
+        }
+        validate_passkey_ceremony_not_expired(entry, now_epoch_ms)?;
+        validate_passkey_ceremony_vault_binding(entry, vault_id)?;
+        validate_passkey_ceremony_client_data(
+            client_data_json_base64url,
+            expected_ceremony,
+            origin,
+            &entry.identity.challenge_base64url,
+            entry.identity.top_origin.as_deref(),
+            &entry.identity.ancestor_origins,
+        )?;
+        Ok(PasskeyClientDataExpectations {
+            challenge_base64url: entry.identity.challenge_base64url.clone(),
+            top_origin: entry.identity.top_origin.clone(),
+            ancestor_origins: entry.identity.ancestor_origins.clone(),
+        })
+    }
+
+    fn passkey_ceremony_user_verified(&self, ceremony_token: &str, vault_id: &str) -> Result<bool> {
+        let now_epoch_ms = self.current_unix_time_ms();
+        let entry = self
+            .passkey_ceremonies
+            .get(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        let verified = entry.user_verification.as_ref().is_some_and(|proof| {
+            proof.vault_id == vault_id
+                && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
+                && proof.verified_at_epoch_ms <= now_epoch_ms
+        });
+        if entry.identity.user_verification == PasskeyUserVerificationRequirementDto::Required
+            && !verified
+        {
+            anyhow::bail!("passkey user verification was not verified");
+        }
+        Ok(verified)
+    }
+
+    pub fn passkey_credential_status(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+        credential_id: &str,
+        relying_party: &str,
+    ) -> Result<PasskeyCredentialStatusDto> {
+        let batch = self.passkey_credential_status_batch(
+            ceremony_token,
+            expected_phase,
+            vault_id,
+            &[credential_id.to_owned()],
+            relying_party,
+        )?;
+        batch
+            .statuses
+            .into_iter()
+            .next()
+            .context("passkey credential status batch returned no status")
+    }
+
+    pub fn passkey_credential_status_batch(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+        credential_ids: &[String],
+        relying_party: &str,
+    ) -> Result<PasskeyCredentialStatusBatchDto> {
+        self.validate_passkey_ceremony_for_s3_read(
+            ceremony_token,
+            expected_phase,
+            PasskeyCeremonyKindDto::Create,
+            vault_id,
+            relying_party,
+        )?;
+        let _ = self.loaded_vault(vault_id)?;
+        self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
+        let vault = self.loaded_vault(vault_id)?;
+        let statuses = credential_ids
+            .iter()
+            .map(|credential_id| PasskeyCredentialStatusDto {
+                credential_id: credential_id.to_owned(),
+                exists: find_passkey_by_credential_id_and_relying_party(
+                    &vault.root,
+                    vault.recycle_bin_group,
+                    vault.recycle_bin_enabled.unwrap_or(true),
+                    credential_id,
+                    Some(relying_party),
+                )
+                .is_some(),
+            })
+            .collect();
+
+        Ok(PasskeyCredentialStatusBatchDto { statuses })
+    }
+
+    pub fn list_passkey_credentials(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+        relying_party: &str,
+    ) -> Result<PasskeyCredentialListDto> {
+        self.validate_passkey_ceremony_for_s3_read(
+            ceremony_token,
+            expected_phase,
+            PasskeyCeremonyKindDto::Get,
+            vault_id,
+            relying_party,
+        )?;
+        let _ = self.loaded_vault(vault_id)?;
+        self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
+        let vault = self.loaded_vault(vault_id)?;
+        let mut candidates = Vec::new();
+        let mut credential_counts = BTreeMap::<String, usize>::new();
+        visit_passkeys(
+            &vault.root,
+            vault.recycle_bin_group,
+            vault.recycle_bin_enabled.unwrap_or(true),
+            &mut |passkey| {
+                if passkey.relying_party == relying_party {
+                    *credential_counts
+                        .entry(passkey.credential_id.clone())
+                        .or_insert(0) += 1;
+                    candidates.push(PasskeyCredentialCandidateDto {
+                        credential_id: passkey.credential_id.clone(),
+                        username: passkey.username.clone(),
+                        user_handle: passkey.user_handle.clone(),
+                    });
+                }
+            },
+        );
+        let credentials = candidates
+            .into_iter()
+            .filter(|candidate| credential_counts[&candidate.credential_id] == 1)
+            .collect();
+
+        Ok(PasskeyCredentialListDto { credentials })
+    }
+
+    fn validate_passkey_ceremony_for_s3_read(
+        &self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        expected_ceremony: PasskeyCeremonyKindDto,
+        vault_id: &str,
+        relying_party: &str,
+    ) -> Result<()> {
+        validate_passkey_relying_party_id(relying_party)?;
+        if expected_phase != PasskeyCeremonyPhaseDto::CredentialResolution {
+            anyhow::bail!("passkey ceremony expected phase must be s3_credential_resolution");
+        }
+        let now_epoch_ms = self.current_unix_time_ms();
+        let entry = self
+            .passkey_ceremonies
+            .get(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        if entry.phase != expected_phase {
+            anyhow::bail!("passkey ceremony phase mismatch");
+        }
+        if entry.identity.ceremony != expected_ceremony {
+            anyhow::bail!("passkey ceremony type mismatch");
+        }
+        if entry.identity.relying_party != relying_party {
+            anyhow::bail!("passkey ceremony relying party mismatch");
+        }
+        validate_passkey_ceremony_not_expired(entry, now_epoch_ms)?;
+        validate_passkey_ceremony_vault_binding(entry, vault_id)?;
+        Ok(())
+    }
+
+    fn register_passkey_ceremony(
+        &mut self,
+        ceremony_token: &str,
+        identity: PasskeyCeremonyIdentity,
+    ) -> Result<PasskeyCeremonyRegisteredDto> {
+        let now_epoch_ms = self.current_unix_time_ms();
+        self.prune_expired_passkey_ceremonies(now_epoch_ms);
+        validate_passkey_ceremony_ttl(
+            identity.registered_at_epoch_ms,
+            identity.expires_at_epoch_ms,
+            now_epoch_ms,
+        )?;
+        validate_passkey_ceremony_connection_id(&identity.connection_id)?;
+        validate_passkey_ceremony_challenge(&identity.challenge_base64url)?;
+        validate_passkey_ceremony_origin_and_relying_party_for_s0(
+            &identity.origin,
+            &identity.relying_party,
+        )?;
+        if let Some(top_origin) = identity.top_origin.as_deref() {
+            validate_passkey_ceremony_origin_value(top_origin, "top")?;
+        }
+        for ancestor_origin in &identity.ancestor_origins {
+            validate_passkey_ceremony_origin_value(ancestor_origin, "ancestor")?;
+        }
+        if identity.tab_id < 0 || identity.frame_id < 0 {
+            anyhow::bail!("passkey ceremony frame position is invalid");
+        }
+        let expected_frame_kind = if identity.frame_id == 0 {
+            PasskeyFrameKindDto::Top
+        } else {
+            PasskeyFrameKindDto::Subframe
+        };
+        if identity.frame_kind != expected_frame_kind {
+            anyhow::bail!("passkey ceremony frame kind mismatch");
+        }
+        if identity.frame_kind == PasskeyFrameKindDto::Top
+            && (identity.top_origin.is_some() || !identity.ancestor_origins.is_empty())
+        {
+            anyhow::bail!("passkey ceremony top frame cannot have ancestor origins");
+        }
+        if !identity.ancestor_origins.is_empty() && identity.top_origin.is_none() {
+            anyhow::bail!("passkey ceremony top origin is required when ancestors are present");
+        }
+        if let (Some(top_origin), Some(last_ancestor)) =
+            (&identity.top_origin, identity.ancestor_origins.last())
+        {
+            if !passkey_ceremony_origins_are_same_origin(top_origin, last_ancestor) {
+                anyhow::bail!("passkey ceremony top origin must match the last ancestor");
+            }
+        }
+        if identity.frame_kind == PasskeyFrameKindDto::Subframe
+            && (identity.top_origin.is_none() || identity.ancestor_origins.is_empty())
+        {
+            anyhow::bail!("passkey ceremony subframe top origin is required");
+        }
+
+        if let Some(existing) = self.passkey_ceremonies.get(ceremony_token) {
+            if existing.identity == identity {
+                return Ok(PasskeyCeremonyRegisteredDto { registered: true });
+            }
+            anyhow::bail!("passkey ceremony token already registered");
+        }
+        if self.passkey_ceremonies.values().any(|existing| {
+            !is_closed_passkey_ceremony_phase(existing.phase)
+                && existing.identity.expires_at_epoch_ms > identity.registered_at_epoch_ms
+                && existing.identity.origin == identity.origin
+                && existing.identity.relying_party == identity.relying_party
+                && existing.identity.tab_id == identity.tab_id
+                && existing.identity.frame_id == identity.frame_id
+        }) {
+            anyhow::bail!(
+                "passkey ceremony already active for origin, relying party, tab, and frame"
+            );
+        }
+
+        self.passkey_ceremonies.insert(
+            ceremony_token.to_owned(),
+            PasskeyCeremonyLedgerEntry {
+                identity,
+                phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                vault_id: None,
+                durable_state: PasskeyCeremonyDurableStateDto::None,
+                delivery_state: PasskeyCeremonyDeliveryStateDto::NotDelivered,
+                user_verification: None,
+                registration_rollback: None,
+            },
+        );
+        Ok(PasskeyCeremonyRegisteredDto { registered: true })
+    }
+
+    fn advance_passkey_ceremony_phase(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        next_phase: PasskeyCeremonyPhaseDto,
+        related_origin_verified: bool,
+    ) -> Result<PasskeyCeremonyAdvancedDto> {
+        let now_epoch_ms = self.current_unix_time_ms();
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        if entry.phase != expected_phase {
+            if is_stale_passkey_phase_advance_noop(entry.phase, expected_phase, next_phase) {
+                return Ok(PasskeyCeremonyAdvancedDto { advanced: true });
+            }
+            anyhow::bail!("passkey ceremony phase mismatch");
+        }
+        if expected_phase == PasskeyCeremonyPhaseDto::NetworkValidation
+            && next_phase == PasskeyCeremonyPhaseDto::CredentialResolution
+            && !related_origin_verified
+        {
+            anyhow::bail!("passkey ceremony related origin evidence is required");
+        }
+        if !is_legal_passkey_ceremony_transition(
+            expected_phase,
+            next_phase,
+            &entry.identity,
+            related_origin_verified,
+        ) {
+            anyhow::bail!("illegal passkey ceremony phase transition");
+        }
+        if next_phase == PasskeyCeremonyPhaseDto::ClosedDelivered
+            && entry.identity.ceremony == PasskeyCeremonyKindDto::Create
+            && entry.durable_state != PasskeyCeremonyDurableStateDto::Committed
+        {
+            anyhow::bail!("passkey ceremony must be committed before delivery");
+        }
+        if !is_closed_passkey_ceremony_phase(next_phase) {
+            validate_passkey_ceremony_not_expired(entry, now_epoch_ms)?;
+        }
+        entry.phase = next_phase;
+        if next_phase == PasskeyCeremonyPhaseDto::ClosedDelivered {
+            entry.delivery_state = PasskeyCeremonyDeliveryStateDto::Delivered;
+        }
+        Ok(PasskeyCeremonyAdvancedDto { advanced: true })
+    }
+
+    fn bind_passkey_ceremony_vault(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+    ) -> Result<PasskeyCeremonyVaultBoundDto> {
+        let now_epoch_ms = self.current_unix_time_ms();
+        {
+            let entry = self
+                .passkey_ceremonies
+                .get(ceremony_token)
+                .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+            if !is_passkey_ceremony_vault_binding_phase(expected_phase)
+                || entry.phase != expected_phase
+                || is_closed_passkey_ceremony_phase(entry.phase)
+            {
+                anyhow::bail!("passkey ceremony phase mismatch");
+            }
+            validate_passkey_ceremony_not_expired(entry, now_epoch_ms)?;
+            validate_passkey_ceremony_vault_binding(entry, vault_id)?;
+        }
+        let _ = self.loaded_vault(vault_id)?;
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .expect("passkey ceremony was checked before vault lookup");
+        bind_passkey_ceremony_vault(entry, vault_id)?;
+        Ok(PasskeyCeremonyVaultBoundDto { bound: true })
+    }
+
+    fn bind_passkey_ceremony_vault_after_vault_lookup(
+        &mut self,
+        ceremony_token: &str,
+        vault_id: &str,
+    ) -> Result<()> {
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        bind_passkey_ceremony_vault(entry, vault_id)
+    }
+
+    fn query_passkey_ceremony_ledger(&self, ceremony_token: &str) -> PasskeyCeremonyLedgerDto {
+        match self.passkey_ceremonies.get(ceremony_token) {
+            Some(entry) => PasskeyCeremonyLedgerDto {
+                known: true,
+                phase: Some(entry.phase),
+                durable_state: Some(entry.durable_state),
+                delivery_state: Some(entry.delivery_state),
+            },
+            None => PasskeyCeremonyLedgerDto {
+                known: false,
+                phase: None,
+                durable_state: None,
+                delivery_state: None,
+            },
+        }
+    }
+
+    fn reconcile_passkey_ceremony_ledger(
+        &mut self,
+        active_connection_id: &str,
+    ) -> Result<PasskeyCeremonyReconciliationDto> {
+        validate_passkey_ceremony_connection_id(active_connection_id)?;
+        let now_epoch_ms = self.current_unix_time_ms();
+        let mut reconciled = Vec::new();
+        let mut rollback_tokens = Vec::new();
+        for (ceremony_token, entry) in &mut self.passkey_ceremonies {
+            if entry.phase != PasskeyCeremonyPhaseDto::CompletionAndMutation
+                || entry.delivery_state != PasskeyCeremonyDeliveryStateDto::NotDelivered
+                || (entry.identity.connection_id == active_connection_id
+                    && entry.identity.expires_at_epoch_ms > now_epoch_ms)
+            {
+                continue;
+            }
+
+            if entry.durable_state == PasskeyCeremonyDurableStateDto::Committed {
+                entry.phase = PasskeyCeremonyPhaseDto::ClosedDelivered;
+                entry.delivery_state = PasskeyCeremonyDeliveryStateDto::UnknownDelivery;
+                reconciled.push(PasskeyCeremonyReconciledDto {
+                    ceremony_token: ceremony_token.clone(),
+                    delivery_state: PasskeyCeremonyDeliveryStateDto::UnknownDelivery,
+                });
+                continue;
+            }
+
+            if entry.identity.ceremony == PasskeyCeremonyKindDto::Create
+                && matches!(
+                    entry.durable_state,
+                    PasskeyCeremonyDurableStateDto::Snapshot
+                        | PasskeyCeremonyDurableStateDto::Mutated
+                        | PasskeyCeremonyDurableStateDto::Saved
+                )
+            {
+                rollback_tokens.push(ceremony_token.clone());
+            }
+        }
+
+        for ceremony_token in rollback_tokens {
+            if self
+                .abort_passkey_registration(
+                    &ceremony_token,
+                    PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                    PasskeyCeremonyPhaseDto::ClosedFailed,
+                )
+                .is_err()
+            {
+                continue;
+            }
+            reconciled.push(PasskeyCeremonyReconciledDto {
+                ceremony_token,
+                delivery_state: PasskeyCeremonyDeliveryStateDto::NotDelivered,
+            });
+        }
+
+        Ok(PasskeyCeremonyReconciliationDto { reconciled })
+    }
+
+    fn prune_expired_passkey_ceremonies(&mut self, now_epoch_ms: u64) {
+        self.passkey_ceremonies.retain(|_, entry| {
+            if entry.identity.expires_at_epoch_ms > now_epoch_ms {
+                return true;
+            }
+            entry.phase == PasskeyCeremonyPhaseDto::CompletionAndMutation
+                && entry.identity.ceremony == PasskeyCeremonyKindDto::Create
+                && entry.durable_state != PasskeyCeremonyDurableStateDto::None
+        });
+    }
+
+    fn mark_passkey_ceremony_unknown_delivery(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+    ) -> Result<PasskeyCeremonyAdvancedDto> {
+        if expected_phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
+            anyhow::bail!("passkey ceremony expected phase must be s4_completion_and_mutation");
+        }
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        if entry.phase == PasskeyCeremonyPhaseDto::ClosedDelivered
+            && entry.delivery_state == PasskeyCeremonyDeliveryStateDto::UnknownDelivery
+        {
+            return Ok(PasskeyCeremonyAdvancedDto { advanced: true });
+        }
+        if entry.phase != expected_phase {
+            anyhow::bail!("passkey ceremony phase mismatch");
+        }
+        match entry.identity.ceremony {
+            PasskeyCeremonyKindDto::Create => {
+                if entry.durable_state != PasskeyCeremonyDurableStateDto::Committed {
+                    anyhow::bail!("passkey ceremony is not committed");
+                }
+            }
+            PasskeyCeremonyKindDto::Get => {
+                if entry.durable_state != PasskeyCeremonyDurableStateDto::None {
+                    anyhow::bail!("passkey get ceremony cannot have durable state");
+                }
+            }
+        }
+
+        entry.phase = PasskeyCeremonyPhaseDto::ClosedDelivered;
+        entry.delivery_state = PasskeyCeremonyDeliveryStateDto::UnknownDelivery;
+        Ok(PasskeyCeremonyAdvancedDto { advanced: true })
+    }
+
+    fn set_passkey_registration_rollback(
+        &mut self,
+        ceremony_token: &str,
+        rollback: PasskeyRegistrationRollbackState,
+        durable_state: PasskeyCeremonyDurableStateDto,
+    ) -> Result<()> {
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        if entry.phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
+            anyhow::bail!("passkey ceremony phase mismatch");
+        }
+        if entry.identity.ceremony != PasskeyCeremonyKindDto::Create {
+            anyhow::bail!("passkey ceremony type mismatch");
+        }
+        if entry.durable_state == PasskeyCeremonyDurableStateDto::Committed {
+            anyhow::bail!("passkey ceremony already committed");
+        }
+        entry.registration_rollback = Some(rollback);
+        entry.durable_state = durable_state;
+        Ok(())
+    }
+
+    fn set_passkey_ceremony_durable_state(
+        &mut self,
+        ceremony_token: &str,
+        durable_state: PasskeyCeremonyDurableStateDto,
+    ) -> Result<()> {
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        if entry.phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
+            anyhow::bail!("passkey ceremony phase mismatch");
+        }
+        if entry.identity.ceremony != PasskeyCeremonyKindDto::Create {
+            anyhow::bail!("passkey ceremony type mismatch");
+        }
+        if entry.durable_state == PasskeyCeremonyDurableStateDto::Committed {
+            anyhow::bail!("passkey ceremony already committed");
+        }
+        entry.durable_state = durable_state;
+        Ok(())
+    }
+
+    pub fn create_passkey_registration(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+        relying_party: &str,
+        origin: &str,
+        user_name: &str,
+        user_display_name: Option<&str>,
+        user_handle_base64url: &str,
+        public_key_algorithm: i32,
+        related_origin_verified: bool,
+        client_data_json_base64url: &str,
+    ) -> Result<PasskeyRegistrationDto> {
+        let client_data_expectations = self.validate_passkey_ceremony_for_s4(
+            ceremony_token,
+            expected_phase,
+            PasskeyCeremonyKindDto::Create,
+            vault_id,
+            origin,
+            relying_party,
+            None,
+            client_data_json_base64url,
+        )?;
+        let user_verified = self.passkey_ceremony_user_verified(ceremony_token, vault_id)?;
+        let modified_at = self.current_unix_time();
+        let credential_id = (self.passkey_credential_id_generator)();
+        let registration = create_registration_with_credential_id(
+            PasskeyRegistrationRequest {
+                relying_party,
+                origin,
+                user_name,
+                user_handle_base64url,
+                public_key_algorithm,
+                user_verified,
+                related_origin_verified,
+                client_data_json_base64url,
+                challenge_base64url: &client_data_expectations.challenge_base64url,
+                top_origin: client_data_expectations.top_origin.as_deref(),
+                ancestor_origins: &client_data_expectations.ancestor_origins,
+            },
+            credential_id,
+        )?;
+        let _ = self.loaded_vault(vault_id)?;
+        self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
+        let mut response = registration.dto;
+
+        let (existing, credential_id_collision_count) = {
+            let loaded = self
+                .loaded
+                .get_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_mut()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            let existing = find_passkey_entry_id_by_relying_party_and_user_handle(
+                &vault.root,
+                vault.recycle_bin_group,
+                vault.recycle_bin_enabled.unwrap_or(true),
+                relying_party,
+                registration.passkey.user_handle.as_deref(),
+            )
+            .map(|entry_id| {
+                let rollback_entry = cloned_entry_by_id(&vault.root, &entry_id)
+                    .with_context(|| format!("entry not found: {entry_id}"))?;
+                Ok::<_, anyhow::Error>((entry_id, rollback_entry))
+            })
+            .transpose()?;
+            let mut credential_id_collision_count = 0;
+            visit_passkeys(
+                &vault.root,
+                vault.recycle_bin_group,
+                vault.recycle_bin_enabled.unwrap_or(true),
+                &mut |passkey| {
+                    if passkey.credential_id == registration.passkey.credential_id {
+                        credential_id_collision_count += 1;
+                    }
+                },
+            );
+            (existing, credential_id_collision_count)
+        };
+        let allowed_existing_collision = existing
+            .as_ref()
+            .and_then(|(_, rollback_entry)| rollback_entry.passkey.as_ref())
+            .is_some_and(|passkey| passkey.credential_id == registration.passkey.credential_id);
+        let allowed_collision_count = if allowed_existing_collision { 1 } else { 0 };
+        if credential_id_collision_count > allowed_collision_count {
+            anyhow::bail!("passkey credential id collision");
+        }
+        if let Some((entry_id, rollback_entry)) = existing {
+            let refresh_entry_username = rollback_entry
+                .passkey
+                .as_ref()
+                .is_some_and(|passkey| rollback_entry.username == passkey.username);
+            let next_passkey_username = registration.passkey.username.clone();
+            self.set_passkey_registration_rollback(
+                ceremony_token,
+                PasskeyRegistrationRollbackState {
+                    vault_id: vault_id.to_owned(),
+                    entry_id: entry_id.clone(),
+                    credential_id: Some(registration.passkey.credential_id.clone()),
+                    created: false,
+                    rollback_entry: Some(rollback_entry),
+                },
+                PasskeyCeremonyDurableStateDto::Snapshot,
+            )?;
+            let loaded = self
+                .loaded
+                .get_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_mut()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            self.core.snapshot_entry_to_history(vault, &entry_id)?;
+            self.core
+                .set_entry_passkey(vault, &entry_id, registration.passkey)?;
+            if refresh_entry_username {
+                self.core.update_entry_fields(
+                    vault,
+                    &entry_id,
+                    EntryUpdate {
+                        title: None,
+                        username: Some(next_passkey_username),
+                        password: None,
+                        url: None,
+                        notes: None,
+                    },
+                )?;
+            }
+            touch_entry_modified_at(&self.core, vault, &entry_id, modified_at)?;
+            enforce_history_limits(vault);
+            response.entry_id = entry_id;
+            response.created = false;
+            self.set_passkey_ceremony_durable_state(
+                ceremony_token,
+                PasskeyCeremonyDurableStateDto::Mutated,
+            )?;
+            return Ok(response);
+        }
+        let title = if relying_party.trim().is_empty() {
+            user_display_name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(user_name)
+                .to_owned()
+        } else {
+            relying_party.to_owned()
+        };
+        let mut created_entry = Entry::new(title);
+        created_entry.username = user_name.to_owned();
+        created_entry.password = String::new();
+        created_entry.url = format!("https://{relying_party}");
+        created_entry.notes = "Created by WebAuthn passkey registration".into();
+        let entry_id = created_entry.id.to_string();
+        self.set_passkey_registration_rollback(
+            ceremony_token,
+            PasskeyRegistrationRollbackState {
+                vault_id: vault_id.to_owned(),
+                entry_id: entry_id.clone(),
+                credential_id: Some(registration.passkey.credential_id.clone()),
+                created: true,
+                rollback_entry: None,
+            },
+            PasskeyCeremonyDurableStateDto::Snapshot,
+        )?;
+        {
+            let loaded = self
+                .loaded
+                .get_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_mut()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            vault.root.entries.push(created_entry);
+            self.core
+                .set_entry_passkey(vault, &entry_id, registration.passkey)?;
+            touch_entry_modified_at(&self.core, vault, &entry_id, modified_at)?;
+        }
+        self.set_passkey_ceremony_durable_state(
+            ceremony_token,
+            PasskeyCeremonyDurableStateDto::Mutated,
+        )?;
+        response.entry_id = entry_id;
+        Ok(response)
+    }
+
+    pub fn abort_passkey_registration(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        closed_phase: PasskeyCeremonyPhaseDto,
+    ) -> Result<()> {
+        if expected_phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
+            anyhow::bail!("passkey ceremony expected phase must be s4_completion_and_mutation");
+        }
+        if !matches!(
+            closed_phase,
+            PasskeyCeremonyPhaseDto::ClosedAborted | PasskeyCeremonyPhaseDto::ClosedFailed
+        ) {
+            anyhow::bail!("passkey ceremony rollback must close aborted or failed");
+        }
+        let (rollback, save_after_rollback) = {
+            let entry = self
+                .passkey_ceremonies
+                .get(ceremony_token)
+                .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+            if entry.phase != expected_phase {
+                if entry.identity.ceremony == PasskeyCeremonyKindDto::Create
+                    && is_closed_passkey_ceremony_phase(entry.phase)
+                {
+                    return Ok(());
+                }
+                anyhow::bail!("passkey ceremony phase mismatch");
+            }
+            if entry.identity.ceremony != PasskeyCeremonyKindDto::Create {
+                anyhow::bail!("passkey ceremony type mismatch");
+            }
+            if entry.durable_state == PasskeyCeremonyDurableStateDto::Committed {
+                anyhow::bail!("passkey ceremony already committed");
+            }
+            (
+                entry.registration_rollback.clone(),
+                entry.durable_state == PasskeyCeremonyDurableStateDto::Saved,
+            )
+        };
+
+        if let Some(rollback) = rollback {
+            let vault_id = rollback.vault_id.clone();
+            self.restore_passkey_registration_rollback(rollback)?;
+            if save_after_rollback {
+                self.save_vault(&vault_id)?;
+            }
+        }
+        self.close_passkey_registration_rollback(ceremony_token, closed_phase)?;
+        Ok(())
+    }
+
+    pub fn save_passkey_registration(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+    ) -> Result<RuntimeResponse> {
+        if expected_phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
+            anyhow::bail!("passkey ceremony expected phase must be s4_completion_and_mutation");
+        }
+        let now_epoch_ms = self.current_unix_time_ms();
+        {
+            let entry = self
+                .passkey_ceremonies
+                .get(ceremony_token)
+                .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+            if entry.phase != expected_phase {
+                if entry.identity.ceremony == PasskeyCeremonyKindDto::Create
+                    && is_closed_passkey_ceremony_phase(entry.phase)
+                {
+                    return Ok(RuntimeResponse::Saved);
+                }
+                anyhow::bail!("passkey ceremony phase mismatch");
+            }
+            if entry.identity.ceremony != PasskeyCeremonyKindDto::Create {
+                anyhow::bail!("passkey ceremony type mismatch");
+            }
+            validate_passkey_ceremony_not_expired(entry, now_epoch_ms)?;
+            if entry.durable_state == PasskeyCeremonyDurableStateDto::Committed {
+                anyhow::bail!("passkey ceremony already committed");
+            }
+            let Some(rollback) = entry.registration_rollback.as_ref() else {
+                anyhow::bail!("passkey registration rollback state missing");
+            };
+            if rollback.vault_id != vault_id {
+                anyhow::bail!("passkey ceremony vault mismatch");
+            }
+        }
+
+        let response = self.save_vault(vault_id)?;
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        if entry.phase != expected_phase {
+            anyhow::bail!("passkey ceremony phase mismatch");
+        }
+        if entry.durable_state == PasskeyCeremonyDurableStateDto::Committed {
+            anyhow::bail!("passkey ceremony already committed");
+        }
+        entry.durable_state = PasskeyCeremonyDurableStateDto::Saved;
+        Ok(response)
+    }
+
+    fn restore_passkey_registration_rollback(
+        &mut self,
+        rollback: PasskeyRegistrationRollbackState,
+    ) -> Result<()> {
+        let loaded = self
+            .loaded
+            .get_mut(&rollback.vault_id)
+            .with_context(|| format!("vault not opened: {}", rollback.vault_id))?;
+        let vault = loaded
+            .vault
+            .as_mut()
+            .with_context(|| format!("vault is locked: {}", rollback.vault_id))?;
+
+        if rollback.created {
+            if let Some(credential_id) = rollback.credential_id.as_deref() {
+                match entry_has_passkey_credential(&vault.root, &rollback.entry_id, credential_id) {
+                    Some(true) => {}
+                    Some(false) => return Ok(()),
+                    None => return Ok(()),
+                }
+            }
+            self.core.delete_entry(vault, &rollback.entry_id)?;
+            return Ok(());
+        }
+
+        if let Some(rollback_entry) = rollback.rollback_entry {
+            if restore_entry_from_snapshot(
+                &mut vault.root,
+                &rollback.entry_id,
+                rollback.credential_id.as_deref(),
+                rollback_entry,
+            )? {
+                return Ok(());
+            }
+            anyhow::bail!("entry not found: {}", rollback.entry_id);
+        }
+
+        if rollback.credential_id.is_some() {
+            return Ok(());
+        }
+
+        if !restore_entry_from_latest_history(
+            &mut vault.root,
+            &rollback.entry_id,
+            rollback.credential_id.as_deref(),
+        )? {
+            anyhow::bail!("entry not found: {}", rollback.entry_id);
+        }
+        Ok(())
+    }
+
+    fn close_passkey_registration_rollback(
+        &mut self,
+        ceremony_token: &str,
+        closed_phase: PasskeyCeremonyPhaseDto,
+    ) -> Result<()> {
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        entry.phase = closed_phase;
+        entry.durable_state = PasskeyCeremonyDurableStateDto::None;
+        entry.registration_rollback = None;
+        Ok(())
+    }
+
+    pub fn commit_passkey_registration(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+        entry_id: &str,
+        credential_id: &str,
+    ) -> Result<()> {
+        if expected_phase != PasskeyCeremonyPhaseDto::CompletionAndMutation {
+            anyhow::bail!("passkey ceremony expected phase must be s4_completion_and_mutation");
+        }
+        let now_epoch_ms = self.current_unix_time_ms();
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        if entry.phase != expected_phase {
+            if entry.identity.ceremony == PasskeyCeremonyKindDto::Create
+                && is_closed_passkey_ceremony_phase(entry.phase)
+            {
+                return Ok(());
+            }
+            anyhow::bail!("passkey ceremony phase mismatch");
+        }
+        if entry.identity.ceremony != PasskeyCeremonyKindDto::Create {
+            anyhow::bail!("passkey ceremony type mismatch");
+        }
+        if entry.durable_state == PasskeyCeremonyDurableStateDto::Committed {
+            return Ok(());
+        }
+        validate_passkey_ceremony_not_expired(entry, now_epoch_ms)?;
+        let Some(rollback) = entry.registration_rollback.as_ref() else {
+            anyhow::bail!("passkey registration rollback state missing");
+        };
+        if rollback.vault_id != vault_id
+            || rollback.entry_id != entry_id
+            || rollback.credential_id.as_deref() != Some(credential_id)
+        {
+            anyhow::bail!("passkey registration rollback identity mismatch");
+        }
+        if entry.durable_state != PasskeyCeremonyDurableStateDto::Saved {
+            anyhow::bail!("passkey ceremony must be saved before commit");
+        }
+        entry.durable_state = PasskeyCeremonyDurableStateDto::Committed;
+        entry.registration_rollback = None;
+        Ok(())
     }
 
     pub fn delete_entry(&mut self, vault_id: &str, entry_id: &str) -> Result<()> {
@@ -1503,6 +2881,36 @@ impl Runtime {
             RuntimeCommand::ClearEntryTotp { vault_id, entry_id } => self
                 .clear_entry_totp(&vault_id, &entry_id)
                 .map(RuntimeResponse::EntryDetail),
+            RuntimeCommand::SetEntryPasskey {
+                vault_id,
+                entry_id,
+                passkey,
+            } => self
+                .set_entry_passkey(&vault_id, &entry_id, passkey)
+                .map(RuntimeResponse::EntryDetail),
+            RuntimeCommand::ClearEntryPasskey { vault_id, entry_id } => self
+                .clear_entry_passkey(&vault_id, &entry_id)
+                .map(RuntimeResponse::EntryDetail),
+            RuntimeCommand::GetPasskeyUserVerificationCapability => {
+                Ok(RuntimeResponse::PasskeyUserVerificationCapability(
+                    self.passkey_user_verification_capability(),
+                ))
+            }
+            RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                method,
+                password,
+            } => self
+                .verify_passkey_user(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    method,
+                    password.as_deref(),
+                )
+                .map(RuntimeResponse::PasskeyUserVerified),
             RuntimeCommand::DeleteEntry { vault_id, entry_id } => self
                 .delete_entry(&vault_id, &entry_id)
                 .map(|_| RuntimeResponse::Saved),
@@ -1601,6 +3009,233 @@ impl Runtime {
                     Err(error) => query_error_response(error),
                 })
             }
+            RuntimeCommand::ListPasskeyCredentials {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                relying_party,
+            } => Ok(
+                match self.list_passkey_credentials(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    &relying_party,
+                ) {
+                    Ok(credentials) => RuntimeResponse::PasskeyCredentialList(credentials),
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token,
+                connection_id,
+                origin,
+                top_origin,
+                ancestor_origins,
+                relying_party,
+                ceremony,
+                discoverable,
+                user_verification,
+                challenge_base64url,
+                request_id,
+                tab_id,
+                frame_id,
+                frame_kind,
+                registered_at_epoch_ms,
+                expires_at_epoch_ms,
+            } => self
+                .register_passkey_ceremony(
+                    &ceremony_token,
+                    PasskeyCeremonyIdentity {
+                        connection_id,
+                        origin,
+                        top_origin,
+                        ancestor_origins,
+                        relying_party,
+                        ceremony,
+                        discoverable,
+                        user_verification,
+                        challenge_base64url,
+                        request_id,
+                        tab_id,
+                        frame_id,
+                        frame_kind,
+                        registered_at_epoch_ms,
+                        expires_at_epoch_ms,
+                    },
+                )
+                .map(RuntimeResponse::PasskeyCeremonyRegistered),
+            RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token,
+                expected_phase,
+                next_phase,
+                related_origin_verified,
+            } => self
+                .advance_passkey_ceremony_phase(
+                    &ceremony_token,
+                    expected_phase,
+                    next_phase,
+                    related_origin_verified,
+                )
+                .map(RuntimeResponse::PasskeyCeremonyAdvanced),
+            RuntimeCommand::BindPasskeyCeremonyVault {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+            } => self
+                .bind_passkey_ceremony_vault(&ceremony_token, expected_phase, &vault_id)
+                .map(RuntimeResponse::PasskeyCeremonyVaultBound),
+            RuntimeCommand::QueryPasskeyCeremonyLedger { ceremony_token } => {
+                Ok(RuntimeResponse::PasskeyCeremonyLedger(
+                    self.query_passkey_ceremony_ledger(&ceremony_token),
+                ))
+            }
+            RuntimeCommand::ReconcilePasskeyCeremonyLedger {
+                active_connection_id,
+            } => self
+                .reconcile_passkey_ceremony_ledger(&active_connection_id)
+                .map(RuntimeResponse::PasskeyCeremonyReconciliation),
+            RuntimeCommand::MarkPasskeyCeremonyUnknownDelivery {
+                ceremony_token,
+                expected_phase,
+            } => Ok(
+                match self.mark_passkey_ceremony_unknown_delivery(&ceremony_token, expected_phase) {
+                    Ok(response) => RuntimeResponse::PasskeyCeremonyAdvanced(response),
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::CreatePasskeyAssertion {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                relying_party,
+                origin,
+                credential_id,
+                discoverable,
+                user_presence_verified,
+                related_origin_verified,
+                client_data_json_base64url,
+            } => Ok(
+                match self.create_passkey_assertion(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    &relying_party,
+                    &origin,
+                    credential_id.as_deref(),
+                    discoverable,
+                    user_presence_verified,
+                    related_origin_verified,
+                    &client_data_json_base64url,
+                ) {
+                    Ok(assertion) => RuntimeResponse::PasskeyAssertion(assertion),
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::CreatePasskeyRegistration {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                relying_party,
+                origin,
+                user_name,
+                user_display_name,
+                user_handle_base64url,
+                public_key_algorithm,
+                related_origin_verified,
+                client_data_json_base64url,
+            } => Ok(
+                match self.create_passkey_registration(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    &relying_party,
+                    &origin,
+                    &user_name,
+                    user_display_name.as_deref(),
+                    &user_handle_base64url,
+                    public_key_algorithm,
+                    related_origin_verified,
+                    &client_data_json_base64url,
+                ) {
+                    Ok(registration) => RuntimeResponse::PasskeyRegistration(registration),
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::SavePasskeyRegistration {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+            } => Ok(
+                match self.save_passkey_registration(&ceremony_token, expected_phase, &vault_id) {
+                    Ok(response) => response,
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::AbortPasskeyRegistration {
+                ceremony_token,
+                expected_phase,
+                closed_phase,
+            } => Ok(
+                match self.abort_passkey_registration(&ceremony_token, expected_phase, closed_phase)
+                {
+                    Ok(()) => RuntimeResponse::Saved,
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::CommitPasskeyRegistration {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                entry_id,
+                credential_id,
+            } => Ok(
+                match self.commit_passkey_registration(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    &entry_id,
+                    &credential_id,
+                ) {
+                    Ok(()) => RuntimeResponse::Saved,
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::PasskeyCredentialStatus {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                credential_id,
+                relying_party,
+            } => Ok(
+                match self.passkey_credential_status(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    &credential_id,
+                    &relying_party,
+                ) {
+                    Ok(status) => RuntimeResponse::PasskeyCredentialStatus(status),
+                    Err(error) => query_error_response(error),
+                },
+            ),
+            RuntimeCommand::PasskeyCredentialStatusBatch {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                credential_ids,
+                relying_party,
+            } => Ok(
+                match self.passkey_credential_status_batch(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    &credential_ids,
+                    &relying_party,
+                ) {
+                    Ok(status) => RuntimeResponse::PasskeyCredentialStatusBatch(status),
+                    Err(error) => query_error_response(error),
+                },
+            ),
             RuntimeCommand::UpdateEntry { .. } => Ok(RuntimeResponse::Error(ErrorDto {
                 code: "unsupported".into(),
                 message: "command is not implemented yet".into(),
@@ -1666,9 +3301,7 @@ impl Runtime {
                     history_snapshots_added: summary.history_snapshots_added,
                 })
             };
-            let bytes = self
-                .core
-                .save_kdbx(vault, &key, save_profile)
+            let bytes = save_kdbx_with_history_limits(&self.core, vault, &key, save_profile)
                 .with_context(|| format!("failed to save vault: {vault_id}"))?;
             (bytes, merge_summary)
         };
@@ -1762,8 +3395,7 @@ impl Runtime {
         let Some(vault) = loaded.vault.as_mut() else {
             anyhow::bail!("vault is locked: {vault_id}");
         };
-        self.core
-            .save_kdbx(vault, key, save_profile)
+        save_kdbx_with_history_limits(&self.core, vault, key, save_profile)
             .with_context(|| format!("failed to save vault: {vault_id}"))
     }
 
@@ -1996,8 +3628,7 @@ impl Runtime {
                 self.core.load_and_merge_kdbx(vault, &snapshot.bytes, key)?;
             }
             let bytes = if let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key) {
-                self.core
-                    .save_kdbx(vault, key, loaded.save_profile.clone())
+                save_kdbx_with_history_limits(&self.core, vault, key, loaded.save_profile.clone())
                     .with_context(|| format!("failed to save vault: {vault_id}"))?
             } else {
                 loaded.bytes.clone()
@@ -2129,6 +3760,10 @@ impl Runtime {
         self.fixed_unix_time.unwrap_or_else(current_unix_time)
     }
 
+    fn current_unix_time_ms(&self) -> u64 {
+        self.fixed_unix_time_ms.unwrap_or_else(current_unix_time_ms)
+    }
+
     fn current_source_status(&self) -> Option<VaultSourceStatusDto> {
         if let Some(active_vault_id) = self.session.active_vault_id() {
             return self
@@ -2246,6 +3881,61 @@ fn collect_group_entries(group: &vaultkern_core::GroupView, output: &mut Vec<Ent
     }
 }
 
+fn collect_fill_candidates(
+    group: &vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+    ancestor_recycled: bool,
+    url: &str,
+    next_index: &mut usize,
+    output: &mut Vec<RankedFillCandidate>,
+) {
+    let group_recycled = group_is_recycled(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        ancestor_recycled,
+    );
+    for entry in &group.entries {
+        if entry_is_recycled(entry, group_recycled) {
+            continue;
+        }
+
+        let index = *next_index;
+        *next_index += 1;
+
+        if entry.password.is_empty() && entry.passkey.is_some() {
+            continue;
+        }
+
+        if let Some(score) = score_entry_match(url, &entry.url) {
+            output.push(RankedFillCandidate {
+                index,
+                entry: EntrySummaryDto {
+                    id: entry.id.to_string(),
+                    title: entry.title.clone(),
+                    username: entry.username.clone(),
+                    url: entry.url.clone(),
+                    group_id: group.id.to_string(),
+                },
+                score,
+            });
+        }
+    }
+
+    for child in &group.children {
+        collect_fill_candidates(
+            child,
+            recycle_bin_group,
+            recycle_bin_enabled,
+            group_recycled,
+            url,
+            next_index,
+            output,
+        );
+    }
+}
+
 fn project_group_node(group: &vaultkern_core::GroupView) -> GroupNodeDto {
     GroupNodeDto {
         id: group.id.clone(),
@@ -2253,6 +3943,436 @@ fn project_group_node(group: &vaultkern_core::GroupView) -> GroupNodeDto {
         entry_count: group.entry_count,
         child_count: group.child_count,
         children: group.children.iter().map(project_group_node).collect(),
+    }
+}
+
+fn entry_passkey_to_dto(passkey: vaultkern_core::EntryPasskeyView) -> EntryPasskeyDto {
+    EntryPasskeyDto {
+        username: passkey.username,
+        credential_id: passkey.credential_id,
+        generated_user_id: passkey.generated_user_id,
+        private_key_pem: passkey.private_key_pem,
+        relying_party: passkey.relying_party,
+        user_handle: passkey.user_handle,
+        backup_eligible: passkey.backup_eligible,
+        backup_state: passkey.backup_state,
+    }
+}
+
+fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> Result<PasskeyRecord> {
+    validate_passkey_credential_id(&passkey.credential_id)?;
+    if let Some(user_handle) = &passkey.user_handle {
+        validate_passkey_user_handle(user_handle)?;
+    }
+
+    Ok(PasskeyRecord {
+        username: passkey.username,
+        credential_id: passkey.credential_id,
+        generated_user_id: passkey.generated_user_id,
+        private_key_pem: passkey.private_key_pem,
+        relying_party: passkey.relying_party,
+        user_handle: passkey.user_handle,
+        backup_eligible: passkey.backup_eligible,
+        backup_state: passkey.backup_state,
+    })
+}
+
+fn validate_passkey_credential_id(credential_id_base64url: &str) -> Result<()> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(credential_id_base64url)
+        .context("invalid passkey credential id base64url")?;
+    if bytes.is_empty() {
+        anyhow::bail!("passkey credential id must not be empty");
+    }
+    Ok(())
+}
+
+fn validate_passkey_user_handle(user_handle_base64url: &str) -> Result<()> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(user_handle_base64url)
+        .context("invalid passkey user handle base64url")?;
+    if bytes.is_empty() || bytes.len() > 64 {
+        anyhow::bail!("passkey user handle must be 1 to 64 bytes");
+    }
+    Ok(())
+}
+
+fn find_passkey_by_credential_id_and_relying_party<'a>(
+    group: &'a vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+    credential_id: &str,
+    relying_party: Option<&str>,
+) -> Option<&'a PasskeyRecord> {
+    let mut found = None;
+    visit_passkeys(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        &mut |passkey| {
+            if found.is_none()
+                && passkey.credential_id == credential_id
+                && relying_party.is_none_or(|value| passkey.relying_party == value)
+            {
+                found = Some(passkey);
+            }
+        },
+    );
+
+    found
+}
+
+fn find_unique_passkey_by_credential_id_and_relying_party<'a>(
+    group: &'a vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+    credential_id: &str,
+    relying_party: Option<&str>,
+) -> Result<&'a PasskeyRecord> {
+    let mut found = None;
+    let mut count = 0usize;
+    visit_passkeys(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        &mut |passkey| {
+            if passkey.credential_id == credential_id
+                && relying_party.is_none_or(|value| passkey.relying_party == value)
+            {
+                count += 1;
+                if found.is_none() {
+                    found = Some(passkey);
+                }
+            }
+        },
+    );
+
+    match (count, found) {
+        (0, _) => anyhow::bail!("passkey credential not found: {credential_id}"),
+        (1, Some(passkey)) => Ok(passkey),
+        _ => anyhow::bail!("multiple passkey credentials found for credential id: {credential_id}"),
+    }
+}
+
+fn find_passkey_entry_id_by_relying_party_and_user_handle(
+    group: &vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+    relying_party: &str,
+    user_handle: Option<&str>,
+) -> Option<String> {
+    find_passkey_entry_id_in_group(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        false,
+        relying_party,
+        user_handle,
+    )
+}
+
+fn find_passkey_entry_id_in_group(
+    group: &vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+    ancestor_recycled: bool,
+    relying_party: &str,
+    user_handle: Option<&str>,
+) -> Option<String> {
+    let group_recycled = group_is_recycled(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        ancestor_recycled,
+    );
+    for entry in &group.entries {
+        if entry_is_recycled(entry, group_recycled) {
+            continue;
+        }
+        if let Some(passkey) = entry.passkey.as_ref()
+            && passkey.relying_party == relying_party
+            && passkey.user_handle.as_deref() == user_handle
+        {
+            return Some(entry.id.to_string());
+        }
+    }
+
+    for child in &group.children {
+        if let Some(found) = find_passkey_entry_id_in_group(
+            child,
+            recycle_bin_group,
+            recycle_bin_enabled,
+            group_recycled,
+            relying_party,
+            user_handle,
+        ) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn visit_passkeys<'a>(
+    group: &'a vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+    visitor: &mut impl FnMut(&'a PasskeyRecord),
+) {
+    visit_passkeys_in_group(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        false,
+        visitor,
+    );
+}
+
+fn visit_passkeys_in_group<'a>(
+    group: &'a vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+    ancestor_recycled: bool,
+    visitor: &mut impl FnMut(&'a PasskeyRecord),
+) {
+    let group_recycled = group_is_recycled(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        ancestor_recycled,
+    );
+    for entry in &group.entries {
+        if !entry_is_recycled(entry, group_recycled)
+            && let Some(passkey) = entry.passkey.as_ref()
+        {
+            visitor(passkey);
+        }
+    }
+
+    for child in &group.children {
+        visit_passkeys_in_group(
+            child,
+            recycle_bin_group,
+            recycle_bin_enabled,
+            group_recycled,
+            visitor,
+        );
+    }
+}
+
+fn group_is_recycled(
+    group: &vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+    ancestor_recycled: bool,
+) -> bool {
+    ancestor_recycled || group_is_recycle_bin(group, recycle_bin_group, recycle_bin_enabled)
+}
+
+fn entry_is_recycled(_entry: &vaultkern_core::Entry, ancestor_recycled: bool) -> bool {
+    // Entry.previous_parent is also written for ordinary moves by other clients;
+    // only ancestor group state is a recycle signal here.
+    ancestor_recycled
+}
+
+fn group_is_recycle_bin(
+    group: &vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+) -> bool {
+    recycle_bin_enabled
+        && recycle_bin_group.is_some_and(|recycle_bin_group| group.id == recycle_bin_group)
+}
+
+fn entry_has_passkey_credential(
+    group: &vaultkern_core::Group,
+    entry_id: &str,
+    credential_id: &str,
+) -> Option<bool> {
+    for entry in &group.entries {
+        if entry.id.to_string() == entry_id {
+            return Some(
+                entry
+                    .passkey
+                    .as_ref()
+                    .is_some_and(|passkey| passkey.credential_id == credential_id),
+            );
+        }
+    }
+
+    for child in &group.children {
+        if let Some(found) = entry_has_passkey_credential(child, entry_id, credential_id) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn cloned_entry_by_id(group: &vaultkern_core::Group, entry_id: &str) -> Option<Entry> {
+    for entry in &group.entries {
+        if entry.id.to_string() == entry_id {
+            let mut cloned = entry.clone();
+            cloned.history.clear();
+            return Some(cloned);
+        }
+    }
+
+    for child in &group.children {
+        if let Some(found) = cloned_entry_by_id(child, entry_id) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn restore_entry_from_snapshot(
+    group: &mut vaultkern_core::Group,
+    entry_id: &str,
+    credential_id: Option<&str>,
+    mut restored: Entry,
+) -> Result<bool> {
+    for entry in &mut group.entries {
+        if entry.id.to_string() != entry_id {
+            continue;
+        }
+
+        if credential_id.is_some_and(|credential_id| {
+            entry
+                .passkey
+                .as_ref()
+                .is_none_or(|passkey| passkey.credential_id != credential_id)
+        }) {
+            return Ok(true);
+        }
+
+        let mut retained_history = std::mem::take(&mut entry.history);
+        if retained_history.last().is_some_and(|history| {
+            history_matches_passkey_registration_rollback(entry, history, credential_id)
+        }) {
+            retained_history.pop();
+        }
+        restored.history = retained_history;
+        *entry = restored;
+        return Ok(true);
+    }
+
+    for child in &mut group.children {
+        if restore_entry_from_snapshot(child, entry_id, credential_id, restored.clone())? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn restore_entry_from_latest_history(
+    group: &mut vaultkern_core::Group,
+    entry_id: &str,
+    credential_id: Option<&str>,
+) -> Result<bool> {
+    for entry in &mut group.entries {
+        if entry.id.to_string() != entry_id {
+            continue;
+        }
+
+        if credential_id.is_some_and(|credential_id| {
+            entry
+                .passkey
+                .as_ref()
+                .is_none_or(|passkey| passkey.credential_id != credential_id)
+        }) {
+            return Ok(true);
+        }
+        let history = entry.history.last().with_context(|| {
+            format!("passkey registration rollback history not found: {entry_id}")
+        })?;
+        if !history_matches_passkey_registration_rollback(entry, history, credential_id) {
+            anyhow::bail!("passkey registration rollback history does not match: {entry_id}");
+        }
+        let mut restored = entry.history.pop().with_context(|| {
+            format!("passkey registration rollback history not found: {entry_id}")
+        })?;
+        restored.history = std::mem::take(&mut entry.history);
+        *entry = restored;
+        return Ok(true);
+    }
+
+    for child in &mut group.children {
+        if restore_entry_from_latest_history(child, entry_id, credential_id)? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn history_matches_passkey_registration_rollback(
+    current: &vaultkern_core::Entry,
+    history: &vaultkern_core::Entry,
+    credential_id: Option<&str>,
+) -> bool {
+    let Some(current_passkey) = current.passkey.as_ref() else {
+        return false;
+    };
+    if credential_id.is_some_and(|credential_id| current_passkey.credential_id != credential_id) {
+        return false;
+    }
+    let Some(history_passkey) = history.passkey.as_ref() else {
+        return false;
+    };
+
+    history_passkey.relying_party == current_passkey.relying_party
+        && history_passkey.user_handle == current_passkey.user_handle
+        && history_passkey.credential_id != current_passkey.credential_id
+}
+
+fn save_kdbx_with_history_limits(
+    core: &KeepassCore,
+    vault: &mut Vault,
+    key: &CompositeKey,
+    save_profile: SaveProfile,
+) -> std::result::Result<Vec<u8>, KdbxError> {
+    if vault.history_max_items.is_none() && vault.history_max_size.is_none() {
+        return core.save_kdbx(vault, key, save_profile);
+    }
+
+    let mut history_snapshots = clone_entry_histories(&vault.root).into_iter();
+    enforce_history_limits(vault);
+    let result = core.save_kdbx(vault, key, save_profile);
+    restore_entry_histories(&mut vault.root, &mut history_snapshots);
+    result
+}
+
+fn clone_entry_histories(group: &vaultkern_core::Group) -> Vec<Vec<Entry>> {
+    let mut snapshots = Vec::new();
+    collect_entry_histories(group, &mut snapshots);
+    snapshots
+}
+
+fn collect_entry_histories(group: &vaultkern_core::Group, snapshots: &mut Vec<Vec<Entry>>) {
+    for entry in &group.entries {
+        snapshots.push(entry.history.clone());
+    }
+
+    for child in &group.children {
+        collect_entry_histories(child, snapshots);
+    }
+}
+
+fn restore_entry_histories(
+    group: &mut vaultkern_core::Group,
+    snapshots: &mut std::vec::IntoIter<Vec<Entry>>,
+) {
+    for entry in &mut group.entries {
+        if let Some(history) = snapshots.next() {
+            entry.history = history;
+        }
+    }
+
+    for child in &mut group.children {
+        restore_entry_histories(child, snapshots);
     }
 }
 
@@ -2605,6 +4725,13 @@ fn current_unix_time() -> u64 {
         .unwrap_or(0)
 }
 
+fn current_unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
 fn fingerprint_for_cached_bytes(bytes: &[u8], cached_at: i64) -> VaultSourceFingerprint {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -2688,6 +4815,17 @@ fn composite_key_from_credentials(credentials: &VaultCredentials) -> Result<Comp
     Ok(key)
 }
 
+fn constant_time_bytes_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        diff |= (left_byte ^ right_byte) as usize;
+    }
+    diff == 0
+}
+
 fn quick_unlock_storage_key(vault_ref_id: &str) -> String {
     let digest = Sha256::digest(vault_ref_id.as_bytes());
     let mut key = String::from("quick_unlock_");
@@ -2724,6 +4862,474 @@ fn query_error_response(error: anyhow::Error) -> RuntimeResponse {
         code: "invalid_request".into(),
         message: format_error_chain(&error),
     })
+}
+
+fn validate_passkey_ceremony_ttl(
+    registered_at_epoch_ms: u64,
+    expires_at_epoch_ms: u64,
+    now_epoch_ms: u64,
+) -> Result<()> {
+    let ttl_ms = expires_at_epoch_ms
+        .checked_sub(registered_at_epoch_ms)
+        .context("invalid passkey ceremony ttl")?;
+    if ttl_ms == 0
+        || ttl_ms > 300_000
+        || expires_at_epoch_ms <= now_epoch_ms
+        || registered_at_epoch_ms > now_epoch_ms.saturating_add(5_000)
+    {
+        anyhow::bail!("invalid passkey ceremony ttl");
+    }
+    Ok(())
+}
+
+fn validate_passkey_ceremony_not_expired(
+    entry: &PasskeyCeremonyLedgerEntry,
+    now_epoch_ms: u64,
+) -> Result<()> {
+    if entry.identity.expires_at_epoch_ms <= now_epoch_ms {
+        anyhow::bail!("passkey ceremony expired");
+    }
+    Ok(())
+}
+
+fn validate_passkey_ceremony_connection_id(connection_id: &str) -> Result<()> {
+    if connection_id.trim().is_empty() || connection_id.len() > 256 {
+        anyhow::bail!("invalid passkey ceremony connection id");
+    }
+    Ok(())
+}
+
+fn bind_passkey_ceremony_vault(
+    entry: &mut PasskeyCeremonyLedgerEntry,
+    vault_id: &str,
+) -> Result<()> {
+    validate_passkey_ceremony_vault_binding(entry, vault_id)?;
+    if entry.vault_id.is_none() {
+        entry.vault_id = Some(vault_id.to_owned());
+    }
+    Ok(())
+}
+
+fn validate_passkey_ceremony_vault_binding(
+    entry: &PasskeyCeremonyLedgerEntry,
+    vault_id: &str,
+) -> Result<()> {
+    if vault_id.trim().is_empty() {
+        anyhow::bail!("passkey ceremony vault mismatch");
+    }
+    match entry.vault_id.as_deref() {
+        Some(bound_vault_id) if bound_vault_id != vault_id => {
+            anyhow::bail!("passkey ceremony vault mismatch");
+        }
+        Some(_) => {}
+        None => {}
+    }
+    Ok(())
+}
+
+fn is_passkey_ceremony_vault_binding_phase(phase: PasskeyCeremonyPhaseDto) -> bool {
+    matches!(
+        phase,
+        PasskeyCeremonyPhaseDto::UserAuthorization
+            | PasskeyCeremonyPhaseDto::CredentialResolution
+            | PasskeyCeremonyPhaseDto::UserSelection
+    )
+}
+
+fn is_legal_passkey_ceremony_transition(
+    expected_phase: PasskeyCeremonyPhaseDto,
+    next_phase: PasskeyCeremonyPhaseDto,
+    identity: &PasskeyCeremonyIdentity,
+    related_origin_verified: bool,
+) -> bool {
+    use PasskeyCeremonyPhaseDto::*;
+
+    if related_origin_verified
+        && (expected_phase, next_phase) != (NetworkValidation, CredentialResolution)
+    {
+        return false;
+    }
+
+    if passkey_ceremony_active_transition_edges().contains(&(expected_phase, next_phase)) {
+        return passkey_ceremony_active_transition_edge_allowed(
+            expected_phase,
+            next_phase,
+            identity,
+            related_origin_verified,
+        );
+    }
+
+    match (expected_phase, next_phase) {
+        (CompletionAndMutation, ClosedDelivered) => true,
+        (PreAuthorization, ClosedAborted | ClosedFailed)
+        | (UserAuthorization, ClosedAborted | ClosedFailed)
+        | (NetworkValidation, ClosedAborted | ClosedFailed)
+        | (CredentialResolution, ClosedAborted | ClosedFailed)
+        | (UserSelection, ClosedAborted | ClosedFailed)
+        | (CompletionAndMutation, ClosedAborted | ClosedFailed) => true,
+        _ => false,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PasskeyCeremonyTransitionContract {
+    active_edges: Vec<[String; 2]>,
+}
+
+type PasskeyCeremonyActiveTransitionEdge = (PasskeyCeremonyPhaseDto, PasskeyCeremonyPhaseDto);
+
+static PASSKEY_CEREMONY_ACTIVE_TRANSITION_EDGES: OnceLock<
+    Vec<PasskeyCeremonyActiveTransitionEdge>,
+> = OnceLock::new();
+
+fn passkey_ceremony_active_transition_edges() -> &'static [PasskeyCeremonyActiveTransitionEdge] {
+    PASSKEY_CEREMONY_ACTIVE_TRANSITION_EDGES
+        .get_or_init(|| {
+            let contract: PasskeyCeremonyTransitionContract =
+                serde_json::from_str(include_str!("passkey_ceremony_transitions.json"))
+                    .expect("passkey ceremony transition contract must parse");
+            contract
+                .active_edges
+                .into_iter()
+                .map(|[from, to]| {
+                    (
+                        passkey_ceremony_phase_from_contract_id(&from)
+                            .expect("passkey transition from phase must be known"),
+                        passkey_ceremony_phase_from_contract_id(&to)
+                            .expect("passkey transition to phase must be known"),
+                    )
+                })
+                .collect()
+        })
+        .as_slice()
+}
+
+fn passkey_ceremony_phase_from_contract_id(value: &str) -> Option<PasskeyCeremonyPhaseDto> {
+    match value {
+        "s0_pre_authorization" => Some(PasskeyCeremonyPhaseDto::PreAuthorization),
+        "s1_user_authorization" => Some(PasskeyCeremonyPhaseDto::UserAuthorization),
+        "s2_network_validation" => Some(PasskeyCeremonyPhaseDto::NetworkValidation),
+        "s3_credential_resolution" => Some(PasskeyCeremonyPhaseDto::CredentialResolution),
+        "s3b_user_selection" => Some(PasskeyCeremonyPhaseDto::UserSelection),
+        "s4_completion_and_mutation" => Some(PasskeyCeremonyPhaseDto::CompletionAndMutation),
+        _ => None,
+    }
+}
+
+fn passkey_ceremony_active_transition_edge_allowed(
+    expected_phase: PasskeyCeremonyPhaseDto,
+    next_phase: PasskeyCeremonyPhaseDto,
+    identity: &PasskeyCeremonyIdentity,
+    related_origin_verified: bool,
+) -> bool {
+    use PasskeyCeremonyPhaseDto::*;
+
+    match (expected_phase, next_phase) {
+        (UserAuthorization, NetworkValidation) => !passkey_ceremony_origin_matches_relying_party(
+            &identity.origin,
+            &identity.relying_party,
+        ),
+        (UserAuthorization, CredentialResolution) => {
+            passkey_ceremony_origin_matches_relying_party(&identity.origin, &identity.relying_party)
+        }
+        (NetworkValidation, CredentialResolution) => related_origin_verified,
+        _ => true,
+    }
+}
+
+fn is_stale_passkey_phase_advance_noop(
+    current_phase: PasskeyCeremonyPhaseDto,
+    expected_phase: PasskeyCeremonyPhaseDto,
+    next_phase: PasskeyCeremonyPhaseDto,
+) -> bool {
+    expected_phase == PasskeyCeremonyPhaseDto::CompletionAndMutation
+        && current_phase == next_phase
+        && matches!(
+            next_phase,
+            PasskeyCeremonyPhaseDto::ClosedAborted
+                | PasskeyCeremonyPhaseDto::ClosedDelivered
+                | PasskeyCeremonyPhaseDto::ClosedFailed
+        )
+}
+
+fn is_closed_passkey_ceremony_phase(phase: PasskeyCeremonyPhaseDto) -> bool {
+    matches!(
+        phase,
+        PasskeyCeremonyPhaseDto::ClosedAborted
+            | PasskeyCeremonyPhaseDto::ClosedDelivered
+            | PasskeyCeremonyPhaseDto::ClosedFailed
+    )
+}
+
+fn passkey_ceremony_origin_matches_relying_party(origin: &str, relying_party: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(origin) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = normalize_passkey_origin_host(host);
+    let relying_party = relying_party
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if parsed.scheme() != "https" {
+        return parsed.scheme() == "http"
+            && is_passkey_loopback_host(&host)
+            && is_passkey_loopback_host(&relying_party)
+            && host == relying_party;
+    }
+    if is_passkey_loopback_host(&host) || is_passkey_loopback_host(&relying_party) {
+        return is_passkey_loopback_host(&host)
+            && is_passkey_loopback_host(&relying_party)
+            && host == relying_party;
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() || relying_party.parse::<std::net::IpAddr>().is_ok()
+    {
+        return host == relying_party;
+    }
+    if psl::domain_str(&relying_party).is_none() {
+        return false;
+    }
+    host == relying_party || host.ends_with(&format!(".{relying_party}"))
+}
+
+fn validate_passkey_ceremony_challenge(challenge_base64url: &str) -> Result<()> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(challenge_base64url)
+        .context("invalid passkey ceremony challenge")?;
+    if bytes.is_empty() {
+        anyhow::bail!("invalid passkey ceremony challenge");
+    }
+    Ok(())
+}
+
+fn validate_passkey_ceremony_origin_value(value: &str, label: &str) -> Result<()> {
+    if value.trim() != value {
+        anyhow::bail!("invalid passkey ceremony {label} origin");
+    }
+    let parsed = url::Url::parse(value)
+        .with_context(|| format!("invalid passkey ceremony {label} origin"))?;
+    let host = normalize_passkey_origin_host(
+        parsed
+            .host_str()
+            .with_context(|| format!("invalid passkey ceremony {label} origin"))?,
+    );
+    if parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        anyhow::bail!("invalid passkey ceremony {label} origin");
+    }
+    if parsed.scheme() != "https" {
+        if parsed.scheme() == "http" && is_passkey_loopback_host(&host) {
+            return Ok(());
+        }
+        anyhow::bail!("passkey ceremony {label} origin must use https");
+    }
+    Ok(())
+}
+
+fn validate_passkey_ceremony_origin_and_relying_party_for_s0(
+    origin: &str,
+    relying_party: &str,
+) -> Result<()> {
+    validate_passkey_relying_party_id(relying_party)?;
+    if origin.trim() != origin {
+        anyhow::bail!("invalid passkey origin");
+    }
+    let parsed = url::Url::parse(origin).context("invalid passkey origin")?;
+    let host = normalize_passkey_origin_host(
+        parsed
+            .host_str()
+            .context("passkey origin is missing a host")?,
+    );
+    if parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        anyhow::bail!("invalid passkey origin");
+    }
+    let relying_party = relying_party
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+
+    if parsed.scheme() != "https" {
+        if parsed.scheme() == "http"
+            && is_passkey_loopback_host(&host)
+            && is_passkey_loopback_host(&relying_party)
+            && host == relying_party
+        {
+            return Ok(());
+        }
+        anyhow::bail!("passkey origin must use https");
+    }
+
+    if passkey_ceremony_origin_matches_relying_party(origin, &relying_party) {
+        return Ok(());
+    }
+
+    if is_passkey_loopback_host(&host)
+        || is_passkey_loopback_host(&relying_party)
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || relying_party.parse::<std::net::IpAddr>().is_ok()
+    {
+        anyhow::bail!("passkey origin does not match relying party");
+    }
+
+    if psl::domain_str(&host).is_none() {
+        anyhow::bail!("invalid passkey origin");
+    }
+
+    Ok(())
+}
+
+fn validate_passkey_relying_party_id(relying_party: &str) -> Result<()> {
+    let value = relying_party.trim();
+    if value.is_empty() || value != relying_party || value.ends_with('.') {
+        anyhow::bail!("invalid passkey relying party id");
+    }
+
+    let canonical = value.to_ascii_lowercase();
+    if value != canonical {
+        anyhow::bail!("invalid passkey relying party id");
+    }
+    if is_passkey_loopback_host(&canonical) || canonical.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    if canonical.len() > 253
+        || canonical.contains('/')
+        || canonical.contains(':')
+        || canonical.contains('@')
+        || canonical.contains('?')
+        || canonical.contains('#')
+    {
+        anyhow::bail!("invalid passkey relying party id");
+    }
+
+    if canonical.split('.').any(|label| {
+        label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .as_bytes()
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    }) {
+        anyhow::bail!("invalid passkey relying party id");
+    }
+
+    if psl::domain_str(&canonical).is_none() {
+        anyhow::bail!("invalid passkey relying party id");
+    }
+
+    Ok(())
+}
+
+fn is_passkey_loopback_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+fn normalize_passkey_origin_host(host: &str) -> String {
+    let canonical = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    canonical
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(&canonical)
+        .to_owned()
+}
+
+fn validate_passkey_ceremony_client_data(
+    client_data_json_base64url: &str,
+    ceremony: PasskeyCeremonyKindDto,
+    origin: &str,
+    challenge_base64url: &str,
+    top_origin: Option<&str>,
+    ancestor_origins: &[String],
+) -> Result<()> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(client_data_json_base64url)
+        .context("invalid passkey clientDataJSON encoding")?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).context("invalid passkey clientDataJSON")?;
+    let expected_type = match ceremony {
+        PasskeyCeremonyKindDto::Get => "webauthn.get",
+        PasskeyCeremonyKindDto::Create => "webauthn.create",
+    };
+    if value.get("type").and_then(serde_json::Value::as_str) != Some(expected_type) {
+        anyhow::bail!("passkey ceremony clientDataJSON type mismatch");
+    }
+    let client_origin = value.get("origin").and_then(serde_json::Value::as_str);
+    if !client_origin.is_some_and(|client_origin| {
+        passkey_ceremony_origins_are_same_origin(client_origin, origin)
+    }) {
+        anyhow::bail!("passkey ceremony clientDataJSON origin mismatch");
+    }
+    if value.get("challenge").and_then(serde_json::Value::as_str) != Some(challenge_base64url) {
+        anyhow::bail!("passkey ceremony challenge mismatch");
+    }
+    let expected_cross_origin = top_origin
+        .is_some_and(|top_origin| !passkey_ceremony_origins_are_same_origin(top_origin, origin))
+        || ancestor_origins.iter().any(|ancestor_origin| {
+            !passkey_ceremony_origins_are_same_origin(ancestor_origin, origin)
+        });
+    if value
+        .get("crossOrigin")
+        .and_then(serde_json::Value::as_bool)
+        != Some(expected_cross_origin)
+    {
+        anyhow::bail!("passkey ceremony clientDataJSON crossOrigin mismatch");
+    }
+    let client_top_origin = value.get("topOrigin").and_then(serde_json::Value::as_str);
+    if expected_cross_origin {
+        if !matches!(
+            (client_top_origin, top_origin),
+            (Some(client_top_origin), Some(top_origin))
+                if passkey_ceremony_origins_are_same_origin(client_top_origin, top_origin)
+        ) {
+            anyhow::bail!("passkey ceremony clientDataJSON topOrigin mismatch");
+        }
+    } else if value.get("topOrigin").is_some() {
+        anyhow::bail!("passkey ceremony clientDataJSON topOrigin mismatch");
+    }
+    Ok(())
+}
+
+fn passkey_ceremony_origins_are_same_origin(left: &str, right: &str) -> bool {
+    let (Some(left), Some(right)) = (
+        passkey_ceremony_origin_url(left),
+        passkey_ceremony_origin_url(right),
+    ) else {
+        return false;
+    };
+    left.scheme() == right.scheme()
+        && left.host_str().map(|host| host.to_ascii_lowercase())
+            == right.host_str().map(|host| host.to_ascii_lowercase())
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn passkey_ceremony_origin_url(value: &str) -> Option<url::Url> {
+    if value.trim() != value {
+        return None;
+    }
+    let parsed = url::Url::parse(value).ok()?;
+    if parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.host_str().is_none()
+    {
+        return None;
+    }
+    Some(parsed)
 }
 
 fn parse_totp_uri(value: Option<String>) -> Result<Option<TotpSpec>> {
@@ -2826,6 +5432,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn history_snapshot_restore_preserves_duplicate_entry_histories_by_position() {
+        let duplicate_id = Uuid::new_v4();
+        let mut group = vaultkern_core::Group::new("Root");
+
+        let mut first = Entry::new("First");
+        first.id = duplicate_id;
+        first.history.push(Entry::new("First old"));
+        let mut second = Entry::new("Second");
+        second.id = duplicate_id;
+        second.history.push(Entry::new("Second old"));
+        group.entries.push(first);
+        group.entries.push(second);
+
+        let mut snapshots = clone_entry_histories(&group).into_iter();
+        group.entries[0].history.clear();
+        group.entries[1].history.clear();
+
+        restore_entry_histories(&mut group, &mut snapshots);
+
+        assert_eq!(group.entries[0].history[0].title, "First old");
+        assert_eq!(group.entries[1].history[0].title, "Second old");
+    }
+
     #[derive(Default)]
     struct CountingBiometricProvider {
         authorizations: std::rc::Rc<RefCell<Vec<String>>>,
@@ -2840,6 +5470,58 @@ mod tests {
             self.authorizations.borrow_mut().push(reason.to_owned());
             Ok(())
         }
+    }
+
+    struct RecordingBiometricProvider {
+        authorized_at_epoch_ms: std::rc::Rc<RefCell<Option<u64>>>,
+    }
+
+    impl BiometricProvider for RecordingBiometricProvider {
+        fn supports_quick_unlock(&self) -> bool {
+            true
+        }
+
+        fn authorize(&self, _reason: &str) -> Result<()> {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            *self.authorized_at_epoch_ms.borrow_mut() = Some(current_unix_time_ms());
+            Ok(())
+        }
+    }
+
+    fn open_unlocked_demo_vault(runtime: &mut Runtime) -> (tempfile::TempDir, VaultHandleDto) {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        (dir, opened)
+    }
+
+    fn create_demo_entry(runtime: &mut Runtime, vault_id: &str) -> EntryDetailDto {
+        let root_group_id = runtime.list_groups(vault_id).unwrap().root.id;
+        runtime
+            .create_entry(
+                vault_id,
+                &root_group_id,
+                "Example".into(),
+                "alice".into(),
+                "secret".into(),
+                "https://example.com".into(),
+                "".into(),
+                None,
+            )
+            .unwrap()
     }
 
     #[test]
@@ -2881,6 +5563,414 @@ mod tests {
         assert_eq!(
             session.active_vault_id.as_deref(),
             Some(opened.vault_id.as_str())
+        );
+    }
+
+    #[test]
+    fn passkey_user_verification_capability_requires_an_unlocked_vault() {
+        let mut runtime = Runtime::for_tests();
+
+        let response = runtime
+            .handle(RuntimeCommand::GetPasskeyUserVerificationCapability)
+            .unwrap();
+
+        assert_eq!(
+            response,
+            RuntimeResponse::PasskeyUserVerificationCapability(
+                PasskeyUserVerificationCapabilityDto {
+                    available: false,
+                    methods: vec![],
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn set_entry_passkey_rejects_invalid_user_handle() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+
+        let error = runtime
+            .set_entry_passkey(
+                &opened.vault_id,
+                &entry.id,
+                EntryPasskeyDto {
+                    username: "alice@example.com".into(),
+                    credential_id: "Y3JlZC0x".into(),
+                    generated_user_id: None,
+                    private_key_pem: "pem".into(),
+                    relying_party: "example.com".into(),
+                    user_handle: Some("alice@example.com".into()),
+                    backup_eligible: true,
+                    backup_state: true,
+                },
+            )
+            .unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("invalid passkey user handle base64url"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn set_entry_passkey_rejects_invalid_credential_id() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+
+        let error = runtime
+            .set_entry_passkey(
+                &opened.vault_id,
+                &entry.id,
+                EntryPasskeyDto {
+                    username: "alice@example.com".into(),
+                    credential_id: "not base64url!".into(),
+                    generated_user_id: None,
+                    private_key_pem: "pem".into(),
+                    relying_party: "example.com".into(),
+                    user_handle: Some("dXNlci0x".into()),
+                    backup_eligible: true,
+                    backup_state: true,
+                },
+            )
+            .unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("invalid passkey credential id base64url"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn passkey_user_verification_capability_reports_master_password_for_unlocked_vault() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests();
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+
+        let response = runtime
+            .handle(RuntimeCommand::GetPasskeyUserVerificationCapability)
+            .unwrap();
+
+        assert_eq!(
+            response,
+            RuntimeResponse::PasskeyUserVerificationCapability(
+                PasskeyUserVerificationCapabilityDto {
+                    available: true,
+                    methods: vec![PasskeyUserVerificationMethodDto::MasterPassword],
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn expired_pre_completion_passkey_ceremony_does_not_block_matching_registration() {
+        let mut runtime = Runtime::for_tests_at(100);
+
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "expired-pre-completion-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Preferred,
+                challenge_base64url: "Y2hhbGxlbmdlLTE".into(),
+                request_id: 42,
+                tab_id: 7,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms: 100_000,
+                expires_at_epoch_ms: 101_000,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "expired-pre-completion-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                related_origin_verified: false,
+            })
+            .unwrap();
+
+        runtime.set_test_unix_time_ms(102_000);
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "replacement-pre-completion-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Preferred,
+                challenge_base64url: "Y2hhbGxlbmdlLTI".into(),
+                request_id: 43,
+                tab_id: 7,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms: 102_000,
+                expires_at_epoch_ms: 103_000,
+            })
+            .unwrap();
+
+        let response = runtime
+            .handle(RuntimeCommand::QueryPasskeyCeremonyLedger {
+                ceremony_token: "expired-pre-completion-token".into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            response,
+            RuntimeResponse::PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto {
+                known: false,
+                phase: None,
+                durable_state: None,
+                delivery_state: None,
+            })
+        );
+    }
+
+    #[test]
+    fn passkey_user_verification_timestamp_is_not_before_same_second_registration() {
+        let mut runtime = Runtime::for_tests_at(100);
+        runtime.set_test_unix_time_ms(100_750);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "same-second-uv-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Required,
+                challenge_base64url: "Y2hhbGxlbmdlLTE".into(),
+                request_id: 42,
+                tab_id: 42,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms: 100_500,
+                expires_at_epoch_ms: 400_000,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "same-second-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                related_origin_verified: false,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::BindPasskeyCeremonyVault {
+                ceremony_token: "same-second-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id.clone(),
+            })
+            .unwrap();
+
+        let verified = runtime
+            .handle(RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token: "same-second-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id,
+                method: PasskeyUserVerificationMethodDto::MasterPassword,
+                password: Some("demo-password".into()),
+            })
+            .unwrap();
+
+        let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+            panic!("expected passkey UV proof, got {verified:?}");
+        };
+        assert!(verified.verified_at_epoch_ms >= 100_500);
+    }
+
+    #[test]
+    fn passkey_master_password_user_verification_does_not_redecrypt_loaded_vault() {
+        let mut runtime = Runtime::for_tests_at(100);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "password-uv-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Required,
+                challenge_base64url: "Y2hhbGxlbmdlLTE".into(),
+                request_id: 42,
+                tab_id: 42,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms: 100_000,
+                expires_at_epoch_ms: 400_000,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "password-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                related_origin_verified: false,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::BindPasskeyCeremonyVault {
+                ceremony_token: "password-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id.clone(),
+            })
+            .unwrap();
+
+        runtime.loaded.get_mut(&opened.vault_id).unwrap().bytes = b"not a kdbx".to_vec();
+
+        let verified = runtime
+            .handle(RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token: "password-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id,
+                method: PasskeyUserVerificationMethodDto::MasterPassword,
+                password: Some("demo-password".into()),
+            })
+            .unwrap();
+
+        let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+            panic!("expected passkey UV proof, got {verified:?}");
+        };
+        assert!(verified.verified);
+    }
+
+    #[test]
+    fn passkey_quick_unlock_user_verification_records_completion_time() {
+        let authorized_at_epoch_ms = std::rc::Rc::new(RefCell::new(None));
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        runtime.biometric = Box::new(RecordingBiometricProvider {
+            authorized_at_epoch_ms: authorized_at_epoch_ms.clone(),
+        });
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        *authorized_at_epoch_ms.borrow_mut() = None;
+        let registered_at_epoch_ms = runtime.current_unix_time_ms();
+
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "quick-uv-time-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Required,
+                challenge_base64url: "Y2hhbGxlbmdlLTE".into(),
+                request_id: 42,
+                tab_id: 42,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms,
+                expires_at_epoch_ms: registered_at_epoch_ms + 300_000,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "quick-uv-time-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                related_origin_verified: false,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::BindPasskeyCeremonyVault {
+                ceremony_token: "quick-uv-time-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id.clone(),
+            })
+            .unwrap();
+
+        let verified = runtime
+            .handle(RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token: "quick-uv-time-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id,
+                method: PasskeyUserVerificationMethodDto::QuickUnlock,
+                password: None,
+            })
+            .unwrap();
+
+        let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+            panic!("expected passkey UV proof, got {verified:?}");
+        };
+        let authorized_at = authorized_at_epoch_ms
+            .borrow()
+            .expect("quick unlock authorization timestamp");
+        assert!(verified.verified_at_epoch_ms as u64 >= authorized_at);
+    }
+
+    #[test]
+    fn passkey_user_verification_capability_reports_quick_unlock_without_loading_secret() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        runtime.secure_storage = Box::new(LoadRejectingSecureStorageProvider::new());
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+
+        let response = runtime
+            .handle(RuntimeCommand::GetPasskeyUserVerificationCapability)
+            .unwrap();
+
+        assert_eq!(
+            response,
+            RuntimeResponse::PasskeyUserVerificationCapability(
+                PasskeyUserVerificationCapabilityDto {
+                    available: true,
+                    methods: vec![
+                        PasskeyUserVerificationMethodDto::MasterPassword,
+                        PasskeyUserVerificationMethodDto::QuickUnlock,
+                    ],
+                }
+            )
         );
     }
 
@@ -3008,6 +6098,96 @@ mod tests {
 
         runtime.unlock_current_vault_with_quick_unlock().unwrap();
 
+        assert_eq!(
+            authorizations.borrow().as_slice(),
+            [
+                "Enable quick unlock for this vault".to_owned(),
+                "Unlock this vault".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn passkey_quick_unlock_user_verification_reuses_same_ceremony_unlock() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests_at(100);
+        runtime.biometric = Box::new(CountingBiometricProvider {
+            authorizations: authorizations.clone(),
+        });
+        runtime.secure_storage = Box::new(MemorySecureStorageProvider::new());
+
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+
+        runtime
+            .handle(RuntimeCommand::RegisterPasskeyCeremony {
+                ceremony_token: "quick-unlock-uv-token".into(),
+                connection_id: "connection-1".into(),
+                origin: "https://example.com".into(),
+                top_origin: None,
+                ancestor_origins: vec![],
+                relying_party: "example.com".into(),
+                ceremony: PasskeyCeremonyKindDto::Get,
+                discoverable: false,
+                user_verification: PasskeyUserVerificationRequirementDto::Required,
+                challenge_base64url: "Y2hhbGxlbmdlLTE".into(),
+                request_id: 42,
+                tab_id: 42,
+                frame_id: 0,
+                frame_kind: PasskeyFrameKindDto::Top,
+                registered_at_epoch_ms: 100_000,
+                expires_at_epoch_ms: 400_000,
+            })
+            .unwrap();
+        runtime
+            .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "quick-unlock-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+                next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                related_origin_verified: false,
+            })
+            .unwrap();
+
+        runtime.set_test_unix_time(120);
+        runtime.unlock_current_vault_with_quick_unlock().unwrap();
+        runtime
+            .handle(RuntimeCommand::BindPasskeyCeremonyVault {
+                ceremony_token: "quick-unlock-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id.clone(),
+            })
+            .unwrap();
+
+        let verified = runtime
+            .handle(RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token: "quick-unlock-uv-token".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: opened.vault_id,
+                method: PasskeyUserVerificationMethodDto::QuickUnlock,
+                password: None,
+            })
+            .unwrap();
+
+        let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+            panic!("expected passkey UV proof, got {verified:?}");
+        };
+        assert!(verified.verified);
         assert_eq!(
             authorizations.borrow().as_slice(),
             [

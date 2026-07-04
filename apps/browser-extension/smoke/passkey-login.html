@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VaultKern Passkey Smoke Login</title>
+  </head>
+  <body>
+    <main>
+      <h1>VaultKern Passkey Smoke Login</h1>
+      <button id="vaultkern-passkey-login" type="button">Sign in with passkey</button>
+      <output id="vaultkern-passkey-result"></output>
+    </main>
+    <script>
+      const SMOKE_CREDENTIAL_STORAGE_KEY = "vaultkern-smoke-passkey-credential-id";
+
+      function bytes(value) {
+        return Uint8Array.from(value, (character) => character.charCodeAt(0));
+      }
+
+      function base64urlBytes(value) {
+        const padded = `${value}${"=".repeat((4 - (value.length % 4)) % 4)}`;
+        const base64 = padded.replace(/-/g, "+").replace(/_/g, "/");
+        return bytes(atob(base64));
+      }
+
+      function credentialId() {
+        return (
+          new URLSearchParams(location.search).get("credential") ??
+          localStorage.getItem(SMOKE_CREDENTIAL_STORAGE_KEY)
+        );
+      }
+
+      function credentialIdBytes() {
+        const value = credentialId();
+        return value ? base64urlBytes(value) : null;
+      }
+
+      function discoverableRequest() {
+        return new URLSearchParams(location.search).get("discoverable") === "1";
+      }
+
+      function userVerificationRequirement() {
+        const value = new URLSearchParams(location.search).get("uv");
+        return ["discouraged", "preferred", "required"].includes(value)
+          ? value
+          : "discouraged";
+      }
+
+      document
+        .querySelector("#vaultkern-passkey-login")
+        .addEventListener("click", async () => {
+          const result = document.querySelector("#vaultkern-passkey-result");
+          try {
+            const discoverable = discoverableRequest();
+            const selectedCredentialId = discoverable ? null : credentialIdBytes();
+            if (!discoverable && !selectedCredentialId) {
+              result.value = "error:NotFoundError:Register a passkey first";
+              return;
+            }
+            const credential = await navigator.credentials.get({
+              publicKey: {
+                challenge: bytes("challenge-1"),
+                ...(discoverable
+                  ? {}
+                  : {
+                      allowCredentials: [
+                        {
+                          type: "public-key",
+                          id: selectedCredentialId
+                        }
+                      ]
+                    }),
+                timeout: 60000,
+                rpId: location.hostname,
+                userVerification: userVerificationRequirement()
+              }
+            });
+            result.value = credential ? `credential:${credential.id}` : "credential:null";
+          } catch (error) {
+            result.value =
+              error instanceof Error
+                ? `error:${error.name}:${error.message}`
+                : "error:unknown";
+          }
+        });
+    </script>
+  </body>
+</html>

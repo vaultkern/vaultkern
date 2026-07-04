@@ -11,6 +11,7 @@ external-fixtures = []
 aes-gcm = "0.10"
 anyhow = "1.0"
 base64.workspace = true
+p256.workspace = true
 psl.workspace = true
 vaultkern-core = { path = "../../crates/vaultkern-core" }
 vaultkern-runtime-protocol = { path = "../../crates/vaultkern-runtime-protocol" }
@@ -27,4 +28,5 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 mockito = "1.5"
+p256.workspace = true
 tempfile = "3.10"

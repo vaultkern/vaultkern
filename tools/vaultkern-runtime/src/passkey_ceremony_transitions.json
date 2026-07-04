@@ -1,0 +1,19 @@
+{
+  "active_phases": [
+    "s0_pre_authorization",
+    "s1_user_authorization",
+    "s2_network_validation",
+    "s3_credential_resolution",
+    "s3b_user_selection",
+    "s4_completion_and_mutation"
+  ],
+  "active_edges": [
+    ["s0_pre_authorization", "s1_user_authorization"],
+    ["s1_user_authorization", "s2_network_validation"],
+    ["s1_user_authorization", "s3_credential_resolution"],
+    ["s2_network_validation", "s3_credential_resolution"],
+    ["s3_credential_resolution", "s3b_user_selection"],
+    ["s3_credential_resolution", "s4_completion_and_mutation"],
+    ["s3b_user_selection", "s4_completion_and_mutation"]
+  ]
+}

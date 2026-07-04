@@ -2,7 +2,8 @@ import type {
   EntryCustomField,
   EntryDetail,
   EntryHistoryDetail,
-  EntryHistoryItem
+  EntryHistoryItem,
+  EntryPasskey
 } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
@@ -32,6 +33,8 @@ export function EntryDetailPane({
   onReplaceAttachment,
   onDeleteAttachment,
   onSelectHistoryItem,
+  onSetPasskey,
+  onClearPasskey,
   onSave,
   onCancel,
   onDelete
@@ -73,6 +76,8 @@ export function EntryDetailPane({
   onReplaceAttachment?: (name: string, file: File) => void;
   onDeleteAttachment?: (name: string) => void;
   onSelectHistoryItem?: (historyIndex: number) => void;
+  onSetPasskey?: (passkey: EntryPasskey) => void;
+  onClearPasskey?: () => void;
   onSave: () => void;
   onCancel: () => void;
   onDelete?: () => void;
@@ -139,6 +144,8 @@ export function EntryDetailPane({
         onReplaceAttachment={onReplaceAttachment}
         onDeleteAttachment={onDeleteAttachment}
         onSelectHistoryItem={onSelectHistoryItem}
+        onSetPasskey={onSetPasskey}
+        onClearPasskey={onClearPasskey}
         onSave={onSave}
         onCancel={onCancel}
         onDelete={onDelete}

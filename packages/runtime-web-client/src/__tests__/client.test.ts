@@ -657,6 +657,67 @@ describe("RuntimeClient", () => {
     });
   });
 
+  it("sets and clears entry passkeys through dedicated helpers", async () => {
+    const passkey = {
+      username: "alice@example.com",
+      credentialId: "credential-base64url",
+      generatedUserId: "generated-user",
+      privateKeyPem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
+      relyingParty: "example.com",
+      userHandle: "user-handle",
+      backupEligible: true,
+      backupState: false
+    };
+    const transport = {
+      send: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: "entry_detail",
+          id: "entry-1",
+          title: "Example",
+          username: "alice",
+          password: "secret",
+          url: "https://example.com",
+          notes: "demo",
+          totp: null,
+          passkey
+        })
+        .mockResolvedValueOnce({
+          type: "entry_detail",
+          id: "entry-1",
+          title: "Example",
+          username: "alice",
+          password: "secret",
+          url: "https://example.com",
+          notes: "demo",
+          totp: null,
+          passkey: null
+        })
+    };
+
+    const client = new RuntimeClient(transport);
+    await client.setEntryPasskey("vault-1", "entry-1", passkey);
+    await client.clearEntryPasskey("vault-1", "entry-1");
+
+    expect(transport.send).toHaveBeenNthCalledWith(1, {
+      version: 1,
+      command: {
+        type: "set_entry_passkey",
+        vault_id: "vault-1",
+        entry_id: "entry-1",
+        passkey
+      }
+    });
+    expect(transport.send).toHaveBeenNthCalledWith(2, {
+      version: 1,
+      command: {
+        type: "clear_entry_passkey",
+        vault_id: "vault-1",
+        entry_id: "entry-1"
+      }
+    });
+  });
+
   it("saves a vault and returns the save status", async () => {
     const transport = {
       send: vi.fn().mockResolvedValue({

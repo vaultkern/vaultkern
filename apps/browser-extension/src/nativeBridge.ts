@@ -1,4 +1,13 @@
-type NativePort = chrome.runtime.Port;
+type NativePort = {
+  postMessage: (message: unknown) => void;
+  disconnect: () => void;
+  onMessage: {
+    addListener: (listener: (message: unknown) => void) => void;
+  };
+  onDisconnect: {
+    addListener: (listener: () => void) => void;
+  };
+};
 
 type NativeMessagingErrorCode =
   | "native_host_missing"
@@ -9,9 +18,19 @@ type NativeMessagingErrorCode =
 
 type PendingRequest = {
   message: unknown;
+  wireMessage: unknown;
+  requestId: string;
   resolve: (response: unknown) => void;
   reject: (error: Error) => void;
   timeoutId: ReturnType<typeof setTimeout> | null;
+  postMessageAttempts: number;
+};
+
+type NativeBridgeEvent = {
+  event: "connect" | "post" | "response" | "disconnect" | "post_error";
+  commandType?: string | null;
+  message?: string;
+  code?: NativeMessagingErrorCode;
 };
 
 export class NativeMessagingError extends Error {
@@ -43,6 +62,15 @@ function classifyNativeMessagingError(
     normalized.includes("permission")
   ) {
     return "native_permission_denied";
+  }
+
+  if (
+    normalized.includes("host has exited") ||
+    normalized.includes("port closed") ||
+    normalized.includes("port disconnected") ||
+    normalized.includes("native port disconnected")
+  ) {
+    return "native_port_disconnected";
   }
 
   return fallback;
@@ -100,6 +128,32 @@ function commandTypeFromMessage(message: unknown) {
   return typeof command.type === "string" ? command.type : null;
 }
 
+function attachRequestId(message: unknown, requestId: string) {
+  if (typeof message === "object" && message !== null && !Array.isArray(message)) {
+    return { ...message, requestId };
+  }
+
+  return { requestId, payload: message };
+}
+
+function requestIdFromResponse(response: unknown) {
+  if (typeof response !== "object" || response === null || !("requestId" in response)) {
+    return null;
+  }
+
+  const requestId = (response as { requestId?: unknown }).requestId;
+  return typeof requestId === "string" ? requestId : null;
+}
+
+function stripResponseRequestId(response: unknown) {
+  if (typeof response !== "object" || response === null || !("requestId" in response)) {
+    return response;
+  }
+
+  const { requestId: _requestId, ...rest } = response as Record<string, unknown>;
+  return rest;
+}
+
 function isStartupCommand(message: unknown) {
   const type = commandTypeFromMessage(message);
   return type === "get_session_state" || type === "list_recent_vaults";
@@ -109,35 +163,10 @@ function isPreloadCommand(message: unknown) {
   return commandTypeFromMessage(message) === "preload_current_vault";
 }
 
-function isInterruptibleReadCommand(message: unknown) {
-  switch (commandTypeFromMessage(message)) {
-    case "preload_current_vault":
-    case "list_entries":
-    case "find_fill_candidates":
-    case "get_entry_detail":
-    case "list_groups":
-    case "get_database_settings":
-    case "list_entry_history":
-    case "get_entry_history_detail":
-    case "get_entry_attachment_content":
-    case "list_one_drive_children":
-      return true;
-    default:
-      return false;
-  }
-}
-
 function preloadCanceledError() {
   return new NativeMessagingError(
     "native_port_disconnected",
     "preload canceled by startup request"
-  );
-}
-
-function readCanceledError() {
-  return new NativeMessagingError(
-    "native_port_disconnected",
-    "native read canceled by startup request"
   );
 }
 
@@ -152,27 +181,22 @@ function shouldCancelActivePreload(
   return isStartupCommand(nextMessage);
 }
 
-function shouldCancelActiveInterruptibleRead(
-  active: PendingRequest | null,
-  nextMessage: unknown
-) {
-  return (
-    isStartupCommand(nextMessage) &&
-    isInterruptibleReadCommand(active?.message) &&
-    !isPreloadCommand(active?.message)
-  );
-}
-
 export function createNativeMessagingBridge(
   connectNative: (hostName: string) => NativePort,
   hostName: string,
-  options?: { timeoutMs?: number; interactiveTimeoutMs?: number }
+  options?: {
+    timeoutMs?: number;
+    interactiveTimeoutMs?: number;
+    onPortDetached?: () => void;
+    onEvent?: (event: NativeBridgeEvent) => void;
+  }
 ) {
   const timeoutMs = options?.timeoutMs ?? 30_000;
   const interactiveTimeoutMs = options?.interactiveTimeoutMs ?? 5 * 60_000;
   let port: NativePort | null = null;
   let activeRequest: PendingRequest | null = null;
   const queuedRequests: PendingRequest[] = [];
+  let nextRequestId = 0;
 
   function timeoutForMessage(message: unknown) {
     if (
@@ -187,9 +211,16 @@ export function createNativeMessagingBridge(
         (command.type === "add_local_vault_reference" && command.path === undefined) ||
         command.type === "unlock_current_vault" ||
         command.type === "unlock_current_vault_with_password" ||
+        command.type === "unlock_with_password" ||
         command.type === "enable_quick_unlock_for_current_vault" ||
         command.type === "unlock_current_vault_with_quick_unlock" ||
-        command.type === "unlock_with_password"
+        command.type === "create_passkey_assertion" ||
+        command.type === "create_passkey_registration" ||
+        command.type === "verify_passkey_user" ||
+        command.type === "save_passkey_registration" ||
+        command.type === "save_vault" ||
+        command.type === "abort_passkey_registration" ||
+        command.type === "commit_passkey_registration"
       ) {
         return interactiveTimeoutMs;
       }
@@ -202,6 +233,14 @@ export function createNativeMessagingBridge(
     if (request?.timeoutId) {
       clearTimeout(request.timeoutId);
       request.timeoutId = null;
+    }
+  }
+
+  function emitEvent(event: NativeBridgeEvent) {
+    try {
+      options?.onEvent?.(event);
+    } catch {
+      // Diagnostics must not affect native messaging behavior.
     }
   }
 
@@ -220,39 +259,35 @@ export function createNativeMessagingBridge(
   }
 
   function detachPort() {
+    const hadPort = port !== null;
     port = null;
-  }
-
-  function cancelActivePreload() {
-    if (!activeRequest) {
-      return;
+    if (hadPort) {
+      try {
+        options?.onPortDetached?.();
+      } catch {
+        // Detach observers must not mask native messaging failures.
+      }
     }
-
-    cancelActiveRequest(preloadCanceledError());
   }
 
-  function cancelActiveInterruptibleRead() {
-    if (!activeRequest) {
-      return;
-    }
-
-    cancelActiveRequest(readCanceledError());
-  }
-
-  function cancelActiveRequest(error: Error) {
+  function interruptActivePreload() {
     const request = activeRequest;
     const requestPort = port;
+    if (!request) {
+      return;
+    }
+
     activeRequest = null;
+    request.postMessageAttempts = 0;
     clearRequestTimeout(request);
     detachPort();
+    queuedRequests.unshift(request);
 
     try {
       requestPort?.disconnect();
     } catch {
-      // The stale request is already being rejected locally.
+      // The interrupted read will be retried on the next native port.
     }
-
-    request.reject(error);
   }
 
   function cancelQueuedPreloads(nextMessage: unknown) {
@@ -297,9 +332,28 @@ export function createNativeMessagingBridge(
     }
 
     const request = activeRequest;
+    const responseRequestId = requestIdFromResponse(response);
+    if (responseRequestId !== request.requestId) {
+      if (responseRequestId === null) {
+        emitEvent({
+          event: "response",
+          commandType: commandTypeFromMessage(request.message)
+        });
+        activeRequest = null;
+        clearRequestTimeout(request);
+        request.resolve(response);
+        flushQueue();
+        return;
+      }
+      return;
+    }
+    emitEvent({
+      event: "response",
+      commandType: commandTypeFromMessage(request.message)
+    });
     activeRequest = null;
     clearRequestTimeout(request);
-    request.resolve(response);
+    request.resolve(stripResponseRequestId(response));
     flushQueue();
   }
 
@@ -309,6 +363,12 @@ export function createNativeMessagingBridge(
     }
 
     const error = disconnectError();
+    emitEvent({
+      event: "disconnect",
+      commandType: commandTypeFromMessage(activeRequest?.message),
+      code: error.code,
+      message: error.message
+    });
     clearRequestTimeout(activeRequest);
     detachPort();
     rejectAll(error);
@@ -320,6 +380,7 @@ export function createNativeMessagingBridge(
     }
 
     port = connectNative(hostName);
+    emitEvent({ event: "connect" });
     const attachedPort = port;
     port.onMessage.addListener((response: unknown) =>
       onNativeMessage(attachedPort, response)
@@ -342,6 +403,7 @@ export function createNativeMessagingBridge(
     activeRequest = request;
 
     try {
+      request.postMessageAttempts += 1;
       const requestPort = ensurePort();
       request.timeoutId = setTimeout(() => {
         if (activeRequest !== request || port !== requestPort) {
@@ -361,12 +423,32 @@ export function createNativeMessagingBridge(
         request.reject(timeoutError());
         flushQueue();
       }, timeoutForMessage(request.message));
-      requestPort.postMessage(request.message);
+      emitEvent({
+        event: "post",
+        commandType: commandTypeFromMessage(request.message)
+      });
+      requestPort.postMessage(request.wireMessage);
     } catch (error) {
       clearRequestTimeout(request);
       activeRequest = null;
       detachPort();
-      request.reject(toNativeMessagingError(error, "native_unknown"));
+      const nativeError = toNativeMessagingError(error, "native_unknown");
+      emitEvent({
+        event: "post_error",
+        commandType: commandTypeFromMessage(request.message),
+        code: nativeError.code,
+        message: nativeError.message
+      });
+      if (
+        nativeError.code === "native_port_disconnected" &&
+        request.postMessageAttempts < 2
+      ) {
+        queuedRequests.unshift(request);
+        flushQueue();
+        return;
+      }
+
+      request.reject(nativeError);
 
       if (queuedRequests.length > 0) {
         flushQueue();
@@ -377,13 +459,20 @@ export function createNativeMessagingBridge(
   return {
     send(message: unknown) {
       return new Promise<unknown>((resolve, reject) => {
-        if (shouldCancelActivePreload(activeRequest, message)) {
-          cancelActivePreload();
-        } else if (shouldCancelActiveInterruptibleRead(activeRequest, message)) {
-          cancelActiveInterruptibleRead();
-        }
         cancelQueuedPreloads(message);
-        enqueueRequest({ message, resolve, reject, timeoutId: null });
+        if (shouldCancelActivePreload(activeRequest, message)) {
+          interruptActivePreload();
+        }
+        const requestId = `native-${++nextRequestId}`;
+        enqueueRequest({
+          message,
+          wireMessage: attachRequestId(message, requestId),
+          requestId,
+          resolve,
+          reject,
+          timeoutId: null,
+          postMessageAttempts: 0
+        });
         flushQueue();
       });
     }
