@@ -353,6 +353,42 @@ it("opens extension settings while locked and saves local extension preferences"
   expect(screen.getByRole("heading", { name: "插件设置" })).toBeInTheDocument();
 });
 
+it("does not save quick unlock as enabled when the host does not support it", async () => {
+  const settingsStore = createSettingsStore();
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null,
+      supportsBiometricUnlock: false
+    }),
+    listRecentVaults: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+
+  const quickUnlock = await screen.findByRole("checkbox", {
+    name: "Quick Unlock"
+  });
+  expect(quickUnlock).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  await waitFor(() => {
+    expect(settingsStore.save).toHaveBeenCalledWith({
+      recentVaultLimit: 10,
+      language: "en",
+      idleLockMinutes: 10,
+      clearClipboardSeconds: 30,
+      passkeyProviderEnabled: false,
+      quickUnlockEnabled: false
+    });
+  });
+});
+
 it("toggles quick unlock for the current vault from extension settings", async () => {
   const settingsStore = createSettingsStore();
   const recentVaults = [

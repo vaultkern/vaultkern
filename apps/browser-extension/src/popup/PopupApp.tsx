@@ -235,14 +235,33 @@ export function PopupApp({
       return unlockedSession;
     }
 
-    const currentVault =
+    let currentVault =
       recentVaults.find(
         (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
       ) ??
       recentVaults.find((vault) => vault.isCurrent) ??
       null;
 
-    if (!currentVault || currentVault.supportsQuickUnlock) {
+    if (!currentVault && unlockedSession.currentVaultRefId) {
+      const vaults = limitRecentVaults(
+        await client.listRecentVaults(),
+        extensionSettings.recentVaultLimit
+      );
+      setRecentVaults(vaults);
+      setRecentVaultsError(null);
+      currentVault =
+        vaults.find(
+          (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
+        ) ??
+        vaults.find((vault) => vault.isCurrent) ??
+        null;
+    }
+
+    if (currentVault?.supportsQuickUnlock) {
+      return unlockedSession;
+    }
+
+    if (!currentVault && !unlockedSession.currentVaultRefId) {
       return unlockedSession;
     }
 

@@ -1533,7 +1533,7 @@ export function App({
               settings={extensionSettings}
               saving={extensionSettingsSaving}
               error={extensionSettingsError}
-              quickUnlockSupported
+              quickUnlockSupported={session?.supportsBiometricUnlock !== false}
               quickUnlockEnabled={extensionSettings.quickUnlockEnabled}
               quickUnlockBusy={quickUnlockBusy}
               quickUnlockError={quickUnlockError}

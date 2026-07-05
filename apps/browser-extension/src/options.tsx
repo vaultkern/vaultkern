@@ -171,7 +171,7 @@ function OptionsApp() {
               settings={settings}
               saving={saving}
               error={error}
-              quickUnlockSupported
+              quickUnlockSupported={session?.supportsBiometricUnlock !== false}
               quickUnlockEnabled={settings.quickUnlockEnabled}
               quickUnlockBusy={quickUnlockBusy}
               quickUnlockError={quickUnlockError}

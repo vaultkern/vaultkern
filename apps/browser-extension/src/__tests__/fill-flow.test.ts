@@ -758,6 +758,104 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("enables quick unlock when the popup unlocks before recent vaults finish loading", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: vi.fn((_key, callback) =>
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 0,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: true
+              }
+            })
+          ),
+          set: vi.fn((_values, callback) => callback?.())
+        }
+      },
+      tabs: {
+        query: vi.fn(async () => [
+          {
+            id: 7,
+            url: "https://example.com/login"
+          }
+        ]),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    const slowVaults = createDeferred<
+      Array<{
+        vaultRefId: string;
+        displayName: string;
+        sourceKind: string;
+        sourceSummary: string;
+        lastUsedAt: number;
+        availability: string;
+        supportsQuickUnlock: boolean;
+        isCurrent: boolean;
+      }>
+    >();
+    const loadedVaults = [
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Personal",
+        sourceKind: "local",
+        sourceSummary: "personal.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ];
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listRecentVaults
+      .mockReturnValueOnce(slowVaults.promise)
+      .mockResolvedValue(loadedVaults);
+    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByLabelText("Master Password")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+    });
+
+    slowVaults.resolve(loadedVaults);
+  });
+
   it("loads fill candidates for the active tab and fills the selected entry", async () => {
     const query = vi.fn(async () => [
       {

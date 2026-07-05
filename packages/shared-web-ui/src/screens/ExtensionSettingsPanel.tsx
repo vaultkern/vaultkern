@@ -20,12 +20,14 @@ export function ExtensionSettingsPanel({
   settings,
   saving,
   error,
+  quickUnlockSupported = true,
   quickUnlockBusy = false,
   quickUnlockError = null,
   onSave
 }: ExtensionSettingsPanelProps) {
   const text = useText();
   const [draft, setDraft] = useState(() => toDraft(settings));
+  const quickUnlockAvailable = quickUnlockSupported !== false;
 
   useEffect(() => {
     setDraft(toDraft(settings));
@@ -47,7 +49,7 @@ export function ExtensionSettingsPanel({
             30
           ),
           passkeyProviderEnabled: draft.passkeyProviderEnabled,
-          quickUnlockEnabled: draft.quickUnlockEnabled
+          quickUnlockEnabled: quickUnlockAvailable && draft.quickUnlockEnabled
         });
       }}
     >
@@ -144,8 +146,8 @@ export function ExtensionSettingsPanel({
         <input
           aria-label={text("Quick Unlock")}
           type="checkbox"
-          checked={draft.quickUnlockEnabled}
-          disabled={quickUnlockBusy}
+          checked={quickUnlockAvailable && draft.quickUnlockEnabled}
+          disabled={quickUnlockBusy || !quickUnlockAvailable}
           onChange={(event) => {
             setDraft({ ...draft, quickUnlockEnabled: event.target.checked });
           }}
