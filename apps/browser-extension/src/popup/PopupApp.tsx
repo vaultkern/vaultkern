@@ -619,12 +619,15 @@ export function PopupApp({
         await preload;
       }
       const unlockPassword = password;
+      const unlockKeyFilePath = keyFilePath;
       const unlockedSession = await client.unlockCurrentVault({
         password,
         keyFilePath
       });
+      const shouldEnableQuickUnlock =
+        unlockPassword !== "" || unlockKeyFilePath !== "";
       const nextSession =
-        unlockPassword !== ""
+        shouldEnableQuickUnlock
           ? await enableQuickUnlockAfterPasswordUnlock(unlockedSession)
           : unlockedSession;
       setSession(nextSession);

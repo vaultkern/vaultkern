@@ -1197,7 +1197,9 @@ export function App({
       return;
     }
 
-    const syncKey = `${currentVault.vaultRefId}:enable`;
+    const syncKey = `${currentVault.vaultRefId}:${
+      session?.unlocked === true ? "unlocked" : "locked"
+    }:enable`;
     if (quickUnlockAutoSyncAttempt.current === syncKey) {
       return;
     }
@@ -1208,7 +1210,8 @@ export function App({
     extensionSettings,
     quickUnlockBusy,
     recentVaults,
-    session?.currentVaultRefId
+    session?.currentVaultRefId,
+    session?.unlocked
   ]);
 
   useEffect(() => {

@@ -483,6 +483,67 @@ it("syncs the quick unlock preference to the current vault when available", asyn
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).toBeChecked();
 });
 
+it("retries quick unlock preference sync after the current vault is unlocked", async () => {
+  const settingsStore = createSettingsStore({
+    quickUnlockEnabled: true
+  });
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    unlockCurrentVault: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    })),
+    enableQuickUnlockForCurrentVault: vi
+      .fn()
+      .mockRejectedValueOnce(new Error("current vault is locked"))
+      .mockImplementation(async () => {
+        recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
+        return {
+          unlocked: true,
+          activeVaultId: "vault-1",
+          currentVaultRefId: "vault-ref-1",
+          supportsBiometricUnlock: true
+        };
+      })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  await waitFor(() => {
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+  });
+
+  fireEvent.change(screen.getByLabelText("Master Password"), {
+    target: { value: "demo-password" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+  await waitFor(() => {
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(2);
+  });
+});
+
 it("renders database and entry workspace labels in Chinese when selected", async () => {
   const settingsStore = createSettingsStore({
     recentVaultLimit: 10,
