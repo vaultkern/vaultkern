@@ -308,31 +308,24 @@ it("unlocks the current recent vault with Windows Hello when quick unlock is ena
   expect(await screen.findByText("No entries available.")).toBeInTheDocument();
 });
 
-it("shows browser settings and saves local extension preferences", async () => {
+it("opens extension settings while locked and saves local extension preferences", async () => {
   const settingsStore = createSettingsStore();
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
-    listGroups: vi.fn(async () => ({
-      type: "group_tree" as const,
-      root: {
-        id: "group-root",
-        title: "Archive",
-        entryCount: 0,
-        childCount: 0,
-        children: []
-      }
-    })),
-    listEntries: vi.fn(async () => []),
-    getEntryDetail: vi.fn()
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    }),
+    listRecentVaults: vi.fn(async () => [])
   } satisfies RuntimeClientLike;
 
   render(<App client={client} extensionSettingsStore={settingsStore} />);
 
-  expect(await screen.findByText("No entries available.")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
 
-  expect(await screen.findByRole("heading", { name: "Browser Settings" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Extension Settings" })).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Recent Databases"), {
     target: { value: "4" }
   });
@@ -343,8 +336,9 @@ it("shows browser settings and saves local extension preferences", async () => {
     target: { value: "12" }
   });
   fireEvent.click(screen.getByLabelText("VaultKern passkey provider"));
+  fireEvent.click(screen.getByLabelText("Quick Unlock"));
   fireEvent.click(screen.getByRole("button", { name: "中文" }));
-  fireEvent.click(screen.getByRole("button", { name: "Save Browser Settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
 
   await waitFor(() => {
     expect(settingsStore.save).toHaveBeenCalledWith({
@@ -352,14 +346,14 @@ it("shows browser settings and saves local extension preferences", async () => {
       language: "zh-CN",
       idleLockMinutes: 7,
       clearClipboardSeconds: 12,
-      passkeyProviderEnabled: true
+      passkeyProviderEnabled: true,
+      quickUnlockEnabled: true
     });
   });
-  expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "浏览器设置" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "插件设置" })).toBeInTheDocument();
 });
 
-it("toggles quick unlock for the current vault from browser settings", async () => {
+it("toggles quick unlock for the current vault from extension settings", async () => {
   const settingsStore = createSettingsStore();
   const recentVaults = [
     {
@@ -417,7 +411,7 @@ it("toggles quick unlock for the current vault from browser settings", async () 
   render(<App client={client} extensionSettingsStore={settingsStore} />);
 
   expect(await screen.findByText("No entries available.")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
 
   const quickUnlock = await screen.findByRole("checkbox", {
     name: "Quick Unlock"
@@ -425,16 +419,68 @@ it("toggles quick unlock for the current vault from browser settings", async () 
   expect(quickUnlock).not.toBeChecked();
 
   fireEvent.click(quickUnlock);
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
   await waitFor(() => {
     expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
   });
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).toBeChecked();
 
   fireEvent.click(screen.getByRole("checkbox", { name: "Quick Unlock" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
   await waitFor(() => {
     expect(client.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
   });
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).not.toBeChecked();
+});
+
+it("syncs the quick unlock preference to the current vault when available", async () => {
+  const settingsStore = createSettingsStore();
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    enableQuickUnlockForCurrentVault: vi.fn(async () => {
+      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
+      return {
+        unlocked: false,
+        activeVaultId: null,
+        currentVaultRefId: "vault-ref-1"
+      };
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+
+  const quickUnlock = await screen.findByRole("checkbox", {
+    name: "Quick Unlock"
+  });
+  expect(quickUnlock).not.toBeDisabled();
+
+  fireEvent.click(quickUnlock);
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+  await waitFor(() => {
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+  });
+  expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).toBeChecked();
 });
 
 it("renders database and entry workspace labels in Chinese when selected", async () => {
@@ -497,8 +543,8 @@ it("renders database and entry workspace labels in Chinese when selected", async
   expect(await screen.findByText(/1970-01-01 00:00:42/)).toBeInTheDocument();
   expect(screen.getByLabelText("标题")).toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "设置" }));
-  expect(await screen.findByRole("heading", { name: "浏览器设置" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "数据库设置" }));
+  expect(screen.queryByRole("heading", { name: "插件设置" })).not.toBeInTheDocument();
   expect(screen.getByText("数据库元数据")).toBeInTheDocument();
   expect(screen.getByLabelText("数据库名称")).toBeInTheDocument();
   expect(screen.getByText("凭据")).toBeInTheDocument();
@@ -748,7 +794,7 @@ it("loads and saves database settings from the manager workspace", async () => {
   render(<App client={client as RuntimeClientLike} />);
 
   await screen.findByText("No entries available.");
-  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Database Settings" }));
   expect(await screen.findByRole("heading", { name: "Archive" })).toBeInTheDocument();
   expect(screen.getByDisplayValue("Archive")).toBeInTheDocument();
 
@@ -872,7 +918,7 @@ it("shows add password action when a database has no password", async () => {
 
   await screen.findByText("No entries available.");
   expect(await screen.findByText("No Password Vault")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
   expect(await screen.findByRole("button", { name: "Add password" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Remove password" })).not.toBeInTheDocument();
 });
@@ -913,7 +959,7 @@ it("shows kdf-specific advanced encryption fields", async () => {
 
   render(<App client={client as RuntimeClientLike} />);
   await screen.findByText("No entries available.");
-  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Database Settings" }));
 
   expect(await screen.findByLabelText("Argon2 Iterations")).toBeInTheDocument();
   expect(screen.getByLabelText("Argon2 Memory MiB")).toBeInTheDocument();

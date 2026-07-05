@@ -18,6 +18,7 @@ export function RecentVaultUnlockScreen({
     unlocking: "Unlocking...",
     unlockWithWindowsHello: "Unlock with Windows Hello",
     manageVaults: "Manage vaults",
+    extensionSettings: "Extension Settings",
     noRecentVaults: "No recent vaults",
     addFirstVault: "Open manager setup to add your first local vault.",
     local: "Local",
@@ -27,6 +28,7 @@ export function RecentVaultUnlockScreen({
   onUnlock,
   onQuickUnlock,
   onOpenSetup,
+  onOpenExtensionSettings,
   error,
   renderRuntimeErrorHelp,
   errorCause,
@@ -45,6 +47,7 @@ export function RecentVaultUnlockScreen({
     unlocking: string;
     unlockWithWindowsHello: string;
     manageVaults: string;
+    extensionSettings: string;
     noRecentVaults: string;
     addFirstVault: string;
     local: string;
@@ -54,6 +57,7 @@ export function RecentVaultUnlockScreen({
   onUnlock: (credentials: { password: string; keyFilePath: string }) => Promise<void>;
   onQuickUnlock?: () => Promise<void>;
   onOpenSetup: () => void;
+  onOpenExtensionSettings: () => void;
   error: string | null;
   errorCause?: unknown;
   busy?: boolean;
@@ -170,7 +174,7 @@ export function RecentVaultUnlockScreen({
           />
         </label>
 
-        <div style={{ display: "flex", gap: archiveTheme.spacing.sm }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: archiveTheme.spacing.sm }}>
           {canQuickUnlock ? (
             <button
               type="button"
@@ -211,6 +215,18 @@ export function RecentVaultUnlockScreen({
             }}
           >
             {labels.manageVaults}
+          </button>
+          <button
+            type="button"
+            onClick={onOpenExtensionSettings}
+            disabled={busy}
+            style={{
+              ...secondaryButtonStyle,
+              cursor: busy ? "wait" : secondaryButtonStyle.cursor,
+              opacity: busy ? 0.72 : 1
+            }}
+          >
+            {labels.extensionSettings}
           </button>
         </div>
 

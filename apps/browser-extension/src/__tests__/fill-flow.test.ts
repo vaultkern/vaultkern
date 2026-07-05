@@ -15,6 +15,7 @@ const runtimeClientMocks = vi.hoisted(() => ({
   openLocalVault: vi.fn(),
   lockSession: vi.fn(),
   unlockCurrentVault: vi.fn(),
+  enableQuickUnlockForCurrentVault: vi.fn(),
   unlockCurrentVaultWithQuickUnlock: vi.fn(),
   unlockWithPassword: vi.fn(),
   listGroups: vi.fn(),
@@ -68,6 +69,7 @@ beforeEach(() => {
   runtimeClientMocks.listEntries.mockReset();
   runtimeClientMocks.getEntryDetail.mockReset();
   runtimeClientMocks.findFillCandidates.mockReset();
+  runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReset();
   runtimeClientMocks.listRecentVaults.mockResolvedValue([]);
   runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
     unlocked: false,
@@ -308,6 +310,79 @@ describe("PopupShell fill flow", () => {
     expect(lockButton).toBeInTheDocument();
   });
 
+  it("opens extension settings from the locked popup", async () => {
+    const openOptionsPage = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: { openOptionsPage },
+      tabs: {
+        query: vi.fn(async () => [
+          {
+            id: 7,
+            url: "https://example.com/login"
+          }
+        ]),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    });
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Extension Settings" }));
+
+    await waitFor(() => {
+      expect(openOptionsPage).toHaveBeenCalled();
+    });
+  });
+
+  it("falls back to the extension options tab when the popup options API fails", async () => {
+    const openOptionsPage = vi.fn(async () => {
+      throw new Error("options page did not open");
+    });
+    const create = vi.fn(async () => undefined);
+    const getURL = vi.fn((path: string) => `chrome-extension://id/${path}`);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: { openOptionsPage, getURL },
+      tabs: {
+        create,
+        query: vi.fn(async () => [
+          {
+            id: 7,
+            url: "https://example.com/login"
+          }
+        ]),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    });
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Extension Settings" }));
+
+    await waitFor(() => {
+      expect(create).toHaveBeenCalledWith({
+        url: "chrome-extension://id/options.html"
+      });
+    });
+  });
+
   it("renders popup site candidates search and selected record details together", async () => {
     const query = vi.fn(async () => [
       {
@@ -513,6 +588,90 @@ describe("PopupShell fill flow", () => {
 
     expect(await screen.findByText("secret-123")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Hide password" })).toBeInTheDocument();
+  });
+
+  it("enables quick unlock during the first popup password unlock when the extension preference is on", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: vi.fn((_key, callback) =>
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 0,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: true
+              }
+            })
+          ),
+          set: vi.fn((_values, callback) => callback?.())
+        }
+      },
+      tabs: {
+        query: vi.fn(async () => [
+          {
+            id: 7,
+            url: "https://example.com/login"
+          }
+        ]),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Personal",
+        sourceKind: "local",
+        sourceSummary: "personal.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Personal")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledWith({
+        password: "demo-password",
+        keyFilePath: ""
+      });
+      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("loads fill candidates for the active tab and fills the selected entry", async () => {

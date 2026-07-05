@@ -38,13 +38,15 @@ export function ManagerTopBar({
     subtitle: "Private Archive",
     globalSearch: "Global Search",
     searchPlaceholder: "Search the archive",
-    settings: "Settings",
+    settings: "Database Settings",
+    extensionSettings: "Extension Settings",
     statistics: "Statistics"
   },
   searchValue,
   onSearchChange,
   onOpenStats,
-  onOpenSettings
+  onOpenSettings,
+  onOpenExtensionSettings
 }: {
   title?: string;
   labels?: {
@@ -52,12 +54,14 @@ export function ManagerTopBar({
     globalSearch: string;
     searchPlaceholder: string;
     settings: string;
+    extensionSettings: string;
     statistics: string;
   };
   searchValue: string;
   onSearchChange: (value: string) => void;
   onOpenStats: () => void;
   onOpenSettings: () => void;
+  onOpenExtensionSettings?: () => void;
 }) {
   return (
     <header
@@ -125,6 +129,15 @@ export function ManagerTopBar({
       >
         {labels.settings}
       </button>
+      {onOpenExtensionSettings ? (
+        <button
+          type="button"
+          onClick={onOpenExtensionSettings}
+          style={{ ...actionStyle, flex: "0 0 auto" }}
+        >
+          {labels.extensionSettings}
+        </button>
+      ) : null}
       <button
         type="button"
         onClick={onOpenStats}

@@ -42,6 +42,7 @@ export interface PopupClientLike {
   lockSession(): Promise<SessionStateLike>;
   unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
+  enableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
   unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
   listEntries(vaultId: string): Promise<EntrySummary[]>;
   getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
@@ -225,6 +226,42 @@ export function PopupApp({
         vault?.supportsQuickUnlock &&
         vault.availability !== "needs_repair"
     );
+  }
+
+  async function enableQuickUnlockAfterPasswordUnlock(
+    unlockedSession: SessionStateLike
+  ) {
+    if (!extensionSettings.quickUnlockEnabled) {
+      return unlockedSession;
+    }
+
+    const currentVault =
+      recentVaults.find(
+        (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
+      ) ??
+      recentVaults.find((vault) => vault.isCurrent) ??
+      null;
+
+    if (!currentVault || currentVault.supportsQuickUnlock) {
+      return unlockedSession;
+    }
+
+    try {
+      const nextSession = await client.enableQuickUnlockForCurrentVault();
+      const vaults = await client.listRecentVaults();
+      setRecentVaults(limitRecentVaults(vaults, extensionSettings.recentVaultLimit));
+      setRecentVaultsError(null);
+      return nextSession;
+    } catch (quickUnlockFailure) {
+      setUnlockError(
+        popupErrorMessage(
+          quickUnlockFailure,
+          translate(extensionSettings.language, "Failed to update quick unlock")
+        )
+      );
+      setUnlockErrorCause(quickUnlockFailure);
+      return unlockedSession;
+    }
   }
 
   function notifyWebAuthnUnlockCompleteOnce(
@@ -582,10 +619,14 @@ export function PopupApp({
         await preload;
       }
       const unlockPassword = password;
-      const nextSession = await client.unlockCurrentVault({
+      const unlockedSession = await client.unlockCurrentVault({
         password,
         keyFilePath
       });
+      const nextSession =
+        unlockPassword !== ""
+          ? await enableQuickUnlockAfterPasswordUnlock(unlockedSession)
+          : unlockedSession;
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");
@@ -770,6 +811,21 @@ export function PopupApp({
     await tabs.create({ url: runtime.getURL("manager.html") });
   }
 
+  async function handleOpenExtensionSettings() {
+    const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+    const runtime = chromeApi?.runtime;
+    const tabs = chromeApi?.tabs;
+
+    if (tabs?.create && runtime?.getURL) {
+      await tabs.create({ url: runtime.getURL("options.html") });
+      return;
+    }
+
+    if (runtime?.openOptionsPage) {
+      await runtime.openOptionsPage();
+    }
+  }
+
   async function handleLock() {
     setLocking(true);
 
@@ -845,7 +901,11 @@ export function PopupApp({
     return (
       <I18nProvider language={extensionSettings.language}>
       <div style={shellStyle}>
-        <PopupStatusStrip siteLabel={siteLabel} unlocked={false} />
+        <PopupStatusStrip
+          siteLabel={siteLabel}
+          unlocked={false}
+          onOpenExtensionSettings={handleOpenExtensionSettings}
+        />
         {webAuthnUnlockPrompt ? (
           <section style={passkeyPromptStyle} aria-live="polite">
             <strong>{passkeyPromptTitle}</strong>
@@ -1113,6 +1173,7 @@ export function PopupApp({
         unlocked
         onLock={locking ? undefined : handleLock}
         onOpenManager={handleOpenManager}
+        onOpenExtensionSettings={handleOpenExtensionSettings}
       />
       {entriesError ? <div role="alert">{entriesError}</div> : null}
       <SiteCandidateList

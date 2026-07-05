@@ -21,10 +21,11 @@ type TranslationKey =
   | "Open manager setup to add your first local vault."
   | "Local"
   | "Needs repair in manager"
-  | "Browser Settings"
+  | "Extension Settings"
   | "Local extension preferences. These are not stored in the KDBX database."
-  | "Save Browser Settings"
+  | "Save Extension Settings"
   | "Saving..."
+  | "Database Settings"
   | "Recent Databases"
   | "Idle Lock Minutes"
   | "Clear Clipboard Seconds"
@@ -168,7 +169,7 @@ type TranslationKey =
   | "Delete this entry permanently?"
   | "This will remove the selected entry from the current vault."
   | "Delete permanently"
-  | "Failed to save browser settings"
+  | "Failed to save extension settings"
   | "Failed to update quick unlock"
   | "Failed to add local vault"
   | "Failed to add OneDrive vault"
@@ -226,10 +227,11 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Open manager setup to add your first local vault.": "打开管理器设置并添加第一个本地数据库。",
   Local: "本地",
   "Needs repair in manager": "需要在管理器中修复",
-  "Browser Settings": "浏览器设置",
+  "Extension Settings": "插件设置",
   "Local extension preferences. These are not stored in the KDBX database.": "本地插件偏好设置，不会保存到 KDBX 数据库。",
-  "Save Browser Settings": "保存浏览器设置",
+  "Save Extension Settings": "保存插件设置",
   "Saving...": "保存中...",
+  "Database Settings": "数据库设置",
   "Recent Databases": "最近数据库",
   "Idle Lock Minutes": "闲置锁定分钟数",
   "Clear Clipboard Seconds": "清空剪贴板秒数",
@@ -373,7 +375,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Delete this entry permanently?": "永久删除此条目？",
   "This will remove the selected entry from the current vault.": "这会从当前数据库中删除选中的条目。",
   "Delete permanently": "永久删除",
-  "Failed to save browser settings": "保存浏览器设置失败",
+  "Failed to save extension settings": "保存插件设置失败",
   "Failed to update quick unlock": "更新快速解锁失败",
   "Failed to add local vault": "添加本地数据库失败",
   "Failed to add OneDrive vault": "添加 OneDrive 数据库失败",

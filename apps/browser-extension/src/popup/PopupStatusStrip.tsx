@@ -6,12 +6,14 @@ export function PopupStatusStrip({
   siteLabel,
   unlocked,
   onLock,
-  onOpenManager
+  onOpenManager,
+  onOpenExtensionSettings
 }: {
   siteLabel: string;
   unlocked: boolean;
   onLock?: () => void;
   onOpenManager?: () => void;
+  onOpenExtensionSettings?: () => void;
 }) {
   const text = useText();
   return (
@@ -61,6 +63,8 @@ export function PopupStatusStrip({
         style={{
           display: "flex",
           alignItems: "center",
+          justifyContent: "flex-end",
+          flexWrap: "wrap",
           gap: popupTheme.spacing.sm,
           flexShrink: 0
         }}
@@ -88,6 +92,15 @@ export function PopupStatusStrip({
             style={buttonStyle}
           >
             {text("Open Manager")}
+          </button>
+        ) : null}
+        {onOpenExtensionSettings ? (
+          <button
+            type="button"
+            onClick={onOpenExtensionSettings}
+            style={buttonStyle}
+          >
+            {text("Extension Settings")}
           </button>
         ) : null}
         {unlocked && onLock ? (
