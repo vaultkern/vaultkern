@@ -92,6 +92,22 @@ function createSiteRuleActions(
   return actions;
 }
 
+function appendFallbackActions(
+  primaryActions: AutofillFillAction[],
+  fallbackActions: AutofillFillAction[]
+) {
+  const usedFieldOpids = new Set(primaryActions.map((action) => action.fieldOpid));
+  const primaryFieldTypes = new Set(primaryActions.map((action) => action.fieldType));
+
+  for (const action of fallbackActions) {
+    if (usedFieldOpids.has(action.fieldOpid) || primaryFieldTypes.has(action.fieldType)) {
+      continue;
+    }
+    usedFieldOpids.add(action.fieldOpid);
+    primaryActions.push(action);
+  }
+}
+
 function pickPasswordField(fields: AutofillTriageFieldResult[]) {
   const passwordFields = fields.filter((field) => field.qualifiedAs === "password");
   return (
@@ -743,9 +759,6 @@ export function createLoginFillPlan(
     return { actions: [] };
   }
   const siteRuleActions = createSiteRuleActions(report.fields, payload);
-  if (siteRuleActions.length > 0) {
-    return { actions: siteRuleActions };
-  }
   const fields = candidateFields(report.fields);
   const passwordChangeFormOpid =
     typeof payload.password === "string" && typeof payload.newPassword === "string"
@@ -753,20 +766,26 @@ export function createLoginFillPlan(
       : null;
   const registrationFormOpid =
     typeof payload.password === "string" ? pickRegistrationFormOpid(fields, report.fields) : null;
-  const actions: AutofillFillAction[] = [];
+  const actions: AutofillFillAction[] = [...siteRuleActions];
 
   if (passwordChangeFormOpid !== null) {
-    actions.push(...createPasswordChangeActions(fields, passwordChangeFormOpid, payload));
+    appendFallbackActions(
+      actions,
+      createPasswordChangeActions(fields, passwordChangeFormOpid, payload)
+    );
     if (typeof payload.totp === "string") {
-      actions.push(...createTotpActions(report.fields, payload.totp));
+      appendFallbackActions(actions, createTotpActions(report.fields, payload.totp));
     }
     return { actions };
   }
 
   if (registrationFormOpid !== null) {
-    actions.push(...createRegistrationActions(fields, registrationFormOpid, payload));
+    appendFallbackActions(
+      actions,
+      createRegistrationActions(fields, registrationFormOpid, payload)
+    );
     if (typeof payload.totp === "string") {
-      actions.push(...createTotpActions(report.fields, payload.totp));
+      appendFallbackActions(actions, createTotpActions(report.fields, payload.totp));
     }
     return { actions };
   }
@@ -781,8 +800,9 @@ export function createLoginFillPlan(
           : null)
       : null;
 
+  const fallbackActions: AutofillFillAction[] = [];
   if (usernameField && typeof payload.username === "string") {
-    actions.push({
+    fallbackActions.push({
       fieldOpid: usernameField.opid,
       elementNumber: usernameField.elementNumber,
       fieldType: usernameField.qualifiedAs === "ignored" ? "username" : usernameField.qualifiedAs,
@@ -791,7 +811,7 @@ export function createLoginFillPlan(
   }
 
   if (passwordField && typeof payload.password === "string") {
-    actions.push({
+    fallbackActions.push({
       fieldOpid: passwordField.opid,
       elementNumber: passwordField.elementNumber,
       fieldType: passwordField.qualifiedAs,
@@ -800,8 +820,9 @@ export function createLoginFillPlan(
   }
 
   if (typeof payload.totp === "string") {
-    actions.push(...createTotpActions(report.fields, payload.totp));
+    fallbackActions.push(...createTotpActions(report.fields, payload.totp));
   }
 
+  appendFallbackActions(actions, fallbackActions);
   return { actions };
 }

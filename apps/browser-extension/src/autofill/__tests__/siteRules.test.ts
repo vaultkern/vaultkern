@@ -115,4 +115,35 @@ describe("autofill site rules", () => {
       "secret"
     );
   });
+
+  it("uses heuristic selection for payload fields not covered by matching rules", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="decoy-user" name="email" type="email" autocomplete="username" />
+        <input id="rule-user" name="account" type="text" />
+        <input id="password" name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "partial-rule",
+          host: window.location.hostname,
+          fields: {
+            username: ["#rule-user"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#rule-user") as HTMLInputElement).value).toBe("alice");
+    expect((document.querySelector("#password") as HTMLInputElement).value).toBe("secret");
+  });
 });
