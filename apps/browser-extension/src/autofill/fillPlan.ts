@@ -76,10 +76,14 @@ function fieldHasSiblingNewPassword(
   field: AutofillTriageFieldResult,
   fields: AutofillTriageFieldResult[]
 ) {
-  return scopedCredentialFields(fields, field).some(
+  if (!field.formOpid) {
+    return false;
+  }
+  return fields.some(
     (candidate) =>
       candidate.qualifiedAs === "newPassword" &&
-      candidate.opid !== field.opid
+      candidate.opid !== field.opid &&
+      candidate.formOpid === field.formOpid
   );
 }
 
