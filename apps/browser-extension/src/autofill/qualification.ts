@@ -693,7 +693,37 @@ export function qualifyAutofillField(
 ): FieldQualification {
   const reasons = [...field.viewableReasons, ...field.fillableReasons];
 
-  if (!field.viewable || !field.fillable) {
+  if (!field.viewable) {
+    return {
+      qualifiedAs: "ignored",
+      eligible: false,
+      reasons
+    };
+  }
+
+  if (!field.fillable) {
+    const fieldText = joinedFieldText(field);
+    const formText = joinedFormText(form);
+    const autocomplete = fieldAutocompleteTokens(field);
+
+    if (
+      field.readonly &&
+      !isSearchField(field, fieldText) &&
+      !excludedReason(fieldText, formText) &&
+      !nonLoginReason(fieldText, formText) &&
+      isUsernameLike(field, fieldText)
+    ) {
+      if (autocomplete.has("username")) {
+        reasons.push("autocomplete:username");
+      } else if (autocomplete.has("email")) {
+        reasons.push("autocomplete:email");
+      }
+      if (hasPasswordSibling(field, snapshot)) {
+        reasons.push("form-has-password");
+      }
+      return { qualifiedAs: "username", eligible: true, reasons };
+    }
+
     return {
       qualifiedAs: "ignored",
       eligible: false,

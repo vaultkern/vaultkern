@@ -80,7 +80,11 @@ export interface PopupClientLike {
 }
 
 type AutofillSavePrompt =
-  | { mode: "save"; submission: PendingAutofillSubmission }
+  | {
+      mode: "save";
+      submission: PendingAutofillSubmission;
+      createdDetail?: EntryDetail;
+    }
   | {
       mode: "update";
       submission: PendingAutofillSubmission;
@@ -708,19 +712,15 @@ export function PopupApp({
 
     findCandidates(session.activeVaultId, pendingAutofillSubmission.url)
       .catch(() => [])
-      .then((pendingCandidates) => {
+      .then(async (pendingCandidates) => {
         if (cancelled) {
           return;
         }
 
         const hasSubmittedUsername = pendingAutofillSubmission.username.trim() !== "";
-        const matchingEntry = hasSubmittedUsername
-          ? pendingCandidates.find((entry) =>
-              entryMatchesPendingUsername(entry, pendingAutofillSubmission)
-            ) ?? null
-          : pendingCandidates[0] ?? null;
+        const pendingCredentialPassword = pendingPassword(pendingAutofillSubmission);
 
-        if (!matchingEntry) {
+        if (!pendingCandidates.length) {
           setAutofillSavePrompt({
             mode: "save",
             submission: pendingAutofillSubmission
@@ -728,14 +728,36 @@ export function PopupApp({
           return;
         }
 
-        void client
-          .getEntryDetail(session.activeVaultId, matchingEntry.id)
-          .then((detail) => {
+        try {
+          if (hasSubmittedUsername) {
+            const matchingEntry =
+              pendingCandidates.find((entry) =>
+                entryMatchesPendingUsername(entry, pendingAutofillSubmission)
+              ) ?? null;
+            if (!matchingEntry) {
+              setAutofillSavePrompt({
+                mode: "save",
+                submission: pendingAutofillSubmission
+              });
+              return;
+            }
+
+            const detail = await client.getEntryDetail(
+              session.activeVaultId,
+              matchingEntry.id
+            );
             if (cancelled) {
               return;
             }
-            if (detail.password === pendingPassword(pendingAutofillSubmission)) {
-              setAutofillSavePrompt(null);
+            if (
+              typeof pendingAutofillSubmission.newPassword === "string" &&
+              detail.password !== pendingAutofillSubmission.password
+            ) {
+              void clearAutofillPrompt();
+              return;
+            }
+            if (detail.password === pendingCredentialPassword) {
+              void clearAutofillPrompt();
               return;
             }
             setAutofillSavePrompt({
@@ -744,12 +766,48 @@ export function PopupApp({
               entry: matchingEntry,
               detail
             });
-          })
-          .catch(() => {
-            if (!cancelled) {
-              setAutofillSavePrompt(null);
-            }
+            return;
+          }
+
+          const candidateDetails = await Promise.all(
+            pendingCandidates.map(async (entry) => ({
+              entry,
+              detail: await client.getEntryDetail(session.activeVaultId, entry.id)
+            }))
+          );
+          if (cancelled) {
+            return;
+          }
+
+          const matchingDetails =
+            typeof pendingAutofillSubmission.newPassword === "string"
+              ? candidateDetails.filter(
+                  ({ detail }) => detail.password === pendingAutofillSubmission.password
+                )
+              : pendingCandidates.length === 1
+                ? candidateDetails
+                : [];
+          if (matchingDetails.length !== 1) {
+            void clearAutofillPrompt();
+            return;
+          }
+
+          const [{ entry, detail }] = matchingDetails;
+          if (detail.password === pendingCredentialPassword) {
+            void clearAutofillPrompt();
+            return;
+          }
+          setAutofillSavePrompt({
+            mode: "update",
+            submission: pendingAutofillSubmission,
+            entry,
+            detail
           });
+        } catch {
+          if (!cancelled) {
+            setAutofillSavePrompt(null);
+          }
+        }
       })
       .catch(() => {
         if (cancelled) {
@@ -1067,17 +1125,24 @@ export function PopupApp({
 
     try {
       if (autofillSavePrompt.mode === "save") {
-        const groupTree = await client.listGroups(session.activeVaultId);
-        await client.createEntry(session.activeVaultId, {
-          parentGroupId: groupTree.root.id,
-          title: titleForPendingSubmission(autofillSavePrompt.submission),
-          username: autofillSavePrompt.submission.username,
-          password: pendingPassword(autofillSavePrompt.submission),
-          url: autofillSavePrompt.submission.url,
-          notes: "",
-          totpUri: null,
-          customFields: []
-        });
+        if (!autofillSavePrompt.createdDetail) {
+          const groupTree = await client.listGroups(session.activeVaultId);
+          const createdDetail = await client.createEntry(session.activeVaultId, {
+            parentGroupId: groupTree.root.id,
+            title: titleForPendingSubmission(autofillSavePrompt.submission),
+            username: autofillSavePrompt.submission.username,
+            password: pendingPassword(autofillSavePrompt.submission),
+            url: autofillSavePrompt.submission.url,
+            notes: "",
+            totpUri: null,
+            customFields: []
+          });
+          setAutofillSavePrompt((currentPrompt) =>
+            currentPrompt === autofillSavePrompt && currentPrompt.mode === "save"
+              ? { ...currentPrompt, createdDetail }
+              : currentPrompt
+          );
+        }
       } else {
         await client.updateEntryFields(
           session.activeVaultId,

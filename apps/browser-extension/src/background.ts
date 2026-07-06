@@ -50,8 +50,8 @@ function isWebAuthnPageRequest(message: unknown) {
   );
 }
 
-function storageLocal() {
-  return chromeApi?.storage?.local;
+function storageSession() {
+  return chromeApi?.storage?.session;
 }
 
 function objectRecordFromUnknown(value: unknown): Record<string, unknown> {
@@ -61,7 +61,7 @@ function objectRecordFromUnknown(value: unknown): Record<string, unknown> {
 }
 
 function storageGet(key: string): Promise<Record<string, unknown>> {
-  const storage = storageLocal();
+  const storage = storageSession();
   if (typeof storage?.get !== "function") {
     return Promise.resolve({});
   }
@@ -87,7 +87,7 @@ function storageGet(key: string): Promise<Record<string, unknown>> {
 }
 
 function storageSet(items: Record<string, unknown>): Promise<void> {
-  const storage = storageLocal();
+  const storage = storageSession();
   if (typeof storage?.set !== "function") {
     return Promise.resolve();
   }
@@ -113,7 +113,7 @@ function storageSet(items: Record<string, unknown>): Promise<void> {
 }
 
 function storageRemove(key: string): Promise<void> {
-  const storage = storageLocal();
+  const storage = storageSession();
   if (typeof storage?.remove !== "function") {
     return Promise.resolve();
   }
@@ -158,6 +158,19 @@ async function loadPersistedPendingAutofillSubmission() {
   );
 }
 
+function newerPendingAutofillSubmission(
+  left: PendingAutofillSubmission | null,
+  right: PendingAutofillSubmission | null
+) {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  return right.submittedAt > left.submittedAt ? right : left;
+}
+
 function handleAutofillPendingMessage(
   message: unknown,
   sendResponse: (response: unknown) => void
@@ -177,7 +190,10 @@ function handleAutofillPendingMessage(
 
   if (messageType === "vaultkern_autofill_pending_request") {
     void loadPersistedPendingAutofillSubmission().then((persistedSubmission) => {
-      pendingAutofillSubmission = persistedSubmission ?? pendingAutofillSubmission;
+      pendingAutofillSubmission = newerPendingAutofillSubmission(
+        pendingAutofillSubmission,
+        persistedSubmission
+      );
       sendResponse({ pending: pendingAutofillSubmission });
     });
     return true;

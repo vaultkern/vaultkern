@@ -1545,6 +1545,302 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("clears a consumed pending submission when the saved password already matches", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const runtimeSendMessage = vi.fn(async (message: unknown) => {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as { type?: unknown }).type === "vaultkern_autofill_pending_request"
+      ) {
+        return {
+          pending: {
+            url: "https://example.com/login",
+            username: "alice",
+            password: "saved-secret",
+            submittedAt: 1710000000000
+          }
+        };
+      }
+      return { ok: true };
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: runtimeSendMessage
+      },
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com/login"
+      }
+    ]);
+    runtimeClientMocks.getEntryDetail.mockResolvedValue({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "saved-secret",
+      url: "https://example.com/login",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    });
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    await waitFor(() => {
+      expect(runtimeSendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_pending_clear"
+      });
+    });
+    expect(screen.queryByRole("button", { name: "Update Password" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save Login" })).not.toBeInTheDocument();
+  });
+
+  it("does not update an arbitrary candidate when a changed-password submission has no username", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const runtimeSendMessage = vi.fn(async (message: unknown) => {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as { type?: unknown }).type === "vaultkern_autofill_pending_request"
+      ) {
+        return {
+          pending: {
+            url: "https://example.com/login",
+            username: "",
+            password: "old-secret",
+            newPassword: "new-secret",
+            submittedAt: 1710000000000
+          }
+        };
+      }
+      return { ok: true };
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: runtimeSendMessage
+      },
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-alice",
+        title: "Alice",
+        username: "alice",
+        url: "https://example.com/login"
+      },
+      {
+        id: "entry-bob",
+        title: "Bob",
+        username: "bob",
+        url: "https://example.com/login"
+      }
+    ]);
+    runtimeClientMocks.getEntryDetail.mockResolvedValue({
+      type: "entry_detail",
+      id: "entry-alice",
+      title: "Alice",
+      username: "alice",
+      password: "old-secret",
+      url: "https://example.com/login",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    });
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    await waitFor(() => {
+      expect(runtimeSendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_pending_clear"
+      });
+    });
+    expect(screen.queryByRole("button", { name: "Update Password" })).not.toBeInTheDocument();
+    expect(runtimeClientMocks.updateEntryFields).not.toHaveBeenCalled();
+  });
+
+  it("does not offer a changed-password update when the current password does not match", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const runtimeSendMessage = vi.fn(async (message: unknown) => {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as { type?: unknown }).type === "vaultkern_autofill_pending_request"
+      ) {
+        return {
+          pending: {
+            url: "https://example.com/login",
+            username: "alice",
+            password: "mistyped-old-secret",
+            newPassword: "new-secret",
+            submittedAt: 1710000000000
+          }
+        };
+      }
+      return { ok: true };
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: runtimeSendMessage
+      },
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com/login"
+      }
+    ]);
+    runtimeClientMocks.getEntryDetail.mockResolvedValue({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "real-old-secret",
+      url: "https://example.com/login",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    });
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    await waitFor(() => {
+      expect(runtimeSendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_pending_clear"
+      });
+    });
+    expect(screen.queryByRole("button", { name: "Update Password" })).not.toBeInTheDocument();
+    expect(runtimeClientMocks.updateEntryFields).not.toHaveBeenCalled();
+  });
+
+  it("does not create duplicate entries when retrying after save fails", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const runtimeSendMessage = vi.fn(async (message: unknown) => {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as { type?: unknown }).type === "vaultkern_autofill_pending_request"
+      ) {
+        return {
+          pending: {
+            url: "https://example.com/login",
+            username: "alice",
+            password: "captured-secret",
+            submittedAt: 1710000000000
+          }
+        };
+      }
+      return { ok: true };
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: runtimeSendMessage
+      },
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+    runtimeClientMocks.saveVault
+      .mockRejectedValueOnce(new Error("disk busy"))
+      .mockResolvedValueOnce({
+        type: "save_vault_result",
+        status: "saved"
+      });
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    const saveButton = await screen.findByRole("button", {
+      name: "Save Login"
+    });
+    fireEvent.click(saveButton);
+    expect(await screen.findByRole("alert")).toHaveTextContent("disk busy");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Login" }));
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.saveVault).toHaveBeenCalledTimes(2);
+      expect(runtimeSendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_pending_clear"
+      });
+    });
+    expect(runtimeClientMocks.createEntry).toHaveBeenCalledTimes(1);
+  });
+
   it("opens the full manager in a dedicated extension page", async () => {
     const query = vi.fn(async () => [
       {
@@ -3565,13 +3861,83 @@ describe("content script fill message", () => {
       new Event("submit", { bubbles: true, cancelable: true })
     );
 
-    expect(sendMessage).toHaveBeenCalledWith({
-      type: "vaultkern_autofill_submission",
-      url: expect.any(String),
-      username: "alice@example.com",
-      password: "captured-secret",
-      submittedAt: expect.any(Number)
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_submission",
+        url: expect.any(String),
+        username: "alice@example.com",
+        password: "captured-secret",
+        submittedAt: expect.any(Number)
+      });
     });
+  });
+
+  it("captures a readonly username from a submitted login form", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const addListener = vi.fn();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" value="alice@example.com" readonly />
+        <input name="password" type="password" autocomplete="current-password" value="captured-secret" />
+      </form>
+    `;
+
+    await import("../contentScript");
+    document.querySelector("form")?.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_submission",
+        url: expect.any(String),
+        username: "alice@example.com",
+        password: "captured-secret",
+        submittedAt: expect.any(Number)
+      });
+    });
+  });
+
+  it("does not report a submitted form when page handlers cancel submit", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const addListener = vi.fn();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" value="alice@example.com" />
+        <input name="password" type="password" autocomplete="current-password" value="rejected-secret" />
+      </form>
+    `;
+    document.querySelector("form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+    });
+
+    await import("../contentScript");
+    document.querySelector("form")?.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true })
+    );
+    await Promise.resolve();
+
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("preserves password whitespace when reporting a submitted login form", async () => {
@@ -3599,12 +3965,14 @@ describe("content script fill message", () => {
       new Event("submit", { bubbles: true, cancelable: true })
     );
 
-    expect(sendMessage).toHaveBeenCalledWith({
-      type: "vaultkern_autofill_submission",
-      url: expect.any(String),
-      username: "alice@example.com",
-      password: " captured secret ",
-      submittedAt: expect.any(Number)
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_submission",
+        url: expect.any(String),
+        username: "alice@example.com",
+        password: " captured secret ",
+        submittedAt: expect.any(Number)
+      });
     });
   });
 
@@ -3634,12 +4002,14 @@ describe("content script fill message", () => {
       new Event("submit", { bubbles: true, cancelable: true })
     );
 
-    expect(sendMessage).toHaveBeenCalledWith({
-      type: "vaultkern_autofill_submission",
-      url: expect.any(String),
-      username: "new@example.com",
-      password: "generated-secret",
-      submittedAt: expect.any(Number)
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_submission",
+        url: expect.any(String),
+        username: "new@example.com",
+        password: "generated-secret",
+        submittedAt: expect.any(Number)
+      });
     });
   });
 
