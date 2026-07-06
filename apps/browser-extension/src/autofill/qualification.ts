@@ -62,12 +62,11 @@ const TOTP_KEYWORDS = [
   "2fa",
   "mfa",
   "onetimecode",
-  "verificationcode",
   "authenticatorcode",
   "twofactor",
   "twostep"
 ];
-const TOTP_INPUT_TYPES = new Set(["number", "tel", "text"]);
+const TOTP_INPUT_TYPES = new Set(["number", "password", "tel", "text"]);
 
 export interface FieldQualification {
   qualifiedAs: AutofillFieldQualification;
@@ -120,6 +119,7 @@ function joinedFormText(form: AutofillFormSnapshot | undefined) {
     form.htmlClass,
     formActionContext(form.htmlAction),
     form.htmlMethod,
+    form.ariaLabel,
     ...form.headingText
   ]
     .map(normalize)

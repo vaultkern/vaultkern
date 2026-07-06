@@ -233,6 +233,7 @@ function collectForms(documentRef: Document) {
       htmlClass: optionalString(formElement.getAttribute("class")),
       htmlAction: getFormAction(formElement),
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
+      ariaLabel: optionalString(formElement.getAttribute("aria-label")),
       headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
     };
     formByElement.set(formElement, snapshot);

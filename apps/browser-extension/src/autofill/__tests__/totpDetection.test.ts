@@ -112,6 +112,52 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#security-code") as HTMLInputElement).value).toBe("");
   });
 
+  it("does not fill card verification code fields without MFA evidence", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="card-code">Card verification code</label>
+        <input id="card-code" name="card_verification_code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#card-code") as HTMLInputElement).value).toBe("");
+  });
+
+  it("fills masked OTP fields with TOTP instead of the account password", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="otp-password" type="password" name="otp" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "account-secret", totp: "123456" });
+
+    expect((document.querySelector("#otp-password") as HTMLInputElement).value).toBe("123456");
+  });
+
+  it("uses form aria labels as MFA context for generic split code fields", () => {
+    document.body.innerHTML = `
+      <form aria-label="Two-factor verification">
+        <input name="digit_1" maxlength="1" inputmode="numeric" />
+        <input name="digit_2" maxlength="1" inputmode="numeric" />
+        <input name="digit_3" maxlength="1" inputmode="numeric" />
+        <input name="digit_4" maxlength="1" inputmode="numeric" />
+        <input name="digit_5" maxlength="1" inputmode="numeric" />
+        <input name="digit_6" maxlength="1" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "246810" });
+
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>('input[name^="digit_"]')].map(
+        (field) => field.value
+      )
+    ).toEqual(["2", "4", "6", "8", "1", "0"]);
+  });
+
   it("expands a partially labeled split TOTP field group", () => {
     document.body.innerHTML = `
       <form>
@@ -132,6 +178,29 @@ describe("totp autofill detection", () => {
         (field) => field.value
       )
     ).toEqual(["1", "3", "5", "7", "9", "0"]);
+  });
+
+  it("scopes form-less split TOTP fields to their contiguous group", () => {
+    document.body.innerHTML = `
+      <input id="unrelated-one-char" name="middle_initial" maxlength="1" />
+      <input id="separator" name="search" />
+      <div>
+        <label for="code-1">Authenticator code</label>
+        <input id="code-1" class="otp" name="code_1" maxlength="1" inputmode="numeric" />
+        <input id="code-2" class="otp" name="code_2" maxlength="1" inputmode="numeric" />
+        <input id="code-3" class="otp" name="code_3" maxlength="1" inputmode="numeric" />
+        <input id="code-4" class="otp" name="code_4" maxlength="1" inputmode="numeric" />
+        <input id="code-5" class="otp" name="code_5" maxlength="1" inputmode="numeric" />
+        <input id="code-6" class="otp" name="code_6" maxlength="1" inputmode="numeric" />
+      </div>
+    `;
+
+    fillLoginForm({ totp: "112358" });
+
+    expect((document.querySelector("#unrelated-one-char") as HTMLInputElement).value).toBe("");
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>(".otp")].map((field) => field.value)
+    ).toEqual(["1", "1", "2", "3", "5", "8"]);
   });
 
   it("does not treat backup service password fields as recovery codes", () => {

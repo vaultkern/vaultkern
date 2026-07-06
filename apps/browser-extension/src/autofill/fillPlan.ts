@@ -108,12 +108,48 @@ function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | unde
   return field.formOpid === formOpid;
 }
 
+function pickContiguousOneCharacterFields(
+  fields: AutofillTriageFieldResult[],
+  seed: AutofillTriageFieldResult,
+  valueLength: number
+) {
+  const sortedFields = [...fields].sort(byDocumentOrder);
+  const seedIndex = sortedFields.findIndex((field) => field.opid === seed.opid);
+  if (seedIndex < 0) {
+    return [];
+  }
+
+  let startIndex = seedIndex;
+  while (startIndex > 0 && isOneCharacterField(sortedFields[startIndex - 1])) {
+    startIndex -= 1;
+  }
+
+  let endIndex = seedIndex;
+  while (
+    endIndex + 1 < sortedFields.length &&
+    isOneCharacterField(sortedFields[endIndex + 1])
+  ) {
+    endIndex += 1;
+  }
+
+  const splitFields = sortedFields.slice(startIndex, endIndex + 1);
+  return splitFields.length === valueLength ? splitFields : [];
+}
+
 function pickSplitTotpFields(
   fields: AutofillTriageFieldResult[],
   totpFields: AutofillTriageFieldResult[],
   valueLength: number
 ) {
   for (const seed of totpFields.filter(isOneCharacterField)) {
+    if (seed.formOpid === undefined) {
+      const splitFields = pickContiguousOneCharacterFields(fields, seed, valueLength);
+      if (splitFields.length === valueLength) {
+        return splitFields;
+      }
+      continue;
+    }
+
     const splitFields = fields
       .filter((field) => fieldIsInForm(field, seed.formOpid))
       .filter(isOneCharacterField)
