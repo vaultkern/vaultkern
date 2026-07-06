@@ -608,7 +608,7 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "new_password").qualifiedAs).toBe("ignored");
   });
 
-  it("suppresses account creation forms before marking generic passwords eligible", () => {
+  it("does not treat account creation forms as current-login candidates", () => {
     document.body.innerHTML = `
       <form id="signup">
         <h2>Create account</h2>
@@ -621,8 +621,7 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
-    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "password").reasons).toContain("non-login:account-creation");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
   });
 
   it("recognizes common create-account wording without suppressing registered-user logins", () => {
