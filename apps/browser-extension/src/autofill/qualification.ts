@@ -62,7 +62,8 @@ function formActionContext(value: string | undefined) {
   }
 
   try {
-    return new URL(value, "https://vaultkern.invalid").pathname;
+    const url = new URL(value, "https://vaultkern.invalid");
+    return `${url.hostname} ${url.pathname}`;
   } catch {
     return value.split(/[?#]/, 1)[0];
   }
@@ -78,7 +79,6 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
     field.placeholder,
     field.title,
     field.ariaLabel,
-    field.ariaDescribedBy,
     field.labelText,
     ...field.dataSetValues
   ]
@@ -203,7 +203,6 @@ function searchPartsForField(field: AutofillFieldSnapshot) {
     field.placeholder,
     field.title,
     field.ariaLabel,
-    field.ariaDescribedBy,
     field.labelText,
     ...field.dataSetValues
   ];
@@ -309,15 +308,17 @@ function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
   );
 }
 
-function hasLoginContext(fieldText: string, formText: string) {
-  return hasAnyKeyword(`${fieldText},${formText}`, ["login", "signin", "signon"]);
+function hasLoginContext(text: string) {
+  return hasAnyKeyword(text, ["login", "signin", "signon"]);
 }
 
 function isPasswordLike(field: AutofillFieldSnapshot) {
   const autocomplete = fieldAutocompleteTokens(field);
   return (
-    field.htmlType === "password" ||
+    field.tagName === "input" &&
+    (field.htmlType === "password" ||
     [...PASSWORD_AUTOCOMPLETE].some((token) => autocomplete.has(token))
+    )
   );
 }
 
@@ -366,7 +367,7 @@ function qualificationForFillableField(
     nonLogin &&
     !(
       nonLogin === "non-login:newsletter" &&
-      hasLoginContext(fieldText, formText) &&
+      hasLoginContext(`${fieldText},${formText}`) &&
       hasPasswordSibling(field, snapshot)
     )
   ) {
@@ -407,7 +408,7 @@ function qualificationForFillableField(
     if (
       needsLoginEvidence &&
       !hasPasswordSibling(field, snapshot) &&
-      !hasLoginContext(fieldText, formText)
+      !hasLoginContext(formText)
     ) {
       return { qualifiedAs: "ignored", eligible: false, reasons };
     }

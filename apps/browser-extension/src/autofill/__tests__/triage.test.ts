@@ -299,6 +299,7 @@ describe("autofill triage", () => {
       <form id="profile">
         <input name="user" type="text" />
         <input name="last_login" type="text" />
+        <input name="last_login_email" type="text" />
       </form>
       <form id="login">
         <input name="login" type="text" />
@@ -310,6 +311,7 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "user").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "last_login").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "last_login_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "login").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
@@ -324,12 +326,34 @@ describe("autofill triage", () => {
         <input name="button_email" type="email" />
         <button type="submit">Sign in</button>
       </form>
+      <form id="external-submit-context" action="/continue">
+        <input name="external_submit_email" type="email" />
+      </form>
+      <button type="submit" form="external-submit-context">Sign in</button>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "external-submit-context")).toMatchObject({
+      headingText: ["Sign in"]
+    });
+    expect(fieldByName(report, "implicit_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "button_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "external_submit_email").qualifiedAs).toBe("username");
+  });
+
+  it("uses login hostnames in form actions as passwordless login context", () => {
+    document.body.innerHTML = `
+      <form id="auth-host" action="https://login.example.com/">
+        <input name="host_email" type="email" />
+        <button type="submit">Continue</button>
+      </form>
     `;
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "implicit_email").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "button_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "host_email").qualifiedAs).toBe("username");
   });
 
   it("ignores auxiliary buttons when collecting submit text context", () => {
@@ -655,6 +679,41 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
+  it("does not apply non-login exclusions to unresolved describedby IDs", () => {
+    document.body.innerHTML = `
+      <form id="login">
+        <input name="email" type="email" autocomplete="username" />
+        <input
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          aria-describedby="forgot-password"
+        />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
+  it("ignores current-password autocomplete on non-input controls", () => {
+    document.body.innerHTML = `
+      <form id="profile">
+        <textarea name="notes" autocomplete="current-password"></textarea>
+        <select name="secret_select" autocomplete="current-password">
+          <option value="">Choose one</option>
+        </select>
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "notes").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "secret_select").qualifiedAs).toBe("ignored");
+  });
+
   it("uses aria-labelledby text as field label context", () => {
     document.body.innerHTML = `
       <form>
@@ -826,6 +885,28 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "shadow_password").reasons).toContain(
       "non-login:account-creation"
     );
+  });
+
+  it("walks assigned slots when checking field visibility", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <div style="display:none">
+        <slot name="login"></slot>
+      </div>
+    `;
+    const email = document.createElement("input");
+    email.name = "slotted_email";
+    email.type = "email";
+    email.autocomplete = "username";
+    email.slot = "login";
+    host.append(email);
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "slotted_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "slotted_email").reasons).toContain("not-viewable:css");
   });
 
   it("does not copy later sibling section headings into an earlier form context", () => {

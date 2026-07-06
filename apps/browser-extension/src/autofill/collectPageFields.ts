@@ -166,7 +166,7 @@ function getHeadingText(form: HTMLFormElement) {
 }
 
 function getSubmitText(form: HTMLFormElement) {
-  return Array.from(form.querySelectorAll("button, input")).flatMap((element) => {
+  return Array.from(form.elements).flatMap((element) => {
     if (!getFieldVisibility(element as HTMLElement).viewable) {
       return [];
     }

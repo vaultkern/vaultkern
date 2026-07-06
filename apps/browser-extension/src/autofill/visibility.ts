@@ -23,6 +23,10 @@ function numericCssValue(value: string | undefined) {
 }
 
 function parentElementOrShadowHost(element: HTMLElement) {
+  if (element.assignedSlot) {
+    return element.assignedSlot;
+  }
+
   if (element.parentElement) {
     return element.parentElement;
   }
