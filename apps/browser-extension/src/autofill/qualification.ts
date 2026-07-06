@@ -134,6 +134,7 @@ function joinedFormTextParts(
   if (!form) {
     return [];
   }
+  const headingText = form.headingText ?? [];
   return [
     form.htmlId,
     form.htmlName,
@@ -141,7 +142,7 @@ function joinedFormTextParts(
     options.includeAction ? formActionContext(form.htmlAction) : undefined,
     form.htmlMethod,
     form.ariaLabel,
-    ...form.headingText
+    ...headingText
   ];
 }
 
@@ -276,13 +277,14 @@ function searchPartsForForm(form: AutofillFormSnapshot | undefined) {
   if (!form) {
     return [];
   }
+  const headingText = form.headingText ?? [];
   return [
     form.htmlId,
     form.htmlName,
     form.htmlClass,
     formActionContext(form.htmlAction),
     form.htmlMethod,
-    ...form.headingText
+    ...headingText
   ];
 }
 
