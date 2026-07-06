@@ -8,6 +8,27 @@ import { getFieldFillability, getFieldVisibility } from "./visibility";
 
 const FIELD_SELECTOR = "input, select, textarea";
 
+function collectMatchingElements(root: ParentNode, selector: string) {
+  const elements: Element[] = [];
+
+  function visit(node: ParentNode) {
+    if (node.nodeType === 1 && (node as Element).matches(selector)) {
+      elements.push(node as Element);
+    }
+
+    for (const child of Array.from(node.children)) {
+      visit(child);
+      const shadowRoot = child.shadowRoot;
+      if (shadowRoot) {
+        visit(shadowRoot);
+      }
+    }
+  }
+
+  visit(root);
+  return elements;
+}
+
 function cleanText(value: string | null | undefined) {
   return (value ?? "").replace(/\p{C}+|\s+/gu, " ").trim();
 }
@@ -116,17 +137,18 @@ function getHeadingText(form: HTMLFormElement) {
 
 function collectForms(documentRef: Document) {
   const formByElement = new Map<HTMLFormElement, AutofillFormSnapshot>();
-  const forms = Array.from(documentRef.querySelectorAll("form")).map((form, index) => {
+  const forms = collectMatchingElements(documentRef, "form").map((form, index) => {
+    const formElement = form as HTMLFormElement;
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
-      htmlId: optionalString(form.id),
-      htmlName: optionalString(form.getAttribute("name")),
-      htmlClass: optionalString(form.getAttribute("class")),
-      htmlAction: getFormAction(form),
-      htmlMethod: optionalString(form.getAttribute("method")?.toLowerCase()),
-      headingText: getHeadingText(form)
+      htmlId: optionalString(formElement.id),
+      htmlName: optionalString(formElement.getAttribute("name")),
+      htmlClass: optionalString(formElement.getAttribute("class")),
+      htmlAction: getFormAction(formElement),
+      htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
+      headingText: getHeadingText(formElement)
     };
-    formByElement.set(form, snapshot);
+    formByElement.set(formElement, snapshot);
     return snapshot;
   });
 
@@ -192,7 +214,7 @@ function collectField(
 
 export function collectAutofillPageSnapshot(documentRef: Document = document): AutofillPageSnapshot {
   const { forms, formByElement } = collectForms(documentRef);
-  const fields = Array.from(documentRef.querySelectorAll(FIELD_SELECTOR))
+  const fields = collectMatchingElements(documentRef, FIELD_SELECTOR)
     .map((element, index) =>
       collectField(
         element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,

@@ -80,16 +80,31 @@ function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPage
   );
 }
 
-function isSearchField(field: AutofillFieldSnapshot, fieldText: string) {
-  return field.htmlType === "search" || /\b(search|query|find)\b/.test(fieldText);
+function hasAnyKeyword(text: string, keywords: string[]) {
+  return keywords.some((keyword) => text.includes(keyword));
+}
+
+function isSearchField(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
+  return field.htmlType === "search" || hasAnyKeyword(`${fieldText},${formText}`, ["search", "query", "find"]);
 }
 
 function excludedReason(fieldText: string, formText: string) {
+  const searchableText = `${fieldText},${formText}`;
   if (fieldText.includes("captcha")) {
     return "excluded:captcha";
   }
-  if (`${fieldText},${formText}`.includes("forgot")) {
+  if (searchableText.includes("forgot")) {
     return "excluded:forgot";
+  }
+  if (searchableText.includes("resetpassword")) {
+    return "excluded:reset";
+  }
+  if (
+    searchableText.includes("accountrecovery") ||
+    searchableText.includes("recoveraccount") ||
+    searchableText.includes("recovery")
+  ) {
+    return "excluded:recovery";
   }
   return null;
 }
@@ -122,9 +137,14 @@ function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
     fieldText.includes("email") ||
     fieldText.includes("phone") ||
     fieldText.includes("mobile") ||
-    fieldText.includes("tel") ||
+    field.htmlType === "tel" ||
+    fieldText.split(",").some((part) => part === "tel" || part.includes("telephone")) ||
     fieldText.includes("login")
   );
+}
+
+function hasLoginContext(fieldText: string, formText: string) {
+  return hasAnyKeyword(`${fieldText},${formText}`, ["login", "signin", "signon"]);
 }
 
 function isPasswordLike(field: AutofillFieldSnapshot) {
@@ -145,7 +165,7 @@ function qualificationForFillableField(
   const formText = joinedFormText(form);
   const autocomplete = fieldAutocompleteTokens(field);
 
-  if (isSearchField(field, fieldText)) {
+  if (isSearchField(field, fieldText, formText)) {
     reasons.push("excluded:search");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
@@ -180,6 +200,17 @@ function qualificationForFillableField(
   }
 
   if (isUsernameLike(field, fieldText)) {
+    const explicitAutocomplete = [...USERNAME_AUTOCOMPLETE].some((token) =>
+      autocomplete.has(token)
+    );
+    if (
+      field.htmlType === "email" &&
+      !explicitAutocomplete &&
+      !hasPasswordSibling(field, snapshot) &&
+      !hasLoginContext(fieldText, formText)
+    ) {
+      return { qualifiedAs: "ignored", eligible: false, reasons };
+    }
     if (autocomplete.has("username")) {
       reasons.push("autocomplete:username");
     } else if (autocomplete.has("email")) {

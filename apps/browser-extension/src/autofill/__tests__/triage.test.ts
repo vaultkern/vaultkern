@@ -155,6 +155,33 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "email").reasons).toContain("excluded:forgot");
   });
 
+  it("excludes search reset and recovery forms from login triage", () => {
+    document.body.innerHTML = `
+      <form id="site-search" action="/search">
+        <input name="email" type="email" />
+      </form>
+      <form id="reset" action="/reset-password">
+        <input name="reset_email" type="email" />
+        <input name="reset_password" type="password" />
+      </form>
+      <form id="recovery">
+        <h2>Account recovery</h2>
+        <input name="recovery_email" type="email" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "email").reasons).toContain("excluded:search");
+    expect(fieldByName(report, "reset_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "reset_email").reasons).toContain("excluded:reset");
+    expect(fieldByName(report, "reset_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "reset_password").reasons).toContain("excluded:reset");
+    expect(fieldByName(report, "recovery_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "recovery_email").reasons).toContain("excluded:recovery");
+  });
+
   it("keeps captcha form metadata from excluding real login fields", () => {
     document.body.innerHTML = `
       <form id="login" class="login g-recaptcha" action="/login-with-captcha">
@@ -218,6 +245,23 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("requires login evidence before treating a generic email field as username", () => {
+    document.body.innerHTML = `
+      <form id="contact">
+        <input name="email" type="email" />
+      </form>
+      <form id="login">
+        <input name="login_email" type="email" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "login_email").qualifiedAs).toBe("username");
+  });
+
   it("suppresses account creation forms before marking generic passwords eligible", () => {
     document.body.innerHTML = `
       <form id="signup">
@@ -233,6 +277,20 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
     expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "password").reasons).toContain("non-login:account-creation");
+  });
+
+  it("does not match tel inside unrelated words", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="hotel" type="text" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "hotel").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
   it("recognizes phone-number username fields with password siblings", () => {
@@ -320,6 +378,45 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "transparent_email").reasons).toContain("not-viewable:transparent");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats zero-sized fields and inert container fields as unavailable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="zero_email" type="email" autocomplete="username" style="width:0;height:0" />
+        <div inert>
+          <input name="inert_email" type="email" autocomplete="username" />
+        </div>
+        <input name="real_user" type="email" autocomplete="username" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "zero_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "zero_email").reasons).toContain("not-viewable:zero-size");
+    expect(fieldByName(report, "inert_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "inert_email").reasons).toContain("not-fillable:inert");
+    expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("collects fields from open shadow roots", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <form>
+        <input name="shadow_email" type="email" autocomplete="username" />
+        <input name="shadow_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "shadow_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("password");
   });
 
   it("does not copy later sibling section headings into an earlier form context", () => {

@@ -25,7 +25,9 @@ function numericCssValue(value: string | undefined) {
 export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult {
   const reasons: string[] = [];
   const inputType =
-    element instanceof HTMLInputElement ? element.type.toLowerCase() : undefined;
+    element.tagName.toLowerCase() === "input"
+      ? (element as HTMLInputElement).type.toLowerCase()
+      : undefined;
 
   if (inputType === "hidden") {
     addReason(reasons, "not-viewable:hidden");
@@ -47,6 +49,8 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const position = current.style.position || style?.position;
     const left = numericCssValue(current.style.left || style?.left);
     const top = numericCssValue(current.style.top || style?.top);
+    const width = numericCssValue(current.style.width || style?.width);
+    const height = numericCssValue(current.style.height || style?.height);
     if (
       inlineDisplay === "none" ||
       inlineVisibility === "hidden" ||
@@ -64,6 +68,9 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
         addReason(reasons, "not-viewable:offscreen");
       }
     }
+    if (current === element && width === 0 && height === 0) {
+      addReason(reasons, "not-viewable:zero-size");
+    }
   }
 
   return {
@@ -78,6 +85,17 @@ export function getFieldFillability(element: HTMLElement): FieldFillabilityResul
 
   if (field.disabled || element.matches(":disabled")) {
     reasons.push("not-fillable:disabled");
+  }
+
+  for (
+    let current: HTMLElement | null = element;
+    current;
+    current = current.parentElement
+  ) {
+    if (current.hasAttribute("inert")) {
+      reasons.push("not-fillable:inert");
+      break;
+    }
   }
 
   if ("readOnly" in field && field.readOnly) {
