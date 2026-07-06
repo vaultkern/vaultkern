@@ -291,6 +291,30 @@ describe("totp autofill detection", () => {
     ).toEqual(["1", "3", "5", "7", "9", "0"]);
   });
 
+  it("keeps same-form split TOTP fields out of adjacent code-shaped fields", () => {
+    document.body.innerHTML = `
+      <form aria-label="Two-factor verification">
+        <input id="account-code" name="account_code" maxlength="1" inputmode="numeric" />
+        <label for="digit-1">Authenticator code</label>
+        <input id="digit-1" name="digit_1" maxlength="1" inputmode="numeric" />
+        <input id="digit-2" name="digit_2" maxlength="1" inputmode="numeric" />
+        <input id="digit-3" name="digit_3" maxlength="1" inputmode="numeric" />
+        <input id="digit-4" name="digit_4" maxlength="1" inputmode="numeric" />
+        <input id="digit-5" name="digit_5" maxlength="1" inputmode="numeric" />
+        <input id="digit-6" name="digit_6" maxlength="1" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "135790" });
+
+    expect((document.querySelector("#account-code") as HTMLInputElement).value).toBe("");
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>('input[name^="digit_"]')].map(
+        (field) => field.value
+      )
+    ).toEqual(["1", "3", "5", "7", "9", "0"]);
+  });
+
   it("scopes form-less split TOTP fields to their contiguous group", () => {
     document.body.innerHTML = `
       <input id="unrelated-one-char" name="middle_initial" maxlength="1" />
