@@ -53,6 +53,13 @@ function isClosedDetailsContent(element: HTMLElement, current: HTMLElement) {
   return summary === undefined || !summary.contains(element);
 }
 
+function isUnslottedShadowHostChild(element: HTMLElement) {
+  return Boolean(
+    element.parentElement?.shadowRoot &&
+      !element.assignedSlot
+  );
+}
+
 export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult {
   const reasons: string[] = [];
   const inputType =
@@ -62,6 +69,9 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
 
   if (inputType === "hidden") {
     addReason(reasons, "not-viewable:hidden");
+  }
+  if (isUnslottedShadowHostChild(element)) {
+    addReason(reasons, "not-viewable:unslotted");
   }
 
   for (

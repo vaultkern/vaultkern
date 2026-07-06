@@ -83,6 +83,36 @@ function getElementByIdInRoot(root: ParentNode, id: string) {
   return root.querySelector<HTMLElement>(`[id="${cssEscape(id)}"]`);
 }
 
+function getReferencedElementText(element: Element, attributeName: string) {
+  const lookupRoot = lookupRootForElement(element);
+  return (element.getAttribute(attributeName) ?? "")
+    .split(/\s+/)
+    .map((id) => (id === "" ? "" : cleanText(getElementByIdInRoot(lookupRoot, id)?.textContent)))
+    .filter(Boolean)
+    .join(" ");
+}
+
+function controlText(
+  element: Element,
+  primaryText: string | null | undefined
+) {
+  return (
+    optionalString(primaryText) ??
+    optionalString(element.getAttribute("aria-label")) ??
+    optionalString(getReferencedElementText(element, "aria-labelledby")) ??
+    optionalString(element.getAttribute("title"))
+  );
+}
+
+function isLoginSubmitText(value: string) {
+  const normalized = value.toLowerCase().replace(/[\s_/-]+/g, "");
+  return (
+    normalized.includes("login") ||
+    normalized.includes("signin") ||
+    normalized.includes("signon")
+  );
+}
+
 function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
   const labels = new Set<Element>();
   const lookupRoot = lookupRootForElement(element);
@@ -166,7 +196,7 @@ function getHeadingText(form: HTMLFormElement) {
 }
 
 function getSubmitText(form: HTMLFormElement) {
-  return Array.from(form.elements).flatMap((element) => {
+  const submitText = Array.from(form.elements).flatMap((element) => {
     if (!getFieldVisibility(element as HTMLElement).viewable) {
       return [];
     }
@@ -176,7 +206,7 @@ function getSubmitText(form: HTMLFormElement) {
       if (type !== "submit") {
         return [];
       }
-      return [cleanText(element.textContent)];
+      return [controlText(element, element.textContent)];
     }
     if (tagName !== "input") {
       return [];
@@ -186,8 +216,10 @@ function getSubmitText(form: HTMLFormElement) {
     if (type !== "submit") {
       return [];
     }
-    return [cleanText(input.value || input.getAttribute("aria-label"))];
+    return [controlText(input, input.value)];
   }).filter(Boolean);
+  const loginSubmitText = submitText.filter(isLoginSubmitText);
+  return loginSubmitText.length > 0 ? loginSubmitText : submitText;
 }
 
 function collectForms(documentRef: Document) {

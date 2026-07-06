@@ -31,10 +31,14 @@ const NEW_PASSWORD_PARTS = [
   "verifypassword"
 ];
 const PASSWORD_MASKED_CODE_PARTS = [
+  "csc",
+  "cccsc",
   "cvc",
   "cvv",
+  "cardcsc",
   "cardcvc",
   "cardcvv",
+  "cardcode",
   "otp",
   "totp",
   "onetime",
@@ -67,7 +71,7 @@ function formActionContext(value: string | undefined) {
 
   try {
     const url = new URL(value, "https://vaultkern.invalid");
-    return `${url.hostname} ${url.pathname}`;
+    return `${url.hostname},${url.pathname}`;
   } catch {
     return value.split(/[?#]/, 1)[0];
   }
@@ -165,7 +169,12 @@ function isAvailablePasswordSibling(candidate: AutofillFieldSnapshot) {
 }
 
 function isNewPasswordField(candidate: AutofillFieldSnapshot) {
-  return candidate.htmlType === "password" && hasNewPasswordSignal(candidate);
+  return (
+    candidate.htmlType === "password" &&
+    candidate.viewable &&
+    candidate.fillable &&
+    hasNewPasswordSignal(candidate)
+  );
 }
 
 function hasScopedField(
@@ -302,6 +311,13 @@ function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
     field.htmlType === "email" ||
     fieldText.includes("username") ||
     fieldText.includes("userid") ||
+    fieldTextParts.some(
+      (part) =>
+        part === "identifier" ||
+        part === "account" ||
+        part === "accountid" ||
+        part === "accountname"
+    ) ||
     fieldTextParts.some((part) => part === "user") ||
     fieldText.includes("email") ||
     fieldText.includes("phone") ||
@@ -360,6 +376,11 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
+  if (field.htmlType !== "password" && hasPasswordMaskedCodeSignal(fieldText)) {
+    reasons.push("excluded:one-time-code");
+    return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
   const nonLogin = nonLoginReason(fieldText, formText);
   if (
     nonLogin &&
@@ -394,7 +415,15 @@ function qualificationForFillableField(
       fieldText.includes("mobile") ||
       fieldTextParts.some((part) => part === "tel" || part.includes("telephone"));
     const hasGenericIdentifierSignal = fieldTextParts.some(
-      (part) => part === "user" || part === "login" || part === "loginid" || part === "loginname"
+      (part) =>
+        part === "user" ||
+        part === "identifier" ||
+        part === "account" ||
+        part === "accountid" ||
+        part === "accountname" ||
+        part === "login" ||
+        part === "loginid" ||
+        part === "loginname"
     );
     const needsLoginEvidence =
       (hasEmailSignal || hasPhoneSignal || hasGenericIdentifierSignal) &&
