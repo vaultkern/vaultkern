@@ -36,6 +36,62 @@ function candidateFields(reportFields: AutofillTriageFieldResult[]) {
     .sort(byDocumentOrder);
 }
 
+function siteRuleFields(reportFields: AutofillTriageFieldResult[]) {
+  return reportFields
+    .filter((field) => field.viewable && field.fillable && field.siteRuleTypes.length > 0)
+    .sort(byDocumentOrder);
+}
+
+function actionForSiteRuleField(
+  field: AutofillTriageFieldResult,
+  payload: LoginFillPayload
+): AutofillFillAction | null {
+  for (const fieldType of field.siteRuleTypes) {
+    const value =
+      fieldType === "username"
+        ? payload.username
+        : fieldType === "password"
+          ? payload.password
+          : fieldType === "newPassword"
+            ? (payload.newPassword ?? payload.password)
+            : fieldType === "totp"
+              ? payload.totp
+              : undefined;
+
+    if (typeof value === "string") {
+      return {
+        fieldOpid: field.opid,
+        elementNumber: field.elementNumber,
+        fieldType,
+        value
+      };
+    }
+  }
+
+  return null;
+}
+
+function createSiteRuleActions(
+  reportFields: AutofillTriageFieldResult[],
+  payload: LoginFillPayload
+) {
+  const usedFields = new Set<string>();
+  const actions: AutofillFillAction[] = [];
+
+  for (const field of siteRuleFields(reportFields)) {
+    if (usedFields.has(field.opid)) {
+      continue;
+    }
+    const action = actionForSiteRuleField(field, payload);
+    if (action) {
+      usedFields.add(field.opid);
+      actions.push(action);
+    }
+  }
+
+  return actions;
+}
+
 function pickPasswordField(fields: AutofillTriageFieldResult[]) {
   const passwordFields = fields.filter((field) => field.qualifiedAs === "password");
   return (
@@ -683,6 +739,13 @@ export function createLoginFillPlan(
   payload: LoginFillPayload
 ): AutofillFillPlan {
   const report = triageAutofillPage(snapshot);
+  if (snapshot.siteRule?.disabled) {
+    return { actions: [] };
+  }
+  const siteRuleActions = createSiteRuleActions(report.fields, payload);
+  if (siteRuleActions.length > 0) {
+    return { actions: siteRuleActions };
+  }
   const fields = candidateFields(report.fields);
   const passwordChangeFormOpid =
     typeof payload.password === "string" && typeof payload.newPassword === "string"

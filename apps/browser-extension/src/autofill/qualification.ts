@@ -693,7 +693,11 @@ export function qualifyAutofillField(
   snapshot: AutofillPageSnapshot,
   form: AutofillFormSnapshot | undefined
 ): FieldQualification {
-  const reasons = [...field.viewableReasons, ...field.fillableReasons];
+  const reasons = [
+    ...field.viewableReasons,
+    ...field.fillableReasons,
+    ...field.siteRuleReasons
+  ];
 
   if (!field.viewable) {
     return {
