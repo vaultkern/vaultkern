@@ -215,14 +215,11 @@ function fieldHasSiblingUsername(
   field: AutofillTriageFieldResult,
   fields: AutofillTriageFieldResult[]
 ) {
-  if (!field.formOpid) {
-    return false;
-  }
   return fields.some(
     (candidate) =>
       candidate.qualifiedAs === "username" &&
       candidate.opid !== field.opid &&
-      candidate.formOpid === field.formOpid
+      fieldScopeMatches(candidate, field)
   );
 }
 
