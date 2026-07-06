@@ -65,6 +65,35 @@ describe("autofill site rules", () => {
     expect(matchAutofillSiteRule("https://example.com/account/login", rules)?.id).toBe("path");
   });
 
+  it("matches path prefixes only on route boundaries", () => {
+    const rules: AutofillSiteRule[] = [
+      {
+        id: "host",
+        host: "example.com",
+        fields: { username: ["#host-user"] }
+      },
+      {
+        id: "account",
+        host: "example.com",
+        pathPrefix: "/account",
+        fields: { username: ["#account-user"] }
+      },
+      {
+        id: "login",
+        host: "example.com",
+        pathPrefix: "/login",
+        fields: { username: ["#login-user"] }
+      }
+    ];
+
+    expect(matchAutofillSiteRule("https://example.com/account", rules)?.id).toBe("account");
+    expect(matchAutofillSiteRule("https://example.com/account/profile", rules)?.id).toBe(
+      "account"
+    );
+    expect(matchAutofillSiteRule("https://example.com/accounting", rules)?.id).toBe("host");
+    expect(matchAutofillSiteRule("https://example.com/login-help", rules)?.id).toBe("host");
+  });
+
   it("returns an empty fill plan for disabled site rules", () => {
     document.body.innerHTML = `
       <form>
@@ -568,6 +597,38 @@ describe("autofill site rules", () => {
     expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe("");
   });
 
+  it("treats readonly rule-selected usernames as consumed for fallback selection", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="decoy-user" name="email" type="email" autocomplete="username" />
+        <input id="opaque-user" name="account_token" type="text" readonly value="alice" />
+        <input id="rule-password" name="secret_text" type="text" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "readonly-username-rule",
+          host: window.location.hostname,
+          fields: {
+            username: ["#opaque-user"],
+            password: ["#rule-password"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#opaque-user") as HTMLInputElement).value).toBe("alice");
+    expect((document.querySelector("#rule-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("splits TOTP values across multi-field site rule matches", () => {
     document.body.innerHTML = `
       <form>
@@ -599,5 +660,53 @@ describe("autofill site rules", () => {
     expect(
       Array.from(document.querySelectorAll<HTMLInputElement>(".otp")).map((field) => field.value)
     ).toEqual(["1", "2", "3", "4", "5", "6"]);
+  });
+
+  it("splits one TOTP site-rule group before comparing all matched fields", () => {
+    document.body.innerHTML = `
+      <form id="primary-otp">
+        <input class="otp" name="primary_1" maxlength="1" inputmode="numeric" />
+        <input class="otp" name="primary_2" maxlength="1" inputmode="numeric" />
+        <input class="otp" name="primary_3" maxlength="1" inputmode="numeric" />
+        <input class="otp" name="primary_4" maxlength="1" inputmode="numeric" />
+        <input class="otp" name="primary_5" maxlength="1" inputmode="numeric" />
+        <input class="otp" name="primary_6" maxlength="1" inputmode="numeric" />
+      </form>
+      <form id="backup-otp">
+        <input class="otp" name="backup_1" maxlength="1" inputmode="numeric" />
+        <input class="otp" name="backup_2" maxlength="1" inputmode="numeric" />
+        <input class="otp" name="backup_3" maxlength="1" inputmode="numeric" />
+        <input class="otp" name="backup_4" maxlength="1" inputmode="numeric" />
+        <input class="otp" name="backup_5" maxlength="1" inputmode="numeric" />
+        <input class="otp" name="backup_6" maxlength="1" inputmode="numeric" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "split-totp-rule",
+          host: window.location.hostname,
+          fields: {
+            totp: [".otp"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      totp: "123456"
+    });
+    applyFillPlan(plan, document);
+
+    expect(
+      Array.from(document.querySelectorAll<HTMLInputElement>("#primary-otp .otp")).map(
+        (field) => field.value
+      )
+    ).toEqual(["1", "2", "3", "4", "5", "6"]);
+    expect(
+      Array.from(document.querySelectorAll<HTMLInputElement>("#backup-otp .otp")).map(
+        (field) => field.value
+      )
+    ).toEqual(["", "", "", "", "", ""]);
   });
 });

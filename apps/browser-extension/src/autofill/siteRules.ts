@@ -24,7 +24,25 @@ function normalizedHost(host: string) {
 }
 
 function pathPrefixLength(rule: AutofillSiteRule) {
-  return rule.pathPrefix?.length ?? 0;
+  return normalizedPathPrefix(rule.pathPrefix)?.length ?? 0;
+}
+
+function normalizedPathPrefix(pathPrefix: string | undefined) {
+  if (!pathPrefix) {
+    return undefined;
+  }
+
+  const withLeadingSlash = pathPrefix.startsWith("/") ? pathPrefix : `/${pathPrefix}`;
+  return withLeadingSlash.length > 1 ? withLeadingSlash.replace(/\/+$/g, "") : "/";
+}
+
+function pathPrefixMatches(pathname: string, pathPrefix: string | undefined) {
+  const normalizedPrefix = normalizedPathPrefix(pathPrefix);
+  if (!normalizedPrefix || normalizedPrefix === "/") {
+    return true;
+  }
+
+  return pathname === normalizedPrefix || pathname.startsWith(`${normalizedPrefix}/`);
 }
 
 export function matchAutofillSiteRule(
@@ -41,7 +59,7 @@ export function matchAutofillSiteRule(
   const host = normalizedHost(parsed.hostname);
   const matches = rules
     .filter((rule) => normalizedHost(rule.host) === host)
-    .filter((rule) => !rule.pathPrefix || parsed.pathname.startsWith(rule.pathPrefix))
+    .filter((rule) => pathPrefixMatches(parsed.pathname, rule.pathPrefix))
     .sort((left, right) => pathPrefixLength(right) - pathPrefixLength(left));
   const rule = matches[0];
   if (!rule) {

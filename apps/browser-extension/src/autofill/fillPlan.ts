@@ -42,11 +42,32 @@ function siteRuleFields(reportFields: AutofillTriageFieldResult[]) {
     .sort(byDocumentOrder);
 }
 
+function viewableSiteRuleFields(
+  reportFields: AutofillTriageFieldResult[],
+  fieldType: AutofillFieldQualification
+) {
+  return reportFields
+    .filter((field) => field.viewable && field.siteRuleTypes.includes(fieldType))
+    .sort(byDocumentOrder);
+}
+
+function firstViewableSiteRuleField(
+  reportFields: AutofillTriageFieldResult[],
+  fieldType: AutofillFieldQualification
+) {
+  return viewableSiteRuleFields(reportFields, fieldType)[0] ?? null;
+}
+
 function actionForSiteRuleField(
   field: AutofillTriageFieldResult,
-  payload: LoginFillPayload
+  payload: LoginFillPayload,
+  skippedFieldTypes: ReadonlySet<AutofillFieldQualification> = new Set()
 ): AutofillFillAction | null {
   for (const fieldType of field.siteRuleTypes) {
+    if (skippedFieldTypes.has(fieldType)) {
+      continue;
+    }
+
     const value =
       fieldType === "username"
         ? payload.username
@@ -79,16 +100,13 @@ function createSplitSiteRuleTotpActions(
     .filter((field) => field.siteRuleTypes.includes("totp"))
     .sort(byDocumentOrder);
   const trimmedValue = value.trim();
+  const splitFields = pickSplitTotpFields(fields, totpFields, trimmedValue.length);
 
-  if (
-    totpFields.length <= 1 ||
-    totpFields.length !== trimmedValue.length ||
-    !totpFields.every(isOneCharacterField)
-  ) {
+  if (splitFields.length <= 1) {
     return [];
   }
 
-  return totpFields.map((field, index) => ({
+  return splitFields.map((field, index) => ({
     fieldOpid: field.opid,
     elementNumber: field.elementNumber,
     fieldType: "totp" as const,
@@ -102,12 +120,17 @@ function createSiteRuleActions(
 ) {
   const fields = siteRuleFields(reportFields);
   const usedFields = new Set<string>();
+  const skippedFieldTypes = new Set<AutofillFieldQualification>();
   const actions: AutofillFillAction[] = [];
 
   if (typeof payload.totp === "string") {
+    const totpFields = fields.filter((field) => field.siteRuleTypes.includes("totp"));
     for (const action of createSplitSiteRuleTotpActions(fields, payload.totp)) {
       usedFields.add(action.fieldOpid);
       actions.push(action);
+    }
+    if (totpFields.length > 1) {
+      skippedFieldTypes.add("totp");
     }
   }
 
@@ -115,7 +138,7 @@ function createSiteRuleActions(
     if (usedFields.has(field.opid)) {
       continue;
     }
-    const action = actionForSiteRuleField(field, payload);
+    const action = actionForSiteRuleField(field, payload, skippedFieldTypes);
     if (action) {
       usedFields.add(field.opid);
       actions.push(action);
@@ -858,7 +881,7 @@ export function createLoginFillPlan(
   const siteRuleUsernameField = fieldForAction(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "username")
-  );
+  ) ?? firstViewableSiteRuleField(report.fields, "username");
   const passwordChangeFields =
     siteRulePasswordChangeField?.formOpid !== undefined
       ? fields.filter((field) => fieldIsInForm(field, siteRulePasswordChangeField.formOpid))
@@ -906,7 +929,7 @@ export function createLoginFillPlan(
         pickLoginPasswordField(fields)
       : null;
   const usernameField =
-    typeof payload.username === "string"
+    typeof payload.username === "string" && siteRuleUsernameField === null
       ? pickUsernameField(fields, passwordField) ??
         (typeof payload.password === "string"
           ? pickSingleStepEmailUsernameField(report.fields, passwordField)
