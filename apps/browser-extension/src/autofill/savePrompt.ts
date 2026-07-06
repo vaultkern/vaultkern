@@ -28,13 +28,15 @@ function isWritableElement(
 
 function fieldValue(
   elements: Element[],
-  field: AutofillTriageFieldResult | null | undefined
+  field: AutofillTriageFieldResult | null | undefined,
+  options: { trim?: boolean } = {}
 ) {
   if (!field) {
     return "";
   }
   const element = elements[field.elementNumber];
-  return isWritableElement(element) ? element.value.trim() : "";
+  const value = isWritableElement(element) ? element.value : "";
+  return options.trim === false ? value : value.trim();
 }
 
 function pickUsernameField(
@@ -75,6 +77,16 @@ function pickPasswordChangeFields(fields: AutofillTriageFieldResult[]) {
   return { currentPasswordField, newPasswordField };
 }
 
+function pickRegistrationPasswordField(fields: AutofillTriageFieldResult[]) {
+  const newPasswordField = fields.find((field) => field.qualifiedAs === "newPassword");
+  if (!newPasswordField) {
+    return null;
+  }
+  const formFields = fields.filter((field) => field.formOpid === newPasswordField.formOpid);
+  const hasCurrentPasswordField = formFields.some((field) => field.qualifiedAs === "password");
+  return hasCurrentPasswordField ? null : newPasswordField;
+}
+
 export function collectAutofillSubmission(
   documentRef: Document = document,
   submittedForm?: HTMLFormElement
@@ -99,8 +111,12 @@ export function collectAutofillSubmission(
 
   const passwordChangeFields = pickPasswordChangeFields(fields);
   if (passwordChangeFields) {
-    const password = fieldValue(elements, passwordChangeFields.currentPasswordField);
-    const newPassword = fieldValue(elements, passwordChangeFields.newPasswordField);
+    const password = fieldValue(elements, passwordChangeFields.currentPasswordField, {
+      trim: false
+    });
+    const newPassword = fieldValue(elements, passwordChangeFields.newPasswordField, {
+      trim: false
+    });
     if (password !== "" && newPassword !== "") {
       const username = fieldValue(
         elements,
@@ -116,6 +132,24 @@ export function collectAutofillSubmission(
     }
   }
 
+  const registrationPasswordField = pickRegistrationPasswordField(fields);
+  if (registrationPasswordField) {
+    const password = fieldValue(elements, registrationPasswordField, { trim: false });
+    const username = fieldValue(
+      elements,
+      pickUsernameField(fields, registrationPasswordField)
+    );
+
+    if (password !== "") {
+      return {
+        url,
+        username,
+        password,
+        submittedAt
+      };
+    }
+  }
+
   const passwordField =
     fields.find(
       (field) =>
@@ -124,7 +158,7 @@ export function collectAutofillSubmission(
     ) ??
     fields.find((field) => field.qualifiedAs === "password") ??
     null;
-  const password = fieldValue(elements, passwordField);
+  const password = fieldValue(elements, passwordField, { trim: false });
   const username = fieldValue(elements, pickUsernameField(fields, passwordField));
 
   if (password === "") {

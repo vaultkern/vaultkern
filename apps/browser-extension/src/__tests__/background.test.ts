@@ -256,6 +256,82 @@ describe("background bridge", () => {
     ).resolves.toEqual({ pending: null });
   });
 
+  it("persists a pending autofill submission across background reloads", async () => {
+    const storedItems: Record<string, unknown> = {};
+
+    function installChrome(listeners: RuntimeMessageListener[]) {
+      (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+        runtime: {
+          onMessage: {
+            addListener: vi.fn((listener: RuntimeMessageListener) => {
+              listeners.push(listener);
+            })
+          }
+        },
+        storage: {
+          local: {
+            get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+              callback?.({ ...storedItems });
+              return Promise.resolve({ ...storedItems });
+            },
+            set(items: Record<string, unknown>, callback?: () => void) {
+              Object.assign(storedItems, items);
+              callback?.();
+              return Promise.resolve();
+            },
+            remove(keys: unknown, callback?: () => void) {
+              for (const key of Array.isArray(keys) ? keys : [keys]) {
+                if (typeof key === "string") {
+                  delete storedItems[key];
+                }
+              }
+              callback?.();
+              return Promise.resolve();
+            }
+          }
+        }
+      };
+    }
+
+    const firstListeners: RuntimeMessageListener[] = [];
+    installChrome(firstListeners);
+    await import("../background");
+
+    await expect(
+      sendRuntimeMessage(firstListeners, {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/login",
+        username: "alice",
+        password: "secret",
+        submittedAt: 1710000000000
+      }).response()
+    ).resolves.toEqual({ ok: true });
+    expect(storedItems.vaultkernPendingAutofillSubmission).toEqual({
+      url: "https://example.com/login",
+      username: "alice",
+      password: "secret",
+      submittedAt: 1710000000000
+    });
+
+    vi.resetModules();
+    const secondListeners: RuntimeMessageListener[] = [];
+    installChrome(secondListeners);
+    await import("../background");
+
+    await expect(
+      sendRuntimeMessage(secondListeners, {
+        type: "vaultkern_autofill_pending_request"
+      }).response()
+    ).resolves.toEqual({
+      pending: {
+        url: "https://example.com/login",
+        username: "alice",
+        password: "secret",
+        submittedAt: 1710000000000
+      }
+    });
+  });
+
   it("keeps the native session alive after an unlocked session response", async () => {
     vi.useFakeTimers();
     const port = createPort();

@@ -1356,6 +1356,79 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("saves a pending login as new when the submitted username does not match candidates", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const runtimeSendMessage = vi.fn(async (message: unknown) => {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as { type?: unknown }).type === "vaultkern_autofill_pending_request"
+      ) {
+        return {
+          pending: {
+            url: "https://example.com/login",
+            username: "bob",
+            password: "captured-secret",
+            submittedAt: 1710000000000
+          }
+        };
+      }
+      return { ok: true };
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: runtimeSendMessage
+      },
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Alice",
+        username: "alice",
+        url: "https://example.com/login"
+      }
+    ]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    const saveButton = await screen.findByRole("button", {
+      name: "Save Login"
+    });
+    fireEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.createEntry).toHaveBeenCalledWith("vault-1", {
+        parentGroupId: "group-root",
+        title: "example.com",
+        username: "bob",
+        password: "captured-secret",
+        url: "https://example.com/login",
+        notes: "",
+        totpUri: null,
+        customFields: []
+      });
+      expect(runtimeClientMocks.updateEntryFields).not.toHaveBeenCalled();
+    });
+  });
+
   it("matches pending password updates by the submitted url instead of the active tab", async () => {
     const query = vi.fn(async () => [
       {
@@ -3497,6 +3570,75 @@ describe("content script fill message", () => {
       url: expect.any(String),
       username: "alice@example.com",
       password: "captured-secret",
+      submittedAt: expect.any(Number)
+    });
+  });
+
+  it("preserves password whitespace when reporting a submitted login form", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const addListener = vi.fn();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" value=" alice@example.com " />
+        <input name="password" type="password" autocomplete="current-password" value=" captured secret " />
+      </form>
+    `;
+
+    await import("../contentScript");
+    document.querySelector("form")?.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true })
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "vaultkern_autofill_submission",
+      url: expect.any(String),
+      username: "alice@example.com",
+      password: " captured secret ",
+      submittedAt: expect.any(Number)
+    });
+  });
+
+  it("reports a submitted registration form as a save candidate", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const addListener = vi.fn();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" value="new@example.com" />
+        <input name="new_password" type="password" autocomplete="new-password" value="generated-secret" />
+        <input name="confirm_password" type="password" autocomplete="new-password" value="generated-secret" />
+      </form>
+    `;
+
+    await import("../contentScript");
+    document.querySelector("form")?.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true })
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "vaultkern_autofill_submission",
+      url: expect.any(String),
+      username: "new@example.com",
+      password: "generated-secret",
       submittedAt: expect.any(Number)
     });
   });

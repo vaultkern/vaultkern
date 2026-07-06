@@ -283,6 +283,14 @@ export function PopupApp({
     }
   }
 
+  function entryMatchesPendingUsername(
+    entry: EntrySummary,
+    submission: PendingAutofillSubmission
+  ) {
+    const submittedUsername = submission.username.trim();
+    return submittedUsername !== "" && entry.username === submittedUsername;
+  }
+
   function canQuickUnlockVault(vault: VaultReference | null) {
     return Boolean(
       session?.supportsBiometricUnlock &&
@@ -705,12 +713,12 @@ export function PopupApp({
           return;
         }
 
-        const matchingEntry =
-          pendingCandidates.find(
-            (entry) => entry.username === pendingAutofillSubmission.username
-          ) ??
-          pendingCandidates[0] ??
-          null;
+        const hasSubmittedUsername = pendingAutofillSubmission.username.trim() !== "";
+        const matchingEntry = hasSubmittedUsername
+          ? pendingCandidates.find((entry) =>
+              entryMatchesPendingUsername(entry, pendingAutofillSubmission)
+            ) ?? null
+          : pendingCandidates[0] ?? null;
 
         if (!matchingEntry) {
           setAutofillSavePrompt({
