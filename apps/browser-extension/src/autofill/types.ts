@@ -41,6 +41,7 @@ export interface AutofillFieldSnapshot {
   selectOptions?: string[];
   readonly: boolean;
   disabled: boolean;
+  focused: boolean;
   viewable: boolean;
   viewableReasons: string[];
   fillable: boolean;

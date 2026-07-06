@@ -94,6 +94,66 @@ function pickSingleStepEmailUsernameField(
   return fallbackFields.length === 1 ? fallbackFields[0] : null;
 }
 
+function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | undefined) {
+  return field.formOpid === formOpid;
+}
+
+function pickRegistrationFormOpid(fields: AutofillTriageFieldResult[]) {
+  const newPasswordFields = fields.filter((field) => field.qualifiedAs === "newPassword");
+  if (!newPasswordFields.length) {
+    return null;
+  }
+
+  const focusedField = fields.find((field) => field.focused);
+  if (
+    focusedField &&
+    newPasswordFields.some((field) => fieldIsInForm(field, focusedField.formOpid))
+  ) {
+    return focusedField.formOpid;
+  }
+
+  const loginPasswordFields = fields.filter((field) => field.qualifiedAs === "password");
+  if (!loginPasswordFields.length) {
+    return newPasswordFields[0].formOpid;
+  }
+
+  return null;
+}
+
+function createRegistrationActions(
+  fields: AutofillTriageFieldResult[],
+  formOpid: string | undefined,
+  payload: LoginFillPayload
+): AutofillFillAction[] {
+  const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
+  const actions: AutofillFillAction[] = [];
+
+  if (typeof payload.username === "string") {
+    const usernameField = formFields.find((field) => field.qualifiedAs === "username");
+    if (usernameField) {
+      actions.push({
+        fieldOpid: usernameField.opid,
+        elementNumber: usernameField.elementNumber,
+        fieldType: usernameField.qualifiedAs,
+        value: payload.username
+      });
+    }
+  }
+
+  if (typeof payload.password === "string") {
+    for (const passwordField of formFields.filter((field) => field.qualifiedAs === "newPassword")) {
+      actions.push({
+        fieldOpid: passwordField.opid,
+        elementNumber: passwordField.elementNumber,
+        fieldType: passwordField.qualifiedAs,
+        value: payload.password
+      });
+    }
+  }
+
+  return actions;
+}
+
 function pickTotpFields(fields: AutofillTriageFieldResult[]) {
   return fields
     .filter((field) => field.qualifiedAs === "totp" && field.viewable && field.fillable)
@@ -298,6 +358,18 @@ export function createLoginFillPlan(
 ): AutofillFillPlan {
   const report = triageAutofillPage(snapshot);
   const fields = candidateFields(report.fields);
+  const registrationFormOpid =
+    typeof payload.password === "string" ? pickRegistrationFormOpid(fields) : null;
+  const actions: AutofillFillAction[] = [];
+
+  if (registrationFormOpid !== null) {
+    actions.push(...createRegistrationActions(fields, registrationFormOpid, payload));
+    if (typeof payload.totp === "string") {
+      actions.push(...createTotpActions(fields, payload.totp));
+    }
+    return { actions };
+  }
+
   const passwordField = typeof payload.password === "string" ? pickPasswordField(fields) : null;
   const usernameField =
     typeof payload.username === "string"
@@ -306,7 +378,6 @@ export function createLoginFillPlan(
           ? pickSingleStepEmailUsernameField(report.fields, passwordField)
           : null)
       : null;
-  const actions: AutofillFillAction[] = [];
 
   if (usernameField && typeof payload.username === "string") {
     actions.push({

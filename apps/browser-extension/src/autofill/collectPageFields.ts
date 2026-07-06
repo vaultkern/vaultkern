@@ -390,6 +390,7 @@ function collectField(
     selectOptions: getSelectOptions(element),
     readonly: "readOnly" in element ? element.readOnly : false,
     disabled: element.disabled,
+    focused: element.ownerDocument.activeElement === element,
     viewable: visibility.viewable,
     viewableReasons: visibility.reasons,
     fillable: fillability.fillable,
