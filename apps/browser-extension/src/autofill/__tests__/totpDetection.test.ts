@@ -28,6 +28,45 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#otp-code") as HTMLInputElement).value).toBe("123456");
   });
 
+  it("does not fill SMS or email one-time-code prompts with authenticator TOTP", () => {
+    document.body.innerHTML = `
+      <form aria-label="SMS verification">
+        <label for="sms-code">Enter the SMS code sent to your phone</label>
+        <input id="sms-code" name="sms_code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#sms-code") as HTMLInputElement).value).toBe("");
+
+    document.body.innerHTML = `
+      <form aria-label="Email verification">
+        <label for="email-code">Enter the email code we sent you</label>
+        <input id="email-code" name="email_code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#email-code") as HTMLInputElement).value).toBe("");
+  });
+
+  it("recognizes authenticator-app code prompts as TOTP", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="authenticator-app-code">Code from your authenticator app</label>
+        <input id="authenticator-app-code" name="code" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#authenticator-app-code") as HTMLInputElement).value).toBe(
+      "123456"
+    );
+  });
+
   it("splits a TOTP value across one-character fields in document order", () => {
     document.body.innerHTML = `
       <form aria-label="Two-factor verification">

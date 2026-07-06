@@ -64,6 +64,19 @@ const TOTP_KEYWORDS = [
   "onetimecode",
   "onetimepassword",
   "authenticationcode",
+  "authenticator",
+  "authenticatorapp",
+  "authenticatorcode",
+  "twofactor",
+  "twostep"
+];
+const AUTHENTICATOR_TOTP_KEYWORDS = [
+  "totp",
+  "2fa",
+  "mfa",
+  "authenticationcode",
+  "authenticator",
+  "authenticatorapp",
   "authenticatorcode",
   "twofactor",
   "twostep"
@@ -377,6 +390,42 @@ function hasTotpKeyword(text: string) {
   return TOTP_KEYWORDS.some((keyword) => text.includes(keyword));
 }
 
+function hasAuthenticatorTotpKeyword(text: string) {
+  return AUTHENTICATOR_TOTP_KEYWORDS.some((keyword) => text.includes(keyword));
+}
+
+function outOfBandCodeReason(
+  fieldText: string,
+  formText: string,
+  autocomplete: Set<string>
+) {
+  const searchableText = `${fieldText},${formText}`;
+  if (hasAuthenticatorTotpKeyword(searchableText)) {
+    return null;
+  }
+
+  const hasCodeContext =
+    autocomplete.has("one-time-code") ||
+    searchableText.includes("code") ||
+    searchableText.includes("verification") ||
+    searchableText.includes("onetime");
+  if (!hasCodeContext) {
+    return null;
+  }
+
+  if (
+    searchableText.includes("sms") ||
+    searchableText.includes("textmessage") ||
+    searchableText.includes("emailcode") ||
+    searchableText.includes("emailverification") ||
+    searchableText.includes("senttoyouremail")
+  ) {
+    return "excluded:out-of-band-code";
+  }
+
+  return null;
+}
+
 function isTotpInputControl(field: AutofillFieldSnapshot) {
   return field.tagName === "input" && TOTP_INPUT_TYPES.has(field.htmlType ?? "text");
 }
@@ -505,6 +554,12 @@ function qualificationForFillableField(
     )
   ) {
     reasons.push(nonLogin);
+    return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  const outOfBandCode = outOfBandCodeReason(fieldText, formText, autocomplete);
+  if (outOfBandCode) {
+    reasons.push(outOfBandCode);
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
