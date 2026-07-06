@@ -529,6 +529,11 @@ function qualificationForFillableField(
   const formText = joinedFormText(form);
   const formPromptText = joinedFormPromptText(form);
   const autocomplete = fieldAutocompleteTokens(field);
+  const siteRuleType = field.siteRuleTypes.find((fieldType) => fieldType !== "ignored");
+
+  if (siteRuleType) {
+    return { qualifiedAs: siteRuleType, eligible: true, reasons };
+  }
 
   if (isSearchField(field, form)) {
     reasons.push("excluded:search");

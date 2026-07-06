@@ -4,6 +4,7 @@ import { applyFillPlan } from "../applyFillPlan";
 import { collectAutofillPageSnapshot } from "../collectPageFields";
 import { createLoginFillPlan } from "../fillPlan";
 import { matchAutofillSiteRule } from "../siteRules";
+import { triageAutofillPage } from "../triage";
 import type { AutofillSiteRule } from "../siteRules";
 
 describe("autofill site rules", () => {
@@ -145,5 +146,165 @@ describe("autofill site rules", () => {
     expect((document.querySelector("#decoy-user") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#rule-user") as HTMLInputElement).value).toBe("alice");
     expect((document.querySelector("#password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("keeps fallback confirmation fills when a rule selects one new password field", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="current-password" name="current_password" type="password" autocomplete="current-password" />
+        <input id="new-password" name="new_password" type="password" autocomplete="new-password" />
+        <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "partial-change-rule",
+          host: window.location.hostname,
+          fields: {
+            newPassword: ["#new-password"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      password: "old-secret",
+      newPassword: "new-secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#current-password") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+    expect((document.querySelector("#confirm-password") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+  });
+
+  it("qualifies rule-selected fields for submission capture", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="rule-password" name="secret_text" type="text" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "text-password-rule",
+          host: window.location.hostname,
+          fields: {
+            password: ["#rule-password"]
+          }
+        }
+      ]
+    });
+
+    const report = triageAutofillPage(snapshot);
+    const passwordField = report.fields.find((field) => field.htmlId === "rule-password");
+
+    expect(passwordField?.eligible).toBe(true);
+    expect(passwordField?.qualifiedAs).toBe("password");
+  });
+
+  it("scopes fallback username selection to a rule-selected password field", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form">
+        <input id="decoy-user" name="email" type="email" autocomplete="username" />
+        <input id="decoy-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="target-form">
+        <input id="target-user" name="account" type="email" autocomplete="username" />
+        <input id="target-password" name="secret" type="password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "password-only-rule",
+          host: window.location.hostname,
+          fields: {
+            password: ["#target-password"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("alice");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("does not fill current passwords into new-password rule fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="current-password" name="current_password" type="password" autocomplete="current-password" />
+        <input id="new-password" name="new_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "new-password-rule",
+          host: window.location.hostname,
+          fields: {
+            newPassword: ["#new-password"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      password: "old-secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#current-password") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("splits TOTP values across multi-field site rule matches", () => {
+    document.body.innerHTML = `
+      <form>
+        <input class="otp" maxlength="1" inputmode="numeric" />
+        <input class="otp" maxlength="1" inputmode="numeric" />
+        <input class="otp" maxlength="1" inputmode="numeric" />
+        <input class="otp" maxlength="1" inputmode="numeric" />
+        <input class="otp" maxlength="1" inputmode="numeric" />
+        <input class="otp" maxlength="1" inputmode="numeric" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "split-totp-rule",
+          host: window.location.hostname,
+          fields: {
+            totp: [".otp"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      totp: "123456"
+    });
+    applyFillPlan(plan, document);
+
+    expect(
+      Array.from(document.querySelectorAll<HTMLInputElement>(".otp")).map((field) => field.value)
+    ).toEqual(["1", "2", "3", "4", "5", "6"]);
   });
 });

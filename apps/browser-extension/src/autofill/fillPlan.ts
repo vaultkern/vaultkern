@@ -53,7 +53,7 @@ function actionForSiteRuleField(
         : fieldType === "password"
           ? payload.password
           : fieldType === "newPassword"
-            ? (payload.newPassword ?? payload.password)
+            ? payload.newPassword
             : fieldType === "totp"
               ? payload.totp
               : undefined;
@@ -71,14 +71,47 @@ function actionForSiteRuleField(
   return null;
 }
 
+function createSplitSiteRuleTotpActions(
+  fields: AutofillTriageFieldResult[],
+  value: string
+) {
+  const totpFields = fields
+    .filter((field) => field.siteRuleTypes.includes("totp"))
+    .sort(byDocumentOrder);
+  const trimmedValue = value.trim();
+
+  if (
+    totpFields.length <= 1 ||
+    totpFields.length !== trimmedValue.length ||
+    !totpFields.every(isOneCharacterField)
+  ) {
+    return [];
+  }
+
+  return totpFields.map((field, index) => ({
+    fieldOpid: field.opid,
+    elementNumber: field.elementNumber,
+    fieldType: "totp" as const,
+    value: trimmedValue[index] ?? ""
+  }));
+}
+
 function createSiteRuleActions(
   reportFields: AutofillTriageFieldResult[],
   payload: LoginFillPayload
 ) {
+  const fields = siteRuleFields(reportFields);
   const usedFields = new Set<string>();
   const actions: AutofillFillAction[] = [];
 
-  for (const field of siteRuleFields(reportFields)) {
+  if (typeof payload.totp === "string") {
+    for (const action of createSplitSiteRuleTotpActions(fields, payload.totp)) {
+      usedFields.add(action.fieldOpid);
+      actions.push(action);
+    }
+  }
+
+  for (const field of fields) {
     if (usedFields.has(field.opid)) {
       continue;
     }
@@ -100,7 +133,11 @@ function appendFallbackActions(
   const primaryFieldTypes = new Set(primaryActions.map((action) => action.fieldType));
 
   for (const action of fallbackActions) {
-    if (usedFieldOpids.has(action.fieldOpid) || primaryFieldTypes.has(action.fieldType)) {
+    const repeatedFieldType = action.fieldType === "newPassword";
+    if (
+      usedFieldOpids.has(action.fieldOpid) ||
+      (!repeatedFieldType && primaryFieldTypes.has(action.fieldType))
+    ) {
       continue;
     }
     usedFieldOpids.add(action.fieldOpid);
@@ -189,6 +226,16 @@ function pickLoginPasswordField(fields: AutofillTriageFieldResult[]) {
   }
 
   return passwordField;
+}
+
+function fieldForAction(
+  fields: AutofillTriageFieldResult[],
+  action: AutofillFillAction | undefined
+) {
+  if (!action) {
+    return null;
+  }
+  return fields.find((field) => field.opid === action.fieldOpid) ?? null;
 }
 
 function pickUsernameField(
@@ -767,6 +814,10 @@ export function createLoginFillPlan(
   const registrationFormOpid =
     typeof payload.password === "string" ? pickRegistrationFormOpid(fields, report.fields) : null;
   const actions: AutofillFillAction[] = [...siteRuleActions];
+  const siteRulePasswordField = fieldForAction(
+    report.fields,
+    siteRuleActions.find((action) => action.fieldType === "password")
+  );
 
   if (passwordChangeFormOpid !== null) {
     appendFallbackActions(
@@ -791,7 +842,9 @@ export function createLoginFillPlan(
   }
 
   const passwordField =
-    typeof payload.password === "string" ? pickLoginPasswordField(fields) : null;
+    typeof payload.password === "string"
+      ? siteRulePasswordField ?? pickLoginPasswordField(fields)
+      : null;
   const usernameField =
     typeof payload.username === "string"
       ? pickUsernameField(fields, passwordField) ??
