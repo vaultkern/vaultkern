@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VaultKern Username First Smoke</title>
+  </head>
+  <body>
+    <form id="vaultkern-username-first-form">
+      <label for="vaultkern-username-first-email">Email</label>
+      <input
+        id="vaultkern-username-first-email"
+        name="email"
+        type="email"
+        autocomplete="username"
+      />
+      <button id="vaultkern-username-first-next" type="submit">Next</button>
+      <output id="vaultkern-username-first-result"></output>
+    </form>
+    <script>
+      document
+        .querySelector("#vaultkern-username-first-form")
+        .addEventListener("submit", (event) => {
+          event.preventDefault();
+          document.querySelector("#vaultkern-username-first-result").value =
+            `submitted:${document.querySelector("#vaultkern-username-first-email").value}`;
+        });
+    </script>
+  </body>
+</html>

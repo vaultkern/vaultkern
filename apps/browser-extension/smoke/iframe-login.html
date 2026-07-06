@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VaultKern Iframe Login Smoke</title>
+  </head>
+  <body>
+    <form id="vaultkern-iframe-form">
+      <label for="vaultkern-iframe-email">Email</label>
+      <input
+        id="vaultkern-iframe-email"
+        name="email"
+        type="email"
+        autocomplete="username"
+      />
+      <label for="vaultkern-iframe-password">Password</label>
+      <input
+        id="vaultkern-iframe-password"
+        name="password"
+        type="password"
+        autocomplete="current-password"
+      />
+      <button id="vaultkern-iframe-submit" type="submit">Sign in</button>
+      <output id="vaultkern-iframe-result"></output>
+    </form>
+    <iframe
+      id="vaultkern-same-origin-frame-placeholder"
+      name="vaultkern-same-origin-frame-placeholder"
+      title="same origin login placeholder"
+      srcdoc="<form><input id='same-origin-email' autocomplete='username'><input id='same-origin-password' type='password'></form>"
+    ></iframe>
+    <iframe
+      id="vaultkern-cross-origin-frame-marker"
+      title="untrusted login marker"
+      data-vaultkern-untrusted="true"
+      sandbox
+      src="https://example.invalid/login"
+    ></iframe>
+    <script>
+      document.querySelector("#vaultkern-iframe-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const username = document.querySelector("#vaultkern-iframe-email").value;
+        const password = document.querySelector("#vaultkern-iframe-password").value;
+        document.querySelector("#vaultkern-iframe-result").value =
+          `submitted:${username}:${password.length}`;
+      });
+    </script>
+  </body>
+</html>

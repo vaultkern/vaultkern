@@ -35,6 +35,16 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+function loadSmokeFixture(name: string) {
+  const smokePage = readFileSync(`smoke/${name}`, "utf8");
+  const parsed = new DOMParser().parseFromString(smokePage, "text/html");
+  document.body.innerHTML = parsed.body.innerHTML;
+}
+
+function inputValue(selector: string) {
+  return (document.querySelector(selector) as HTMLInputElement | null)?.value;
+}
+
 vi.mock("@vaultkern/runtime-web-client", () => ({
   RuntimeClient: vi.fn(() => runtimeClientMocks)
 }));
@@ -204,9 +214,7 @@ describe("fillLoginForm", () => {
   });
 
   it("fills the checked-in browser smoke login page", () => {
-    const smokePage = readFileSync("smoke/basic-login.html", "utf8");
-    const parsed = new DOMParser().parseFromString(smokePage, "text/html");
-    document.body.innerHTML = parsed.body.innerHTML;
+    loadSmokeFixture("basic-login.html");
 
     fillLoginForm({
       username: "alice@example.com",
@@ -219,6 +227,129 @@ describe("fillLoginForm", () => {
     expect(
       (document.querySelector("#vaultkern-smoke-password") as HTMLInputElement).value
     ).toBe("secret-123");
+  });
+
+  it("fills_the_username_first_smoke_fixture", () => {
+    loadSmokeFixture("username-first.html");
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123"
+    });
+
+    expect(inputValue("#vaultkern-username-first-email")).toBe("alice@example.com");
+  });
+
+  it("fills_the_password_step_smoke_fixture", () => {
+    loadSmokeFixture("password-step.html");
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123"
+    });
+
+    expect(inputValue("#vaultkern-password-step-password")).toBe("secret-123");
+  });
+
+  it("ignores_noisy_hidden_readonly_disabled_and_search_fields", () => {
+    loadSmokeFixture("noisy-login.html");
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123"
+    });
+
+    expect(inputValue("#vaultkern-noisy-email")).toBe("alice@example.com");
+    expect(inputValue("#vaultkern-noisy-password")).toBe("secret-123");
+    expect(inputValue("#vaultkern-noisy-hidden-email")).toBe("hidden@example.com");
+    expect(inputValue("#vaultkern-noisy-disabled-email")).toBe("disabled@example.com");
+    expect(inputValue("#vaultkern-noisy-readonly-email")).toBe("readonly@example.com");
+    expect(inputValue("#vaultkern-noisy-search")).toBe("find me");
+    expect(inputValue("#vaultkern-noisy-zero-email")).toBe("zero@example.com");
+    expect(inputValue("#vaultkern-noisy-offscreen-password")).toBe("offscreen-secret");
+  });
+
+  it("does_not_misfill_totp_only_smoke_fixture", () => {
+    loadSmokeFixture("totp-step.html");
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123"
+    });
+
+    expect(inputValue("#vaultkern-totp-code")).toBe("");
+  });
+
+  it("detects_password_change_fixture_without_overwriting_old_password", () => {
+    loadSmokeFixture("password-change.html");
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123"
+    });
+
+    expect(inputValue("#vaultkern-old-password")).toBe("");
+    expect(inputValue("#vaultkern-new-password")).toBe("");
+    expect(inputValue("#vaultkern-repeat-password")).toBe("");
+  });
+
+  it("rejects_untrusted_iframe_fixture_without_filling_cross_origin_frame", () => {
+    loadSmokeFixture("iframe-login.html");
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123"
+    });
+
+    expect(inputValue("#vaultkern-iframe-email")).toBe("alice@example.com");
+    expect(inputValue("#vaultkern-iframe-password")).toBe("secret-123");
+    expect(
+      document
+        .querySelector("#vaultkern-cross-origin-frame-marker")
+        ?.getAttribute("data-vaultkern-untrusted")
+    ).toBe("true");
+  });
+
+  it("field selection ignores collapsed zero sized and offscreen inputs", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="collapsed-email" type="email" autocomplete="username" style="visibility: collapse" value="collapsed@example.com" />
+        <input id="zero-email" type="email" autocomplete="username" style="width: 0; height: 0; padding: 0; border: 0;" value="zero@example.com" />
+        <input id="offscreen-email" type="email" autocomplete="username" style="position: absolute; left: -10000px; top: 0;" value="offscreen@example.com" />
+        <input id="visible-email" type="email" autocomplete="username" value="" />
+        <input id="collapsed-password" type="password" style="visibility: collapse" value="collapsed-secret" />
+        <input id="zero-password" type="password" style="width: 0; height: 0; padding: 0; border: 0;" value="zero-secret" />
+        <input id="offscreen-password" type="password" style="position: absolute; left: -10000px; top: 0;" value="offscreen-secret" />
+        <input id="visible-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#visible-email")).toBe("alice@example.com");
+    expect(inputValue("#visible-password")).toBe("secret-123");
+    expect(inputValue("#collapsed-email")).toBe("collapsed@example.com");
+    expect(inputValue("#zero-email")).toBe("zero@example.com");
+    expect(inputValue("#offscreen-email")).toBe("offscreen@example.com");
+    expect(inputValue("#collapsed-password")).toBe("collapsed-secret");
+    expect(inputValue("#zero-password")).toBe("zero-secret");
+    expect(inputValue("#offscreen-password")).toBe("offscreen-secret");
+  });
+
+  it("field selection rejects search and verification code username candidates", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="search-query" type="text" name="search" placeholder="Search" value="existing search" />
+        <input id="otp-code" type="text" name="otp" autocomplete="one-time-code" value="" />
+        <input id="postcode" type="text" name="postcode" value="90210" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com" });
+
+    expect(inputValue("#search-query")).toBe("existing search");
+    expect(inputValue("#otp-code")).toBe("");
+    expect(inputValue("#postcode")).toBe("90210");
   });
 });
 

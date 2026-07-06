@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VaultKern Noisy Login Smoke</title>
+  </head>
+  <body>
+    <form id="vaultkern-noisy-form">
+      <input
+        id="vaultkern-noisy-hidden-email"
+        name="email"
+        type="hidden"
+        value="hidden@example.com"
+      />
+      <input
+        id="vaultkern-noisy-disabled-email"
+        name="email"
+        type="email"
+        value="disabled@example.com"
+        disabled
+      />
+      <input
+        id="vaultkern-noisy-readonly-email"
+        name="email"
+        type="email"
+        value="readonly@example.com"
+        readonly
+      />
+      <input
+        id="vaultkern-noisy-search"
+        name="search"
+        type="search"
+        placeholder="Search"
+        value="find me"
+      />
+      <input
+        id="vaultkern-noisy-zero-email"
+        name="email"
+        type="email"
+        autocomplete="username"
+        style="width: 0; height: 0; padding: 0; border: 0;"
+        value="zero@example.com"
+      />
+      <input
+        id="vaultkern-noisy-offscreen-password"
+        name="password"
+        type="password"
+        style="position: absolute; left: -10000px; top: 0;"
+        value="offscreen-secret"
+      />
+      <label for="vaultkern-noisy-email">Email</label>
+      <input
+        id="vaultkern-noisy-email"
+        name="email"
+        type="email"
+        autocomplete="username"
+      />
+      <label for="vaultkern-noisy-password">Password</label>
+      <input
+        id="vaultkern-noisy-password"
+        name="password"
+        type="password"
+        autocomplete="current-password"
+      />
+      <button id="vaultkern-noisy-submit" type="submit">Sign in</button>
+      <output id="vaultkern-noisy-result"></output>
+    </form>
+    <script>
+      document.querySelector("#vaultkern-noisy-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const username = document.querySelector("#vaultkern-noisy-email").value;
+        const password = document.querySelector("#vaultkern-noisy-password").value;
+        document.querySelector("#vaultkern-noisy-result").value =
+          `submitted:${username}:${password.length}`;
+      });
+    </script>
+  </body>
+</html>

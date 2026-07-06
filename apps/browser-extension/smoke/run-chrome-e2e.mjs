@@ -10,7 +10,7 @@ import playwright from "playwright";
 
 import { E2E_EXTENSION_ID } from "../scripts/manifestBuild.mjs";
 import { createSimpleWebAuthnSmokeServer } from "./simplewebauthn-server.mjs";
-import { SMOKE_HOST, smokeUrl } from "./smokeUrls.mjs";
+import { SMOKE_HOST, smokePageUrls } from "./smokeUrls.mjs";
 import { waitForWebAuthnDebugEvent } from "./webauthnDebug.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -75,11 +75,13 @@ export async function startSmokeServer() {
   if (!address || typeof address === "string") {
     throw new Error("failed to bind smoke server");
   }
+  const urls = smokePageUrls(address.port);
 
   return {
-    url: smokeUrl(address.port, "basic-login.html"),
-    passkeyRegisterUrl: smokeUrl(address.port, "passkey-register.html"),
-    passkeyUrl: smokeUrl(address.port, "passkey-login.html"),
+    url: urls.basicLogin,
+    urls,
+    passkeyRegisterUrl: urls.passkeyRegister,
+    passkeyUrl: urls.passkeyLogin,
     close: () => new Promise((resolvePromise) => server.close(resolvePromise))
   };
 }
@@ -154,6 +156,51 @@ async function sendCommand(extensionPage, command, timeout = 60_000) {
   }
 
   return wrapped.response;
+}
+
+async function assertFillCandidateForUrl(extensionPage, vaultId, pageUrl, entryId) {
+  const candidates = await sendCommand(extensionPage, {
+    type: "find_fill_candidates",
+    vault_id: vaultId,
+    url: pageUrl
+  });
+  if (!candidates.entries?.some((entry) => entry.id === entryId)) {
+    throw new Error(`created entry was not returned as a fill candidate for ${pageUrl}`);
+  }
+}
+
+async function fillCurrentPageFromPopup(_context, extensionPage, page, expectedResultSelector) {
+  const pageUrl = page.url();
+  await extensionPage.evaluate(
+    async ({ pageUrl, username, entryPassword }) => {
+      const targetUrl = new URL(pageUrl);
+      const tabs = await chrome.tabs.query({
+        url: `${targetUrl.protocol}//${targetUrl.hostname}/*`
+      });
+      const tab = tabs.find((candidate) => candidate.url === pageUrl);
+      if (!tab?.id) {
+        throw new Error(`smoke tab not found for ${pageUrl}`);
+      }
+      await chrome.tabs.sendMessage(tab.id, {
+        type: "fill_entry_detail",
+        username,
+        password: entryPassword
+      });
+    },
+    { pageUrl, username, entryPassword }
+  );
+  await page.waitForSelector(expectedResultSelector, { state: "attached" });
+}
+
+async function assertSmokeSubmitResult(page, submitSelector, resultSelector, expected) {
+  await page.click(submitSelector);
+  const submitted = await page
+    .locator(resultSelector)
+    .evaluate((node) => node.value || node.textContent);
+  if (submitted !== expected) {
+    throw new Error(`unexpected submit result for ${page.url()}: ${submitted}`);
+  }
+  return submitted;
 }
 
 async function passkeyDiagnostics(extensionPage, webAuthnPage) {
@@ -613,36 +660,15 @@ async function main() {
       totp_uri: null
     });
     await sendCommand(extensionPage, { type: "save_vault", vault_id: vaultId });
-    const candidates = await sendCommand(extensionPage, {
-      type: "find_fill_candidates",
-      vault_id: vaultId,
-      url: server.url
-    });
-    if (!candidates.entries?.some((entry) => entry.id === created.id)) {
-      throw new Error("created entry was not returned as a fill candidate");
-    }
-
+    await assertFillCandidateForUrl(extensionPage, vaultId, server.urls.basicLogin, created.id);
     const page = await context.newPage();
-    await page.goto(server.url);
-    await extensionPage.evaluate(
-      async ({ serverUrl, username, entryPassword }) => {
-        const smokeUrl = new URL(serverUrl);
-        const tabs = await chrome.tabs.query({
-          url: `${smokeUrl.protocol}//${smokeUrl.hostname}/*`
-        });
-        const tab = tabs.find((candidate) => candidate.url === serverUrl);
-        if (!tab?.id) {
-          throw new Error("smoke tab not found");
-        }
-        await chrome.tabs.sendMessage(tab.id, {
-          type: "fill_entry_detail",
-          username,
-          password: entryPassword
-        });
-      },
-      { serverUrl: server.url, username, entryPassword }
+    await page.goto(server.urls.basicLogin);
+    await fillCurrentPageFromPopup(
+      context,
+      extensionPage,
+      page,
+      "#vaultkern-smoke-result"
     );
-
     const formValues = await page.evaluate(() => ({
       username: document.querySelector("#vaultkern-smoke-username")?.value,
       password: document.querySelector("#vaultkern-smoke-password")?.value
@@ -650,15 +676,79 @@ async function main() {
     if (formValues.username !== username || formValues.password !== entryPassword) {
       throw new Error(`content script fill failed: ${JSON.stringify(formValues)}`);
     }
+    const submitted = await assertSmokeSubmitResult(
+      page,
+      "#vaultkern-smoke-submit",
+      "#vaultkern-smoke-result",
+      `submitted:${username}:${entryPassword.length}`
+    );
 
-    await page.click("#vaultkern-smoke-submit");
-    const submitted = await page
-      .locator("#vaultkern-smoke-result")
-      .evaluate((node) => node.value || node.textContent);
-    const expectedSubmit = `submitted:${username}:${entryPassword.length}`;
-    if (submitted !== expectedSubmit) {
-      throw new Error(`unexpected submit result: ${submitted}`);
+    await assertFillCandidateForUrl(extensionPage, vaultId, server.urls.noisyLogin, created.id);
+    const noisyPage = await context.newPage();
+    await noisyPage.goto(server.urls.noisyLogin);
+    await fillCurrentPageFromPopup(
+      context,
+      extensionPage,
+      noisyPage,
+      "#vaultkern-noisy-result"
+    );
+    const noisyValues = await noisyPage.evaluate(() => ({
+      username: document.querySelector("#vaultkern-noisy-email")?.value,
+      password: document.querySelector("#vaultkern-noisy-password")?.value,
+      zeroEmail: document.querySelector("#vaultkern-noisy-zero-email")?.value,
+      offscreenPassword: document.querySelector("#vaultkern-noisy-offscreen-password")?.value
+    }));
+    if (
+      noisyValues.username !== username ||
+      noisyValues.password !== entryPassword ||
+      noisyValues.zeroEmail !== "zero@example.com" ||
+      noisyValues.offscreenPassword !== "offscreen-secret"
+    ) {
+      throw new Error(`noisy login fill failed: ${JSON.stringify(noisyValues)}`);
     }
+    const noisySubmitResult = await assertSmokeSubmitResult(
+      noisyPage,
+      "#vaultkern-noisy-submit",
+      "#vaultkern-noisy-result",
+      `submitted:${username}:${entryPassword.length}`
+    );
+
+    await assertFillCandidateForUrl(
+      extensionPage,
+      vaultId,
+      server.urls.usernameFirst,
+      created.id
+    );
+    const usernameFirstPage = await context.newPage();
+    await usernameFirstPage.goto(server.urls.usernameFirst);
+    await fillCurrentPageFromPopup(
+      context,
+      extensionPage,
+      usernameFirstPage,
+      "#vaultkern-username-first-result"
+    );
+    const usernameFirstSubmitResult = await assertSmokeSubmitResult(
+      usernameFirstPage,
+      "#vaultkern-username-first-next",
+      "#vaultkern-username-first-result",
+      `submitted:${username}`
+    );
+
+    await assertFillCandidateForUrl(extensionPage, vaultId, server.urls.passwordStep, created.id);
+    const passwordStepPage = await context.newPage();
+    await passwordStepPage.goto(server.urls.passwordStep);
+    await fillCurrentPageFromPopup(
+      context,
+      extensionPage,
+      passwordStepPage,
+      "#vaultkern-password-step-result"
+    );
+    const passwordStepSubmitResult = await assertSmokeSubmitResult(
+      passwordStepPage,
+      "#vaultkern-password-step-submit",
+      "#vaultkern-password-step-result",
+      `submitted:${entryPassword.length}`
+    );
 
     await enablePasskeyProvider(extensionPage);
 
@@ -993,6 +1083,9 @@ async function main() {
           extensionId,
           nativeManifest,
           smokeUrl: server.url,
+          noisySmokeUrl: server.urls.noisyLogin,
+          usernameFirstSmokeUrl: server.urls.usernameFirst,
+          passwordStepSmokeUrl: server.urls.passwordStep,
           passkeyRegisterUrl: server.passkeyRegisterUrl,
           passkeySmokeUrl: server.passkeyUrl,
           publicKeyCredentialAvailable: passkeySmokeReady.publicKeyCredentialAvailable,
@@ -1012,7 +1105,10 @@ async function main() {
             simpleDiscoverableAuthenticationVerification.userHandle,
           lockedPasskeyRegisterResult,
           lockedPasskeyResult,
-          submitResult: submitted
+          submitResult: submitted,
+          noisySubmitResult,
+          usernameFirstSubmitResult,
+          passwordStepSubmitResult
         },
         null,
         2

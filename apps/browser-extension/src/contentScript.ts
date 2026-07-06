@@ -7,17 +7,101 @@ function isWritableVisibleInput(input: HTMLInputElement) {
     return false;
   }
 
-  if (input.style.display === "none" || input.style.visibility === "hidden") {
+  const style = window.getComputedStyle(input);
+  if (
+    style.display === "none" ||
+    style.visibility === "hidden" ||
+    style.visibility === "collapse"
+  ) {
+    return false;
+  }
+
+  if (hasTinyExplicitSize(style) || hasOffscreenExplicitPosition(style)) {
+    return false;
+  }
+
+  const rect = input.getBoundingClientRect();
+  if (input.getClientRects().length > 0 && (rect.width < 2 || rect.height < 2)) {
+    return false;
+  }
+
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  if (
+    input.getClientRects().length > 0 &&
+    (rect.right < 0 ||
+      rect.bottom < 0 ||
+      rect.left > viewportWidth ||
+      rect.top > viewportHeight)
+  ) {
     return false;
   }
 
   return true;
 }
 
-function usernameScore(input: HTMLInputElement) {
+function cssPixelValue(value: string) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasTinyExplicitSize(style: CSSStyleDeclaration) {
+  const width = cssPixelValue(style.width);
+  const height = cssPixelValue(style.height);
+
+  return (
+    (width !== null && width < 2) ||
+    (height !== null && height < 2) ||
+    style.maxWidth === "0px" ||
+    style.maxHeight === "0px"
+  );
+}
+
+function hasOffscreenExplicitPosition(style: CSSStyleDeclaration) {
+  if (style.position !== "absolute" && style.position !== "fixed") {
+    return false;
+  }
+
+  const left = cssPixelValue(style.left);
+  const top = cssPixelValue(style.top);
+  return (left !== null && left < -2) || (top !== null && top < -2);
+}
+
+function fieldTokens(input: HTMLInputElement) {
+  return [
+    input.autocomplete,
+    input.name,
+    input.id,
+    input.placeholder,
+    input.getAttribute("aria-label") ?? ""
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function isRejectedUsernameCandidate(input: HTMLInputElement) {
+  if (input.type === "search") {
+    return true;
+  }
+
   const autocomplete = input.autocomplete.toLowerCase();
-  const name = input.name.toLowerCase();
-  const id = input.id.toLowerCase();
+  if (autocomplete === "one-time-code") {
+    return true;
+  }
+
+  const tokens = fieldTokens(input);
+  return ["search", "otp", "totp", "2fa", "code", "postcode", "zip"].some(
+    (fragment) => tokens.includes(fragment)
+  );
+}
+
+function usernameScore(input: HTMLInputElement) {
+  if (isRejectedUsernameCandidate(input)) {
+    return -1;
+  }
+
+  const autocomplete = input.autocomplete.toLowerCase();
+  const tokens = fieldTokens(input);
   let score = 0;
 
   if (autocomplete === "username" || autocomplete === "email") {
@@ -25,12 +109,9 @@ function usernameScore(input: HTMLInputElement) {
   }
 
   if (
-    name.includes("username") ||
-    name.includes("email") ||
-    name.includes("login") ||
-    id.includes("username") ||
-    id.includes("email") ||
-    id.includes("login")
+    tokens.includes("username") ||
+    tokens.includes("email") ||
+    tokens.includes("login")
   ) {
     score += 2;
   }
@@ -50,8 +131,32 @@ function pickUsernameField() {
   return candidates
     .filter(isWritableVisibleInput)
     .map((input, index) => ({ input, score: usernameScore(input), index }))
+    .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score || left.index - right.index)[0]
     ?.input;
+}
+
+function isPasswordChangeField(input: HTMLInputElement) {
+  const form = input.form;
+  if (!form) {
+    return false;
+  }
+
+  const passwords = Array.from(form.querySelectorAll('input[type="password"]')).filter(
+    (candidate): candidate is HTMLInputElement =>
+      candidate instanceof HTMLInputElement && isWritableVisibleInput(candidate)
+  );
+
+  if (passwords.length < 2) {
+    return false;
+  }
+
+  return passwords.some((candidate) => {
+    const tokens = fieldTokens(candidate);
+    return ["old", "current", "new", "repeat", "confirm", "change"].some(
+      (fragment) => tokens.includes(fragment)
+    );
+  });
 }
 
 function pickPasswordField() {
@@ -59,7 +164,11 @@ function pickPasswordField() {
     (input): input is HTMLInputElement => input instanceof HTMLInputElement
   );
 
-  return candidates.filter(isWritableVisibleInput)[0] ?? null;
+  return (
+    candidates
+      .filter(isWritableVisibleInput)
+      .filter((input) => !isPasswordChangeField(input))[0] ?? null
+  );
 }
 
 function writeFieldValue(input: HTMLInputElement, value: string) {

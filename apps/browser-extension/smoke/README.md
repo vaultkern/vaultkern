@@ -10,20 +10,22 @@ This is not a product page and does not replace unit tests. Its value is providi
 - It does not operate on the user's daily Edge window, profile, configuration, or extension state.
 - Any future Edge installation validation must be confirmed separately and must use an isolated profile.
 
-## Page
+## Fixture Matrix
 
-Smoke page:
+| Fixture | Purpose | Expected fill behavior | Coverage |
+| --- | --- | --- | --- |
+| `basic-login.html` | Standard username and password form. | Fill `#vaultkern-smoke-username` and `#vaultkern-smoke-password`. | Unit and Chrome E2E. |
+| `username-first.html` | First step of a two-step sign-in flow. | Fill `#vaultkern-username-first-email` and leave password absent. | Unit; Chrome E2E target. |
+| `password-step.html` | Second step of a two-step sign-in flow. | Fill `#vaultkern-password-step-password` and leave username absent. | Unit; Chrome E2E target. |
+| `noisy-login.html` | Realistic login page with hidden, disabled, readonly, search, zero-size, and offscreen decoys. | Fill only `#vaultkern-noisy-email` and `#vaultkern-noisy-password`; leave decoys unchanged. | Unit; Chrome E2E target. |
+| `totp-step.html` | Verification-code-only step. | Do not fill username or password into `#vaultkern-totp-code`. | Unit only in P0. |
+| `password-change.html` | Password-change form with current, new, and repeat password fields. | Normal login autofill must not write into any password-change field. | Unit only in P0. |
+| `iframe-login.html` | Top-level login plus same-origin placeholder and untrusted iframe marker. | Fill the top-level form only; do not blindly target untrusted frames. | Unit; future Chrome E2E target. |
 
-```text
-apps/browser-extension/smoke/basic-login.html
-```
-
-The page provides two stable inputs:
-
-- `#vaultkern-smoke-username`
-- `#vaultkern-smoke-password`
-
-They use standard `autocomplete="username"` and `autocomplete="current-password"` attributes, which are recognized by the current content-script field selection rules.
+The standard login fields use `autocomplete="username"` and
+`autocomplete="current-password"`, which are recognized by the content-script field
+selection rules. The noisy and step fixtures intentionally contain realistic
+negative controls so regressions fail before touching real sites.
 
 ## Manual Verification
 
@@ -88,7 +90,7 @@ The manifest should contain:
 {"name":"com.vaultkern.runtime","description":"VaultKern runtime native host","path":"C:\\Users\\<user>\\AppData\\Local\\vaultkern-runtime\\vaultkern-runtime.exe","type":"stdio","allowed_origins":["chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/"]}
 ```
 
-Open:
+Open the standard login smoke page:
 
 ```text
 http://localhost:4174/basic-login.html

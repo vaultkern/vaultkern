@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VaultKern TOTP Step Smoke</title>
+  </head>
+  <body>
+    <form id="vaultkern-totp-form">
+      <label for="vaultkern-totp-code">Verification code</label>
+      <input
+        id="vaultkern-totp-code"
+        name="otp"
+        type="text"
+        inputmode="numeric"
+        autocomplete="one-time-code"
+        maxlength="6"
+      />
+      <button id="vaultkern-totp-submit" type="submit">Verify</button>
+      <output id="vaultkern-totp-result"></output>
+    </form>
+    <script>
+      document.querySelector("#vaultkern-totp-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        document.querySelector("#vaultkern-totp-result").value =
+          `submitted:${document.querySelector("#vaultkern-totp-code").value}`;
+      });
+    </script>
+  </body>
+</html>

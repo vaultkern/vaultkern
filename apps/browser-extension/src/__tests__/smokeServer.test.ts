@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SMOKE_HOST, smokeUrl } from "../../smoke/smokeUrls.mjs";
+import { SMOKE_HOST, smokePageUrls, smokeUrl } from "../../smoke/smokeUrls.mjs";
 import { waitForWebAuthnDebugEvent } from "../../smoke/webauthnDebug.mjs";
 
 describe("Chrome smoke server", () => {
@@ -15,6 +15,17 @@ describe("Chrome smoke server", () => {
     expect(new URL(smokeUrl(8877, "passkey-login.html")).hostname).toBe(
       SMOKE_HOST
     );
+  });
+
+  it("builds named smoke page urls for the autofill matrix", () => {
+    expect(smokePageUrls(8877)).toEqual({
+      basicLogin: "http://localhost:8877/basic-login.html",
+      noisyLogin: "http://localhost:8877/noisy-login.html",
+      usernameFirst: "http://localhost:8877/username-first.html",
+      passwordStep: "http://localhost:8877/password-step.html",
+      passkeyRegister: "http://localhost:8877/passkey-register.html",
+      passkeyLogin: "http://localhost:8877/passkey-login.html"
+    });
   });
 
   it("waits for asynchronously persisted WebAuthn debug events", async () => {
