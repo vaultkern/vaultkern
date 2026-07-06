@@ -216,6 +216,7 @@ function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
   }
 
   const autocomplete = fieldAutocompleteTokens(field);
+  const fieldTextParts = fieldText.split(",");
   if (
     [...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) ||
     [...EMAIL_AUTOCOMPLETE].some((token) => autocomplete.has(token))
@@ -227,13 +228,13 @@ function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
     field.htmlType === "email" ||
     fieldText.includes("username") ||
     fieldText.includes("userid") ||
-    fieldText.split(",").some((part) => part === "user") ||
+    fieldTextParts.some((part) => part === "user") ||
     fieldText.includes("email") ||
     fieldText.includes("phone") ||
     fieldText.includes("mobile") ||
     field.htmlType === "tel" ||
-    fieldText.split(",").some((part) => part === "tel" || part.includes("telephone")) ||
-    fieldText.includes("login")
+    fieldTextParts.some((part) => part === "tel" || part.includes("telephone")) ||
+    fieldTextParts.some((part) => part === "login" || part === "loginid" || part === "loginname")
   );
 }
 
@@ -313,7 +314,12 @@ function qualificationForFillableField(
       fieldText.includes("phone") ||
       fieldText.includes("mobile") ||
       fieldTextParts.some((part) => part === "tel" || part.includes("telephone"));
-    const needsLoginEvidence = (hasEmailSignal || hasPhoneSignal) && !hasUsernameAutocomplete;
+    const hasGenericIdentifierSignal = fieldTextParts.some(
+      (part) => part === "user" || part === "login" || part === "loginid" || part === "loginname"
+    );
+    const needsLoginEvidence =
+      (hasEmailSignal || hasPhoneSignal || hasGenericIdentifierSignal) &&
+      !hasUsernameAutocomplete;
     if (hasNewPasswordSibling(field, snapshot) && !hasPasswordSibling(field, snapshot)) {
       reasons.push("non-login:account-creation");
       return { qualifiedAs: "ignored", eligible: false, reasons };

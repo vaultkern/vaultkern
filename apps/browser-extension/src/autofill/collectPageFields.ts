@@ -133,6 +133,9 @@ function getHeadingText(form: HTMLFormElement) {
 
   return headings
     .filter((heading) => {
+      if (!getFieldVisibility(heading as HTMLElement).viewable) {
+        return false;
+      }
       const ownerForm = heading.closest("form");
       if (ownerForm === form) {
         return true;
@@ -159,6 +162,10 @@ function getSubmitText(form: HTMLFormElement) {
   return Array.from(form.querySelectorAll("button, input")).flatMap((element) => {
     const tagName = element.tagName.toLowerCase();
     if (tagName === "button") {
+      const type = (element.getAttribute("type") ?? "submit").toLowerCase();
+      if (type !== "submit") {
+        return [];
+      }
       return [cleanText(element.textContent)];
     }
     if (tagName !== "input") {
@@ -166,7 +173,7 @@ function getSubmitText(form: HTMLFormElement) {
     }
     const input = element as HTMLInputElement;
     const type = input.type.toLowerCase();
-    if (type !== "submit" && type !== "button") {
+    if (type !== "submit") {
       return [];
     }
     return [cleanText(input.value || input.getAttribute("aria-label"))];
@@ -206,12 +213,39 @@ function getSelectOptions(element: Element) {
   return Array.from((element as HTMLSelectElement).options).map((option) => option.value);
 }
 
+function getRootLevelFieldRunContainer(
+  element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+): ParentNode | undefined {
+  const parent = element.parentElement;
+  const parentTag = parent?.tagName.toLowerCase();
+  if (parent === null || (parentTag !== "body" && parentTag !== "html")) {
+    return undefined;
+  }
+
+  let first: Element = element;
+  while (first.previousElementSibling?.matches(FIELD_SELECTOR)) {
+    first = first.previousElementSibling;
+  }
+
+  let last: Element = element;
+  while (last.nextElementSibling?.matches(FIELD_SELECTOR)) {
+    last = last.nextElementSibling;
+  }
+
+  return first === last ? undefined : first;
+}
+
 function getFieldContainer(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
   form: AutofillFormSnapshot | undefined
 ): ParentNode | undefined {
   if (form !== undefined) {
     return undefined;
+  }
+
+  const rootLevelRun = getRootLevelFieldRunContainer(element);
+  if (rootLevelRun) {
+    return rootLevelRun;
   }
 
   let container = element.parentElement;

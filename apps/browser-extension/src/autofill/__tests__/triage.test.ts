@@ -228,6 +228,25 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
   });
 
+  it("ignores hidden headings when building form context", () => {
+    document.body.innerHTML = `
+      <div hidden>
+        <h2>Create account</h2>
+      </div>
+      <form id="login">
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "login")?.headingText).toEqual([]);
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
   it("does not classify new-password fields or non-text controls as login candidates", () => {
     document.body.innerHTML = `
       <form>
@@ -275,6 +294,26 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
+  it("requires login evidence for generic user and login identifiers", () => {
+    document.body.innerHTML = `
+      <form id="profile">
+        <input name="user" type="text" />
+        <input name="last_login" type="text" />
+      </form>
+      <form id="login">
+        <input name="login" type="text" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "user").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "last_login").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "login").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
   it("uses implicit form actions and submit text as passwordless login context", () => {
     window.history.replaceState(null, "", "/login");
     document.body.innerHTML = `
@@ -291,6 +330,24 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "implicit_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "button_email").qualifiedAs).toBe("username");
+  });
+
+  it("ignores auxiliary buttons when collecting submit text context", () => {
+    document.body.innerHTML = `
+      <form id="login">
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+        <button type="button">Forgot password?</button>
+        <input type="button" name="create_account" value="Create account" />
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "login")?.headingText).toEqual([]);
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
   it("lets subscription login context override newsletter exclusions", () => {
@@ -379,6 +436,24 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "contact_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "login_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
+  });
+
+  it("shares local context for adjacent form-less body-level login fields", () => {
+    document.body.innerHTML = `
+      <input name="contact_email" type="email" />
+      <hr />
+      <input name="body_email" type="email" />
+      <input name="body_password" type="password" />
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "contact_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "body_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "body_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "body_email").containerOpid).toBe(
+      fieldByName(report, "body_password").containerOpid
+    );
   });
 
   it("ignores unavailable password siblings as login evidence", () => {
