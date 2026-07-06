@@ -174,15 +174,25 @@ function OptionsApp() {
       const normalizedSettings = normalizeExtensionSettings(nextSettings);
       await extensionSettingsStore.save(normalizedSettings);
       setSettings(normalizedSettings);
-      setRecentVaults(
-        await applyRecentVaultLimit(
-          await client.listRecentVaults(),
-          normalizedSettings
-        )
-      );
-      await syncQuickUnlockPreferenceToCurrentVault(
-        normalizedSettings.quickUnlockEnabled
-      );
+
+      try {
+        setRecentVaults(
+          await applyRecentVaultLimit(
+            await client.listRecentVaults(),
+            normalizedSettings
+          )
+        );
+        await syncQuickUnlockPreferenceToCurrentVault(
+          normalizedSettings.quickUnlockEnabled
+        );
+      } catch (nativeSaveError) {
+        setQuickUnlockError(
+          errorMessage(
+            nativeSaveError,
+            translate(settings.language, "Failed to update quick unlock")
+          )
+        );
+      }
     } catch (saveError) {
       setError(
         errorMessage(
@@ -274,9 +284,9 @@ function OptionsApp() {
               settings={settings}
               saving={saving}
               error={error}
-              quickUnlockSupported={session?.supportsBiometricUnlock === true}
+              quickUnlockSupported={session?.supportsBiometricUnlock}
               quickUnlockEnabled={settings.quickUnlockEnabled}
-              quickUnlockBusy={quickUnlockBusy}
+              quickUnlockBusy={quickUnlockBusy || session === null}
               quickUnlockError={quickUnlockError}
               onSave={(nextSettings) => {
                 void saveSettings(nextSettings);

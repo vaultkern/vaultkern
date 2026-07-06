@@ -20,14 +20,18 @@ vi.mock("../runtimeBridge", () => ({
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((promiseResolve) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
     resolve = promiseResolve;
+    reject = promiseReject;
   });
 
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function installChromeStorage(settings: Record<string, unknown>) {
+  const set = vi.fn((_values, callback) => callback?.());
+
   (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
     storage: {
       local: {
@@ -36,10 +40,12 @@ function installChromeStorage(settings: Record<string, unknown>) {
             vaultkernExtensionSettings: settings
           })
         ),
-        set: vi.fn((_values, callback) => callback?.())
+        set
       }
     }
   };
+
+  return { set };
 }
 
 async function renderOptionsPage() {
@@ -326,4 +332,91 @@ it("applies the recent vault limit when options settings are saved", async () =>
   await waitFor(() => {
     expect(runtimeClientMocks.deleteRecentVault).toHaveBeenCalledWith("vault-ref-3");
   });
+});
+
+it("preserves saved quick unlock when biometric support lookup fails", async () => {
+  const chromeStorage = installChromeStorage({
+    recentVaultLimit: 10,
+    language: "en",
+    idleLockMinutes: 0,
+    clearClipboardSeconds: 30,
+    passkeyProviderEnabled: false,
+    quickUnlockEnabled: true
+  });
+
+  runtimeClientMocks.getSessionState.mockRejectedValue(new Error("native host unavailable"));
+  runtimeClientMocks.listRecentVaults.mockResolvedValue([]);
+
+  await renderOptionsPage();
+
+  const quickUnlock = await screen.findByRole("checkbox", { name: "Quick Unlock" });
+  expect(quickUnlock).toBeChecked();
+  expect(quickUnlock).toBeDisabled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  await waitFor(() => {
+    expect(chromeStorage.set).toHaveBeenCalledWith(
+      {
+        vaultkernExtensionSettings: expect.objectContaining({
+          quickUnlockEnabled: true
+        })
+      },
+      expect.any(Function)
+    );
+  });
+});
+
+it("saves local options when native recent vault operations fail", async () => {
+  const chromeStorage = installChromeStorage({
+    recentVaultLimit: 10,
+    language: "en",
+    idleLockMinutes: 0,
+    clearClipboardSeconds: 30,
+    passkeyProviderEnabled: false,
+    quickUnlockEnabled: false
+  });
+  const saveRecentVaults = createDeferred<
+    Array<{
+      vaultRefId: string;
+      displayName: string;
+      sourceKind: string;
+      sourceSummary: string;
+      lastUsedAt: number;
+      availability: string;
+      supportsQuickUnlock: boolean;
+      isCurrent: boolean;
+    }>
+  >();
+
+  runtimeClientMocks.getSessionState.mockRejectedValue(new Error("native host unavailable"));
+  runtimeClientMocks.listRecentVaults
+    .mockRejectedValueOnce(new Error("native host unavailable"))
+    .mockReturnValueOnce(saveRecentVaults.promise);
+
+  await renderOptionsPage();
+
+  fireEvent.click(await screen.findByText("中文"));
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  await waitFor(() => {
+    expect(chromeStorage.set).toHaveBeenCalled();
+  });
+  expect(runtimeClientMocks.listRecentVaults).toHaveBeenCalledTimes(2);
+
+  saveRecentVaults.reject(new Error("native recent vault unavailable"));
+
+  await waitFor(() => {
+    expect(screen.queryByText("Saving...")).not.toBeInTheDocument();
+  });
+
+  expect(chromeStorage.set).toHaveBeenCalledWith(
+    {
+      vaultkernExtensionSettings: expect.objectContaining({
+        language: "zh-CN"
+      })
+    },
+    expect.any(Function)
+  );
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
 });
