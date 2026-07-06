@@ -54,7 +54,7 @@ describe("totp autofill detection", () => {
 
   it("does not let generic MFA form context override SMS or email code labels", () => {
     document.body.innerHTML = `
-      <form aria-label="Two-factor verification">
+      <form>
         <label for="sms-code">Enter the SMS code sent to your phone</label>
         <input id="sms-code" name="sms_code" inputmode="numeric" autocomplete="one-time-code" />
       </form>
@@ -168,6 +168,30 @@ describe("totp autofill detection", () => {
         <input id="email" class="mfa-field" type="email" autocomplete="username" />
         <input id="password" class="mfa-field" type="password" autocomplete="current-password" />
         <input id="otp-code" class="mfa-field" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123",
+      totp: "123456"
+    });
+
+    expect((document.querySelector("#email") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#password") as HTMLInputElement).value).toBe(
+      "secret-123"
+    );
+    expect((document.querySelector("#otp-code") as HTMLInputElement).value).toBe("123456");
+  });
+
+  it("honors email autocomplete before shared MFA styling", () => {
+    document.body.innerHTML = `
+      <form aria-label="Two-factor verification">
+        <input id="email" class="otp-code" type="text" autocomplete="email" />
+        <input id="password" type="password" autocomplete="current-password" />
+        <input id="otp-code" inputmode="numeric" autocomplete="one-time-code" />
       </form>
     `;
 
@@ -371,6 +395,28 @@ describe("totp autofill detection", () => {
     ).toEqual(["1", "3", "5", "7", "9", "0"]);
   });
 
+  it("expands anonymous split TOTP fields after a numbered seed", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="digit-1">Authenticator code</label>
+        <input id="digit-1" name="digit_1" maxlength="1" inputmode="numeric" />
+        <input maxlength="1" />
+        <input maxlength="1" />
+        <input maxlength="1" />
+        <input maxlength="1" />
+        <input maxlength="1" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "135790" });
+
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>('input[maxlength="1"]')].map(
+        (field) => field.value
+      )
+    ).toEqual(["1", "3", "5", "7", "9", "0"]);
+  });
+
   it("keeps in-form split TOTP fields scoped to the labeled group", () => {
     document.body.innerHTML = `
       <form>
@@ -504,6 +550,20 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#backup-password") as HTMLInputElement).value).toBe(
       "secret-123"
     );
+  });
+
+  it("does not treat the page URL as MFA context for generic code fields", () => {
+    window.history.replaceState(null, "", "/mfa");
+    document.body.innerHTML = `
+      <form>
+        <label for="promo-code">Code</label>
+        <input id="promo-code" name="code" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#promo-code") as HTMLInputElement).value).toBe("");
   });
 
   it("fills the checked-in single-field TOTP smoke page", () => {

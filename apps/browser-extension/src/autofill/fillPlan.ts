@@ -139,6 +139,16 @@ function isOneCharacterField(field: AutofillTriageFieldResult) {
   return field.viewable && field.fillable && field.maxLength === 1 && hasSplitCodeHint(field);
 }
 
+function isAnonymousOneCharacterField(field: AutofillTriageFieldResult) {
+  return (
+    field.viewable &&
+    field.fillable &&
+    field.maxLength === 1 &&
+    field.htmlName === undefined &&
+    field.htmlId === undefined
+  );
+}
+
 function splitSequenceKey(value: string | undefined) {
   const match = (value ?? "").toLowerCase().match(/^(.*?)(\d+)$/);
   if (!match) {
@@ -165,7 +175,17 @@ function splitSequenceMatches(
   }
 
   const candidateKeys = splitSequenceKeys(candidate);
+  if (!candidateKeys.length) {
+    return isAnonymousOneCharacterField(candidate);
+  }
   return candidateKeys.some((key) => seedKeys.includes(key));
+}
+
+function isContiguousSplitField(
+  seed: AutofillTriageFieldResult,
+  candidate: AutofillTriageFieldResult
+) {
+  return isOneCharacterField(candidate) || isAnonymousOneCharacterField(candidate);
 }
 
 function splitScopeMatches(
@@ -197,7 +217,7 @@ function pickContiguousOneCharacterFields(
   let startIndex = seedIndex;
   while (
     startIndex > 0 &&
-    isOneCharacterField(sortedFields[startIndex - 1]) &&
+    isContiguousSplitField(seed, sortedFields[startIndex - 1]) &&
     splitScopeMatches(seed, sortedFields[startIndex - 1]) &&
     splitSequenceMatches(seed, sortedFields[startIndex - 1])
   ) {
@@ -207,7 +227,7 @@ function pickContiguousOneCharacterFields(
   let endIndex = seedIndex;
   while (
     endIndex + 1 < sortedFields.length &&
-    isOneCharacterField(sortedFields[endIndex + 1]) &&
+    isContiguousSplitField(seed, sortedFields[endIndex + 1]) &&
     splitScopeMatches(seed, sortedFields[endIndex + 1]) &&
     splitSequenceMatches(seed, sortedFields[endIndex + 1])
   ) {

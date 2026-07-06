@@ -122,19 +122,32 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
     .join(",");
 }
 
-function joinedFormText(form: AutofillFormSnapshot | undefined) {
+function joinedFormTextParts(
+  form: AutofillFormSnapshot | undefined,
+  options: { includeAction: boolean }
+) {
   if (!form) {
-    return "";
+    return [];
   }
   return [
     form.htmlId,
     form.htmlName,
     form.htmlClass,
-    formActionContext(form.htmlAction),
+    options.includeAction ? formActionContext(form.htmlAction) : undefined,
     form.htmlMethod,
     form.ariaLabel,
     ...form.headingText
-  ]
+  ];
+}
+
+function joinedFormText(form: AutofillFormSnapshot | undefined) {
+  return joinedFormTextParts(form, { includeAction: true })
+    .map(normalize)
+    .join(",");
+}
+
+function joinedFormPromptText(form: AutofillFormSnapshot | undefined) {
+  return joinedFormTextParts(form, { includeAction: false })
     .map(normalize)
     .join(",");
 }
@@ -491,6 +504,7 @@ function qualificationForFillableField(
 ): FieldQualification {
   const fieldText = joinedFieldText(field);
   const formText = joinedFormText(form);
+  const formPromptText = joinedFormPromptText(form);
   const autocomplete = fieldAutocompleteTokens(field);
 
   if (isSearchField(field, form)) {
@@ -504,7 +518,7 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  const recoveryCode = recoveryCodeReason(fieldText, formText, autocomplete);
+  const recoveryCode = recoveryCodeReason(fieldText, formPromptText, autocomplete);
   if (recoveryCode) {
     reasons.push(recoveryCode);
     return { qualifiedAs: "ignored", eligible: false, reasons };
@@ -528,6 +542,18 @@ function qualificationForFillableField(
     } else if (autocomplete.has("email")) {
       reasons.push("autocomplete:email");
     }
+    if (hasPasswordSibling(field, snapshot)) {
+      reasons.push("form-has-password");
+    }
+    return { qualifiedAs: "username", eligible: true, reasons };
+  }
+
+  if (
+    [...EMAIL_AUTOCOMPLETE].some((token) => autocomplete.has(token)) &&
+    isUsernameLike(field, fieldText) &&
+    (hasPasswordSibling(field, snapshot) || hasLoginContext(formText))
+  ) {
+    reasons.push("autocomplete:email");
     if (hasPasswordSibling(field, snapshot)) {
       reasons.push("form-has-password");
     }
@@ -564,13 +590,13 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  const outOfBandCode = outOfBandCodeReason(fieldText, formText, autocomplete);
+  const outOfBandCode = outOfBandCodeReason(fieldText, formPromptText, autocomplete);
   if (outOfBandCode) {
     reasons.push(outOfBandCode);
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  if (isTotpLike(field, fieldText, formText)) {
+  if (isTotpLike(field, fieldText, formPromptText)) {
     if (autocomplete.has("one-time-code")) {
       reasons.push("autocomplete:one-time-code");
     }
