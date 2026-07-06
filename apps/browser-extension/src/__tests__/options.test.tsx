@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const runtimeClientMocks = vi.hoisted(() => ({
   getSessionState: vi.fn(),
   listRecentVaults: vi.fn(),
+  deleteRecentVault: vi.fn(),
   enableQuickUnlockForCurrentVault: vi.fn(),
   disableQuickUnlockForCurrentVault: vi.fn()
 }));
@@ -52,6 +53,7 @@ beforeEach(() => {
   delete (globalThis as typeof globalThis & { chrome?: unknown }).chrome;
   runtimeClientMocks.getSessionState.mockReset();
   runtimeClientMocks.listRecentVaults.mockReset();
+  runtimeClientMocks.deleteRecentVault.mockReset();
   runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReset();
   runtimeClientMocks.disableQuickUnlockForCurrentVault.mockReset();
 });
@@ -216,5 +218,112 @@ it("keeps options loading until biometric support is known", async () => {
     activeVaultId: null,
     currentVaultRefId: null,
     supportsBiometricUnlock: false
+  });
+});
+
+it("syncs the off quick unlock preference on options refreshes", async () => {
+  installChromeStorage({
+    recentVaultLimit: 10,
+    language: "en",
+    idleLockMinutes: 0,
+    clearClipboardSeconds: 30,
+    passkeyProviderEnabled: false,
+    quickUnlockEnabled: false
+  });
+
+  runtimeClientMocks.getSessionState.mockResolvedValue({
+    unlocked: false,
+    activeVaultId: null,
+    currentVaultRefId: "vault-ref-2",
+    supportsBiometricUnlock: true
+  });
+  runtimeClientMocks.listRecentVaults.mockResolvedValue([
+    {
+      vaultRefId: "vault-ref-2",
+      displayName: "Work",
+      sourceKind: "local",
+      sourceSummary: "work.kdbx",
+      lastUsedAt: 1776500010,
+      availability: "ready",
+      supportsQuickUnlock: true,
+      isCurrent: true
+    }
+  ]);
+  runtimeClientMocks.disableQuickUnlockForCurrentVault.mockResolvedValue({
+    unlocked: false,
+    activeVaultId: null,
+    currentVaultRefId: "vault-ref-2",
+    supportsBiometricUnlock: true
+  });
+
+  await renderOptionsPage();
+
+  await waitFor(() => {
+    expect(runtimeClientMocks.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+  });
+});
+
+it("applies the recent vault limit when options settings are saved", async () => {
+  installChromeStorage({
+    recentVaultLimit: 10,
+    language: "en",
+    idleLockMinutes: 0,
+    clearClipboardSeconds: 30,
+    passkeyProviderEnabled: false,
+    quickUnlockEnabled: false
+  });
+
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500020,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    },
+    {
+      vaultRefId: "vault-ref-2",
+      displayName: "Work",
+      sourceKind: "local",
+      sourceSummary: "work.kdbx",
+      lastUsedAt: 1776500010,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: false
+    },
+    {
+      vaultRefId: "vault-ref-3",
+      displayName: "Archive",
+      sourceKind: "local",
+      sourceSummary: "archive.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: false
+    }
+  ];
+
+  runtimeClientMocks.getSessionState.mockResolvedValue({
+    unlocked: false,
+    activeVaultId: null,
+    currentVaultRefId: "vault-ref-1",
+    supportsBiometricUnlock: true
+  });
+  runtimeClientMocks.listRecentVaults.mockResolvedValue(recentVaults);
+  runtimeClientMocks.deleteRecentVault.mockResolvedValue(recentVaults.slice(0, 2));
+
+  await renderOptionsPage();
+
+  const limitInput = await screen.findByLabelText("Recent Databases");
+  fireEvent.change(limitInput, {
+    target: { value: "2" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  await waitFor(() => {
+    expect(runtimeClientMocks.deleteRecentVault).toHaveBeenCalledWith("vault-ref-3");
   });
 });

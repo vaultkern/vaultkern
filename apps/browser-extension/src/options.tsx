@@ -32,6 +32,25 @@ function findCurrentVaultReference(
   );
 }
 
+async function applyRecentVaultLimit(
+  vaults: VaultReference[],
+  settings: ExtensionSettings
+) {
+  const sortedVaults = [...vaults].sort(
+    (left, right) => (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0)
+  );
+  const overflowVaults = sortedVaults.slice(settings.recentVaultLimit);
+
+  if (overflowVaults.length > 0) {
+    await Promise.all(
+      overflowVaults.map((vault) => client.deleteRecentVault(vault.vaultRefId))
+    );
+    return sortedVaults.slice(0, settings.recentVaultLimit);
+  }
+
+  return sortedVaults;
+}
+
 function OptionsApp() {
   const [settings, setSettings] = useState<ExtensionSettings>(DEFAULT_EXTENSION_SETTINGS);
   const [loading, setLoading] = useState(true);
@@ -155,6 +174,12 @@ function OptionsApp() {
       const normalizedSettings = normalizeExtensionSettings(nextSettings);
       await extensionSettingsStore.save(normalizedSettings);
       setSettings(normalizedSettings);
+      setRecentVaults(
+        await applyRecentVaultLimit(
+          await client.listRecentVaults(),
+          normalizedSettings
+        )
+      );
       await syncQuickUnlockPreferenceToCurrentVault(
         normalizedSettings.quickUnlockEnabled
       );
@@ -213,26 +238,27 @@ function OptionsApp() {
 
   useEffect(() => {
     if (
-      !settings.quickUnlockEnabled ||
       quickUnlockBusy ||
       !currentVaultReference ||
-      currentVaultReference.supportsQuickUnlock
+      currentVaultReference.supportsQuickUnlock === settings.quickUnlockEnabled ||
+      (settings.quickUnlockEnabled && session?.supportsBiometricUnlock !== true)
     ) {
       return;
     }
 
     const syncKey = `${currentVaultReference.vaultRefId}:${
       session?.unlocked === true ? "unlocked" : "locked"
-    }:enable`;
+    }:${settings.quickUnlockEnabled ? "enable" : "disable"}`;
     if (quickUnlockAutoSyncAttempt.current === syncKey) {
       return;
     }
 
     quickUnlockAutoSyncAttempt.current = syncKey;
-    void syncQuickUnlockPreferenceToCurrentVault(true);
+    void syncQuickUnlockPreferenceToCurrentVault(settings.quickUnlockEnabled);
   }, [
     currentVaultReference,
     quickUnlockBusy,
+    session?.supportsBiometricUnlock,
     session?.unlocked,
     settings.quickUnlockEnabled
   ]);
