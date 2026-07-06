@@ -249,9 +249,11 @@ describe("autofill triage", () => {
     document.body.innerHTML = `
       <form id="contact">
         <input name="email" type="email" />
+        <input name="text_email" type="text" aria-label="Email address" />
       </form>
       <form id="login">
         <input name="login_email" type="email" />
+        <input name="login_text_email" type="text" aria-label="Email address" />
         <input name="password" type="password" />
       </form>
     `;
@@ -259,7 +261,9 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "text_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "login_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "login_text_email").qualifiedAs).toBe("username");
   });
 
   it("requires login evidence before treating autocomplete email as username", () => {
@@ -285,12 +289,18 @@ describe("autofill triage", () => {
         <input name="email" type="email" autocomplete="username" />
         <input name="password" type="password" autocomplete="current-password" />
       </form>
+      <form id="redirect-login" action="/login?next=/newsletter/search">
+        <input name="redirect_email" type="email" autocomplete="username" />
+        <input name="redirect_password" type="password" autocomplete="current-password" />
+      </form>
     `;
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "redirect_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "redirect_password").qualifiedAs).toBe("password");
   });
 
   it("keeps password sibling evidence scoped for form-less fields", () => {
@@ -307,6 +317,32 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "contact_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "login_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
+  });
+
+  it("ignores unavailable password siblings as login evidence", () => {
+    document.body.innerHTML = `
+      <form id="hidden-password">
+        <input name="hidden_sibling_email" type="email" />
+        <input name="hidden_sibling_password" type="password" hidden />
+      </form>
+      <form id="disabled-password">
+        <input name="disabled_sibling_email" type="email" />
+        <input name="disabled_sibling_password" type="password" disabled />
+      </form>
+      <form id="new-password">
+        <input name="new_password_sibling_email" type="email" />
+        <input name="new_password_sibling" type="password" autocomplete="new-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "hidden_sibling_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "hidden_sibling_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "disabled_sibling_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "disabled_sibling_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "new_password_sibling_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "new_password_sibling").qualifiedAs).toBe("ignored");
   });
 
   it("suppresses account creation forms before marking generic passwords eligible", () => {
@@ -326,6 +362,19 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").reasons).toContain("non-login:account-creation");
   });
 
+  it("matches password reset wording before marking passwords eligible", () => {
+    document.body.innerHTML = `
+      <form action="/password-reset">
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").reasons).toContain("excluded:reset");
+  });
+
   it("does not match tel inside unrelated words", () => {
     document.body.innerHTML = `
       <form>
@@ -342,6 +391,9 @@ describe("autofill triage", () => {
 
   it("recognizes phone-number username fields with password siblings", () => {
     document.body.innerHTML = `
+      <form id="contact">
+        <input name="contact_phone" type="tel" />
+      </form>
       <form>
         <input name="phone" type="tel" />
         <input name="password" type="password" autocomplete="current-password" />
@@ -350,6 +402,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
+    expect(fieldByName(report, "contact_phone").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "phone").qualifiedAs).toBe("username");
     expect(fieldByName(report, "phone").reasons).toContain("form-has-password");
   });
@@ -459,11 +512,20 @@ describe("autofill triage", () => {
         <input name="shadow_password" type="password" autocomplete="current-password" />
       </form>
     `;
+    const rootLevelHost = document.createElement("div");
+    document.body.append(rootLevelHost);
+    const rootLevelRoot = rootLevelHost.attachShadow({ mode: "open" });
+    rootLevelRoot.innerHTML = `
+      <input name="root_shadow_email" type="email" />
+      <input name="root_shadow_password" type="password" />
+    `;
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "shadow_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "root_shadow_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "root_shadow_password").qualifiedAs).toBe("password");
   });
 
   it("uses shadow-root labels and host visibility for collected fields", () => {

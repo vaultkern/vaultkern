@@ -181,7 +181,7 @@ function getSelectOptions(element: Element) {
 function getFieldContainer(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
   form: AutofillFormSnapshot | undefined
-) {
+): ParentNode | undefined {
   if (form !== undefined) {
     return undefined;
   }
@@ -197,10 +197,22 @@ function getFieldContainer(
     }
     container = container.parentElement;
   }
+
+  const root = element.getRootNode();
+  if (
+    root.nodeType === 11 &&
+    "querySelectorAll" in root &&
+    root.querySelectorAll(FIELD_SELECTOR).length > 1
+  ) {
+    return root;
+  }
   return undefined;
 }
 
-function getContainerOpid(container: Element | undefined, containerByElement: Map<Element, string>) {
+function getContainerOpid(
+  container: ParentNode | undefined,
+  containerByElement: Map<ParentNode, string>
+) {
   if (container === undefined) {
     return undefined;
   }
@@ -219,7 +231,7 @@ function collectField(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
   index: number,
   formByElement: Map<HTMLFormElement, AutofillFormSnapshot>,
-  containerByElement: Map<Element, string>
+  containerByElement: Map<ParentNode, string>
 ): AutofillFieldSnapshot | null {
   const tagName = getFieldTag(element);
   if (tagName === null) {
@@ -265,7 +277,7 @@ function collectField(
 
 export function collectAutofillPageSnapshot(documentRef: Document = document): AutofillPageSnapshot {
   const { forms, formByElement } = collectForms(documentRef);
-  const containerByElement = new Map<Element, string>();
+  const containerByElement = new Map<ParentNode, string>();
   const fields = collectMatchingElements(documentRef, FIELD_SELECTOR)
     .map((element, index) =>
       collectField(

@@ -29,6 +29,18 @@ function normalize(value: string | undefined) {
   return (value ?? "").toLowerCase().replace(/[\s_-]+/g, "");
 }
 
+function formActionContext(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    return new URL(value, "https://vaultkern.invalid").pathname;
+  } catch {
+    return value.split(/[?#]/, 1)[0];
+  }
+}
+
 function joinedFieldText(field: AutofillFieldSnapshot) {
   return [
     field.htmlType,
@@ -55,7 +67,7 @@ function joinedFormText(form: AutofillFormSnapshot | undefined) {
     form.htmlId,
     form.htmlName,
     form.htmlClass,
-    form.htmlAction,
+    formActionContext(form.htmlAction),
     form.htmlMethod,
     ...form.headingText
   ]
@@ -72,10 +84,21 @@ function fieldAutocompleteTokens(field: AutofillFieldSnapshot) {
   );
 }
 
+function isAvailablePasswordSibling(candidate: AutofillFieldSnapshot) {
+  const autocomplete = fieldAutocompleteTokens(candidate);
+  return (
+    candidate.htmlType === "password" &&
+    candidate.viewable &&
+    candidate.fillable &&
+    !autocomplete.has("new-password") &&
+    !autocomplete.has("one-time-code")
+  );
+}
+
 function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
   if (field.formOpid) {
     return snapshot.fields.some(
-      (candidate) => candidate.formOpid === field.formOpid && candidate.htmlType === "password"
+      (candidate) => candidate.formOpid === field.formOpid && isAvailablePasswordSibling(candidate)
     );
   }
   if (field.containerOpid) {
@@ -83,7 +106,7 @@ function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPage
       (candidate) =>
         !candidate.formOpid &&
         candidate.containerOpid === field.containerOpid &&
-        candidate.htmlType === "password"
+        isAvailablePasswordSibling(candidate)
     );
   }
   return false;
@@ -113,7 +136,7 @@ function searchPartsForForm(form: AutofillFormSnapshot | undefined) {
     form.htmlId,
     form.htmlName,
     form.htmlClass,
-    form.htmlAction,
+    formActionContext(form.htmlAction),
     form.htmlMethod,
     ...form.headingText
   ];
@@ -147,7 +170,7 @@ function excludedReason(fieldText: string, formText: string) {
   if (searchableText.includes("forgot")) {
     return "excluded:forgot";
   }
-  if (searchableText.includes("resetpassword")) {
+  if (searchableText.includes("resetpassword") || searchableText.includes("passwordreset")) {
     return "excluded:reset";
   }
   if (
@@ -258,7 +281,15 @@ function qualificationForFillableField(
       autocomplete.has(token)
     );
     const hasEmailAutocomplete = [...EMAIL_AUTOCOMPLETE].some((token) => autocomplete.has(token));
-    const needsLoginEvidence = (field.htmlType === "email" || hasEmailAutocomplete) && !hasUsernameAutocomplete;
+    const fieldTextParts = fieldText.split(",");
+    const hasEmailSignal =
+      field.htmlType === "email" || hasEmailAutocomplete || fieldText.includes("email");
+    const hasPhoneSignal =
+      field.htmlType === "tel" ||
+      fieldText.includes("phone") ||
+      fieldText.includes("mobile") ||
+      fieldTextParts.some((part) => part === "tel" || part.includes("telephone"));
+    const needsLoginEvidence = (hasEmailSignal || hasPhoneSignal) && !hasUsernameAutocomplete;
     if (
       needsLoginEvidence &&
       !hasPasswordSibling(field, snapshot) &&
