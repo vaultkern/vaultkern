@@ -720,6 +720,13 @@ export function PopupApp({
 
     let cancelled = false;
     setAutofillSavePrompt(null);
+    if (pendingAutofillSubmission.saveOnly) {
+      setAutofillSavePrompt({
+        mode: "save",
+        submission: pendingAutofillSubmission
+      });
+      return;
+    }
 
     findCandidates(session.activeVaultId, pendingAutofillSubmission.url)
       .then(async (pendingCandidates) => {

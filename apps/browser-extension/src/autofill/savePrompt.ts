@@ -46,6 +46,32 @@ function captureHintText(field: AutofillTriageFieldResult) {
     .join(",");
 }
 
+function captureContextText(fields: AutofillTriageFieldResult[]) {
+  return fields
+    .flatMap((field) => [
+      captureHintText(field),
+      field.formContext?.htmlId,
+      field.formContext?.htmlName,
+      field.formContext?.htmlClass,
+      field.formContext?.htmlAction,
+      field.formContext?.ariaLabel,
+      ...((field.formContext?.headingText ?? []) as string[])
+    ])
+    .map(normalizeHint)
+    .join(",");
+}
+
+function hasPasswordResetContext(fields: AutofillTriageFieldResult[]) {
+  const contextText = captureContextText(fields);
+  return (
+    contextText.includes("forgotpassword") ||
+    contextText.includes("resetpassword") ||
+    contextText.includes("passwordreset") ||
+    contextText.includes("changepassword") ||
+    contextText.includes("updatepassword")
+  );
+}
+
 function isCaptureUsernameField(field: AutofillTriageFieldResult) {
   if (field.disabled || field.tagName !== "input") {
     return false;
@@ -222,6 +248,9 @@ export function collectAutofillSubmission(
 
   const registrationPasswordField = pickRegistrationPasswordField(fieldsForUsername);
   if (registrationPasswordField) {
+    const registrationFields = fieldsForUsername.filter(
+      (field) => field.formOpid === registrationPasswordField.formOpid
+    );
     const password = fieldValue(elements, registrationPasswordField, { trim: false });
     const username = fieldValue(
       elements,
@@ -233,6 +262,7 @@ export function collectAutofillSubmission(
         url,
         username,
         password,
+        ...(hasPasswordResetContext(registrationFields) ? {} : { saveOnly: true }),
         submittedAt
       };
     }

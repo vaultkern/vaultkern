@@ -3,6 +3,7 @@ export interface PendingAutofillSubmission {
   username: string;
   password: string;
   newPassword?: string;
+  saveOnly?: boolean;
   submittedAt: number;
 }
 
@@ -32,6 +33,7 @@ export function pendingAutofillSubmissionFromUnknown(
     ...(typeof candidate.newPassword === "string" && candidate.newPassword !== ""
       ? { newPassword: candidate.newPassword }
       : {}),
+    ...(candidate.saveOnly === true ? { saveOnly: true } : {}),
     submittedAt: candidate.submittedAt
   };
 }

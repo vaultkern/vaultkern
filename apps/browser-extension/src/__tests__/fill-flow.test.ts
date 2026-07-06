@@ -1269,6 +1269,95 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("saves a save-only registration submission as new even when the username matches", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/signup"
+      }
+    ]);
+    const runtimeSendMessage = vi.fn(async (message: unknown) => {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as { type?: unknown }).type === "vaultkern_autofill_pending_request"
+      ) {
+        return {
+          pending: {
+            url: "https://example.com/signup",
+            username: "alice",
+            password: "new-registration-secret",
+            saveOnly: true,
+            submittedAt: 1710000000000
+          }
+        };
+      }
+      return { ok: true };
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: runtimeSendMessage
+      },
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Existing",
+        username: "alice",
+        url: "https://example.com/login"
+      }
+    ]);
+    runtimeClientMocks.getEntryDetail.mockResolvedValue({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Existing",
+      username: "alice",
+      password: "old-secret",
+      url: "https://example.com/login",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    });
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    const saveButton = await screen.findByRole("button", {
+      name: "Save Login"
+    });
+    fireEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.createEntry).toHaveBeenCalledWith("vault-1", {
+        parentGroupId: "group-root",
+        title: "example.com",
+        username: "alice",
+        password: "new-registration-secret",
+        url: "https://example.com/signup",
+        notes: "",
+        totpUri: null,
+        customFields: []
+      });
+      expect(runtimeClientMocks.updateEntryFields).not.toHaveBeenCalled();
+      expect(runtimeClientMocks.saveVault).toHaveBeenCalledWith("vault-1");
+      expect(runtimeSendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_pending_clear"
+      });
+    });
+  });
+
   it("updates an existing entry from a pending changed password after user confirmation", async () => {
     const query = vi.fn(async () => [
       {
@@ -4207,6 +4296,7 @@ describe("content script fill message", () => {
         url: expect.any(String),
         username: "new@example.com",
         password: "generated-secret",
+        saveOnly: true,
         submittedAt: expect.any(Number)
       });
     });
@@ -4280,6 +4370,7 @@ describe("content script fill message", () => {
         url: expect.any(String),
         username: "new@example.com",
         password: "generated-secret",
+        saveOnly: true,
         submittedAt: expect.any(Number)
       });
     });
