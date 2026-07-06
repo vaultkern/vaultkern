@@ -31,6 +31,10 @@ const NEW_PASSWORD_PARTS = [
   "verifypassword"
 ];
 const PASSWORD_MASKED_CODE_PARTS = [
+  "cvc",
+  "cvv",
+  "cardcvc",
+  "cardcvv",
   "otp",
   "totp",
   "onetime",
@@ -53,7 +57,7 @@ export interface FieldQualification {
 }
 
 function normalize(value: string | undefined) {
-  return (value ?? "").toLowerCase().replace(/[\s_-]+/g, "");
+  return (value ?? "").toLowerCase().replace(/[\s_/-]+/g, "");
 }
 
 function formActionContext(value: string | undefined) {
@@ -313,13 +317,7 @@ function hasLoginContext(text: string) {
 }
 
 function isPasswordLike(field: AutofillFieldSnapshot) {
-  const autocomplete = fieldAutocompleteTokens(field);
-  return (
-    field.tagName === "input" &&
-    (field.htmlType === "password" ||
-    [...PASSWORD_AUTOCOMPLETE].some((token) => autocomplete.has(token))
-    )
-  );
+  return field.tagName === "input" && field.htmlType === "password";
 }
 
 function qualificationForFillableField(
@@ -368,7 +366,7 @@ function qualificationForFillableField(
     !(
       nonLogin === "non-login:newsletter" &&
       hasLoginContext(`${fieldText},${formText}`) &&
-      hasPasswordSibling(field, snapshot)
+      (hasPasswordSibling(field, snapshot) || isUsernameLike(field, fieldText))
     )
   ) {
     reasons.push(nonLogin);
