@@ -10,13 +10,40 @@ const EMAIL_AUTOCOMPLETE = new Set(["email"]);
 const PASSWORD_AUTOCOMPLETE = new Set(["current-password"]);
 const USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
 const NON_LOGIN_KEYWORDS = ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"];
-const ACCOUNT_CREATION_KEYWORDS = [
+const ACCOUNT_CREATION_EXACT_PARTS = new Set([
   "register",
+  "registration",
   "signup",
   "createaccount",
+  "createyouraccount",
+  "createanaccount",
   "createpassword",
   "newpassword",
   "confirmpassword"
+]);
+const NEW_PASSWORD_PARTS = [
+  "createpassword",
+  "newpassword",
+  "confirmpassword",
+  "passwordconfirmation",
+  "passwordconfirm",
+  "repeatpassword",
+  "verifypassword"
+];
+const PASSWORD_MASKED_CODE_PARTS = [
+  "otp",
+  "totp",
+  "onetime",
+  "onetimecode",
+  "onetimepassword",
+  "securitycode",
+  "verificationcode",
+  "authenticationcode",
+  "authenticatorcode",
+  "mfacode",
+  "2facode",
+  "2stepcode",
+  "2factorcode"
 ];
 
 export interface FieldQualification {
@@ -75,6 +102,35 @@ function joinedFormText(form: AutofillFormSnapshot | undefined) {
     .join(",");
 }
 
+function normalizedParts(text: string) {
+  return text.split(",").filter(Boolean);
+}
+
+function isRegisterAccountCreationPart(part: string) {
+  if (part.startsWith("registered")) {
+    return false;
+  }
+  return part.startsWith("register") || part.startsWith("registration");
+}
+
+function isAccountCreationPart(part: string) {
+  return (
+    ACCOUNT_CREATION_EXACT_PARTS.has(part) ||
+    isRegisterAccountCreationPart(part) ||
+    part.includes("signup") ||
+    part.includes("createaccount") ||
+    part.includes("createyouraccount") ||
+    part.includes("createanaccount") ||
+    part.includes("createpassword") ||
+    part.includes("newpassword") ||
+    part.includes("confirmpassword")
+  );
+}
+
+function hasAccountCreationContext(text: string) {
+  return normalizedParts(text).some(isAccountCreationPart);
+}
+
 function fieldAutocompleteTokens(field: AutofillFieldSnapshot) {
   return new Set(
     (field.autocomplete ?? "")
@@ -84,19 +140,28 @@ function fieldAutocompleteTokens(field: AutofillFieldSnapshot) {
   );
 }
 
+function hasNewPasswordSignal(candidate: AutofillFieldSnapshot) {
+  if (fieldAutocompleteTokens(candidate).has("new-password")) {
+    return true;
+  }
+  return normalizedParts(joinedFieldText(candidate)).some((part) =>
+    NEW_PASSWORD_PARTS.some((keyword) => part.includes(keyword))
+  );
+}
+
 function isAvailablePasswordSibling(candidate: AutofillFieldSnapshot) {
   const autocomplete = fieldAutocompleteTokens(candidate);
   return (
     candidate.htmlType === "password" &&
     candidate.viewable &&
     candidate.fillable &&
-    !autocomplete.has("new-password") &&
+    !hasNewPasswordSignal(candidate) &&
     !autocomplete.has("one-time-code")
   );
 }
 
 function isNewPasswordField(candidate: AutofillFieldSnapshot) {
-  return candidate.htmlType === "password" && fieldAutocompleteTokens(candidate).has("new-password");
+  return candidate.htmlType === "password" && hasNewPasswordSignal(candidate);
 }
 
 function hasScopedField(
@@ -204,10 +269,16 @@ function nonLoginReason(fieldText: string, formText: string) {
   if (NON_LOGIN_KEYWORDS.some((keyword) => searchableText.includes(keyword))) {
     return "non-login:newsletter";
   }
-  if (ACCOUNT_CREATION_KEYWORDS.some((keyword) => searchableText.includes(keyword))) {
+  if (hasAccountCreationContext(searchableText)) {
     return "non-login:account-creation";
   }
   return null;
+}
+
+function hasPasswordMaskedCodeSignal(fieldText: string) {
+  return normalizedParts(fieldText).some((part) =>
+    PASSWORD_MASKED_CODE_PARTS.some((keyword) => part.includes(keyword))
+  );
 }
 
 function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
@@ -277,6 +348,15 @@ function qualificationForFillableField(
   }
 
   if (autocomplete.has("one-time-code")) {
+    reasons.push("excluded:one-time-code");
+    return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  if (
+    field.htmlType === "password" &&
+    !autocomplete.has("current-password") &&
+    hasPasswordMaskedCodeSignal(fieldText)
+  ) {
     reasons.push("excluded:one-time-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }

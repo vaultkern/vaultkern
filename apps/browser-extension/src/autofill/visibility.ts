@@ -38,6 +38,17 @@ function parentElementOrShadowHost(element: HTMLElement) {
   return null;
 }
 
+function isClosedDetailsContent(element: HTMLElement, current: HTMLElement) {
+  if (current.tagName.toLowerCase() !== "details" || current.hasAttribute("open")) {
+    return false;
+  }
+
+  const summary = Array.from(current.children).find(
+    (child) => child.tagName.toLowerCase() === "summary"
+  );
+  return summary === undefined || !summary.contains(element);
+}
+
 export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult {
   const reasons: string[] = [];
   const inputType =
@@ -56,6 +67,9 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
   ) {
     if (current.hidden) {
       addReason(reasons, "not-viewable:hidden");
+    }
+    if (isClosedDetailsContent(element, current)) {
+      addReason(reasons, "not-viewable:details-closed");
     }
 
     const style = current.ownerDocument.defaultView?.getComputedStyle(current);

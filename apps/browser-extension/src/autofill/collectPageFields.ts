@@ -131,35 +131,45 @@ function getHeadingText(form: HTMLFormElement) {
   );
   const previousForm = previousForms[previousForms.length - 1];
 
-  return headings
-    .filter((heading) => {
-      if (!getFieldVisibility(heading as HTMLElement).viewable) {
-        return false;
-      }
-      const ownerForm = heading.closest("form");
-      if (ownerForm === form) {
-        return true;
-      }
-      if (ownerForm !== null) {
-        return false;
-      }
-      const headingIsBeforeForm = Boolean(
-        heading.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING
-      );
-      if (!headingIsBeforeForm) {
-        return false;
-      }
-      return (
-        previousForm === undefined ||
-        Boolean(previousForm.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING)
-      );
-    })
+  const ownedHeadings: Element[] = [];
+  const precedingHeadings: Element[] = [];
+  for (const heading of headings) {
+    if (!getFieldVisibility(heading as HTMLElement).viewable) {
+      continue;
+    }
+    const ownerForm = heading.closest("form");
+    if (ownerForm === form) {
+      ownedHeadings.push(heading);
+      continue;
+    }
+    if (ownerForm !== null) {
+      continue;
+    }
+    const headingIsBeforeForm = Boolean(
+      heading.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING
+    );
+    if (!headingIsBeforeForm) {
+      continue;
+    }
+    if (
+      previousForm !== undefined &&
+      !Boolean(previousForm.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ) {
+      continue;
+    }
+    precedingHeadings.push(heading);
+  }
+
+  return [...precedingHeadings.slice(-1), ...ownedHeadings]
     .map((heading) => cleanText(heading.textContent))
     .filter(Boolean);
 }
 
 function getSubmitText(form: HTMLFormElement) {
   return Array.from(form.querySelectorAll("button, input")).flatMap((element) => {
+    if (!getFieldVisibility(element as HTMLElement).viewable) {
+      return [];
+    }
     const tagName = element.tagName.toLowerCase();
     if (tagName === "button") {
       const type = (element.getAttribute("type") ?? "submit").toLowerCase();
