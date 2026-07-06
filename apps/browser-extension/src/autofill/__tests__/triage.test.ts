@@ -681,7 +681,7 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "register_path_email").reasons).toContain(
       "non-login:account-creation"
     );
-    expect(fieldByName(report, "register_path_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "register_path_password").qualifiedAs).toBe("newPassword");
     expect(fieldByName(report, "registered_path_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "registered_path_password").qualifiedAs).toBe("password");
   });
