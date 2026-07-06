@@ -38,6 +38,29 @@ describe("registration detection fill flow", () => {
     ).toBe("generated-secret");
   });
 
+  it("recognizes spaced create-account headings as registration context", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Create your account</h2>
+        <input name="email" type="email" autocomplete="username" />
+        <input name="new_password" type="password" autocomplete="new-password" />
+        <input name="confirm_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "generated-secret" });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="new_password"]') as HTMLInputElement).value).toBe(
+      "generated-secret"
+    );
+    expect(
+      (document.querySelector('input[name="confirm_password"]') as HTMLInputElement).value
+    ).toBe("generated-secret");
+  });
+
   it("fills the focused registration form when login and registration forms coexist", () => {
     document.body.innerHTML = `
       <form id="login-form">
@@ -276,6 +299,59 @@ describe("registration detection fill flow", () => {
 
     expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#confirm-password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("iterates past reset new-password forms to find a registration form", () => {
+    document.body.innerHTML = `
+      <form id="reset-form">
+        <h2>Reset password</h2>
+        <input id="reset-new-password" name="reset_new_password" type="password" autocomplete="new-password" />
+        <input id="reset-confirm-password" name="reset_confirm_password" type="password" autocomplete="new-password" />
+      </form>
+      <form id="register-form">
+        <h2>Create account</h2>
+        <input id="register-email" name="register_email" type="email" autocomplete="username" />
+        <input id="register-new-password" name="register_new_password" type="password" autocomplete="new-password" />
+        <input id="register-confirm-password" name="register_confirm_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "new@example.com", password: "generated-secret" });
+
+    expect((document.querySelector("#reset-new-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#reset-confirm-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#register-email") as HTMLInputElement).value).toBe(
+      "new@example.com"
+    );
+    expect((document.querySelector("#register-new-password") as HTMLInputElement).value).toBe(
+      "generated-secret"
+    );
+    expect((document.querySelector("#register-confirm-password") as HTMLInputElement).value).toBe(
+      "generated-secret"
+    );
+  });
+
+  it("does not fall back from a focused excluded credential form", () => {
+    document.body.innerHTML = `
+      <form id="reset-form">
+        <h2>Reset password</h2>
+        <input id="reset-email" name="reset_email" type="email" />
+        <input id="reset-new-password" name="reset_new_password" type="password" autocomplete="new-password" />
+      </form>
+      <form id="register-form">
+        <h2>Create account</h2>
+        <input id="register-email" name="register_email" type="email" autocomplete="username" />
+        <input id="register-new-password" name="register_new_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    (document.querySelector("#reset-email") as HTMLInputElement).focus();
+
+    fillLoginForm({ username: "new@example.com", password: "generated-secret" });
+
+    expect((document.querySelector("#reset-email") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#reset-new-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#register-email") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#register-new-password") as HTMLInputElement).value).toBe("");
   });
 
   it("fills the checked-in registration smoke page", () => {

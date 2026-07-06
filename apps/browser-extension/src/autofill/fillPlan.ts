@@ -180,6 +180,8 @@ function formHasRegistrationContext(formFields: AutofillTriageFieldResult[]) {
     searchableText.includes("register") ||
     searchableText.includes("signup") ||
     searchableText.includes("createaccount") ||
+    searchableText.includes("createyouraccount") ||
+    searchableText.includes("createanaccount") ||
     searchableText.includes("createpassword") ||
     searchableText.includes("join")
   );
@@ -207,6 +209,30 @@ function formHasCredentialCandidate(
   );
 }
 
+function hasCredentialSignal(field: AutofillTriageFieldResult) {
+  const searchableText = searchableFieldText(field);
+  const autocomplete = field.autocomplete ?? "";
+  return (
+    field.htmlType === "email" ||
+    field.htmlType === "password" ||
+    autocomplete.includes("username") ||
+    autocomplete.includes("email") ||
+    autocomplete.includes("current-password") ||
+    autocomplete.includes("new-password") ||
+    searchableText.includes("email") ||
+    searchableText.includes("username") ||
+    searchableText.includes("login") ||
+    searchableText.includes("password")
+  );
+}
+
+function formHasCredentialSignal(
+  fields: AutofillTriageFieldResult[],
+  formOpid: string
+) {
+  return fields.some((field) => fieldIsInForm(field, formOpid) && hasCredentialSignal(field));
+}
+
 function pickRegistrationFormOpid(
   fields: AutofillTriageFieldResult[],
   allFields: AutofillTriageFieldResult[]
@@ -231,6 +257,9 @@ function pickRegistrationFormOpid(
       return focusedField.formOpid;
     }
     if (formHasCredentialCandidate(fields, focusedField.formOpid)) {
+      return null;
+    }
+    if (formHasCredentialSignal(allFields, focusedField.formOpid)) {
       return null;
     }
   }
