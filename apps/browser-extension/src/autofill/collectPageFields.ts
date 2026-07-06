@@ -74,10 +74,20 @@ function cssEscape(value: string) {
   return value.replace(/["\\]/g, "\\$&");
 }
 
+function lookupRootForElement(element: Element): ParentNode {
+  const root = element.getRootNode();
+  return "querySelectorAll" in root ? root : element.ownerDocument;
+}
+
+function getElementByIdInRoot(root: ParentNode, id: string) {
+  return root.querySelector<HTMLElement>(`[id="${cssEscape(id)}"]`);
+}
+
 function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
   const labels = new Set<Element>();
+  const lookupRoot = lookupRootForElement(element);
   if (element.id) {
-    element.ownerDocument
+    lookupRoot
       .querySelectorAll<HTMLLabelElement>(`label[for="${cssEscape(element.id)}"]`)
       .forEach((label) => labels.add(label));
   }
@@ -88,7 +98,7 @@ function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAr
 
   const referencedLabels = (element.getAttribute("aria-labelledby") ?? "")
     .split(/\s+/)
-    .map((id) => element.ownerDocument.getElementById(id))
+    .map((id) => (id === "" ? null : getElementByIdInRoot(lookupRoot, id)))
     .filter((label): label is HTMLElement => label !== null);
 
   const labelText = [...Array.from(labels), ...referencedLabels]
@@ -168,10 +178,48 @@ function getSelectOptions(element: Element) {
   return Array.from((element as HTMLSelectElement).options).map((option) => option.value);
 }
 
+function getFieldContainer(
+  element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
+  form: AutofillFormSnapshot | undefined
+) {
+  if (form !== undefined) {
+    return undefined;
+  }
+
+  let container = element.parentElement;
+  while (container) {
+    const tagName = container.tagName.toLowerCase();
+    if (tagName === "body" || tagName === "html" || tagName === "form") {
+      return undefined;
+    }
+    if (container.querySelectorAll(FIELD_SELECTOR).length > 1) {
+      return container;
+    }
+    container = container.parentElement;
+  }
+  return undefined;
+}
+
+function getContainerOpid(container: Element | undefined, containerByElement: Map<Element, string>) {
+  if (container === undefined) {
+    return undefined;
+  }
+
+  const existing = containerByElement.get(container);
+  if (existing) {
+    return existing;
+  }
+
+  const opid = `container-${containerByElement.size}`;
+  containerByElement.set(container, opid);
+  return opid;
+}
+
 function collectField(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
   index: number,
-  formByElement: Map<HTMLFormElement, AutofillFormSnapshot>
+  formByElement: Map<HTMLFormElement, AutofillFormSnapshot>,
+  containerByElement: Map<Element, string>
 ): AutofillFieldSnapshot | null {
   const tagName = getFieldTag(element);
   if (tagName === null) {
@@ -181,6 +229,8 @@ function collectField(
   const visibility = getFieldVisibility(element);
   const fillability = getFieldFillability(element);
   const form = element.form ? formByElement.get(element.form) : undefined;
+  const container = getFieldContainer(element, form);
+  const containerOpid = getContainerOpid(container, containerByElement);
   const htmlType =
     tagName === "input"
       ? optionalString((element as HTMLInputElement).type.toLowerCase())
@@ -189,6 +239,7 @@ function collectField(
   return {
     opid: `field-${index}`,
     formOpid: form?.opid,
+    containerOpid,
     elementNumber: index,
     tagName,
     htmlType,
@@ -214,12 +265,14 @@ function collectField(
 
 export function collectAutofillPageSnapshot(documentRef: Document = document): AutofillPageSnapshot {
   const { forms, formByElement } = collectForms(documentRef);
+  const containerByElement = new Map<Element, string>();
   const fields = collectMatchingElements(documentRef, FIELD_SELECTOR)
     .map((element, index) =>
       collectField(
         element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
         index,
-        formByElement
+        formByElement,
+        containerByElement
       )
     )
     .filter((field): field is AutofillFieldSnapshot => field !== null);

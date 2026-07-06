@@ -22,6 +22,22 @@ function numericCssValue(value: string | undefined) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parentElementOrShadowHost(element: HTMLElement) {
+  if (element.parentElement) {
+    return element.parentElement;
+  }
+
+  const root = element.getRootNode();
+  if (root.nodeType === 11 && "host" in root) {
+    const host = root.host;
+    if (host && host.nodeType === 1) {
+      return host as HTMLElement;
+    }
+  }
+
+  return null;
+}
+
 export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult {
   const reasons: string[] = [];
   const inputType =
@@ -36,7 +52,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
   for (
     let current: HTMLElement | null = element;
     current;
-    current = current.parentElement
+    current = parentElementOrShadowHost(current)
   ) {
     if (current.hidden) {
       addReason(reasons, "not-viewable:hidden");
@@ -90,7 +106,7 @@ export function getFieldFillability(element: HTMLElement): FieldFillabilityResul
   for (
     let current: HTMLElement | null = element;
     current;
-    current = current.parentElement
+    current = parentElementOrShadowHost(current)
   ) {
     if (current.hasAttribute("inert")) {
       reasons.push("not-fillable:inert");

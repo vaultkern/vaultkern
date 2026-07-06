@@ -5,7 +5,8 @@ import type {
   AutofillPageSnapshot
 } from "./types";
 
-const USERNAME_AUTOCOMPLETE = new Set(["username", "email"]);
+const USERNAME_AUTOCOMPLETE = new Set(["username"]);
+const EMAIL_AUTOCOMPLETE = new Set(["email"]);
 const PASSWORD_AUTOCOMPLETE = new Set(["current-password"]);
 const USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
 const NON_LOGIN_KEYWORDS = ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"];
@@ -72,20 +73,70 @@ function fieldAutocompleteTokens(field: AutofillFieldSnapshot) {
 }
 
 function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
-  if (!field.formOpid) {
-    return snapshot.fields.some((candidate) => candidate.htmlType === "password");
+  if (field.formOpid) {
+    return snapshot.fields.some(
+      (candidate) => candidate.formOpid === field.formOpid && candidate.htmlType === "password"
+    );
   }
-  return snapshot.fields.some(
-    (candidate) => candidate.formOpid === field.formOpid && candidate.htmlType === "password"
+  if (field.containerOpid) {
+    return snapshot.fields.some(
+      (candidate) =>
+        !candidate.formOpid &&
+        candidate.containerOpid === field.containerOpid &&
+        candidate.htmlType === "password"
+    );
+  }
+  return false;
+}
+
+function searchPartsForField(field: AutofillFieldSnapshot) {
+  return [
+    field.htmlType,
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.autocomplete,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.ariaDescribedBy,
+    field.labelText,
+    ...field.dataSetValues
+  ];
+}
+
+function searchPartsForForm(form: AutofillFormSnapshot | undefined) {
+  if (!form) {
+    return [];
+  }
+  return [
+    form.htmlId,
+    form.htmlName,
+    form.htmlClass,
+    form.htmlAction,
+    form.htmlMethod,
+    ...form.headingText
+  ];
+}
+
+function hasSearchToken(parts: Array<string | undefined>) {
+  return parts.some((part) =>
+    (part ?? "")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .some((token) => token === "search" || token === "query" || token === "find")
   );
+}
+
+function isSearchField(field: AutofillFieldSnapshot, form: AutofillFormSnapshot | undefined) {
+  if (field.htmlType === "search") {
+    return true;
+  }
+  return hasSearchToken([...searchPartsForField(field), ...searchPartsForForm(form)]);
 }
 
 function hasAnyKeyword(text: string, keywords: string[]) {
   return keywords.some((keyword) => text.includes(keyword));
-}
-
-function isSearchField(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
-  return field.htmlType === "search" || hasAnyKeyword(`${fieldText},${formText}`, ["search", "query", "find"]);
 }
 
 function excludedReason(fieldText: string, formText: string) {
@@ -126,7 +177,10 @@ function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
   }
 
   const autocomplete = fieldAutocompleteTokens(field);
-  if ([...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
+  if (
+    [...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) ||
+    [...EMAIL_AUTOCOMPLETE].some((token) => autocomplete.has(token))
+  ) {
     return true;
   }
 
@@ -165,7 +219,7 @@ function qualificationForFillableField(
   const formText = joinedFormText(form);
   const autocomplete = fieldAutocompleteTokens(field);
 
-  if (isSearchField(field, fieldText, formText)) {
+  if (isSearchField(field, form)) {
     reasons.push("excluded:search");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
@@ -200,12 +254,13 @@ function qualificationForFillableField(
   }
 
   if (isUsernameLike(field, fieldText)) {
-    const explicitAutocomplete = [...USERNAME_AUTOCOMPLETE].some((token) =>
+    const hasUsernameAutocomplete = [...USERNAME_AUTOCOMPLETE].some((token) =>
       autocomplete.has(token)
     );
+    const hasEmailAutocomplete = [...EMAIL_AUTOCOMPLETE].some((token) => autocomplete.has(token));
+    const needsLoginEvidence = (field.htmlType === "email" || hasEmailAutocomplete) && !hasUsernameAutocomplete;
     if (
-      field.htmlType === "email" &&
-      !explicitAutocomplete &&
+      needsLoginEvidence &&
       !hasPasswordSibling(field, snapshot) &&
       !hasLoginContext(fieldText, formText)
     ) {

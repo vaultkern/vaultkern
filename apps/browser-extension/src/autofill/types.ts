@@ -21,6 +21,7 @@ export interface AutofillFormSnapshot {
 export interface AutofillFieldSnapshot {
   opid: string;
   formOpid?: string;
+  containerOpid?: string;
   elementNumber: number;
   tagName: AutofillFieldTag;
   htmlType?: string;

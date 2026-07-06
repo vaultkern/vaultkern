@@ -262,6 +262,53 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "login_email").qualifiedAs).toBe("username");
   });
 
+  it("requires login evidence before treating autocomplete email as username", () => {
+    document.body.innerHTML = `
+      <form id="contact">
+        <input name="contact_email" type="email" autocomplete="email" />
+      </form>
+      <form id="login">
+        <input name="login_email" type="email" autocomplete="email" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "contact_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "login_email").qualifiedAs).toBe("username");
+  });
+
+  it("does not treat search substrings in login URLs as search context", () => {
+    document.body.innerHTML = `
+      <form id="login" action="https://research.example.com/login">
+        <input name="email" type="email" autocomplete="username" />
+        <input name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
+  it("keeps password sibling evidence scoped for form-less fields", () => {
+    document.body.innerHTML = `
+      <input name="contact_email" type="email" />
+      <div>
+        <input name="login_email" type="email" />
+        <input name="login_password" type="password" />
+      </div>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "contact_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "login_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
+  });
+
   it("suppresses account creation forms before marking generic passwords eligible", () => {
     document.body.innerHTML = `
       <form id="signup">
@@ -416,6 +463,35 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "shadow_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("password");
+  });
+
+  it("uses shadow-root labels and host visibility for collected fields", () => {
+    const hiddenHost = document.createElement("div");
+    hiddenHost.hidden = true;
+    document.body.append(hiddenHost);
+    const hiddenRoot = hiddenHost.attachShadow({ mode: "open" });
+    hiddenRoot.innerHTML = `
+      <input name="hidden_shadow_email" type="email" autocomplete="username" />
+    `;
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <form>
+        <label for="shadow-user">Email address</label>
+        <input id="shadow-user" name="opaque_shadow_user" type="text" />
+        <input name="shadow_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "hidden_shadow_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "hidden_shadow_email").reasons).toContain("not-viewable:hidden");
+    expect(fieldByName(report, "opaque_shadow_user").labelText).toBe("Email address");
+    expect(fieldByName(report, "opaque_shadow_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("password");
   });
 
