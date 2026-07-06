@@ -649,18 +649,12 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "create_your_email").reasons).toContain(
       "non-login:account-creation"
     );
-    expect(fieldByName(report, "create_your_password").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "create_your_password").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "create_your_password").qualifiedAs).toBe("newPassword");
     expect(fieldByName(report, "create_an_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "create_an_email").reasons).toContain(
       "non-login:account-creation"
     );
-    expect(fieldByName(report, "create_an_password").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "create_an_password").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "create_an_password").qualifiedAs).toBe("newPassword");
     expect(fieldByName(report, "registered_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "registered_password").qualifiedAs).toBe("password");
   });
@@ -705,8 +699,8 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
-    expect(fieldByName(report, "new_password").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "confirm_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "new_password").qualifiedAs).toBe("newPassword");
+    expect(fieldByName(report, "confirm_password").qualifiedAs).toBe("newPassword");
   });
 
   it("suppresses mixed password and confirmation signup forms", () => {
