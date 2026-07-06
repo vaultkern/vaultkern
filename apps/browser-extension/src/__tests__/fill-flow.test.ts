@@ -1164,12 +1164,10 @@ describe("PopupShell fill flow", () => {
         type: "fill_entry_detail",
         username: "alice",
         password: "secret-123",
-        newPassword: expect.any(String),
         totp: "123456"
       });
       const message = sendMessage.mock.calls[0]?.[1] as { newPassword?: string };
-      expect(message.newPassword).not.toBe("secret-123");
-      expect(message.newPassword?.length).toBeGreaterThanOrEqual(20);
+      expect(message.newPassword).toBeUndefined();
     });
   });
 

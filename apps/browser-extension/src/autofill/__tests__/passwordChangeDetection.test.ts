@@ -38,6 +38,37 @@ describe("password change detection fill flow", () => {
     ).toBe("new-secret");
   });
 
+  it("fills the username in a change-password form when one is required", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Change password</h2>
+        <input name="email" type="email" autocomplete="username" />
+        <input name="current_password" type="password" autocomplete="current-password" />
+        <input name="new_password" type="password" autocomplete="new-password" />
+        <input name="confirm_new_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "old-secret",
+      newPassword: "new-secret"
+    });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect(
+      (document.querySelector('input[name="current_password"]') as HTMLInputElement).value
+    ).toBe("old-secret");
+    expect((document.querySelector('input[name="new_password"]') as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+    expect(
+      (document.querySelector('input[name="confirm_new_password"]') as HTMLInputElement).value
+    ).toBe("new-secret");
+  });
+
   it("uses autocomplete roles even when the current password is not first", () => {
     document.body.innerHTML = `
       <form>
@@ -107,6 +138,60 @@ describe("password change detection fill flow", () => {
       "old-secret"
     );
     expect((document.querySelector("#signup-password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("keeps form-less login fields fillable beside signup fields", () => {
+    document.body.innerHTML = `
+      <input id="login-user" name="username" autocomplete="username" />
+      <input id="login-password" name="password" type="password" />
+      <input id="signup-password" name="signup_password" type="password" autocomplete="new-password" />
+    `;
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "old-secret",
+      newPassword: "new-secret"
+    });
+
+    expect((document.querySelector("#login-user") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#signup-password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("does not let an unfocused change-password form preempt a focused login form", () => {
+    document.body.innerHTML = `
+      <form id="login">
+        <input id="login-user" name="username" autocomplete="username" />
+        <input id="login-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="change">
+        <h2>Change password</h2>
+        <input id="change-current" name="current_password" type="password" autocomplete="current-password" />
+        <input id="change-new" name="new_password" type="password" autocomplete="new-password" />
+        <input id="change-confirm" name="confirm_new_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    (document.querySelector("#login-user") as HTMLInputElement).focus();
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "old-secret",
+      newPassword: "new-secret"
+    });
+
+    expect((document.querySelector("#login-user") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#change-current") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#change-new") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#change-confirm") as HTMLInputElement).value).toBe("");
   });
 
   it("does not put the current password into new-password fields when no new password is supplied", () => {

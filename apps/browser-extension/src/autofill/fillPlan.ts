@@ -234,26 +234,48 @@ function pickCurrentPasswordField(formFields: AutofillTriageFieldResult[]) {
   return passwordFields.find(isCurrentPasswordField) ?? null;
 }
 
-function pickPasswordChangeFormOpid(fields: AutofillTriageFieldResult[]) {
+function formQualifiesForPasswordChange(
+  fields: AutofillTriageFieldResult[],
+  formOpid: string
+) {
+  const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
+  const currentPasswordField = pickCurrentPasswordField(formFields);
+  const formNewPasswordFields = formFields.filter(
+    (field) => field.qualifiedAs === "newPassword"
+  );
+  if (!currentPasswordField || !formNewPasswordFields.length) {
+    return false;
+  }
+
+  const hasAutocompleteRoles =
+    currentPasswordField.reasons.includes("autocomplete:current-password") &&
+    formNewPasswordFields.some((field) => field.reasons.includes("autocomplete:new-password"));
+  return hasAutocompleteRoles || formHasChangePasswordContext(formFields);
+}
+
+function pickPasswordChangeFormOpid(
+  fields: AutofillTriageFieldResult[],
+  allFields: AutofillTriageFieldResult[]
+) {
   const newPasswordFields = fields.filter(
     (field) => field.qualifiedAs === "newPassword" && field.formOpid !== undefined
   );
   const formOpids = new Set(newPasswordFields.map((field) => field.formOpid));
 
-  for (const formOpid of formOpids) {
-    const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
-    const currentPasswordField = pickCurrentPasswordField(formFields);
-    const formNewPasswordFields = formFields.filter(
-      (field) => field.qualifiedAs === "newPassword"
-    );
-    if (!currentPasswordField || !formNewPasswordFields.length) {
-      continue;
+  const focusedField = allFields.find((field) => field.focused && field.formOpid !== undefined);
+  if (focusedField?.formOpid) {
+    if (formOpids.has(focusedField.formOpid)) {
+      return formQualifiesForPasswordChange(fields, focusedField.formOpid)
+        ? focusedField.formOpid
+        : null;
     }
+    if (formHasCredentialCandidate(fields, focusedField.formOpid)) {
+      return null;
+    }
+  }
 
-    const hasAutocompleteRoles =
-      currentPasswordField.reasons.includes("autocomplete:current-password") &&
-      formNewPasswordFields.some((field) => field.reasons.includes("autocomplete:new-password"));
-    if (hasAutocompleteRoles || formHasChangePasswordContext(formFields)) {
+  for (const formOpid of formOpids) {
+    if (formOpid && formQualifiesForPasswordChange(fields, formOpid)) {
       return formOpid;
     }
   }
@@ -269,6 +291,18 @@ function createPasswordChangeActions(
   const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
   const currentPasswordField = pickCurrentPasswordField(formFields);
   const actions: AutofillFillAction[] = [];
+
+  if (typeof payload.username === "string") {
+    const usernameField = formFields.find((field) => field.qualifiedAs === "username");
+    if (usernameField) {
+      actions.push({
+        fieldOpid: usernameField.opid,
+        elementNumber: usernameField.elementNumber,
+        fieldType: usernameField.qualifiedAs,
+        value: payload.username
+      });
+    }
+  }
 
   if (currentPasswordField && typeof payload.password === "string") {
     actions.push({
@@ -632,7 +666,7 @@ export function createLoginFillPlan(
   const fields = candidateFields(report.fields);
   const passwordChangeFormOpid =
     typeof payload.password === "string" && typeof payload.newPassword === "string"
-      ? pickPasswordChangeFormOpid(fields)
+      ? pickPasswordChangeFormOpid(fields, report.fields)
       : null;
   const registrationFormOpid =
     typeof payload.password === "string" ? pickRegistrationFormOpid(fields, report.fields) : null;
