@@ -87,6 +87,21 @@ function fieldHasSiblingNewPassword(
   );
 }
 
+function fieldHasSiblingUsername(
+  field: AutofillTriageFieldResult,
+  fields: AutofillTriageFieldResult[]
+) {
+  if (!field.formOpid) {
+    return false;
+  }
+  return fields.some(
+    (candidate) =>
+      candidate.qualifiedAs === "username" &&
+      candidate.opid !== field.opid &&
+      candidate.formOpid === field.formOpid
+  );
+}
+
 function pickLoginPasswordField(fields: AutofillTriageFieldResult[]) {
   const passwordField = pickPasswordField(fields);
   if (!passwordField) {
@@ -95,7 +110,8 @@ function pickLoginPasswordField(fields: AutofillTriageFieldResult[]) {
 
   if (
     fieldHasSiblingNewPassword(passwordField, fields) &&
-    !isCurrentPasswordField(passwordField)
+    !isCurrentPasswordField(passwordField) &&
+    !fieldHasSiblingUsername(passwordField, fields)
   ) {
     return null;
   }

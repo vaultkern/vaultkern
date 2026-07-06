@@ -185,6 +185,36 @@ describe("password change detection fill flow", () => {
     expect((document.querySelector("#signup-password") as HTMLInputElement).value).toBe("");
   });
 
+  it("keeps same-form login passwords fillable beside signup fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <section>
+          <h2>Sign in</h2>
+          <input id="login-user" name="username" autocomplete="username" />
+          <input id="login-password" name="password" type="password" />
+        </section>
+        <section>
+          <h2>Password setup</h2>
+          <input id="signup-password" name="signup_password" type="password" autocomplete="new-password" />
+        </section>
+      </form>
+    `;
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "old-secret",
+      newPassword: "new-secret"
+    });
+
+    expect((document.querySelector("#login-user") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#signup-password") as HTMLInputElement).value).toBe("");
+  });
+
   it("does not let an unfocused change-password form preempt a focused login form", () => {
     document.body.innerHTML = `
       <form id="login">
