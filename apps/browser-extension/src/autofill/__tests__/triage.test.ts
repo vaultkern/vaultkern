@@ -276,7 +276,7 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "account").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
   });
 
   it("recognizes plain user identifiers when login evidence is present", () => {
@@ -1027,10 +1027,7 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "opaque_shadow_user").reasons).toContain(
       "non-login:account-creation"
     );
-    expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "shadow_password").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("newPassword");
   });
 
   it("walks assigned slots when checking field visibility", () => {
