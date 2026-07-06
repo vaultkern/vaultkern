@@ -715,8 +715,8 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "confirm_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
+    expect(fieldByName(report, "confirm_password").qualifiedAs).toBe("newPassword");
   });
 
   it("matches password reset wording before marking passwords eligible", () => {
