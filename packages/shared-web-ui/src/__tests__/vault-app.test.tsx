@@ -297,7 +297,12 @@ it("unlocks the current recent vault with Windows Hello when quick unlock is ena
     getEntryDetail: vi.fn()
   } satisfies RuntimeClientLike;
 
-  render(<App client={client} />);
+  render(
+    <App
+      client={client}
+      extensionSettingsStore={createSettingsStore({ quickUnlockEnabled: true })}
+    />
+  );
 
   expect(await screen.findByText("Personal")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Unlock with Windows Hello" }));
@@ -577,6 +582,72 @@ it("retries quick unlock preference sync after the current vault is unlocked", a
 
   await waitFor(() => {
     expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(2);
+  });
+});
+
+it("syncs the off quick unlock preference when switching to another current vault", async () => {
+  const settingsStore = createSettingsStore({
+    quickUnlockEnabled: false
+  });
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    },
+    {
+      vaultRefId: "vault-ref-2",
+      displayName: "Work",
+      sourceKind: "local",
+      sourceSummary: "work.kdbx",
+      lastUsedAt: 1776500010,
+      availability: "ready",
+      supportsQuickUnlock: true,
+      isCurrent: false
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    setCurrentVault: vi.fn(async (vaultRefId: string) => {
+      recentVaults[0] = { ...recentVaults[0], isCurrent: false };
+      recentVaults[1] = { ...recentVaults[1], isCurrent: true };
+      return {
+        unlocked: false,
+        activeVaultId: null,
+        currentVaultRefId: vaultRefId,
+        supportsBiometricUnlock: true
+      };
+    }),
+    disableQuickUnlockForCurrentVault: vi.fn(async () => {
+      recentVaults[1] = { ...recentVaults[1], supportsQuickUnlock: false };
+      return {
+        unlocked: false,
+        activeVaultId: null,
+        currentVaultRefId: "vault-ref-2",
+        supportsBiometricUnlock: true
+      };
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Work/ }));
+
+  await waitFor(() => {
+    expect(client.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
   });
 });
 

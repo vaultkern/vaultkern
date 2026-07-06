@@ -1184,7 +1184,7 @@ export function App({
   }, [client, extensionSettings.idleLockMinutes, session?.unlocked]);
 
   useEffect(() => {
-    if (!extensionSettings.quickUnlockEnabled || quickUnlockBusy) {
+    if (quickUnlockBusy) {
       return;
     }
 
@@ -1193,19 +1193,25 @@ export function App({
       recentVaults.find((vault) => vault.isCurrent) ??
       null;
 
-    if (!currentVault || currentVault.supportsQuickUnlock) {
+    if (
+      !currentVault ||
+      currentVault.supportsQuickUnlock === extensionSettings.quickUnlockEnabled
+    ) {
       return;
     }
 
     const syncKey = `${currentVault.vaultRefId}:${
       session?.unlocked === true ? "unlocked" : "locked"
-    }:enable`;
+    }:${extensionSettings.quickUnlockEnabled ? "enable" : "disable"}`;
     if (quickUnlockAutoSyncAttempt.current === syncKey) {
       return;
     }
 
     quickUnlockAutoSyncAttempt.current = syncKey;
-    void syncQuickUnlockPreferenceToCurrentVault(true, extensionSettings);
+    void syncQuickUnlockPreferenceToCurrentVault(
+      extensionSettings.quickUnlockEnabled,
+      extensionSettings
+    );
   }, [
     extensionSettings,
     quickUnlockBusy,

@@ -21,6 +21,17 @@ const container = document.getElementById("root");
 const client = new RuntimeClient(extensionTransport);
 const extensionSettingsStore = createChromeExtensionSettingsStore();
 
+function findCurrentVaultReference(
+  session: SessionState | null,
+  vaults: VaultReference[]
+) {
+  return (
+    vaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
+    vaults.find((vault) => vault.isCurrent) ??
+    null
+  );
+}
+
 function OptionsApp() {
   const [settings, setSettings] = useState<ExtensionSettings>(DEFAULT_EXTENSION_SETTINGS);
   const [loading, setLoading] = useState(true);
@@ -31,6 +42,20 @@ function OptionsApp() {
   const [quickUnlockBusy, setQuickUnlockBusy] = useState(false);
   const [quickUnlockError, setQuickUnlockError] = useState<string | null>(null);
   const quickUnlockAutoSyncAttempt = useRef<string | null>(null);
+
+  async function loadQuickUnlockState() {
+    const [loadedSession, loadedVaults] = await Promise.all([
+      client.getSessionState(),
+      client.listRecentVaults()
+    ]);
+    setSession(loadedSession);
+    setRecentVaults(loadedVaults);
+    setQuickUnlockError(null);
+    return {
+      session: loadedSession,
+      recentVaults: loadedVaults
+    };
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -58,13 +83,10 @@ function OptionsApp() {
       }
 
       try {
-        const [loadedSession, loadedVaults] = await Promise.all([
-          client.getSessionState(),
-          client.listRecentVaults()
-        ]);
+        const loadedState = await loadQuickUnlockState();
         if (!cancelled) {
-          setSession(loadedSession);
-          setRecentVaults(loadedVaults);
+          setSession(loadedState.session);
+          setRecentVaults(loadedState.recentVaults);
           setQuickUnlockError(null);
         }
       } catch (loadQuickUnlockError) {
@@ -85,6 +107,36 @@ function OptionsApp() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshQuickUnlockState = () => {
+      void loadQuickUnlockState().catch((refreshError) => {
+        if (!cancelled) {
+          setQuickUnlockError(
+            errorMessage(
+              refreshError,
+              translate(settings.language, "Failed to update quick unlock")
+            )
+          );
+        }
+      });
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        refreshQuickUnlockState();
+      }
+    };
+
+    window.addEventListener("focus", refreshQuickUnlockState);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", refreshQuickUnlockState);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [settings.language]);
 
   async function saveSettings(nextSettings: ExtensionSettings) {
     setSaving(true);
@@ -112,7 +164,18 @@ function OptionsApp() {
   async function syncQuickUnlockPreferenceToCurrentVault(enabled: boolean) {
     setQuickUnlockError(null);
 
-    if (!currentVaultReference || currentVaultReference.supportsQuickUnlock === enabled) {
+    let currentSession = session;
+    let currentVaults = recentVaults;
+    let currentVault = findCurrentVaultReference(currentSession, currentVaults);
+
+    if (!currentVault) {
+      const loadedState = await loadQuickUnlockState();
+      currentSession = loadedState.session;
+      currentVaults = loadedState.recentVaults;
+      currentVault = findCurrentVaultReference(currentSession, currentVaults);
+    }
+
+    if (!currentVault || currentVault.supportsQuickUnlock === enabled) {
       return;
     }
 
@@ -137,9 +200,7 @@ function OptionsApp() {
   }
 
   const currentVaultReference =
-    recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
-    recentVaults.find((vault) => vault.isCurrent) ??
-    null;
+    findCurrentVaultReference(session, recentVaults);
 
   useEffect(() => {
     if (
@@ -151,14 +212,21 @@ function OptionsApp() {
       return;
     }
 
-    const syncKey = `${currentVaultReference.vaultRefId}:enable`;
+    const syncKey = `${currentVaultReference.vaultRefId}:${
+      session?.unlocked === true ? "unlocked" : "locked"
+    }:enable`;
     if (quickUnlockAutoSyncAttempt.current === syncKey) {
       return;
     }
 
     quickUnlockAutoSyncAttempt.current = syncKey;
     void syncQuickUnlockPreferenceToCurrentVault(true);
-  }, [currentVaultReference, quickUnlockBusy, settings.quickUnlockEnabled]);
+  }, [
+    currentVaultReference,
+    quickUnlockBusy,
+    session?.unlocked,
+    settings.quickUnlockEnabled
+  ]);
 
   return (
     <I18nProvider language={settings.language}>

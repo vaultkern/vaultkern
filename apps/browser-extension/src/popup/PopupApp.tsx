@@ -192,6 +192,7 @@ export function PopupApp({
   const [extensionSettings, setExtensionSettings] = useState(
     DEFAULT_EXTENSION_SETTINGS
   );
+  const extensionSettingsRef = useRef(DEFAULT_EXTENSION_SETTINGS);
   const currentVaultPreload = useRef<Promise<void> | null>(null);
   const webAuthnQuickUnlockAttempted = useRef(false);
   const webAuthnUnlockCompletionSent = useRef(false);
@@ -228,10 +229,20 @@ export function PopupApp({
     );
   }
 
+  async function loadExtensionSettingsForPopup() {
+    const loadedSettings =
+      (await extensionSettingsStore?.load()) ?? DEFAULT_EXTENSION_SETTINGS;
+    const normalizedSettings = normalizeExtensionSettings(loadedSettings);
+    extensionSettingsRef.current = normalizedSettings;
+    setExtensionSettings(normalizedSettings);
+    return normalizedSettings;
+  }
+
   async function enableQuickUnlockAfterPasswordUnlock(
-    unlockedSession: SessionStateLike
+    unlockedSession: SessionStateLike,
+    settingsForUnlock = extensionSettingsRef.current
   ) {
-    if (!extensionSettings.quickUnlockEnabled) {
+    if (!settingsForUnlock.quickUnlockEnabled) {
       return unlockedSession;
     }
 
@@ -245,7 +256,7 @@ export function PopupApp({
     if (!currentVault && unlockedSession.currentVaultRefId) {
       const vaults = limitRecentVaults(
         await client.listRecentVaults(),
-        extensionSettings.recentVaultLimit
+        settingsForUnlock.recentVaultLimit
       );
       setRecentVaults(vaults);
       setRecentVaultsError(null);
@@ -275,7 +286,7 @@ export function PopupApp({
       setUnlockError(
         popupErrorMessage(
           quickUnlockFailure,
-          translate(extensionSettings.language, "Failed to update quick unlock")
+          translate(settingsForUnlock.language, "Failed to update quick unlock")
         )
       );
       setUnlockErrorCause(quickUnlockFailure);
@@ -324,17 +335,7 @@ export function PopupApp({
   useEffect(() => {
     let cancelled = false;
 
-    const settingsPromise =
-      extensionSettingsStore?.load() ?? Promise.resolve(DEFAULT_EXTENSION_SETTINGS);
-
-    settingsPromise
-      .then((loadedSettings) => {
-        const normalizedSettings = normalizeExtensionSettings(loadedSettings);
-        if (!cancelled) {
-          setExtensionSettings(normalizedSettings);
-        }
-        return normalizedSettings;
-      })
+    loadExtensionSettingsForPopup()
       .then((normalizedSettings) =>
         client.listRecentVaults().then((vaults) => ({
           normalizedSettings,
@@ -637,6 +638,7 @@ export function PopupApp({
       if (preload) {
         await preload;
       }
+      const settingsForUnlock = await loadExtensionSettingsForPopup();
       const unlockPassword = password;
       const unlockKeyFilePath = keyFilePath;
       const unlockedSession = await client.unlockCurrentVault({
@@ -647,7 +649,10 @@ export function PopupApp({
         unlockPassword !== "" || unlockKeyFilePath !== "";
       const nextSession =
         shouldEnableQuickUnlock
-          ? await enableQuickUnlockAfterPasswordUnlock(unlockedSession)
+          ? await enableQuickUnlockAfterPasswordUnlock(
+              unlockedSession,
+              settingsForUnlock
+            )
           : unlockedSession;
       setSession(nextSession);
       setPassword("");
