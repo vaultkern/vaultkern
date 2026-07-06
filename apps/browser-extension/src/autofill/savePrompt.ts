@@ -76,11 +76,23 @@ function pickPasswordChangeFields(fields: AutofillTriageFieldResult[]) {
 }
 
 export function collectAutofillSubmission(
-  documentRef: Document = document
+  documentRef: Document = document,
+  submittedForm?: HTMLFormElement
 ): PendingAutofillSubmission | null {
   const snapshot = collectAutofillPageSnapshot(documentRef);
   const report = triageAutofillPage(snapshot);
-  const fields = candidateFields(report.fields);
+  const forms = Array.from(documentRef.querySelectorAll("form"));
+  const submittedFormOpid =
+    submittedForm === undefined
+      ? undefined
+      : snapshot.forms.find((_form, index) => forms[index] === submittedForm)?.opid;
+  if (submittedForm !== undefined && submittedFormOpid === undefined) {
+    return null;
+  }
+  const fields = candidateFields(report.fields).filter(
+    (field) =>
+      submittedFormOpid === undefined || field.formOpid === submittedFormOpid
+  );
   const elements = Array.from(documentRef.querySelectorAll("input, select, textarea"));
   const submittedAt = Date.now();
   const url = documentRef.location.href;

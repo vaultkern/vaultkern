@@ -193,7 +193,7 @@ export function PopupApp({
   onWebAuthnUserVerificationComplete
 }: {
   client: PopupClientLike;
-  findCandidates: (vaultId: string) => Promise<EntrySummary[]>;
+  findCandidates: (vaultId: string, siteUrl?: string) => Promise<EntrySummary[]>;
   fillEntry: (vaultId: string, entryId: string) => Promise<void>;
   activeSite: () => Promise<string>;
   loadPendingAutofillSubmission?: () => Promise<PendingAutofillSubmission | null>;
@@ -695,47 +695,65 @@ export function PopupApp({
       return;
     }
 
-    const matchingEntry =
-      candidates.find((entry) => entry.username === pendingAutofillSubmission.username) ??
-      candidates[0] ??
-      null;
-
-    if (!matchingEntry) {
-      setAutofillSavePrompt({
-        mode: "save",
-        submission: pendingAutofillSubmission
-      });
-      return;
-    }
-
     let cancelled = false;
-    client
-      .getEntryDetail(session.activeVaultId, matchingEntry.id)
-      .then((detail) => {
+    setAutofillSavePrompt(null);
+
+    findCandidates(session.activeVaultId, pendingAutofillSubmission.url)
+      .catch(() => [])
+      .then((pendingCandidates) => {
         if (cancelled) {
           return;
         }
-        if (detail.password === pendingPassword(pendingAutofillSubmission)) {
-          setAutofillSavePrompt(null);
+
+        const matchingEntry =
+          pendingCandidates.find(
+            (entry) => entry.username === pendingAutofillSubmission.username
+          ) ??
+          pendingCandidates[0] ??
+          null;
+
+        if (!matchingEntry) {
+          setAutofillSavePrompt({
+            mode: "save",
+            submission: pendingAutofillSubmission
+          });
           return;
         }
-        setAutofillSavePrompt({
-          mode: "update",
-          submission: pendingAutofillSubmission,
-          entry: matchingEntry,
-          detail
-        });
+
+        void client
+          .getEntryDetail(session.activeVaultId, matchingEntry.id)
+          .then((detail) => {
+            if (cancelled) {
+              return;
+            }
+            if (detail.password === pendingPassword(pendingAutofillSubmission)) {
+              setAutofillSavePrompt(null);
+              return;
+            }
+            setAutofillSavePrompt({
+              mode: "update",
+              submission: pendingAutofillSubmission,
+              entry: matchingEntry,
+              detail
+            });
+          })
+          .catch(() => {
+            if (!cancelled) {
+              setAutofillSavePrompt(null);
+            }
+          });
       })
       .catch(() => {
-        if (!cancelled) {
-          setAutofillSavePrompt(null);
+        if (cancelled) {
+          return;
         }
+        setAutofillSavePrompt(null);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [candidates, client, pendingAutofillSubmission, session?.activeVaultId]);
+  }, [client, findCandidates, pendingAutofillSubmission, session?.activeVaultId]);
 
   useEffect(() => {
     if (webAuthnCeremonyPrompt) {

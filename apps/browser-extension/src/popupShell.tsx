@@ -15,7 +15,11 @@ async function getActiveTab() {
   return tabs[0] as { id?: number; url?: string } | undefined;
 }
 
-export async function requestFillCandidates(vaultId: string) {
+export async function requestFillCandidates(vaultId: string, siteUrl?: string) {
+  if (siteUrl) {
+    return client.findFillCandidates(vaultId, siteUrl);
+  }
+
   const tab = await getActiveTab();
 
   if (!tab?.url) {

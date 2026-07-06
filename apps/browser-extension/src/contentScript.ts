@@ -57,8 +57,10 @@ if (chromeApi?.runtime?.onMessage) {
 if (chromeApi?.runtime?.sendMessage && typeof document !== "undefined") {
   document.addEventListener(
     "submit",
-    () => {
-      const submission = collectAutofillSubmission(document);
+    (event) => {
+      const submittedForm =
+        event.target instanceof HTMLFormElement ? event.target : undefined;
+      const submission = collectAutofillSubmission(document, submittedForm);
       if (!submission) {
         return;
       }

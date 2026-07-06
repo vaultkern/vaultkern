@@ -1356,6 +1356,122 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("matches pending password updates by the submitted url instead of the active tab", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://other.example/login"
+      }
+    ]);
+    const runtimeSendMessage = vi.fn(async (message: unknown) => {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as { type?: unknown }).type === "vaultkern_autofill_pending_request"
+      ) {
+        return {
+          pending: {
+            url: "https://example.com/login",
+            username: "alice",
+            password: "old-secret",
+            newPassword: "new-secret",
+            submittedAt: 1710000000000
+          }
+        };
+      }
+      return { ok: true };
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: runtimeSendMessage
+      },
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockImplementation(
+      async (_vaultId: string, url: string) => {
+        if (url === "https://other.example/login") {
+          return [
+            {
+              id: "entry-other",
+              title: "Other Site",
+              username: "alice",
+              url
+            }
+          ];
+        }
+        if (url === "https://example.com/login") {
+          return [
+            {
+              id: "entry-pending",
+              title: "Submitted Site",
+              username: "alice",
+              url
+            }
+          ];
+        }
+        return [];
+      }
+    );
+    runtimeClientMocks.getEntryDetail.mockImplementation(async (_vaultId, entryId) => ({
+      type: "entry_detail",
+      id: entryId,
+      title: entryId === "entry-pending" ? "Submitted Site" : "Other Site",
+      username: "alice",
+      password: "old-secret",
+      url:
+        entryId === "entry-pending"
+          ? "https://example.com/login"
+          : "https://other.example/login",
+      notes: "keep me",
+      totpUri: null,
+      customFields: []
+    }));
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    const updateButton = await screen.findByRole("button", {
+      name: "Update Password"
+    });
+    fireEvent.click(updateButton);
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.findFillCandidates).toHaveBeenCalledWith(
+        "vault-1",
+        "https://example.com/login"
+      );
+      expect(runtimeClientMocks.updateEntryFields).toHaveBeenCalledWith(
+        "vault-1",
+        "entry-pending",
+        {
+          title: "Submitted Site",
+          username: "alice",
+          password: "new-secret",
+          url: "https://example.com/login",
+          notes: "keep me",
+          totpUri: null,
+          customFields: []
+        }
+      );
+      expect(runtimeClientMocks.updateEntryFields).not.toHaveBeenCalledWith(
+        "vault-1",
+        "entry-other",
+        expect.anything()
+      );
+    });
+  });
+
   it("opens the full manager in a dedicated extension page", async () => {
     const query = vi.fn(async () => [
       {
@@ -3383,6 +3499,37 @@ describe("content script fill message", () => {
       password: "captured-secret",
       submittedAt: expect.any(Number)
     });
+  });
+
+  it("ignores filled credentials outside the submitted form", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const addListener = vi.fn();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    document.body.innerHTML = `
+      <form id="login-form">
+        <input name="email" type="email" autocomplete="username" value="alice@example.com" />
+        <input name="password" type="password" autocomplete="current-password" value="captured-secret" />
+      </form>
+      <form id="search-form">
+        <input name="q" type="search" value="pricing" />
+      </form>
+    `;
+
+    await import("../contentScript");
+    document.querySelector("#search-form")?.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true })
+    );
+
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("forwards WebAuthn page observations with the actual page origin", async () => {
