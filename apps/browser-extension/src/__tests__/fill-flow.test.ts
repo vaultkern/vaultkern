@@ -351,6 +351,22 @@ describe("fillLoginForm", () => {
     expect(inputValue("#otp-code")).toBe("");
     expect(inputValue("#postcode")).toBe("90210");
   });
+
+  it("does not fill an unrelated email form when the login form only has a password", () => {
+    document.body.innerHTML = `
+      <form id="newsletter-form">
+        <input id="newsletter-email" type="email" autocomplete="email" value="" />
+      </form>
+      <form id="login-form">
+        <input id="login-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#newsletter-email")).toBe("");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
 });
 
 describe("PopupShell fill flow", () => {

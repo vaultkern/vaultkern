@@ -123,17 +123,23 @@ function usernameScore(input: HTMLInputElement) {
   return score;
 }
 
-function pickUsernameField() {
+function pickUsernameField(passwordField: HTMLInputElement | null) {
   const candidates = Array.from(
     document.querySelectorAll('input[type="text"], input[type="email"]')
   ).filter((input): input is HTMLInputElement => input instanceof HTMLInputElement);
 
-  return candidates
+  const scoredCandidates = candidates
     .filter(isWritableVisibleInput)
     .map((input, index) => ({ input, score: usernameScore(input), index }))
     .filter((candidate) => candidate.score > 0)
-    .sort((left, right) => right.score - left.score || left.index - right.index)[0]
-    ?.input;
+    .sort((left, right) => right.score - left.score || left.index - right.index);
+
+  if (passwordField?.form) {
+    return scoredCandidates.find((candidate) => candidate.input.form === passwordField.form)
+      ?.input;
+  }
+
+  return scoredCandidates[0]?.input;
 }
 
 function isPasswordChangeField(input: HTMLInputElement) {
@@ -183,8 +189,8 @@ export function fillLoginForm(payload: {
   username?: string;
   password?: string;
 }) {
-  const username = pickUsernameField();
   const password = pickPasswordField();
+  const username = pickUsernameField(password);
 
   if (typeof payload.username === "string" && username) {
     writeFieldValue(username, payload.username);
