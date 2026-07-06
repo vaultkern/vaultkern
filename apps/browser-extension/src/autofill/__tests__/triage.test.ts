@@ -590,7 +590,7 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "disabled_sibling_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "disabled_sibling_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "new_password_sibling_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "new_password_sibling").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "new_password_sibling").qualifiedAs).toBe("newPassword");
   });
 
   it("ignores hidden new-password siblings as account-creation evidence", () => {
