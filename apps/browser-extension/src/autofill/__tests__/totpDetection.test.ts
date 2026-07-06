@@ -52,6 +52,30 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#email-code") as HTMLInputElement).value).toBe("");
   });
 
+  it("does not let generic MFA form context override SMS or email code labels", () => {
+    document.body.innerHTML = `
+      <form aria-label="Two-factor verification">
+        <label for="sms-code">Enter the SMS code sent to your phone</label>
+        <input id="sms-code" name="sms_code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#sms-code") as HTMLInputElement).value).toBe("");
+
+    document.body.innerHTML = `
+      <form aria-label="Two-factor verification">
+        <label for="email-code">Enter the email code we sent you</label>
+        <input id="email-code" name="email_code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#email-code") as HTMLInputElement).value).toBe("");
+  });
+
   it("recognizes authenticator-app code prompts as TOTP", () => {
     document.body.innerHTML = `
       <form>
@@ -160,6 +184,47 @@ describe("totp autofill detection", () => {
       "secret-123"
     );
     expect((document.querySelector("#otp-code") as HTMLInputElement).value).toBe("123456");
+  });
+
+  it("does not let shared MFA styling override unannotated password fields", () => {
+    document.body.innerHTML = `
+      <form aria-label="Two-factor verification">
+        <input id="password" class="mfa-field" type="password" name="password" />
+        <input id="otp-code" class="mfa-field" name="otp" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({
+      password: "secret-123",
+      totp: "123456"
+    });
+
+    expect((document.querySelector("#password") as HTMLInputElement).value).toBe(
+      "secret-123"
+    );
+    expect((document.querySelector("#otp-code") as HTMLInputElement).value).toBe("123456");
+  });
+
+  it("recognizes numeric two-step and two-factor MFA labels", () => {
+    document.body.innerHTML = `
+      <form aria-label="2-step verification">
+        <input id="step-code" name="code" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#step-code") as HTMLInputElement).value).toBe("123456");
+
+    document.body.innerHTML = `
+      <form aria-label="2-factor authentication">
+        <input id="factor-code" name="code" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "654321" });
+
+    expect((document.querySelector("#factor-code") as HTMLInputElement).value).toBe("654321");
   });
 
   it("recognizes one-time-password prompts as TOTP", () => {

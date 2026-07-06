@@ -60,6 +60,8 @@ const TOTP_KEYWORDS = [
   "totp",
   "otp",
   "2fa",
+  "2factor",
+  "2step",
   "mfa",
   "onetimecode",
   "onetimepassword",
@@ -72,14 +74,10 @@ const TOTP_KEYWORDS = [
 ];
 const AUTHENTICATOR_TOTP_KEYWORDS = [
   "totp",
-  "2fa",
-  "mfa",
   "authenticationcode",
   "authenticator",
   "authenticatorapp",
-  "authenticatorcode",
-  "twofactor",
-  "twostep"
+  "authenticatorcode"
 ];
 const TOTP_INPUT_TYPES = new Set(["number", "password", "tel", "text"]);
 
@@ -394,16 +392,23 @@ function hasAuthenticatorTotpKeyword(text: string) {
   return AUTHENTICATOR_TOTP_KEYWORDS.some((keyword) => text.includes(keyword));
 }
 
+function hasOutOfBandCodeSignal(text: string) {
+  return (
+    text.includes("sms") ||
+    text.includes("textmessage") ||
+    text.includes("emailcode") ||
+    text.includes("emailotp") ||
+    text.includes("emailverification") ||
+    text.includes("senttoyouremail")
+  );
+}
+
 function outOfBandCodeReason(
   fieldText: string,
   formText: string,
   autocomplete: Set<string>
 ) {
   const searchableText = `${fieldText},${formText}`;
-  if (hasAuthenticatorTotpKeyword(searchableText)) {
-    return null;
-  }
-
   const hasCodeContext =
     autocomplete.has("one-time-code") ||
     searchableText.includes("code") ||
@@ -413,13 +418,15 @@ function outOfBandCodeReason(
     return null;
   }
 
-  if (
-    searchableText.includes("sms") ||
-    searchableText.includes("textmessage") ||
-    searchableText.includes("emailcode") ||
-    searchableText.includes("emailverification") ||
-    searchableText.includes("senttoyouremail")
-  ) {
+  if (hasOutOfBandCodeSignal(fieldText)) {
+    return "excluded:out-of-band-code";
+  }
+
+  if (hasAuthenticatorTotpKeyword(searchableText)) {
+    return null;
+  }
+
+  if (hasOutOfBandCodeSignal(formText)) {
     return "excluded:out-of-band-code";
   }
 

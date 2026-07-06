@@ -795,8 +795,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "otp").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "otp").reasons).toContain("excluded:one-time-code");
+    expect(fieldByName(report, "otp").qualifiedAs).toBe("totp");
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
