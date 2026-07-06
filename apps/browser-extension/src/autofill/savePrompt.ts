@@ -16,13 +16,86 @@ function candidateFields(fields: AutofillTriageFieldResult[]) {
     .sort(byDocumentOrder);
 }
 
+function normalizeHint(value: string | undefined) {
+  return (value ?? "").toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function fieldAutocompleteTokens(field: AutofillTriageFieldResult) {
+  return new Set(
+    (field.autocomplete ?? "")
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean)
+  );
+}
+
+function captureHintText(field: AutofillTriageFieldResult) {
+  return [
+    field.htmlType,
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.autocomplete,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.labelText,
+    ...field.dataSetValues
+  ]
+    .map(normalizeHint)
+    .join(",");
+}
+
+function isCaptureUsernameField(field: AutofillTriageFieldResult) {
+  if (field.disabled || field.tagName !== "input") {
+    return false;
+  }
+
+  const autocomplete = fieldAutocompleteTokens(field);
+  if (autocomplete.has("username") || autocomplete.has("email")) {
+    return true;
+  }
+
+  const fieldText = captureHintText(field);
+  return (
+    field.qualifiedAs === "username" ||
+    field.htmlType === "email" ||
+    fieldText.includes("username") ||
+    fieldText.includes("userid") ||
+    fieldText.includes("email") ||
+    fieldText.includes("login")
+  );
+}
+
+function isCaptureNewPasswordField(field: AutofillTriageFieldResult) {
+  if (field.disabled || field.tagName !== "input") {
+    return false;
+  }
+
+  const autocomplete = fieldAutocompleteTokens(field);
+  if (autocomplete.has("new-password")) {
+    return true;
+  }
+
+  const fieldText = captureHintText(field);
+  return (
+    field.qualifiedAs === "newPassword" ||
+    (field.htmlType === "password" &&
+      (fieldText.includes("newpassword") ||
+        fieldText.includes("createpassword") ||
+        fieldText.includes("confirmpassword")))
+  );
+}
+
 function captureFields(fields: AutofillTriageFieldResult[]) {
   return fields
     .filter(
       (field) =>
-        field.eligible &&
-        field.viewable &&
-        (field.fillable || field.qualifiedAs === "username")
+        (field.eligible &&
+          field.viewable &&
+          (field.fillable || field.qualifiedAs === "username")) ||
+        isCaptureUsernameField(field) ||
+        isCaptureNewPasswordField(field)
     )
     .sort(byDocumentOrder);
 }
@@ -54,7 +127,7 @@ function pickUsernameField(
   fields: AutofillTriageFieldResult[],
   passwordField: AutofillTriageFieldResult | null
 ) {
-  const usernameFields = fields.filter((field) => field.qualifiedAs === "username");
+  const usernameFields = fields.filter(isCaptureUsernameField);
   if (passwordField?.formOpid) {
     const sameFormUsername = usernameFields.find(
       (field) => field.formOpid === passwordField.formOpid
@@ -67,7 +140,7 @@ function pickUsernameField(
 }
 
 function pickPasswordChangeFields(fields: AutofillTriageFieldResult[]) {
-  const newPasswordField = fields.find((field) => field.qualifiedAs === "newPassword");
+  const newPasswordField = fields.find(isCaptureNewPasswordField);
   if (!newPasswordField) {
     return null;
   }
@@ -89,7 +162,7 @@ function pickPasswordChangeFields(fields: AutofillTriageFieldResult[]) {
 }
 
 function pickRegistrationPasswordField(fields: AutofillTriageFieldResult[]) {
-  const newPasswordField = fields.find((field) => field.qualifiedAs === "newPassword");
+  const newPasswordField = fields.find(isCaptureNewPasswordField);
   if (!newPasswordField) {
     return null;
   }
@@ -124,7 +197,7 @@ export function collectAutofillSubmission(
   const submittedAt = Date.now();
   const url = documentRef.location.href;
 
-  const passwordChangeFields = pickPasswordChangeFields(fields);
+  const passwordChangeFields = pickPasswordChangeFields(fieldsForUsername);
   if (passwordChangeFields) {
     const password = fieldValue(elements, passwordChangeFields.currentPasswordField, {
       trim: false
@@ -147,7 +220,7 @@ export function collectAutofillSubmission(
     }
   }
 
-  const registrationPasswordField = pickRegistrationPasswordField(fields);
+  const registrationPasswordField = pickRegistrationPasswordField(fieldsForUsername);
   if (registrationPasswordField) {
     const password = fieldValue(elements, registrationPasswordField, { trim: false });
     const username = fieldValue(

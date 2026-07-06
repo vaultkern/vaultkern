@@ -287,6 +287,17 @@ export function PopupApp({
     }
   }
 
+  function savedUrlForPendingSubmission(submission: PendingAutofillSubmission) {
+    try {
+      const url = new URL(submission.url);
+      url.search = "";
+      url.hash = "";
+      return url.href;
+    } catch {
+      return submission.url.split(/[?#]/, 1)[0] || submission.url;
+    }
+  }
+
   function entryMatchesPendingUsername(
     entry: EntrySummary,
     submission: PendingAutofillSubmission
@@ -711,7 +722,6 @@ export function PopupApp({
     setAutofillSavePrompt(null);
 
     findCandidates(session.activeVaultId, pendingAutofillSubmission.url)
-      .catch(() => [])
       .then(async (pendingCandidates) => {
         if (cancelled) {
           return;
@@ -730,21 +740,24 @@ export function PopupApp({
 
         try {
           if (hasSubmittedUsername) {
-            const matchingEntry =
-              pendingCandidates.find((entry) =>
-                entryMatchesPendingUsername(entry, pendingAutofillSubmission)
-              ) ?? null;
-            if (!matchingEntry) {
+            const matchingEntries = pendingCandidates.filter((entry) =>
+              entryMatchesPendingUsername(entry, pendingAutofillSubmission)
+            );
+            if (!matchingEntries.length) {
               setAutofillSavePrompt({
                 mode: "save",
                 submission: pendingAutofillSubmission
               });
               return;
             }
+            if (matchingEntries.length !== 1) {
+              void clearAutofillPrompt();
+              return;
+            }
 
             const detail = await client.getEntryDetail(
               session.activeVaultId,
-              matchingEntry.id
+              matchingEntries[0].id
             );
             if (cancelled) {
               return;
@@ -763,7 +776,7 @@ export function PopupApp({
             setAutofillSavePrompt({
               mode: "update",
               submission: pendingAutofillSubmission,
-              entry: matchingEntry,
+              entry: matchingEntries[0],
               detail
             });
             return;
@@ -1132,7 +1145,7 @@ export function PopupApp({
             title: titleForPendingSubmission(autofillSavePrompt.submission),
             username: autofillSavePrompt.submission.username,
             password: pendingPassword(autofillSavePrompt.submission),
-            url: autofillSavePrompt.submission.url,
+            url: savedUrlForPendingSubmission(autofillSavePrompt.submission),
             notes: "",
             totpUri: null,
             customFields: []
@@ -1151,7 +1164,9 @@ export function PopupApp({
             title: autofillSavePrompt.detail.title,
             username: autofillSavePrompt.detail.username,
             password: pendingPassword(autofillSavePrompt.submission),
-            url: autofillSavePrompt.detail.url || autofillSavePrompt.submission.url,
+            url:
+              autofillSavePrompt.detail.url ||
+              savedUrlForPendingSubmission(autofillSavePrompt.submission),
             notes: autofillSavePrompt.detail.notes,
             totpUri: autofillSavePrompt.detail.totpUri ?? null,
             customFields: autofillSavePrompt.detail.customFields ?? []

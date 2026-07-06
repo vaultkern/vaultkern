@@ -55,21 +55,25 @@ if (chromeApi?.runtime?.onMessage) {
 }
 
 if (chromeApi?.runtime?.sendMessage && typeof document !== "undefined") {
-  document.addEventListener("submit", (event) => {
-    const submittedForm =
-      event.target instanceof HTMLFormElement ? event.target : undefined;
-    queueMicrotask(() => {
-      if (event.defaultPrevented) {
-        return;
-      }
-      const submission = collectAutofillSubmission(document, submittedForm);
-      if (!submission) {
-        return;
-      }
-      void chromeApi.runtime.sendMessage({
-        type: "vaultkern_autofill_submission",
-        ...submission
+  document.addEventListener(
+    "submit",
+    (event) => {
+      const submittedForm =
+        event.target instanceof HTMLFormElement ? event.target : undefined;
+      queueMicrotask(() => {
+        if (event.defaultPrevented) {
+          return;
+        }
+        const submission = collectAutofillSubmission(document, submittedForm);
+        if (!submission) {
+          return;
+        }
+        void chromeApi.runtime.sendMessage({
+          type: "vaultkern_autofill_submission",
+          ...submission
+        });
       });
-    });
-  });
+    },
+    { capture: true }
+  );
 }
