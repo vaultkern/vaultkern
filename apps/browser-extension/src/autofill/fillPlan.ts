@@ -98,12 +98,85 @@ function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | unde
   return field.formOpid === formOpid;
 }
 
+function normalizeText(value: string | undefined) {
+  return (value ?? "").toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function searchableFieldText(field: AutofillTriageFieldResult) {
+  return [
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.autocomplete,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.labelText,
+    field.formContext?.htmlId,
+    field.formContext?.htmlName,
+    field.formContext?.htmlClass,
+    field.formContext?.htmlAction,
+    field.formContext?.ariaLabel,
+    ...((field.formContext?.headingText ?? []) as string[])
+  ]
+    .map(normalizeText)
+    .join(",");
+}
+
+function formSearchText(formFields: AutofillTriageFieldResult[]) {
+  return formFields.map(searchableFieldText).join(",");
+}
+
+function isCurrentPasswordField(field: AutofillTriageFieldResult) {
+  const searchableText = searchableFieldText(field);
+  return (
+    field.reasons.includes("autocomplete:current-password") ||
+    searchableText.includes("currentpassword") ||
+    searchableText.includes("oldpassword") ||
+    searchableText.includes("existingpassword")
+  );
+}
+
+function formHasResetPasswordContext(formFields: AutofillTriageFieldResult[]) {
+  const searchableText = formSearchText(formFields);
+  return (
+    searchableText.includes("resetpassword") ||
+    searchableText.includes("changepassword") ||
+    searchableText.includes("updatepassword") ||
+    searchableText.includes("forgotpassword")
+  );
+}
+
+function formHasRegistrationContext(formFields: AutofillTriageFieldResult[]) {
+  const searchableText = formSearchText(formFields);
+  return (
+    searchableText.includes("register") ||
+    searchableText.includes("signup") ||
+    searchableText.includes("createaccount") ||
+    searchableText.includes("createpassword") ||
+    searchableText.includes("join")
+  );
+}
+
 function formHasCurrentPassword(fields: AutofillTriageFieldResult[], formOpid: string) {
   return fields.some(
     (field) =>
       fieldIsInForm(field, formOpid) &&
       field.qualifiedAs === "password" &&
-      field.reasons.includes("autocomplete:current-password")
+      isCurrentPasswordField(field)
+  );
+}
+
+function formHasCredentialCandidate(
+  fields: AutofillTriageFieldResult[],
+  formOpid: string
+) {
+  return fields.some(
+    (field) =>
+      fieldIsInForm(field, formOpid) &&
+      (field.qualifiedAs === "username" ||
+        field.qualifiedAs === "password" ||
+        field.qualifiedAs === "newPassword")
   );
 }
 
@@ -123,19 +196,29 @@ function pickRegistrationFormOpid(
     const focusedRegistrationForm = newPasswordFields.some((field) =>
       fieldIsInForm(field, focusedField.formOpid)
     );
-    if (
-      focusedRegistrationForm &&
-      !formHasCurrentPassword(fields, focusedField.formOpid)
-    ) {
+    if (focusedRegistrationForm && !formHasCurrentPassword(fields, focusedField.formOpid)) {
+      const formFields = fields.filter((field) => fieldIsInForm(field, focusedField.formOpid));
+      if (formHasResetPasswordContext(formFields)) {
+        return null;
+      }
       return focusedField.formOpid;
     }
-    return null;
+    if (formHasCredentialCandidate(fields, focusedField.formOpid)) {
+      return null;
+    }
   }
 
   const loginPasswordFields = fields.filter((field) => field.qualifiedAs === "password");
   if (!loginPasswordFields.length) {
     const formOpid = newPasswordFields[0].formOpid;
-    return formOpid && !formHasCurrentPassword(fields, formOpid) ? formOpid : null;
+    if (!formOpid || formHasCurrentPassword(fields, formOpid)) {
+      return null;
+    }
+    const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
+    if (formHasResetPasswordContext(formFields) || !formHasRegistrationContext(formFields)) {
+      return null;
+    }
+    return formOpid;
   }
 
   return null;
@@ -162,7 +245,12 @@ function createRegistrationActions(
   }
 
   if (typeof payload.password === "string") {
-    for (const passwordField of formFields.filter((field) => field.qualifiedAs === "newPassword")) {
+    const passwordFields = formHasCurrentPassword(fields, formOpid ?? "")
+      ? formFields.filter((field) => field.qualifiedAs === "newPassword")
+      : formFields.filter(
+          (field) => field.qualifiedAs === "newPassword" || field.qualifiedAs === "password"
+        );
+    for (const passwordField of passwordFields) {
       actions.push({
         fieldOpid: passwordField.opid,
         elementNumber: passwordField.elementNumber,
