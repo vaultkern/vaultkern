@@ -39,17 +39,25 @@ function OptionsApp() {
   const [error, setError] = useState<string | null>(null);
   const [session, setSession] = useState<SessionState | null>(null);
   const [recentVaults, setRecentVaults] = useState<VaultReference[]>([]);
+  const [quickUnlockSupportKnown, setQuickUnlockSupportKnown] = useState(false);
   const [quickUnlockBusy, setQuickUnlockBusy] = useState(false);
   const [quickUnlockError, setQuickUnlockError] = useState<string | null>(null);
   const quickUnlockAutoSyncAttempt = useRef<string | null>(null);
 
   async function loadQuickUnlockState() {
+    const sessionPromise = client.getSessionState().then((loadedSession) => {
+      setSession(loadedSession);
+      setQuickUnlockSupportKnown(true);
+      return loadedSession;
+    });
+    const recentVaultsPromise = client.listRecentVaults().then((loadedVaults) => {
+      setRecentVaults(loadedVaults);
+      return loadedVaults;
+    });
     const [loadedSession, loadedVaults] = await Promise.all([
-      client.getSessionState(),
-      client.listRecentVaults()
+      sessionPromise,
+      recentVaultsPromise
     ]);
-    setSession(loadedSession);
-    setRecentVaults(loadedVaults);
     setQuickUnlockError(null);
     return {
       session: loadedSession,
@@ -91,6 +99,7 @@ function OptionsApp() {
         }
       } catch (loadQuickUnlockError) {
         if (!cancelled) {
+          setQuickUnlockSupportKnown(true);
           setQuickUnlockError(
             errorMessage(
               loadQuickUnlockError,
@@ -232,14 +241,14 @@ function OptionsApp() {
     <I18nProvider language={settings.language}>
       <main style={pageStyle}>
         <div style={shellStyle}>
-          {loading ? (
+          {loading || !quickUnlockSupportKnown ? (
             <div style={messageStyle}>Loading...</div>
           ) : (
             <ExtensionSettingsPanel
               settings={settings}
               saving={saving}
               error={error}
-              quickUnlockSupported={session?.supportsBiometricUnlock !== false}
+              quickUnlockSupported={session?.supportsBiometricUnlock === true}
               quickUnlockEnabled={settings.quickUnlockEnabled}
               quickUnlockBusy={quickUnlockBusy}
               quickUnlockError={quickUnlockError}

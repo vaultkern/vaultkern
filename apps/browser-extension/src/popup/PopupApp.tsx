@@ -254,18 +254,22 @@ export function PopupApp({
       null;
 
     if (!currentVault && unlockedSession.currentVaultRefId) {
-      const vaults = limitRecentVaults(
-        await client.listRecentVaults(),
-        settingsForUnlock.recentVaultLimit
-      );
-      setRecentVaults(vaults);
-      setRecentVaultsError(null);
-      currentVault =
-        vaults.find(
-          (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
-        ) ??
-        vaults.find((vault) => vault.isCurrent) ??
-        null;
+      try {
+        const vaults = limitRecentVaults(
+          await client.listRecentVaults(),
+          settingsForUnlock.recentVaultLimit
+        );
+        setRecentVaults(vaults);
+        setRecentVaultsError(null);
+        currentVault =
+          vaults.find(
+            (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
+          ) ??
+          vaults.find((vault) => vault.isCurrent) ??
+          null;
+      } catch {
+        return unlockedSession;
+      }
     }
 
     if (currentVault?.supportsQuickUnlock) {
@@ -279,7 +283,7 @@ export function PopupApp({
     try {
       const nextSession = await client.enableQuickUnlockForCurrentVault();
       const vaults = await client.listRecentVaults();
-      setRecentVaults(limitRecentVaults(vaults, extensionSettings.recentVaultLimit));
+      setRecentVaults(limitRecentVaults(vaults, settingsForUnlock.recentVaultLimit));
       setRecentVaultsError(null);
       return nextSession;
     } catch (quickUnlockFailure) {

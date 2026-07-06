@@ -114,7 +114,9 @@ it("syncs an off quick unlock preference after options vault data finishes loadi
   await renderOptionsPage();
 
   const quickUnlock = await screen.findByRole("checkbox", { name: "Quick Unlock" });
-  expect(quickUnlock).toBeChecked();
+  await waitFor(() => {
+    expect(quickUnlock).toBeChecked();
+  });
   fireEvent.click(quickUnlock);
   fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
 
@@ -181,5 +183,38 @@ it("retries options quick unlock setup after a locked current vault is unlocked"
 
   await waitFor(() => {
     expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(2);
+  });
+});
+
+it("keeps options loading until biometric support is known", async () => {
+  installChromeStorage({
+    recentVaultLimit: 10,
+    language: "en",
+    idleLockMinutes: 0,
+    clearClipboardSeconds: 30,
+    passkeyProviderEnabled: false,
+    quickUnlockEnabled: false
+  });
+
+  const slowSession = createDeferred<{
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+    supportsBiometricUnlock: boolean;
+  }>();
+
+  runtimeClientMocks.getSessionState.mockReturnValue(slowSession.promise);
+  runtimeClientMocks.listRecentVaults.mockResolvedValue([]);
+
+  await renderOptionsPage();
+
+  expect(await screen.findByText("Loading...")).toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: "Quick Unlock" })).not.toBeInTheDocument();
+
+  slowSession.resolve({
+    unlocked: false,
+    activeVaultId: null,
+    currentVaultRefId: null,
+    supportsBiometricUnlock: false
   });
 });
