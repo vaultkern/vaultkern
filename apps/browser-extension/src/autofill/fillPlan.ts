@@ -181,6 +181,21 @@ function isRegistrationUsernameFallback(
   );
 }
 
+function fieldScopeMatches(
+  left: AutofillTriageFieldResult,
+  right: AutofillTriageFieldResult
+) {
+  if (left.formOpid !== undefined || right.formOpid !== undefined) {
+    return left.formOpid !== undefined && left.formOpid === right.formOpid;
+  }
+
+  if (left.containerOpid !== undefined || right.containerOpid !== undefined) {
+    return left.containerOpid !== undefined && left.containerOpid === right.containerOpid;
+  }
+
+  return false;
+}
+
 function fieldHasSiblingNewPassword(
   field: AutofillTriageFieldResult,
   fields: AutofillTriageFieldResult[]
@@ -247,12 +262,12 @@ function pickUsernameField(
     return null;
   }
 
-  if (passwordField?.formOpid) {
-    const sameFormUsername = usernameFields.find(
-      (field) => field.formOpid === passwordField.formOpid
+  if (passwordField) {
+    const sameScopeUsername = usernameFields.find((field) =>
+      fieldScopeMatches(field, passwordField)
     );
-    if (sameFormUsername) {
-      return sameFormUsername;
+    if (sameScopeUsername) {
+      return sameScopeUsername;
     }
   }
 
@@ -296,6 +311,16 @@ function pickLoginPasswordFieldInForm(
     return null;
   }
   return pickLoginPasswordField(fields.filter((field) => fieldIsInForm(field, formOpid)));
+}
+
+function pickLoginPasswordFieldInScope(
+  fields: AutofillTriageFieldResult[],
+  anchorField: AutofillTriageFieldResult | null
+) {
+  if (!anchorField) {
+    return null;
+  }
+  return pickLoginPasswordField(fields.filter((field) => fieldScopeMatches(field, anchorField)));
 }
 
 function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | undefined) {
@@ -820,12 +845,6 @@ export function createLoginFillPlan(
   }
   const siteRuleActions = createSiteRuleActions(report.fields, payload);
   const fields = candidateFields(report.fields);
-  const passwordChangeFormOpid =
-    typeof payload.password === "string" && typeof payload.newPassword === "string"
-      ? pickPasswordChangeFormOpid(fields, report.fields)
-      : null;
-  const registrationFormOpid =
-    typeof payload.password === "string" ? pickRegistrationFormOpid(fields, report.fields) : null;
   const actions: AutofillFillAction[] = [...siteRuleActions];
   const siteRulePasswordField = fieldForAction(
     report.fields,
@@ -833,10 +852,32 @@ export function createLoginFillPlan(
       (action) => action.fieldType === "password" || action.fieldType === "currentPassword"
     )
   );
+  const siteRulePasswordChangeField = fieldForAction(
+    report.fields,
+    siteRuleActions.find(
+      (action) => action.fieldType === "currentPassword" || action.fieldType === "newPassword"
+    )
+  );
   const siteRuleUsernameField = fieldForAction(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "username")
   );
+  const passwordChangeFields =
+    siteRulePasswordChangeField?.formOpid !== undefined
+      ? fields.filter((field) => fieldIsInForm(field, siteRulePasswordChangeField.formOpid))
+      : fields;
+  const passwordChangeAllFields =
+    siteRulePasswordChangeField?.formOpid !== undefined
+      ? report.fields.filter((field) =>
+          fieldIsInForm(field, siteRulePasswordChangeField.formOpid)
+        )
+      : report.fields;
+  const passwordChangeFormOpid =
+    typeof payload.password === "string" && typeof payload.newPassword === "string"
+      ? pickPasswordChangeFormOpid(passwordChangeFields, passwordChangeAllFields)
+      : null;
+  const registrationFormOpid =
+    typeof payload.password === "string" ? pickRegistrationFormOpid(fields, report.fields) : null;
 
   if (passwordChangeFormOpid !== null) {
     appendFallbackActions(
@@ -863,6 +904,7 @@ export function createLoginFillPlan(
   const passwordField =
     typeof payload.password === "string"
       ? siteRulePasswordField ??
+        pickLoginPasswordFieldInScope(fields, siteRuleUsernameField) ??
         pickLoginPasswordFieldInForm(fields, siteRuleUsernameField?.formOpid) ??
         pickLoginPasswordField(fields)
       : null;

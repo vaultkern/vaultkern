@@ -464,6 +464,80 @@ describe("autofill site rules", () => {
     expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("scopes form-less fallback fields to a partial rule container", () => {
+    document.body.innerHTML = `
+      <input id="decoy-user" name="email" type="email" autocomplete="username" />
+      <div id="target-widget">
+        <input id="target-user" name="email" type="email" autocomplete="username" />
+        <input id="target-password" name="secret" type="password" />
+      </div>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "formless-password-rule",
+          host: window.location.hostname,
+          fields: {
+            password: ["#target-password"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("alice");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("scopes change-password fallback fills to the rule-selected form", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form">
+        <input id="decoy-current" name="current_password" type="password" autocomplete="current-password" />
+        <input id="decoy-new" name="new_password" type="password" autocomplete="new-password" />
+        <input id="decoy-confirm" name="confirm_password" type="password" autocomplete="new-password" />
+      </form>
+      <form id="target-form">
+        <input id="target-current" name="current_password" type="password" autocomplete="current-password" />
+        <input id="target-new" name="new_password" type="password" autocomplete="new-password" />
+        <input id="target-confirm" name="confirm_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "target-change-rule",
+          host: window.location.hostname,
+          fields: {
+            newPassword: ["#target-new"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      password: "old-secret",
+      newPassword: "new-secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-current") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#decoy-new") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#decoy-confirm") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-current") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#target-new") as HTMLInputElement).value).toBe("new-secret");
+    expect((document.querySelector("#target-confirm") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+  });
+
   it("does not fill current passwords into new-password rule fields", () => {
     document.body.innerHTML = `
       <form>
