@@ -593,6 +593,10 @@ function qualificationForFillableField(
       nonLogin === "non-login:newsletter" &&
       hasLoginContext(`${fieldText},${formText}`) &&
       (hasPasswordSibling(field, snapshot) || isUsernameLike(field, fieldText))
+    ) &&
+    !(
+      nonLogin === "non-login:account-creation" &&
+      isUsernameLike(field, fieldText)
     )
   ) {
     reasons.push(nonLogin);

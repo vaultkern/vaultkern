@@ -619,8 +619,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
   });
 
@@ -645,15 +644,9 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "create_your_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "create_your_email").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "create_your_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "create_your_password").qualifiedAs).toBe("newPassword");
-    expect(fieldByName(report, "create_an_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "create_an_email").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "create_an_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "create_an_password").qualifiedAs).toBe("newPassword");
     expect(fieldByName(report, "registered_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "registered_password").qualifiedAs).toBe("password");
@@ -1011,10 +1004,7 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "hidden_shadow_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "hidden_shadow_email").reasons).toContain("not-viewable:hidden");
     expect(fieldByName(report, "opaque_shadow_user").labelText).toBe("Email address");
-    expect(fieldByName(report, "opaque_shadow_user").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "opaque_shadow_user").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "opaque_shadow_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("newPassword");
   });
 
