@@ -64,6 +64,35 @@ function pickUsernameField(
   return usernameFields[0];
 }
 
+function hasBlockingUsernameFallbackReason(field: AutofillTriageFieldResult) {
+  return field.reasons.some(
+    (reason) => reason.startsWith("excluded:") || reason.startsWith("non-login:")
+  );
+}
+
+function isSingleStepEmailCandidate(field: AutofillTriageFieldResult) {
+  return (
+    field.qualifiedAs === "ignored" &&
+    field.viewable &&
+    field.fillable &&
+    field.tagName === "input" &&
+    field.htmlType === "email" &&
+    !hasBlockingUsernameFallbackReason(field)
+  );
+}
+
+function pickSingleStepEmailUsernameField(
+  fields: AutofillTriageFieldResult[],
+  passwordField: AutofillTriageFieldResult | null
+) {
+  if (passwordField !== null) {
+    return null;
+  }
+
+  const fallbackFields = fields.filter(isSingleStepEmailCandidate).sort(byDocumentOrder);
+  return fallbackFields.length === 1 ? fallbackFields[0] : null;
+}
+
 export function createLoginFillPlan(
   snapshot: AutofillPageSnapshot,
   payload: LoginFillPayload
@@ -72,14 +101,19 @@ export function createLoginFillPlan(
   const fields = candidateFields(report.fields);
   const passwordField = typeof payload.password === "string" ? pickPasswordField(fields) : null;
   const usernameField =
-    typeof payload.username === "string" ? pickUsernameField(fields, passwordField) : null;
+    typeof payload.username === "string"
+      ? pickUsernameField(fields, passwordField) ??
+        (typeof payload.password === "string"
+          ? pickSingleStepEmailUsernameField(report.fields, passwordField)
+          : null)
+      : null;
   const actions: AutofillFillAction[] = [];
 
   if (usernameField && typeof payload.username === "string") {
     actions.push({
       fieldOpid: usernameField.opid,
       elementNumber: usernameField.elementNumber,
-      fieldType: usernameField.qualifiedAs,
+      fieldType: usernameField.qualifiedAs === "ignored" ? "username" : usernameField.qualifiedAs,
       value: payload.username
     });
   }

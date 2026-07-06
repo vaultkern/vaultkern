@@ -98,6 +98,20 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("falls back to a single generic email field for username-first fill", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+  });
+
   it("fills the checked-in username-first smoke page", () => {
     loadSmokeBody("username-first-login.html");
 
