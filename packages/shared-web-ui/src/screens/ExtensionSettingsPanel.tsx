@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 
 import { archiveTheme } from "../designTokens";
-import type { ExtensionLanguage, ExtensionSettings } from "../extensionSettings";
+import type { ExtensionSettings } from "../extensionSettings";
 import { useText } from "../i18n";
 
-interface BrowserSettingsPanelProps {
+interface ExtensionSettingsPanelProps {
   settings: ExtensionSettings;
   saving: boolean;
   error: string | null;
@@ -13,23 +13,21 @@ interface BrowserSettingsPanelProps {
   quickUnlockEnabled?: boolean;
   quickUnlockBusy?: boolean;
   quickUnlockError?: string | null;
-  onQuickUnlockChange?(enabled: boolean): void;
   onSave(settings: ExtensionSettings): void;
 }
 
-export function BrowserSettingsPanel({
+export function ExtensionSettingsPanel({
   settings,
   saving,
   error,
-  quickUnlockSupported = false,
-  quickUnlockEnabled = false,
+  quickUnlockSupported = true,
   quickUnlockBusy = false,
   quickUnlockError = null,
-  onQuickUnlockChange,
   onSave
-}: BrowserSettingsPanelProps) {
+}: ExtensionSettingsPanelProps) {
   const text = useText();
   const [draft, setDraft] = useState(() => toDraft(settings));
+  const quickUnlockAvailable = quickUnlockSupported !== false;
 
   useEffect(() => {
     setDraft(toDraft(settings));
@@ -50,19 +48,20 @@ export function BrowserSettingsPanel({
             3600,
             30
           ),
-          passkeyProviderEnabled: draft.passkeyProviderEnabled
+          passkeyProviderEnabled: draft.passkeyProviderEnabled,
+          quickUnlockEnabled: quickUnlockAvailable && draft.quickUnlockEnabled
         });
       }}
     >
       <div style={titleRowStyle}>
         <div>
-          <h2 style={headingStyle}>{text("Browser Settings")}</h2>
+          <h2 style={headingStyle}>{text("Extension Settings")}</h2>
           <p style={descriptionStyle}>
             {text("Local extension preferences. These are not stored in the KDBX database.")}
           </p>
         </div>
         <button type="submit" disabled={saving} style={primaryButtonStyle}>
-          {saving ? text("Saving...") : text("Save Browser Settings")}
+          {saving ? text("Saving...") : text("Save Extension Settings")}
         </button>
       </div>
 
@@ -147,9 +146,11 @@ export function BrowserSettingsPanel({
         <input
           aria-label={text("Quick Unlock")}
           type="checkbox"
-          checked={quickUnlockEnabled}
-          disabled={!quickUnlockSupported || quickUnlockBusy}
-          onChange={(event) => onQuickUnlockChange?.(event.target.checked)}
+          checked={quickUnlockAvailable && draft.quickUnlockEnabled}
+          disabled={quickUnlockBusy || !quickUnlockAvailable}
+          onChange={(event) => {
+            setDraft({ ...draft, quickUnlockEnabled: event.target.checked });
+          }}
         />
         <span>{text("Quick Unlock")}</span>
       </label>
@@ -168,7 +169,8 @@ function toDraft(settings: ExtensionSettings) {
     language: settings.language,
     idleLockMinutes: String(settings.idleLockMinutes),
     clearClipboardSeconds: String(settings.clearClipboardSeconds),
-    passkeyProviderEnabled: settings.passkeyProviderEnabled
+    passkeyProviderEnabled: settings.passkeyProviderEnabled,
+    quickUnlockEnabled: settings.quickUnlockEnabled
   };
 }
 

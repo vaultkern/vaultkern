@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type {
@@ -37,7 +37,7 @@ import {
 import type { ExtensionSettings, ExtensionSettingsStore } from "./extensionSettings";
 import { I18nProvider, deleteEntryDescription, translate } from "./i18n";
 import { DatabaseSettingsPage } from "./screens/DatabaseSettingsPage";
-import { BrowserSettingsPanel } from "./screens/BrowserSettingsPanel";
+import { ExtensionSettingsPanel } from "./screens/ExtensionSettingsPanel";
 import { EntryDetailPane } from "./layout/EntryDetailPane";
 import { GroupTreePane } from "./layout/GroupTreePane";
 import { ManagerSecondaryPage } from "./layout/ManagerSecondaryPage";
@@ -163,7 +163,8 @@ type PendingAction =
   | { type: "new-entry" }
   | { type: "search"; value: string }
   | { type: "open-stats" }
-  | { type: "open-settings" };
+  | { type: "open-database-settings" }
+  | { type: "open-extension-settings" };
 
 type DialogState =
   | { type: "unsaved"; action: PendingAction }
@@ -256,7 +257,8 @@ const APP_LABELS = {
       subtitle: "Private Archive",
       globalSearch: "Global Search",
       searchPlaceholder: "Search the archive",
-      settings: "Settings",
+      settings: "Database Settings",
+      extensionSettings: "Extension Settings",
       statistics: "Statistics"
     },
     unlock: {
@@ -269,6 +271,7 @@ const APP_LABELS = {
       unlocking: "Unlocking...",
       unlockWithWindowsHello: "Unlock with Windows Hello",
       manageVaults: "Manage vaults",
+      extensionSettings: "Extension Settings",
       noRecentVaults: "No recent vaults",
       addFirstVault: "Open manager setup to add your first local vault.",
       local: "Local",
@@ -280,7 +283,8 @@ const APP_LABELS = {
       subtitle: "私人档案",
       globalSearch: "全局搜索",
       searchPlaceholder: "搜索数据库",
-      settings: "设置",
+      settings: "数据库设置",
+      extensionSettings: "插件设置",
       statistics: "统计"
     },
     unlock: {
@@ -293,6 +297,7 @@ const APP_LABELS = {
       unlocking: "解锁中...",
       unlockWithWindowsHello: "使用 Windows Hello 解锁",
       manageVaults: "管理数据库",
+      extensionSettings: "插件设置",
       noRecentVaults: "没有最近数据库",
       addFirstVault: "打开管理器设置并添加第一个本地数据库。",
       local: "本地",
@@ -324,7 +329,8 @@ export function App({
   const [stackedStage, setStackedStage] = useState<StackedManagerStage>("groups");
   const [searchValue, setSearchValue] = useState("");
   const [showStatsPage, setShowStatsPage] = useState(false);
-  const [showSettingsPage, setShowSettingsPage] = useState(false);
+  const [showDatabaseSettingsPage, setShowDatabaseSettingsPage] = useState(false);
+  const [showExtensionSettingsPage, setShowExtensionSettingsPage] = useState(false);
   const [databaseSettings, setDatabaseSettings] = useState<DatabaseSettings | null>(null);
   const [databaseSettingsError, setDatabaseSettingsError] = useState<string | null>(null);
   const [databaseSettingsBusy, setDatabaseSettingsBusy] = useState(false);
@@ -372,6 +378,7 @@ export function App({
   const [extensionSettingsSaving, setExtensionSettingsSaving] = useState(false);
   const [quickUnlockBusy, setQuickUnlockBusy] = useState(false);
   const [quickUnlockError, setQuickUnlockError] = useState<string | null>(null);
+  const quickUnlockAutoSyncAttempt = useRef<string | null>(null);
 
   async function reloadLockedState() {
     const [nextSession, nextRecentVaults] = await Promise.all([
@@ -412,11 +419,15 @@ export function App({
       await localExtensionSettingsStore.save(normalizedSettings);
       setExtensionSettings(normalizedSettings);
       await applyRecentVaultLimit(await client.listRecentVaults(), normalizedSettings);
+      await syncQuickUnlockPreferenceToCurrentVault(
+        normalizedSettings.quickUnlockEnabled,
+        normalizedSettings
+      );
     } catch (saveFailure) {
       setExtensionSettingsError(
         errorMessage(
           saveFailure,
-          translate(extensionSettings.language, "Failed to save browser settings")
+          translate(extensionSettings.language, "Failed to save extension settings")
         )
       );
     } finally {
@@ -424,16 +435,26 @@ export function App({
     }
   }
 
-  async function setQuickUnlockEnabled(enabled: boolean) {
-    setQuickUnlockBusy(true);
-    setQuickUnlockError(null);
+  async function syncQuickUnlockPreferenceToCurrentVault(
+    enabled: boolean,
+    settingsForReload: ExtensionSettings
+  ) {
+    const currentVault =
+      recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
+      recentVaults.find((vault) => vault.isCurrent) ??
+      null;
 
+    if (!currentVault || currentVault.supportsQuickUnlock === enabled) {
+      return;
+    }
+
+    setQuickUnlockBusy(true);
     try {
       const nextSession = enabled
         ? await client.enableQuickUnlockForCurrentVault()
         : await client.disableQuickUnlockForCurrentVault();
       setSession(nextSession);
-      await applyRecentVaultLimit(await client.listRecentVaults(), extensionSettings);
+      await applyRecentVaultLimit(await client.listRecentVaults(), settingsForReload);
     } catch (quickUnlockFailure) {
       setQuickUnlockError(
         errorMessage(
@@ -715,14 +736,23 @@ export function App({
       case "open-stats":
         setShowEntryListWithDetail(false);
         resetEditorState();
-        setShowSettingsPage(false);
+        setShowDatabaseSettingsPage(false);
+        setShowExtensionSettingsPage(false);
         setShowStatsPage(true);
         break;
-      case "open-settings":
+      case "open-database-settings":
         setShowEntryListWithDetail(false);
         resetEditorState();
         setShowStatsPage(false);
-        setShowSettingsPage(true);
+        setShowExtensionSettingsPage(false);
+        setShowDatabaseSettingsPage(true);
+        break;
+      case "open-extension-settings":
+        setShowEntryListWithDetail(false);
+        resetEditorState();
+        setShowStatsPage(false);
+        setShowDatabaseSettingsPage(false);
+        setShowExtensionSettingsPage(true);
         break;
     }
   }
@@ -1154,9 +1184,49 @@ export function App({
   }, [client, extensionSettings.idleLockMinutes, session?.unlocked]);
 
   useEffect(() => {
+    if (quickUnlockBusy) {
+      return;
+    }
+
+    const currentVault =
+      recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
+      recentVaults.find((vault) => vault.isCurrent) ??
+      null;
+
+    if (
+      !currentVault ||
+      currentVault.supportsQuickUnlock === extensionSettings.quickUnlockEnabled ||
+      (extensionSettings.quickUnlockEnabled &&
+        session?.supportsBiometricUnlock !== true)
+    ) {
+      return;
+    }
+
+    const syncKey = `${currentVault.vaultRefId}:${
+      session?.unlocked === true ? "unlocked" : "locked"
+    }:${extensionSettings.quickUnlockEnabled ? "enable" : "disable"}`;
+    if (quickUnlockAutoSyncAttempt.current === syncKey) {
+      return;
+    }
+
+    quickUnlockAutoSyncAttempt.current = syncKey;
+    void syncQuickUnlockPreferenceToCurrentVault(
+      extensionSettings.quickUnlockEnabled,
+      extensionSettings
+    );
+  }, [
+    extensionSettings,
+    quickUnlockBusy,
+    recentVaults,
+    session?.currentVaultRefId,
+    session?.supportsBiometricUnlock,
+    session?.unlocked
+  ]);
+
+  useEffect(() => {
     setSearchValue("");
     setShowStatsPage(false);
-    setShowSettingsPage(false);
+    setShowDatabaseSettingsPage(false);
     setDatabaseSettings(null);
     setDatabaseSettingsError(null);
     setDatabaseSettingsBusy(false);
@@ -1359,7 +1429,7 @@ export function App({
   }, [client, session?.activeVaultId, workspaceReloadKey]);
 
   useEffect(() => {
-    if (!session?.activeVaultId || !showSettingsPage) {
+    if (!session?.activeVaultId || !showDatabaseSettingsPage) {
       return;
     }
 
@@ -1393,7 +1463,7 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [client, session?.activeVaultId, showSettingsPage]);
+  }, [client, session?.activeVaultId, showDatabaseSettingsPage]);
 
   useEffect(() => {
     if (!entryDetail || !session?.activeVaultId || !selectedEntryId) {
@@ -1451,6 +1521,41 @@ export function App({
     );
   }
 
+  const currentVaultReference =
+    recentVaults.find((vault) => vault.vaultRefId === session.currentVaultRefId) ??
+    recentVaults.find((vault) => vault.isCurrent) ??
+    null;
+
+  if (showExtensionSettingsPage) {
+    return (
+      <I18nProvider language={extensionSettings.language}>
+        <div style={messageShellStyle}>
+          <div style={settingsPageShellStyle}>
+            <button
+              type="button"
+              onClick={() => setShowExtensionSettingsPage(false)}
+              style={backButtonStyle}
+            >
+              {translate(extensionSettings.language, "Back")}
+            </button>
+            <ExtensionSettingsPanel
+              settings={extensionSettings}
+              saving={extensionSettingsSaving}
+              error={extensionSettingsError}
+              quickUnlockSupported={session?.supportsBiometricUnlock !== false}
+              quickUnlockEnabled={extensionSettings.quickUnlockEnabled}
+              quickUnlockBusy={quickUnlockBusy}
+              quickUnlockError={quickUnlockError}
+              onSave={(settings) => {
+                void saveExtensionSettings(settings);
+              }}
+            />
+          </div>
+        </div>
+      </I18nProvider>
+    );
+  }
+
   if (!session.unlocked) {
     const labels = APP_LABELS[extensionSettings.language];
 
@@ -1484,6 +1589,7 @@ export function App({
               setOneDriveBrowserPath([]);
               setShowSetup(false);
             }}
+            onOpenExtensionSettings={() => setShowExtensionSettingsPage(true)}
             addLocalVaultBusy={setupAddBusy}
             addLocalVaultError={setupAddError}
             addLocalVaultErrorCause={setupAddErrorCause}
@@ -1548,6 +1654,7 @@ export function App({
         }}
         quickUnlockSupported={Boolean(session.supportsBiometricUnlock)}
         onOpenSetup={() => setShowSetup(true)}
+        onOpenExtensionSettings={() => setShowExtensionSettingsPage(true)}
         error={unlockError}
         errorCause={unlockErrorCause}
         busy={unlockBusy}
@@ -1575,10 +1682,6 @@ export function App({
     selection.selectedEntryId !== null ||
     editorMode === "create-pending";
   const labels = APP_LABELS[extensionSettings.language];
-  const currentVaultReference =
-    recentVaults.find((vault) => vault.vaultRefId === session.currentVaultRefId) ??
-    recentVaults.find((vault) => vault.isCurrent) ??
-    null;
   const sourceStatus = session.sourceStatus;
   const sourceSyncMessage = sourceSyncError ?? sourceStatus?.lastError ?? null;
   const sourceSyncTitle =
@@ -1670,7 +1773,10 @@ export function App({
               searchValue={searchValue}
               onSearchChange={handleSearchChange}
               onOpenStats={() => requestAction({ type: "open-stats" })}
-              onOpenSettings={() => requestAction({ type: "open-settings" })}
+              onOpenSettings={() => requestAction({ type: "open-database-settings" })}
+              onOpenExtensionSettings={() =>
+                requestAction({ type: "open-extension-settings" })
+              }
             />
           }
           groupTree={
@@ -1812,11 +1918,11 @@ export function App({
                 description={translate(extensionSettings.language, "Statistics description")}
                 onBack={() => setShowStatsPage(false)}
               />
-            ) : showSettingsPage ? (
+            ) : showDatabaseSettingsPage ? (
               <div style={{ display: "grid", gap: archiveTheme.spacing.lg }}>
                 <button
                   type="button"
-                  onClick={() => setShowSettingsPage(false)}
+                  onClick={() => setShowDatabaseSettingsPage(false)}
                   style={{
                     justifySelf: "start",
                     border: `1px solid ${archiveTheme.colors.line}`,
@@ -1830,25 +1936,6 @@ export function App({
                 >
                   {translate(extensionSettings.language, "Back to archive")}
                 </button>
-                <BrowserSettingsPanel
-                  settings={extensionSettings}
-                  saving={extensionSettingsSaving}
-                  error={extensionSettingsError}
-                  quickUnlockSupported={Boolean(
-                    session.supportsBiometricUnlock && currentVaultReference
-                  )}
-                  quickUnlockEnabled={Boolean(
-                    currentVaultReference?.supportsQuickUnlock
-                  )}
-                  quickUnlockBusy={quickUnlockBusy}
-                  quickUnlockError={quickUnlockError}
-                  onQuickUnlockChange={(enabled) => {
-                    void setQuickUnlockEnabled(enabled);
-                  }}
-                  onSave={(settings) => {
-                    void saveExtensionSettings(settings);
-                  }}
-                />
                 <DatabaseSettingsPage
                   settings={databaseSettings}
                   loading={databaseSettingsBusy && !databaseSettings}
@@ -1944,6 +2031,12 @@ const messagePanelStyle = {
   color: archiveTheme.colors.text,
   fontFamily: archiveTheme.font.body,
   boxShadow: archiveTheme.shadow.panel
+};
+
+const settingsPageShellStyle = {
+  width: "min(760px, 100%)",
+  display: "grid",
+  gap: archiveTheme.spacing.lg
 };
 
 const saveTipStyle = {

@@ -1,6 +1,7 @@
 export { App } from "./App";
 export { archiveTheme } from "./designTokens";
 export { errorMessage } from "./error";
+export { ExtensionSettingsPanel } from "./screens/ExtensionSettingsPanel";
 export {
   DEFAULT_EXTENSION_SETTINGS,
   createMemoryExtensionSettingsStore,

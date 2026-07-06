@@ -18,7 +18,8 @@ it("persists extension settings in the memory store", async () => {
     language: "zh-CN",
     idleLockMinutes: 5,
     clearClipboardSeconds: 20,
-    passkeyProviderEnabled: false
+    passkeyProviderEnabled: false,
+    quickUnlockEnabled: true
   });
 
   await expect(store.load()).resolves.toEqual({
@@ -26,6 +27,7 @@ it("persists extension settings in the memory store", async () => {
     language: "zh-CN",
     idleLockMinutes: 5,
     clearClipboardSeconds: 20,
-    passkeyProviderEnabled: false
+    passkeyProviderEnabled: false,
+    quickUnlockEnabled: true
   });
 });

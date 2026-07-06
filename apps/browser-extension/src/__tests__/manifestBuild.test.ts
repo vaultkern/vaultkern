@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -20,6 +21,20 @@ const baseManifest = {
 };
 
 describe("manifest build", () => {
+  it("declares a standalone extension options page", () => {
+    const repoManifest = JSON.parse(
+      readFileSync(
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          "../../manifest.json"
+        ),
+        "utf8"
+      )
+    );
+
+    expect(repoManifest.options_page).toBe("options.html");
+  });
+
   it("omits the fixed extension key for normal production builds", () => {
     expect(buildManifest(baseManifest, { fixedKey: false })).not.toHaveProperty("key");
   });

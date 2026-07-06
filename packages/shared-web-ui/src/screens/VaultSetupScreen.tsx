@@ -16,6 +16,7 @@ export function VaultSetupScreen({
   onSelectOneDriveVault,
   onDeleteVault,
   onBack,
+  onOpenExtensionSettings,
   addLocalVaultBusy = false,
   addLocalVaultError,
   addLocalVaultErrorCause,
@@ -32,6 +33,7 @@ export function VaultSetupScreen({
   onSelectOneDriveVault: (vault: OneDriveItem) => Promise<void>;
   onDeleteVault: (vaultRefId: string) => Promise<void>;
   onBack: () => void;
+  onOpenExtensionSettings: () => void;
   addLocalVaultBusy?: boolean;
   addLocalVaultError?: string | null;
   addLocalVaultErrorCause?: unknown;
@@ -199,9 +201,14 @@ export function VaultSetupScreen({
           </section>
         ) : null}
 
-        <button type="button" onClick={onBack} style={secondaryButtonStyle}>
-          {text("Back")}
-        </button>
+        <div style={footerActionsStyle}>
+          <button type="button" onClick={onBack} style={secondaryButtonStyle}>
+            {text("Back")}
+          </button>
+          <button type="button" onClick={onOpenExtensionSettings} style={secondaryButtonStyle}>
+            {text("Extension Settings")}
+          </button>
+        </div>
       </section>
     </div>
   );
@@ -261,6 +268,12 @@ const secondaryButtonStyle = {
   fontFamily: archiveTheme.font.body,
   fontSize: "1rem",
   cursor: "pointer"
+};
+
+const footerActionsStyle = {
+  display: "flex",
+  flexWrap: "wrap" as const,
+  gap: archiveTheme.spacing.sm
 };
 
 const disabledButtonStyle = {

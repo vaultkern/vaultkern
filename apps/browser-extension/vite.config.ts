@@ -9,6 +9,7 @@ export default defineConfig({
       input: {
         popup: "popup.html",
         manager: "manager.html",
+        options: "options.html",
         background: "src/background.ts",
         contentScript: "src/contentScript.ts",
         webauthnContentScript: "src/webauthnContentScript.ts",
