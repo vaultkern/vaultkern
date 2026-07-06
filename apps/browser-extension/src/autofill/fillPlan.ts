@@ -8,6 +8,7 @@ import type {
 export interface LoginFillPayload {
   username?: string;
   password?: string;
+  newPassword?: string;
   totp?: string;
 }
 
@@ -125,6 +126,15 @@ function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | unde
   return field.formOpid === formOpid;
 }
 
+const CHANGE_PASSWORD_KEYWORDS = [
+  "changepassword",
+  "updatepassword",
+  "resetpassword",
+  "currentpassword",
+  "oldpassword",
+  "existingpassword"
+];
+
 function normalizeText(value: string | undefined) {
   return (value ?? "").toLowerCase().replace(/[\s_-]+/g, "");
 }
@@ -185,6 +195,75 @@ function formHasRegistrationContext(formFields: AutofillTriageFieldResult[]) {
     searchableText.includes("createpassword") ||
     searchableText.includes("join")
   );
+}
+
+function formHasChangePasswordContext(formFields: AutofillTriageFieldResult[]) {
+  const searchableText = formSearchText(formFields);
+  return CHANGE_PASSWORD_KEYWORDS.some((keyword) => searchableText.includes(keyword));
+}
+
+function pickCurrentPasswordField(formFields: AutofillTriageFieldResult[]) {
+  const passwordFields = formFields.filter((field) => field.qualifiedAs === "password");
+  return passwordFields.find(isCurrentPasswordField) ?? null;
+}
+
+function pickPasswordChangeFormOpid(fields: AutofillTriageFieldResult[]) {
+  const newPasswordFields = fields.filter(
+    (field) => field.qualifiedAs === "newPassword" && field.formOpid !== undefined
+  );
+  const formOpids = new Set(newPasswordFields.map((field) => field.formOpid));
+
+  for (const formOpid of formOpids) {
+    const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
+    const currentPasswordField = pickCurrentPasswordField(formFields);
+    const formNewPasswordFields = formFields.filter(
+      (field) => field.qualifiedAs === "newPassword"
+    );
+    if (!currentPasswordField || !formNewPasswordFields.length) {
+      continue;
+    }
+
+    const hasAutocompleteRoles =
+      currentPasswordField.reasons.includes("autocomplete:current-password") &&
+      formNewPasswordFields.some((field) => field.reasons.includes("autocomplete:new-password"));
+    if (hasAutocompleteRoles || formHasChangePasswordContext(formFields)) {
+      return formOpid;
+    }
+  }
+
+  return null;
+}
+
+function createPasswordChangeActions(
+  fields: AutofillTriageFieldResult[],
+  formOpid: string | undefined,
+  payload: LoginFillPayload
+): AutofillFillAction[] {
+  const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
+  const currentPasswordField = pickCurrentPasswordField(formFields);
+  const actions: AutofillFillAction[] = [];
+
+  if (currentPasswordField && typeof payload.password === "string") {
+    actions.push({
+      fieldOpid: currentPasswordField.opid,
+      elementNumber: currentPasswordField.elementNumber,
+      fieldType: currentPasswordField.qualifiedAs,
+      value: payload.password
+    });
+  }
+
+  if (typeof payload.newPassword === "string") {
+    for (const passwordField of formFields.filter((field) => field.qualifiedAs === "newPassword")) {
+      actions.push({
+        fieldOpid: passwordField.opid,
+        elementNumber: passwordField.elementNumber,
+        fieldType: passwordField.qualifiedAs,
+        value: payload.newPassword
+      });
+    }
+  }
+
+  return actions;
 }
 
 function formHasCurrentPassword(fields: AutofillTriageFieldResult[], formOpid: string) {
@@ -300,7 +379,8 @@ function createRegistrationActions(
     }
   }
 
-  if (typeof payload.password === "string") {
+  const registrationPassword = payload.newPassword ?? payload.password;
+  if (typeof registrationPassword === "string") {
     const passwordFields = formHasCurrentPassword(fields, formOpid ?? "")
       ? formFields.filter((field) => field.qualifiedAs === "newPassword")
       : formFields.filter(
@@ -311,7 +391,7 @@ function createRegistrationActions(
         fieldOpid: passwordField.opid,
         elementNumber: passwordField.elementNumber,
         fieldType: passwordField.qualifiedAs,
-        value: payload.password
+        value: registrationPassword
       });
     }
   }
@@ -523,9 +603,21 @@ export function createLoginFillPlan(
 ): AutofillFillPlan {
   const report = triageAutofillPage(snapshot);
   const fields = candidateFields(report.fields);
+  const passwordChangeFormOpid =
+    typeof payload.password === "string" && typeof payload.newPassword === "string"
+      ? pickPasswordChangeFormOpid(fields)
+      : null;
   const registrationFormOpid =
     typeof payload.password === "string" ? pickRegistrationFormOpid(fields, report.fields) : null;
   const actions: AutofillFillAction[] = [];
+
+  if (passwordChangeFormOpid !== null) {
+    actions.push(...createPasswordChangeActions(fields, passwordChangeFormOpid, payload));
+    if (typeof payload.totp === "string") {
+      actions.push(...createTotpActions(fields, payload.totp));
+    }
+    return { actions };
+  }
 
   if (registrationFormOpid !== null) {
     actions.push(...createRegistrationActions(fields, registrationFormOpid, payload));
