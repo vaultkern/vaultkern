@@ -677,16 +677,13 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "register_path_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "register_path_email").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "register_path_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "register_path_password").qualifiedAs).toBe("newPassword");
     expect(fieldByName(report, "registered_path_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "registered_path_password").qualifiedAs).toBe("password");
   });
 
-  it("excludes named new-password siblings from login evidence", () => {
+  it("keeps named new-password siblings available for registration", () => {
     document.body.innerHTML = `
       <form id="account-form">
         <input name="email" type="email" autocomplete="username" />
@@ -697,8 +694,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "new_password").qualifiedAs).toBe("newPassword");
     expect(fieldByName(report, "confirm_password").qualifiedAs).toBe("newPassword");
   });

@@ -68,6 +68,28 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("does not use registration usernames as a password-step login fallback", () => {
+    document.body.innerHTML = `
+      <form id="register-form">
+        <h2>Create account</h2>
+        <input id="signup-user" name="signup_user" autocomplete="username" />
+        <input name="new_password" type="password" autocomplete="new-password" />
+        <input name="confirm_password" type="password" autocomplete="new-password" />
+      </form>
+      <form id="password-step">
+        <h2>Sign in</h2>
+        <input id="login-password" name="login_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "login-secret" });
+
+    expect((document.querySelector("#signup-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe(
+      "login-secret"
+    );
+  });
+
   it("does not fill a newsletter-only email field", () => {
     document.body.innerHTML = `
       <form class="newsletter-signup">

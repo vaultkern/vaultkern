@@ -44,6 +44,33 @@ function pickPasswordField(fields: AutofillTriageFieldResult[]) {
   );
 }
 
+function scopedCredentialFields(
+  fields: AutofillTriageFieldResult[],
+  field: AutofillTriageFieldResult
+) {
+  if (field.formOpid) {
+    return fields.filter((candidate) => candidate.formOpid === field.formOpid);
+  }
+  if (field.containerOpid) {
+    return fields.filter(
+      (candidate) =>
+        candidate.formOpid === undefined && candidate.containerOpid === field.containerOpid
+    );
+  }
+  return [field];
+}
+
+function isRegistrationUsernameFallback(
+  field: AutofillTriageFieldResult,
+  fields: AutofillTriageFieldResult[]
+) {
+  const scopedFields = scopedCredentialFields(fields, field);
+  return (
+    scopedFields.some((candidate) => candidate.qualifiedAs === "newPassword") &&
+    !scopedFields.some((candidate) => candidate.qualifiedAs === "password")
+  );
+}
+
 function pickUsernameField(
   fields: AutofillTriageFieldResult[],
   passwordField: AutofillTriageFieldResult | null
@@ -62,7 +89,7 @@ function pickUsernameField(
     }
   }
 
-  return usernameFields[0];
+  return usernameFields.find((field) => !isRegistrationUsernameFallback(field, fields)) ?? null;
 }
 
 function hasBlockingUsernameFallbackReason(field: AutofillTriageFieldResult) {
