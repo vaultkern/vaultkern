@@ -9,6 +9,14 @@ const USERNAME_AUTOCOMPLETE = new Set(["username", "email"]);
 const PASSWORD_AUTOCOMPLETE = new Set(["current-password"]);
 const USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
 const NON_LOGIN_KEYWORDS = ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"];
+const ACCOUNT_CREATION_KEYWORDS = [
+  "register",
+  "signup",
+  "createaccount",
+  "createpassword",
+  "newpassword",
+  "confirmpassword"
+];
 
 export interface FieldQualification {
   qualifiedAs: AutofillFieldQualification;
@@ -88,9 +96,13 @@ function excludedReason(fieldText: string, formText: string) {
 
 function nonLoginReason(fieldText: string, formText: string) {
   const searchableText = `${fieldText},${formText}`;
-  return NON_LOGIN_KEYWORDS.some((keyword) => searchableText.includes(keyword))
-    ? "non-login:newsletter"
-    : null;
+  if (NON_LOGIN_KEYWORDS.some((keyword) => searchableText.includes(keyword))) {
+    return "non-login:newsletter";
+  }
+  if (ACCOUNT_CREATION_KEYWORDS.some((keyword) => searchableText.includes(keyword))) {
+    return "non-login:account-creation";
+  }
+  return null;
 }
 
 function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
@@ -108,6 +120,9 @@ function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
     fieldText.includes("username") ||
     fieldText.includes("userid") ||
     fieldText.includes("email") ||
+    fieldText.includes("phone") ||
+    fieldText.includes("mobile") ||
+    fieldText.includes("tel") ||
     fieldText.includes("login")
   );
 }
@@ -143,6 +158,11 @@ function qualificationForFillableField(
 
   if (autocomplete.has("new-password")) {
     reasons.push("excluded:new-password");
+    return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  if (autocomplete.has("one-time-code")) {
+    reasons.push("excluded:one-time-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 

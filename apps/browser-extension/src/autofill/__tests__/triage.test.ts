@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { collectAutofillPageSnapshot } from "../collectPageFields";
 import { triageAutofillPage } from "../triage";
@@ -216,6 +216,90 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "login").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("suppresses account creation forms before marking generic passwords eligible", () => {
+    document.body.innerHTML = `
+      <form id="signup">
+        <h2>Create account</h2>
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").reasons).toContain("non-login:account-creation");
+  });
+
+  it("recognizes phone-number username fields with password siblings", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="phone" type="tel" />
+        <input name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "phone").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "phone").reasons).toContain("form-has-password");
+  });
+
+  it("does not classify one-time-code fields as usernames", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="login_otp" type="text" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "login_otp").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "login_otp").reasons).toContain("excluded:one-time-code");
+  });
+
+  it("uses aria-labelledby text as field label context", () => {
+    document.body.innerHTML = `
+      <form>
+        <span id="account-label">Email address</span>
+        <input name="opaque_account" type="text" aria-labelledby="account-label" />
+        <input name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    const username = fieldByName(report, "opaque_account");
+
+    expect(username.labelText).toBe("Email address");
+    expect(username.qualifiedAs).toBe("username");
+  });
+
+  it("collects field types from fields whose owner document has different constructors", () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const frameDocument = frame.contentDocument;
+    expect(frameDocument).toBeDefined();
+    frameDocument!.body.innerHTML = `
+      <form>
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const originalInputElement = globalThis.HTMLInputElement;
+    vi.stubGlobal("HTMLInputElement", class OtherRealmInputElement {});
+    try {
+      const report = triageAutofillPage(collectAutofillPageSnapshot(frameDocument!));
+
+      expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+      expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+    } finally {
+      vi.stubGlobal("HTMLInputElement", originalInputElement);
+    }
   });
 
   it("treats offscreen and transparent honeypot fields as not viewable", () => {

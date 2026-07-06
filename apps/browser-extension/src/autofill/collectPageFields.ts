@@ -38,8 +38,8 @@ function getFormAction(form: HTMLFormElement) {
   }
 }
 
-function labelTextWithoutNestedFields(label: HTMLLabelElement) {
-  const clone = label.cloneNode(true) as HTMLLabelElement;
+function labelTextWithoutNestedFields(label: Element) {
+  const clone = label.cloneNode(true) as Element;
   clone.querySelectorAll(FIELD_SELECTOR).forEach((field) => field.remove());
   return cleanText(clone.textContent);
 }
@@ -54,18 +54,23 @@ function cssEscape(value: string) {
 }
 
 function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
-  const labels = new Set<HTMLLabelElement>();
+  const labels = new Set<Element>();
   if (element.id) {
     element.ownerDocument
       .querySelectorAll<HTMLLabelElement>(`label[for="${cssEscape(element.id)}"]`)
       .forEach((label) => labels.add(label));
   }
   const wrappingLabel = element.closest("label");
-  if (wrappingLabel instanceof HTMLLabelElement) {
+  if (wrappingLabel?.tagName.toLowerCase() === "label") {
     labels.add(wrappingLabel);
   }
 
-  const labelText = Array.from(labels)
+  const referencedLabels = (element.getAttribute("aria-labelledby") ?? "")
+    .split(/\s+/)
+    .map((id) => element.ownerDocument.getElementById(id))
+    .filter((label): label is HTMLElement => label !== null);
+
+  const labelText = [...Array.from(labels), ...referencedLabels]
     .map(labelTextWithoutNestedFields)
     .filter(Boolean)
     .join(" ");
@@ -135,10 +140,10 @@ function getDatasetValues(element: HTMLElement) {
 }
 
 function getSelectOptions(element: Element) {
-  if (!(element instanceof HTMLSelectElement)) {
+  if (element.tagName.toLowerCase() !== "select") {
     return undefined;
   }
-  return Array.from(element.options).map((option) => option.value);
+  return Array.from((element as HTMLSelectElement).options).map((option) => option.value);
 }
 
 function collectField(
@@ -155,7 +160,9 @@ function collectField(
   const fillability = getFieldFillability(element);
   const form = element.form ? formByElement.get(element.form) : undefined;
   const htmlType =
-    element instanceof HTMLInputElement ? optionalString(element.type.toLowerCase()) : undefined;
+    tagName === "input"
+      ? optionalString((element as HTMLInputElement).type.toLowerCase())
+      : undefined;
 
   return {
     opid: `field-${index}`,
