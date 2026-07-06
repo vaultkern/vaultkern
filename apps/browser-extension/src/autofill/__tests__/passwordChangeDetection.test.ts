@@ -80,6 +80,35 @@ describe("password change detection fill flow", () => {
     );
   });
 
+  it("does not use a generic reset password field as the current password", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Reset password</h2>
+        <input id="password-field" name="password" type="password" />
+        <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "old-secret", newPassword: "new-secret" });
+
+    expect((document.querySelector("#password-field") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#confirm-password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("does not group form-less current and new password fields as one change form", () => {
+    document.body.innerHTML = `
+      <input id="login-password" name="login_password" type="password" autocomplete="current-password" />
+      <input id="signup-password" name="signup_password" type="password" autocomplete="new-password" />
+    `;
+
+    fillLoginForm({ password: "old-secret", newPassword: "new-secret" });
+
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#signup-password") as HTMLInputElement).value).toBe("");
+  });
+
   it("does not put the current password into new-password fields when no new password is supplied", () => {
     document.body.innerHTML = `
       <form>

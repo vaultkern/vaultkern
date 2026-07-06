@@ -72,6 +72,33 @@ function isRegistrationUsernameFallback(
   );
 }
 
+function fieldHasSiblingNewPassword(
+  field: AutofillTriageFieldResult,
+  fields: AutofillTriageFieldResult[]
+) {
+  return scopedCredentialFields(fields, field).some(
+    (candidate) =>
+      candidate.qualifiedAs === "newPassword" &&
+      candidate.opid !== field.opid
+  );
+}
+
+function pickLoginPasswordField(fields: AutofillTriageFieldResult[]) {
+  const passwordField = pickPasswordField(fields);
+  if (!passwordField) {
+    return null;
+  }
+
+  if (
+    fieldHasSiblingNewPassword(passwordField, fields) &&
+    !isCurrentPasswordField(passwordField)
+  ) {
+    return null;
+  }
+
+  return passwordField;
+}
+
 function pickUsernameField(
   fields: AutofillTriageFieldResult[],
   passwordField: AutofillTriageFieldResult | null
@@ -614,7 +641,7 @@ export function createLoginFillPlan(
   if (passwordChangeFormOpid !== null) {
     actions.push(...createPasswordChangeActions(fields, passwordChangeFormOpid, payload));
     if (typeof payload.totp === "string") {
-      actions.push(...createTotpActions(fields, payload.totp));
+      actions.push(...createTotpActions(report.fields, payload.totp));
     }
     return { actions };
   }
@@ -627,7 +654,8 @@ export function createLoginFillPlan(
     return { actions };
   }
 
-  const passwordField = typeof payload.password === "string" ? pickPasswordField(fields) : null;
+  const passwordField =
+    typeof payload.password === "string" ? pickLoginPasswordField(fields) : null;
   const usernameField =
     typeof payload.username === "string"
       ? pickUsernameField(fields, passwordField) ??

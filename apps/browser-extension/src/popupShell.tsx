@@ -7,6 +7,22 @@ import { extensionTransport } from "./runtimeBridge";
 
 const client = new RuntimeClient(extensionTransport);
 const extensionSettingsStore = createChromeExtensionSettingsStore();
+const AUTOFILL_GENERATED_PASSWORD_CHARS =
+  "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*()-_=+";
+
+export function generateAutofillPassword(length = 24) {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.getRandomValues !== "function") {
+    return undefined;
+  }
+
+  const bytes = new Uint8Array(length);
+  cryptoApi.getRandomValues(bytes);
+  return Array.from(
+    bytes,
+    (byte) => AUTOFILL_GENERATED_PASSWORD_CHARS[byte % AUTOFILL_GENERATED_PASSWORD_CHARS.length]
+  ).join("");
+}
 
 async function getActiveTab() {
   const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
@@ -37,11 +53,13 @@ export async function fillSelectedEntry(vaultId: string, entryId: string) {
     type: "fill_entry_detail";
     username?: string;
     password?: string;
+    newPassword?: string;
     totp?: string;
   } = {
     type: "fill_entry_detail",
     username: detail.username,
-    password: detail.password
+    password: detail.password,
+    newPassword: generateAutofillPassword()
   };
 
   if (typeof detail.totp === "string" && detail.totp !== "") {
