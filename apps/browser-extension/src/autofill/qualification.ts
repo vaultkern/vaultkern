@@ -12,6 +12,7 @@ const USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
 const NEW_PASSWORD_AUTOCOMPLETE = new Set(["new-password"]);
 const TOTP_AUTOCOMPLETE = new Set(["one-time-code"]);
 const NON_LOGIN_KEYWORDS = ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"];
+const CURRENT_PASSWORD_KEYWORDS = ["currentpassword", "oldpassword", "existingpassword"];
 const ACCOUNT_CREATION_EXACT_PARTS = new Set([
   "register",
   "registration",
@@ -497,6 +498,13 @@ function isPasswordLike(field: AutofillFieldSnapshot) {
   return field.tagName === "input" && field.htmlType === "password";
 }
 
+function isCurrentPasswordLike(field: AutofillFieldSnapshot, fieldText: string) {
+  if (!isPasswordLike(field)) {
+    return false;
+  }
+  return CURRENT_PASSWORD_KEYWORDS.some((keyword) => fieldText.includes(keyword));
+}
+
 function isNewPasswordLike(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
   const autocomplete = fieldAutocompleteTokens(field);
   if ([...NEW_PASSWORD_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
@@ -571,6 +579,10 @@ function qualificationForFillableField(
 
   if (autocomplete.has("current-password") && isPasswordLike(field)) {
     reasons.push("autocomplete:current-password");
+    return { qualifiedAs: "password", eligible: true, reasons };
+  }
+
+  if (isCurrentPasswordLike(field, fieldText)) {
     return { qualifiedAs: "password", eligible: true, reasons };
   }
 

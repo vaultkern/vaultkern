@@ -111,6 +111,29 @@ describe("password change detection fill flow", () => {
     );
   });
 
+  it("keeps old password fields current when the form is headed new password", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>New password</h2>
+        <input id="old-password" name="old_password" type="password" />
+        <input id="new-password" name="new_password" type="password" />
+        <input id="confirm-password" name="confirm_password" type="password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "old-secret", newPassword: "new-secret" });
+
+    expect((document.querySelector("#old-password") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+    expect((document.querySelector("#confirm-password") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+  });
+
   it("does not use a generic reset password field as the current password", () => {
     document.body.innerHTML = `
       <form>
