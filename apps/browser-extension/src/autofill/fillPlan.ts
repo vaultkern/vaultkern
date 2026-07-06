@@ -98,23 +98,44 @@ function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | unde
   return field.formOpid === formOpid;
 }
 
-function pickRegistrationFormOpid(fields: AutofillTriageFieldResult[]) {
-  const newPasswordFields = fields.filter((field) => field.qualifiedAs === "newPassword");
+function formHasCurrentPassword(fields: AutofillTriageFieldResult[], formOpid: string) {
+  return fields.some(
+    (field) =>
+      fieldIsInForm(field, formOpid) &&
+      field.qualifiedAs === "password" &&
+      field.reasons.includes("autocomplete:current-password")
+  );
+}
+
+function pickRegistrationFormOpid(
+  fields: AutofillTriageFieldResult[],
+  allFields: AutofillTriageFieldResult[]
+) {
+  const newPasswordFields = fields.filter(
+    (field) => field.qualifiedAs === "newPassword" && field.formOpid !== undefined
+  );
   if (!newPasswordFields.length) {
     return null;
   }
 
-  const focusedField = fields.find((field) => field.focused);
-  if (
-    focusedField &&
-    newPasswordFields.some((field) => fieldIsInForm(field, focusedField.formOpid))
-  ) {
-    return focusedField.formOpid;
+  const focusedField = allFields.find((field) => field.focused && field.formOpid !== undefined);
+  if (focusedField?.formOpid) {
+    const focusedRegistrationForm = newPasswordFields.some((field) =>
+      fieldIsInForm(field, focusedField.formOpid)
+    );
+    if (
+      focusedRegistrationForm &&
+      !formHasCurrentPassword(fields, focusedField.formOpid)
+    ) {
+      return focusedField.formOpid;
+    }
+    return null;
   }
 
   const loginPasswordFields = fields.filter((field) => field.qualifiedAs === "password");
   if (!loginPasswordFields.length) {
-    return newPasswordFields[0].formOpid;
+    const formOpid = newPasswordFields[0].formOpid;
+    return formOpid && !formHasCurrentPassword(fields, formOpid) ? formOpid : null;
   }
 
   return null;
@@ -359,13 +380,13 @@ export function createLoginFillPlan(
   const report = triageAutofillPage(snapshot);
   const fields = candidateFields(report.fields);
   const registrationFormOpid =
-    typeof payload.password === "string" ? pickRegistrationFormOpid(fields) : null;
+    typeof payload.password === "string" ? pickRegistrationFormOpid(fields, report.fields) : null;
   const actions: AutofillFillAction[] = [];
 
   if (registrationFormOpid !== null) {
     actions.push(...createRegistrationActions(fields, registrationFormOpid, payload));
     if (typeof payload.totp === "string") {
-      actions.push(...createTotpActions(fields, payload.totp));
+      actions.push(...createTotpActions(report.fields, payload.totp));
     }
     return { actions };
   }

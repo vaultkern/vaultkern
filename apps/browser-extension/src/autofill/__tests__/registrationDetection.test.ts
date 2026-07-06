@@ -105,6 +105,98 @@ describe("registration detection fill flow", () => {
     ).toBe("");
   });
 
+  it("keeps form-less login fields separate from unrelated registration fields", () => {
+    document.body.innerHTML = `
+      <input id="login-user" name="login_email" type="email" autocomplete="username" />
+      <input id="login-password" name="login_password" type="password" autocomplete="current-password" />
+      <input id="signup-password" name="signup_password" type="password" autocomplete="new-password" />
+    `;
+    (document.querySelector("#login-password") as HTMLInputElement).focus();
+
+    fillLoginForm({ username: "alice@example.com", password: "current-secret" });
+
+    expect((document.querySelector("#login-user") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe(
+      "current-secret"
+    );
+    expect((document.querySelector("#signup-password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("does not treat a current-password change form as registration", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Change password</h2>
+        <input id="current-password" name="current_password" type="password" autocomplete="current-password" />
+        <input id="new-password" name="new_password" type="password" autocomplete="new-password" />
+        <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    (document.querySelector("#current-password") as HTMLInputElement).focus();
+
+    fillLoginForm({ password: "current-secret" });
+
+    expect((document.querySelector("#current-password") as HTMLInputElement).value).toBe(
+      "current-secret"
+    );
+    expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#confirm-password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("keeps a focused username-first login ahead of a separate signup form", () => {
+    document.body.innerHTML = `
+      <form id="login-form">
+        <h2>Sign in</h2>
+        <input id="login-email" name="login_email" type="email" autocomplete="username" />
+      </form>
+      <form id="register-form">
+        <h2>Create account</h2>
+        <input id="register-email" name="register_email" type="email" autocomplete="username" />
+        <input id="register-password" name="register_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    (document.querySelector("#login-email") as HTMLInputElement).focus();
+
+    fillLoginForm({ username: "alice@example.com", password: "current-secret" });
+
+    expect((document.querySelector("#login-email") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#register-email") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#register-password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("routes to a registration form when a non-credential field in that form is focused", () => {
+    document.body.innerHTML = `
+      <form id="login-form">
+        <h2>Sign in</h2>
+        <input name="login_user" type="email" autocomplete="username" />
+        <input name="login_password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="register-form">
+        <h2>Create account</h2>
+        <input id="first-name" name="first_name" type="text" />
+        <input name="register_email" type="email" autocomplete="username" />
+        <input name="register_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    (document.querySelector("#first-name") as HTMLInputElement).focus();
+
+    fillLoginForm({ username: "new@example.com", password: "generated-secret" });
+
+    expect((document.querySelector('input[name="login_user"]') as HTMLInputElement).value).toBe("");
+    expect((document.querySelector('input[name="login_password"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+    expect(
+      (document.querySelector('input[name="register_email"]') as HTMLInputElement).value
+    ).toBe("new@example.com");
+    expect(
+      (document.querySelector('input[name="register_password"]') as HTMLInputElement).value
+    ).toBe("generated-secret");
+  });
+
   it("fills the checked-in registration smoke page", () => {
     loadSmokeBody("register.html");
 
