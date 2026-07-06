@@ -1007,7 +1007,7 @@ describe("autofill triage", () => {
       <form>
         <label for="shadow-user">Email address</label>
         <input id="shadow-user" name="opaque_shadow_user" type="text" />
-        <input name="shadow_password" type="password" autocomplete="current-password" />
+        <input name="shadow_password" type="password" />
       </form>
     `;
 

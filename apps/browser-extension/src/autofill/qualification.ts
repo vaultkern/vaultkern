@@ -455,6 +455,15 @@ function qualificationForFillableField(
   }
 
   if (
+    isUsernameLike(field, fieldText) &&
+    hasNewPasswordSibling(field, snapshot) &&
+    !hasPasswordSibling(field, snapshot)
+  ) {
+    reasons.push("non-login:account-creation");
+    return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  if (
     [...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) &&
     isUsernameLike(field, fieldText)
   ) {
