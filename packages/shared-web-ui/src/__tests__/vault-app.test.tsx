@@ -493,7 +493,8 @@ it("syncs the quick unlock preference to the current vault when available", asyn
     getSessionState: async () => ({
       unlocked: false,
       activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
     }),
     listRecentVaults: vi.fn(async () => recentVaults),
     enableQuickUnlockForCurrentVault: vi.fn(async () => {
@@ -545,7 +546,8 @@ it("retries quick unlock preference sync after the current vault is unlocked", a
     getSessionState: async () => ({
       unlocked: false,
       activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
     }),
     listRecentVaults: vi.fn(async () => recentVaults),
     unlockCurrentVault: vi.fn(async () => ({
@@ -583,6 +585,44 @@ it("retries quick unlock preference sync after the current vault is unlocked", a
   await waitFor(() => {
     expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(2);
   });
+});
+
+it("does not auto-enable quick unlock in the manager when biometric unlock is unsupported", async () => {
+  const settingsStore = createSettingsStore({
+    quickUnlockEnabled: true
+  });
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    }),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    enableQuickUnlockForCurrentVault: vi.fn(async () => {
+      throw new Error("biometric unlock is not supported");
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByText("Personal")).toBeInTheDocument();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 });
 
 it("syncs the off quick unlock preference when switching to another current vault", async () => {

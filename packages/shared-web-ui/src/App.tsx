@@ -1195,7 +1195,9 @@ export function App({
 
     if (
       !currentVault ||
-      currentVault.supportsQuickUnlock === extensionSettings.quickUnlockEnabled
+      currentVault.supportsQuickUnlock === extensionSettings.quickUnlockEnabled ||
+      (extensionSettings.quickUnlockEnabled &&
+        session?.supportsBiometricUnlock !== true)
     ) {
       return;
     }
@@ -1217,6 +1219,7 @@ export function App({
     quickUnlockBusy,
     recentVaults,
     session?.currentVaultRefId,
+    session?.supportsBiometricUnlock,
     session?.unlocked
   ]);
 

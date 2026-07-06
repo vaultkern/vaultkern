@@ -645,7 +645,8 @@ describe("PopupShell fill flow", () => {
     runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
       unlocked: true,
       activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
     });
     runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
       unlocked: true,
@@ -672,6 +673,85 @@ describe("PopupShell fill flow", () => {
       });
       expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("does not provision quick unlock after popup unlock when biometric unlock is unsupported", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: vi.fn((_key, callback) =>
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 0,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: true
+              }
+            })
+          ),
+          set: vi.fn((_values, callback) => callback?.())
+        }
+      },
+      tabs: {
+        query: vi.fn(async () => [
+          {
+            id: 7,
+            url: "https://example.com/login"
+          }
+        ]),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Personal",
+        sourceKind: "local",
+        sourceSummary: "personal.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: false
+    });
+    runtimeClientMocks.enableQuickUnlockForCurrentVault.mockRejectedValue(
+      new Error("biometric unlock is not supported")
+    );
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Personal")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    expect(await screen.findByText("Unlocked")).toBeInTheDocument();
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+    expect(screen.queryByText("Failed to update quick unlock")).not.toBeInTheDocument();
   });
 
   it("enables quick unlock during the first popup key-file-only unlock when the extension preference is on", async () => {
@@ -729,7 +809,8 @@ describe("PopupShell fill flow", () => {
     runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
       unlocked: true,
       activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
     });
     runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
       unlocked: true,
@@ -829,7 +910,8 @@ describe("PopupShell fill flow", () => {
     runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
       unlocked: true,
       activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
     });
     runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
       unlocked: true,
@@ -918,7 +1000,8 @@ describe("PopupShell fill flow", () => {
     runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
       unlocked: true,
       activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
     });
     runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
       unlocked: true,

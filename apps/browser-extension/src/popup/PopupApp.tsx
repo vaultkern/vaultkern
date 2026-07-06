@@ -246,6 +246,10 @@ export function PopupApp({
       return unlockedSession;
     }
 
+    if (unlockedSession.supportsBiometricUnlock !== true) {
+      return unlockedSession;
+    }
+
     let currentVault =
       recentVaults.find(
         (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
