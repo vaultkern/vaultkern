@@ -151,6 +151,32 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#security-code") as HTMLInputElement).value).toBe("");
   });
 
+  it("does not fill non-login newsletter fields that look like TOTP", () => {
+    document.body.innerHTML = `
+      <form class="newsletter">
+        <h2>Subscribe to our newsletter</h2>
+        <input id="newsletter-otp" name="otp_code" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#newsletter-otp") as HTMLInputElement).value).toBe("");
+  });
+
+  it("recognizes authentication-code labels as TOTP", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="auth-code">Authentication code</label>
+        <input id="auth-code" name="code" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#auth-code") as HTMLInputElement).value).toBe("123456");
+  });
+
   it("does not fill card verification code fields without MFA evidence", () => {
     document.body.innerHTML = `
       <form>
@@ -241,6 +267,30 @@ describe("totp autofill detection", () => {
     ).toEqual(["1", "3", "5", "7", "9", "0"]);
   });
 
+  it("keeps in-form split TOTP fields scoped to the labeled group", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="unrelated-one-char" name="middle_initial" maxlength="1" />
+        <label for="digit-1">Authenticator code</label>
+        <input id="digit-1" name="digit_1" maxlength="1" inputmode="numeric" />
+        <input id="digit-2" name="digit_2" maxlength="1" inputmode="numeric" />
+        <input id="digit-3" name="digit_3" maxlength="1" inputmode="numeric" />
+        <input id="digit-4" name="digit_4" maxlength="1" inputmode="numeric" />
+        <input id="digit-5" name="digit_5" maxlength="1" inputmode="numeric" />
+        <input id="digit-6" name="digit_6" maxlength="1" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "135790" });
+
+    expect((document.querySelector("#unrelated-one-char") as HTMLInputElement).value).toBe("");
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>('input[name^="digit_"]')].map(
+        (field) => field.value
+      )
+    ).toEqual(["1", "3", "5", "7", "9", "0"]);
+  });
+
   it("scopes form-less split TOTP fields to their contiguous group", () => {
     document.body.innerHTML = `
       <input id="unrelated-one-char" name="middle_initial" maxlength="1" />
@@ -259,6 +309,26 @@ describe("totp autofill detection", () => {
     fillLoginForm({ totp: "112358" });
 
     expect((document.querySelector("#unrelated-one-char") as HTMLInputElement).value).toBe("");
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>(".otp")].map((field) => field.value)
+    ).toEqual(["1", "1", "2", "3", "5", "8"]);
+  });
+
+  it("derives a shared container for wrapped form-less split TOTP inputs", () => {
+    document.body.innerHTML = `
+      <div id="otp-widget">
+        <label for="code-1">Authenticator code</label>
+        <span><input id="code-1" class="otp" name="code_1" maxlength="1" inputmode="numeric" /></span>
+        <span><input id="code-2" class="otp" name="code_2" maxlength="1" inputmode="numeric" /></span>
+        <span><input id="code-3" class="otp" name="code_3" maxlength="1" inputmode="numeric" /></span>
+        <span><input id="code-4" class="otp" name="code_4" maxlength="1" inputmode="numeric" /></span>
+        <span><input id="code-5" class="otp" name="code_5" maxlength="1" inputmode="numeric" /></span>
+        <span><input id="code-6" class="otp" name="code_6" maxlength="1" inputmode="numeric" /></span>
+      </div>
+    `;
+
+    fillLoginForm({ totp: "112358" });
+
     expect(
       [...document.querySelectorAll<HTMLInputElement>(".otp")].map((field) => field.value)
     ).toEqual(["1", "1", "2", "3", "5", "8"]);

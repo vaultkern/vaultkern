@@ -63,6 +63,7 @@ const TOTP_KEYWORDS = [
   "mfa",
   "onetimecode",
   "onetimepassword",
+  "authenticationcode",
   "authenticatorcode",
   "twofactor",
   "twostep"
@@ -478,21 +479,6 @@ function qualificationForFillableField(
     return { qualifiedAs: "newPassword", eligible: true, reasons };
   }
 
-  if (isTotpLike(field, fieldText, formText)) {
-    if (autocomplete.has("one-time-code")) {
-      reasons.push("autocomplete:one-time-code");
-    }
-    if (field.maxLength === 1) {
-      reasons.push("totp:split-field");
-    }
-    return { qualifiedAs: "totp", eligible: true, reasons };
-  }
-
-  if (field.htmlType !== "password" && hasPasswordMaskedCodeSignal(fieldText)) {
-    reasons.push("excluded:one-time-code");
-    return { qualifiedAs: "ignored", eligible: false, reasons };
-  }
-
   if (isNewPasswordLike(field, fieldText, formText)) {
     if (autocomplete.has("new-password")) {
       reasons.push("autocomplete:new-password");
@@ -511,6 +497,16 @@ function qualificationForFillableField(
   ) {
     reasons.push(nonLogin);
     return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  if (isTotpLike(field, fieldText, formText)) {
+    if (autocomplete.has("one-time-code")) {
+      reasons.push("autocomplete:one-time-code");
+    }
+    if (field.maxLength === 1) {
+      reasons.push("totp:split-field");
+    }
+    return { qualifiedAs: "totp", eligible: true, reasons };
   }
 
   if (isPasswordLike(field)) {

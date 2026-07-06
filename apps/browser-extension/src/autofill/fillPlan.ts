@@ -100,12 +100,43 @@ function pickTotpFields(fields: AutofillTriageFieldResult[]) {
     .sort(byDocumentOrder);
 }
 
-function isOneCharacterField(field: AutofillTriageFieldResult) {
-  return field.viewable && field.fillable && field.maxLength === 1;
+function normalizeHint(value: string | undefined) {
+  return (value ?? "").toLowerCase().replace(/[\s_-]+/g, "");
 }
 
-function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | undefined) {
-  return field.formOpid === formOpid;
+function splitFieldHintText(field: AutofillTriageFieldResult) {
+  return [
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.autocomplete,
+    field.inputMode,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.ariaDescribedBy,
+    field.labelText,
+    ...field.dataSetValues
+  ]
+    .map(normalizeHint)
+    .join(",");
+}
+
+function hasSplitCodeHint(field: AutofillTriageFieldResult) {
+  const fieldText = splitFieldHintText(field);
+  return (
+    field.qualifiedAs === "totp" ||
+    field.inputMode === "numeric" ||
+    field.inputMode === "decimal" ||
+    fieldText.includes("digit") ||
+    fieldText.includes("code") ||
+    fieldText.includes("otp") ||
+    fieldText.includes("totp")
+  );
+}
+
+function isOneCharacterField(field: AutofillTriageFieldResult) {
+  return field.viewable && field.fillable && field.maxLength === 1 && hasSplitCodeHint(field);
 }
 
 function splitScopeMatches(
@@ -162,18 +193,7 @@ function pickSplitTotpFields(
   valueLength: number
 ) {
   for (const seed of totpFields.filter(isOneCharacterField)) {
-    if (seed.formOpid === undefined) {
-      const splitFields = pickContiguousOneCharacterFields(fields, seed, valueLength);
-      if (splitFields.length === valueLength) {
-        return splitFields;
-      }
-      continue;
-    }
-
-    const splitFields = fields
-      .filter((field) => fieldIsInForm(field, seed.formOpid))
-      .filter(isOneCharacterField)
-      .sort(byDocumentOrder);
+    const splitFields = pickContiguousOneCharacterFields(fields, seed, valueLength);
     if (splitFields.length === valueLength) {
       return splitFields;
     }
