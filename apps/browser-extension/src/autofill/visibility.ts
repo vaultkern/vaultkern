@@ -14,6 +14,14 @@ function addReason(reasons: string[], reason: string) {
   }
 }
 
+function numericCssValue(value: string | undefined) {
+  if (!value) {
+    return null;
+  }
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult {
   const reasons: string[] = [];
   const inputType =
@@ -35,6 +43,10 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const style = current.ownerDocument.defaultView?.getComputedStyle(current);
     const inlineDisplay = current.style.display;
     const inlineVisibility = current.style.visibility;
+    const opacity = numericCssValue(current.style.opacity || style?.opacity);
+    const position = current.style.position || style?.position;
+    const left = numericCssValue(current.style.left || style?.left);
+    const top = numericCssValue(current.style.top || style?.top);
     if (
       inlineDisplay === "none" ||
       inlineVisibility === "hidden" ||
@@ -43,6 +55,14 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       style?.visibility === "collapse"
     ) {
       addReason(reasons, "not-viewable:css");
+    }
+    if (opacity === 0) {
+      addReason(reasons, "not-viewable:transparent");
+    }
+    if ((position === "absolute" || position === "fixed") && (left !== null || top !== null)) {
+      if ((left !== null && left <= -1000) || (top !== null && top <= -1000)) {
+        addReason(reasons, "not-viewable:offscreen");
+      }
     }
   }
 

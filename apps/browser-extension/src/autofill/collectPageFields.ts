@@ -73,7 +73,10 @@ function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAr
 }
 
 function getHeadingText(form: HTMLFormElement) {
-  const scope = form.parentElement?.closest("section, article, main, aside") ?? form;
+  const scope =
+    form.parentElement?.closest("section, article, main, aside") ??
+    form.parentElement ??
+    form;
   const headings = Array.from(scope.querySelectorAll("h1, h2, h3, h4, h5, h6"));
   const previousForms = Array.from(scope.querySelectorAll("form")).filter(
     (candidate) =>

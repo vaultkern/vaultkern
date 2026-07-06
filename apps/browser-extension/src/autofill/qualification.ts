@@ -8,10 +8,6 @@ import type {
 const USERNAME_AUTOCOMPLETE = new Set(["username", "email"]);
 const PASSWORD_AUTOCOMPLETE = new Set(["current-password"]);
 const USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
-const EXCLUDED_KEYWORDS = [
-  ["captcha", "excluded:captcha"],
-  ["forgot", "excluded:forgot"]
-] as const;
 const NON_LOGIN_KEYWORDS = ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"];
 
 export interface FieldQualification {
@@ -81,11 +77,11 @@ function isSearchField(field: AutofillFieldSnapshot, fieldText: string) {
 }
 
 function excludedReason(fieldText: string, formText: string) {
-  const searchableText = `${fieldText},${formText}`;
-  for (const [keyword, reason] of EXCLUDED_KEYWORDS) {
-    if (searchableText.includes(keyword)) {
-      return reason;
-    }
+  if (fieldText.includes("captcha")) {
+    return "excluded:captcha";
+  }
+  if (`${fieldText},${formText}`.includes("forgot")) {
+    return "excluded:forgot";
   }
   return null;
 }

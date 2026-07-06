@@ -155,6 +155,51 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "email").reasons).toContain("excluded:forgot");
   });
 
+  it("keeps captcha form metadata from excluding real login fields", () => {
+    document.body.innerHTML = `
+      <form id="login" class="login g-recaptcha" action="/login-with-captcha">
+        <input name="email" type="email" autocomplete="username" />
+        <input name="password" type="password" autocomplete="current-password" />
+        <input name="captcha_code" type="text" placeholder="Captcha" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "captcha_code").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "captcha_code").reasons).toContain("excluded:captcha");
+  });
+
+  it("uses preceding headings outside semantic containers as form context", () => {
+    document.body.innerHTML = `
+      <h2>Forgot password</h2>
+      <form id="forgot">
+        <input name="email" type="email" />
+      </form>
+      <h2>Sign in</h2>
+      <form id="login">
+        <input name="login_email" type="email" autocomplete="username" />
+        <input name="login_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "forgot")).toMatchObject({
+      headingText: ["Forgot password"]
+    });
+    expect(snapshot.forms.find((form) => form.htmlId === "login")).toMatchObject({
+      headingText: ["Sign in"]
+    });
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "email").reasons).toContain("excluded:forgot");
+    expect(fieldByName(report, "login_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
+  });
+
   it("does not classify new-password fields or non-text controls as login candidates", () => {
     document.body.innerHTML = `
       <form>
@@ -169,6 +214,26 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "create_password").qualifiedAs).not.toBe("password");
     expect(fieldByName(report, "login").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats offscreen and transparent honeypot fields as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="offscreen_email" type="email" autocomplete="username" style="position:absolute;left:-9999px" />
+        <input name="transparent_email" type="email" autocomplete="username" style="opacity:0" />
+        <input name="real_user" type="email" autocomplete="username" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "offscreen_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "offscreen_email").reasons).toContain("not-viewable:offscreen");
+    expect(fieldByName(report, "transparent_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "transparent_email").reasons).toContain("not-viewable:transparent");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
