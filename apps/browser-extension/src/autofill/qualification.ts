@@ -9,6 +9,7 @@ const USERNAME_AUTOCOMPLETE = new Set(["username"]);
 const EMAIL_AUTOCOMPLETE = new Set(["email"]);
 const PASSWORD_AUTOCOMPLETE = new Set(["current-password"]);
 const USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
+const NEW_PASSWORD_AUTOCOMPLETE = new Set(["new-password"]);
 const NON_LOGIN_KEYWORDS = ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"];
 const ACCOUNT_CREATION_EXACT_PARTS = new Set([
   "register",
@@ -149,7 +150,8 @@ function fieldAutocompleteTokens(field: AutofillFieldSnapshot) {
 }
 
 function hasNewPasswordSignal(candidate: AutofillFieldSnapshot) {
-  if (fieldAutocompleteTokens(candidate).has("new-password")) {
+  const autocomplete = fieldAutocompleteTokens(candidate);
+  if ([...NEW_PASSWORD_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
     return true;
   }
   return normalizedParts(joinedFieldText(candidate)).some((part) =>
@@ -336,6 +338,18 @@ function isPasswordLike(field: AutofillFieldSnapshot) {
   return field.tagName === "input" && field.htmlType === "password";
 }
 
+function isNewPasswordLike(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
+  const autocomplete = fieldAutocompleteTokens(field);
+  if ([...NEW_PASSWORD_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
+    return true;
+  }
+  if (field.htmlType !== "password") {
+    return false;
+  }
+  const searchableText = `${fieldText},${formText}`;
+  return hasAccountCreationContext(searchableText);
+}
+
 function qualificationForFillableField(
   field: AutofillFieldSnapshot,
   snapshot: AutofillPageSnapshot,
@@ -357,11 +371,6 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  if (autocomplete.has("new-password")) {
-    reasons.push("excluded:new-password");
-    return { qualifiedAs: "ignored", eligible: false, reasons };
-  }
-
   if (autocomplete.has("one-time-code")) {
     reasons.push("excluded:one-time-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
@@ -379,6 +388,13 @@ function qualificationForFillableField(
   if (field.htmlType !== "password" && hasPasswordMaskedCodeSignal(fieldText)) {
     reasons.push("excluded:one-time-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  if (isNewPasswordLike(field, fieldText, formText)) {
+    if (autocomplete.has("new-password")) {
+      reasons.push("autocomplete:new-password");
+    }
+    return { qualifiedAs: "newPassword", eligible: true, reasons };
   }
 
   const nonLogin = nonLoginReason(fieldText, formText);

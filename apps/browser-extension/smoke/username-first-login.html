@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VaultKern Username First Login Smoke</title>
+  </head>
+  <body>
+    <main>
+      <h1>Sign in</h1>
+      <form id="vaultkern-smoke-username-first-form" action="/login/identifier" method="post">
+        <label for="vaultkern-smoke-username-first-email">
+          Email
+          <input
+            id="vaultkern-smoke-username-first-email"
+            name="email"
+            type="email"
+            autocomplete="username"
+          />
+        </label>
+        <button type="submit">Next</button>
+      </form>
+    </main>
+  </body>
+</html>

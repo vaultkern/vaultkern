@@ -1,6 +1,6 @@
 # Browser v0 Smoke Test
 
-This directory contains the fixed login page used by the browser extension v0 smoke test. It validates the smallest autofill path: the extension recognizes a normal HTTP login page and fills the selected entry's username and password into the page.
+This directory contains fixed pages used by the browser extension v0 smoke and autofill regression tests. The automated Chrome smoke currently drives the smallest autofill path: the extension recognizes a normal HTTP login page and fills the selected entry's username and password into the page.
 
 This is not a product page and does not replace unit tests. Its value is providing a stable, repeatable browser scene for regression checks.
 
@@ -12,7 +12,7 @@ This is not a product page and does not replace unit tests. Its value is providi
 
 ## Page
 
-Smoke page:
+Chrome E2E smoke page:
 
 ```text
 apps/browser-extension/smoke/basic-login.html
@@ -24,6 +24,16 @@ The page provides two stable inputs:
 - `#vaultkern-smoke-password`
 
 They use standard `autocomplete="username"` and `autocomplete="current-password"` attributes, which are recognized by the current content-script field selection rules.
+
+Additional autofill regression fixtures:
+
+```text
+apps/browser-extension/smoke/username-first-login.html
+apps/browser-extension/smoke/password-step-login.html
+apps/browser-extension/smoke/noisy-login.html
+```
+
+These pages are covered by unit tests. They verify username-first login, password-only login steps, and noisy pages with search, newsletter, and registration fields that should not receive login credentials.
 
 ## Manual Verification
 
