@@ -720,6 +720,11 @@ export function qualifyAutofillField(
     const fieldText = joinedFieldText(field);
     const formText = joinedFormText(form);
     const autocomplete = fieldAutocompleteTokens(field);
+    const siteRuleType = field.siteRuleTypes.find((fieldType) => fieldType !== "ignored");
+
+    if (field.readonly && siteRuleType === "username") {
+      return { qualifiedAs: "username", eligible: true, reasons };
+    }
 
     if (
       field.readonly &&

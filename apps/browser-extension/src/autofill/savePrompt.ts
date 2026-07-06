@@ -2,7 +2,7 @@ import { collectAutofillPageSnapshot } from "./collectPageFields";
 import type { PendingAutofillSubmission } from "./pendingSubmission";
 import type { AutofillSiteRule } from "./siteRules";
 import { triageAutofillPage } from "./triage";
-import type { AutofillTriageFieldResult } from "./types";
+import type { AutofillFieldQualification, AutofillTriageFieldResult } from "./types";
 
 export interface CollectAutofillSubmissionOptions {
   siteRules?: AutofillSiteRule[];
@@ -154,28 +154,51 @@ function fieldValue(
   return options.trim === false ? value : value.trim();
 }
 
+function hasSiteRuleType(
+  field: AutofillTriageFieldResult,
+  fieldType: AutofillFieldQualification
+) {
+  return field.siteRuleTypes.includes(fieldType);
+}
+
 function pickUsernameField(
   fields: AutofillTriageFieldResult[],
   passwordField: AutofillTriageFieldResult | null
 ) {
   const usernameFields = fields.filter(isCaptureUsernameField);
   if (passwordField?.formOpid) {
-    const sameFormUsername = usernameFields.find(
-      (field) => field.formOpid === passwordField.formOpid
-    );
+    const sameFormUsername =
+      usernameFields.find(
+        (field) => field.formOpid === passwordField.formOpid && hasSiteRuleType(field, "username")
+      ) ??
+      usernameFields.find((field) => field.formOpid === passwordField.formOpid);
     if (sameFormUsername) {
       return sameFormUsername;
     }
   }
-  return usernameFields[0] ?? null;
+  return (
+    usernameFields.find((field) => hasSiteRuleType(field, "username")) ??
+    usernameFields[0] ??
+    null
+  );
 }
 
 function pickPasswordChangeFields(fields: AutofillTriageFieldResult[]) {
-  const newPasswordField = fields.find(isCaptureNewPasswordField);
+  const newPasswordField =
+    fields.find(
+      (field) => isCaptureNewPasswordField(field) && hasSiteRuleType(field, "newPassword")
+    ) ??
+    fields.find(isCaptureNewPasswordField);
   if (!newPasswordField) {
     return null;
   }
   const currentPasswordField =
+    fields.find(
+      (field) =>
+        field.qualifiedAs === "password" &&
+        field.formOpid === newPasswordField.formOpid &&
+        hasSiteRuleType(field, "currentPassword")
+    ) ??
     fields.find(
       (field) =>
         field.qualifiedAs === "password" &&
@@ -193,7 +216,11 @@ function pickPasswordChangeFields(fields: AutofillTriageFieldResult[]) {
 }
 
 function pickRegistrationPasswordField(fields: AutofillTriageFieldResult[]) {
-  const newPasswordField = fields.find(isCaptureNewPasswordField);
+  const newPasswordField =
+    fields.find(
+      (field) => isCaptureNewPasswordField(field) && hasSiteRuleType(field, "newPassword")
+    ) ??
+    fields.find(isCaptureNewPasswordField);
   if (!newPasswordField) {
     return null;
   }
@@ -280,6 +307,11 @@ export function collectAutofillSubmission(
   }
 
   const passwordField =
+    fields.find(
+      (field) =>
+        field.qualifiedAs === "password" &&
+        (hasSiteRuleType(field, "password") || hasSiteRuleType(field, "currentPassword"))
+    ) ??
     fields.find(
       (field) =>
         field.qualifiedAs === "password" &&

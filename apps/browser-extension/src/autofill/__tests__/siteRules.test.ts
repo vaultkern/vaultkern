@@ -278,6 +278,98 @@ describe("autofill site rules", () => {
     });
   });
 
+  it("prefers rule-selected fields when capturing submitted credentials", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="decoy-user" name="email" type="email" autocomplete="username" value="decoy@example.com" />
+        <input id="decoy-password" name="password" type="password" autocomplete="current-password" value="wrong-secret" />
+        <input id="rule-user" name="account" type="text" value="alice" />
+        <input id="rule-password" name="secret_text" type="text" value="captured-secret" />
+      </form>
+    `;
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("form") as HTMLFormElement,
+      {
+        siteRules: [
+          {
+            id: "text-password-rule",
+            host: window.location.hostname,
+            fields: {
+              username: ["#rule-user"],
+              password: ["#rule-password"]
+            }
+          }
+        ]
+      }
+    );
+
+    expect(submission).toMatchObject({
+      username: "alice",
+      password: "captured-secret"
+    });
+  });
+
+  it("uses current-password site rules when capturing password changes", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="decoy-current" name="password" type="password" value="wrong-secret" />
+        <input id="rule-current" name="opaque_token" type="text" value="old-secret" />
+        <input id="new-password" name="new_password" type="password" autocomplete="new-password" value="new-secret" />
+      </form>
+    `;
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("form") as HTMLFormElement,
+      {
+        siteRules: [
+          {
+            id: "change-password-rule",
+            host: window.location.hostname,
+            fields: {
+              currentPassword: ["#rule-current"]
+            }
+          }
+        ]
+      }
+    );
+
+    expect(submission).toMatchObject({
+      password: "old-secret",
+      newPassword: "new-secret"
+    });
+  });
+
+  it("captures readonly opaque usernames selected by site rules", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="opaque-account" name="display_token" type="text" readonly value="alice" />
+        <input id="rule-password" name="secret_text" type="text" value="captured-secret" />
+      </form>
+    `;
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("form") as HTMLFormElement,
+      {
+        siteRules: [
+          {
+            id: "readonly-username-rule",
+            host: window.location.hostname,
+            fields: {
+              username: ["#opaque-account"],
+              password: ["#rule-password"]
+            }
+          }
+        ]
+      }
+    );
+
+    expect(submission).toMatchObject({
+      username: "alice",
+      password: "captured-secret"
+    });
+  });
+
   it("does not capture submissions when the matching site rule is disabled", () => {
     document.body.innerHTML = `
       <form>
