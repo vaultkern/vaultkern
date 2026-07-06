@@ -7,6 +7,7 @@ import type {
 
 const USERNAME_AUTOCOMPLETE = new Set(["username", "email"]);
 const PASSWORD_AUTOCOMPLETE = new Set(["current-password"]);
+const USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
 const EXCLUDED_KEYWORDS = [
   ["captcha", "excluded:captcha"],
   ["forgot", "excluded:forgot"]
@@ -79,9 +80,10 @@ function isSearchField(field: AutofillFieldSnapshot, fieldText: string) {
   return field.htmlType === "search" || /\b(search|query|find)\b/.test(fieldText);
 }
 
-function excludedReason(fieldText: string) {
+function excludedReason(fieldText: string, formText: string) {
+  const searchableText = `${fieldText},${formText}`;
   for (const [keyword, reason] of EXCLUDED_KEYWORDS) {
-    if (fieldText.includes(keyword)) {
+    if (searchableText.includes(keyword)) {
       return reason;
     }
   }
@@ -96,6 +98,10 @@ function nonLoginReason(fieldText: string, formText: string) {
 }
 
 function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
+  if (field.tagName !== "input" || !USERNAME_INPUT_TYPES.has(field.htmlType ?? "text")) {
+    return false;
+  }
+
   const autocomplete = fieldAutocompleteTokens(field);
   if ([...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
     return true;
@@ -126,15 +132,21 @@ function qualificationForFillableField(
 ): FieldQualification {
   const fieldText = joinedFieldText(field);
   const formText = joinedFormText(form);
+  const autocomplete = fieldAutocompleteTokens(field);
 
   if (isSearchField(field, fieldText)) {
     reasons.push("excluded:search");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  const excluded = excludedReason(fieldText);
+  const excluded = excludedReason(fieldText, formText);
   if (excluded) {
     reasons.push(excluded);
+    return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  if (autocomplete.has("new-password")) {
+    reasons.push("excluded:new-password");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
@@ -144,7 +156,6 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  const autocomplete = fieldAutocompleteTokens(field);
   if (isPasswordLike(field)) {
     if (autocomplete.has("current-password")) {
       reasons.push("autocomplete:current-password");

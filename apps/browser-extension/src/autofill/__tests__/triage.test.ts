@@ -75,8 +75,17 @@ describe("autofill triage", () => {
       <form>
         <input name="readonly_user" type="text" readonly />
         <input name="disabled_user" type="text" disabled />
+        <fieldset disabled>
+          <input name="fieldset_disabled_user" type="email" autocomplete="username" />
+        </fieldset>
         <input name="hidden_user" type="text" hidden />
         <input name="css_hidden_user" type="text" style="display:none" />
+        <div hidden>
+          <input name="ancestor_hidden_user" type="email" autocomplete="username" />
+        </div>
+        <div style="display:none">
+          <input name="ancestor_css_hidden_user" type="email" autocomplete="username" />
+        </div>
       </form>
     `;
 
@@ -89,8 +98,17 @@ describe("autofill triage", () => {
     });
     expect(fieldByName(report, "readonly_user").reasons).toContain("not-fillable:readonly");
     expect(fieldByName(report, "disabled_user").reasons).toContain("not-fillable:disabled");
+    expect(fieldByName(report, "fieldset_disabled_user").reasons).toContain(
+      "not-fillable:disabled"
+    );
     expect(fieldByName(report, "hidden_user").reasons).toContain("not-viewable:hidden");
     expect(fieldByName(report, "css_hidden_user").reasons).toContain("not-viewable:css");
+    expect(fieldByName(report, "ancestor_hidden_user").reasons).toContain(
+      "not-viewable:hidden"
+    );
+    expect(fieldByName(report, "ancestor_css_hidden_user").reasons).toContain(
+      "not-viewable:css"
+    );
   });
 
   it("excludes search newsletter captcha and forgot-password fields from login qualification", () => {
@@ -122,6 +140,62 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "forgot_email").reasons).toContain("excluded:forgot");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("excludes forgot-password fields when the signal is in the form context", () => {
+    document.body.innerHTML = `
+      <form id="forgot" action="/forgot-password">
+        <input name="email" type="email" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "email").reasons).toContain("excluded:forgot");
+  });
+
+  it("does not classify new-password fields or non-text controls as login candidates", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="create_password" type="password" autocomplete="new-password" />
+        <input name="login" type="submit" value="Sign in" />
+        <input name="real_user" type="email" autocomplete="username" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "create_password").qualifiedAs).not.toBe("password");
+    expect(fieldByName(report, "login").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("does not copy later sibling section headings into an earlier form context", () => {
+    document.body.innerHTML = `
+      <section>
+        <h2>Sign in</h2>
+        <form id="login-form">
+          <input name="email" type="email" autocomplete="username" />
+          <input name="password" type="password" autocomplete="current-password" />
+        </form>
+        <h2>Subscribe to our newsletter</h2>
+        <form id="newsletter-form">
+          <input name="newsletter_email" type="email" />
+        </form>
+      </section>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "login-form")).toMatchObject({
+      headingText: ["Sign in"]
+    });
+    expect(snapshot.forms.find((form) => form.htmlId === "newsletter-form")).toMatchObject({
+      headingText: ["Subscribe to our newsletter"]
+    });
   });
 
   it("captures select textarea labels and form metadata without collecting secret values", () => {

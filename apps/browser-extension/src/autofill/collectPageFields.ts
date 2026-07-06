@@ -74,10 +74,33 @@ function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAr
 
 function getHeadingText(form: HTMLFormElement) {
   const scope = form.parentElement?.closest("section, article, main, aside") ?? form;
-  return Array.from(scope.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+  const headings = Array.from(scope.querySelectorAll("h1, h2, h3, h4, h5, h6"));
+  const previousForms = Array.from(scope.querySelectorAll("form")).filter(
+    (candidate) =>
+      candidate !== form &&
+      Boolean(candidate.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING)
+  );
+  const previousForm = previousForms[previousForms.length - 1];
+
+  return headings
     .filter((heading) => {
       const ownerForm = heading.closest("form");
-      return ownerForm === null || ownerForm === form;
+      if (ownerForm === form) {
+        return true;
+      }
+      if (ownerForm !== null) {
+        return false;
+      }
+      const headingIsBeforeForm = Boolean(
+        heading.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING
+      );
+      if (!headingIsBeforeForm) {
+        return false;
+      }
+      return (
+        previousForm === undefined ||
+        Boolean(previousForm.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING)
+      );
     })
     .map((heading) => cleanText(heading.textContent))
     .filter(Boolean);
