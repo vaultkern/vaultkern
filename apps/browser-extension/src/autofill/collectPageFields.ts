@@ -331,6 +331,13 @@ function getContainerOpid(
   return opid;
 }
 
+function getMaxLength(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
+    return undefined;
+  }
+  return element.maxLength > 0 ? element.maxLength : undefined;
+}
+
 function collectField(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
   index: number,
@@ -363,6 +370,8 @@ function collectField(
     htmlId: optionalString(element.id),
     htmlClass: optionalString(element.getAttribute("class")),
     autocomplete: optionalString(element.getAttribute("autocomplete")?.toLowerCase()),
+    inputMode: optionalString(element.getAttribute("inputmode")?.toLowerCase()),
+    maxLength: getMaxLength(element),
     placeholder: optionalString(element.getAttribute("placeholder")),
     title: optionalString(element.getAttribute("title")),
     ariaLabel: optionalString(element.getAttribute("aria-label")),

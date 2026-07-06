@@ -1136,6 +1136,7 @@ describe("PopupShell fill flow", () => {
       title: "Example Account",
       username: "alice",
       password: "secret-123",
+      totp: "123456",
       url: "https://example.com/login",
       notes: ""
     });
@@ -1162,7 +1163,8 @@ describe("PopupShell fill flow", () => {
       expect(sendMessage).toHaveBeenCalledWith(7, {
         type: "fill_entry_detail",
         username: "alice",
-        password: "secret-123"
+        password: "secret-123",
+        totp: "123456"
       });
     });
   });
@@ -3034,6 +3036,35 @@ describe("content script fill message", () => {
     expect(
       (document.querySelector('input[name="password"]') as HTMLInputElement).value
     ).toBe("root-secret");
+  });
+
+  it("fills a TOTP field when the content script receives entry detail", async () => {
+    const addListener = vi.fn((listener: (message: unknown) => void) => {
+      listener({
+        type: "fill_entry_detail",
+        totp: "246810"
+      });
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        }
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input name="otp" autocomplete="one-time-code" value="" />
+      </form>
+    `;
+
+    await import("../contentScript");
+
+    expect((document.querySelector('input[name="otp"]') as HTMLInputElement).value).toBe(
+      "246810"
+    );
   });
 
   it("fills available fields from a partial fill message", async () => {

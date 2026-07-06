@@ -10,6 +10,7 @@ const EMAIL_AUTOCOMPLETE = new Set(["email"]);
 const PASSWORD_AUTOCOMPLETE = new Set(["current-password"]);
 const USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
 const NEW_PASSWORD_AUTOCOMPLETE = new Set(["new-password"]);
+const TOTP_AUTOCOMPLETE = new Set(["one-time-code"]);
 const NON_LOGIN_KEYWORDS = ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"];
 const ACCOUNT_CREATION_EXACT_PARTS = new Set([
   "register",
@@ -54,6 +55,19 @@ const PASSWORD_MASKED_CODE_PARTS = [
   "2stepcode",
   "2factorcode"
 ];
+const RECOVERY_CODE_KEYWORDS = ["backup", "recovery"];
+const TOTP_KEYWORDS = [
+  "totp",
+  "otp",
+  "2fa",
+  "mfa",
+  "onetimecode",
+  "verificationcode",
+  "authenticatorcode",
+  "securitycode",
+  "twofactor",
+  "twostep"
+];
 
 export interface FieldQualification {
   qualifiedAs: AutofillFieldQualification;
@@ -85,6 +99,7 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
     field.htmlId,
     field.htmlClass,
     field.autocomplete,
+    field.inputMode,
     field.placeholder,
     field.title,
     field.ariaLabel,
@@ -295,6 +310,28 @@ function hasPasswordMaskedCodeSignal(fieldText: string) {
   );
 }
 
+function recoveryCodeReason(
+  fieldText: string,
+  formText: string,
+  autocomplete: Set<string>
+) {
+  const searchableText = `${fieldText},${formText}`;
+  const hasRecoveryMarker = RECOVERY_CODE_KEYWORDS.some((keyword) =>
+    searchableText.includes(keyword)
+  );
+  if (!hasRecoveryMarker) {
+    return null;
+  }
+
+  const hasCodeContext =
+    autocomplete.has("one-time-code") ||
+    fieldText.includes("code") ||
+    fieldText.includes("otp") ||
+    fieldText.includes("totp") ||
+    fieldText.includes("onetime");
+  return hasCodeContext ? "excluded:recovery-code" : null;
+}
+
 function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
   if (field.tagName !== "input" || !USERNAME_INPUT_TYPES.has(field.htmlType ?? "text")) {
     return false;
@@ -334,6 +371,19 @@ function hasLoginContext(text: string) {
   return hasAnyKeyword(text, ["login", "signin", "signon"]);
 }
 
+function isTotpLike(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
+  const autocomplete = fieldAutocompleteTokens(field);
+  if ([...TOTP_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
+    return true;
+  }
+  if (field.htmlType === "password") {
+    return !autocomplete.has("current-password") && hasPasswordMaskedCodeSignal(fieldText);
+  }
+
+  const searchableText = `${fieldText},${formText}`;
+  return TOTP_KEYWORDS.some((keyword) => searchableText.includes(keyword));
+}
+
 function isPasswordLike(field: AutofillFieldSnapshot) {
   return field.tagName === "input" && field.htmlType === "password";
 }
@@ -371,18 +421,20 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  if (autocomplete.has("one-time-code")) {
-    reasons.push("excluded:one-time-code");
+  const recoveryCode = recoveryCodeReason(fieldText, formText, autocomplete);
+  if (recoveryCode) {
+    reasons.push(recoveryCode);
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  if (
-    field.htmlType === "password" &&
-    !autocomplete.has("current-password") &&
-    hasPasswordMaskedCodeSignal(fieldText)
-  ) {
-    reasons.push("excluded:one-time-code");
-    return { qualifiedAs: "ignored", eligible: false, reasons };
+  if (isTotpLike(field, fieldText, formText)) {
+    if (autocomplete.has("one-time-code")) {
+      reasons.push("autocomplete:one-time-code");
+    }
+    if (field.maxLength === 1) {
+      reasons.push("totp:split-field");
+    }
+    return { qualifiedAs: "totp", eligible: true, reasons };
   }
 
   if (field.htmlType !== "password" && hasPasswordMaskedCodeSignal(fieldText)) {

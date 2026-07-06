@@ -8,6 +8,7 @@ import type {
 export interface LoginFillPayload {
   username?: string;
   password?: string;
+  totp?: string;
 }
 
 export interface AutofillFillAction {
@@ -93,6 +94,48 @@ function pickSingleStepEmailUsernameField(
   return fallbackFields.length === 1 ? fallbackFields[0] : null;
 }
 
+function pickTotpFields(fields: AutofillTriageFieldResult[]) {
+  return fields.filter((field) => field.qualifiedAs === "totp");
+}
+
+function createTotpActions(
+  fields: AutofillTriageFieldResult[],
+  value: string
+): AutofillFillAction[] {
+  const totpFields = pickTotpFields(fields);
+  if (!totpFields.length) {
+    return [];
+  }
+
+  const trimmedValue = value.trim();
+  const splitFields = totpFields.filter(
+    (field) => field.maxLength === 1 || field.reasons.includes("totp:split-field")
+  );
+
+  if (splitFields.length > 1 && splitFields.length === trimmedValue.length) {
+    return splitFields.map((field, index) => ({
+      fieldOpid: field.opid,
+      elementNumber: field.elementNumber,
+      fieldType: field.qualifiedAs,
+      value: trimmedValue[index] ?? ""
+    }));
+  }
+
+  if (totpFields.length === 1) {
+    const field = totpFields[0];
+    return [
+      {
+        fieldOpid: field.opid,
+        elementNumber: field.elementNumber,
+        fieldType: field.qualifiedAs,
+        value: trimmedValue
+      }
+    ];
+  }
+
+  return [];
+}
+
 export function createLoginFillPlan(
   snapshot: AutofillPageSnapshot,
   payload: LoginFillPayload
@@ -125,6 +168,10 @@ export function createLoginFillPlan(
       fieldType: passwordField.qualifiedAs,
       value: payload.password
     });
+  }
+
+  if (typeof payload.totp === "string") {
+    actions.push(...createTotpActions(fields, payload.totp));
   }
 
   return { actions };

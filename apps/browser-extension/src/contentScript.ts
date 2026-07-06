@@ -5,6 +5,7 @@ import { createLoginFillPlan } from "./autofill/fillPlan";
 export function fillLoginForm(payload: {
   username?: string;
   password?: string;
+  totp?: string;
 }) {
   const snapshot = collectAutofillPageSnapshot(document);
   const fillPlan = createLoginFillPlan(snapshot, payload);
@@ -16,7 +17,7 @@ const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
 if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener(
     (
-      message: { type?: string; username?: string; password?: string },
+      message: { type?: string; username?: string; password?: string; totp?: string },
       _sender: unknown,
       _sendResponse: (response?: unknown) => void
     ) => {
@@ -26,14 +27,16 @@ if (chromeApi?.runtime?.onMessage) {
 
       const hasUsername = typeof message.username === "string";
       const hasPassword = typeof message.password === "string";
+      const hasTotp = typeof message.totp === "string";
 
-      if (!hasUsername && !hasPassword) {
+      if (!hasUsername && !hasPassword && !hasTotp) {
         return false;
       }
 
       fillLoginForm({
         username: hasUsername ? message.username : undefined,
-        password: hasPassword ? message.password : undefined
+        password: hasPassword ? message.password : undefined,
+        totp: hasTotp ? message.totp : undefined
       });
 
       return false;

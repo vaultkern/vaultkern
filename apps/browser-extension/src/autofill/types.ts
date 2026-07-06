@@ -29,6 +29,8 @@ export interface AutofillFieldSnapshot {
   htmlId?: string;
   htmlClass?: string;
   autocomplete?: string;
+  inputMode?: string;
+  maxLength?: number;
   placeholder?: string;
   title?: string;
   ariaLabel?: string;

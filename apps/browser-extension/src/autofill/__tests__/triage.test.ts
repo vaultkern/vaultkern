@@ -776,10 +776,9 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "login_otp").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "login_otp").reasons).toContain("excluded:one-time-code");
-    expect(fieldByName(report, "phone_otp").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "phone_otp").reasons).toContain("excluded:one-time-code");
+    expect(fieldByName(report, "login_otp").qualifiedAs).toBe("totp");
+    expect(fieldByName(report, "login_otp").reasons).toContain("autocomplete:one-time-code");
+    expect(fieldByName(report, "phone_otp").qualifiedAs).toBe("totp");
   });
 
   it("does not classify password-masked OTP fields as saved-password targets", () => {
