@@ -415,9 +415,17 @@ export function PopupApp({
   }, [recentVaultsLoading, session?.currentVaultRefId, session?.unlocked]);
 
   useEffect(() => {
-    setSelectedPasskeyCredentialId(
-      passkeyCredentialOptions[0]?.credentialId ?? ""
-    );
+    setSelectedPasskeyCredentialId((currentCredentialId) => {
+      if (
+        currentCredentialId &&
+        passkeyCredentialOptions.some(
+          (option) => option.credentialId === currentCredentialId
+        )
+      ) {
+        return currentCredentialId;
+      }
+      return passkeyCredentialOptions[0]?.credentialId ?? "";
+    });
   }, [passkeyCredentialOptions]);
 
   useEffect(() => {
