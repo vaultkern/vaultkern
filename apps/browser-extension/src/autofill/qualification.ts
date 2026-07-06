@@ -33,14 +33,6 @@ const NEW_PASSWORD_PARTS = [
   "verifypassword"
 ];
 const PASSWORD_MASKED_CODE_PARTS = [
-  "csc",
-  "cccsc",
-  "cvc",
-  "cvv",
-  "cardcsc",
-  "cardcvc",
-  "cardcvv",
-  "cardcode",
   "otp",
   "totp",
   "onetime",
@@ -54,6 +46,18 @@ const PASSWORD_MASKED_CODE_PARTS = [
   "2facode",
   "2stepcode",
   "2factorcode"
+];
+const CARD_SECURITY_CODE_PARTS = [
+  "csc",
+  "cccsc",
+  "cvc",
+  "cvv",
+  "cardcsc",
+  "cardcvc",
+  "cardcvv",
+  "cardcode",
+  "cardsecuritycode",
+  "cardverificationcode"
 ];
 const RECOVERY_CODE_KEYWORDS = ["backup", "recovery"];
 const TOTP_KEYWORDS = [
@@ -249,6 +253,22 @@ function hasNewPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillP
   return hasScopedField(field, snapshot, isNewPasswordField);
 }
 
+function isCurrentPasswordSibling(candidate: AutofillFieldSnapshot) {
+  const autocomplete = fieldAutocompleteTokens(candidate);
+  const candidateText = joinedFieldText(candidate);
+  return (
+    candidate.htmlType === "password" &&
+    (autocomplete.has("current-password") ||
+      candidateText.includes("currentpassword") ||
+      candidateText.includes("oldpassword") ||
+      candidateText.includes("existingpassword"))
+  );
+}
+
+function hasCurrentPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
+  return hasScopedField(field, snapshot, isCurrentPasswordSibling);
+}
+
 function searchPartsForField(field: AutofillFieldSnapshot) {
   return [
     field.htmlType,
@@ -333,6 +353,12 @@ function nonLoginReason(fieldText: string, formText: string) {
 function hasPasswordMaskedCodeSignal(fieldText: string) {
   return normalizedParts(fieldText).some((part) =>
     PASSWORD_MASKED_CODE_PARTS.some((keyword) => part.includes(keyword))
+  );
+}
+
+function hasCardSecurityCodeSignal(fieldText: string) {
+  return normalizedParts(fieldText).some((part) =>
+    CARD_SECURITY_CODE_PARTS.some((keyword) => part.includes(keyword))
   );
 }
 
@@ -527,9 +553,14 @@ function qualificationForFillableField(
   if (
     isUsernameLike(field, fieldText) &&
     hasNewPasswordSibling(field, snapshot) &&
-    !hasPasswordSibling(field, snapshot)
+    !hasCurrentPasswordSibling(field, snapshot)
   ) {
     reasons.push("non-login:account-creation");
+    return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  if (field.htmlType === "password" && hasCardSecurityCodeSignal(fieldText)) {
+    reasons.push("excluded:card-security-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
@@ -640,7 +671,7 @@ function qualificationForFillableField(
     const needsLoginEvidence =
       (hasEmailSignal || hasPhoneSignal || hasGenericIdentifierSignal) &&
       !hasUsernameAutocomplete;
-    if (hasNewPasswordSibling(field, snapshot) && !hasPasswordSibling(field, snapshot)) {
+    if (hasNewPasswordSibling(field, snapshot) && !hasCurrentPasswordSibling(field, snapshot)) {
       reasons.push("non-login:account-creation");
       return { qualifiedAs: "ignored", eligible: false, reasons };
     }
