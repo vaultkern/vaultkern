@@ -11,6 +11,7 @@ function fieldByName(report: ReturnType<typeof triageAutofillPage>, htmlName: st
 
 describe("autofill triage", () => {
   beforeEach(() => {
+    window.history.replaceState(null, "", "/");
     document.body.innerHTML = "";
   });
 
@@ -243,6 +244,67 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "login").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("suppresses usernames that only sit beside new-password fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="account" autocomplete="username" />
+        <input name="password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "account").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
+  });
+
+  it("recognizes plain user identifiers when login evidence is present", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="plain-user">User</label>
+        <input id="plain-user" name="user" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "user").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
+  it("uses implicit form actions and submit text as passwordless login context", () => {
+    window.history.replaceState(null, "", "/login");
+    document.body.innerHTML = `
+      <form id="implicit-action">
+        <input name="implicit_email" type="email" />
+      </form>
+      <form id="button-context" action="/continue">
+        <input name="button_email" type="email" />
+        <button type="submit">Sign in</button>
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "implicit_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "button_email").qualifiedAs).toBe("username");
+  });
+
+  it("lets subscription login context override newsletter exclusions", () => {
+    document.body.innerHTML = `
+      <form id="subscription-login">
+        <input name="subscriber_email" type="email" />
+        <input name="subscriber_password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "subscriber_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "subscriber_password").qualifiedAs).toBe("password");
   });
 
   it("requires login evidence before treating a generic email field as username", () => {
@@ -541,6 +603,7 @@ describe("autofill triage", () => {
     document.body.append(host);
     const root = host.attachShadow({ mode: "open" });
     root.innerHTML = `
+      <h2>Create account</h2>
       <form>
         <label for="shadow-user">Email address</label>
         <input id="shadow-user" name="opaque_shadow_user" type="text" />
@@ -553,8 +616,14 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "hidden_shadow_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "hidden_shadow_email").reasons).toContain("not-viewable:hidden");
     expect(fieldByName(report, "opaque_shadow_user").labelText).toBe("Email address");
-    expect(fieldByName(report, "opaque_shadow_user").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "opaque_shadow_user").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "opaque_shadow_user").reasons).toContain(
+      "non-login:account-creation"
+    );
+    expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "shadow_password").reasons).toContain(
+      "non-login:account-creation"
+    );
   });
 
   it("does not copy later sibling section headings into an earlier form context", () => {

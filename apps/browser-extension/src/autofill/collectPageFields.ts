@@ -49,7 +49,7 @@ function getFieldTag(element: Element): AutofillFieldTag | null {
 function getFormAction(form: HTMLFormElement) {
   const rawAction = form.getAttribute("action");
   if (!rawAction) {
-    return undefined;
+    return form.ownerDocument.location.href;
   }
 
   try {
@@ -108,11 +108,21 @@ function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAr
   return optionalString(labelText);
 }
 
+function scopeForFormHeadings(form: HTMLFormElement): ParentNode {
+  if (form.parentElement) {
+    return form.parentElement.closest("section, article, main, aside") ?? form.parentElement;
+  }
+
+  const root = form.getRootNode();
+  if (root.nodeType === 11 && "querySelectorAll" in root) {
+    return root;
+  }
+
+  return form;
+}
+
 function getHeadingText(form: HTMLFormElement) {
-  const scope =
-    form.parentElement?.closest("section, article, main, aside") ??
-    form.parentElement ??
-    form;
+  const scope = scopeForFormHeadings(form);
   const headings = Array.from(scope.querySelectorAll("h1, h2, h3, h4, h5, h6"));
   const previousForms = Array.from(scope.querySelectorAll("form")).filter(
     (candidate) =>
@@ -145,6 +155,24 @@ function getHeadingText(form: HTMLFormElement) {
     .filter(Boolean);
 }
 
+function getSubmitText(form: HTMLFormElement) {
+  return Array.from(form.querySelectorAll("button, input")).flatMap((element) => {
+    const tagName = element.tagName.toLowerCase();
+    if (tagName === "button") {
+      return [cleanText(element.textContent)];
+    }
+    if (tagName !== "input") {
+      return [];
+    }
+    const input = element as HTMLInputElement;
+    const type = input.type.toLowerCase();
+    if (type !== "submit" && type !== "button") {
+      return [];
+    }
+    return [cleanText(input.value || input.getAttribute("aria-label"))];
+  }).filter(Boolean);
+}
+
 function collectForms(documentRef: Document) {
   const formByElement = new Map<HTMLFormElement, AutofillFormSnapshot>();
   const forms = collectMatchingElements(documentRef, "form").map((form, index) => {
@@ -156,7 +184,7 @@ function collectForms(documentRef: Document) {
       htmlClass: optionalString(formElement.getAttribute("class")),
       htmlAction: getFormAction(formElement),
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
-      headingText: getHeadingText(formElement)
+      headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
     };
     formByElement.set(formElement, snapshot);
     return snapshot;

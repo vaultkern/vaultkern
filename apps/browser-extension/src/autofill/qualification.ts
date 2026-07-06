@@ -95,10 +95,18 @@ function isAvailablePasswordSibling(candidate: AutofillFieldSnapshot) {
   );
 }
 
-function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
+function isNewPasswordField(candidate: AutofillFieldSnapshot) {
+  return candidate.htmlType === "password" && fieldAutocompleteTokens(candidate).has("new-password");
+}
+
+function hasScopedField(
+  field: AutofillFieldSnapshot,
+  snapshot: AutofillPageSnapshot,
+  predicate: (candidate: AutofillFieldSnapshot) => boolean
+) {
   if (field.formOpid) {
     return snapshot.fields.some(
-      (candidate) => candidate.formOpid === field.formOpid && isAvailablePasswordSibling(candidate)
+      (candidate) => candidate.formOpid === field.formOpid && predicate(candidate)
     );
   }
   if (field.containerOpid) {
@@ -106,10 +114,18 @@ function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPage
       (candidate) =>
         !candidate.formOpid &&
         candidate.containerOpid === field.containerOpid &&
-        isAvailablePasswordSibling(candidate)
+        predicate(candidate)
     );
   }
   return false;
+}
+
+function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
+  return hasScopedField(field, snapshot, isAvailablePasswordSibling);
+}
+
+function hasNewPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
+  return hasScopedField(field, snapshot, isNewPasswordField);
 }
 
 function searchPartsForField(field: AutofillFieldSnapshot) {
@@ -211,6 +227,7 @@ function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
     field.htmlType === "email" ||
     fieldText.includes("username") ||
     fieldText.includes("userid") ||
+    fieldText.split(",").some((part) => part === "user") ||
     fieldText.includes("email") ||
     fieldText.includes("phone") ||
     fieldText.includes("mobile") ||
@@ -264,7 +281,14 @@ function qualificationForFillableField(
   }
 
   const nonLogin = nonLoginReason(fieldText, formText);
-  if (nonLogin) {
+  if (
+    nonLogin &&
+    !(
+      nonLogin === "non-login:newsletter" &&
+      hasLoginContext(fieldText, formText) &&
+      hasPasswordSibling(field, snapshot)
+    )
+  ) {
     reasons.push(nonLogin);
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
@@ -290,6 +314,10 @@ function qualificationForFillableField(
       fieldText.includes("mobile") ||
       fieldTextParts.some((part) => part === "tel" || part.includes("telephone"));
     const needsLoginEvidence = (hasEmailSignal || hasPhoneSignal) && !hasUsernameAutocomplete;
+    if (hasNewPasswordSibling(field, snapshot) && !hasPasswordSibling(field, snapshot)) {
+      reasons.push("non-login:account-creation");
+      return { qualifiedAs: "ignored", eligible: false, reasons };
+    }
     if (
       needsLoginEvidence &&
       !hasPasswordSibling(field, snapshot) &&
