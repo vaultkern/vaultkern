@@ -99,6 +99,45 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#otp-code") as HTMLInputElement).value).toBe("123456");
   });
 
+  it("lets explicit login autocompletes win over shared MFA field styling", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="email" class="mfa-field" type="email" autocomplete="username" />
+        <input id="password" class="mfa-field" type="password" autocomplete="current-password" />
+        <input id="otp-code" class="mfa-field" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123",
+      totp: "123456"
+    });
+
+    expect((document.querySelector("#email") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#password") as HTMLInputElement).value).toBe(
+      "secret-123"
+    );
+    expect((document.querySelector("#otp-code") as HTMLInputElement).value).toBe("123456");
+  });
+
+  it("recognizes one-time-password prompts as TOTP", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="one-time-password">One-time password</label>
+        <input id="one-time-password" type="password" name="one_time_password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "account-secret", totp: "123456" });
+
+    expect((document.querySelector("#one-time-password") as HTMLInputElement).value).toBe(
+      "123456"
+    );
+  });
+
   it("does not fill payment-style security code fields without MFA evidence", () => {
     document.body.innerHTML = `
       <form>
@@ -158,6 +197,28 @@ describe("totp autofill detection", () => {
     ).toEqual(["2", "4", "6", "8", "1", "0"]);
   });
 
+  it("uses form aria-labelledby text as MFA context for generic split code fields", () => {
+    document.body.innerHTML = `
+      <div id="mfa-title">Two-factor verification</div>
+      <form aria-labelledby="mfa-title">
+        <input name="digit_1" maxlength="1" inputmode="numeric" />
+        <input name="digit_2" maxlength="1" inputmode="numeric" />
+        <input name="digit_3" maxlength="1" inputmode="numeric" />
+        <input name="digit_4" maxlength="1" inputmode="numeric" />
+        <input name="digit_5" maxlength="1" inputmode="numeric" />
+        <input name="digit_6" maxlength="1" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "246810" });
+
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>('input[name^="digit_"]')].map(
+        (field) => field.value
+      )
+    ).toEqual(["2", "4", "6", "8", "1", "0"]);
+  });
+
   it("expands a partially labeled split TOTP field group", () => {
     document.body.innerHTML = `
       <form>
@@ -185,6 +246,28 @@ describe("totp autofill detection", () => {
       <input id="unrelated-one-char" name="middle_initial" maxlength="1" />
       <input id="separator" name="search" />
       <div>
+        <label for="code-1">Authenticator code</label>
+        <input id="code-1" class="otp" name="code_1" maxlength="1" inputmode="numeric" />
+        <input id="code-2" class="otp" name="code_2" maxlength="1" inputmode="numeric" />
+        <input id="code-3" class="otp" name="code_3" maxlength="1" inputmode="numeric" />
+        <input id="code-4" class="otp" name="code_4" maxlength="1" inputmode="numeric" />
+        <input id="code-5" class="otp" name="code_5" maxlength="1" inputmode="numeric" />
+        <input id="code-6" class="otp" name="code_6" maxlength="1" inputmode="numeric" />
+      </div>
+    `;
+
+    fillLoginForm({ totp: "112358" });
+
+    expect((document.querySelector("#unrelated-one-char") as HTMLInputElement).value).toBe("");
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>(".otp")].map((field) => field.value)
+    ).toEqual(["1", "1", "2", "3", "5", "8"]);
+  });
+
+  it("keeps form-less split TOTP fields inside one container", () => {
+    document.body.innerHTML = `
+      <input id="unrelated-one-char" name="middle_initial" maxlength="1" />
+      <div id="otp-widget">
         <label for="code-1">Authenticator code</label>
         <input id="code-1" class="otp" name="code_1" maxlength="1" inputmode="numeric" />
         <input id="code-2" class="otp" name="code_2" maxlength="1" inputmode="numeric" />

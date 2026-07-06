@@ -62,6 +62,7 @@ const TOTP_KEYWORDS = [
   "2fa",
   "mfa",
   "onetimecode",
+  "onetimepassword",
   "authenticatorcode",
   "twofactor",
   "twostep"
@@ -450,6 +451,31 @@ function qualificationForFillableField(
   if (recoveryCode) {
     reasons.push(recoveryCode);
     return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  if (
+    [...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) &&
+    isUsernameLike(field, fieldText)
+  ) {
+    if (autocomplete.has("username")) {
+      reasons.push("autocomplete:username");
+    } else if (autocomplete.has("email")) {
+      reasons.push("autocomplete:email");
+    }
+    if (hasPasswordSibling(field, snapshot)) {
+      reasons.push("form-has-password");
+    }
+    return { qualifiedAs: "username", eligible: true, reasons };
+  }
+
+  if (autocomplete.has("current-password") && isPasswordLike(field)) {
+    reasons.push("autocomplete:current-password");
+    return { qualifiedAs: "password", eligible: true, reasons };
+  }
+
+  if (autocomplete.has("new-password") && isNewPasswordLike(field, fieldText, formText)) {
+    reasons.push("autocomplete:new-password");
+    return { qualifiedAs: "newPassword", eligible: true, reasons };
   }
 
   if (isTotpLike(field, fieldText, formText)) {

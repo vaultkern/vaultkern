@@ -108,6 +108,21 @@ function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | unde
   return field.formOpid === formOpid;
 }
 
+function splitScopeMatches(
+  seed: AutofillTriageFieldResult,
+  candidate: AutofillTriageFieldResult
+) {
+  if (seed.formOpid !== undefined) {
+    return candidate.formOpid === seed.formOpid;
+  }
+
+  if (seed.containerOpid !== undefined) {
+    return candidate.formOpid === undefined && candidate.containerOpid === seed.containerOpid;
+  }
+
+  return candidate.formOpid === undefined && candidate.containerOpid === undefined;
+}
+
 function pickContiguousOneCharacterFields(
   fields: AutofillTriageFieldResult[],
   seed: AutofillTriageFieldResult,
@@ -120,14 +135,19 @@ function pickContiguousOneCharacterFields(
   }
 
   let startIndex = seedIndex;
-  while (startIndex > 0 && isOneCharacterField(sortedFields[startIndex - 1])) {
+  while (
+    startIndex > 0 &&
+    isOneCharacterField(sortedFields[startIndex - 1]) &&
+    splitScopeMatches(seed, sortedFields[startIndex - 1])
+  ) {
     startIndex -= 1;
   }
 
   let endIndex = seedIndex;
   while (
     endIndex + 1 < sortedFields.length &&
-    isOneCharacterField(sortedFields[endIndex + 1])
+    isOneCharacterField(sortedFields[endIndex + 1]) &&
+    splitScopeMatches(seed, sortedFields[endIndex + 1])
   ) {
     endIndex += 1;
   }
