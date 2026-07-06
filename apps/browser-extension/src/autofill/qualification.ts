@@ -215,15 +215,6 @@ function isAvailablePasswordSibling(candidate: AutofillFieldSnapshot) {
   );
 }
 
-function isNewPasswordField(candidate: AutofillFieldSnapshot) {
-  return (
-    candidate.htmlType === "password" &&
-    candidate.viewable &&
-    candidate.fillable &&
-    hasNewPasswordSignal(candidate)
-  );
-}
-
 function hasScopedField(
   field: AutofillFieldSnapshot,
   snapshot: AutofillPageSnapshot,
@@ -247,10 +238,6 @@ function hasScopedField(
 
 function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
   return hasScopedField(field, snapshot, isAvailablePasswordSibling);
-}
-
-function hasNewPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
-  return hasScopedField(field, snapshot, isNewPasswordField);
 }
 
 function isCurrentPasswordSibling(candidate: AutofillFieldSnapshot) {
@@ -550,15 +537,6 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  if (
-    isUsernameLike(field, fieldText) &&
-    hasNewPasswordSibling(field, snapshot) &&
-    !hasCurrentPasswordSibling(field, snapshot)
-  ) {
-    reasons.push("non-login:account-creation");
-    return { qualifiedAs: "ignored", eligible: false, reasons };
-  }
-
   if (field.htmlType === "password" && hasCardSecurityCodeSignal(fieldText)) {
     reasons.push("excluded:card-security-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
@@ -671,10 +649,6 @@ function qualificationForFillableField(
     const needsLoginEvidence =
       (hasEmailSignal || hasPhoneSignal || hasGenericIdentifierSignal) &&
       !hasUsernameAutocomplete;
-    if (hasNewPasswordSibling(field, snapshot) && !hasCurrentPasswordSibling(field, snapshot)) {
-      reasons.push("non-login:account-creation");
-      return { qualifiedAs: "ignored", eligible: false, reasons };
-    }
     if (
       needsLoginEvidence &&
       !hasPasswordSibling(field, snapshot) &&

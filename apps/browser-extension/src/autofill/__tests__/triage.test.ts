@@ -265,7 +265,7 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
-  it("suppresses usernames that only sit beside new-password fields", () => {
+  it("keeps usernames beside new-password fields available for registration", () => {
     document.body.innerHTML = `
       <form>
         <input name="account" autocomplete="username" />
@@ -275,7 +275,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "account").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "account").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
   });
 
