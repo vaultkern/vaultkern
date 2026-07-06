@@ -95,7 +95,35 @@ function pickSingleStepEmailUsernameField(
 }
 
 function pickTotpFields(fields: AutofillTriageFieldResult[]) {
-  return fields.filter((field) => field.qualifiedAs === "totp");
+  return fields
+    .filter((field) => field.qualifiedAs === "totp" && field.viewable && field.fillable)
+    .sort(byDocumentOrder);
+}
+
+function isOneCharacterField(field: AutofillTriageFieldResult) {
+  return field.viewable && field.fillable && field.maxLength === 1;
+}
+
+function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | undefined) {
+  return field.formOpid === formOpid;
+}
+
+function pickSplitTotpFields(
+  fields: AutofillTriageFieldResult[],
+  totpFields: AutofillTriageFieldResult[],
+  valueLength: number
+) {
+  for (const seed of totpFields.filter(isOneCharacterField)) {
+    const splitFields = fields
+      .filter((field) => fieldIsInForm(field, seed.formOpid))
+      .filter(isOneCharacterField)
+      .sort(byDocumentOrder);
+    if (splitFields.length === valueLength) {
+      return splitFields;
+    }
+  }
+
+  return [];
 }
 
 function createTotpActions(
@@ -108,21 +136,22 @@ function createTotpActions(
   }
 
   const trimmedValue = value.trim();
-  const splitFields = totpFields.filter(
-    (field) => field.maxLength === 1 || field.reasons.includes("totp:split-field")
-  );
+  const splitFields = pickSplitTotpFields(fields, totpFields, trimmedValue.length);
 
-  if (splitFields.length > 1 && splitFields.length === trimmedValue.length) {
+  if (splitFields.length > 1) {
     return splitFields.map((field, index) => ({
       fieldOpid: field.opid,
       elementNumber: field.elementNumber,
-      fieldType: field.qualifiedAs,
+      fieldType: "totp",
       value: trimmedValue[index] ?? ""
     }));
   }
 
   if (totpFields.length === 1) {
     const field = totpFields[0];
+    if (isOneCharacterField(field)) {
+      return [];
+    }
     return [
       {
         fieldOpid: field.opid,
@@ -171,7 +200,7 @@ export function createLoginFillPlan(
   }
 
   if (typeof payload.totp === "string") {
-    actions.push(...createTotpActions(fields, payload.totp));
+    actions.push(...createTotpActions(report.fields, payload.totp));
   }
 
   return { actions };

@@ -64,10 +64,10 @@ const TOTP_KEYWORDS = [
   "onetimecode",
   "verificationcode",
   "authenticatorcode",
-  "securitycode",
   "twofactor",
   "twostep"
 ];
+const TOTP_INPUT_TYPES = new Set(["number", "tel", "text"]);
 
 export interface FieldQualification {
   qualifiedAs: AutofillFieldQualification;
@@ -371,6 +371,24 @@ function hasLoginContext(text: string) {
   return hasAnyKeyword(text, ["login", "signin", "signon"]);
 }
 
+function hasTotpKeyword(text: string) {
+  return TOTP_KEYWORDS.some((keyword) => text.includes(keyword));
+}
+
+function isTotpInputControl(field: AutofillFieldSnapshot) {
+  return field.tagName === "input" && TOTP_INPUT_TYPES.has(field.htmlType ?? "text");
+}
+
+function hasNumericCodeShape(field: AutofillFieldSnapshot, fieldText: string) {
+  return (
+    field.inputMode === "numeric" ||
+    field.inputMode === "decimal" ||
+    field.maxLength === 1 ||
+    fieldText.includes("digit") ||
+    fieldText.includes("code")
+  );
+}
+
 function isTotpLike(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
   const autocomplete = fieldAutocompleteTokens(field);
   if ([...TOTP_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
@@ -380,8 +398,15 @@ function isTotpLike(field: AutofillFieldSnapshot, fieldText: string, formText: s
     return !autocomplete.has("current-password") && hasPasswordMaskedCodeSignal(fieldText);
   }
 
-  const searchableText = `${fieldText},${formText}`;
-  return TOTP_KEYWORDS.some((keyword) => searchableText.includes(keyword));
+  if (!isTotpInputControl(field)) {
+    return false;
+  }
+
+  if (hasTotpKeyword(fieldText)) {
+    return true;
+  }
+
+  return hasTotpKeyword(formText) && hasNumericCodeShape(field, fieldText);
 }
 
 function isPasswordLike(field: AutofillFieldSnapshot) {

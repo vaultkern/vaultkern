@@ -75,6 +75,87 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#promo-code") as HTMLInputElement).value).toBe("");
   });
 
+  it("keeps explicit login fields in a combined MFA form", () => {
+    document.body.innerHTML = `
+      <form id="mfa-login" aria-label="Two-factor verification">
+        <input id="email" type="email" autocomplete="username" />
+        <input id="password" type="password" autocomplete="current-password" />
+        <input id="otp-code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123",
+      totp: "123456"
+    });
+
+    expect((document.querySelector("#email") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#password") as HTMLInputElement).value).toBe(
+      "secret-123"
+    );
+    expect((document.querySelector("#otp-code") as HTMLInputElement).value).toBe("123456");
+  });
+
+  it("does not fill payment-style security code fields without MFA evidence", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="security-code">Security code</label>
+        <input id="security-code" name="security_code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#security-code") as HTMLInputElement).value).toBe("");
+  });
+
+  it("expands a partially labeled split TOTP field group", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="digit-1">Authenticator code</label>
+        <input id="digit-1" name="digit_1" maxlength="1" inputmode="numeric" />
+        <input id="digit-2" name="digit_2" maxlength="1" inputmode="numeric" />
+        <input id="digit-3" name="digit_3" maxlength="1" inputmode="numeric" />
+        <input id="digit-4" name="digit_4" maxlength="1" inputmode="numeric" />
+        <input id="digit-5" name="digit_5" maxlength="1" inputmode="numeric" />
+        <input id="digit-6" name="digit_6" maxlength="1" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "135790" });
+
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>('input[name^="digit_"]')].map(
+        (field) => field.value
+      )
+    ).toEqual(["1", "3", "5", "7", "9", "0"]);
+  });
+
+  it("does not treat backup service password fields as recovery codes", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="backup-user" name="backup_email" type="email" autocomplete="username" />
+        <input id="backup-password" name="backup_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123",
+      totp: "123456"
+    });
+
+    expect((document.querySelector("#backup-user") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#backup-password") as HTMLInputElement).value).toBe(
+      "secret-123"
+    );
+  });
+
   it("fills the checked-in single-field TOTP smoke page", () => {
     loadSmokeBody("totp.html");
 
