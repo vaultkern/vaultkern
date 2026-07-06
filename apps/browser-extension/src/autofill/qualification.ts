@@ -532,7 +532,11 @@ function qualificationForFillableField(
   const siteRuleType = field.siteRuleTypes.find((fieldType) => fieldType !== "ignored");
 
   if (siteRuleType) {
-    return { qualifiedAs: siteRuleType, eligible: true, reasons };
+    return {
+      qualifiedAs: siteRuleType === "currentPassword" ? "password" : siteRuleType,
+      eligible: true,
+      reasons
+    };
   }
 
   if (isSearchField(field, form)) {

@@ -50,7 +50,7 @@ function actionForSiteRuleField(
     const value =
       fieldType === "username"
         ? payload.username
-        : fieldType === "password"
+        : fieldType === "password" || fieldType === "currentPassword"
           ? payload.password
           : fieldType === "newPassword"
             ? payload.newPassword
@@ -288,6 +288,16 @@ function pickSingleStepEmailUsernameField(
   return fallbackFields.length === 1 ? fallbackFields[0] : null;
 }
 
+function pickLoginPasswordFieldInForm(
+  fields: AutofillTriageFieldResult[],
+  formOpid: string | undefined
+) {
+  if (!formOpid) {
+    return null;
+  }
+  return pickLoginPasswordField(fields.filter((field) => fieldIsInForm(field, formOpid)));
+}
+
 function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | undefined) {
   return field.formOpid === formOpid;
 }
@@ -333,7 +343,9 @@ function formSearchText(formFields: AutofillTriageFieldResult[]) {
 function isCurrentPasswordField(field: AutofillTriageFieldResult) {
   const searchableText = searchableFieldText(field);
   return (
+    field.siteRuleTypes.includes("currentPassword") ||
     field.reasons.includes("autocomplete:current-password") ||
+    field.reasons.some((reason) => reason.endsWith(":currentPassword")) ||
     searchableText.includes("currentpassword") ||
     searchableText.includes("oldpassword") ||
     searchableText.includes("existingpassword")
@@ -387,7 +399,8 @@ function formQualifiesForPasswordChange(
   }
 
   const hasAutocompleteRoles =
-    currentPasswordField.reasons.includes("autocomplete:current-password") &&
+    (currentPasswordField.reasons.includes("autocomplete:current-password") ||
+      currentPasswordField.siteRuleTypes.includes("currentPassword")) &&
     formNewPasswordFields.some((field) => field.reasons.includes("autocomplete:new-password"));
   return hasAutocompleteRoles || formHasChangePasswordContext(formFields);
 }
@@ -816,7 +829,13 @@ export function createLoginFillPlan(
   const actions: AutofillFillAction[] = [...siteRuleActions];
   const siteRulePasswordField = fieldForAction(
     report.fields,
-    siteRuleActions.find((action) => action.fieldType === "password")
+    siteRuleActions.find(
+      (action) => action.fieldType === "password" || action.fieldType === "currentPassword"
+    )
+  );
+  const siteRuleUsernameField = fieldForAction(
+    report.fields,
+    siteRuleActions.find((action) => action.fieldType === "username")
   );
 
   if (passwordChangeFormOpid !== null) {
@@ -843,7 +862,9 @@ export function createLoginFillPlan(
 
   const passwordField =
     typeof payload.password === "string"
-      ? siteRulePasswordField ?? pickLoginPasswordField(fields)
+      ? siteRulePasswordField ??
+        pickLoginPasswordFieldInForm(fields, siteRuleUsernameField?.formOpid) ??
+        pickLoginPasswordField(fields)
       : null;
   const usernameField =
     typeof payload.username === "string"

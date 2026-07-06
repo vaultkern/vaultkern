@@ -1,7 +1,12 @@
 import { collectAutofillPageSnapshot } from "./collectPageFields";
 import type { PendingAutofillSubmission } from "./pendingSubmission";
+import type { AutofillSiteRule } from "./siteRules";
 import { triageAutofillPage } from "./triage";
 import type { AutofillTriageFieldResult } from "./types";
+
+export interface CollectAutofillSubmissionOptions {
+  siteRules?: AutofillSiteRule[];
+}
 
 function byDocumentOrder(
   left: AutofillTriageFieldResult,
@@ -199,9 +204,15 @@ function pickRegistrationPasswordField(fields: AutofillTriageFieldResult[]) {
 
 export function collectAutofillSubmission(
   documentRef: Document = document,
-  submittedForm?: HTMLFormElement
+  submittedForm?: HTMLFormElement,
+  options: CollectAutofillSubmissionOptions = {}
 ): PendingAutofillSubmission | null {
-  const snapshot = collectAutofillPageSnapshot(documentRef);
+  const snapshot = collectAutofillPageSnapshot(documentRef, {
+    siteRules: options.siteRules
+  });
+  if (snapshot.siteRule?.disabled) {
+    return null;
+  }
   const report = triageAutofillPage(snapshot);
   const forms = Array.from(documentRef.querySelectorAll("form"));
   const submittedFormOpid =

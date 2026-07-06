@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { applyFillPlan } from "../applyFillPlan";
 import { collectAutofillPageSnapshot } from "../collectPageFields";
 import { createLoginFillPlan } from "../fillPlan";
+import { collectAutofillSubmission } from "../savePrompt";
 import { matchAutofillSiteRule } from "../siteRules";
 import { triageAutofillPage } from "../triage";
 import type { AutofillSiteRule } from "../siteRules";
@@ -185,6 +186,43 @@ describe("autofill site rules", () => {
     );
   });
 
+  it("uses a current-password site rule role to fill heuristic new password fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="opaque-token" name="credential" type="password" />
+        <input id="new-password" name="next_secret" type="password" autocomplete="new-password" />
+        <input id="confirm-password" name="repeat_secret" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "current-password-rule",
+          host: window.location.hostname,
+          fields: {
+            currentPassword: ["#opaque-token"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      password: "old-secret",
+      newPassword: "new-secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#opaque-token") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+    expect((document.querySelector("#confirm-password") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+  });
+
   it("qualifies rule-selected fields for submission capture", () => {
     document.body.innerHTML = `
       <form>
@@ -210,6 +248,60 @@ describe("autofill site rules", () => {
     expect(passwordField?.qualifiedAs).toBe("password");
   });
 
+  it("captures rule-selected password fields during submission", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="rule-user" name="account" type="text" value="alice" />
+        <input id="rule-password" name="secret_text" type="text" value="captured-secret" />
+      </form>
+    `;
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("form") as HTMLFormElement,
+      {
+        siteRules: [
+          {
+            id: "text-password-rule",
+            host: window.location.hostname,
+            fields: {
+              username: ["#rule-user"],
+              password: ["#rule-password"]
+            }
+          }
+        ]
+      }
+    );
+
+    expect(submission).toMatchObject({
+      username: "alice",
+      password: "captured-secret"
+    });
+  });
+
+  it("does not capture submissions when the matching site rule is disabled", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" value="alice@example.com" />
+        <input name="password" type="password" autocomplete="current-password" value="captured-secret" />
+      </form>
+    `;
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("form") as HTMLFormElement,
+      {
+        siteRules: [
+          {
+            id: "disabled",
+            host: window.location.hostname,
+            disabled: true
+          }
+        ]
+      }
+    );
+
+    expect(submission).toBeNull();
+  });
+
   it("scopes fallback username selection to a rule-selected password field", () => {
     document.body.innerHTML = `
       <form id="decoy-form">
@@ -228,6 +320,41 @@ describe("autofill site rules", () => {
           host: window.location.hostname,
           fields: {
             password: ["#target-password"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("alice");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("scopes fallback password selection to a rule-selected username field", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form">
+        <input id="decoy-user" name="email" type="email" autocomplete="username" />
+        <input id="decoy-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="target-form">
+        <input id="target-user" name="account" type="email" autocomplete="username" />
+        <input id="target-password" name="secret" type="password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "username-only-rule",
+          host: window.location.hostname,
+          fields: {
+            username: ["#target-user"]
           }
         }
       ]
