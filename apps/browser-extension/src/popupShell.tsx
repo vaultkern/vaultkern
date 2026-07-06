@@ -4,6 +4,7 @@ import { createChromeExtensionSettingsStore } from "./extensionSettings";
 import { renderNativeHostHelp } from "./nativeHostHelp";
 import { PopupApp } from "./popup/PopupApp";
 import { extensionTransport } from "./runtimeBridge";
+import { pendingAutofillSubmissionFromUnknown } from "./autofill/pendingSubmission";
 
 const client = new RuntimeClient(extensionTransport);
 const extensionSettingsStore = createChromeExtensionSettingsStore();
@@ -72,6 +73,31 @@ export async function activeSiteLabel() {
   } catch {
     return tab.url;
   }
+}
+
+export async function loadPendingAutofillSubmission() {
+  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+  if (typeof chromeApi?.runtime?.sendMessage !== "function") {
+    return null;
+  }
+
+  const response = await chromeApi.runtime.sendMessage({
+    type: "vaultkern_autofill_pending_request"
+  });
+  return pendingAutofillSubmissionFromUnknown(
+    (response as { pending?: unknown } | null)?.pending
+  );
+}
+
+export async function clearPendingAutofillSubmission() {
+  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+  if (typeof chromeApi?.runtime?.sendMessage !== "function") {
+    return;
+  }
+
+  await chromeApi.runtime.sendMessage({
+    type: "vaultkern_autofill_pending_clear"
+  });
 }
 
 function webAuthnPromptSiteLabel() {
@@ -271,6 +297,8 @@ export function PopupShell() {
       activeSite={activeSiteLabel}
       findCandidates={requestFillCandidates}
       fillEntry={fillSelectedEntry}
+      loadPendingAutofillSubmission={loadPendingAutofillSubmission}
+      clearPendingAutofillSubmission={clearPendingAutofillSubmission}
       onUnlockComplete={notifyUnlockComplete}
       onWebAuthnPresenceComplete={notifyPresenceComplete}
       onWebAuthnUserVerificationComplete={notifyUserVerificationComplete}

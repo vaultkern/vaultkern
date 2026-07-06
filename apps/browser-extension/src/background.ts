@@ -4,6 +4,10 @@ import {
   createChromeExtensionSettingsStore
 } from "./extensionSettings";
 import {
+  pendingAutofillSubmissionFromUnknown
+} from "./autofill/pendingSubmission";
+import type { PendingAutofillSubmission } from "./autofill/pendingSubmission";
+import {
   attachWebAuthnProxy,
   currentPasskeyLedgerConnectionId,
   detachWebAuthnProxy,
@@ -21,6 +25,7 @@ let webAuthnProxySyncPromise: Promise<void> | null = null;
 let webAuthnProxySyncRequested = false;
 let passkeyProviderEnabled = false;
 let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
+let pendingAutofillSubmission: PendingAutofillSubmission | null = null;
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
 const WEB_AUTHN_CONTENT_SCRIPT_FILE = "webauthnContentScript.js";
 const WEB_AUTHN_PAGE_HOOK_SCRIPT_FILE = "webauthnPageHook.js";
@@ -44,6 +49,35 @@ function isWebAuthnPageRequest(message: unknown) {
     message !== null &&
     (message as { type?: unknown }).type === "vaultkern_webauthn_page_request"
   );
+}
+
+function handleAutofillPendingMessage(
+  message: unknown,
+  sendResponse: (response: unknown) => void
+) {
+  if (typeof message !== "object" || message === null) {
+    return false;
+  }
+
+  const messageType = (message as { type?: unknown }).type;
+  if (messageType === "vaultkern_autofill_submission") {
+    pendingAutofillSubmission = pendingAutofillSubmissionFromUnknown(message);
+    sendResponse({ ok: pendingAutofillSubmission !== null });
+    return true;
+  }
+
+  if (messageType === "vaultkern_autofill_pending_request") {
+    sendResponse({ pending: pendingAutofillSubmission });
+    return true;
+  }
+
+  if (messageType === "vaultkern_autofill_pending_clear") {
+    pendingAutofillSubmission = null;
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  return false;
 }
 
 function serializeError(error: unknown) {
@@ -84,13 +118,17 @@ const nativeBridge =
       )
     : null;
 
-if (chromeApi?.runtime?.onMessage && nativeBridge) {
+if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener(
     (
       message: unknown,
       sender: unknown,
       sendResponse: (response: unknown) => void
     ) => {
+      if (handleAutofillPendingMessage(message, sendResponse)) {
+        return true;
+      }
+
       if (isWebAuthnPageRequest(message)) {
         if (webAuthnProxyAttached || webAuthnProxySyncPromise) {
           recordWebAuthnPageRequest(message, chromeApi, sender);
@@ -99,6 +137,10 @@ if (chromeApi?.runtime?.onMessage && nativeBridge) {
       }
 
       if (!isRuntimeCommand(message)) {
+        return false;
+      }
+
+      if (!nativeBridge) {
         return false;
       }
 

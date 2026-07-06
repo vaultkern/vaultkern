@@ -4,6 +4,8 @@ import type { ReactNode } from "react";
 import type {
   EntryDetail,
   EntrySummary,
+  GroupTree,
+  SaveVaultResult,
   SessionState,
   UnlockCredentials,
   VaultReference
@@ -22,6 +24,7 @@ import { PopupStatusStrip } from "./PopupStatusStrip";
 import { SiteCandidateList } from "./SiteCandidateList";
 import { PopupVaultList } from "./PopupVaultList";
 import { popupErrorMessage, popupTheme } from "./theme";
+import type { PendingAutofillSubmission } from "../autofill/pendingSubmission";
 
 type SessionStateLike = Pick<
   SessionState,
@@ -44,9 +47,46 @@ export interface PopupClientLike {
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
   enableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
   unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
+  listGroups(vaultId: string): Promise<GroupTree>;
   listEntries(vaultId: string): Promise<EntrySummary[]>;
   getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
+  createEntry(
+    vaultId: string,
+    input: {
+      parentGroupId: string;
+      title: string;
+      username: string;
+      password: string;
+      url: string;
+      notes: string;
+      totpUri: string | null;
+      customFields: [];
+    }
+  ): Promise<EntryDetail>;
+  updateEntryFields(
+    vaultId: string,
+    entryId: string,
+    input: {
+      title: string;
+      username: string;
+      password: string;
+      url: string;
+      notes: string;
+      totpUri: string | null;
+      customFields: EntryDetail["customFields"];
+    }
+  ): Promise<EntryDetail>;
+  saveVault(vaultId: string): Promise<SaveVaultResult>;
 }
+
+type AutofillSavePrompt =
+  | { mode: "save"; submission: PendingAutofillSubmission }
+  | {
+      mode: "update";
+      submission: PendingAutofillSubmission;
+      entry: EntrySummary;
+      detail: EntryDetail;
+    };
 
 function limitRecentVaults(vaults: VaultReference[], limit: number) {
   return [...vaults]
@@ -144,6 +184,8 @@ export function PopupApp({
   findCandidates,
   fillEntry,
   activeSite,
+  loadPendingAutofillSubmission,
+  clearPendingAutofillSubmission,
   extensionSettingsStore,
   renderRuntimeErrorHelp,
   onUnlockComplete,
@@ -154,6 +196,8 @@ export function PopupApp({
   findCandidates: (vaultId: string) => Promise<EntrySummary[]>;
   fillEntry: (vaultId: string, entryId: string) => Promise<void>;
   activeSite: () => Promise<string>;
+  loadPendingAutofillSubmission?: () => Promise<PendingAutofillSubmission | null>;
+  clearPendingAutofillSubmission?: () => Promise<void>;
   extensionSettingsStore?: ExtensionSettingsStore;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
   onUnlockComplete?: (
@@ -180,6 +224,12 @@ export function PopupApp({
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<EntryDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [pendingAutofillSubmission, setPendingAutofillSubmission] =
+    useState<PendingAutofillSubmission | null>(null);
+  const [autofillSavePrompt, setAutofillSavePrompt] =
+    useState<AutofillSavePrompt | null>(null);
+  const [autofillSaveError, setAutofillSaveError] = useState<string | null>(null);
+  const [savingAutofillPrompt, setSavingAutofillPrompt] = useState(false);
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [unlockErrorCause, setUnlockErrorCause] = useState<unknown>(null);
   const [recentVaults, setRecentVaults] = useState<VaultReference[]>([]);
@@ -219,6 +269,18 @@ export function PopupApp({
       recentVaults.find((vault) => vault.isCurrent) ??
       null
     );
+  }
+
+  function pendingPassword(submission: PendingAutofillSubmission) {
+    return submission.newPassword ?? submission.password;
+  }
+
+  function titleForPendingSubmission(submission: PendingAutofillSubmission) {
+    try {
+      return new URL(submission.url).host || submission.url;
+    } catch {
+      return submission.url;
+    }
   }
 
   function canQuickUnlockVault(vault: VaultReference | null) {
@@ -592,6 +654,90 @@ export function PopupApp({
   ]);
 
   useEffect(() => {
+    if (
+      webAuthnCeremonyPrompt ||
+      !session?.unlocked ||
+      !session.activeVaultId ||
+      !loadPendingAutofillSubmission
+    ) {
+      setPendingAutofillSubmission(null);
+      setAutofillSavePrompt(null);
+      setAutofillSaveError(null);
+      return;
+    }
+
+    let cancelled = false;
+    loadPendingAutofillSubmission()
+      .then((submission) => {
+        if (!cancelled) {
+          setPendingAutofillSubmission(submission);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPendingAutofillSubmission(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    loadPendingAutofillSubmission,
+    session?.activeVaultId,
+    session?.unlocked,
+    webAuthnCeremonyPrompt
+  ]);
+
+  useEffect(() => {
+    if (!pendingAutofillSubmission || !session?.activeVaultId) {
+      setAutofillSavePrompt(null);
+      return;
+    }
+
+    const matchingEntry =
+      candidates.find((entry) => entry.username === pendingAutofillSubmission.username) ??
+      candidates[0] ??
+      null;
+
+    if (!matchingEntry) {
+      setAutofillSavePrompt({
+        mode: "save",
+        submission: pendingAutofillSubmission
+      });
+      return;
+    }
+
+    let cancelled = false;
+    client
+      .getEntryDetail(session.activeVaultId, matchingEntry.id)
+      .then((detail) => {
+        if (cancelled) {
+          return;
+        }
+        if (detail.password === pendingPassword(pendingAutofillSubmission)) {
+          setAutofillSavePrompt(null);
+          return;
+        }
+        setAutofillSavePrompt({
+          mode: "update",
+          submission: pendingAutofillSubmission,
+          entry: matchingEntry,
+          detail
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAutofillSavePrompt(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [candidates, client, pendingAutofillSubmission, session?.activeVaultId]);
+
+  useEffect(() => {
     if (webAuthnCeremonyPrompt) {
       setSelectedDetail(null);
       setDetailError(null);
@@ -866,6 +1012,71 @@ export function PopupApp({
 
     if (runtime?.openOptionsPage) {
       await runtime.openOptionsPage();
+    }
+  }
+
+  async function clearAutofillPrompt() {
+    await clearPendingAutofillSubmission?.();
+    setPendingAutofillSubmission(null);
+    setAutofillSavePrompt(null);
+    setAutofillSaveError(null);
+  }
+
+  async function refreshEntriesAfterAutofillSave(vaultId: string) {
+    const [nextEntries, nextCandidates] = await Promise.all([
+      client.listEntries(vaultId),
+      findCandidates(vaultId)
+    ]);
+    setEntries(nextEntries);
+    setCandidates(nextCandidates);
+  }
+
+  async function handleSavePendingLogin() {
+    if (!session?.activeVaultId || !autofillSavePrompt || savingAutofillPrompt) {
+      return;
+    }
+
+    setSavingAutofillPrompt(true);
+    setAutofillSaveError(null);
+
+    try {
+      if (autofillSavePrompt.mode === "save") {
+        const groupTree = await client.listGroups(session.activeVaultId);
+        await client.createEntry(session.activeVaultId, {
+          parentGroupId: groupTree.root.id,
+          title: titleForPendingSubmission(autofillSavePrompt.submission),
+          username: autofillSavePrompt.submission.username,
+          password: pendingPassword(autofillSavePrompt.submission),
+          url: autofillSavePrompt.submission.url,
+          notes: "",
+          totpUri: null,
+          customFields: []
+        });
+      } else {
+        await client.updateEntryFields(
+          session.activeVaultId,
+          autofillSavePrompt.entry.id,
+          {
+            title: autofillSavePrompt.detail.title,
+            username: autofillSavePrompt.detail.username,
+            password: pendingPassword(autofillSavePrompt.submission),
+            url: autofillSavePrompt.detail.url || autofillSavePrompt.submission.url,
+            notes: autofillSavePrompt.detail.notes,
+            totpUri: autofillSavePrompt.detail.totpUri ?? null,
+            customFields: autofillSavePrompt.detail.customFields ?? []
+          }
+        );
+      }
+
+      await client.saveVault(session.activeVaultId);
+      await clearAutofillPrompt();
+      await refreshEntriesAfterAutofillSave(session.activeVaultId);
+    } catch (saveFailure) {
+      setAutofillSaveError(
+        popupErrorMessage(saveFailure, "Failed to save login")
+      );
+    } finally {
+      setSavingAutofillPrompt(false);
     }
   }
 
@@ -1219,6 +1430,39 @@ export function PopupApp({
         onOpenExtensionSettings={handleOpenExtensionSettings}
       />
       {entriesError ? <div role="alert">{entriesError}</div> : null}
+      {autofillSavePrompt ? (
+        <section style={passkeyPromptStyle} aria-live="polite">
+          <strong>
+            {autofillSavePrompt.mode === "save" ? "Save login?" : "Update password?"}
+          </strong>
+          <div style={{ color: popupTheme.colors.muted, fontSize: "0.86rem" }}>
+            {titleForPendingSubmission(autofillSavePrompt.submission)}
+          </div>
+          {autofillSaveError ? <div role="alert">{autofillSaveError}</div> : null}
+          <div style={{ display: "flex", gap: popupTheme.spacing.sm, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() => {
+                void handleSavePendingLogin();
+              }}
+              disabled={savingAutofillPrompt}
+              style={primaryActionStyle}
+            >
+              {autofillSavePrompt.mode === "save" ? "Save Login" : "Update Password"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void clearAutofillPrompt();
+              }}
+              disabled={savingAutofillPrompt}
+              style={secondaryActionStyle}
+            >
+              Dismiss
+            </button>
+          </div>
+        </section>
+      ) : null}
       <SiteCandidateList
         candidates={candidates}
         onFill={(entryId) => fillEntry(session.activeVaultId ?? "", entryId)}

@@ -209,6 +209,53 @@ function stableJson(value: unknown): string {
 }
 
 describe("background bridge", () => {
+  it("stores returns and clears a pending autofill submission", async () => {
+    const listeners: RuntimeMessageListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(listeners, {
+      type: "vaultkern_autofill_submission",
+      url: "https://example.com/login",
+      username: "alice",
+      password: "secret",
+      submittedAt: 1710000000000
+    }).response();
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request"
+      }).response()
+    ).resolves.toEqual({
+      pending: {
+        url: "https://example.com/login",
+        username: "alice",
+        password: "secret",
+        submittedAt: 1710000000000
+      }
+    });
+
+    await sendRuntimeMessage(listeners, {
+      type: "vaultkern_autofill_pending_clear"
+    }).response();
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request"
+      }).response()
+    ).resolves.toEqual({ pending: null });
+  });
+
   it("keeps the native session alive after an unlocked session response", async () => {
     vi.useFakeTimers();
     const port = createPort();

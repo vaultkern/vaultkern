@@ -21,7 +21,10 @@ const runtimeClientMocks = vi.hoisted(() => ({
   listGroups: vi.fn(),
   listEntries: vi.fn(),
   getEntryDetail: vi.fn(),
-  findFillCandidates: vi.fn()
+  findFillCandidates: vi.fn(),
+  createEntry: vi.fn(),
+  updateEntryFields: vi.fn(),
+  saveVault: vi.fn()
 }));
 
 function createDeferred<T>() {
@@ -69,6 +72,9 @@ beforeEach(() => {
   runtimeClientMocks.listEntries.mockReset();
   runtimeClientMocks.getEntryDetail.mockReset();
   runtimeClientMocks.findFillCandidates.mockReset();
+  runtimeClientMocks.createEntry.mockReset();
+  runtimeClientMocks.updateEntryFields.mockReset();
+  runtimeClientMocks.saveVault.mockReset();
   runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReset();
   runtimeClientMocks.listRecentVaults.mockResolvedValue([]);
   runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
@@ -85,6 +91,28 @@ beforeEach(() => {
       childCount: 0,
       children: []
     }
+  });
+  runtimeClientMocks.createEntry.mockResolvedValue({
+    type: "entry_detail",
+    id: "entry-created",
+    title: "Example",
+    username: "alice",
+    password: "secret",
+    url: "https://example.com/login",
+    notes: ""
+  });
+  runtimeClientMocks.updateEntryFields.mockResolvedValue({
+    type: "entry_detail",
+    id: "entry-1",
+    title: "Example",
+    username: "alice",
+    password: "new-secret",
+    url: "https://example.com/login",
+    notes: ""
+  });
+  runtimeClientMocks.saveVault.mockResolvedValue({
+    type: "save_vault_result",
+    status: "saved"
   });
 });
 
@@ -1171,6 +1199,163 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("saves a pending login submission as a new entry after user confirmation", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const runtimeSendMessage = vi.fn(async (message: unknown) => {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as { type?: unknown }).type === "vaultkern_autofill_pending_request"
+      ) {
+        return {
+          pending: {
+            url: "https://example.com/login",
+            username: "alice",
+            password: "captured-secret",
+            submittedAt: 1710000000000
+          }
+        };
+      }
+      return { ok: true };
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: runtimeSendMessage
+      },
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    const saveButton = await screen.findByRole("button", {
+      name: "Save Login"
+    });
+    fireEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.listGroups).toHaveBeenCalledWith("vault-1");
+      expect(runtimeClientMocks.createEntry).toHaveBeenCalledWith("vault-1", {
+        parentGroupId: "group-root",
+        title: "example.com",
+        username: "alice",
+        password: "captured-secret",
+        url: "https://example.com/login",
+        notes: "",
+        totpUri: null,
+        customFields: []
+      });
+      expect(runtimeClientMocks.saveVault).toHaveBeenCalledWith("vault-1");
+      expect(runtimeSendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_pending_clear"
+      });
+    });
+  });
+
+  it("updates an existing entry from a pending changed password after user confirmation", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const runtimeSendMessage = vi.fn(async (message: unknown) => {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as { type?: unknown }).type === "vaultkern_autofill_pending_request"
+      ) {
+        return {
+          pending: {
+            url: "https://example.com/login",
+            username: "alice",
+            password: "old-secret",
+            newPassword: "new-secret",
+            submittedAt: 1710000000000
+          }
+        };
+      }
+      return { ok: true };
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        sendMessage: runtimeSendMessage
+      },
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com/login"
+      }
+    ]);
+    runtimeClientMocks.getEntryDetail.mockResolvedValue({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "old-secret",
+      url: "https://example.com/login",
+      notes: "keep me",
+      totpUri: null,
+      customFields: []
+    });
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    const updateButton = await screen.findByRole("button", {
+      name: "Update Password"
+    });
+    fireEvent.click(updateButton);
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.updateEntryFields).toHaveBeenCalledWith("vault-1", "entry-1", {
+        title: "Example",
+        username: "alice",
+        password: "new-secret",
+        url: "https://example.com/login",
+        notes: "keep me",
+        totpUri: null,
+        customFields: []
+      });
+      expect(runtimeClientMocks.saveVault).toHaveBeenCalledWith("vault-1");
+      expect(runtimeSendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_pending_clear"
+      });
+    });
+  });
+
   it("opens the full manager in a dedicated extension page", async () => {
     const query = vi.fn(async () => [
       {
@@ -1752,7 +1937,11 @@ describe("PopupShell fill flow", () => {
     await waitFor(() => {
       expect(screen.queryByLabelText("Master Password")).not.toBeInTheDocument();
     });
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "vaultkern_unlock_complete"
+      })
+    );
     expect(window.close).not.toHaveBeenCalled();
   });
 
@@ -3160,6 +3349,40 @@ describe("content script fill message", () => {
     expect(
       (document.querySelector('input[name="password"]') as HTMLInputElement).value
     ).toBe("root-secret");
+  });
+
+  it("reports a submitted login form to the background page", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const addListener = vi.fn();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" value="alice@example.com" />
+        <input name="password" type="password" autocomplete="current-password" value="captured-secret" />
+      </form>
+    `;
+
+    await import("../contentScript");
+    document.querySelector("form")?.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true })
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "vaultkern_autofill_submission",
+      url: expect.any(String),
+      username: "alice@example.com",
+      password: "captured-secret",
+      submittedAt: expect.any(Number)
+    });
   });
 
   it("forwards WebAuthn page observations with the actual page origin", async () => {
