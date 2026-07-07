@@ -174,11 +174,15 @@ function pickUsernameField(passwordField: HTMLInputElement | null) {
     .sort((left, right) => right.score - left.score || left.index - right.index);
 
   if (passwordField?.form) {
+    const sameFormCandidates = scoredCandidates.filter(
+      (candidate) => candidate.input.form === passwordField.form
+    );
+
     return (
-      scoredCandidates.find((candidate) => candidate.input.form === passwordField.form)
-        ?.input ??
+      sameFormCandidates.find((candidate) => candidate.score > 0)?.input ??
       scoredCandidates.find((candidate) => candidate.input.form === null && candidate.score > 0)
-        ?.input
+        ?.input ??
+      sameFormCandidates[0]?.input
     );
   }
 
@@ -212,13 +216,69 @@ function passwordChangeGroup(input: HTMLInputElement) {
     );
   }
 
-  const passwords = Array.from(document.querySelectorAll('input[type="password"]')).filter(
-    (candidate): candidate is HTMLInputElement =>
-      candidate instanceof HTMLInputElement &&
-      candidate.form === null &&
-      isWritableVisibleInput(candidate)
+  const container = nearestFormlessPasswordContainer(input);
+  if (container) {
+    return Array.from(container.querySelectorAll('input[type="password"]')).filter(
+      isVisibleFormlessPassword
+    );
+  }
+
+  return rootLevelPasswordRun(input);
+}
+
+function isVisibleFormlessPassword(candidate: Element): candidate is HTMLInputElement {
+  return (
+    candidate instanceof HTMLInputElement &&
+    candidate.form === null &&
+    isWritableVisibleInput(candidate)
   );
-  return passwords.length >= 3 ? passwords : [];
+}
+
+function nearestFormlessPasswordContainer(input: HTMLInputElement) {
+  let container = input.parentElement;
+
+  while (container) {
+    const tagName = container.tagName.toLowerCase();
+    if (tagName === "body" || tagName === "html" || tagName === "form") {
+      return null;
+    }
+
+    const passwords = Array.from(container.querySelectorAll('input[type="password"]')).filter(
+      isVisibleFormlessPassword
+    );
+    if (passwords.length > 1) {
+      return container;
+    }
+
+    container = container.parentElement;
+  }
+
+  return null;
+}
+
+function rootLevelPasswordRun(input: HTMLInputElement) {
+  if (input.parentElement?.tagName.toLowerCase() !== "body") {
+    return [];
+  }
+
+  const passwords: HTMLInputElement[] = [input];
+  let previous = input.previousElementSibling;
+  while (previous instanceof HTMLInputElement && previous.type === "password") {
+    if (isVisibleFormlessPassword(previous)) {
+      passwords.unshift(previous);
+    }
+    previous = previous.previousElementSibling;
+  }
+
+  let next = input.nextElementSibling;
+  while (next instanceof HTMLInputElement && next.type === "password") {
+    if (isVisibleFormlessPassword(next)) {
+      passwords.push(next);
+    }
+    next = next.nextElementSibling;
+  }
+
+  return passwords.length > 1 ? passwords : [];
 }
 
 function pickPasswordField() {

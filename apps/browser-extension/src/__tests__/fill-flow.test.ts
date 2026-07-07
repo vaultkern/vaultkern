@@ -552,6 +552,22 @@ describe("fillLoginForm", () => {
     expect(inputValue("#login-password")).toBe("secret-123");
   });
 
+  it("prefers high-confidence external usernames over same-form scoreless fields", () => {
+    document.body.innerHTML = `
+      <input id="login-user" type="text" autocomplete="username" value="" />
+      <form>
+        <input id="captcha-field" type="text" value="" />
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice", password: "secret-123" });
+
+    expect(inputValue("#login-user")).toBe("alice");
+    expect(inputValue("#captcha-field")).toBe("");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
   it("does not fill form-less password change groups", () => {
     document.body.innerHTML = `
       <input id="old-password" type="password" name="old_password" value="" />
@@ -564,6 +580,24 @@ describe("fillLoginForm", () => {
     expect(inputValue("#old-password")).toBe("");
     expect(inputValue("#new-password")).toBe("");
     expect(inputValue("#repeat-password")).toBe("");
+  });
+
+  it("keeps form-less login passwords separate from reset panels", () => {
+    document.body.innerHTML = `
+      <section>
+        <input id="login-password" type="password" value="" />
+      </section>
+      <section>
+        <input id="new-password" type="password" name="new_password" value="" />
+        <input id="confirm-password" type="password" name="confirm_password" value="" />
+      </section>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#login-password")).toBe("secret-123");
+    expect(inputValue("#new-password")).toBe("");
+    expect(inputValue("#confirm-password")).toBe("");
   });
 
   it("does not treat current-password as a password-change signal", () => {
