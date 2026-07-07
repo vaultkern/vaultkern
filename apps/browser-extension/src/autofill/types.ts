@@ -17,6 +17,8 @@ export interface AutofillFormSnapshot {
   htmlActionAttribute?: string;
   htmlActionIsImplicit?: boolean;
   htmlSubmitAction?: string;
+  htmlSubmitActionAttribute?: string;
+  htmlSubmitActionIsImplicit?: boolean;
   htmlMethod?: string;
   headingText: string[];
 }

@@ -504,6 +504,27 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "submitter_email").qualifiedAs).toBe("username");
   });
 
+  it("keeps implicit submitter current-page targets out of negative form context", () => {
+    window.history.replaceState(null, "", "/forgot-password");
+    document.body.innerHTML = `
+      <form id="modal-login">
+        <h2>Sign in</h2>
+        <input name="submitter_hash_email" type="email" />
+        <input name="submitter_hash_password" type="password" />
+        <button type="submit" formaction="#">Continue</button>
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "modal-login")).toMatchObject({
+      htmlSubmitActionIsImplicit: true
+    });
+    expect(fieldByName(report, "submitter_hash_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "submitter_hash_password").qualifiedAs).toBe("password");
+  });
+
   it("includes external image submit controls in form context", () => {
     document.body.innerHTML = `
       <form id="image-submit-context" action="/continue">

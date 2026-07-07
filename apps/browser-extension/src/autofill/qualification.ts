@@ -205,11 +205,19 @@ function joinedFormText(
     (form.htmlActionIsImplicit && options.includeImplicitAction === false)
       ? undefined
       : formActionContext(form.htmlAction),
-    options.includeAction === false ? undefined : formActionContext(form.htmlSubmitAction),
+    options.includeAction === false ||
+    (form.htmlSubmitActionIsImplicit && options.includeImplicitAction === false)
+      ? undefined
+      : formActionContext(form.htmlSubmitAction),
     options.includeAction !== false &&
     form.htmlActionIsImplicit &&
     options.includeImplicitAction === false
       ? implicitFormActionContext(form.htmlActionAttribute)
+      : undefined,
+    options.includeAction !== false &&
+    form.htmlSubmitActionIsImplicit &&
+    options.includeImplicitAction === false
+      ? implicitFormActionContext(form.htmlSubmitActionAttribute)
       : undefined,
     form.htmlMethod,
     ...form.headingText
@@ -379,7 +387,7 @@ function searchPartsForForm(form: AutofillFormSnapshot | undefined) {
     form.htmlName,
     form.htmlClass,
     form.htmlActionIsImplicit ? undefined : formActionPathContext(form.htmlAction),
-    formActionPathContext(form.htmlSubmitAction),
+    form.htmlSubmitActionIsImplicit ? undefined : formActionPathContext(form.htmlSubmitAction),
     form.htmlMethod,
     ...form.headingText
   ];

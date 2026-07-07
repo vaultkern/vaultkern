@@ -84,6 +84,10 @@ function formActionIsImplicit(form: HTMLFormElement) {
   if (rawAction === null) {
     return true;
   }
+  return actionAttributeIsImplicit(rawAction);
+}
+
+function actionAttributeIsImplicit(rawAction: string) {
   const trimmed = rawAction.trim();
   return trimmed === "" || trimmed.startsWith("#") || trimmed.startsWith("?");
 }
@@ -490,18 +494,29 @@ function getSubmitText(form: HTMLFormElement) {
   return pickSubmitText(collectSubmitText(getFormControlElements(form)));
 }
 
-function getSubmitAction(form: HTMLFormElement) {
+function getSubmitActionMetadata(form: HTMLFormElement) {
   const primarySubmit = getFormControlElements(form).find(isUsableSubmitControl);
   const rawAction = primarySubmit?.getAttribute("formaction");
-  const trimmedAction = rawAction?.trim();
-  if (!trimmedAction) {
-    return undefined;
+  if (rawAction === null || rawAction === undefined) {
+    return {};
   }
+  const trimmedAction = rawAction.trim();
+  const htmlSubmitActionIsImplicit = actionAttributeIsImplicit(rawAction);
 
   try {
-    return new URL(trimmedAction, form.ownerDocument.baseURI).href;
+    return {
+      htmlSubmitAction: trimmedAction
+        ? new URL(trimmedAction, form.ownerDocument.baseURI).href
+        : form.ownerDocument.location.href,
+      htmlSubmitActionAttribute: optionalString(rawAction),
+      htmlSubmitActionIsImplicit
+    };
   } catch {
-    return trimmedAction;
+    return {
+      htmlSubmitAction: trimmedAction,
+      htmlSubmitActionAttribute: optionalString(rawAction),
+      htmlSubmitActionIsImplicit
+    };
   }
 }
 
@@ -510,6 +525,7 @@ function collectForms(documentRef: Document) {
   const forms = collectMatchingElements(documentRef, "form").map((form, index) => {
     const formElement = form as HTMLFormElement;
     const htmlActionIsImplicit = formActionIsImplicit(formElement);
+    const submitActionMetadata = getSubmitActionMetadata(formElement);
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
       htmlId: optionalString(formElement.id),
@@ -518,7 +534,7 @@ function collectForms(documentRef: Document) {
       htmlAction: getFormAction(formElement),
       htmlActionAttribute: optionalString(formElement.getAttribute("action")),
       htmlActionIsImplicit,
-      htmlSubmitAction: getSubmitAction(formElement),
+      ...submitActionMetadata,
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
       headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
     };
