@@ -931,9 +931,7 @@ export function createLoginFillPlan(
   const usernameField =
     typeof payload.username === "string" && siteRuleUsernameField === null
       ? pickUsernameField(fields, passwordField) ??
-        (typeof payload.password === "string"
-          ? pickSingleStepEmailUsernameField(report.fields, passwordField)
-          : null)
+        pickSingleStepEmailUsernameField(report.fields, passwordField)
       : null;
 
   const fallbackActions: AutofillFillAction[] = [];

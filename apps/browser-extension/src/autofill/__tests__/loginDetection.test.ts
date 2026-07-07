@@ -134,6 +134,78 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("falls back to a single generic email field for username-only fill", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com" });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+  });
+
+  it("fills login fields collected from open shadow roots", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <form>
+        <input name="shadow_email" type="email" autocomplete="username" />
+        <input name="shadow_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      `
+        <form>
+          <input name="light_email" type="email" autocomplete="username" />
+          <input name="light_password" type="password" autocomplete="current-password" />
+        </form>
+      `
+    );
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((root.querySelector('input[name="shadow_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((root.querySelector('input[name="shadow_password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+    expect((document.querySelector('input[name="light_email"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+    expect((document.querySelector('input[name="light_password"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+  });
+
+  it("honors current-password autocomplete in mixed sign-in and create-account copy", () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>Create account or sign in</h1>
+        <form>
+          <input name="email" type="email" autocomplete="username" />
+          <input name="password" type="password" autocomplete="current-password" />
+        </form>
+      </main>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+  });
+
   it("fills the checked-in username-first smoke page", () => {
     loadSmokeBody("username-first-login.html");
 

@@ -12,13 +12,13 @@ import {
 } from "./siteRules";
 import type { AutofillSiteRule, MatchedAutofillSiteRule } from "./siteRules";
 
-const FIELD_SELECTOR = "input, select, textarea";
+export const FIELD_SELECTOR = "input, select, textarea";
 
 export interface CollectAutofillPageSnapshotOptions {
   siteRules?: AutofillSiteRule[];
 }
 
-function collectMatchingElements(root: ParentNode, selector: string) {
+export function collectMatchingElements(root: ParentNode, selector: string) {
   const elements: Element[] = [];
 
   function visit(node: ParentNode) {
