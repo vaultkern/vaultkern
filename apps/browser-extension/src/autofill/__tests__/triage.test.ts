@@ -1041,6 +1041,20 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "code").reasons).toContain("excluded:out-of-band-code");
   });
 
+  it("does not classify mobile-delivered OTP prompts as authenticator TOTP", () => {
+    document.body.innerHTML = `
+      <form id="mobile-code">
+        <p>OTP sent to your mobile</p>
+        <input name="otp" type="tel" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "otp").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "otp").reasons).toContain("excluded:out-of-band-code");
+  });
+
   it("requires field-level code evidence before using MFA form context", () => {
     document.body.innerHTML = `
       <form id="mfa-setup">
@@ -1102,6 +1116,22 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "checkout_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "card_cvv").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "card_code").qualifiedAs).toBe("ignored");
+  });
+
+  it("does not classify text card security code fields as saved credentials", () => {
+    document.body.innerHTML = `
+      <form id="payment">
+        <input name="checkout_email" type="email" />
+        <label for="card-cvc">Card security code</label>
+        <input id="card-cvc" name="card_cvc" type="tel" autocomplete="cc-csc" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "checkout_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "card_cvc").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "card_cvc").reasons).toContain("excluded:card-security-code");
   });
 
   it("does not classify generic masked security-code fields as TOTP targets", () => {

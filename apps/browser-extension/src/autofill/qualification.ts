@@ -487,10 +487,12 @@ function hasOutOfBandCodeSignal(text: string) {
   return (
     text.includes("sms") ||
     text.includes("textmessage") ||
+    text.includes("mobile") ||
     text.includes("emailcode") ||
     text.includes("emailotp") ||
     text.includes("emailverification") ||
     text.includes("senttoyouremail") ||
+    text.includes("senttoyourmobile") ||
     text.includes("senttoyourphone")
   );
 }
@@ -653,7 +655,7 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  if (field.htmlType === "password" && hasCardSecurityCodeSignal(fieldText)) {
+  if (field.tagName === "input" && hasCardSecurityCodeSignal(fieldText)) {
     reasons.push("excluded:card-security-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
