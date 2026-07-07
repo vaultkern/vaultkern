@@ -53,7 +53,7 @@ function getFormAction(form: HTMLFormElement) {
   }
 
   try {
-    return new URL(rawAction, form.ownerDocument.location.href).href;
+    return new URL(rawAction, form.ownerDocument.baseURI).href;
   } catch {
     return rawAction;
   }
@@ -61,7 +61,11 @@ function getFormAction(form: HTMLFormElement) {
 
 function formActionIsImplicit(form: HTMLFormElement) {
   const rawAction = form.getAttribute("action");
-  return !rawAction || rawAction.trim().startsWith("#");
+  if (!rawAction) {
+    return true;
+  }
+  const trimmed = rawAction.trim();
+  return trimmed.startsWith("#") || trimmed.startsWith("?");
 }
 
 function labelTextWithoutNestedFields(label: Element) {
@@ -144,6 +148,15 @@ function getFormControlElements(form: HTMLFormElement) {
       controls.add(element);
     }
   });
+  if (form.id) {
+    lookupRootForElement(form)
+      .querySelectorAll<HTMLInputElement>(`input[type="image"][form="${cssEscape(form.id)}"]`)
+      .forEach((element) => {
+        if (element.form === form) {
+          controls.add(element);
+        }
+      });
+  }
   return Array.from(controls).sort(byDocumentOrder);
 }
 
@@ -318,10 +331,21 @@ function getHeadingText(form: HTMLFormElement) {
     .filter(Boolean);
 }
 
-function getOwnedHeadingText(container: Element) {
+function headingAppliesToContainerField(heading: Element, field: Element | undefined) {
+  if (!field) {
+    return true;
+  }
+  return (
+    heading.contains(field) ||
+    Boolean(heading.compareDocumentPosition(field) & Node.DOCUMENT_POSITION_FOLLOWING)
+  );
+}
+
+function getOwnedHeadingText(container: Element, field?: Element) {
   return Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6"))
     .filter((heading) => heading.closest("form") === null)
     .filter((heading) => getFieldVisibility(heading as HTMLElement).viewable)
+    .filter((heading) => headingAppliesToContainerField(heading, field))
     .map((heading) => cleanText(heading.textContent))
     .filter(Boolean);
 }
@@ -330,7 +354,7 @@ function isElementNode(node: ParentNode | undefined): node is Element {
   return node !== undefined && node.nodeType === 1 && "matches" in node;
 }
 
-function getContainerText(container: ParentNode | undefined) {
+function getContainerText(container: ParentNode | undefined, field?: Element) {
   if (!isElementNode(container) || container.matches(FIELD_SELECTOR)) {
     return [];
   }
@@ -338,7 +362,7 @@ function getContainerText(container: ParentNode | undefined) {
     container.id,
     container.getAttribute("class"),
     container.getAttribute("aria-label"),
-    ...getOwnedHeadingText(container),
+    ...getOwnedHeadingText(container, field),
     ...getContainerSubmitText(container)
   ]
     .map(optionalString)
@@ -513,7 +537,7 @@ function getFieldContainer(
       return undefined;
     }
     const fieldCount = container.querySelectorAll(FIELD_SELECTOR).length;
-    if (fieldCount > 1 || (fieldCount === 1 && getContainerText(container).length > 0)) {
+    if (fieldCount > 1 || (fieldCount === 1 && getContainerText(container, element).length > 0)) {
       return container;
     }
     if (["section", "article", "main", "aside"].includes(tagName)) {
@@ -580,7 +604,7 @@ function collectField(
     ariaLabel: optionalString(element.getAttribute("aria-label")),
     ariaDescribedBy: optionalString(element.getAttribute("aria-describedby")),
     labelText: getLabelText(element),
-    containerText: getContainerText(container),
+    containerText: getContainerText(container, element),
     dataSetValues: getDatasetValues(element),
     selectOptions: getSelectOptions(element),
     readonly: "readOnly" in element ? element.readOnly : false,

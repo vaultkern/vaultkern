@@ -11,6 +11,7 @@ function fieldByName(report: ReturnType<typeof triageAutofillPage>, htmlName: st
 
 describe("autofill triage", () => {
   beforeEach(() => {
+    document.head.innerHTML = "";
     window.history.replaceState(null, "", "/");
     document.body.innerHTML = "";
   });
@@ -118,6 +119,27 @@ describe("autofill triage", () => {
         <div style="visibility:hidden">
           <input name="email" type="email" autocomplete="username" style="visibility:visible" />
           <input name="password" type="password" autocomplete="current-password" style="visibility:visible" />
+        </div>
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
+  it("honors stylesheet visibility overrides under hidden ancestors", () => {
+    document.head.innerHTML = `
+      <style>
+        .visible-login-field { visibility: visible; }
+      </style>
+    `;
+    document.body.innerHTML = `
+      <form>
+        <div style="visibility:hidden">
+          <input name="email" class="visible-login-field" type="email" autocomplete="username" />
+          <input name="password" class="visible-login-field" type="password" autocomplete="current-password" />
         </div>
       </form>
     `;
@@ -439,6 +461,23 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "external_submit_email").qualifiedAs).toBe("username");
   });
 
+  it("includes external image submit controls in form context", () => {
+    document.body.innerHTML = `
+      <form id="image-submit-context" action="/continue">
+        <input name="image_submit_email" type="email" />
+      </form>
+      <input type="image" form="image-submit-context" alt="Sign in" />
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "image-submit-context")).toMatchObject({
+      headingText: ["Sign in"]
+    });
+    expect(fieldByName(report, "image_submit_email").qualifiedAs).toBe("username");
+  });
+
   it("treats missing and invalid button types as submit controls", () => {
     document.body.innerHTML = `
       <form id="missing-button-type" action="/continue">
@@ -506,6 +545,26 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "forgot_password").qualifiedAs).toBe("ignored");
   });
 
+  it("keeps current-page query actions out of negative form context", () => {
+    window.history.replaceState(null, "", "/forgot-password");
+    document.body.innerHTML = `
+      <form id="modal-login" action="?login">
+        <h2>Sign in</h2>
+        <input name="modal_email" type="email" />
+        <input name="modal_password" type="password" />
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "modal-login")).toMatchObject({
+      htmlActionIsImplicit: true
+    });
+    expect(fieldByName(report, "modal_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "modal_password").qualifiedAs).toBe("password");
+  });
+
   it("treats hash-only form actions as implicit current-page actions", () => {
     window.history.replaceState(null, "", "/forgot-password");
     document.body.innerHTML = `
@@ -524,6 +583,23 @@ describe("autofill triage", () => {
     });
     expect(fieldByName(report, "modal_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "modal_password").qualifiedAs).toBe("password");
+  });
+
+  it("resolves relative form actions against the document base URL", () => {
+    document.head.innerHTML = `<base href="https://example.test/sign-in/" />`;
+    document.body.innerHTML = `
+      <form id="base-login" action="continue">
+        <input name="base_email" type="email" />
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "base-login")).toMatchObject({
+      htmlAction: "https://example.test/sign-in/continue"
+    });
+    expect(fieldByName(report, "base_email").qualifiedAs).toBe("username");
   });
 
   it("uses login hostnames in form actions as passwordless login context", () => {
@@ -956,6 +1032,23 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+  });
+
+  it("ignores later form-less container headings for earlier fields", () => {
+    document.body.innerHTML = `
+      <div class="login">
+        <input name="email" type="email" />
+        <button type="submit">Sign in</button>
+        <h2>Create account</h2>
+      </div>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+    const email = snapshot.fields.find((field) => field.htmlName === "email");
+
+    expect(email?.containerText).not.toContain("Create account");
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
   });
 

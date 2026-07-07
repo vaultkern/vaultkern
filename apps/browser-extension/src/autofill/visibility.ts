@@ -95,7 +95,8 @@ function isUnslottedShadowHostChild(element: HTMLElement) {
 function hasExplicitVisibleDescendantOverride(element: HTMLElement, ancestor: HTMLElement) {
   let current: HTMLElement | null = element;
   while (current && current !== ancestor) {
-    if (current.style.visibility === "visible") {
+    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    if (current.style.visibility === "visible" || style?.visibility === "visible") {
       return true;
     }
     current = parentElementOrShadowHost(current);
