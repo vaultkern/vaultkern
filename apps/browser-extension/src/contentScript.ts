@@ -95,10 +95,21 @@ function fieldTokens(input: HTMLInputElement) {
     input.name,
     input.id,
     input.placeholder,
-    input.getAttribute("aria-label") ?? ""
+    input.getAttribute("aria-label") ?? "",
+    labelTextForInput(input)
   ]
     .join(" ")
     .toLowerCase();
+}
+
+function labelTextForInput(input: HTMLInputElement) {
+  const labels = Array.from(input.labels ?? []).map((label) => label.textContent ?? "");
+  const labelledBy = (input.getAttribute("aria-labelledby") ?? "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((id) => input.ownerDocument.getElementById(id)?.textContent ?? "");
+
+  return [...labels, ...labelledBy].join(" ");
 }
 
 function isRejectedUsernameCandidate(input: HTMLInputElement) {
@@ -119,7 +130,10 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
       "securitycode",
       "authenticationcode",
       "searchquery",
-      "zipcode"
+      "zipcode",
+      "newsletter",
+      "subscribe",
+      "subscription"
     ].some((token) => tokens.includes(token))
   ) {
     return true;
@@ -155,6 +169,11 @@ function usernameScore(input: HTMLInputElement) {
     score += 2;
   }
 
+  const tokenSet = new Set(tokens.split(/[^a-z0-9]+/).filter(Boolean));
+  if (tokenSet.has("user") || tokenSet.has("account")) {
+    score += 1;
+  }
+
   if (input.type === "email") {
     score += 1;
   }
@@ -178,17 +197,106 @@ function pickUsernameField(passwordField: HTMLInputElement | null) {
       (candidate) => candidate.input.form === passwordField.form
     );
 
-    return (
-      sameFormCandidates.find((candidate) => candidate.score > 0)?.input ??
-      scoredCandidates.find((candidate) => candidate.input.form === null && candidate.score > 0)
-        ?.input ??
-      sameFormCandidates[0]?.input
-    );
+    return sameFormCandidates.find((candidate) => candidate.score > 0)?.input ?? null;
+  }
+
+  if (passwordField) {
+    const scopedCandidates = scopedFormlessUsernameCandidates(scoredCandidates, passwordField);
+    return scopedCandidates.find((candidate) => candidate.score > 0)?.input ?? null;
   }
 
   return (
     scoredCandidates.find((candidate) => candidate.score > 0)?.input ??
     scoredCandidates[0]?.input
+  );
+}
+
+function scopedFormlessUsernameCandidates(
+  scoredCandidates: Array<{ input: HTMLInputElement; score: number; index: number }>,
+  passwordField: HTMLInputElement
+) {
+  const container = nearestFormlessCredentialContainer(passwordField);
+  if (container) {
+    return scoredCandidates.filter(
+      (candidate) => candidate.input.form === null && container.contains(candidate.input)
+    );
+  }
+
+  const rootRun = rootLevelCredentialRun(passwordField);
+  if (!rootRun.length) {
+    return [];
+  }
+
+  return scoredCandidates.filter((candidate) => rootRun.includes(candidate.input));
+}
+
+function nearestFormlessCredentialContainer(input: HTMLInputElement) {
+  let container = input.parentElement;
+
+  while (container) {
+    const tagName = container.tagName.toLowerCase();
+    if (tagName === "body" || tagName === "html" || tagName === "form") {
+      return null;
+    }
+
+    const usernames = visibleFormlessUsernameInputs(container);
+    if (usernames.length > 0) {
+      const panelChildren = formLessCredentialPanelChildren(container);
+      if (panelChildren.length > 1) {
+        const inputPanel = panelChildren.find((panel) => panel.contains(input));
+        if (!inputPanel || visibleFormlessUsernameInputs(inputPanel).length === 0) {
+          return null;
+        }
+        return inputPanel;
+      }
+      return container;
+    }
+
+    container = container.parentElement;
+  }
+
+  return null;
+}
+
+function visibleFormlessUsernameInputs(container: Element) {
+  return Array.from(
+    container.querySelectorAll('input[type="text"], input[type="email"]')
+  ).filter(
+    (candidate): candidate is HTMLInputElement =>
+      candidate instanceof HTMLInputElement &&
+      candidate.form === null &&
+      isWritableVisibleInput(candidate) &&
+      usernameScore(candidate) >= 0
+  );
+}
+
+function rootLevelCredentialRun(input: HTMLInputElement) {
+  if (input.parentElement?.tagName.toLowerCase() !== "body") {
+    return [];
+  }
+
+  const fields: HTMLInputElement[] = [input];
+  let previous = input.previousElementSibling;
+  while (isFormlessCredentialInput(previous)) {
+    fields.unshift(previous);
+    previous = previous.previousElementSibling;
+  }
+
+  let next = input.nextElementSibling;
+  while (isFormlessCredentialInput(next)) {
+    fields.push(next);
+    next = next.nextElementSibling;
+  }
+
+  return fields.length > 1 ? fields : [];
+}
+
+function isFormlessCredentialInput(candidate: Element | null): candidate is HTMLInputElement {
+  return (
+    candidate instanceof HTMLInputElement &&
+    candidate.form === null &&
+    (candidate.type === "text" || candidate.type === "email" || candidate.type === "password") &&
+    isWritableVisibleInput(candidate)
   );
 }
 
@@ -247,6 +355,14 @@ function nearestFormlessPasswordContainer(input: HTMLInputElement) {
       isVisibleFormlessPassword
     );
     if (passwords.length > 1) {
+      const panelChildren = formLessCredentialPanelChildren(container);
+      if (panelChildren.length > 1) {
+        const inputPanel = panelChildren.find((panel) => panel.contains(input));
+        if (!inputPanel || visibleFormlessPasswords(inputPanel).length < 2) {
+          return null;
+        }
+        return inputPanel;
+      }
       return container;
     }
 
@@ -254,6 +370,22 @@ function nearestFormlessPasswordContainer(input: HTMLInputElement) {
   }
 
   return null;
+}
+
+function formLessCredentialPanelChildren(container: Element) {
+  return Array.from(container.children).filter((child) => {
+    const tagName = child.tagName.toLowerCase();
+    return (
+      ["article", "aside", "div", "fieldset", "main", "section"].includes(tagName) &&
+      (visibleFormlessPasswords(child).length > 0 || visibleFormlessUsernameInputs(child).length > 0)
+    );
+  });
+}
+
+function visibleFormlessPasswords(container: Element) {
+  return Array.from(container.querySelectorAll('input[type="password"]')).filter(
+    isVisibleFormlessPassword
+  );
 }
 
 function rootLevelPasswordRun(input: HTMLInputElement) {
@@ -293,6 +425,13 @@ function pickPasswordField() {
   );
 }
 
+function hasPasswordChangeContext() {
+  return Array.from(document.querySelectorAll('input[type="password"]'))
+    .filter((input): input is HTMLInputElement => input instanceof HTMLInputElement)
+    .filter(isWritableVisibleInput)
+    .some(isPasswordChangeField);
+}
+
 function writeFieldValue(input: HTMLInputElement, value: string) {
   input.value = value;
 
@@ -306,7 +445,8 @@ export function fillLoginForm(payload: {
   password?: string;
 }) {
   const password = pickPasswordField();
-  const username = pickUsernameField(password);
+  const username =
+    password === null && hasPasswordChangeContext() ? null : pickUsernameField(password);
 
   if (typeof payload.username === "string" && username) {
     writeFieldValue(username, payload.username);
