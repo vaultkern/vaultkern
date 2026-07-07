@@ -336,6 +336,35 @@ describe("fillLoginForm", () => {
     expect(inputValue("#offscreen-password")).toBe("offscreen-secret");
   });
 
+  it("fills visible login fields below the current viewport", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="below-email" type="email" autocomplete="username" value="" />
+        <input id="below-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+    const rect = {
+      x: 0,
+      y: 1200,
+      width: 320,
+      height: 32,
+      top: 1200,
+      right: 320,
+      bottom: 1232,
+      left: 0,
+      toJSON: () => ({})
+    } as DOMRect;
+    for (const input of Array.from(document.querySelectorAll("input"))) {
+      vi.spyOn(input, "getClientRects").mockReturnValue([rect] as unknown as DOMRectList);
+      vi.spyOn(input, "getBoundingClientRect").mockReturnValue(rect);
+    }
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#below-email")).toBe("alice@example.com");
+    expect(inputValue("#below-password")).toBe("secret-123");
+  });
+
   it("field selection rejects search and verification code username candidates", () => {
     document.body.innerHTML = `
       <form>
@@ -350,6 +379,50 @@ describe("fillLoginForm", () => {
     expect(inputValue("#search-query")).toBe("existing search");
     expect(inputValue("#otp-code")).toBe("");
     expect(inputValue("#postcode")).toBe("90210");
+  });
+
+  it("does not reject username fields just because helper text mentions code", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="login-user" type="text" autocomplete="username" placeholder="Email or access code" value="" />
+        <input id="login-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#login-user")).toBe("alice@example.com");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("uses same-form generic user fields as username fallback", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="account-field" type="text" name="user" value="" />
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice", password: "secret-123" });
+
+    expect(inputValue("#account-field")).toBe("alice");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("does not treat current-password as a password-change signal", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="login-user" type="text" autocomplete="username" value="" />
+        <input id="login-password" type="password" autocomplete="current-password" value="" />
+        <input id="login-pin" type="password" name="pin" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice", password: "secret-123" });
+
+    expect(inputValue("#login-user")).toBe("alice");
+    expect(inputValue("#login-password")).toBe("secret-123");
+    expect(inputValue("#login-pin")).toBe("");
   });
 
   it("does not fill an unrelated email form when the login form only has a password", () => {
@@ -2192,7 +2265,11 @@ describe("PopupShell fill flow", () => {
 
     expect(await screen.findByText("Confirm passkey request")).toBeInTheDocument();
     expect(screen.getByText("alice@example.com")).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText("bob@example.com"));
+    const bobCredential = screen.getByLabelText("bob@example.com");
+    fireEvent.click(bobCredential);
+    await waitFor(() => {
+      expect(bobCredential).toBeChecked();
+    });
     fireEvent.click(
       screen.getByRole("button", { name: "Continue passkey request" })
     );

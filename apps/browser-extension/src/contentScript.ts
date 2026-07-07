@@ -25,15 +25,7 @@ function isWritableVisibleInput(input: HTMLInputElement) {
     return false;
   }
 
-  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-  if (
-    input.getClientRects().length > 0 &&
-    (rect.right < 0 ||
-      rect.bottom < 0 ||
-      rect.left > viewportWidth ||
-      rect.top > viewportHeight)
-  ) {
+  if (input.getClientRects().length > 0 && (rect.right < 0 || rect.bottom < 0)) {
     return false;
   }
 
@@ -90,9 +82,15 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
   }
 
   const tokens = fieldTokens(input);
-  return ["search", "otp", "totp", "2fa", "code", "postcode", "zip"].some(
-    (fragment) => tokens.includes(fragment)
-  );
+  const tokenSet = new Set(tokens.split(/[^a-z0-9]+/).filter(Boolean));
+  if (
+    ["search", "otp", "totp", "2fa", "postcode", "zip"].some((token) =>
+      tokenSet.has(token)
+    )
+  ) {
+    return true;
+  }
+  return tokenSet.has("code") && autocomplete !== "username" && autocomplete !== "email";
 }
 
 function usernameScore(input: HTMLInputElement) {
@@ -131,7 +129,7 @@ function pickUsernameField(passwordField: HTMLInputElement | null) {
   const scoredCandidates = candidates
     .filter(isWritableVisibleInput)
     .map((input, index) => ({ input, score: usernameScore(input), index }))
-    .filter((candidate) => candidate.score > 0)
+    .filter((candidate) => candidate.score >= 0)
     .sort((left, right) => right.score - left.score || left.index - right.index);
 
   if (passwordField?.form) {
@@ -139,7 +137,7 @@ function pickUsernameField(passwordField: HTMLInputElement | null) {
       ?.input;
   }
 
-  return scoredCandidates[0]?.input;
+  return scoredCandidates.find((candidate) => candidate.score > 0)?.input;
 }
 
 function isPasswordChangeField(input: HTMLInputElement) {
@@ -159,7 +157,7 @@ function isPasswordChangeField(input: HTMLInputElement) {
 
   return passwords.some((candidate) => {
     const tokens = fieldTokens(candidate);
-    return ["old", "current", "new", "repeat", "confirm", "change"].some(
+    return ["old", "new", "repeat", "confirm", "change"].some(
       (fragment) => tokens.includes(fragment)
     );
   });
