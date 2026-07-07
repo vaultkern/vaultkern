@@ -42,6 +42,8 @@ export interface AutofillFieldSnapshot {
   readonly: boolean;
   disabled: boolean;
   focused: boolean;
+  siteRuleTypes: AutofillFieldQualification[];
+  siteRuleReasons: string[];
   viewable: boolean;
   viewableReasons: string[];
   fillable: boolean;
@@ -49,6 +51,11 @@ export interface AutofillFieldSnapshot {
 }
 
 export interface AutofillPageSnapshot {
+  url?: string;
+  siteRule?: {
+    id: string;
+    disabled: boolean;
+  };
   forms: AutofillFormSnapshot[];
   fields: AutofillFieldSnapshot[];
 }

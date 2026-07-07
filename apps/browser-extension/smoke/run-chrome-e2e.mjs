@@ -78,10 +78,32 @@ export async function startSmokeServer() {
 
   return {
     url: smokeUrl(address.port, "basic-login.html"),
+    noisyLoginUrl: smokeUrl(address.port, "noisy-login.html"),
+    totpUrl: smokeUrl(address.port, "totp.html"),
     passkeyRegisterUrl: smokeUrl(address.port, "passkey-register.html"),
     passkeyUrl: smokeUrl(address.port, "passkey-login.html"),
     close: () => new Promise((resolvePromise) => server.close(resolvePromise))
   };
+}
+
+async function sendFillEntryDetail(extensionPage, targetUrl, payload) {
+  await extensionPage.evaluate(
+    async ({ targetUrl, payload }) => {
+      const pageUrl = new URL(targetUrl);
+      const tabs = await chrome.tabs.query({
+        url: `${pageUrl.protocol}//${pageUrl.hostname}/*`
+      });
+      const tab = tabs.find((candidate) => candidate.url === targetUrl);
+      if (!tab?.id) {
+        throw new Error(`target tab not found: ${targetUrl}`);
+      }
+      await chrome.tabs.sendMessage(tab.id, {
+        type: "fill_entry_detail",
+        ...payload
+      });
+    },
+    { targetUrl, payload }
+  );
 }
 
 async function writeNativeManifest(workDir) {
@@ -624,24 +646,10 @@ async function main() {
 
     const page = await context.newPage();
     await page.goto(server.url);
-    await extensionPage.evaluate(
-      async ({ serverUrl, username, entryPassword }) => {
-        const smokeUrl = new URL(serverUrl);
-        const tabs = await chrome.tabs.query({
-          url: `${smokeUrl.protocol}//${smokeUrl.hostname}/*`
-        });
-        const tab = tabs.find((candidate) => candidate.url === serverUrl);
-        if (!tab?.id) {
-          throw new Error("smoke tab not found");
-        }
-        await chrome.tabs.sendMessage(tab.id, {
-          type: "fill_entry_detail",
-          username,
-          password: entryPassword
-        });
-      },
-      { serverUrl: server.url, username, entryPassword }
-    );
+    await sendFillEntryDetail(extensionPage, server.url, {
+      username,
+      password: entryPassword
+    });
 
     const formValues = await page.evaluate(() => ({
       username: document.querySelector("#vaultkern-smoke-username")?.value,
@@ -658,6 +666,44 @@ async function main() {
     const expectedSubmit = `submitted:${username}:${entryPassword.length}`;
     if (submitted !== expectedSubmit) {
       throw new Error(`unexpected submit result: ${submitted}`);
+    }
+
+    const noisyPage = await context.newPage();
+    await noisyPage.goto(server.noisyLoginUrl);
+    await sendFillEntryDetail(extensionPage, server.noisyLoginUrl, {
+      username,
+      password: entryPassword
+    });
+    const noisyValues = await noisyPage.evaluate(() => ({
+      query: document.querySelector("#vaultkern-smoke-query")?.value,
+      newsletter: document.querySelector("#vaultkern-smoke-newsletter-email")?.value,
+      signup: document.querySelector("#vaultkern-smoke-signup-email")?.value,
+      newPassword: document.querySelector("#vaultkern-smoke-new-password")?.value,
+      username: document.querySelector("#vaultkern-smoke-noisy-user")?.value,
+      password: document.querySelector("#vaultkern-smoke-noisy-password")?.value
+    }));
+    if (
+      noisyValues.query !== "" ||
+      noisyValues.newsletter !== "" ||
+      noisyValues.signup !== "" ||
+      noisyValues.newPassword !== "" ||
+      noisyValues.username !== username ||
+      noisyValues.password !== entryPassword
+    ) {
+      throw new Error(`noisy login fill failed: ${JSON.stringify(noisyValues)}`);
+    }
+
+    const totpPage = await context.newPage();
+    await totpPage.goto(server.totpUrl);
+    const smokeTotp = "112233";
+    await sendFillEntryDetail(extensionPage, server.totpUrl, {
+      totp: smokeTotp
+    });
+    const totpValue = await totpPage.evaluate(
+      () => document.querySelector("#vaultkern-smoke-totp")?.value
+    );
+    if (totpValue !== smokeTotp) {
+      throw new Error(`totp fill failed: ${JSON.stringify({ totpValue })}`);
     }
 
     await enablePasskeyProvider(extensionPage);
@@ -993,6 +1039,8 @@ async function main() {
           extensionId,
           nativeManifest,
           smokeUrl: server.url,
+          noisyLoginUrl: server.noisyLoginUrl,
+          totpUrl: server.totpUrl,
           passkeyRegisterUrl: server.passkeyRegisterUrl,
           passkeySmokeUrl: server.passkeyUrl,
           publicKeyCredentialAvailable: passkeySmokeReady.publicKeyCredentialAvailable,
@@ -1012,7 +1060,9 @@ async function main() {
             simpleDiscoverableAuthenticationVerification.userHandle,
           lockedPasskeyRegisterResult,
           lockedPasskeyResult,
-          submitResult: submitted
+          submitResult: submitted,
+          noisyLoginResult: noisyValues,
+          totpResult: totpValue
         },
         null,
         2
