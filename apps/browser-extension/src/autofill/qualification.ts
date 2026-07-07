@@ -529,6 +529,15 @@ function qualificationForFillableField(
   const formText = joinedFormText(form);
   const formPromptText = joinedFormPromptText(form);
   const autocomplete = fieldAutocompleteTokens(field);
+  const siteRuleType = field.siteRuleTypes.find((fieldType) => fieldType !== "ignored");
+
+  if (siteRuleType) {
+    return {
+      qualifiedAs: siteRuleType === "currentPassword" ? "password" : siteRuleType,
+      eligible: true,
+      reasons
+    };
+  }
 
   if (isSearchField(field, form)) {
     reasons.push("excluded:search");
@@ -693,7 +702,11 @@ export function qualifyAutofillField(
   snapshot: AutofillPageSnapshot,
   form: AutofillFormSnapshot | undefined
 ): FieldQualification {
-  const reasons = [...field.viewableReasons, ...field.fillableReasons];
+  const reasons = [
+    ...field.viewableReasons,
+    ...field.fillableReasons,
+    ...field.siteRuleReasons
+  ];
 
   if (!field.viewable) {
     return {
@@ -707,6 +720,11 @@ export function qualifyAutofillField(
     const fieldText = joinedFieldText(field);
     const formText = joinedFormText(form);
     const autocomplete = fieldAutocompleteTokens(field);
+    const siteRuleType = field.siteRuleTypes.find((fieldType) => fieldType !== "ignored");
+
+    if (field.readonly && siteRuleType === "username") {
+      return { qualifiedAs: "username", eligible: true, reasons };
+    }
 
     if (
       field.readonly &&

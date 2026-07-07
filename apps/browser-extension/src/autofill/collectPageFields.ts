@@ -5,8 +5,18 @@ import type {
   AutofillPageSnapshot
 } from "./types";
 import { getFieldFillability, getFieldVisibility } from "./visibility";
+import { localAutofillSiteRules } from "./siteRules.local";
+import {
+  matchAutofillSiteRule,
+  siteRuleFieldTypesForElement
+} from "./siteRules";
+import type { AutofillSiteRule, MatchedAutofillSiteRule } from "./siteRules";
 
 const FIELD_SELECTOR = "input, select, textarea";
+
+export interface CollectAutofillPageSnapshotOptions {
+  siteRules?: AutofillSiteRule[];
+}
 
 function collectMatchingElements(root: ParentNode, selector: string) {
   const elements: Element[] = [];
@@ -351,7 +361,8 @@ function collectField(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
   index: number,
   formByElement: Map<HTMLFormElement, AutofillFormSnapshot>,
-  containerByElement: Map<ParentNode, string>
+  containerByElement: Map<ParentNode, string>,
+  siteRule: MatchedAutofillSiteRule | null
 ): AutofillFieldSnapshot | null {
   const tagName = getFieldTag(element);
   if (tagName === null) {
@@ -367,6 +378,7 @@ function collectField(
     tagName === "input"
       ? optionalString((element as HTMLInputElement).type.toLowerCase())
       : undefined;
+  const siteRuleTypes = siteRuleFieldTypesForElement(element, siteRule);
 
   return {
     opid: `field-${index}`,
@@ -391,6 +403,10 @@ function collectField(
     readonly: "readOnly" in element ? element.readOnly : false,
     disabled: element.disabled,
     focused: element.ownerDocument.activeElement === element,
+    siteRuleTypes,
+    siteRuleReasons: siteRuleTypes.map(
+      (fieldType) => `site-rule:${siteRule?.id}:${fieldType}`
+    ),
     viewable: visibility.viewable,
     viewableReasons: visibility.reasons,
     fillable: fillability.fillable,
@@ -398,19 +414,32 @@ function collectField(
   };
 }
 
-export function collectAutofillPageSnapshot(documentRef: Document = document): AutofillPageSnapshot {
+export function collectAutofillPageSnapshot(
+  documentRef: Document = document,
+  options: CollectAutofillPageSnapshotOptions = {}
+): AutofillPageSnapshot {
   const { forms, formByElement } = collectForms(documentRef);
   const containerByElement = new Map<ParentNode, string>();
+  const siteRule = matchAutofillSiteRule(
+    documentRef.location.href,
+    options.siteRules ?? localAutofillSiteRules
+  );
   const fields = collectMatchingElements(documentRef, FIELD_SELECTOR)
     .map((element, index) =>
       collectField(
         element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
         index,
         formByElement,
-        containerByElement
+        containerByElement,
+        siteRule
       )
     )
     .filter((field): field is AutofillFieldSnapshot => field !== null);
 
-  return { forms, fields };
+  return {
+    url: documentRef.location.href,
+    siteRule: siteRule ? { id: siteRule.id, disabled: siteRule.disabled } : undefined,
+    forms,
+    fields
+  };
 }
