@@ -233,8 +233,79 @@ function getHeadingText(form: HTMLFormElement) {
     .filter(Boolean);
 }
 
+function isElementNode(node: ParentNode | undefined): node is Element {
+  return node !== undefined && node.nodeType === 1 && "matches" in node;
+}
+
+function getOwnedHeadingText(container: ParentNode | undefined) {
+  if (container === undefined || !("querySelectorAll" in container)) {
+    return [];
+  }
+  return Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+    .filter((heading) => heading.closest("form") === null)
+    .filter((heading) => getFieldVisibility(heading as HTMLElement).viewable)
+    .map((heading) => cleanText(heading.textContent))
+    .filter(Boolean);
+}
+
+function getContainerText(container: ParentNode | undefined) {
+  if (container === undefined) {
+    return [];
+  }
+  const elementText = isElementNode(container)
+    ? [
+        container.id,
+        container.getAttribute("class"),
+        container.getAttribute("aria-label")
+      ]
+    : [];
+  return [...elementText, ...getOwnedHeadingText(container)]
+    .map(optionalString)
+    .filter((value): value is string => typeof value === "string");
+}
+
+function uniqueText(values: string[]) {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = value.toLowerCase();
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function isNewPasswordControl(element: Element) {
+  if (element.tagName.toLowerCase() !== "input") {
+    return false;
+  }
+  const input = element as HTMLInputElement;
+  if (input.type.toLowerCase() !== "password") {
+    return false;
+  }
+  const text = [
+    input.getAttribute("autocomplete"),
+    input.name,
+    input.id,
+    input.className,
+    input.placeholder,
+    input.title,
+    input.getAttribute("aria-label")
+  ]
+    .map((value) => (typeof value === "string" ? value.toLowerCase().replace(/[\s_/-]+/g, "") : ""))
+    .join(",");
+  return (
+    text.includes("newpassword") ||
+    text.includes("confirmpassword") ||
+    text.includes("passwordconfirmation") ||
+    text.includes("repeatpassword")
+  );
+}
+
 function getSubmitText(form: HTMLFormElement) {
-  const submitText = getFormControlElements(form).flatMap((element) => {
+  const controls = getFormControlElements(form);
+  const submitText = controls.flatMap((element) => {
     if (!getFieldVisibility(element as HTMLElement).viewable) {
       return [];
     }
@@ -260,13 +331,20 @@ function getSubmitText(form: HTMLFormElement) {
     return [controlText(input, type === "image" ? input.alt : input.value)];
   }).filter(Boolean);
   const primarySubmitText = submitText[0];
+  const accountCreationSubmitText = submitText.filter(isAccountCreationSubmitText);
+  const loginSubmitText = submitText.filter(isLoginSubmitText);
   if (primarySubmitText && isAccountCreationSubmitText(primarySubmitText)) {
-    const loginSubmitText = submitText.filter(isLoginSubmitText);
     return loginSubmitText.length > 0
       ? [primarySubmitText, ...loginSubmitText]
       : [primarySubmitText];
   }
-  const loginSubmitText = submitText.filter(isLoginSubmitText);
+  if (accountCreationSubmitText.length > 0 && controls.some(isNewPasswordControl)) {
+    return uniqueText([
+      ...(primarySubmitText ? [primarySubmitText] : []),
+      ...accountCreationSubmitText,
+      ...loginSubmitText
+    ]);
+  }
   return loginSubmitText.length > 0 ? loginSubmitText : submitText.slice(0, 1);
 }
 
@@ -467,6 +545,7 @@ function collectField(
     ariaLabel: optionalString(element.getAttribute("aria-label")),
     ariaDescribedBy: optionalString(element.getAttribute("aria-describedby")),
     labelText: getLabelText(element),
+    containerText: getContainerText(container),
     dataSetValues: getDatasetValues(element),
     selectOptions: getSelectOptions(element),
     readonly: "readOnly" in element ? element.readOnly : false,

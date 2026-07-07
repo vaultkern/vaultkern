@@ -560,6 +560,24 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
+  it("preserves later account-creation submit labels for registration forms", () => {
+    document.body.innerHTML = `
+      <form id="signup">
+        <input name="email" type="email" autocomplete="username" />
+        <input name="new_password" type="password" autocomplete="new-password" />
+        <button type="submit">Continue</button>
+        <button type="submit">Create account</button>
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "signup")?.headingText).toEqual([
+      "Continue",
+      "Create account"
+    ]);
+  });
+
   it("ignores disabled submit controls when collecting submit text context", () => {
     document.body.innerHTML = `
       <form id="login">

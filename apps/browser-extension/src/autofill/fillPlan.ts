@@ -404,6 +404,12 @@ const CHANGE_PASSWORD_KEYWORDS = [
   "oldpassword",
   "existingpassword"
 ];
+const EXPLICIT_CHANGE_PASSWORD_KEYWORDS = [
+  "changepassword",
+  "updatepassword",
+  "resetpassword",
+  "forgotpassword"
+];
 
 function normalizeText(value: string | undefined) {
   return (value ?? "").toLowerCase().replace(/[\s_-]+/g, "");
@@ -419,6 +425,7 @@ function searchableFieldText(field: AutofillTriageFieldResult) {
     field.title,
     field.ariaLabel,
     field.labelText,
+    ...((field.containerText ?? []) as string[]),
     field.formContext?.htmlId,
     field.formContext?.htmlName,
     field.formContext?.htmlClass,
@@ -474,6 +481,11 @@ function formHasChangePasswordContext(formFields: AutofillTriageFieldResult[]) {
   return CHANGE_PASSWORD_KEYWORDS.some((keyword) => searchableText.includes(keyword));
 }
 
+function formHasExplicitChangePasswordContext(formFields: AutofillTriageFieldResult[]) {
+  const searchableText = formSearchText(formFields);
+  return EXPLICIT_CHANGE_PASSWORD_KEYWORDS.some((keyword) => searchableText.includes(keyword));
+}
+
 function pickCurrentPasswordField(formFields: AutofillTriageFieldResult[]) {
   const passwordFields = formFields.filter((field) => field.qualifiedAs === "password");
   return passwordFields.find(isCurrentPasswordField) ?? null;
@@ -504,6 +516,9 @@ function scopeQualifiesForPasswordChange(
     (currentPasswordField.reasons.includes("autocomplete:current-password") ||
       currentPasswordField.siteRuleTypes.includes("currentPassword")) &&
     formNewPasswordFields.some((field) => field.reasons.includes("autocomplete:new-password"));
+  if (scopeKey.startsWith("container:")) {
+    return formHasExplicitChangePasswordContext(formFields);
+  }
   return hasAutocompleteRoles || formHasChangePasswordContext(formFields);
 }
 
@@ -599,28 +614,6 @@ function createPasswordChangeActions(
   return actions;
 }
 
-function formHasCurrentPassword(fields: AutofillTriageFieldResult[], formOpid: string) {
-  return fields.some(
-    (field) =>
-      fieldIsInForm(field, formOpid) &&
-      field.qualifiedAs === "password" &&
-      isCurrentPasswordField(field)
-  );
-}
-
-function formHasCredentialCandidate(
-  fields: AutofillTriageFieldResult[],
-  formOpid: string
-) {
-  return fields.some(
-    (field) =>
-      fieldIsInForm(field, formOpid) &&
-      (field.qualifiedAs === "username" ||
-        field.qualifiedAs === "password" ||
-        field.qualifiedAs === "newPassword")
-  );
-}
-
 function hasCredentialSignal(field: AutofillTriageFieldResult) {
   const searchableText = searchableFieldText(field);
   const autocomplete = field.autocomplete ?? "";
@@ -638,19 +631,26 @@ function hasCredentialSignal(field: AutofillTriageFieldResult) {
   );
 }
 
-function formHasCredentialSignal(
-  fields: AutofillTriageFieldResult[],
-  formOpid: string
-) {
-  return fields.some((field) => fieldIsInForm(field, formOpid) && hasCredentialSignal(field));
+function fieldsInCredentialScope(fields: AutofillTriageFieldResult[], scopeKey: string) {
+  return fields.filter((field) => fieldIsInCredentialScope(field, scopeKey));
 }
 
-function formHasNewsletterExclusion(
-  fields: AutofillTriageFieldResult[],
-  formOpid: string
-) {
+function scopeHasCurrentPassword(fields: AutofillTriageFieldResult[], scopeKey: string) {
+  return fields.some(
+    (field) =>
+      fieldIsInCredentialScope(field, scopeKey) &&
+      field.qualifiedAs === "password" &&
+      isCurrentPasswordField(field)
+  );
+}
+
+function scopeHasCredentialSignal(fields: AutofillTriageFieldResult[], scopeKey: string) {
+  return fields.some((field) => fieldIsInCredentialScope(field, scopeKey) && hasCredentialSignal(field));
+}
+
+function scopeHasNewsletterExclusion(fields: AutofillTriageFieldResult[], scopeKey: string) {
   return fields.some((field) => {
-    if (!fieldIsInForm(field, formOpid)) {
+    if (!fieldIsInCredentialScope(field, scopeKey)) {
       return false;
     }
     const searchableText = searchableFieldText(field);
@@ -663,36 +663,37 @@ function formHasNewsletterExclusion(
   });
 }
 
-function pickRegistrationFormOpid(
+function pickRegistrationScopeKey(
   fields: AutofillTriageFieldResult[],
   allFields: AutofillTriageFieldResult[],
   options: { allowSingleNewPassword?: boolean } = {}
 ) {
   const newPasswordFields = fields.filter(
-    (field) => field.qualifiedAs === "newPassword" && field.formOpid !== undefined
+    (field) => field.qualifiedAs === "newPassword" && credentialScopeKey(field) !== null
   );
   if (!newPasswordFields.length) {
     return null;
   }
 
-  const focusedField = allFields.find((field) => field.focused && field.formOpid !== undefined);
-  if (focusedField?.formOpid) {
+  const focusedField = allFields.find((field) => field.focused && credentialScopeKey(field) !== null);
+  const focusedScopeKey = focusedField ? credentialScopeKey(focusedField) : null;
+  if (focusedScopeKey) {
     const focusedRegistrationForm = newPasswordFields.some((field) =>
-      fieldIsInForm(field, focusedField.formOpid)
+      fieldIsInCredentialScope(field, focusedScopeKey)
     );
-    if (focusedRegistrationForm && !formHasCurrentPassword(fields, focusedField.formOpid)) {
-      const formFields = fields.filter((field) => fieldIsInForm(field, focusedField.formOpid));
+    if (focusedRegistrationForm && !scopeHasCurrentPassword(fields, focusedScopeKey)) {
+      const formFields = fieldsInCredentialScope(fields, focusedScopeKey);
       if (formHasResetPasswordContext(formFields)) {
         return null;
       }
-      return focusedField.formOpid;
+      return focusedScopeKey;
     }
-    if (formHasCredentialCandidate(fields, focusedField.formOpid)) {
+    if (scopeHasCredentialCandidate(fields, focusedScopeKey)) {
       return null;
     }
     if (
-      !formHasNewsletterExclusion(allFields, focusedField.formOpid) &&
-      formHasCredentialSignal(allFields, focusedField.formOpid)
+      !scopeHasNewsletterExclusion(allFields, focusedScopeKey) &&
+      scopeHasCredentialSignal(allFields, focusedScopeKey)
     ) {
       return null;
     }
@@ -700,22 +701,28 @@ function pickRegistrationFormOpid(
 
   const loginPasswordFields = fields.filter((field) => field.qualifiedAs === "password");
   if (!loginPasswordFields.length) {
-    const formOpid = newPasswordFields[0].formOpid;
-    if (!formOpid || formHasCurrentPassword(fields, formOpid)) {
-      return null;
+    const scopeKeys = new Set(
+      newPasswordFields
+        .map(credentialScopeKey)
+        .filter((scopeKey): scopeKey is string => scopeKey !== null)
+    );
+    for (const scopeKey of scopeKeys) {
+      if (scopeHasCurrentPassword(fields, scopeKey)) {
+        continue;
+      }
+      const formFields = fieldsInCredentialScope(fields, scopeKey);
+      const newPasswordCount = formFields.filter(
+        (field) => field.qualifiedAs === "newPassword"
+      ).length;
+      if (
+        formHasResetPasswordContext(formFields) ||
+        !formHasRegistrationContext(formFields) ||
+        (newPasswordCount < 2 && options.allowSingleNewPassword !== true)
+      ) {
+        continue;
+      }
+      return scopeKey;
     }
-    const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
-    const newPasswordCount = formFields.filter(
-      (field) => field.qualifiedAs === "newPassword"
-    ).length;
-    if (
-      formHasResetPasswordContext(formFields) ||
-      !formHasRegistrationContext(formFields) ||
-      (newPasswordCount < 2 && options.allowSingleNewPassword !== true)
-    ) {
-      return null;
-    }
-    return formOpid;
   }
 
   return null;
@@ -723,10 +730,10 @@ function pickRegistrationFormOpid(
 
 function createRegistrationActions(
   fields: AutofillTriageFieldResult[],
-  formOpid: string | undefined,
+  scopeKey: string,
   payload: LoginFillPayload
 ): AutofillFillAction[] {
-  const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
+  const formFields = fieldsInCredentialScope(fields, scopeKey);
   const actions: AutofillFillAction[] = [];
 
   if (typeof payload.username === "string") {
@@ -743,7 +750,7 @@ function createRegistrationActions(
 
   const registrationPassword = payload.newPassword ?? payload.password;
   if (typeof registrationPassword === "string") {
-    const passwordFields = formHasCurrentPassword(fields, formOpid ?? "")
+    const passwordFields = scopeHasCurrentPassword(fields, scopeKey)
       ? formFields.filter((field) => field.qualifiedAs === "newPassword")
       : formFields.filter(
           (field) => field.qualifiedAs === "newPassword" || field.qualifiedAs === "password"
@@ -1005,9 +1012,9 @@ export function createLoginFillPlan(
     typeof payload.password === "string" && typeof payload.newPassword === "string"
       ? pickPasswordChangeScopeKey(passwordChangeFields, passwordChangeAllFields)
       : null;
-  const registrationFormOpid =
+  const registrationScopeKey =
     typeof payload.password === "string" || typeof payload.newPassword === "string"
-      ? pickRegistrationFormOpid(fields, report.fields, {
+      ? pickRegistrationScopeKey(fields, report.fields, {
           allowSingleNewPassword: typeof payload.newPassword === "string"
         })
       : null;
@@ -1023,10 +1030,10 @@ export function createLoginFillPlan(
     return { actions };
   }
 
-  if (registrationFormOpid !== null) {
+  if (registrationScopeKey !== null) {
     appendFallbackActions(
       actions,
-      createRegistrationActions(fields, registrationFormOpid, payload)
+      createRegistrationActions(fields, registrationScopeKey, payload)
     );
     if (typeof payload.totp === "string") {
       appendFallbackActions(actions, createTotpActions(report.fields, payload.totp));

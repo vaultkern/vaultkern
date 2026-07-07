@@ -121,6 +121,7 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
     field.title,
     field.ariaLabel,
     field.labelText,
+    ...(field.containerText ?? []),
     ...field.dataSetValues
   ]
     .map(normalize)

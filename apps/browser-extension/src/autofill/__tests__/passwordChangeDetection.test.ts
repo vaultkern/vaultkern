@@ -61,6 +61,24 @@ describe("password change detection fill flow", () => {
     );
   });
 
+  it("requires explicit change context for container-scoped password changes", () => {
+    document.body.innerHTML = `
+      <section id="account-panel">
+        <input id="current-password" name="current_password" type="password" autocomplete="current-password" />
+        <input id="new-password" name="new_password" type="password" autocomplete="new-password" />
+        <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
+      </section>
+    `;
+
+    fillLoginForm({ password: "old-secret", newPassword: "new-secret" });
+
+    expect((document.querySelector("#current-password") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#confirm-password") as HTMLInputElement).value).toBe("");
+  });
+
   it("fills the username in a change-password form when one is required", () => {
     document.body.innerHTML = `
       <form>

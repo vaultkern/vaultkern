@@ -246,6 +246,28 @@ describe("registration detection fill flow", () => {
     expect((document.querySelector("#signup-password") as HTMLInputElement).value).toBe("");
   });
 
+  it("fills registration fields grouped by a form-less container", () => {
+    document.body.innerHTML = `
+      <div id="register-card">
+        <input id="register-email" name="register_email" type="email" autocomplete="username" />
+        <input id="register-new-password" name="register_new_password" type="password" autocomplete="new-password" />
+        <input id="register-confirm-password" name="register_confirm_password" type="password" autocomplete="new-password" />
+      </div>
+    `;
+
+    fillLoginForm({ username: "new@example.com", password: "generated-secret" });
+
+    expect((document.querySelector("#register-email") as HTMLInputElement).value).toBe(
+      "new@example.com"
+    );
+    expect((document.querySelector("#register-new-password") as HTMLInputElement).value).toBe(
+      "generated-secret"
+    );
+    expect((document.querySelector("#register-confirm-password") as HTMLInputElement).value).toBe(
+      "generated-secret"
+    );
+  });
+
   it("does not treat a current-password change form as registration", () => {
     document.body.innerHTML = `
       <form>
