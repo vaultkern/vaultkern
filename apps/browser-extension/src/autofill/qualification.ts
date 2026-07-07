@@ -497,6 +497,19 @@ function hasOutOfBandCodeSignal(text: string) {
   );
 }
 
+function hasDirectedOutOfBandCodeSignal(text: string) {
+  return (
+    text.includes("sms") ||
+    text.includes("textmessage") ||
+    text.includes("emailcode") ||
+    text.includes("emailotp") ||
+    text.includes("emailverification") ||
+    text.includes("senttoyouremail") ||
+    text.includes("senttoyourmobile") ||
+    text.includes("senttoyourphone")
+  );
+}
+
 function outOfBandCodeReason(
   fieldText: string,
   formText: string,
@@ -514,16 +527,23 @@ function outOfBandCodeReason(
     return null;
   }
 
+  if (
+    hasDirectedOutOfBandCodeSignal(fieldText) ||
+    hasDirectedOutOfBandCodeSignal(formText)
+  ) {
+    return "excluded:out-of-band-code";
+  }
+
+  if (hasAuthenticatorTotpKeyword(searchableText)) {
+    return null;
+  }
+
   if (hasOutOfBandCodeSignal(fieldText)) {
     return "excluded:out-of-band-code";
   }
 
   if (hasOutOfBandCodeSignal(formText)) {
     return "excluded:out-of-band-code";
-  }
-
-  if (hasAuthenticatorTotpKeyword(searchableText)) {
-    return null;
   }
 
   return null;

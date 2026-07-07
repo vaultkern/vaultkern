@@ -1055,6 +1055,19 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "otp").reasons).toContain("excluded:out-of-band-code");
   });
 
+  it("keeps mobile authenticator prompts as TOTP targets", () => {
+    document.body.innerHTML = `
+      <form id="mobile-authenticator">
+        <label for="auth-code">Mobile authenticator code</label>
+        <input id="auth-code" name="authenticator_code" type="tel" inputmode="numeric" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "authenticator_code").qualifiedAs).toBe("totp");
+  });
+
   it("requires field-level code evidence before using MFA form context", () => {
     document.body.innerHTML = `
       <form id="mfa-setup">

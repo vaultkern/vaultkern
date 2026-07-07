@@ -425,7 +425,7 @@ export function createLoginFillPlan(
   const usernameField =
     typeof payload.username === "string"
       ? pickUsernameField(fields, initialPasswordField) ??
-        pickSingleStepEmailUsernameField(report.fields, initialPasswordField)
+        pickSingleStepEmailUsernameField(report.fields, null)
       : null;
   const passwordField =
     typeof payload.password === "string"

@@ -101,6 +101,28 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("does not let unrelated password forms disable username-first fills", () => {
+    document.body.innerHTML = `
+      <main>
+        <form id="username-step">
+          <input name="email" type="email" />
+        </form>
+        <form id="settings">
+          <input name="current_password" type="password" autocomplete="current-password" />
+        </form>
+      </main>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="current_password"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+  });
+
   it("falls back to a single generic email field for username-first fill", () => {
     document.body.innerHTML = `
       <form>
