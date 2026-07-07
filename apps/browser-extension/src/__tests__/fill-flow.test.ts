@@ -191,6 +191,24 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#settings-new-password") as HTMLInputElement).value).toBe("");
   });
 
+  it("keeps password-only fills off setup forms that also ask for a new password", () => {
+    document.body.innerHTML = `
+      <form id="setup">
+        <input id="setup-password" type="password" value="" />
+        <input id="setup-new-password" type="password" autocomplete="new-password" value="" />
+      </form>
+      <form id="login">
+        <input id="login-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#setup-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#setup-new-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("prefers writable visible fields over readonly or hidden candidates", () => {
     document.body.innerHTML = `
       <form>

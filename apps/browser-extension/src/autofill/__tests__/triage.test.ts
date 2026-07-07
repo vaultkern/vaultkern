@@ -71,6 +71,25 @@ describe("autofill triage", () => {
     expect(password.valuePreview).toBeUndefined();
   });
 
+  it("does not collect shadow-internal buttons as outer form submit context", () => {
+    document.body.innerHTML = `
+      <form id="login-form">
+        <input name="email" type="email" autocomplete="username" />
+        <input name="password" type="password" autocomplete="current-password" />
+        <div id="widget-host"></div>
+        <button type="submit">Continue</button>
+      </form>
+    `;
+    const host = document.querySelector("#widget-host") as HTMLDivElement;
+    host.attachShadow({ mode: "open" }).innerHTML = `
+      <button type="submit">Create account</button>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    expect(snapshot.forms[0].submitText).toEqual(["Continue"]);
+    expect(snapshot.forms[0].headingText).toEqual(["Continue"]);
+  });
+
   it("marks readonly disabled and hidden fields as not fillable", () => {
     document.body.innerHTML = `
       <form>

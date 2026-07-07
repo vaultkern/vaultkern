@@ -430,6 +430,35 @@ describe("registration detection fill flow", () => {
     );
   });
 
+  it("falls back to registration when focus is in an unrelated newsletter email form", () => {
+    document.body.innerHTML = `
+      <form id="newsletter-form">
+        <h2>Newsletter</h2>
+        <input id="newsletter-email" name="newsletter_email" type="email" />
+      </form>
+      <form id="register-form">
+        <h2>Create account</h2>
+        <input id="register-email" name="register_email" type="email" autocomplete="username" />
+        <input id="register-new-password" name="register_new_password" type="password" autocomplete="new-password" />
+        <input id="register-confirm-password" name="register_confirm_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    (document.querySelector("#newsletter-email") as HTMLInputElement).focus();
+
+    fillLoginForm({ username: "new@example.com", password: "generated-secret" });
+
+    expect((document.querySelector("#newsletter-email") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#register-email") as HTMLInputElement).value).toBe(
+      "new@example.com"
+    );
+    expect((document.querySelector("#register-new-password") as HTMLInputElement).value).toBe(
+      "generated-secret"
+    );
+    expect((document.querySelector("#register-confirm-password") as HTMLInputElement).value).toBe(
+      "generated-secret"
+    );
+  });
+
   it("does not fall back from a focused excluded credential form", () => {
     document.body.innerHTML = `
       <form id="reset-form">

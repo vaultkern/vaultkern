@@ -263,21 +263,36 @@ function fieldHasSiblingUsername(
   );
 }
 
+function isUnsafeLoginPasswordField(
+  passwordField: AutofillTriageFieldResult,
+  fields: AutofillTriageFieldResult[]
+) {
+  return (
+    fieldHasSiblingNewPassword(passwordField, fields) &&
+    !isCurrentPasswordField(passwordField) &&
+    !fieldHasSiblingUsername(passwordField, fields)
+  );
+}
+
 function pickLoginPasswordField(fields: AutofillTriageFieldResult[]) {
   const passwordField = pickPasswordField(fields);
   if (!passwordField) {
     return null;
   }
 
-  if (
-    fieldHasSiblingNewPassword(passwordField, fields) &&
-    !isCurrentPasswordField(passwordField) &&
-    !fieldHasSiblingUsername(passwordField, fields)
-  ) {
+  if (isUnsafeLoginPasswordField(passwordField, fields)) {
     return null;
   }
 
   return passwordField;
+}
+
+function pickFirstSafeLoginPasswordField(fields: AutofillTriageFieldResult[]) {
+  return (
+    fields.find(
+      (field) => field.qualifiedAs === "password" && !isUnsafeLoginPasswordField(field, fields)
+    ) ?? null
+  );
 }
 
 function fieldForAction(
@@ -630,6 +645,24 @@ function formHasCredentialSignal(
   return fields.some((field) => fieldIsInForm(field, formOpid) && hasCredentialSignal(field));
 }
 
+function formHasNewsletterExclusion(
+  fields: AutofillTriageFieldResult[],
+  formOpid: string
+) {
+  return fields.some((field) => {
+    if (!fieldIsInForm(field, formOpid)) {
+      return false;
+    }
+    const searchableText = searchableFieldText(field);
+    return (
+      field.reasons.some((reason) => reason === "non-login:newsletter") ||
+      ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"].some((keyword) =>
+        searchableText.includes(keyword)
+      )
+    );
+  });
+}
+
 function pickRegistrationFormOpid(
   fields: AutofillTriageFieldResult[],
   allFields: AutofillTriageFieldResult[],
@@ -657,7 +690,10 @@ function pickRegistrationFormOpid(
     if (formHasCredentialCandidate(fields, focusedField.formOpid)) {
       return null;
     }
-    if (formHasCredentialSignal(allFields, focusedField.formOpid)) {
+    if (
+      !formHasNewsletterExclusion(allFields, focusedField.formOpid) &&
+      formHasCredentialSignal(allFields, focusedField.formOpid)
+    ) {
       return null;
     }
   }
@@ -1021,7 +1057,7 @@ export function createLoginFillPlan(
               fields.filter((field) => fieldScopeMatches(field, usernameAnchor))
             ) ??
             initialPasswordField
-        : pickFirstPasswordField(fields)
+        : pickFirstSafeLoginPasswordField(fields)
         )
       : null;
 
