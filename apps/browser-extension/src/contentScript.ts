@@ -16,6 +16,10 @@ function isWritableVisibleInput(input: HTMLInputElement) {
     return false;
   }
 
+  if (hasHiddenAncestor(input)) {
+    return false;
+  }
+
   if (hasTinyExplicitSize(style)) {
     return false;
   }
@@ -30,6 +34,10 @@ function isWritableVisibleInput(input: HTMLInputElement) {
     return false;
   }
 
+  if (hasLayoutBox && rect.left > window.innerWidth) {
+    return false;
+  }
+
   if (!hasLayoutBox && hasOffscreenExplicitPosition(style)) {
     return false;
   }
@@ -40,6 +48,23 @@ function isWritableVisibleInput(input: HTMLInputElement) {
 function cssPixelValue(value: string) {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasHiddenAncestor(input: HTMLInputElement) {
+  let element = input.parentElement;
+  while (element) {
+    const style = window.getComputedStyle(element);
+    if (
+      element.hidden ||
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.visibility === "collapse"
+    ) {
+      return true;
+    }
+    element = element.parentElement;
+  }
+  return false;
 }
 
 function hasTinyExplicitSize(style: CSSStyleDeclaration) {
@@ -88,6 +113,17 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
 
   const tokens = fieldTokens(input);
   const tokenSet = new Set(tokens.split(/[^a-z0-9]+/).filter(Boolean));
+  if (
+    [
+      "verificationcode",
+      "securitycode",
+      "authenticationcode",
+      "searchquery",
+      "zipcode"
+    ].some((token) => tokens.includes(token))
+  ) {
+    return true;
+  }
   if (
     ["search", "otp", "totp", "2fa", "postcode", "zip"].some((token) =>
       tokenSet.has(token)
@@ -153,15 +189,7 @@ function pickUsernameField(passwordField: HTMLInputElement | null) {
 }
 
 function isPasswordChangeField(input: HTMLInputElement) {
-  const form = input.form;
-  if (!form) {
-    return false;
-  }
-
-  const passwords = Array.from(form.querySelectorAll('input[type="password"]')).filter(
-    (candidate): candidate is HTMLInputElement =>
-      candidate instanceof HTMLInputElement && isWritableVisibleInput(candidate)
-  );
+  const passwords = passwordChangeGroup(input);
 
   if (passwords.length < 2) {
     return false;
@@ -173,6 +201,24 @@ function isPasswordChangeField(input: HTMLInputElement) {
       (fragment) => tokens.includes(fragment)
     );
   });
+}
+
+function passwordChangeGroup(input: HTMLInputElement) {
+  const form = input.form;
+  if (form) {
+    return Array.from(form.querySelectorAll('input[type="password"]')).filter(
+      (candidate): candidate is HTMLInputElement =>
+        candidate instanceof HTMLInputElement && isWritableVisibleInput(candidate)
+    );
+  }
+
+  const passwords = Array.from(document.querySelectorAll('input[type="password"]')).filter(
+    (candidate): candidate is HTMLInputElement =>
+      candidate instanceof HTMLInputElement &&
+      candidate.form === null &&
+      isWritableVisibleInput(candidate)
+  );
+  return passwords.length >= 3 ? passwords : [];
 }
 
 function pickPasswordField() {

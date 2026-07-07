@@ -412,6 +412,22 @@ describe("fillLoginForm", () => {
     expect(inputValue("#postcode")).toBe("90210");
   });
 
+  it("rejects compound verification search and zip field names", () => {
+    document.body.innerHTML = `
+      <input id="verification-code" type="text" name="verificationCode" value="" />
+      <input id="security-code" type="text" name="securityCode" value="" />
+      <input id="search-query" type="text" name="searchQuery" value="" />
+      <input id="zip-code" type="text" name="zipcode" value="" />
+    `;
+
+    fillLoginForm({ username: "alice@example.com" });
+
+    expect(inputValue("#verification-code")).toBe("");
+    expect(inputValue("#security-code")).toBe("");
+    expect(inputValue("#search-query")).toBe("");
+    expect(inputValue("#zip-code")).toBe("");
+  });
+
   it("does not reject username fields just because helper text mentions code", () => {
     document.body.innerHTML = `
       <form>
@@ -440,6 +456,76 @@ describe("fillLoginForm", () => {
     expect(inputValue("#login-password")).toBe("secret-123");
   });
 
+  it("ignores fields inside hidden containers", () => {
+    document.body.innerHTML = `
+      <div style="display:none">
+        <input id="hidden-email" type="email" autocomplete="username" value="hidden@example.com" />
+        <input id="hidden-password" type="password" autocomplete="current-password" value="hidden-secret" />
+      </div>
+      <form>
+        <input id="visible-email" type="email" autocomplete="username" value="" />
+        <input id="visible-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#hidden-email")).toBe("hidden@example.com");
+    expect(inputValue("#hidden-password")).toBe("hidden-secret");
+    expect(inputValue("#visible-email")).toBe("alice@example.com");
+    expect(inputValue("#visible-password")).toBe("secret-123");
+  });
+
+  it("rejects fields positioned offscreen to the right", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="right-email" type="email" autocomplete="username" value="right@example.com" />
+        <input id="visible-email" type="email" autocomplete="username" value="" />
+        <input id="right-password" type="password" autocomplete="current-password" value="right-secret" />
+        <input id="visible-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+    const rightRect = {
+      x: 10000,
+      y: 0,
+      width: 320,
+      height: 32,
+      top: 0,
+      right: 10320,
+      bottom: 32,
+      left: 10000,
+      toJSON: () => ({})
+    } as DOMRect;
+    const visibleRect = {
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 32,
+      top: 0,
+      right: 320,
+      bottom: 32,
+      left: 0,
+      toJSON: () => ({})
+    } as DOMRect;
+    for (const selector of ["#right-email", "#right-password"]) {
+      const input = document.querySelector(selector) as HTMLInputElement;
+      vi.spyOn(input, "getClientRects").mockReturnValue([rightRect] as unknown as DOMRectList);
+      vi.spyOn(input, "getBoundingClientRect").mockReturnValue(rightRect);
+    }
+    for (const selector of ["#visible-email", "#visible-password"]) {
+      const input = document.querySelector(selector) as HTMLInputElement;
+      vi.spyOn(input, "getClientRects").mockReturnValue([visibleRect] as unknown as DOMRectList);
+      vi.spyOn(input, "getBoundingClientRect").mockReturnValue(visibleRect);
+    }
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#right-email")).toBe("right@example.com");
+    expect(inputValue("#right-password")).toBe("right-secret");
+    expect(inputValue("#visible-email")).toBe("alice@example.com");
+    expect(inputValue("#visible-password")).toBe("secret-123");
+  });
+
   it("uses generic user fields as a form-less username fallback", () => {
     document.body.innerHTML = `
       <input id="account-field" type="text" name="user" value="" />
@@ -464,6 +550,20 @@ describe("fillLoginForm", () => {
 
     expect(inputValue("#account-field")).toBe("alice");
     expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("does not fill form-less password change groups", () => {
+    document.body.innerHTML = `
+      <input id="old-password" type="password" name="old_password" value="" />
+      <input id="new-password" type="password" name="new_password" value="" />
+      <input id="repeat-password" type="password" name="repeat_password" value="" />
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#old-password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
+    expect(inputValue("#repeat-password")).toBe("");
   });
 
   it("does not treat current-password as a password-change signal", () => {
