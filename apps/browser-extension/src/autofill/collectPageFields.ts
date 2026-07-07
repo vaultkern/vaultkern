@@ -97,9 +97,9 @@ function controlText(
   primaryText: string | null | undefined
 ) {
   return (
-    optionalString(primaryText) ??
-    optionalString(element.getAttribute("aria-label")) ??
     optionalString(getReferencedElementText(element, "aria-labelledby")) ??
+    optionalString(element.getAttribute("aria-label")) ??
+    optionalString(primaryText) ??
     optionalString(element.getAttribute("title"))
   );
 }
@@ -219,7 +219,7 @@ function getSubmitText(form: HTMLFormElement) {
     return [controlText(input, input.value)];
   }).filter(Boolean);
   const loginSubmitText = submitText.filter(isLoginSubmitText);
-  return loginSubmitText.length > 0 ? loginSubmitText : submitText;
+  return loginSubmitText.length > 0 ? loginSubmitText : submitText.slice(0, 1);
 }
 
 function collectForms(documentRef: Document) {

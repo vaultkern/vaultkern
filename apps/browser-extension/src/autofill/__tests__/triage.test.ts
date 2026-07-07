@@ -371,12 +371,12 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "route_email").qualifiedAs).toBe("username");
   });
 
-  it("uses accessible submit labels as passwordless login context", () => {
+  it("prefers accessible submit labels over visible button text", () => {
     document.body.innerHTML = `
       <form id="icon-submit" action="/continue">
         <input name="icon_email" type="email" />
         <button type="submit" aria-label="Sign in">
-          <svg aria-hidden="true"></svg>
+          Continue
         </button>
       </form>
     `;
@@ -443,6 +443,27 @@ describe("autofill triage", () => {
 
     expect(snapshot.forms.find((form) => form.htmlId === "login")?.headingText).toEqual([
       "Sign in"
+    ]);
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
+  it("keeps neutral primary submits from inheriting secondary submit exclusions", () => {
+    document.body.innerHTML = `
+      <form id="login">
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+        <button type="submit">Continue</button>
+        <button type="submit">Create account</button>
+        <button type="submit">Forgot password?</button>
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "login")?.headingText).toEqual([
+      "Continue"
     ]);
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
@@ -719,7 +740,7 @@ describe("autofill triage", () => {
 
   it("suppresses mixed password and confirmation signup forms", () => {
     document.body.innerHTML = `
-      <form id="signup">
+      <form>
         <input name="email" type="email" autocomplete="username" />
         <input name="password" type="password" />
         <input name="confirm_password" type="password" />
@@ -1096,6 +1117,29 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "unslotted_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "unslotted_email").reasons).toContain(
+      "not-viewable:unslotted"
+    );
+    expect(fieldByName(report, "shadow_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats descendants of unslotted shadow-host children as not viewable", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    host.attachShadow({ mode: "open" }).innerHTML = `
+      <input name="shadow_email" type="email" autocomplete="username" />
+      <input name="shadow_password" type="password" autocomplete="current-password" />
+    `;
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = `
+      <input name="nested_unslotted_email" type="email" autocomplete="username" />
+    `;
+    host.append(wrapper);
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "nested_unslotted_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "nested_unslotted_email").reasons).toContain(
       "not-viewable:unslotted"
     );
     expect(fieldByName(report, "shadow_email").qualifiedAs).toBe("username");

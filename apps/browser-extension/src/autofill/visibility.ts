@@ -70,15 +70,14 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
   if (inputType === "hidden") {
     addReason(reasons, "not-viewable:hidden");
   }
-  if (isUnslottedShadowHostChild(element)) {
-    addReason(reasons, "not-viewable:unslotted");
-  }
-
   for (
     let current: HTMLElement | null = element;
     current;
     current = parentElementOrShadowHost(current)
   ) {
+    if (isUnslottedShadowHostChild(current)) {
+      addReason(reasons, "not-viewable:unslotted");
+    }
     if (current.hidden) {
       addReason(reasons, "not-viewable:hidden");
     }

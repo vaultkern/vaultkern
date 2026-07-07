@@ -177,6 +177,16 @@ function isNewPasswordField(candidate: AutofillFieldSnapshot) {
   );
 }
 
+function isCurrentPasswordField(candidate: AutofillFieldSnapshot) {
+  const autocomplete = fieldAutocompleteTokens(candidate);
+  return (
+    candidate.htmlType === "password" &&
+    candidate.viewable &&
+    candidate.fillable &&
+    autocomplete.has("current-password")
+  );
+}
+
 function hasScopedField(
   field: AutofillFieldSnapshot,
   snapshot: AutofillPageSnapshot,
@@ -204,6 +214,10 @@ function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPage
 
 function hasNewPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
   return hasScopedField(field, snapshot, isNewPasswordField);
+}
+
+function hasCurrentPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
+  return hasScopedField(field, snapshot, isCurrentPasswordField);
 }
 
 function searchPartsForField(field: AutofillFieldSnapshot) {
@@ -401,6 +415,14 @@ function qualificationForFillableField(
   }
 
   if (isPasswordLike(field)) {
+    if (
+      hasNewPasswordSibling(field, snapshot) &&
+      !hasCurrentPasswordSibling(field, snapshot) &&
+      !autocomplete.has("current-password")
+    ) {
+      reasons.push("non-login:account-creation");
+      return { qualifiedAs: "ignored", eligible: false, reasons };
+    }
     if (autocomplete.has("current-password")) {
       reasons.push("autocomplete:current-password");
     }
@@ -434,7 +456,10 @@ function qualificationForFillableField(
     const needsLoginEvidence =
       (hasEmailSignal || hasPhoneSignal || hasGenericIdentifierSignal) &&
       !hasUsernameAutocomplete;
-    if (hasNewPasswordSibling(field, snapshot) && !hasPasswordSibling(field, snapshot)) {
+    if (
+      hasNewPasswordSibling(field, snapshot) &&
+      !hasCurrentPasswordSibling(field, snapshot)
+    ) {
       reasons.push("non-login:account-creation");
       return { qualifiedAs: "ignored", eligible: false, reasons };
     }
