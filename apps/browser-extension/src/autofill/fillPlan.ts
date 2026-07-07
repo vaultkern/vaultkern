@@ -295,6 +295,25 @@ function pickFirstSafeLoginPasswordField(fields: AutofillTriageFieldResult[]) {
   );
 }
 
+function pickUnscopedPasswordAfterUsername(
+  fields: AutofillTriageFieldResult[],
+  usernameField: AutofillTriageFieldResult
+) {
+  if (usernameField.formOpid !== undefined || usernameField.containerOpid !== undefined) {
+    return null;
+  }
+
+  return (
+    fields.find(
+      (field) =>
+        field.qualifiedAs === "password" &&
+        field.elementNumber > usernameField.elementNumber &&
+        field.formOpid === undefined &&
+        field.containerOpid === undefined
+    ) ?? null
+  );
+}
+
 function fieldForAction(
   fields: AutofillTriageFieldResult[],
   action: AutofillFillAction | undefined
@@ -303,6 +322,49 @@ function fieldForAction(
     return null;
   }
   return fields.find((field) => field.opid === action.fieldOpid) ?? null;
+}
+
+function usernameHintScore(field: AutofillTriageFieldResult) {
+  const fieldText = [
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.autocomplete,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.labelText,
+    ...field.dataSetValues
+  ]
+    .map(normalizeHint)
+    .join(",");
+
+  let score = 0;
+  if (field.reasons.includes("autocomplete:username")) {
+    score += 100;
+  }
+  if (field.reasons.includes("autocomplete:email")) {
+    score += 80;
+  }
+  if (field.htmlType === "email") {
+    score += 20;
+  }
+  if (fieldText.includes("username") || fieldText.includes("email")) {
+    score += 10;
+  }
+  if (fieldText.includes("login")) {
+    score += 5;
+  }
+  return score;
+}
+
+function pickPreferredUsernameField(fields: AutofillTriageFieldResult[]) {
+  return (
+    [...fields].sort(
+      (left, right) =>
+        usernameHintScore(right) - usernameHintScore(left) || byDocumentOrder(left, right)
+    )[0] ?? null
+  );
 }
 
 function pickUsernameField(
@@ -315,15 +377,45 @@ function pickUsernameField(
   }
 
   if (passwordField) {
-    const sameScopeUsername = usernameFields.find((field) =>
-      fieldScopeMatches(field, passwordField)
-    );
-    if (sameScopeUsername) {
-      return sameScopeUsername;
+    if (passwordField.formOpid) {
+      return pickPreferredUsernameField(
+        usernameFields.filter((field) => field.formOpid === passwordField.formOpid)
+      );
+    }
+
+    if (passwordField.containerOpid) {
+      return pickPreferredUsernameField(
+        usernameFields.filter(
+          (field) =>
+            field.formOpid === undefined && field.containerOpid === passwordField.containerOpid
+        )
+      );
     }
   }
 
-  return usernameFields.find((field) => !isRegistrationUsernameFallback(field, fields)) ?? null;
+  return pickPreferredUsernameField(
+    usernameFields.filter((field) => !isRegistrationUsernameFallback(field, fields))
+  );
+}
+
+function hasScopedPasswordField(
+  fields: AutofillTriageFieldResult[],
+  usernameField: AutofillTriageFieldResult
+) {
+  return fields.some(
+    (field) => field.qualifiedAs === "password" && fieldScopeMatches(field, usernameField)
+  );
+}
+
+function pickUsernameFirstField(fields: AutofillTriageFieldResult[]) {
+  return pickPreferredUsernameField(
+    fields.filter(
+      (field) =>
+        field.qualifiedAs === "username" &&
+        !isRegistrationUsernameFallback(field, fields) &&
+        !hasScopedPasswordField(fields, field)
+    )
+  );
 }
 
 function hasBlockingUsernameFallbackReason(field: AutofillTriageFieldResult) {
@@ -338,9 +430,26 @@ function isSingleStepEmailCandidate(field: AutofillTriageFieldResult) {
     field.viewable &&
     field.fillable &&
     field.tagName === "input" &&
-    field.htmlType === "email" &&
+    (field.htmlType === "email" ||
+      (field.htmlType === "text" && singleStepFieldHasEmailHint(field))) &&
     !hasBlockingUsernameFallbackReason(field)
   );
+}
+
+function singleStepFieldHasEmailHint(field: AutofillTriageFieldResult) {
+  const fieldText = [
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.labelText,
+    ...field.dataSetValues
+  ]
+    .map(normalizeHint)
+    .join(",");
+  return fieldText.includes("email");
 }
 
 function pickSingleStepEmailUsernameField(
@@ -841,7 +950,8 @@ function splitSequenceKeys(field: AutofillTriageFieldResult) {
 
 function splitSequenceMatches(
   seed: AutofillTriageFieldResult,
-  candidate: AutofillTriageFieldResult
+  candidate: AutofillTriageFieldResult,
+  options: { allowAnonymousFallback?: boolean } = {}
 ) {
   const seedKeys = splitSequenceKeys(seed);
   if (!seedKeys.length) {
@@ -850,7 +960,7 @@ function splitSequenceMatches(
 
   const candidateKeys = splitSequenceKeys(candidate);
   if (!candidateKeys.length) {
-    return isAnonymousOneCharacterField(candidate);
+    return options.allowAnonymousFallback === true && isAnonymousOneCharacterField(candidate);
   }
   return candidateKeys.some((key) => seedKeys.includes(key));
 }
@@ -888,12 +998,15 @@ function pickContiguousOneCharacterFields(
     return [];
   }
 
+  const seedSequenceKeys = splitSequenceKeys(seed);
   let startIndex = seedIndex;
   while (
     startIndex > 0 &&
     isContiguousSplitField(seed, sortedFields[startIndex - 1]) &&
     splitScopeMatches(seed, sortedFields[startIndex - 1]) &&
-    splitSequenceMatches(seed, sortedFields[startIndex - 1])
+    splitSequenceMatches(seed, sortedFields[startIndex - 1], {
+      allowAnonymousFallback: seedSequenceKeys.length === 0
+    })
   ) {
     startIndex -= 1;
   }
@@ -901,9 +1014,14 @@ function pickContiguousOneCharacterFields(
   let endIndex = seedIndex;
   while (
     endIndex + 1 < sortedFields.length &&
+    !(
+      seedSequenceKeys.length > 0 &&
+      endIndex - startIndex + 1 >= valueLength &&
+      isAnonymousOneCharacterField(sortedFields[endIndex + 1])
+    ) &&
     isContiguousSplitField(seed, sortedFields[endIndex + 1]) &&
     splitScopeMatches(seed, sortedFields[endIndex + 1]) &&
-    splitSequenceMatches(seed, sortedFields[endIndex + 1])
+    splitSequenceMatches(seed, sortedFields[endIndex + 1], { allowAnonymousFallback: true })
   ) {
     endIndex += 1;
   }
@@ -1046,12 +1164,13 @@ export function createLoginFillPlan(
       ? siteRulePasswordField ??
         pickLoginPasswordFieldInScope(fields, siteRuleUsernameField) ??
         pickLoginPasswordFieldInForm(fields, siteRuleUsernameField?.formOpid) ??
-        pickLoginPasswordField(fields)
+        pickFirstSafeLoginPasswordField(fields)
       : null;
   const usernameField =
     typeof payload.username === "string" && siteRuleUsernameField === null
       ? pickUsernameField(fields, initialPasswordField) ??
-        pickSingleStepEmailUsernameField(report.fields, initialPasswordField)
+        pickUsernameFirstField(fields) ??
+        pickSingleStepEmailUsernameField(report.fields, null)
       : null;
   const usernameAnchor = usernameField ?? siteRuleUsernameField;
   const passwordField =
@@ -1063,7 +1182,7 @@ export function createLoginFillPlan(
             pickLoginPasswordField(
               fields.filter((field) => fieldScopeMatches(field, usernameAnchor))
             ) ??
-            initialPasswordField
+            pickUnscopedPasswordAfterUsername(fields, usernameAnchor)
         : pickFirstSafeLoginPasswordField(fields)
         )
       : null;

@@ -128,6 +128,23 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
     .join(",");
 }
 
+function joinedFieldPromptText(field: AutofillFieldSnapshot) {
+  return [
+    field.htmlType,
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.inputMode,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.labelText,
+    ...field.dataSetValues
+  ]
+    .map(normalize)
+    .join(",");
+}
+
 function joinedFormTextParts(
   form: AutofillFormSnapshot | undefined,
   options: { includeAction: boolean; includeSubmitText?: boolean }
@@ -448,10 +465,27 @@ function recoveryCodeReason(
   autocomplete: Set<string>
 ) {
   const searchableText = `${fieldText},${formText}`;
-  const hasRecoveryMarker = RECOVERY_CODE_KEYWORDS.some((keyword) =>
-    searchableText.includes(keyword)
+  const fieldHasRecoveryMarker = RECOVERY_CODE_KEYWORDS.some((keyword) =>
+    fieldText.includes(keyword)
   );
+  const formHasRecoveryMarker = RECOVERY_CODE_KEYWORDS.some((keyword) => formText.includes(keyword));
+  const hasRecoveryMarker = fieldHasRecoveryMarker || formHasRecoveryMarker;
   if (!hasRecoveryMarker) {
+    return null;
+  }
+
+  const formHasRecoveryCodePrompt =
+    formHasRecoveryMarker &&
+    (formText.includes("code") ||
+      formText.includes("otp") ||
+      formText.includes("totp") ||
+      formText.includes("onetime"));
+
+  if (
+    !fieldHasRecoveryMarker &&
+    hasAuthenticatorTotpKeyword(searchableText) &&
+    !formHasRecoveryCodePrompt
+  ) {
     return null;
   }
 
@@ -511,7 +545,46 @@ function hasAuthenticatorTotpKeyword(text: string) {
   return AUTHENTICATOR_TOTP_KEYWORDS.some((keyword) => text.includes(keyword));
 }
 
+function hasStrongTotpContext(text: string) {
+  return (
+    hasAuthenticatorTotpKeyword(text) ||
+    text.includes("2fa") ||
+    text.includes("2factor") ||
+    text.includes("2step") ||
+    text.includes("mfa") ||
+    text.includes("otp") ||
+    text.includes("totp") ||
+    text.includes("twofactor") ||
+    text.includes("twostep")
+  );
+}
+
+function hasPhoneVerificationCodeSignal(text: string) {
+  const hasPhoneContext = text.includes("phone") || text.includes("mobile");
+  const hasCodeContext =
+    text.includes("code") ||
+    text.includes("otp") ||
+    text.includes("onetime") ||
+    text.includes("verification") ||
+    text.includes("verify");
+  return hasPhoneContext && hasCodeContext && !hasAuthenticatorTotpKeyword(text);
+}
+
 function hasOutOfBandCodeSignal(text: string) {
+  return (
+    text.includes("sms") ||
+    text.includes("textmessage") ||
+    text.includes("mobile") ||
+    text.includes("emailcode") ||
+    text.includes("emailotp") ||
+    text.includes("emailverification") ||
+    text.includes("senttoyouremail") ||
+    text.includes("senttoyourmobile") ||
+    text.includes("senttoyourphone")
+  );
+}
+
+function hasDirectedOutOfBandCodeSignal(text: string) {
   return (
     text.includes("sms") ||
     text.includes("textmessage") ||
@@ -519,6 +592,7 @@ function hasOutOfBandCodeSignal(text: string) {
     text.includes("emailotp") ||
     text.includes("emailverification") ||
     text.includes("senttoyouremail") ||
+    text.includes("senttoyourmobile") ||
     text.includes("senttoyourphone")
   );
 }
@@ -540,16 +614,24 @@ function outOfBandCodeReason(
     return null;
   }
 
+  if (
+    hasDirectedOutOfBandCodeSignal(fieldText) ||
+    hasDirectedOutOfBandCodeSignal(formText) ||
+    hasPhoneVerificationCodeSignal(formText)
+  ) {
+    return "excluded:out-of-band-code";
+  }
+
+  if (hasAuthenticatorTotpKeyword(searchableText)) {
+    return null;
+  }
+
   if (hasOutOfBandCodeSignal(fieldText)) {
     return "excluded:out-of-band-code";
   }
 
   if (hasOutOfBandCodeSignal(formText)) {
     return "excluded:out-of-band-code";
-  }
-
-  if (hasAuthenticatorTotpKeyword(searchableText)) {
-    return null;
   }
 
   return null;
@@ -580,6 +662,7 @@ function hasFieldCodeHint(
   return (
     autocomplete.has("one-time-code") ||
     field.maxLength === 1 ||
+    (field.maxLength !== undefined && field.maxLength >= 4 && field.maxLength <= 8) ||
     fieldText.includes("digit") ||
     fieldText.includes("code") ||
     fieldText.includes("otp") ||
@@ -588,10 +671,15 @@ function hasFieldCodeHint(
   );
 }
 
-function isTotpLike(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
+function isTotpLike(
+  field: AutofillFieldSnapshot,
+  fieldText: string,
+  fieldPromptText: string,
+  formText: string
+) {
   const autocomplete = fieldAutocompleteTokens(field);
   if ([...TOTP_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
-    return true;
+    return hasStrongTotpContext(`${fieldPromptText},${formText}`);
   }
   if (field.htmlType === "password") {
     return (
@@ -616,8 +704,7 @@ function isTotpLike(field: AutofillFieldSnapshot, fieldText: string, formText: s
 
   return (
     hasTotpKeyword(formText) &&
-    (hasFieldCodeHint(field, fieldText, autocomplete) ||
-      hasAuthenticatorTotpKeyword(formText)) &&
+    hasFieldCodeHint(field, fieldText, autocomplete) &&
     hasNumericCodeShape(field, fieldText)
   );
 }
@@ -652,6 +739,7 @@ function qualificationForFillableField(
   reasons: string[]
 ): FieldQualification {
   const fieldText = joinedFieldText(field);
+  const fieldPromptText = joinedFieldPromptText(field);
   const formText = joinedFormText(form);
   const formNonSubmitText = joinedFormNonSubmitText(form);
   const formPromptText = joinedFormPromptText(form);
@@ -824,13 +912,13 @@ function qualificationForFillableField(
     field.htmlType === "password" &&
     !autocomplete.has("current-password") &&
     hasPasswordMaskedCodeSignal(fieldText) &&
-    !isTotpLike(field, fieldText, formPromptText)
+    !isTotpLike(field, fieldText, fieldPromptText, formPromptText)
   ) {
     reasons.push("excluded:one-time-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  if (isTotpLike(field, fieldText, formPromptText)) {
+  if (isTotpLike(field, fieldText, fieldPromptText, formPromptText)) {
     if (autocomplete.has("one-time-code")) {
       reasons.push("autocomplete:one-time-code");
     }
