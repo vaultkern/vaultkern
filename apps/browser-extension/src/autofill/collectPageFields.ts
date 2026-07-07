@@ -6,9 +6,9 @@ import type {
 } from "./types";
 import { getFieldFillability, getFieldVisibility } from "./visibility";
 
-const FIELD_SELECTOR = "input, select, textarea";
+export const FIELD_SELECTOR = "input, select, textarea";
 
-function collectMatchingElements(root: ParentNode, selector: string) {
+export function collectMatchingElements(root: ParentNode, selector: string) {
   const elements: Element[] = [];
 
   function visit(node: ParentNode) {

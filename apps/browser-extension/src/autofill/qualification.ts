@@ -179,6 +179,16 @@ function isNewPasswordField(candidate: AutofillFieldSnapshot) {
   );
 }
 
+function isCurrentPasswordField(candidate: AutofillFieldSnapshot) {
+  const autocomplete = fieldAutocompleteTokens(candidate);
+  return (
+    candidate.htmlType === "password" &&
+    candidate.viewable &&
+    candidate.fillable &&
+    autocomplete.has("current-password")
+  );
+}
+
 function hasScopedField(
   field: AutofillFieldSnapshot,
   snapshot: AutofillPageSnapshot,
@@ -206,6 +216,10 @@ function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPage
 
 function hasNewPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
   return hasScopedField(field, snapshot, isNewPasswordField);
+}
+
+function hasCurrentPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
+  return hasScopedField(field, snapshot, isCurrentPasswordField);
 }
 
 function searchPartsForField(field: AutofillFieldSnapshot) {
@@ -390,6 +404,15 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
+  const searchableText = `${fieldText},${formText}`;
+  const hasMixedLoginContext =
+    hasLoginContext(searchableText) || !hasAccountCreationContext(searchableText);
+
+  if (isPasswordLike(field) && autocomplete.has("current-password") && hasMixedLoginContext) {
+    reasons.push("autocomplete:current-password");
+    return { qualifiedAs: "password", eligible: true, reasons };
+  }
+
   if (isNewPasswordLike(field, fieldText, formText)) {
     if (autocomplete.has("new-password")) {
       reasons.push("autocomplete:new-password");
@@ -398,8 +421,14 @@ function qualificationForFillableField(
   }
 
   const nonLogin = nonLoginReason(fieldText, formText);
+  const isExplicitUsernameInCurrentPasswordForm =
+    ([...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) ||
+      [...EMAIL_AUTOCOMPLETE].some((token) => autocomplete.has(token))) &&
+    hasMixedLoginContext &&
+    hasCurrentPasswordSibling(field, snapshot);
   if (
     nonLogin &&
+    !isExplicitUsernameInCurrentPasswordForm &&
     !(
       nonLogin === "non-login:newsletter" &&
       hasLoginContext(`${fieldText},${formText}`) &&
