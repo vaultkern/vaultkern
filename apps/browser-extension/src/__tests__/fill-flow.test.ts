@@ -742,6 +742,50 @@ describe("fillLoginForm", () => {
     expect(inputValue("#login-password")).toBe("secret-123");
   });
 
+  it("does not prefer a same-form newsletter email over the login username", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="newsletter-email" type="email" name="newsletter_email" autocomplete="username" value="" />
+        <input id="login-user" type="text" name="username" value="" />
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#newsletter-email")).toBe("");
+    expect(inputValue("#login-user")).toBe("alice@example.com");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("does not use a same-form newsletter email as a password login username", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="newsletter-email" type="email" name="newsletter_email" autocomplete="username" value="" />
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#newsletter-email")).toBe("");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("does not use same-form subscribe email fields as login usernames", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="subscribe-email" type="email" name="subscribe_email" autocomplete="username" value="" />
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#subscribe-email")).toBe("");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
   it("does not scope username-only fills to unrelated password fields", () => {
     document.body.innerHTML = `
       <form id="username-step">
