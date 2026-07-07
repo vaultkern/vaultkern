@@ -132,7 +132,11 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
     tokens.includes("email") ||
     tokens.includes("login") ||
     tokenSet.has("user") ||
-    tokenSet.has("account");
+    tokenSet.has("account") ||
+    tokenSet.has("customer") ||
+    tokenSet.has("member") ||
+    tokenSet.has("client") ||
+    tokenSet.has("identifier");
   if (
     [
       "verificationcode",
@@ -142,10 +146,12 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
       "searchquery",
       "zipcode",
       "newsletter",
-      "subscribe",
-      "subscription"
+      "subscribe"
     ].some((token) => tokens.includes(token))
   ) {
+    return true;
+  }
+  if (tokens.includes("subscription") && !hasUsernameSignal) {
     return true;
   }
   if (
@@ -180,7 +186,14 @@ function usernameScore(input: HTMLInputElement) {
   }
 
   const tokenSet = new Set(tokens.split(/[^a-z0-9]+/).filter(Boolean));
-  if (tokenSet.has("user") || tokenSet.has("account")) {
+  if (
+    tokenSet.has("user") ||
+    tokenSet.has("account") ||
+    tokenSet.has("customer") ||
+    tokenSet.has("member") ||
+    tokenSet.has("client") ||
+    tokenSet.has("identifier")
+  ) {
     score += 1;
   }
 
@@ -287,24 +300,40 @@ function visibleFormlessUsernameInputs(container: Element) {
 }
 
 function rootLevelCredentialRun(input: HTMLInputElement) {
-  if (input.parentElement?.tagName.toLowerCase() !== "body") {
+  const runElement = rootLevelRunElement(input);
+  if (!rootLevelRunParent(runElement)) {
     return [];
   }
 
   const fields: HTMLInputElement[] = [input];
-  let previous = adjacentRootCredentialElement(input.previousElementSibling, "previous");
-  while (isFormlessCredentialInput(previous)) {
-    fields.unshift(previous);
-    previous = adjacentRootCredentialElement(previous.previousElementSibling, "previous");
+  let previous = adjacentRootCredentialElement(runElement.previousElementSibling, "previous");
+  let previousField = credentialInputForRunElement(previous);
+  while (previousField) {
+    fields.unshift(previousField);
+    previous = adjacentRootCredentialElement(previous?.previousElementSibling ?? null, "previous");
+    previousField = credentialInputForRunElement(previous);
   }
 
-  let next = adjacentRootCredentialElement(input.nextElementSibling, "next");
-  while (isFormlessCredentialInput(next)) {
-    fields.push(next);
-    next = adjacentRootCredentialElement(next.nextElementSibling, "next");
+  let next = adjacentRootCredentialElement(runElement.nextElementSibling, "next");
+  let nextField = credentialInputForRunElement(next);
+  while (nextField) {
+    fields.push(nextField);
+    next = adjacentRootCredentialElement(next?.nextElementSibling ?? null, "next");
+    nextField = credentialInputForRunElement(next);
   }
 
   return fields.length > 1 ? fields : [];
+}
+
+function rootLevelRunElement(input: HTMLInputElement) {
+  const parent = input.parentElement;
+  return parent?.tagName.toLowerCase() === "label" ? parent : input;
+}
+
+function rootLevelRunParent(element: Element) {
+  const parent = element.parentElement;
+  const parentTag = parent?.tagName.toLowerCase();
+  return parentTag === "body" || parentTag === "html" ? parent : null;
 }
 
 function adjacentRootCredentialElement(
@@ -312,11 +341,27 @@ function adjacentRootCredentialElement(
   direction: "next" | "previous"
 ) {
   let element = candidate;
-  while (element?.tagName.toLowerCase() === "label") {
+  while (
+    element?.tagName.toLowerCase() === "label" &&
+    credentialInputForRunElement(element) === null
+  ) {
     element =
       direction === "next" ? element.nextElementSibling : element.previousElementSibling;
   }
   return element;
+}
+
+function credentialInputForRunElement(candidate: Element | null) {
+  if (isFormlessCredentialInput(candidate)) {
+    return candidate;
+  }
+  if (candidate?.tagName.toLowerCase() !== "label") {
+    return null;
+  }
+  const inputs = Array.from(candidate.querySelectorAll("input")).filter(
+    isFormlessCredentialInput
+  );
+  return inputs.length === 1 ? inputs[0] : null;
 }
 
 function isFormlessCredentialInput(candidate: Element | null): candidate is HTMLInputElement {
@@ -434,7 +479,12 @@ function hasOnlyWrappedPasswordFields(panelChildren: Element[]) {
   );
   return (
     passwordChildren.length > 1 &&
-    passwordChildren.every((child) => visibleFormlessPasswords(child).length === 1)
+    passwordChildren.every((child) => visibleFormlessPasswords(child).length === 1) &&
+    passwordChildren.some((child) => {
+      const password = visibleFormlessPasswords(child)[0];
+      const tokens = password ? fieldTokens(password) : "";
+      return tokens.includes("confirm") || tokens.includes("repeat");
+    })
   );
 }
 

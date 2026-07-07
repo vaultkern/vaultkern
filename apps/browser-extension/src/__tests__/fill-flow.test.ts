@@ -609,6 +609,47 @@ describe("fillLoginForm", () => {
     expect(inputValue("#login-password")).toBe("secret-123");
   });
 
+  it("pairs root-level form-less credential fields wrapped by labels", () => {
+    document.body.innerHTML = `
+      <label>Email <input id="login-email" type="email" value="" /></label>
+      <label>Password <input id="login-password" type="password" value="" /></label>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#login-email")).toBe("alice@example.com");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("fills customer-code identifiers paired with a same-form password", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="customer-code">Customer code</label>
+        <input id="customer-code" type="text" value="" />
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "C-12345", password: "secret-123" });
+
+    expect(inputValue("#customer-code")).toBe("C-12345");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("fills explicit subscription login emails beside passwords", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="subscription-email" type="email" name="subscription_email" autocomplete="username" value="" />
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "subscriber@example.com", password: "secret-123" });
+
+    expect(inputValue("#subscription-email")).toBe("subscriber@example.com");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
   it("does not fill high-confidence usernames outside the password form", () => {
     document.body.innerHTML = `
       <input id="account-field" type="text" autocomplete="username" value="" />
@@ -669,6 +710,26 @@ describe("fillLoginForm", () => {
     expect(inputValue("#login-password")).toBe("secret-123");
     expect(inputValue("#new-password")).toBe("");
     expect(inputValue("#confirm-password")).toBe("");
+  });
+
+  it("keeps sibling single-password panels from forming a password-change group", () => {
+    document.body.innerHTML = `
+      <div id="app">
+        <section>
+          <label for="login-password">Password</label>
+          <input id="login-password" type="password" autocomplete="current-password" value="" />
+        </section>
+        <section>
+          <label for="new-password">New password</label>
+          <input id="new-password" type="password" value="" />
+        </section>
+      </div>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#login-password")).toBe("secret-123");
+    expect(inputValue("#new-password")).toBe("");
   });
 
   it("does not treat current-password as a password-change signal", () => {
