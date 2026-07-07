@@ -1,89 +1,15 @@
-function isWritableVisibleInput(input: HTMLInputElement) {
-  if (input.disabled || input.readOnly || input.hidden) {
-    return false;
-  }
-
-  if (input.type === "hidden") {
-    return false;
-  }
-
-  if (input.style.display === "none" || input.style.visibility === "hidden") {
-    return false;
-  }
-
-  return true;
-}
-
-function usernameScore(input: HTMLInputElement) {
-  const autocomplete = input.autocomplete.toLowerCase();
-  const name = input.name.toLowerCase();
-  const id = input.id.toLowerCase();
-  let score = 0;
-
-  if (autocomplete === "username" || autocomplete === "email") {
-    score += 4;
-  }
-
-  if (
-    name.includes("username") ||
-    name.includes("email") ||
-    name.includes("login") ||
-    id.includes("username") ||
-    id.includes("email") ||
-    id.includes("login")
-  ) {
-    score += 2;
-  }
-
-  if (input.type === "email") {
-    score += 1;
-  }
-
-  return score;
-}
-
-function pickUsernameField() {
-  const candidates = Array.from(
-    document.querySelectorAll('input[type="text"], input[type="email"]')
-  ).filter((input): input is HTMLInputElement => input instanceof HTMLInputElement);
-
-  return candidates
-    .filter(isWritableVisibleInput)
-    .map((input, index) => ({ input, score: usernameScore(input), index }))
-    .sort((left, right) => right.score - left.score || left.index - right.index)[0]
-    ?.input;
-}
-
-function pickPasswordField() {
-  const candidates = Array.from(document.querySelectorAll('input[type="password"]')).filter(
-    (input): input is HTMLInputElement => input instanceof HTMLInputElement
-  );
-
-  return candidates.filter(isWritableVisibleInput)[0] ?? null;
-}
-
-function writeFieldValue(input: HTMLInputElement, value: string) {
-  input.value = value;
-
-  for (const eventName of ["input", "change", "blur"]) {
-    input.dispatchEvent(new Event(eventName, { bubbles: true }));
-  }
-}
+import { applyFillPlan } from "./autofill/applyFillPlan";
+import { collectAutofillPageSnapshot } from "./autofill/collectPageFields";
+import { createLoginFillPlan } from "./autofill/fillPlan";
 
 export function fillLoginForm(payload: {
   username?: string;
   password?: string;
+  totp?: string;
 }) {
-  const username = pickUsernameField();
-  const password = pickPasswordField();
-
-  if (typeof payload.username === "string" && username) {
-    writeFieldValue(username, payload.username);
-  }
-
-  if (typeof payload.password === "string" && password) {
-    writeFieldValue(password, payload.password);
-  }
+  const snapshot = collectAutofillPageSnapshot(document);
+  const fillPlan = createLoginFillPlan(snapshot, payload);
+  applyFillPlan(fillPlan, document);
 }
 
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
@@ -91,7 +17,7 @@ const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
 if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener(
     (
-      message: { type?: string; username?: string; password?: string },
+      message: { type?: string; username?: string; password?: string; totp?: string },
       _sender: unknown,
       _sendResponse: (response?: unknown) => void
     ) => {
@@ -101,14 +27,16 @@ if (chromeApi?.runtime?.onMessage) {
 
       const hasUsername = typeof message.username === "string";
       const hasPassword = typeof message.password === "string";
+      const hasTotp = typeof message.totp === "string";
 
-      if (!hasUsername && !hasPassword) {
+      if (!hasUsername && !hasPassword && !hasTotp) {
         return false;
       }
 
       fillLoginForm({
         username: hasUsername ? message.username : undefined,
-        password: hasPassword ? message.password : undefined
+        password: hasPassword ? message.password : undefined,
+        totp: hasTotp ? message.totp : undefined
       });
 
       return false;

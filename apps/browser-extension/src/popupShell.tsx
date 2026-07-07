@@ -33,13 +33,23 @@ export async function fillSelectedEntry(vaultId: string, entryId: string) {
   }
 
   const detail = await client.getEntryDetail(vaultId, entryId);
+  const fillMessage: {
+    type: "fill_entry_detail";
+    username?: string;
+    password?: string;
+    totp?: string;
+  } = {
+    type: "fill_entry_detail",
+    username: detail.username,
+    password: detail.password
+  };
+
+  if (typeof detail.totp === "string" && detail.totp !== "") {
+    fillMessage.totp = detail.totp;
+  }
 
   try {
-    await chromeApi.tabs.sendMessage(tab.id, {
-      type: "fill_entry_detail",
-      username: detail.username,
-      password: detail.password
-    });
+    await chromeApi.tabs.sendMessage(tab.id, fillMessage);
   } catch (error) {
     console.warn("Failed to send fill message to active tab", error);
   }
