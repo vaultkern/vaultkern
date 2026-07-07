@@ -10,6 +10,7 @@ const EMAIL_AUTOCOMPLETE = new Set(["email"]);
 const PASSWORD_AUTOCOMPLETE = new Set(["current-password"]);
 const USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
 const NEW_PASSWORD_AUTOCOMPLETE = new Set(["new-password"]);
+const TOTP_AUTOCOMPLETE = new Set(["one-time-code"]);
 const NON_LOGIN_KEYWORDS = ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"];
 const ACCOUNT_CREATION_EXACT_PARTS = new Set([
   "register",
@@ -32,14 +33,6 @@ const NEW_PASSWORD_PARTS = [
   "verifypassword"
 ];
 const PASSWORD_MASKED_CODE_PARTS = [
-  "csc",
-  "cccsc",
-  "cvc",
-  "cvv",
-  "cardcsc",
-  "cardcvc",
-  "cardcvv",
-  "cardcode",
   "otp",
   "totp",
   "onetime",
@@ -54,6 +47,43 @@ const PASSWORD_MASKED_CODE_PARTS = [
   "2stepcode",
   "2factorcode"
 ];
+const CARD_SECURITY_CODE_PARTS = [
+  "csc",
+  "cccsc",
+  "cvc",
+  "cvv",
+  "cardcsc",
+  "cardcvc",
+  "cardcvv",
+  "cardcode",
+  "cardsecuritycode",
+  "cardverificationcode"
+];
+const RECOVERY_CODE_KEYWORDS = ["backup", "recovery"];
+const TOTP_KEYWORDS = [
+  "totp",
+  "otp",
+  "2fa",
+  "2factor",
+  "2step",
+  "mfa",
+  "onetimecode",
+  "onetimepassword",
+  "authenticationcode",
+  "authenticator",
+  "authenticatorapp",
+  "authenticatorcode",
+  "twofactor",
+  "twostep"
+];
+const AUTHENTICATOR_TOTP_KEYWORDS = [
+  "totp",
+  "authenticationcode",
+  "authenticator",
+  "authenticatorapp",
+  "authenticatorcode"
+];
+const TOTP_INPUT_TYPES = new Set(["number", "password", "tel", "text"]);
 
 export interface FieldQualification {
   qualifiedAs: AutofillFieldQualification;
@@ -85,6 +115,7 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
     field.htmlId,
     field.htmlClass,
     field.autocomplete,
+    field.inputMode,
     field.placeholder,
     field.title,
     field.ariaLabel,
@@ -95,18 +126,32 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
     .join(",");
 }
 
-function joinedFormText(form: AutofillFormSnapshot | undefined) {
+function joinedFormTextParts(
+  form: AutofillFormSnapshot | undefined,
+  options: { includeAction: boolean }
+) {
   if (!form) {
-    return "";
+    return [];
   }
   return [
     form.htmlId,
     form.htmlName,
     form.htmlClass,
-    formActionContext(form.htmlAction),
+    options.includeAction ? formActionContext(form.htmlAction) : undefined,
     form.htmlMethod,
+    form.ariaLabel,
     ...form.headingText
-  ]
+  ];
+}
+
+function joinedFormText(form: AutofillFormSnapshot | undefined) {
+  return joinedFormTextParts(form, { includeAction: true })
+    .map(normalize)
+    .join(",");
+}
+
+function joinedFormPromptText(form: AutofillFormSnapshot | undefined) {
+  return joinedFormTextParts(form, { includeAction: false })
     .map(normalize)
     .join(",");
 }
@@ -179,16 +224,6 @@ function isNewPasswordField(candidate: AutofillFieldSnapshot) {
   );
 }
 
-function isCurrentPasswordField(candidate: AutofillFieldSnapshot) {
-  const autocomplete = fieldAutocompleteTokens(candidate);
-  return (
-    candidate.htmlType === "password" &&
-    candidate.viewable &&
-    candidate.fillable &&
-    autocomplete.has("current-password")
-  );
-}
-
 function hasScopedField(
   field: AutofillFieldSnapshot,
   snapshot: AutofillPageSnapshot,
@@ -218,8 +253,22 @@ function hasNewPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillP
   return hasScopedField(field, snapshot, isNewPasswordField);
 }
 
+function isCurrentPasswordSibling(candidate: AutofillFieldSnapshot) {
+  const autocomplete = fieldAutocompleteTokens(candidate);
+  const candidateText = joinedFieldText(candidate);
+  return (
+    candidate.htmlType === "password" &&
+    candidate.viewable &&
+    candidate.fillable &&
+    (autocomplete.has("current-password") ||
+      candidateText.includes("currentpassword") ||
+      candidateText.includes("oldpassword") ||
+      candidateText.includes("existingpassword"))
+  );
+}
+
 function hasCurrentPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
-  return hasScopedField(field, snapshot, isCurrentPasswordField);
+  return hasScopedField(field, snapshot, isCurrentPasswordSibling);
 }
 
 function searchPartsForField(field: AutofillFieldSnapshot) {
@@ -309,6 +358,34 @@ function hasPasswordMaskedCodeSignal(fieldText: string) {
   );
 }
 
+function hasCardSecurityCodeSignal(fieldText: string) {
+  return normalizedParts(fieldText).some((part) =>
+    CARD_SECURITY_CODE_PARTS.some((keyword) => part.includes(keyword))
+  );
+}
+
+function recoveryCodeReason(
+  fieldText: string,
+  formText: string,
+  autocomplete: Set<string>
+) {
+  const searchableText = `${fieldText},${formText}`;
+  const hasRecoveryMarker = RECOVERY_CODE_KEYWORDS.some((keyword) =>
+    searchableText.includes(keyword)
+  );
+  if (!hasRecoveryMarker) {
+    return null;
+  }
+
+  const hasCodeContext =
+    autocomplete.has("one-time-code") ||
+    fieldText.includes("code") ||
+    fieldText.includes("otp") ||
+    fieldText.includes("totp") ||
+    fieldText.includes("onetime");
+  return hasCodeContext ? "excluded:recovery-code" : null;
+}
+
 function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
   if (field.tagName !== "input" || !USERNAME_INPUT_TYPES.has(field.htmlType ?? "text")) {
     return false;
@@ -348,6 +425,89 @@ function hasLoginContext(text: string) {
   return hasAnyKeyword(text, ["login", "signin", "signon"]);
 }
 
+function hasTotpKeyword(text: string) {
+  return TOTP_KEYWORDS.some((keyword) => text.includes(keyword));
+}
+
+function hasAuthenticatorTotpKeyword(text: string) {
+  return AUTHENTICATOR_TOTP_KEYWORDS.some((keyword) => text.includes(keyword));
+}
+
+function hasOutOfBandCodeSignal(text: string) {
+  return (
+    text.includes("sms") ||
+    text.includes("textmessage") ||
+    text.includes("emailcode") ||
+    text.includes("emailotp") ||
+    text.includes("emailverification") ||
+    text.includes("senttoyouremail")
+  );
+}
+
+function outOfBandCodeReason(
+  fieldText: string,
+  formText: string,
+  autocomplete: Set<string>
+) {
+  const searchableText = `${fieldText},${formText}`;
+  const hasCodeContext =
+    autocomplete.has("one-time-code") ||
+    searchableText.includes("code") ||
+    searchableText.includes("verification") ||
+    searchableText.includes("onetime");
+  if (!hasCodeContext) {
+    return null;
+  }
+
+  if (hasOutOfBandCodeSignal(fieldText)) {
+    return "excluded:out-of-band-code";
+  }
+
+  if (hasAuthenticatorTotpKeyword(searchableText)) {
+    return null;
+  }
+
+  if (hasOutOfBandCodeSignal(formText)) {
+    return "excluded:out-of-band-code";
+  }
+
+  return null;
+}
+
+function isTotpInputControl(field: AutofillFieldSnapshot) {
+  return field.tagName === "input" && TOTP_INPUT_TYPES.has(field.htmlType ?? "text");
+}
+
+function hasNumericCodeShape(field: AutofillFieldSnapshot, fieldText: string) {
+  return (
+    field.inputMode === "numeric" ||
+    field.inputMode === "decimal" ||
+    field.maxLength === 1 ||
+    fieldText.includes("digit") ||
+    fieldText.includes("code")
+  );
+}
+
+function isTotpLike(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
+  const autocomplete = fieldAutocompleteTokens(field);
+  if ([...TOTP_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
+    return true;
+  }
+  if (field.htmlType === "password") {
+    return !autocomplete.has("current-password") && hasPasswordMaskedCodeSignal(fieldText);
+  }
+
+  if (!isTotpInputControl(field)) {
+    return false;
+  }
+
+  if (hasTotpKeyword(fieldText)) {
+    return true;
+  }
+
+  return hasTotpKeyword(formText) && hasNumericCodeShape(field, fieldText);
+}
+
 function isPasswordLike(field: AutofillFieldSnapshot) {
   return field.tagName === "input" && field.htmlType === "password";
 }
@@ -372,6 +532,7 @@ function qualificationForFillableField(
 ): FieldQualification {
   const fieldText = joinedFieldText(field);
   const formText = joinedFormText(form);
+  const formPromptText = joinedFormPromptText(form);
   const autocomplete = fieldAutocompleteTokens(field);
 
   if (isSearchField(field, form)) {
@@ -385,28 +546,56 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  if (autocomplete.has("one-time-code")) {
-    reasons.push("excluded:one-time-code");
+  const recoveryCode = recoveryCodeReason(fieldText, formPromptText, autocomplete);
+  if (recoveryCode) {
+    reasons.push(recoveryCode);
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
   if (
-    field.htmlType === "password" &&
-    !autocomplete.has("current-password") &&
-    hasPasswordMaskedCodeSignal(fieldText)
+    isUsernameLike(field, fieldText) &&
+    hasNewPasswordSibling(field, snapshot) &&
+    !hasCurrentPasswordSibling(field, snapshot)
   ) {
-    reasons.push("excluded:one-time-code");
+    reasons.push("non-login:account-creation");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  if (field.htmlType !== "password" && hasPasswordMaskedCodeSignal(fieldText)) {
-    reasons.push("excluded:one-time-code");
+  if (field.htmlType === "password" && hasCardSecurityCodeSignal(fieldText)) {
+    reasons.push("excluded:card-security-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
   const searchableText = `${fieldText},${formText}`;
   const hasMixedLoginContext =
     hasLoginContext(searchableText) || !hasAccountCreationContext(searchableText);
+
+  if (
+    [...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) &&
+    isUsernameLike(field, fieldText)
+  ) {
+    if (autocomplete.has("username")) {
+      reasons.push("autocomplete:username");
+    } else if (autocomplete.has("email")) {
+      reasons.push("autocomplete:email");
+    }
+    if (hasPasswordSibling(field, snapshot)) {
+      reasons.push("form-has-password");
+    }
+    return { qualifiedAs: "username", eligible: true, reasons };
+  }
+
+  if (
+    [...EMAIL_AUTOCOMPLETE].some((token) => autocomplete.has(token)) &&
+    isUsernameLike(field, fieldText) &&
+    (hasPasswordSibling(field, snapshot) || hasLoginContext(formText))
+  ) {
+    reasons.push("autocomplete:email");
+    if (hasPasswordSibling(field, snapshot)) {
+      reasons.push("form-has-password");
+    }
+    return { qualifiedAs: "username", eligible: true, reasons };
+  }
 
   if (isPasswordLike(field) && autocomplete.has("current-password") && hasMixedLoginContext) {
     reasons.push("autocomplete:current-password");
@@ -437,6 +626,22 @@ function qualificationForFillableField(
   ) {
     reasons.push(nonLogin);
     return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  const outOfBandCode = outOfBandCodeReason(fieldText, formPromptText, autocomplete);
+  if (outOfBandCode) {
+    reasons.push(outOfBandCode);
+    return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  if (isTotpLike(field, fieldText, formPromptText)) {
+    if (autocomplete.has("one-time-code")) {
+      reasons.push("autocomplete:one-time-code");
+    }
+    if (field.maxLength === 1) {
+      reasons.push("totp:split-field");
+    }
+    return { qualifiedAs: "totp", eligible: true, reasons };
   }
 
   if (isPasswordLike(field)) {
@@ -473,7 +678,7 @@ function qualificationForFillableField(
     const needsLoginEvidence =
       (hasEmailSignal || hasPhoneSignal || hasGenericIdentifierSignal) &&
       !hasUsernameAutocomplete;
-    if (hasNewPasswordSibling(field, snapshot) && !hasPasswordSibling(field, snapshot)) {
+    if (hasNewPasswordSibling(field, snapshot) && !hasCurrentPasswordSibling(field, snapshot)) {
       reasons.push("non-login:account-creation");
       return { qualifiedAs: "ignored", eligible: false, reasons };
     }

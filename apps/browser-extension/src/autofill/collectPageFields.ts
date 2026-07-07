@@ -83,13 +83,15 @@ function getElementByIdInRoot(root: ParentNode, id: string) {
   return root.querySelector<HTMLElement>(`[id="${cssEscape(id)}"]`);
 }
 
-function getReferencedElementText(element: Element, attributeName: string) {
-  const lookupRoot = lookupRootForElement(element);
-  return (element.getAttribute(attributeName) ?? "")
+function getAriaLabelledByText(element: Element, lookupRoot = lookupRootForElement(element)) {
+  const labelText = (element.getAttribute("aria-labelledby") ?? "")
     .split(/\s+/)
-    .map((id) => (id === "" ? "" : cleanText(getElementByIdInRoot(lookupRoot, id)?.textContent)))
+    .map((id) => (id === "" ? null : getElementByIdInRoot(lookupRoot, id)))
+    .filter((label): label is HTMLElement => label !== null)
+    .map(labelTextWithoutNestedFields)
     .filter(Boolean)
     .join(" ");
+  return optionalString(labelText);
 }
 
 function controlText(
@@ -99,7 +101,7 @@ function controlText(
   return (
     optionalString(primaryText) ??
     optionalString(element.getAttribute("aria-label")) ??
-    optionalString(getReferencedElementText(element, "aria-labelledby")) ??
+    getAriaLabelledByText(element) ??
     optionalString(element.getAttribute("title"))
   );
 }
@@ -126,13 +128,10 @@ function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAr
     labels.add(wrappingLabel);
   }
 
-  const referencedLabels = (element.getAttribute("aria-labelledby") ?? "")
-    .split(/\s+/)
-    .map((id) => (id === "" ? null : getElementByIdInRoot(lookupRoot, id)))
-    .filter((label): label is HTMLElement => label !== null);
-
-  const labelText = [...Array.from(labels), ...referencedLabels]
-    .map(labelTextWithoutNestedFields)
+  const labelText = [
+    ...Array.from(labels).map(labelTextWithoutNestedFields),
+    getAriaLabelledByText(element, lookupRoot)
+  ]
     .filter(Boolean)
     .join(" ");
   return optionalString(labelText);
@@ -226,6 +225,14 @@ function collectForms(documentRef: Document) {
   const formByElement = new Map<HTMLFormElement, AutofillFormSnapshot>();
   const forms = collectMatchingElements(documentRef, "form").map((form, index) => {
     const formElement = form as HTMLFormElement;
+    const lookupRoot = lookupRootForElement(formElement);
+    const ariaLabel = [
+      formElement.getAttribute("aria-label"),
+      getAriaLabelledByText(formElement, lookupRoot)
+    ]
+      .map(optionalString)
+      .filter(Boolean)
+      .join(" ");
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
       htmlId: optionalString(formElement.id),
@@ -233,6 +240,7 @@ function collectForms(documentRef: Document) {
       htmlClass: optionalString(formElement.getAttribute("class")),
       htmlAction: getFormAction(formElement),
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
+      ariaLabel: optionalString(ariaLabel),
       headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
     };
     formByElement.set(formElement, snapshot);
@@ -331,6 +339,14 @@ function getContainerOpid(
   return opid;
 }
 
+function getMaxLength(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
+  const tagName = element.tagName.toLowerCase();
+  if (tagName !== "input" && tagName !== "textarea") {
+    return undefined;
+  }
+  return element.maxLength > 0 ? element.maxLength : undefined;
+}
+
 function collectField(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
   index: number,
@@ -363,6 +379,8 @@ function collectField(
     htmlId: optionalString(element.id),
     htmlClass: optionalString(element.getAttribute("class")),
     autocomplete: optionalString(element.getAttribute("autocomplete")?.toLowerCase()),
+    inputMode: optionalString(element.getAttribute("inputmode")?.toLowerCase()),
+    maxLength: getMaxLength(element),
     placeholder: optionalString(element.getAttribute("placeholder")),
     title: optionalString(element.getAttribute("title")),
     ariaLabel: optionalString(element.getAttribute("aria-label")),

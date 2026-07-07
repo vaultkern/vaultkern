@@ -776,10 +776,9 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "login_otp").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "login_otp").reasons).toContain("excluded:one-time-code");
-    expect(fieldByName(report, "phone_otp").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "phone_otp").reasons).toContain("excluded:one-time-code");
+    expect(fieldByName(report, "login_otp").qualifiedAs).toBe("totp");
+    expect(fieldByName(report, "login_otp").reasons).toContain("autocomplete:one-time-code");
+    expect(fieldByName(report, "phone_otp").qualifiedAs).toBe("totp");
   });
 
   it("does not classify password-masked OTP fields as saved-password targets", () => {
@@ -796,8 +795,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "otp").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "otp").reasons).toContain("excluded:one-time-code");
+    expect(fieldByName(report, "otp").qualifiedAs).toBe("totp");
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
@@ -1008,7 +1006,7 @@ describe("autofill triage", () => {
       <form>
         <label for="shadow-user">Email address</label>
         <input id="shadow-user" name="opaque_shadow_user" type="text" />
-        <input name="shadow_password" type="password" autocomplete="current-password" />
+        <input name="shadow_password" type="password" />
       </form>
     `;
 
