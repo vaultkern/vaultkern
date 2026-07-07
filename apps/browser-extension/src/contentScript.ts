@@ -30,7 +30,7 @@ function isWritableVisibleInput(input: HTMLInputElement) {
     return false;
   }
 
-  if (hasLayoutBox && (rect.right < 0 || rect.bottom < 0)) {
+  if (hasLayoutBox && rect.right < 0) {
     return false;
   }
 
@@ -138,6 +138,7 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
       "verificationcode",
       "securitycode",
       "authenticationcode",
+      "captcha",
       "searchquery",
       "zipcode",
       "newsletter",
@@ -206,7 +207,10 @@ function pickUsernameField(passwordField: HTMLInputElement | null) {
       (candidate) => candidate.input.form === passwordField.form
     );
 
-    return sameFormCandidates.find((candidate) => candidate.score > 0)?.input ?? null;
+    return (
+      sameFormCandidates.find((candidate) => candidate.score > 0)?.input ??
+      (sameFormCandidates.length === 1 ? sameFormCandidates[0].input : null)
+    );
   }
 
   if (passwordField) {
@@ -288,19 +292,31 @@ function rootLevelCredentialRun(input: HTMLInputElement) {
   }
 
   const fields: HTMLInputElement[] = [input];
-  let previous = input.previousElementSibling;
+  let previous = adjacentRootCredentialElement(input.previousElementSibling, "previous");
   while (isFormlessCredentialInput(previous)) {
     fields.unshift(previous);
-    previous = previous.previousElementSibling;
+    previous = adjacentRootCredentialElement(previous.previousElementSibling, "previous");
   }
 
-  let next = input.nextElementSibling;
+  let next = adjacentRootCredentialElement(input.nextElementSibling, "next");
   while (isFormlessCredentialInput(next)) {
     fields.push(next);
-    next = next.nextElementSibling;
+    next = adjacentRootCredentialElement(next.nextElementSibling, "next");
   }
 
   return fields.length > 1 ? fields : [];
+}
+
+function adjacentRootCredentialElement(
+  candidate: Element | null,
+  direction: "next" | "previous"
+) {
+  let element = candidate;
+  while (element?.tagName.toLowerCase() === "label") {
+    element =
+      direction === "next" ? element.nextElementSibling : element.previousElementSibling;
+  }
+  return element;
 }
 
 function isFormlessCredentialInput(candidate: Element | null): candidate is HTMLInputElement {

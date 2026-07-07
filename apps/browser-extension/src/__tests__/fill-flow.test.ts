@@ -396,6 +396,35 @@ describe("fillLoginForm", () => {
     expect(inputValue("#offset-password")).toBe("secret-123");
   });
 
+  it("keeps scrolled-above login fields fillable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="above-email" type="email" autocomplete="username" value="" />
+        <input id="above-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+    const rect = {
+      x: 0,
+      y: -72,
+      width: 320,
+      height: 32,
+      top: -72,
+      right: 320,
+      bottom: -40,
+      left: 0,
+      toJSON: () => ({})
+    } as DOMRect;
+    for (const input of Array.from(document.querySelectorAll("input"))) {
+      vi.spyOn(input, "getClientRects").mockReturnValue([rect] as unknown as DOMRectList);
+      vi.spyOn(input, "getBoundingClientRect").mockReturnValue(rect);
+    }
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#above-email")).toBe("alice@example.com");
+    expect(inputValue("#above-password")).toBe("secret-123");
+  });
+
   it("field selection rejects search and verification code username candidates", () => {
     document.body.innerHTML = `
       <form>
@@ -467,6 +496,20 @@ describe("fillLoginForm", () => {
     fillLoginForm({ username: "alice", password: "secret-123" });
 
     expect(inputValue("#account-field")).toBe("alice");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("uses a single same-form identifier field as username fallback", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="identifier-field" type="text" name="identifier" value="" />
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice", password: "secret-123" });
+
+    expect(inputValue("#identifier-field")).toBe("alice");
     expect(inputValue("#login-password")).toBe("secret-123");
   });
 
@@ -549,6 +592,20 @@ describe("fillLoginForm", () => {
     fillLoginForm({ username: "alice", password: "secret-123" });
 
     expect(inputValue("#account-field")).toBe("alice");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("pairs root-level form-less credential fields separated by labels", () => {
+    document.body.innerHTML = `
+      <label for="login-email">Email</label>
+      <input id="login-email" type="email" autocomplete="username" value="" />
+      <label for="login-password">Password</label>
+      <input id="login-password" type="password" autocomplete="current-password" value="" />
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#login-email")).toBe("alice@example.com");
     expect(inputValue("#login-password")).toBe("secret-123");
   });
 
