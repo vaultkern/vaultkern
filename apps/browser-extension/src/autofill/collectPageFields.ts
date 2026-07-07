@@ -59,6 +59,11 @@ function getFormAction(form: HTMLFormElement) {
   }
 }
 
+function formActionIsImplicit(form: HTMLFormElement) {
+  const rawAction = form.getAttribute("action");
+  return !rawAction || rawAction.trim().startsWith("#");
+}
+
 function labelTextWithoutNestedFields(label: Element) {
   const clone = label.cloneNode(true) as Element;
   clone.querySelectorAll(FIELD_SELECTOR).forEach((field) => field.remove());
@@ -281,7 +286,7 @@ function collectForms(documentRef: Document) {
       .map(optionalString)
       .filter(Boolean)
       .join(" ");
-    const htmlActionIsImplicit = !formElement.getAttribute("action");
+    const htmlActionIsImplicit = formActionIsImplicit(formElement);
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
       htmlId: optionalString(formElement.id),
