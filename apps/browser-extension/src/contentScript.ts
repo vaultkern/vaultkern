@@ -16,6 +16,8 @@ export function fillLoginForm(payload: {
 
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
 const autofillSubmissionListenerRoots = new WeakSet<EventTarget>();
+const dynamicShadowPatchKey = Symbol.for("vaultkern.autofill.dynamicShadowPatch");
+const dynamicShadowInstallerKey = Symbol.for("vaultkern.autofill.dynamicShadowInstaller");
 
 if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener(
@@ -99,6 +101,40 @@ function installAutofillSubmissionListener(root: Document | ShadowRoot) {
   });
 }
 
+function installDynamicShadowRootAutofillListener() {
+  if (typeof Element === "undefined" || typeof Element.prototype.attachShadow !== "function") {
+    return;
+  }
+
+  (globalThis as typeof globalThis & {
+    [dynamicShadowInstallerKey]?: (root: ShadowRoot) => void;
+  })[dynamicShadowInstallerKey] = installAutofillSubmissionListener;
+
+  const elementPrototype = Element.prototype as typeof Element.prototype & {
+    [dynamicShadowPatchKey]?: true;
+  };
+  if (elementPrototype[dynamicShadowPatchKey]) {
+    return;
+  }
+
+  const attachShadow = Element.prototype.attachShadow;
+  Object.defineProperty(elementPrototype, dynamicShadowPatchKey, {
+    configurable: false,
+    enumerable: false,
+    value: true
+  });
+  elementPrototype.attachShadow = function attachShadowWithAutofillListener(
+    init: ShadowRootInit
+  ) {
+    const shadowRoot = attachShadow.call(this, init);
+    (globalThis as typeof globalThis & {
+      [dynamicShadowInstallerKey]?: (root: ShadowRoot) => void;
+    })[dynamicShadowInstallerKey]?.(shadowRoot);
+    return shadowRoot;
+  };
+}
+
 if (chromeApi?.runtime?.sendMessage && typeof document !== "undefined") {
+  installDynamicShadowRootAutofillListener();
   installAutofillSubmissionListener(document);
 }

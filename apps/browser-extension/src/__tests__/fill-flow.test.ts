@@ -3956,6 +3956,7 @@ describe("content script fill message", () => {
       </form>
     `;
 
+    vi.resetModules();
     await import("../contentScript");
 
     expect(addListener).toHaveBeenCalledTimes(1);
@@ -4275,6 +4276,48 @@ describe("content script fill message", () => {
 
     vi.resetModules();
     await import("../contentScript");
+    root.querySelector("form")?.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_submission",
+        url: expect.any(String),
+        username: "alice@example.com",
+        password: "captured-secret",
+        saveOnly: true,
+        submittedAt: expect.any(Number)
+      });
+    });
+  });
+
+  it("captures submitted registration credentials inside dynamically attached shadow roots", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const addListener = vi.fn();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    vi.resetModules();
+    await import("../contentScript");
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <form>
+        <h2>Create account</h2>
+        <input name="email" type="email" autocomplete="username" value="alice@example.com" />
+        <input name="new_password" type="password" autocomplete="new-password" value="captured-secret" />
+      </form>
+    `;
     root.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
     );

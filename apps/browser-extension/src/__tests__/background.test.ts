@@ -520,9 +520,10 @@ describe("background bridge", () => {
     ).resolves.toEqual({ pending: null });
   });
 
-  it("keeps a pending autofill submission in session storage across background reloads", async () => {
+  it("keeps pending autofill submissions memory-only across background reloads", async () => {
     const sessionItems: Record<string, unknown> = {};
     const localSet = vi.fn();
+    const sessionSet = vi.fn();
 
     function installChrome(listeners: RuntimeMessageListener[]) {
       (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -540,6 +541,7 @@ describe("background bridge", () => {
               return Promise.resolve({ ...sessionItems });
             },
             set(items: Record<string, unknown>, callback?: () => void) {
+              sessionSet(items);
               Object.assign(sessionItems, items);
               callback?.();
               return Promise.resolve();
@@ -586,12 +588,8 @@ describe("background bridge", () => {
         submittedAt: 1710000000000
       }).response()
     ).resolves.toEqual({ ok: true });
-    expect(sessionItems.vaultkernPendingAutofillSubmission).toEqual({
-      url: "https://example.com/login",
-      username: "alice",
-      password: "secret",
-      submittedAt: 1710000000000
-    });
+    expect(sessionItems.vaultkernPendingAutofillSubmission).toBeUndefined();
+    expect(sessionSet).not.toHaveBeenCalled();
     expect(localSet).not.toHaveBeenCalled();
 
     vi.resetModules();
@@ -603,17 +601,10 @@ describe("background bridge", () => {
       sendRuntimeMessage(secondListeners, {
         type: "vaultkern_autofill_pending_request"
       }).response()
-    ).resolves.toEqual({
-      pending: {
-        url: "https://example.com/login",
-        username: "alice",
-        password: "secret",
-        submittedAt: 1710000000000
-      }
-    });
+    ).resolves.toEqual({ pending: null });
   });
 
-  it("prefers a newer in-memory pending autofill submission over older session storage", async () => {
+  it("ignores stale pending autofill submissions from session storage", async () => {
     const sessionItems: Record<string, unknown> = {
       vaultkernPendingAutofillSubmission: {
         url: "https://old.example/login",
@@ -652,26 +643,11 @@ describe("background bridge", () => {
 
     await import("../background");
 
-    await sendRuntimeMessage(listeners, {
-      type: "vaultkern_autofill_submission",
-      url: "https://new.example/login",
-      username: "new",
-      password: "new-secret",
-      submittedAt: 1710000001000
-    }).response();
-
     await expect(
       sendRuntimeMessage(listeners, {
         type: "vaultkern_autofill_pending_request"
       }).response()
-    ).resolves.toEqual({
-      pending: {
-        url: "https://new.example/login",
-        username: "new",
-        password: "new-secret",
-        submittedAt: 1710000001000
-      }
-    });
+    ).resolves.toEqual({ pending: null });
   });
 
   it("keeps the native session alive after an unlocked session response", async () => {

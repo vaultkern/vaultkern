@@ -1,3 +1,4 @@
+import { resolveAutofillIntent } from "./intent";
 import { credentialScopeKey, fieldScopeMatches } from "./scope";
 import { triageAutofillPage } from "./triage";
 import type {
@@ -478,6 +479,9 @@ function fieldIsInCredentialScope(
   field: AutofillTriageFieldResult,
   scopeKey: string
 ) {
+  if (scopeKey.startsWith("root-run:")) {
+    return field.formOpid === undefined && field.containerOpid === undefined;
+  }
   return credentialScopeKey(field) === scopeKey;
 }
 
@@ -1068,6 +1072,11 @@ export function createLoginFillPlan(
   if (snapshot.siteRule?.disabled) {
     return { actions: [] };
   }
+  const intent = resolveAutofillIntent(report, payload);
+  const intentScopeKey =
+    intent.scopeKey !== undefined && !intent.scopeKey.startsWith("site-rule:")
+      ? intent.scopeKey
+      : null;
   const siteRuleActions = createSiteRuleActions(report.fields, payload);
   const fields = candidateFields(report.fields);
   const actions: AutofillFillAction[] = [...siteRuleActions];
@@ -1090,6 +1099,26 @@ export function createLoginFillPlan(
   const siteRulePasswordChangeScopeKey = siteRulePasswordChangeField
     ? credentialScopeKey(siteRulePasswordChangeField)
     : null;
+  const siteRuleAnchorScopeKey =
+    siteRulePasswordField !== null
+      ? credentialScopeKey(siteRulePasswordField)
+      : siteRuleUsernameField !== null
+        ? credentialScopeKey(siteRuleUsernameField)
+        : siteRulePasswordChangeScopeKey;
+  const shouldUseResolvedScope =
+    siteRuleAnchorScopeKey !== null ||
+    intent.kind === "login" ||
+    intent.kind === "registration" ||
+    intent.kind === "passwordChange";
+  const primaryScopeKey = siteRuleAnchorScopeKey ?? intentScopeKey;
+  const intentFields =
+    shouldUseResolvedScope && primaryScopeKey !== null
+      ? fields.filter((field) => fieldIsInCredentialScope(field, primaryScopeKey))
+      : fields;
+  const intentAllFields =
+    shouldUseResolvedScope && primaryScopeKey !== null
+      ? report.fields.filter((field) => fieldIsInCredentialScope(field, primaryScopeKey))
+      : report.fields;
   const passwordChangeFields =
     siteRulePasswordChangeScopeKey !== null
       ? fields.filter((field) =>
@@ -1103,14 +1132,21 @@ export function createLoginFillPlan(
         )
       : report.fields;
   const passwordChangeScopeKey =
-    typeof payload.password === "string" && typeof payload.newPassword === "string"
-      ? pickPasswordChangeScopeKey(passwordChangeFields, passwordChangeAllFields)
+    intent.kind === "passwordChange"
+      ? siteRulePasswordChangeScopeKey ??
+        intentScopeKey ??
+        (typeof payload.password === "string" && typeof payload.newPassword === "string"
+          ? pickPasswordChangeScopeKey(passwordChangeFields, passwordChangeAllFields)
+          : null)
       : null;
   const registrationScopeKey =
-    typeof payload.password === "string" || typeof payload.newPassword === "string"
-      ? pickRegistrationScopeKey(fields, report.fields, {
-          allowSingleNewPassword: typeof payload.newPassword === "string"
-        })
+    intent.kind === "registration"
+      ? intentScopeKey ??
+        (typeof payload.password === "string" || typeof payload.newPassword === "string"
+          ? pickRegistrationScopeKey(fields, report.fields, {
+              allowSingleNewPassword: typeof payload.newPassword === "string"
+            })
+          : null)
       : null;
 
   if (passwordChangeScopeKey !== null) {
@@ -1138,28 +1174,28 @@ export function createLoginFillPlan(
   const initialPasswordField =
     typeof payload.password === "string"
       ? siteRulePasswordField ??
-        pickLoginPasswordFieldInScope(fields, siteRuleUsernameField) ??
-        pickLoginPasswordFieldInForm(fields, siteRuleUsernameField?.formOpid) ??
-        pickFirstSafeLoginPasswordField(fields)
+        pickLoginPasswordFieldInScope(intentFields, siteRuleUsernameField) ??
+        pickLoginPasswordFieldInForm(intentFields, siteRuleUsernameField?.formOpid) ??
+        pickFirstSafeLoginPasswordField(intentFields)
       : null;
   const usernameField =
     typeof payload.username === "string" && siteRuleUsernameField === null
-      ? pickUsernameField(fields, initialPasswordField) ??
-        pickUsernameFirstField(fields) ??
-        pickSingleStepEmailUsernameField(report.fields, null)
+      ? pickUsernameField(intentFields, initialPasswordField) ??
+        pickUsernameFirstField(intentFields) ??
+        pickSingleStepEmailUsernameField(intentAllFields, null)
       : null;
   const usernameAnchor = usernameField ?? siteRuleUsernameField;
   const passwordField =
     typeof payload.password === "string"
       ? siteRulePasswordField ??
         (usernameAnchor
-          ? pickLoginPasswordFieldInScope(fields, usernameAnchor) ??
-            pickLoginPasswordFieldInForm(fields, usernameAnchor.formOpid) ??
+          ? pickLoginPasswordFieldInScope(intentFields, usernameAnchor) ??
+            pickLoginPasswordFieldInForm(intentFields, usernameAnchor.formOpid) ??
             pickLoginPasswordField(
-              fields.filter((field) => fieldScopeMatches(field, usernameAnchor))
+              intentFields.filter((field) => fieldScopeMatches(field, usernameAnchor))
             ) ??
-            pickUnscopedPasswordAfterUsername(fields, usernameAnchor)
-        : pickFirstSafeLoginPasswordField(fields)
+            pickUnscopedPasswordAfterUsername(intentFields, usernameAnchor)
+        : pickFirstSafeLoginPasswordField(intentFields)
         )
       : null;
 
