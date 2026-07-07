@@ -442,6 +442,20 @@ describe("fillLoginForm", () => {
     expect(inputValue("#login-password")).toBe("secret-123");
   });
 
+  it("keeps email login fields fillable when helper text mentions code", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="login-email" type="email" placeholder="Email or access code" value="" />
+        <input id="login-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#login-email")).toBe("alice@example.com");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
   it("uses same-form generic user fields as username fallback", () => {
     document.body.innerHTML = `
       <form>
@@ -664,6 +678,24 @@ describe("fillLoginForm", () => {
     expect(inputValue("#login-password")).toBe("secret-123");
   });
 
+  it("keeps sibling field wrappers in the same form-less login container", () => {
+    document.body.innerHTML = `
+      <div id="login">
+        <div>
+          <input id="login-email" type="email" autocomplete="username" value="" />
+        </div>
+        <div>
+          <input id="login-password" type="password" autocomplete="current-password" value="" />
+        </div>
+      </div>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#login-email")).toBe("alice@example.com");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
   it("does not fill usernames on label-only password change forms", () => {
     document.body.innerHTML = `
       <form>
@@ -681,6 +713,31 @@ describe("fillLoginForm", () => {
     fillLoginForm({ username: "alice@example.com", password: "secret-123" });
 
     expect(inputValue("#account-email")).toBe("");
+    expect(inputValue("#old-password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
+    expect(inputValue("#confirm-password")).toBe("");
+  });
+
+  it("detects form-less password change groups when each field is wrapped", () => {
+    document.body.innerHTML = `
+      <div id="change-password">
+        <div>
+          <label for="old-password">Current password</label>
+          <input id="old-password" type="password" name="password" value="" />
+        </div>
+        <div>
+          <label for="new-password">New password</label>
+          <input id="new-password" type="password" name="password" value="" />
+        </div>
+        <div>
+          <label for="confirm-password">Confirm password</label>
+          <input id="confirm-password" type="password" name="password" value="" />
+        </div>
+      </div>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
     expect(inputValue("#old-password")).toBe("");
     expect(inputValue("#new-password")).toBe("");
     expect(inputValue("#confirm-password")).toBe("");

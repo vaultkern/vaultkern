@@ -124,6 +124,15 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
 
   const tokens = fieldTokens(input);
   const tokenSet = new Set(tokens.split(/[^a-z0-9]+/).filter(Boolean));
+  const hasUsernameSignal =
+    autocomplete === "username" ||
+    autocomplete === "email" ||
+    input.type === "email" ||
+    tokens.includes("username") ||
+    tokens.includes("email") ||
+    tokens.includes("login") ||
+    tokenSet.has("user") ||
+    tokenSet.has("account");
   if (
     [
       "verificationcode",
@@ -145,7 +154,7 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
   ) {
     return true;
   }
-  return tokenSet.has("code") && autocomplete !== "username" && autocomplete !== "email";
+  return tokenSet.has("code") && !hasUsernameSignal;
 }
 
 function usernameScore(input: HTMLInputElement) {
@@ -243,6 +252,9 @@ function nearestFormlessCredentialContainer(input: HTMLInputElement) {
     if (usernames.length > 0) {
       const panelChildren = formLessCredentialPanelChildren(container);
       if (panelChildren.length > 1) {
+        if (hasOnlyWrappedCredentialFields(panelChildren)) {
+          return container;
+        }
         const inputPanel = panelChildren.find((panel) => panel.contains(input));
         if (!inputPanel || visibleFormlessUsernameInputs(inputPanel).length === 0) {
           return null;
@@ -357,6 +369,9 @@ function nearestFormlessPasswordContainer(input: HTMLInputElement) {
     if (passwords.length > 1) {
       const panelChildren = formLessCredentialPanelChildren(container);
       if (panelChildren.length > 1) {
+        if (hasOnlyWrappedPasswordFields(panelChildren)) {
+          return container;
+        }
         const inputPanel = panelChildren.find((panel) => panel.contains(input));
         if (!inputPanel || visibleFormlessPasswords(inputPanel).length < 2) {
           return null;
@@ -385,6 +400,31 @@ function formLessCredentialPanelChildren(container: Element) {
 function visibleFormlessPasswords(container: Element) {
   return Array.from(container.querySelectorAll('input[type="password"]')).filter(
     isVisibleFormlessPassword
+  );
+}
+
+function hasOnlyWrappedCredentialFields(panelChildren: Element[]) {
+  const counts = panelChildren.map(credentialFieldCount);
+  return (
+    counts.every((count) => count === 1) &&
+    panelChildren.some((child) => visibleFormlessUsernameInputs(child).length === 1) &&
+    panelChildren.some((child) => visibleFormlessPasswords(child).length === 1)
+  );
+}
+
+function hasOnlyWrappedPasswordFields(panelChildren: Element[]) {
+  const passwordChildren = panelChildren.filter(
+    (child) => visibleFormlessPasswords(child).length > 0
+  );
+  return (
+    passwordChildren.length > 1 &&
+    passwordChildren.every((child) => visibleFormlessPasswords(child).length === 1)
+  );
+}
+
+function credentialFieldCount(container: Element) {
+  return (
+    visibleFormlessUsernameInputs(container).length + visibleFormlessPasswords(container).length
   );
 }
 
