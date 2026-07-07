@@ -970,6 +970,21 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "host_password").qualifiedAs).toBe("password");
   });
 
+  it("lets scoped password evidence override broad form search tokens", () => {
+    document.body.innerHTML = `
+      <form id="search-login" action="/search/login">
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "email").reasons).toContain("form-has-password");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
   it("keeps password sibling evidence scoped for form-less fields", () => {
     document.body.innerHTML = `
       <input name="contact_email" type="email" />
@@ -1033,6 +1048,31 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+  });
+
+  it("uses root-level submit text as passwordless form-less login context", () => {
+    document.body.innerHTML = `
+      <input name="root_email" type="email" />
+      <button type="submit">Sign in</button>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "root_email").qualifiedAs).toBe("username");
+  });
+
+  it("uses shadow-root-level submit text as passwordless form-less login context", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <input name="shadow_root_email" type="email" />
+      <button type="submit">Sign in</button>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "shadow_root_email").qualifiedAs).toBe("username");
   });
 
   it("ignores later form-less container headings for earlier fields", () => {
@@ -1620,6 +1660,44 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "transparent_email").reasons).toContain("not-viewable:transparent");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("keeps positioned login fields viewable when their rendered rect intersects the viewport", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="wide_layout_email" type="email" autocomplete="username" style="position:absolute;left:1000px;top:20px;width:120px;height:20px" />
+        <input name="wide_layout_password" type="password" autocomplete="current-password" style="position:absolute;left:1000px;top:50px;width:120px;height:20px" />
+      </form>
+    `;
+    const email = document.querySelector<HTMLInputElement>("[name=wide_layout_email]")!;
+    const password = document.querySelector<HTMLInputElement>("[name=wide_layout_password]")!;
+    const rectFor = (top: number) =>
+      ({
+        x: 1000,
+        y: top,
+        width: 120,
+        height: 20,
+        left: 1000,
+        top,
+        right: 1120,
+        bottom: top + 20,
+        toJSON: () => ({})
+      }) as DOMRect;
+    vi.spyOn(email, "getBoundingClientRect").mockReturnValue(rectFor(20));
+    vi.spyOn(password, "getBoundingClientRect").mockReturnValue(rectFor(50));
+    vi.stubGlobal("innerWidth", 1280);
+    vi.stubGlobal("innerHeight", 720);
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "wide_layout_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "wide_layout_email").reasons).not.toContain(
+      "not-viewable:offscreen"
+    );
+    expect(fieldByName(report, "wide_layout_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "wide_layout_password").reasons).not.toContain(
+      "not-viewable:offscreen"
+    );
   });
 
   it("treats stylesheet-clipped zero-size ancestors as not viewable", () => {

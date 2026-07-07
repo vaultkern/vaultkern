@@ -355,15 +355,21 @@ function isElementNode(node: ParentNode | undefined): node is Element {
 }
 
 function getContainerText(container: ParentNode | undefined, field?: Element) {
-  if (!isElementNode(container) || container.matches(FIELD_SELECTOR)) {
+  if (!isElementNode(container)) {
     return [];
   }
+  if (container.matches(FIELD_SELECTOR)) {
+    return getRootLevelRunSubmitText(container);
+  }
+  const submitText = isRootLevelRunAnchor(container)
+    ? getRootLevelRunSubmitText(container)
+    : getContainerSubmitText(container);
   return [
     container.id,
     container.getAttribute("class"),
     container.getAttribute("aria-label"),
     ...getOwnedHeadingText(container, field),
-    ...getContainerSubmitText(container)
+    ...submitText
   ]
     .map(optionalString)
     .filter((value): value is string => typeof value === "string");
@@ -471,35 +477,11 @@ function getRootLevelFieldRunContainer(
     return undefined;
   }
 
-  const isRunElement = (candidate: Element) =>
-    candidate.matches(FIELD_SELECTOR) ||
-    ["label", "small", "span", "p"].includes(candidate.tagName.toLowerCase());
+  const runElements = getRootLevelRunElements(runElement);
+  const fieldCount = countFieldsInElements(runElements);
+  const submitText = collectRootLevelRunSubmitText(runElements);
 
-  let first: Element = runElement;
-  while (first.previousElementSibling && isRunElement(first.previousElementSibling)) {
-    first = first.previousElementSibling;
-  }
-
-  let last: Element = runElement;
-  while (last.nextElementSibling && isRunElement(last.nextElementSibling)) {
-    last = last.nextElementSibling;
-  }
-
-  let fieldCount = 0;
-  let current: Element | null = first;
-  while (current) {
-    if (current.matches(FIELD_SELECTOR)) {
-      fieldCount += 1;
-    } else {
-      fieldCount += current.querySelectorAll(FIELD_SELECTOR).length;
-    }
-    if (current === last) {
-      break;
-    }
-    current = current.nextElementSibling;
-  }
-
-  return fieldCount > 1 ? first : undefined;
+  return fieldCount > 1 || submitText.length > 0 ? runElements[0] : undefined;
 }
 
 function getRootLevelRunParent(element: Element): ParentNode | undefined {
@@ -515,6 +497,74 @@ function getRootLevelRunParent(element: Element): ParentNode | undefined {
   }
 
   return undefined;
+}
+
+function isRootLevelRunElement(candidate: Element) {
+  return (
+    candidate.matches(FIELD_SELECTOR) ||
+    candidate.tagName.toLowerCase() === "button" ||
+    ["label", "small", "span", "p"].includes(candidate.tagName.toLowerCase())
+  );
+}
+
+function isRootLevelRunAnchor(element: Element) {
+  return isRootLevelRunElement(element) && getRootLevelRunParent(element) !== undefined;
+}
+
+function getRootLevelRunElements(runElement: Element) {
+  let first: Element = runElement;
+  while (first.previousElementSibling && isRootLevelRunElement(first.previousElementSibling)) {
+    first = first.previousElementSibling;
+  }
+
+  let last: Element = runElement;
+  while (last.nextElementSibling && isRootLevelRunElement(last.nextElementSibling)) {
+    last = last.nextElementSibling;
+  }
+
+  const elements: Element[] = [];
+  let current: Element | null = first;
+  while (current) {
+    elements.push(current);
+    if (current === last) {
+      break;
+    }
+    current = current.nextElementSibling;
+  }
+  return elements;
+}
+
+function countFieldsInElements(elements: Element[]) {
+  return elements.reduce((count, element) => {
+    if (element.matches(FIELD_SELECTOR)) {
+      return count + 1;
+    }
+    return count + element.querySelectorAll(FIELD_SELECTOR).length;
+  }, 0);
+}
+
+function formlessControlsInElements(elements: Element[]) {
+  const controls = new Set<Element>();
+  elements.forEach((element) => {
+    collectMatchingElements(element, "button, input").forEach((control) => controls.add(control));
+  });
+  return Array.from(controls).filter((element) => {
+    if (element.closest("form")) {
+      return false;
+    }
+    return (element as HTMLButtonElement | HTMLInputElement).form === null;
+  });
+}
+
+function collectRootLevelRunSubmitText(elements: Element[]) {
+  return pickSubmitText(collectSubmitText(formlessControlsInElements(elements)));
+}
+
+function getRootLevelRunSubmitText(anchor: Element) {
+  if (!isRootLevelRunAnchor(anchor)) {
+    return [];
+  }
+  return collectRootLevelRunSubmitText(getRootLevelRunElements(anchor));
 }
 
 function getFieldContainer(

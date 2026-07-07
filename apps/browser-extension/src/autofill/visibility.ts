@@ -8,6 +8,8 @@ export interface FieldFillabilityResult {
   reasons: string[];
 }
 
+const FALLBACK_OFFSCREEN_OFFSET_PX = 5000;
+
 function addReason(reasons: string[], reason: string) {
   if (!reasons.includes(reason)) {
     reasons.push(reason);
@@ -124,6 +126,64 @@ function isClippedZeroSizeAncestor(
   return overflow.includes("hidden") || overflow.includes("clip");
 }
 
+function hasUsableRenderedRect(rect: DOMRect) {
+  return (
+    Number.isFinite(rect.left) &&
+    Number.isFinite(rect.top) &&
+    Number.isFinite(rect.right) &&
+    Number.isFinite(rect.bottom) &&
+    (rect.width > 0 || rect.height > 0 || rect.right !== rect.left || rect.bottom !== rect.top)
+  );
+}
+
+function viewportSize(element: HTMLElement) {
+  const view = element.ownerDocument.defaultView;
+  const documentElement = element.ownerDocument.documentElement;
+  const width =
+    view?.innerWidth && view.innerWidth > 0 ? view.innerWidth : documentElement.clientWidth;
+  const height =
+    view?.innerHeight && view.innerHeight > 0 ? view.innerHeight : documentElement.clientHeight;
+  return {
+    width,
+    height
+  };
+}
+
+function documentScrollSize(element: HTMLElement) {
+  const { width, height } = viewportSize(element);
+  const documentElement = element.ownerDocument.documentElement;
+  const body = element.ownerDocument.body;
+  return {
+    width: Math.max(width, documentElement.scrollWidth, body?.scrollWidth ?? 0),
+    height: Math.max(height, documentElement.scrollHeight, body?.scrollHeight ?? 0)
+  };
+}
+
+function isOutsideRenderedArea(element: HTMLElement, position: string | undefined) {
+  const rect = element.getBoundingClientRect();
+  if (!hasUsableRenderedRect(rect)) {
+    return null;
+  }
+
+  if (position === "fixed") {
+    const { width, height } = viewportSize(element);
+    if (width <= 0 || height <= 0) {
+      return null;
+    }
+    return rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height;
+  }
+
+  const { width, height } = documentScrollSize(element);
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+  return rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height;
+}
+
+function hasExtremePositionFallback(...values: Array<number | null>) {
+  return values.some((value) => value !== null && Math.abs(value) >= FALLBACK_OFFSCREEN_OFFSET_PX);
+}
+
 export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult {
   const reasons: string[] = [];
   const inputType =
@@ -189,11 +249,10 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       (position === "absolute" || position === "fixed") &&
       (left !== null || top !== null || right !== null || bottom !== null)
     ) {
+      const outsideRenderedArea = isOutsideRenderedArea(current, position);
       if (
-        (left !== null && Math.abs(left) >= 1000) ||
-        (top !== null && Math.abs(top) >= 1000) ||
-        (right !== null && Math.abs(right) >= 1000) ||
-        (bottom !== null && Math.abs(bottom) >= 1000)
+        outsideRenderedArea === true ||
+        (outsideRenderedArea === null && hasExtremePositionFallback(left, top, right, bottom))
       ) {
         addReason(reasons, "not-viewable:offscreen");
       }

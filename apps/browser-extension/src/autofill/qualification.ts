@@ -301,11 +301,26 @@ function hasSearchToken(parts: Array<string | undefined>) {
   );
 }
 
-function isSearchField(field: AutofillFieldSnapshot, form: AutofillFormSnapshot | undefined) {
+function hasFieldSearchContext(field: AutofillFieldSnapshot) {
   if (field.htmlType === "search") {
     return true;
   }
-  return hasSearchToken([...searchPartsForField(field), ...searchPartsForForm(form)]);
+  return hasSearchToken(searchPartsForField(field));
+}
+
+function hasFormSearchContext(form: AutofillFormSnapshot | undefined) {
+  return hasSearchToken(searchPartsForForm(form));
+}
+
+function isSearchField(
+  field: AutofillFieldSnapshot,
+  form: AutofillFormSnapshot | undefined,
+  hasScopedPasswordEvidence: boolean
+) {
+  return (
+    hasFieldSearchContext(field) ||
+    (hasFormSearchContext(form) && !hasScopedPasswordEvidence)
+  );
 }
 
 function hasAnyKeyword(text: string, keywords: string[]) {
@@ -437,8 +452,9 @@ function qualificationForFillableField(
   const formPromptText = joinedFormText(form, { includeAction: false });
   const negativeFormText = joinedFormText(form, { includeImplicitAction: false });
   const autocomplete = fieldAutocompleteTokens(field);
+  const hasScopedPasswordEvidence = isPasswordLike(field) || hasPasswordSibling(field, snapshot);
 
-  if (isSearchField(field, form)) {
+  if (isSearchField(field, form, hasScopedPasswordEvidence)) {
     reasons.push("excluded:search");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
