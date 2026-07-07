@@ -766,6 +766,19 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "route_email").qualifiedAs).toBe("username");
   });
 
+  it("uses nested login route segments as passwordless login context", () => {
+    document.body.innerHTML = `
+      <form id="nested-login-route" action="/auth/login/continue">
+        <input name="nested_route_email" type="email" />
+        <button type="submit">Continue</button>
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "nested_route_email").qualifiedAs).toBe("username");
+  });
+
   it("preserves auth mode query parameters without using redirect targets as context", () => {
     document.body.innerHTML = `
       <form id="mode-login" action="/account?mode=login">
@@ -1222,6 +1235,25 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
   });
 
+  it("does not group whole semantic wrappers for form-less fields", () => {
+    document.body.innerHTML = `
+      <main>
+        <h2>Contact</h2>
+        <input name="semantic_contact_email" type="email" />
+        <h2>Sign in</h2>
+        <input name="semantic_login_password" type="password" />
+      </main>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "semantic_contact_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "semantic_login_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "semantic_contact_email").containerOpid).not.toBe(
+      fieldByName(report, "semantic_login_password").containerOpid
+    );
+  });
+
   it("shares local context for adjacent form-less body-level login fields", () => {
     document.body.innerHTML = `
       <input name="contact_email" type="email" />
@@ -1575,6 +1607,40 @@ describe("autofill triage", () => {
     );
   });
 
+  it("uses form captions and legends as auth context", () => {
+    document.body.innerHTML = `
+      <form id="aria-signup" aria-label="Create account">
+        <input name="aria_signup_email" type="email" />
+        <input name="aria_signup_password" type="password" />
+      </form>
+      <form id="legend-signup">
+        <fieldset>
+          <legend>Create account</legend>
+          <input name="legend_signup_email" type="email" />
+          <input name="legend_signup_password" type="password" />
+        </fieldset>
+      </form>
+      <form id="aria-login" aria-label="Sign in">
+        <input name="aria_login_email" type="email" />
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "aria-signup")?.headingText).toContain(
+      "Create account"
+    );
+    expect(snapshot.forms.find((form) => form.htmlId === "legend-signup")?.headingText).toContain(
+      "Create account"
+    );
+    expect(fieldByName(report, "aria_signup_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "aria_signup_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "legend_signup_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "legend_signup_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "aria_login_email").qualifiedAs).toBe("username");
+  });
+
   it("recognizes common create-account wording without suppressing registered-user logins", () => {
     document.body.innerHTML = `
       <form id="create-your-account">
@@ -1925,6 +1991,23 @@ describe("autofill triage", () => {
     expect(username.qualifiedAs).toBe("username");
   });
 
+  it("ignores hidden labels when deriving field intent", () => {
+    document.body.innerHTML = `
+      <form>
+        <label hidden for="email">Forgot password email</label>
+        <input id="email" name="email" type="email" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    const email = fieldByName(report, "email");
+
+    expect(email.labelText).toBeUndefined();
+    expect(email.qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
   it("collects field types from fields whose owner document has different constructors", () => {
     const frame = document.createElement("iframe");
     document.body.append(frame);
@@ -2065,6 +2148,49 @@ describe("autofill triage", () => {
     );
   });
 
+  it("treats relative and transformed offscreen fields as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="relative_offscreen_email" type="email" autocomplete="username" style="position:relative;left:-9999px;width:20px;height:20px" />
+        <input name="translated_offscreen_email" type="email" autocomplete="username" style="transform:translateX(-9999px);width:20px;height:20px" />
+        <input name="real_user" type="email" autocomplete="username" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const relative = document.querySelector<HTMLInputElement>("[name=relative_offscreen_email]")!;
+    const translated = document.querySelector<HTMLInputElement>(
+      "[name=translated_offscreen_email]"
+    )!;
+    const offscreenRect = {
+      x: -9999,
+      y: 10,
+      width: 20,
+      height: 20,
+      left: -9999,
+      top: 10,
+      right: -9979,
+      bottom: 30,
+      toJSON: () => ({})
+    } as DOMRect;
+    vi.spyOn(relative, "getBoundingClientRect").mockReturnValue(offscreenRect);
+    vi.spyOn(translated, "getBoundingClientRect").mockReturnValue(offscreenRect);
+    vi.stubGlobal("innerWidth", 1280);
+    vi.stubGlobal("innerHeight", 720);
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "relative_offscreen_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "relative_offscreen_email").reasons).toContain(
+      "not-viewable:offscreen"
+    );
+    expect(fieldByName(report, "translated_offscreen_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "translated_offscreen_email").reasons).toContain(
+      "not-viewable:offscreen"
+    );
+    expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats stylesheet-clipped zero-size ancestors as not viewable", () => {
     document.head.innerHTML = `
       <style>
@@ -2086,6 +2212,34 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "decoy_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "decoy_email").reasons).toContain("not-viewable:zero-size");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+  });
+
+  it("treats one-dimensional clipped ancestors as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="height:0;overflow:hidden">
+          <input name="height_clipped_email" type="email" autocomplete="username" />
+        </div>
+        <div style="width:0;overflow:hidden">
+          <input name="width_clipped_email" type="email" autocomplete="username" />
+        </div>
+        <input name="real_user" type="email" autocomplete="username" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "height_clipped_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "height_clipped_email").reasons).toContain(
+      "not-viewable:zero-size"
+    );
+    expect(fieldByName(report, "width_clipped_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "width_clipped_email").reasons).toContain(
+      "not-viewable:zero-size"
+    );
+    expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
   it("treats content-visibility hidden ancestors as not viewable", () => {

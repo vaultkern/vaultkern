@@ -111,7 +111,7 @@ function isClippedZeroSizeAncestor(
   width: number | null,
   height: number | null
 ) {
-  if (width !== 0 || height !== 0) {
+  if (width !== 0 && height !== 0) {
     return false;
   }
   const style = current.ownerDocument.defaultView?.getComputedStyle(current);
@@ -212,6 +212,11 @@ function styleAttributeIsFullyClipped(value: string | null) {
 function hasZeroScaleTransform(value: string | undefined) {
   const normalized = value?.replace(/\s+/g, "").toLowerCase();
   return Boolean(normalized?.match(/(?:^|[,(])scale(?:x|y)?\(0(?:\.0+)?\)/));
+}
+
+function hasNonNoneTransform(value: string | undefined) {
+  const normalized = value?.replace(/\s+/g, "").toLowerCase();
+  return Boolean(normalized && normalized !== "none");
 }
 
 function hasUsableRenderedRect(rect: DOMRect) {
@@ -358,19 +363,20 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (isFullyClipped(clip, clipPath) || styleAttributeIsFullyClipped(styleAttribute)) {
       addReason(reasons, "not-viewable:clipped");
     }
-    if (
-      (position === "absolute" || position === "fixed") &&
-      (left !== null || top !== null || right !== null || bottom !== null)
-    ) {
+    if (left !== null || top !== null || right !== null || bottom !== null) {
       const outsideRenderedArea = isOutsideRenderedArea(current, position);
       const hasExtremePosition = hasExtremePositionFallback(left, top, right, bottom);
       if (
-        outsideRenderedArea === true ||
+        ((position === "absolute" || position === "fixed") && outsideRenderedArea === true) ||
         (outsideRenderedArea === null && hasExtremePosition) ||
+        (position === "relative" && hasExtremePosition && isOutsideViewport(current) === true) ||
         (outsideRenderedArea === false && hasExtremePosition && isOutsideViewport(current) === true)
       ) {
         addReason(reasons, "not-viewable:offscreen");
       }
+    }
+    if (current === element && hasNonNoneTransform(transform) && isOutsideViewport(current) === true) {
+      addReason(reasons, "not-viewable:offscreen");
     }
     if (
       (current === element && width === 0 && height === 0) ||

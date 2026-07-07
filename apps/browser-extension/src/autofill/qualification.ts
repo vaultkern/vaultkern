@@ -122,6 +122,10 @@ function authQueryContext(url: URL) {
   return terms;
 }
 
+function splitUrlPart(value: string | undefined) {
+  return (value ?? "").split(/[^a-z0-9]+/i).filter(Boolean);
+}
+
 function formActionContext(value: string | undefined) {
   if (!value) {
     return undefined;
@@ -130,7 +134,16 @@ function formActionContext(value: string | undefined) {
   try {
     const url = new URL(value, "https://vaultkern.invalid");
     const hash = url.hash ? url.hash.slice(1) : undefined;
-    return [url.hostname, url.pathname, hash, ...authQueryContext(url)].filter(Boolean).join(",");
+    return [
+      url.hostname,
+      url.pathname,
+      ...splitUrlPart(url.pathname),
+      hash,
+      ...splitUrlPart(hash),
+      ...authQueryContext(url)
+    ]
+      .filter(Boolean)
+      .join(",");
   } catch {
     return value.split(/[?#]/, 1)[0];
   }

@@ -120,7 +120,13 @@ function getReferencedElementText(element: Element, attributeName: string) {
   const lookupRoot = lookupRootForElement(element);
   return (element.getAttribute(attributeName) ?? "")
     .split(/\s+/)
-    .map((id) => (id === "" ? "" : cleanText(getElementByIdInRoot(lookupRoot, id)?.textContent)))
+    .map((id) => {
+      const referenced = id === "" ? null : getElementByIdInRoot(lookupRoot, id);
+      if (!referenced || !getFieldVisibility(referenced).viewable) {
+        return "";
+      }
+      return cleanText(referenced.textContent);
+    })
     .filter(Boolean)
     .join(" ");
 }
@@ -199,17 +205,26 @@ function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAr
   if (element.id) {
     lookupRoot
       .querySelectorAll<HTMLLabelElement>(`label[for="${cssEscape(element.id)}"]`)
-      .forEach((label) => labels.add(label));
+      .forEach((label) => {
+        if (getFieldVisibility(label).viewable) {
+          labels.add(label);
+        }
+      });
   }
   const wrappingLabel = element.closest("label");
-  if (wrappingLabel?.tagName.toLowerCase() === "label") {
+  if (
+    wrappingLabel?.tagName.toLowerCase() === "label" &&
+    getFieldVisibility(wrappingLabel).viewable
+  ) {
     labels.add(wrappingLabel);
   }
 
   const referencedLabels = (element.getAttribute("aria-labelledby") ?? "")
     .split(/\s+/)
     .map((id) => (id === "" ? null : getElementByIdInRoot(lookupRoot, id)))
-    .filter((label): label is HTMLElement => label !== null);
+    .filter(
+      (label): label is HTMLElement => label !== null && getFieldVisibility(label).viewable
+    );
 
   const labelText = [...Array.from(labels), ...referencedLabels]
     .map(labelTextWithoutNestedFields)
@@ -371,6 +386,21 @@ function getHeadingText(form: HTMLFormElement) {
   return contextualHeadings
     .map((heading) => cleanText(heading.textContent))
     .filter(Boolean);
+}
+
+function getFormCaptionText(form: HTMLFormElement) {
+  const firstField = getFirstFormField(form);
+  const accessibleName = controlText(form, undefined);
+  const legends = Array.from(form.querySelectorAll("legend"))
+    .filter((legend) => legend.closest("form") === form)
+    .filter((legend) => getFieldVisibility(legend as HTMLElement).viewable)
+    .filter((legend) => headingAppliesToContainerField(legend, firstField))
+    .map((legend) => cleanText(legend.textContent))
+    .filter(Boolean);
+
+  return [accessibleName, ...legends]
+    .map(optionalString)
+    .filter((value): value is string => typeof value === "string");
 }
 
 function headingAppliesToContainerField(heading: Element, field: Element | undefined) {
@@ -536,7 +566,11 @@ function collectForms(documentRef: Document) {
       htmlActionIsImplicit,
       ...submitActionMetadata,
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
-      headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
+      headingText: [
+        ...getFormCaptionText(formElement),
+        ...getHeadingText(formElement),
+        ...getSubmitText(formElement)
+      ]
     };
     formByElement.set(formElement, snapshot);
     return snapshot;
@@ -584,7 +618,12 @@ function getRootLevelFieldRunContainer(
 function getRootLevelRunParent(element: Element): ParentNode | undefined {
   const parent = element.parentElement;
   const parentTag = parent?.tagName.toLowerCase();
-  if (parent && (parentTag === "body" || parentTag === "html")) {
+  if (
+    parent &&
+    (parentTag === "body" ||
+      parentTag === "html" ||
+      ["section", "article", "main", "aside"].includes(parentTag ?? ""))
+  ) {
     return parent;
   }
 
@@ -714,15 +753,15 @@ function getFieldContainer(
     if (tagName === "body" || tagName === "html" || tagName === "form") {
       return undefined;
     }
+    if (["section", "article", "main", "aside"].includes(tagName)) {
+      return undefined;
+    }
     const fieldCount = container.querySelectorAll(FIELD_SELECTOR).length;
     if (
       fieldCount > 1 ||
       (fieldCount === 1 && getContainerBoundaryText(container, element).length > 0)
     ) {
       return container;
-    }
-    if (["section", "article", "main", "aside"].includes(tagName)) {
-      return undefined;
     }
     container = container.parentElement;
   }
