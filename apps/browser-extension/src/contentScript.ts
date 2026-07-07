@@ -38,7 +38,11 @@ function isWritableVisibleInput(input: HTMLInputElement) {
     return false;
   }
 
-  if (hasLayoutBox && rect.bottom < 0 && hasOffscreenExplicitPosition(style)) {
+  if (
+    hasLayoutBox &&
+    (rect.bottom < 0 || rect.top > window.innerHeight) &&
+    hasOffscreenExplicitPosition(style)
+  ) {
     return false;
   }
 
@@ -90,7 +94,10 @@ function hasOffscreenExplicitPosition(style: CSSStyleDeclaration) {
 
   const left = cssPixelValue(style.left);
   const top = cssPixelValue(style.top);
-  return (left !== null && left < -2) || (top !== null && top < -2);
+  return (
+    (left !== null && left < -2) ||
+    (top !== null && (top < -2 || top > window.innerHeight + 2))
+  );
 }
 
 function fieldTokens(input: HTMLInputElement) {
@@ -162,6 +169,8 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
       "verificationcode",
       "securitycode",
       "authenticationcode",
+      "authcode",
+      "mfacode",
       "captcha",
       "searchquery",
       "zipcode"
@@ -178,7 +187,7 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
   }
   if (
     tokenSet.has("code") &&
-    ["verification", "security", "authentication", "authenticator"].some((token) =>
+    ["verification", "security", "authentication", "authenticator", "auth", "mfa"].some((token) =>
       tokenSet.has(token)
     )
   ) {
@@ -432,6 +441,7 @@ function adjacentRootCredentialElement(
   while (
     element &&
     (isIgnorableRootRunSeparator(element) ||
+      isTextOnlyRootRunLabel(element) ||
       (element.tagName.toLowerCase() === "label" &&
         credentialInputForRunElement(element) === null))
   ) {
@@ -443,6 +453,15 @@ function adjacentRootCredentialElement(
 
 function isIgnorableRootRunSeparator(element: Element) {
   return ["br", "wbr"].includes(element.tagName.toLowerCase());
+}
+
+function isTextOnlyRootRunLabel(element: Element) {
+  const tagName = element.tagName.toLowerCase();
+  return (
+    ["span", "p", "strong", "em", "b", "i"].includes(tagName) &&
+    element.children.length === 0 &&
+    Boolean(element.textContent?.trim())
+  );
 }
 
 function credentialInputForRunElement(candidate: Element | null) {
@@ -490,6 +509,7 @@ function isPasswordChangeField(input: HTMLInputElement) {
     (hasGroupChangeContext ||
       passwords.some(
         (candidate) =>
+          hasNewPasswordSignal(candidate) ||
           hasCurrentPasswordSignal(candidate) ||
           hasConfirmationPasswordSignal(candidate) ||
           hasPasswordVerificationSignal(candidate) ||
@@ -721,12 +741,15 @@ function hasConfirmationPasswordSignal(input: HTMLInputElement) {
   const normalizedTokens = normalizedFieldTokens(input);
   return (
     normalizedTokens.includes("confirmpassword") ||
+    normalizedTokens.includes("passwordconfirmation") ||
     normalizedTokens.includes("repeatpassword") ||
     normalizedTokens.includes("reenterpassword") ||
     tokens.includes("confirm password") ||
+    tokens.includes("password confirmation") ||
     tokens.includes("repeat password") ||
     (tokenSet.has("password") &&
       (tokenSet.has("confirm") ||
+        tokenSet.has("confirmation") ||
         tokenSet.has("repeat") ||
         tokenSet.has("reenter") ||
         (tokenSet.has("re") && tokenSet.has("enter"))))
@@ -783,6 +806,7 @@ function adjacentRootPasswordElement(
   while (
     element &&
     (isIgnorableRootRunSeparator(element) ||
+      isTextOnlyRootRunLabel(element) ||
       (element.tagName.toLowerCase() === "label" &&
         passwordInputForRunElement(element) === null))
   ) {

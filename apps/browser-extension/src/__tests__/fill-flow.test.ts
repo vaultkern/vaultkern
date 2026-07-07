@@ -365,6 +365,24 @@ describe("fillLoginForm", () => {
     expect(inputValue("#below-password")).toBe("secret-123");
   });
 
+  it("rejects explicitly positioned fields below the viewport", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="below-decoy-email" type="email" autocomplete="username" style="position: absolute; top: 10000px; left: 0;" value="" />
+        <input id="visible-email" type="email" autocomplete="username" value="" />
+        <input id="below-decoy-password" type="password" autocomplete="current-password" style="position: absolute; top: 10000px; left: 0;" value="" />
+        <input id="visible-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#below-decoy-email")).toBe("");
+    expect(inputValue("#below-decoy-password")).toBe("");
+    expect(inputValue("#visible-email")).toBe("alice@example.com");
+    expect(inputValue("#visible-password")).toBe("secret-123");
+  });
+
   it("keeps negatively offset fields fillable when viewport geometry is visible", () => {
     document.body.innerHTML = `
       <form>
@@ -453,6 +471,22 @@ describe("fillLoginForm", () => {
 
     expect(inputValue("#account-field")).toBe("alice@example.com");
     expect(inputValue("#login-code")).toBe("");
+  });
+
+  it("rejects auth-code username candidates before scoring", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="account-field" type="text" name="account" value="" />
+        <input id="auth-code" type="text" name="login_auth_code" value="" />
+        <input id="login-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#account-field")).toBe("alice@example.com");
+    expect(inputValue("#auth-code")).toBe("");
+    expect(inputValue("#login-password")).toBe("secret-123");
   });
 
   it("rejects compound verification search and zip field names", () => {
@@ -678,6 +712,20 @@ describe("fillLoginForm", () => {
       <label for="login-email">Email</label>
       <input id="login-email" type="email" autocomplete="username" value="" />
       <label for="login-password">Password</label>
+      <input id="login-password" type="password" autocomplete="current-password" value="" />
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#login-email")).toBe("alice@example.com");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("pairs root-level form-less credential fields separated by text labels", () => {
+    document.body.innerHTML = `
+      <span>Email</span>
+      <input id="login-email" type="email" autocomplete="username" value="" />
+      <span>Password</span>
       <input id="login-password" type="password" autocomplete="current-password" value="" />
     `;
 
@@ -1299,6 +1347,20 @@ describe("fillLoginForm", () => {
     expect(inputValue("#new-password")).toBe("");
   });
 
+  it("treats generic password and new-password pairs as change forms", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="password" type="password" name="password" value="" />
+        <input id="new-password" type="password" name="new_password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
+  });
+
   it("treats confirm-your-password labels as confirmation fields", () => {
     document.body.innerHTML = `
       <form>
@@ -1345,6 +1407,20 @@ describe("fillLoginForm", () => {
 
     expect(inputValue("#new-password")).toBe("");
     expect(inputValue("#second-password")).toBe("");
+  });
+
+  it("treats password-confirmation fields as confirmation fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="new-password" type="password" name="new_password" value="" />
+        <input id="confirm-password" type="password" name="password_confirmation" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#new-password")).toBe("");
+    expect(inputValue("#confirm-password")).toBe("");
   });
 
   it("detects form-less password change groups when each field is wrapped", () => {
