@@ -541,6 +541,29 @@ describe("totp autofill detection", () => {
     ).toEqual(["1", "3", "5", "7", "9", "0"]);
   });
 
+  it("stops numbered split TOTP expansion before trailing anonymous fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="digit-1">Authenticator code</label>
+        <input id="digit-1" name="digit_1" maxlength="1" inputmode="numeric" />
+        <input maxlength="1" />
+        <input maxlength="1" />
+        <input maxlength="1" />
+        <input maxlength="1" />
+        <input maxlength="1" />
+        <input maxlength="1" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "135790" });
+
+    const fields = [...document.querySelectorAll<HTMLInputElement>('input[maxlength="1"]')];
+    expect(fields.at(-1)?.value).toBe("");
+    expect(
+      fields.slice(0, 6).map((field) => field.value)
+    ).toEqual(["1", "3", "5", "7", "9", "0"]);
+  });
+
   it("keeps in-form split TOTP fields scoped to the labeled group", () => {
     document.body.innerHTML = `
       <form>

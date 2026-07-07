@@ -337,13 +337,14 @@ function pickContiguousOneCharacterFields(
     return [];
   }
 
+  const seedSequenceKeys = splitSequenceKeys(seed);
   let startIndex = seedIndex;
   while (
     startIndex > 0 &&
     isContiguousSplitField(seed, sortedFields[startIndex - 1]) &&
     splitScopeMatches(seed, sortedFields[startIndex - 1]) &&
     splitSequenceMatches(seed, sortedFields[startIndex - 1], {
-      allowAnonymousFallback: splitSequenceKeys(seed).length === 0
+      allowAnonymousFallback: seedSequenceKeys.length === 0
     })
   ) {
     startIndex -= 1;
@@ -352,6 +353,11 @@ function pickContiguousOneCharacterFields(
   let endIndex = seedIndex;
   while (
     endIndex + 1 < sortedFields.length &&
+    !(
+      seedSequenceKeys.length > 0 &&
+      endIndex - startIndex + 1 >= valueLength &&
+      isAnonymousOneCharacterField(sortedFields[endIndex + 1])
+    ) &&
     isContiguousSplitField(seed, sortedFields[endIndex + 1]) &&
     splitScopeMatches(seed, sortedFields[endIndex + 1]) &&
     splitSequenceMatches(seed, sortedFields[endIndex + 1], { allowAnonymousFallback: true })
