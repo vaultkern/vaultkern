@@ -24,6 +24,7 @@ let webAuthnProxySyncRequested = false;
 let passkeyProviderEnabled = false;
 let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
 let pendingAutofillSubmission: PendingAutofillSubmission | null = null;
+let pendingAutofillSubmissionsByTab = new Map<number, PendingAutofillSubmission>();
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
 const PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY = "vaultkernPendingAutofillSubmission";
 const WEB_AUTHN_CONTENT_SCRIPT_FILE = "webauthnContentScript.js";
@@ -141,19 +142,56 @@ function storageRemove(key: string): Promise<void> {
 async function persistPendingAutofillSubmission(
   submission: PendingAutofillSubmission | null
 ) {
-  if (!submission) {
+  if (!submission && pendingAutofillSubmissionsByTab.size === 0) {
     await storageRemove(PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY);
     return;
   }
 
   await storageSet({
-    [PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY]: submission
+    [PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY]: serializePendingAutofillSubmissions(submission)
   });
 }
 
-async function loadPersistedPendingAutofillSubmission() {
+function pendingAutofillSubmissionStoreFromUnknown(value: unknown) {
+  const legacySubmission = pendingAutofillSubmissionFromUnknown(value);
+  if (legacySubmission) {
+    return {
+      latest: legacySubmission,
+      byTab: new Map<number, PendingAutofillSubmission>()
+    };
+  }
+
+  const candidate = objectRecordFromUnknown(value);
+  const latest = pendingAutofillSubmissionFromUnknown(candidate.latest);
+  const byTab = new Map<number, PendingAutofillSubmission>();
+  const byTabRecord = objectRecordFromUnknown(candidate.byTab);
+  for (const [tabIdKey, submissionValue] of Object.entries(byTabRecord)) {
+    const tabId = Number(tabIdKey);
+    const submission = pendingAutofillSubmissionFromUnknown(submissionValue);
+    if (Number.isInteger(tabId) && tabId >= 0 && submission) {
+      byTab.set(tabId, submission);
+    }
+  }
+
+  return { latest, byTab };
+}
+
+function serializePendingAutofillSubmissions(
+  latest: PendingAutofillSubmission | null
+) {
+  if (pendingAutofillSubmissionsByTab.size === 0) {
+    return latest;
+  }
+
+  return {
+    latest,
+    byTab: Object.fromEntries(pendingAutofillSubmissionsByTab)
+  };
+}
+
+async function loadPersistedPendingAutofillSubmissions() {
   const items = await storageGet(PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY);
-  return pendingAutofillSubmissionFromUnknown(
+  return pendingAutofillSubmissionStoreFromUnknown(
     items[PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY]
   );
 }
@@ -171,8 +209,49 @@ function newerPendingAutofillSubmission(
   return right.submittedAt > left.submittedAt ? right : left;
 }
 
+function latestPendingAutofillSubmission() {
+  return Array.from(pendingAutofillSubmissionsByTab.values()).reduce(
+    newerPendingAutofillSubmission,
+    null as PendingAutofillSubmission | null
+  );
+}
+
+function mergePersistedPendingAutofillSubmissions(store: {
+  latest: PendingAutofillSubmission | null;
+  byTab: Map<number, PendingAutofillSubmission>;
+}) {
+  pendingAutofillSubmission = newerPendingAutofillSubmission(
+    pendingAutofillSubmission,
+    store.latest
+  );
+  for (const [tabId, persistedSubmission] of store.byTab) {
+    pendingAutofillSubmissionsByTab.set(
+      tabId,
+      newerPendingAutofillSubmission(
+        pendingAutofillSubmissionsByTab.get(tabId) ?? null,
+        persistedSubmission
+      )!
+    );
+  }
+}
+
+function tabIdFromMessage(message: unknown) {
+  const tabId = (message as { tabId?: unknown }).tabId;
+  return typeof tabId === "number" && Number.isInteger(tabId) && tabId >= 0
+    ? tabId
+    : undefined;
+}
+
+function tabIdFromSender(sender: unknown) {
+  const tabId = (sender as { tab?: { id?: unknown } } | null)?.tab?.id;
+  return typeof tabId === "number" && Number.isInteger(tabId) && tabId >= 0
+    ? tabId
+    : undefined;
+}
+
 function handleAutofillPendingMessage(
   message: unknown,
+  sender: unknown,
   sendResponse: (response: unknown) => void
 ) {
   if (typeof message !== "object" || message === null) {
@@ -182,6 +261,10 @@ function handleAutofillPendingMessage(
   const messageType = (message as { type?: unknown }).type;
   if (messageType === "vaultkern_autofill_submission") {
     pendingAutofillSubmission = pendingAutofillSubmissionFromUnknown(message);
+    const tabId = tabIdFromSender(sender) ?? tabIdFromMessage(message);
+    if (pendingAutofillSubmission && tabId !== undefined) {
+      pendingAutofillSubmissionsByTab.set(tabId, pendingAutofillSubmission);
+    }
     void persistPendingAutofillSubmission(pendingAutofillSubmission).then(() => {
       sendResponse({ ok: pendingAutofillSubmission !== null });
     });
@@ -189,18 +272,28 @@ function handleAutofillPendingMessage(
   }
 
   if (messageType === "vaultkern_autofill_pending_request") {
-    void loadPersistedPendingAutofillSubmission().then((persistedSubmission) => {
-      pendingAutofillSubmission = newerPendingAutofillSubmission(
-        pendingAutofillSubmission,
-        persistedSubmission
-      );
-      sendResponse({ pending: pendingAutofillSubmission });
+    const tabId = tabIdFromMessage(message);
+    void loadPersistedPendingAutofillSubmissions().then((persistedSubmissions) => {
+      mergePersistedPendingAutofillSubmissions(persistedSubmissions);
+      sendResponse({
+        pending:
+          tabId === undefined
+            ? pendingAutofillSubmission
+            : pendingAutofillSubmissionsByTab.get(tabId) ?? null
+      });
     });
     return true;
   }
 
   if (messageType === "vaultkern_autofill_pending_clear") {
-    pendingAutofillSubmission = null;
+    const tabId = tabIdFromMessage(message);
+    if (tabId === undefined) {
+      pendingAutofillSubmission = null;
+      pendingAutofillSubmissionsByTab = new Map();
+    } else {
+      pendingAutofillSubmissionsByTab.delete(tabId);
+      pendingAutofillSubmission = latestPendingAutofillSubmission();
+    }
     void persistPendingAutofillSubmission(null).then(() => {
       sendResponse({ ok: true });
     });
@@ -255,7 +348,7 @@ if (chromeApi?.runtime?.onMessage) {
       sender: unknown,
       sendResponse: (response: unknown) => void
     ) => {
-      if (handleAutofillPendingMessage(message, sendResponse)) {
+      if (handleAutofillPendingMessage(message, sender, sendResponse)) {
         return true;
       }
 

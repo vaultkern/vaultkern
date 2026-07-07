@@ -256,7 +256,10 @@ function getSubmitText(form: HTMLFormElement) {
   }).filter(Boolean);
   const primarySubmitText = submitText[0];
   if (primarySubmitText && isAccountCreationSubmitText(primarySubmitText)) {
-    return [primarySubmitText];
+    const loginSubmitText = submitText.filter(isLoginSubmitText);
+    return loginSubmitText.length > 0
+      ? [primarySubmitText, ...loginSubmitText]
+      : [primarySubmitText];
   }
   const loginSubmitText = submitText.filter(isLoginSubmitText);
   return loginSubmitText.length > 0 ? loginSubmitText : submitText.slice(0, 1);

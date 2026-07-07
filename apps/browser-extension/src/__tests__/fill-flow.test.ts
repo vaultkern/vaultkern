@@ -1285,9 +1285,9 @@ describe("PopupShell fill flow", () => {
         customFields: []
       });
       expect(runtimeClientMocks.saveVault).toHaveBeenCalledWith("vault-1");
-      expect(runtimeSendMessage).toHaveBeenCalledWith({
+      expect(runtimeSendMessage).toHaveBeenCalledWith(expect.objectContaining({
         type: "vaultkern_autofill_pending_clear"
-      });
+      }));
     });
   });
 
@@ -1374,9 +1374,9 @@ describe("PopupShell fill flow", () => {
       });
       expect(runtimeClientMocks.updateEntryFields).not.toHaveBeenCalled();
       expect(runtimeClientMocks.saveVault).toHaveBeenCalledWith("vault-1");
-      expect(runtimeSendMessage).toHaveBeenCalledWith({
+      expect(runtimeSendMessage).toHaveBeenCalledWith(expect.objectContaining({
         type: "vaultkern_autofill_pending_clear"
-      });
+      }));
     });
   });
 
@@ -1461,9 +1461,9 @@ describe("PopupShell fill flow", () => {
         customFields: []
       });
       expect(runtimeClientMocks.saveVault).toHaveBeenCalledWith("vault-1");
-      expect(runtimeSendMessage).toHaveBeenCalledWith({
+      expect(runtimeSendMessage).toHaveBeenCalledWith(expect.objectContaining({
         type: "vaultkern_autofill_pending_clear"
-      });
+      }));
     });
   });
 
@@ -1656,9 +1656,9 @@ describe("PopupShell fill flow", () => {
     render(createElement(PopupShell));
 
     await waitFor(() => {
-      expect(runtimeSendMessage).toHaveBeenCalledWith({
+      expect(runtimeSendMessage).toHaveBeenCalledWith(expect.objectContaining({
         type: "vaultkern_autofill_pending_clear"
-      });
+      }));
     });
     expect(runtimeClientMocks.updateEntryFields).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Update Password" })).not.toBeInTheDocument();
@@ -1845,9 +1845,9 @@ describe("PopupShell fill flow", () => {
     render(createElement(PopupShell));
 
     await waitFor(() => {
-      expect(runtimeSendMessage).toHaveBeenCalledWith({
+      expect(runtimeSendMessage).toHaveBeenCalledWith(expect.objectContaining({
         type: "vaultkern_autofill_pending_clear"
-      });
+      }));
     });
     expect(screen.queryByRole("button", { name: "Update Password" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save Login" })).not.toBeInTheDocument();
@@ -1925,9 +1925,9 @@ describe("PopupShell fill flow", () => {
     render(createElement(PopupShell));
 
     await waitFor(() => {
-      expect(runtimeSendMessage).toHaveBeenCalledWith({
+      expect(runtimeSendMessage).toHaveBeenCalledWith(expect.objectContaining({
         type: "vaultkern_autofill_pending_clear"
-      });
+      }));
     });
     expect(screen.queryByRole("button", { name: "Update Password" })).not.toBeInTheDocument();
     expect(runtimeClientMocks.updateEntryFields).not.toHaveBeenCalled();
@@ -1999,9 +1999,9 @@ describe("PopupShell fill flow", () => {
     render(createElement(PopupShell));
 
     await waitFor(() => {
-      expect(runtimeSendMessage).toHaveBeenCalledWith({
+      expect(runtimeSendMessage).toHaveBeenCalledWith(expect.objectContaining({
         type: "vaultkern_autofill_pending_clear"
-      });
+      }));
     });
     expect(screen.queryByRole("button", { name: "Update Password" })).not.toBeInTheDocument();
     expect(runtimeClientMocks.updateEntryFields).not.toHaveBeenCalled();
@@ -2069,9 +2069,9 @@ describe("PopupShell fill flow", () => {
 
     await waitFor(() => {
       expect(runtimeClientMocks.saveVault).toHaveBeenCalledTimes(2);
-      expect(runtimeSendMessage).toHaveBeenCalledWith({
+      expect(runtimeSendMessage).toHaveBeenCalledWith(expect.objectContaining({
         type: "vaultkern_autofill_pending_clear"
-      });
+      }));
     });
     expect(runtimeClientMocks.createEntry).toHaveBeenCalledTimes(1);
   });
@@ -4071,7 +4071,7 @@ describe("content script fill message", () => {
     ).toBe("root-secret");
   });
 
-  it("reports a submitted login form to the background page", async () => {
+  it("does not report ordinary login submits before success is known", async () => {
     const sendMessage = vi.fn(async () => undefined);
     const addListener = vi.fn();
 
@@ -4095,19 +4095,12 @@ describe("content script fill message", () => {
     document.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
     );
+    await Promise.resolve();
 
-    await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_autofill_submission",
-        url: expect.any(String),
-        username: "alice@example.com",
-        password: "captured-secret",
-        submittedAt: expect.any(Number)
-      });
-    });
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("captures a readonly username from a submitted login form", async () => {
+  it("does not capture readonly ordinary login submits before success is known", async () => {
     const sendMessage = vi.fn(async () => undefined);
     const addListener = vi.fn();
 
@@ -4131,19 +4124,12 @@ describe("content script fill message", () => {
     document.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
     );
+    await Promise.resolve();
 
-    await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_autofill_submission",
-        url: expect.any(String),
-        username: "alice@example.com",
-        password: "captured-secret",
-        submittedAt: expect.any(Number)
-      });
-    });
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("captures a hidden submitted username from a password-step form", async () => {
+  it("does not capture hidden-username ordinary login submits before success is known", async () => {
     const sendMessage = vi.fn(async () => undefined);
     const addListener = vi.fn();
 
@@ -4167,16 +4153,9 @@ describe("content script fill message", () => {
     document.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
     );
+    await Promise.resolve();
 
-    await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_autofill_submission",
-        url: expect.any(String),
-        username: "alice@example.com",
-        password: "captured-secret",
-        submittedAt: expect.any(Number)
-      });
-    });
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("does not report a submitted form when page handlers cancel submit", async () => {
@@ -4211,7 +4190,7 @@ describe("content script fill message", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("captures submitted credentials when page handlers stop propagation", async () => {
+  it("captures submitted registration credentials when page handlers stop propagation", async () => {
     const sendMessage = vi.fn(async () => undefined);
     const addListener = vi.fn();
 
@@ -4226,8 +4205,9 @@ describe("content script fill message", () => {
 
     document.body.innerHTML = `
       <form>
+        <h2>Create account</h2>
         <input name="email" type="email" autocomplete="username" value="alice@example.com" />
-        <input name="password" type="password" autocomplete="current-password" value="captured-secret" />
+        <input name="new_password" type="password" autocomplete="new-password" value="captured-secret" />
       </form>
     `;
     document.querySelector("form")?.addEventListener("submit", (event) => {
@@ -4245,12 +4225,13 @@ describe("content script fill message", () => {
         url: expect.any(String),
         username: "alice@example.com",
         password: "captured-secret",
+        saveOnly: true,
         submittedAt: expect.any(Number)
       });
     });
   });
 
-  it("preserves password whitespace when reporting a submitted login form", async () => {
+  it("preserves password whitespace when reporting a submitted registration form", async () => {
     const sendMessage = vi.fn(async () => undefined);
     const addListener = vi.fn();
 
@@ -4265,8 +4246,9 @@ describe("content script fill message", () => {
 
     document.body.innerHTML = `
       <form>
+        <h2>Create account</h2>
         <input name="email" type="email" autocomplete="username" value=" alice@example.com " />
-        <input name="password" type="password" autocomplete="current-password" value=" captured secret " />
+        <input name="new_password" type="password" autocomplete="new-password" value=" captured secret " />
       </form>
     `;
 
@@ -4281,6 +4263,7 @@ describe("content script fill message", () => {
         url: expect.any(String),
         username: "alice@example.com",
         password: " captured secret ",
+        saveOnly: true,
         submittedAt: expect.any(Number)
       });
     });

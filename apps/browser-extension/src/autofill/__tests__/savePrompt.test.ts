@@ -78,6 +78,23 @@ describe("autofill save prompt capture", () => {
     });
   });
 
+  it("does not capture hidden new-password fields as submissions", () => {
+    document.body.innerHTML = `
+      <form id="signup">
+        <h2>Create account</h2>
+        <input name="email" autocomplete="username" value="alice@example.com" />
+        <input name="new_password" type="password" autocomplete="new-password" value="hidden-secret" hidden />
+      </form>
+    `;
+
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("#signup") as HTMLFormElement
+    );
+
+    expect(submission).toBeNull();
+  });
+
   it("preserves a save-only marker when parsing pending submissions", () => {
     expect(
       pendingAutofillSubmissionFromUnknown({

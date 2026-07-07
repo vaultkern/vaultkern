@@ -64,7 +64,9 @@ if (chromeApi?.runtime?.sendMessage && typeof document !== "undefined") {
         if (event.defaultPrevented) {
           return;
         }
-        const submission = collectAutofillSubmission(document, submittedForm);
+        const submission = collectAutofillSubmission(document, submittedForm, {
+          includeLoginSubmissions: false
+        });
         if (!submission) {
           return;
         }

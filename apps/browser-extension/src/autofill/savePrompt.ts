@@ -10,6 +10,7 @@ import type { AutofillFieldQualification, AutofillTriageFieldResult } from "./ty
 
 export interface CollectAutofillSubmissionOptions {
   siteRules?: AutofillSiteRule[];
+  includeLoginSubmissions?: boolean;
 }
 
 function byDocumentOrder(
@@ -103,7 +104,7 @@ function isCaptureUsernameField(field: AutofillTriageFieldResult) {
 }
 
 function isCaptureNewPasswordField(field: AutofillTriageFieldResult) {
-  if (field.disabled || field.tagName !== "input") {
+  if (field.disabled || field.tagName !== "input" || !field.viewable || !field.fillable) {
     return false;
   }
 
@@ -337,7 +338,7 @@ export function collectAutofillSubmission(
   const password = fieldValue(elements, passwordField, { trim: false });
   const username = fieldValue(elements, pickUsernameField(fieldsForUsername, passwordField, elements));
 
-  if (password === "") {
+  if (password === "" || options.includeLoginSubmissions === false) {
     return null;
   }
 

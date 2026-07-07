@@ -66,11 +66,12 @@ async function flushMicrotasks() {
 
 function sendRuntimeMessage(
   listeners: RuntimeMessageListener[],
-  message: unknown
+  message: unknown,
+  sender: unknown = {}
 ) {
   let response: unknown;
   const handled = listeners.some((listener) =>
-    listener(message, {}, (value) => {
+    listener(message, sender, (value) => {
       response = value;
     })
   );
@@ -254,6 +255,94 @@ describe("background bridge", () => {
         type: "vaultkern_autofill_pending_request"
       }).response()
     ).resolves.toEqual({ pending: null });
+  });
+
+  it("scopes pending autofill submissions to their source tab", async () => {
+    const listeners: RuntimeMessageListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://one.example/login",
+        username: "alice",
+        password: "one-secret",
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 11 } }
+    ).response();
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://two.example/login",
+        username: "bob",
+        password: "two-secret",
+        submittedAt: 1710000001000
+      },
+      { tab: { id: 22 } }
+    ).response();
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 11
+      }).response()
+    ).resolves.toMatchObject({
+      pending: {
+        url: "https://one.example/login",
+        username: "alice",
+        password: "one-secret"
+      }
+    });
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 22
+      }).response()
+    ).resolves.toMatchObject({
+      pending: {
+        url: "https://two.example/login",
+        username: "bob",
+        password: "two-secret"
+      }
+    });
+
+    await sendRuntimeMessage(listeners, {
+      type: "vaultkern_autofill_pending_clear",
+      tabId: 11
+    }).response();
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 11
+      }).response()
+    ).resolves.toEqual({ pending: null });
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 22
+      }).response()
+    ).resolves.toMatchObject({
+      pending: {
+        url: "https://two.example/login",
+        username: "bob",
+        password: "two-secret"
+      }
+    });
   });
 
   it("keeps a pending autofill submission in session storage across background reloads", async () => {

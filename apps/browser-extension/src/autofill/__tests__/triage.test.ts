@@ -483,7 +483,7 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
-  it("preserves primary account-creation submit context", () => {
+  it("preserves login submit labels on combined auth forms", () => {
     document.body.innerHTML = `
       <form id="start">
         <input name="email" type="email" />
@@ -497,11 +497,11 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(snapshot);
 
     expect(snapshot.forms.find((form) => form.htmlId === "start")?.headingText).toEqual([
-      "Create account"
+      "Create account",
+      "Sign in"
     ]);
-    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
-    expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
   it("keeps neutral primary submits from inheriting secondary submit exclusions", () => {
@@ -1129,12 +1129,12 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "offscreen_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "offscreen_email").reasons).toContain("not-viewable:offscreen");
-    expect(fieldByName(report, "positive_left_offscreen_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "positive_left_offscreen_email").reasons).toContain(
+    expect(fieldByName(report, "positive_left_offscreen_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "positive_left_offscreen_email").reasons).not.toContain(
       "not-viewable:offscreen"
     );
-    expect(fieldByName(report, "positive_top_offscreen_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "positive_top_offscreen_email").reasons).toContain(
+    expect(fieldByName(report, "positive_top_offscreen_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "positive_top_offscreen_email").reasons).not.toContain(
       "not-viewable:offscreen"
     );
     expect(fieldByName(report, "right_offscreen_email").qualifiedAs).toBe("ignored");

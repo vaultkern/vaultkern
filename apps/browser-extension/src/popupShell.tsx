@@ -15,6 +15,15 @@ async function getActiveTab() {
   return tabs[0] as { id?: number; url?: string } | undefined;
 }
 
+async function activeTabId() {
+  try {
+    const tab = await getActiveTab();
+    return typeof tab?.id === "number" ? tab.id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function requestFillCandidates(vaultId: string, siteUrl?: string) {
   if (siteUrl) {
     return client.findFillCandidates(vaultId, siteUrl);
@@ -85,8 +94,10 @@ export async function loadPendingAutofillSubmission() {
     return null;
   }
 
+  const tabId = await activeTabId();
   const response = await chromeApi.runtime.sendMessage({
-    type: "vaultkern_autofill_pending_request"
+    type: "vaultkern_autofill_pending_request",
+    ...(tabId === undefined ? {} : { tabId })
   });
   return pendingAutofillSubmissionFromUnknown(
     (response as { pending?: unknown } | null)?.pending
@@ -99,8 +110,10 @@ export async function clearPendingAutofillSubmission() {
     return;
   }
 
+  const tabId = await activeTabId();
   await chromeApi.runtime.sendMessage({
-    type: "vaultkern_autofill_pending_clear"
+    type: "vaultkern_autofill_pending_clear",
+    ...(tabId === undefined ? {} : { tabId })
   });
 }
 
