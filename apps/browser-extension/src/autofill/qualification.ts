@@ -258,6 +258,8 @@ function isCurrentPasswordSibling(candidate: AutofillFieldSnapshot) {
   const candidateText = joinedFieldText(candidate);
   return (
     candidate.htmlType === "password" &&
+    candidate.viewable &&
+    candidate.fillable &&
     (autocomplete.has("current-password") ||
       candidateText.includes("currentpassword") ||
       candidateText.includes("oldpassword") ||
@@ -564,6 +566,10 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
+  const searchableText = `${fieldText},${formText}`;
+  const hasMixedLoginContext =
+    hasLoginContext(searchableText) || !hasAccountCreationContext(searchableText);
+
   if (
     [...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) &&
     isUsernameLike(field, fieldText)
@@ -591,14 +597,9 @@ function qualificationForFillableField(
     return { qualifiedAs: "username", eligible: true, reasons };
   }
 
-  if (autocomplete.has("current-password") && isPasswordLike(field)) {
+  if (isPasswordLike(field) && autocomplete.has("current-password") && hasMixedLoginContext) {
     reasons.push("autocomplete:current-password");
     return { qualifiedAs: "password", eligible: true, reasons };
-  }
-
-  if (autocomplete.has("new-password") && isNewPasswordLike(field, fieldText, formText)) {
-    reasons.push("autocomplete:new-password");
-    return { qualifiedAs: "newPassword", eligible: true, reasons };
   }
 
   if (isNewPasswordLike(field, fieldText, formText)) {
@@ -609,8 +610,14 @@ function qualificationForFillableField(
   }
 
   const nonLogin = nonLoginReason(fieldText, formText);
+  const isExplicitUsernameInCurrentPasswordForm =
+    ([...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) ||
+      [...EMAIL_AUTOCOMPLETE].some((token) => autocomplete.has(token))) &&
+    hasMixedLoginContext &&
+    hasCurrentPasswordSibling(field, snapshot);
   if (
     nonLogin &&
+    !isExplicitUsernameInCurrentPasswordForm &&
     !(
       nonLogin === "non-login:newsletter" &&
       hasLoginContext(`${fieldText},${formText}`) &&

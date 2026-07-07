@@ -1,6 +1,5 @@
 import type { AutofillFillPlan } from "./fillPlan";
-
-const FIELD_SELECTOR = "input, select, textarea";
+import { collectMatchingElements, FIELD_SELECTOR } from "./collectPageFields";
 
 function isWritableField(
   element: Element
@@ -38,7 +37,7 @@ function writeFieldValue(
 }
 
 export function applyFillPlan(plan: AutofillFillPlan, documentRef: Document = document) {
-  const elements = Array.from(documentRef.querySelectorAll(FIELD_SELECTOR));
+  const elements = collectMatchingElements(documentRef, FIELD_SELECTOR);
 
   for (const action of plan.actions) {
     const element = elements[action.elementNumber];
