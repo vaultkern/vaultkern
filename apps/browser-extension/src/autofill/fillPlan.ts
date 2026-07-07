@@ -35,13 +35,41 @@ function candidateFields(reportFields: AutofillTriageFieldResult[]) {
     .sort(byDocumentOrder);
 }
 
-function pickPasswordField(fields: AutofillTriageFieldResult[]) {
-  const passwordFields = fields.filter((field) => field.qualifiedAs === "password");
+function preferCurrentPasswordField(fields: AutofillTriageFieldResult[]) {
   return (
-    passwordFields.find((field) => field.reasons.includes("autocomplete:current-password")) ??
-    passwordFields[0] ??
+    fields.find((field) => field.reasons.includes("autocomplete:current-password")) ??
+    fields[0] ??
     null
   );
+}
+
+function isSameFillScope(
+  left: AutofillTriageFieldResult,
+  right: AutofillTriageFieldResult
+) {
+  if (left.formOpid !== undefined || right.formOpid !== undefined) {
+    return left.formOpid !== undefined && left.formOpid === right.formOpid;
+  }
+
+  if (left.containerOpid !== undefined || right.containerOpid !== undefined) {
+    return left.containerOpid !== undefined && left.containerOpid === right.containerOpid;
+  }
+
+  return false;
+}
+
+function pickPasswordField(
+  fields: AutofillTriageFieldResult[],
+  usernameField?: AutofillTriageFieldResult | null
+) {
+  const passwordFields = fields.filter((field) => field.qualifiedAs === "password");
+  if (usernameField) {
+    return preferCurrentPasswordField(
+      passwordFields.filter((field) => isSameFillScope(field, usernameField))
+    );
+  }
+
+  return preferCurrentPasswordField(passwordFields);
 }
 
 function pickUsernameField(
@@ -59,6 +87,15 @@ function pickUsernameField(
     );
     if (sameFormUsername) {
       return sameFormUsername;
+    }
+  }
+
+  if (passwordField?.containerOpid) {
+    const sameContainerUsername = usernameFields.find(
+      (field) => field.formOpid === undefined && field.containerOpid === passwordField.containerOpid
+    );
+    if (sameContainerUsername) {
+      return sameContainerUsername;
     }
   }
 
@@ -298,11 +335,16 @@ export function createLoginFillPlan(
 ): AutofillFillPlan {
   const report = triageAutofillPage(snapshot);
   const fields = candidateFields(report.fields);
-  const passwordField = typeof payload.password === "string" ? pickPasswordField(fields) : null;
+  const initialPasswordField =
+    typeof payload.password === "string" ? pickPasswordField(fields) : null;
   const usernameField =
     typeof payload.username === "string"
-      ? pickUsernameField(fields, passwordField) ??
-        pickSingleStepEmailUsernameField(report.fields, passwordField)
+      ? pickUsernameField(fields, initialPasswordField) ??
+        pickSingleStepEmailUsernameField(report.fields, initialPasswordField)
+      : null;
+  const passwordField =
+    typeof payload.password === "string"
+      ? pickPasswordField(fields, usernameField) ?? (usernameField ? null : initialPasswordField)
       : null;
   const actions: AutofillFillAction[] = [];
 

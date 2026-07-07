@@ -852,6 +852,20 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "secret_select").qualifiedAs).toBe("ignored");
   });
 
+  it("respects non-login exclusions before accepting current-password fields", () => {
+    document.body.innerHTML = `
+      <form class="newsletter">
+        <h2>Subscribe to our newsletter</h2>
+        <input name="subscriber_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "subscriber_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "subscriber_password").reasons).toContain("non-login:newsletter");
+  });
+
   it("uses aria-labelledby text as field label context", () => {
     document.body.innerHTML = `
       <form>

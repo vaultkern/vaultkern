@@ -569,6 +569,19 @@ function qualificationForFillableField(
   const searchableText = `${fieldText},${formText}`;
   const hasMixedLoginContext =
     hasLoginContext(searchableText) || !hasAccountCreationContext(searchableText);
+  const nonLogin = nonLoginReason(fieldText, formText);
+  const hasNewsletterLoginContext =
+    nonLogin === "non-login:newsletter" &&
+    hasLoginContext(searchableText) &&
+    (hasPasswordSibling(field, snapshot) || isUsernameLike(field, fieldText));
+  const canUseCurrentPasswordInNonLoginContext =
+    !nonLogin ||
+    hasNewsletterLoginContext ||
+    (nonLogin === "non-login:account-creation" && hasLoginContext(searchableText));
+  const isUsernameInCurrentPasswordForm =
+    isUsernameLike(field, fieldText) &&
+    hasMixedLoginContext &&
+    hasCurrentPasswordSibling(field, snapshot);
 
   if (
     [...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) &&
@@ -598,6 +611,10 @@ function qualificationForFillableField(
   }
 
   if (isPasswordLike(field) && autocomplete.has("current-password") && hasMixedLoginContext) {
+    if (nonLogin && !canUseCurrentPasswordInNonLoginContext) {
+      reasons.push(nonLogin);
+      return { qualifiedAs: "ignored", eligible: false, reasons };
+    }
     reasons.push("autocomplete:current-password");
     return { qualifiedAs: "password", eligible: true, reasons };
   }
@@ -609,20 +626,10 @@ function qualificationForFillableField(
     return { qualifiedAs: "newPassword", eligible: true, reasons };
   }
 
-  const nonLogin = nonLoginReason(fieldText, formText);
-  const isExplicitUsernameInCurrentPasswordForm =
-    ([...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) ||
-      [...EMAIL_AUTOCOMPLETE].some((token) => autocomplete.has(token))) &&
-    hasMixedLoginContext &&
-    hasCurrentPasswordSibling(field, snapshot);
   if (
     nonLogin &&
-    !isExplicitUsernameInCurrentPasswordForm &&
-    !(
-      nonLogin === "non-login:newsletter" &&
-      hasLoginContext(`${fieldText},${formText}`) &&
-      (hasPasswordSibling(field, snapshot) || isUsernameLike(field, fieldText))
-    )
+    !isUsernameInCurrentPasswordForm &&
+    !hasNewsletterLoginContext
   ) {
     reasons.push(nonLogin);
     return { qualifiedAs: "ignored", eligible: false, reasons };
