@@ -126,6 +126,94 @@ function isClippedZeroSizeAncestor(
   return overflow.includes("hidden") || overflow.includes("clip");
 }
 
+function parseCssNumber(value: string) {
+  return Number.parseFloat(value.trim().replace(/px$/i, ""));
+}
+
+function isZeroClipRect(value: string | undefined) {
+  const match = value?.trim().toLowerCase().match(/^rect\((.+)\)$/);
+  if (!match) {
+    return false;
+  }
+
+  const parts = match[1]
+    .split(/(?:\s*,\s*)|\s+/)
+    .filter(Boolean)
+    .map(parseCssNumber);
+  if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part))) {
+    return false;
+  }
+
+  const [top, right, bottom, left] = parts;
+  return right <= left || bottom <= top;
+}
+
+function expandInsetValues(values: number[]) {
+  if (values.length === 1) {
+    return [values[0], values[0], values[0], values[0]];
+  }
+  if (values.length === 2) {
+    return [values[0], values[1], values[0], values[1]];
+  }
+  if (values.length === 3) {
+    return [values[0], values[1], values[2], values[1]];
+  }
+  return values.slice(0, 4);
+}
+
+function isFullyInsetClipPath(value: string | undefined) {
+  const match = value?.trim().toLowerCase().match(/^inset\(([^)]+)\)$/);
+  if (!match) {
+    return false;
+  }
+
+  const values = match[1]
+    .split(/\s+/)
+    .filter((part) => part !== "round")
+    .map((part) => {
+      if (!part.endsWith("%")) {
+        return null;
+      }
+      const parsed = Number.parseFloat(part);
+      return Number.isFinite(parsed) ? parsed : null;
+    });
+  if (values.length === 0 || values.some((value) => value === null)) {
+    return false;
+  }
+
+  const [top, right, bottom, left] = expandInsetValues(values as number[]);
+  return top + bottom >= 100 || left + right >= 100;
+}
+
+function isFullyClipped(clip: string | undefined, clipPath: string | undefined) {
+  const normalizedClipPath = clipPath?.trim().toLowerCase();
+  return (
+    isZeroClipRect(clip) ||
+    (normalizedClipPath !== undefined &&
+      normalizedClipPath !== "" &&
+      normalizedClipPath !== "none" &&
+      isFullyInsetClipPath(normalizedClipPath))
+  );
+}
+
+function styleAttributeIsFullyClipped(value: string | null) {
+  const normalized = value?.toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return (
+    /(?:^|;)\s*clip\s*:\s*rect\(\s*0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?\s*\)/.test(
+      normalized
+    ) ||
+    /(?:^|;)\s*clip-path\s*:\s*inset\(\s*50%\s*\)/.test(normalized)
+  );
+}
+
+function hasZeroScaleTransform(value: string | undefined) {
+  const normalized = value?.replace(/\s+/g, "").toLowerCase();
+  return Boolean(normalized?.match(/(?:^|[,(])scale(?:x|y)?\(0(?:\.0+)?\)/));
+}
+
 function hasUsableRenderedRect(rect: DOMRect) {
   return (
     Number.isFinite(rect.left) &&
@@ -219,6 +307,10 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const inlineVisibility = current.style.visibility;
     const opacity = computedCssValue(style?.opacity, current.style.opacity);
     const position = current.style.position || style?.position;
+    const clip = current.style.clip || style?.clip;
+    const clipPath = current.style.clipPath || style?.clipPath;
+    const styleAttribute = current.getAttribute("style");
+    const transform = current.style.transform || style?.transform;
     const cssUnits = { emPx, remPx };
     const left = computedCssValue(style?.left, current.style.left, cssUnits);
     const top = computedCssValue(style?.top, current.style.top, cssUnits);
@@ -245,6 +337,9 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (opacity === 0) {
       addReason(reasons, "not-viewable:transparent");
     }
+    if (isFullyClipped(clip, clipPath) || styleAttributeIsFullyClipped(styleAttribute)) {
+      addReason(reasons, "not-viewable:clipped");
+    }
     if (
       (position === "absolute" || position === "fixed") &&
       (left !== null || top !== null || right !== null || bottom !== null)
@@ -259,6 +354,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     }
     if (
       (current === element && width === 0 && height === 0) ||
+      (current === element && hasZeroScaleTransform(transform)) ||
       (current !== element && isClippedZeroSizeAncestor(current, width, height))
     ) {
       addReason(reasons, "not-viewable:zero-size");

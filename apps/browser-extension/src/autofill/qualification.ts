@@ -33,6 +33,7 @@ const NEW_PASSWORD_PARTS = [
   "repeatpassword",
   "verifypassword"
 ];
+const PASSWORD_CONFIRMATION_EXACT_PARTS = new Set(["confirm", "confirmation"]);
 const PASSWORD_MASKED_CODE_PARTS = [
   "csc",
   "cccsc",
@@ -135,6 +136,25 @@ function formActionContext(value: string | undefined) {
   }
 }
 
+function implicitFormActionContext(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("#") && !trimmed.startsWith("?")) {
+    return undefined;
+  }
+
+  try {
+    const url = new URL(trimmed, "https://vaultkern.invalid");
+    const hash = url.hash ? url.hash.slice(1) : undefined;
+    return [hash, ...authQueryContext(url)].filter(Boolean).join(",");
+  } catch {
+    return trimmed.split(/[?#]/, 1)[0];
+  }
+}
+
 function formActionPathContext(value: string | undefined) {
   if (!value) {
     return undefined;
@@ -185,11 +205,20 @@ function joinedFormText(
     (form.htmlActionIsImplicit && options.includeImplicitAction === false)
       ? undefined
       : formActionContext(form.htmlAction),
+    options.includeAction !== false &&
+    form.htmlActionIsImplicit &&
+    options.includeImplicitAction === false
+      ? implicitFormActionContext(form.htmlActionAttribute)
+      : undefined,
     form.htmlMethod,
     ...form.headingText
   ]
     .map(normalize)
     .join(",");
+}
+
+function joinedFormPromptText(form: AutofillFormSnapshot | undefined) {
+  return (form?.headingText ?? []).map(normalize).join(",");
 }
 
 function normalizedParts(text: string) {
@@ -247,8 +276,10 @@ function hasNewPasswordSignal(candidate: AutofillFieldSnapshot) {
   if (fieldAutocompleteTokens(candidate).has("new-password")) {
     return true;
   }
-  return normalizedParts(joinedFieldText(candidate)).some((part) =>
-    NEW_PASSWORD_PARTS.some((keyword) => part.includes(keyword))
+  return normalizedParts(joinedFieldText(candidate)).some(
+    (part) =>
+      PASSWORD_CONFIRMATION_EXACT_PARTS.has(part) ||
+      NEW_PASSWORD_PARTS.some((keyword) => part.includes(keyword))
   );
 }
 
@@ -369,11 +400,12 @@ function hasFormSearchContext(form: AutofillFormSnapshot | undefined) {
 function isSearchField(
   field: AutofillFieldSnapshot,
   form: AutofillFormSnapshot | undefined,
-  hasScopedPasswordEvidence: boolean
+  hasScopedPasswordEvidence: boolean,
+  hasScopedLoginEvidence: boolean
 ) {
   return (
     hasFieldSearchContext(field) ||
-    (hasFormSearchContext(form) && !hasScopedPasswordEvidence)
+    (hasFormSearchContext(form) && !hasScopedPasswordEvidence && !hasScopedLoginEvidence)
   );
 }
 
@@ -504,11 +536,13 @@ function qualificationForFillableField(
   const fieldText = joinedFieldText(field);
   const formText = joinedFormText(form);
   const formPromptText = joinedFormText(form, { includeAction: false });
+  const visiblePromptText = `${joinedFieldContainerText(field)},${joinedFormPromptText(form)}`;
   const negativeFormText = joinedFormText(form, { includeImplicitAction: false });
   const autocomplete = fieldAutocompleteTokens(field);
   const hasScopedPasswordEvidence = isPasswordLike(field) || hasPasswordSibling(field, snapshot);
+  const loginEvidenceText = `${joinedFieldContainerText(field)},${formText}`;
 
-  if (isSearchField(field, form, hasScopedPasswordEvidence)) {
+  if (isSearchField(field, form, hasScopedPasswordEvidence, hasLoginContext(loginEvidenceText))) {
     reasons.push("excluded:search");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
@@ -545,7 +579,6 @@ function qualificationForFillableField(
 
   const searchableText = `${fieldText},${formText}`;
   const searchablePromptText = `${fieldText},${formPromptText}`;
-  const loginEvidenceText = `${joinedFieldContainerText(field)},${formText}`;
   const nonLogin = nonLoginReason(fieldText, negativeFormText);
   const hasNewsletterPasswordContext = hasPasswordSibling(field, snapshot) || isPasswordLike(field);
   const hasNewsletterLoginContext =
@@ -554,11 +587,11 @@ function qualificationForFillableField(
     (hasNewsletterPasswordContext || isUsernameLike(field, fieldText));
   const hasMixedCurrentPasswordLoginContext =
     nonLogin === "non-login:account-creation" &&
-    hasLoginContext(searchablePromptText) &&
+    hasLoginContext(visiblePromptText) &&
     (autocomplete.has("current-password") || hasCurrentPasswordSibling(field, snapshot));
   const hasMixedPasswordLoginContext =
     nonLogin === "non-login:account-creation" &&
-    hasLoginContext(searchablePromptText) &&
+    hasLoginContext(visiblePromptText) &&
     !hasNewPasswordSibling(field, snapshot) &&
     (isPasswordLike(field) || hasPasswordSibling(field, snapshot));
   if (

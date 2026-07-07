@@ -7,6 +7,7 @@ import type {
 import { getFieldFillability, getFieldVisibility } from "./visibility";
 
 const FIELD_SELECTOR = "input, select, textarea";
+const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
 
 function collectMatchingElements(root: ParentNode, selector: string) {
   const elements: Element[] = [];
@@ -161,6 +162,15 @@ function getFormControlElements(form: HTMLFormElement) {
   return Array.from(controls).sort(byDocumentOrder);
 }
 
+function getFirstFormField(form: HTMLFormElement) {
+  return collectMatchingElements(form, FIELD_SELECTOR)
+    .filter((element) => {
+      const field = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+      return field.form === form;
+    })
+    .sort(byDocumentOrder)[0];
+}
+
 function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
   const labels = new Set<Element>();
   const lookupRoot = lookupRootForElement(element);
@@ -201,7 +211,7 @@ function headingCanApplyToForm(heading: Element, form: HTMLFormElement) {
 }
 
 function scopeHasContextualHeading(scope: ParentNode, form: HTMLFormElement) {
-  return Array.from(scope.querySelectorAll("h1, h2, h3, h4, h5, h6")).some((heading) =>
+  return Array.from(scope.querySelectorAll(HEADING_SELECTOR)).some((heading) =>
     headingCanApplyToForm(heading, form)
   );
 }
@@ -232,7 +242,7 @@ function scopeForFormHeadings(form: HTMLFormElement): ParentNode {
     if (
       root.nodeType === 11 &&
       typeof shadowRoot.querySelector === "function" &&
-      shadowRoot.querySelector("h1, h2, h3, h4, h5, h6")
+      shadowRoot.querySelector(HEADING_SELECTOR)
     ) {
       return shadowRoot;
     }
@@ -288,7 +298,7 @@ function contextualPrecedingHeadings(precedingHeadings: Element[]) {
 
 function getHeadingText(form: HTMLFormElement) {
   const scope = scopeForFormHeadings(form);
-  const headings = Array.from(scope.querySelectorAll("h1, h2, h3, h4, h5, h6"));
+  const headings = Array.from(scope.querySelectorAll(HEADING_SELECTOR));
   const previousForms = Array.from(scope.querySelectorAll("form")).filter(
     (candidate) =>
       candidate !== form &&
@@ -296,6 +306,7 @@ function getHeadingText(form: HTMLFormElement) {
       Boolean(candidate.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING)
   );
   const previousForm = previousForms[previousForms.length - 1];
+  const firstField = getFirstFormField(form);
 
   const ownedHeadings: Element[] = [];
   const precedingHeadings: Element[] = [];
@@ -305,6 +316,13 @@ function getHeadingText(form: HTMLFormElement) {
     }
     const ownerForm = heading.closest("form");
     if (ownerForm === form) {
+      if (
+        firstField !== undefined &&
+        !heading.contains(firstField) &&
+        !Boolean(heading.compareDocumentPosition(firstField) & Node.DOCUMENT_POSITION_FOLLOWING)
+      ) {
+        continue;
+      }
       ownedHeadings.push(heading);
       continue;
     }
@@ -344,7 +362,7 @@ function headingAppliesToContainerField(heading: Element, field: Element | undef
 }
 
 function getOwnedHeadingText(container: Element, field?: Element) {
-  return Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+  return Array.from(container.querySelectorAll(HEADING_SELECTOR))
     .filter((heading) => heading.closest("form") === null)
     .filter((heading) => getFieldVisibility(heading as HTMLElement).viewable)
     .filter((heading) => headingAppliesToContainerField(heading, field))
@@ -363,6 +381,9 @@ function getContainerText(container: ParentNode | undefined, field?: Element) {
   if (container.matches(FIELD_SELECTOR)) {
     return getRootLevelRunSubmitText(container);
   }
+  const rootLevelHeadings = isRootLevelRunAnchor(container)
+    ? getRootLevelRunHeadingText(container, field)
+    : undefined;
   const submitText = isRootLevelRunAnchor(container)
     ? getRootLevelRunSubmitText(container)
     : getContainerSubmitText(container);
@@ -370,7 +391,7 @@ function getContainerText(container: ParentNode | undefined, field?: Element) {
     container.id,
     container.getAttribute("class"),
     container.getAttribute("aria-label"),
-    ...getOwnedHeadingText(container, field),
+    ...(rootLevelHeadings ?? getOwnedHeadingText(container, field)),
     ...submitText
   ]
     .map(optionalString)
@@ -442,6 +463,7 @@ function collectForms(documentRef: Document) {
       htmlName: optionalString(formElement.getAttribute("name")),
       htmlClass: optionalString(formElement.getAttribute("class")),
       htmlAction: getFormAction(formElement),
+      htmlActionAttribute: optionalString(formElement.getAttribute("action")),
       htmlActionIsImplicit,
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
       headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
@@ -505,7 +527,9 @@ function isRootLevelRunElement(candidate: Element) {
   return (
     candidate.matches(FIELD_SELECTOR) ||
     candidate.tagName.toLowerCase() === "button" ||
-    ["label", "small", "span", "p"].includes(candidate.tagName.toLowerCase())
+    ["label", "small", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6"].includes(
+      candidate.tagName.toLowerCase()
+    )
   );
 }
 
@@ -562,11 +586,27 @@ function collectRootLevelRunSubmitText(elements: Element[]) {
   return pickSubmitText(collectSubmitText(formlessControlsInElements(elements)));
 }
 
+function collectRootLevelRunHeadingText(elements: Element[], field?: Element) {
+  return elements
+    .filter((element) => element.matches(HEADING_SELECTOR))
+    .filter((heading) => getFieldVisibility(heading as HTMLElement).viewable)
+    .filter((heading) => headingAppliesToContainerField(heading, field))
+    .map((heading) => cleanText(heading.textContent))
+    .filter(Boolean);
+}
+
 function getRootLevelRunSubmitText(anchor: Element) {
   if (!isRootLevelRunAnchor(anchor)) {
     return [];
   }
   return collectRootLevelRunSubmitText(getRootLevelRunElements(anchor));
+}
+
+function getRootLevelRunHeadingText(anchor: Element, field?: Element) {
+  if (!isRootLevelRunAnchor(anchor)) {
+    return [];
+  }
+  return collectRootLevelRunHeadingText(getRootLevelRunElements(anchor), field);
 }
 
 function getFieldContainer(
