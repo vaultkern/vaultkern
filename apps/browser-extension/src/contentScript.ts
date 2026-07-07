@@ -472,14 +472,11 @@ function isPasswordChangeField(input: HTMLInputElement) {
   const passwords = passwordChangeGroup(input);
   const hasGroupChangeContext = hasPasswordChangeContextSignal(input);
 
-  if (
-    (hasNewPasswordSignal(input) || hasConfirmationPasswordSignal(input)) &&
-    !hasCurrentPasswordSignal(input)
-  ) {
+  if (hasNewPasswordSignal(input) && !hasCurrentPasswordSignal(input)) {
     return true;
   }
   if (passwords.length < 2) {
-    return false;
+    return hasLocalNewPasswordConfirmationContext(input);
   }
 
   const hasNewOrConfirmation = passwords.some(
@@ -646,11 +643,45 @@ function hasOnlyWrappedPasswordFields(panelChildren: Element[], container: Eleme
     passwordChildren.every((child) => visibleFormlessPasswords(child).length === 1) &&
     passwords.some(hasNewPasswordSignal) &&
     (passwords.some(hasCurrentPasswordSignal) ||
-      passwords.some((password) => {
-        const tokens = fieldTokens(password);
-        return tokens.includes("confirm") || tokens.includes("repeat");
-      }))
+      passwords.some(hasConfirmationPasswordSignal) ||
+      passwords.some(hasPasswordVerificationSignal))
   );
+}
+
+function hasLocalNewPasswordConfirmationContext(input: HTMLInputElement) {
+  if (!hasConfirmationPasswordSignal(input) && !hasPasswordVerificationSignal(input)) {
+    return false;
+  }
+
+  let container = input.parentElement;
+  while (container) {
+    const tagName = container.tagName.toLowerCase();
+    if (tagName === "body" || tagName === "html" || tagName === "form") {
+      return false;
+    }
+
+    const panelChildren = formLessCredentialPanelChildren(container);
+    const inputPanel = panelChildren.find((panel) => panel.contains(input));
+    const passwordChildren = panelChildren.filter(
+      (child) => visibleFormlessPasswords(child).length > 0
+    );
+    if (
+      inputPanel &&
+      passwordChildren.length > 1 &&
+      passwordChildren.every((child) => visibleFormlessPasswords(child).length === 1)
+    ) {
+      const passwords = passwordChildren.flatMap((child) => visibleFormlessPasswords(child));
+      return (
+        passwords.includes(input) &&
+        passwords.some((password) => password !== input && hasNewPasswordSignal(password)) &&
+        !passwords.some(hasCurrentPasswordSignal)
+      );
+    }
+
+    container = container.parentElement;
+  }
+
+  return false;
 }
 
 function hasCurrentPasswordSignal(input: HTMLInputElement) {

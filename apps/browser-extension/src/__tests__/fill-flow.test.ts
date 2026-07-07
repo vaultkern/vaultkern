@@ -1270,6 +1270,19 @@ describe("fillLoginForm", () => {
     expect(inputValue("#password")).toBe("secret-123");
   });
 
+  it("fills single confirm-password prompts as current-password prompts", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="password">Confirm password</label>
+        <input id="password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#password")).toBe("secret-123");
+  });
+
   it("uses form change context for generic current password fields", () => {
     document.body.innerHTML = `
       <form id="change-password">
@@ -1375,6 +1388,26 @@ describe("fillLoginForm", () => {
 
     expect(inputValue("#current-password")).toBe("");
     expect(inputValue("#new-password")).toBe("");
+  });
+
+  it("detects wrapped form-less new and verify password pairs", () => {
+    document.body.innerHTML = `
+      <div id="change-password">
+        <div>
+          <label for="new-password">New password</label>
+          <input id="new-password" type="password" name="password" value="" />
+        </div>
+        <div>
+          <label for="verify-password">Verify password</label>
+          <input id="verify-password" type="password" name="password" value="" />
+        </div>
+      </div>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#new-password")).toBe("");
+    expect(inputValue("#verify-password")).toBe("");
   });
 
   it("detects body-level wrapped current and new password pairs", () => {
