@@ -74,3 +74,36 @@ export interface AutofillTriageFieldResult extends AutofillFieldSnapshot {
 export interface AutofillTriageReport {
   fields: AutofillTriageFieldResult[];
 }
+
+export type AutofillCredentialScopeKind = "form" | "container" | "root-run" | "site-rule";
+
+export interface AutofillCredentialScope {
+  key: string;
+  kind: AutofillCredentialScopeKind;
+  fieldOpids: string[];
+  roles: AutofillFieldQualification[];
+  fields: AutofillTriageFieldResult[];
+}
+
+export interface AutofillFillPayload {
+  username?: string;
+  password?: string;
+  newPassword?: string;
+  totp?: string;
+}
+
+export type AutofillIntentKind =
+  | "login"
+  | "usernameFirst"
+  | "passwordStep"
+  | "totp"
+  | "registration"
+  | "passwordChange"
+  | "none";
+
+export interface AutofillIntentPlan {
+  kind: AutofillIntentKind;
+  scopeKey?: string;
+  fieldOpids: string[];
+  reasons: string[];
+}

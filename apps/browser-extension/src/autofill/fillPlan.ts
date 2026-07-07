@@ -1,3 +1,4 @@
+import { credentialScopeKey, fieldScopeMatches } from "./scope";
 import { triageAutofillPage } from "./triage";
 import type {
   AutofillPageSnapshot,
@@ -205,21 +206,6 @@ function isRegistrationUsernameFallback(
     scopedFields.some((candidate) => candidate.qualifiedAs === "newPassword") &&
     !scopedFields.some((candidate) => candidate.qualifiedAs === "password")
   );
-}
-
-function fieldScopeMatches(
-  left: AutofillTriageFieldResult,
-  right: AutofillTriageFieldResult
-) {
-  if (left.formOpid !== undefined || right.formOpid !== undefined) {
-    return left.formOpid !== undefined && left.formOpid === right.formOpid;
-  }
-
-  if (left.containerOpid !== undefined || right.containerOpid !== undefined) {
-    return left.containerOpid !== undefined && left.containerOpid === right.containerOpid;
-  }
-
-  return false;
 }
 
 function pickPasswordField(
@@ -486,16 +472,6 @@ function pickLoginPasswordFieldInScope(
 
 function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | undefined) {
   return field.formOpid === formOpid;
-}
-
-function credentialScopeKey(field: AutofillTriageFieldResult) {
-  if (field.formOpid !== undefined) {
-    return `form:${field.formOpid}`;
-  }
-  if (field.containerOpid !== undefined) {
-    return `container:${field.containerOpid}`;
-  }
-  return null;
 }
 
 function fieldIsInCredentialScope(
