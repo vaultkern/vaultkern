@@ -14,12 +14,44 @@ function addReason(reasons: string[], reason: string) {
   }
 }
 
-function numericCssValue(value: string | undefined) {
-  if (!value) {
+function numericCssValue(
+  value: string | undefined,
+  units: { emPx?: number; remPx?: number } = {}
+) {
+  const trimmed = value?.trim().toLowerCase();
+  if (!trimmed || trimmed === "auto") {
     return null;
   }
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  const match = trimmed.match(/^(-?\d+(?:\.\d+)?)([a-z%]*)$/);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number.parseFloat(match[1]);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  const unit = match[2];
+  if (unit === "" || unit === "px") {
+    return parsed;
+  }
+  if (unit === "em") {
+    return parsed * (units.emPx ?? 16);
+  }
+  if (unit === "rem") {
+    return parsed * (units.remPx ?? units.emPx ?? 16);
+  }
+
+  return parsed;
+}
+
+function computedCssValue(
+  computed: string | undefined,
+  inline: string | undefined,
+  units: { emPx?: number; remPx?: number } = {}
+) {
+  return numericCssValue(computed, units) ?? numericCssValue(inline, units);
 }
 
 function parentElementOrShadowHost(element: HTMLElement) {
@@ -86,16 +118,22 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     }
 
     const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    const rootStyle = current.ownerDocument.defaultView?.getComputedStyle(
+      current.ownerDocument.documentElement
+    );
+    const emPx = numericCssValue(style?.fontSize || current.style.fontSize) ?? 16;
+    const remPx = numericCssValue(rootStyle?.fontSize) ?? emPx;
     const inlineDisplay = current.style.display;
     const inlineVisibility = current.style.visibility;
-    const opacity = numericCssValue(current.style.opacity || style?.opacity);
+    const opacity = computedCssValue(style?.opacity, current.style.opacity);
     const position = current.style.position || style?.position;
-    const left = numericCssValue(current.style.left || style?.left);
-    const top = numericCssValue(current.style.top || style?.top);
-    const right = numericCssValue(current.style.right || style?.right);
-    const bottom = numericCssValue(current.style.bottom || style?.bottom);
-    const width = numericCssValue(current.style.width || style?.width);
-    const height = numericCssValue(current.style.height || style?.height);
+    const cssUnits = { emPx, remPx };
+    const left = computedCssValue(style?.left, current.style.left, cssUnits);
+    const top = computedCssValue(style?.top, current.style.top, cssUnits);
+    const right = computedCssValue(style?.right, current.style.right, cssUnits);
+    const bottom = computedCssValue(style?.bottom, current.style.bottom, cssUnits);
+    const width = computedCssValue(style?.width, current.style.width, cssUnits);
+    const height = computedCssValue(style?.height, current.style.height, cssUnits);
     if (
       inlineDisplay === "none" ||
       inlineVisibility === "hidden" ||

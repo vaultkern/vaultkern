@@ -671,15 +671,16 @@ function qualificationForFillableField(
     nonLogin === "non-login:account-creation" &&
     hasLoginContext(searchableText) &&
     (autocomplete.has("current-password") || hasCurrentPasswordSibling(field, snapshot));
-  const hasMixedLoginFormContext =
+  const hasMixedPasswordLoginContext =
     nonLogin === "non-login:account-creation" &&
     hasLoginContext(searchableText) &&
-    (isPasswordLike(field) || hasPasswordSibling(field, snapshot) || hasCurrentPasswordSibling(field, snapshot));
+    !hasNewPasswordSibling(field, snapshot) &&
+    (isPasswordLike(field) || hasPasswordSibling(field, snapshot));
   const canUseCurrentPasswordInNonLoginContext =
     !nonLogin ||
     hasNewsletterLoginContext ||
     hasMixedCurrentPasswordLoginContext ||
-    hasMixedLoginFormContext;
+    hasMixedPasswordLoginContext;
   const isUsernameInCurrentPasswordForm =
     isUsernameLike(field, fieldText) &&
     hasMixedLoginContext &&
@@ -689,7 +690,7 @@ function qualificationForFillableField(
     isUsernameInCurrentPasswordForm ||
     hasNewsletterLoginContext ||
     hasMixedCurrentPasswordLoginContext ||
-    hasMixedLoginFormContext;
+    hasMixedPasswordLoginContext;
 
   if (
     [...USERNAME_AUTOCOMPLETE].some((token) => autocomplete.has(token)) &&
@@ -747,7 +748,7 @@ function qualificationForFillableField(
     !isUsernameInCurrentPasswordForm &&
     !hasNewsletterLoginContext &&
     !hasMixedCurrentPasswordLoginContext &&
-    !hasMixedLoginFormContext
+    !hasMixedPasswordLoginContext
   ) {
     reasons.push(nonLogin);
     return { qualifiedAs: "ignored", eligible: false, reasons };

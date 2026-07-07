@@ -162,8 +162,25 @@ function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAr
 }
 
 function scopeForFormHeadings(form: HTMLFormElement): ParentNode {
-  if (form.parentElement) {
-    return form.parentElement.closest("section, article, main, aside") ?? form.parentElement;
+  let scope = form.parentElement;
+  if (scope) {
+    const semanticScope = scope.closest("section, article, main, aside");
+    if (semanticScope) {
+      return semanticScope;
+    }
+
+    while (scope) {
+      const tagName = scope.tagName.toLowerCase();
+      if (tagName === "body" || tagName === "html") {
+        break;
+      }
+      if (scope.querySelector("h1, h2, h3, h4, h5, h6")) {
+        return scope;
+      }
+      scope = scope.parentElement;
+    }
+
+    return form.parentElement;
   }
 
   const root = form.getRootNode();
@@ -228,7 +245,7 @@ function getSubmitText(form: HTMLFormElement) {
     }
     const tagName = element.tagName.toLowerCase();
     if (tagName === "button") {
-      const type = (element.getAttribute("type") ?? "submit").toLowerCase();
+      const type = (element as HTMLButtonElement).type.toLowerCase();
       if (type !== "submit") {
         return [];
       }
@@ -360,8 +377,12 @@ function getFieldContainer(
     if (tagName === "body" || tagName === "html" || tagName === "form") {
       return undefined;
     }
-    if (container.querySelectorAll(FIELD_SELECTOR).length > 1) {
+    const fieldCount = container.querySelectorAll(FIELD_SELECTOR).length;
+    if (fieldCount > 1) {
       return container;
+    }
+    if (["section", "article", "main", "aside"].includes(tagName)) {
+      return undefined;
     }
     container = container.parentElement;
   }
