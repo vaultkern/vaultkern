@@ -583,6 +583,56 @@ describe("fillLoginForm", () => {
     expect(inputValue("#visible-password")).toBe("secret-123");
   });
 
+  it("rejects explicitly positioned fields above the document", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="top-email" type="email" autocomplete="username" style="position: absolute; top: -10000px; left: 0;" value="top@example.com" />
+        <input id="visible-email" type="email" autocomplete="username" value="" />
+        <input id="top-password" type="password" autocomplete="current-password" style="position: absolute; top: -10000px; left: 0;" value="top-secret" />
+        <input id="visible-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+    const topRect = {
+      x: 0,
+      y: -10000,
+      width: 320,
+      height: 32,
+      top: -10000,
+      right: 320,
+      bottom: -9968,
+      left: 0,
+      toJSON: () => ({})
+    } as DOMRect;
+    const visibleRect = {
+      x: 0,
+      y: 0,
+      width: 320,
+      height: 32,
+      top: 0,
+      right: 320,
+      bottom: 32,
+      left: 0,
+      toJSON: () => ({})
+    } as DOMRect;
+    for (const selector of ["#top-email", "#top-password"]) {
+      const input = document.querySelector(selector) as HTMLInputElement;
+      vi.spyOn(input, "getClientRects").mockReturnValue([topRect] as unknown as DOMRectList);
+      vi.spyOn(input, "getBoundingClientRect").mockReturnValue(topRect);
+    }
+    for (const selector of ["#visible-email", "#visible-password"]) {
+      const input = document.querySelector(selector) as HTMLInputElement;
+      vi.spyOn(input, "getClientRects").mockReturnValue([visibleRect] as unknown as DOMRectList);
+      vi.spyOn(input, "getBoundingClientRect").mockReturnValue(visibleRect);
+    }
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#top-email")).toBe("top@example.com");
+    expect(inputValue("#top-password")).toBe("top-secret");
+    expect(inputValue("#visible-email")).toBe("alice@example.com");
+    expect(inputValue("#visible-password")).toBe("secret-123");
+  });
+
   it("uses generic user fields as a form-less username fallback", () => {
     document.body.innerHTML = `
       <input id="account-field" type="text" name="user" value="" />
@@ -676,6 +726,54 @@ describe("fillLoginForm", () => {
 
     expect(inputValue("#subscription-email")).toBe("subscriber@example.com");
     expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("fills subscriber login emails beside passwords", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="subscriber-email" type="email" name="subscriber_email" autocomplete="username" value="" />
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "subscriber@example.com", password: "secret-123" });
+
+    expect(inputValue("#subscriber-email")).toBe("subscriber@example.com");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("does not scope username-only fills to unrelated password fields", () => {
+    document.body.innerHTML = `
+      <form id="username-step">
+        <input id="login-email" type="email" autocomplete="username" value="" />
+      </form>
+      <form id="unrelated-password-form">
+        <input id="unrelated-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com" });
+
+    expect(inputValue("#login-email")).toBe("alice@example.com");
+    expect(inputValue("#unrelated-password")).toBe("");
+  });
+
+  it("does not let unrelated password-change groups suppress username-only fills", () => {
+    document.body.innerHTML = `
+      <form id="username-step">
+        <input id="login-email" type="email" autocomplete="username" value="" />
+      </form>
+      <section id="reset-panel">
+        <input id="current-password" type="password" name="current_password" value="" />
+        <input id="new-password" type="password" name="new_password" value="" />
+      </section>
+    `;
+
+    fillLoginForm({ username: "alice@example.com" });
+
+    expect(inputValue("#login-email")).toBe("alice@example.com");
+    expect(inputValue("#current-password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
   });
 
   it("does not fill high-confidence usernames outside the password form", () => {

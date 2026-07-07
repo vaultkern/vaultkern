@@ -38,6 +38,10 @@ function isWritableVisibleInput(input: HTMLInputElement) {
     return false;
   }
 
+  if (hasLayoutBox && rect.bottom < 0 && hasOffscreenExplicitPosition(style)) {
+    return false;
+  }
+
   if (!hasLayoutBox && hasOffscreenExplicitPosition(style)) {
     return false;
   }
@@ -116,7 +120,28 @@ function labelTextForInput(input: HTMLInputElement) {
   return [...labels, ...labelledBy].join(" ");
 }
 
-function isRejectedUsernameCandidate(input: HTMLInputElement) {
+type UsernameScoreOptions = {
+  allowPromotionalLoginIdentifier?: boolean;
+};
+
+type UsernameCandidate = {
+  input: HTMLInputElement;
+  index: number;
+};
+
+type ScoredUsernameCandidate = UsernameCandidate & {
+  score: number;
+};
+
+type ScopedUsernameCandidates = {
+  candidates: UsernameCandidate[];
+  allowPromotionalLoginIdentifier: boolean;
+};
+
+function isRejectedUsernameCandidate(
+  input: HTMLInputElement,
+  options: UsernameScoreOptions = {}
+) {
   if (input.type === "search") {
     return true;
   }
@@ -128,19 +153,19 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
 
   const tokens = fieldTokens(input);
   const tokenSet = new Set(tokens.split(/[^a-z0-9]+/).filter(Boolean));
-  const hasUsernameSignal =
-    autocomplete === "username" ||
-    autocomplete === "email" ||
-    input.type === "email" ||
-    tokens.includes("username") ||
-    tokens.includes("email") ||
-    tokens.includes("login") ||
-    tokenSet.has("user") ||
-    tokenSet.has("account") ||
-    tokenSet.has("customer") ||
-    tokenSet.has("member") ||
-    tokenSet.has("client") ||
-    tokenSet.has("identifier");
+  const hasUsernameSignal = hasUsernameFieldSignal(input, autocomplete, tokens, tokenSet);
+  const isPromotionalField = ["newsletter", "subscribe"].some((token) =>
+    tokens.includes(token)
+  );
+  if (
+    isPromotionalField &&
+    !(options.allowPromotionalLoginIdentifier && hasUsernameSignal)
+  ) {
+    return true;
+  }
+  if (tokens.includes("subscription") && !hasUsernameSignal) {
+    return true;
+  }
   if (
     [
       "verificationcode",
@@ -148,14 +173,9 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
       "authenticationcode",
       "captcha",
       "searchquery",
-      "zipcode",
-      "newsletter",
-      "subscribe"
+      "zipcode"
     ].some((token) => tokens.includes(token))
   ) {
-    return true;
-  }
-  if (tokens.includes("subscription") && !hasUsernameSignal) {
     return true;
   }
   if (
@@ -176,8 +196,33 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
   return false;
 }
 
-function usernameScore(input: HTMLInputElement) {
-  if (isRejectedUsernameCandidate(input)) {
+function hasUsernameFieldSignal(
+  input: HTMLInputElement,
+  autocomplete: string,
+  tokens: string,
+  tokenSet: Set<string>
+) {
+  return (
+    autocomplete === "username" ||
+    autocomplete === "email" ||
+    input.type === "email" ||
+    tokens.includes("username") ||
+    tokens.includes("email") ||
+    tokens.includes("login") ||
+    tokenSet.has("user") ||
+    tokenSet.has("account") ||
+    tokenSet.has("customer") ||
+    tokenSet.has("member") ||
+    tokenSet.has("client") ||
+    tokenSet.has("identifier")
+  );
+}
+
+function usernameScore(
+  input: HTMLInputElement,
+  options: UsernameScoreOptions = {}
+) {
+  if (isRejectedUsernameCandidate(input, options)) {
     return -1;
   }
 
@@ -219,17 +264,15 @@ function usernameScore(input: HTMLInputElement) {
 function pickUsernameField(passwordField: HTMLInputElement | null) {
   const candidates = Array.from(
     document.querySelectorAll('input[type="text"], input[type="email"]')
-  ).filter((input): input is HTMLInputElement => input instanceof HTMLInputElement);
-
-  const scoredCandidates = candidates
+  )
+    .filter((input): input is HTMLInputElement => input instanceof HTMLInputElement)
     .filter(isWritableVisibleInput)
-    .map((input, index) => ({ input, score: usernameScore(input), index }))
-    .filter((candidate) => candidate.score >= 0)
-    .sort((left, right) => right.score - left.score || left.index - right.index);
+    .map((input, index) => ({ input, index }));
 
   if (passwordField?.form) {
-    const sameFormCandidates = scoredCandidates.filter(
-      (candidate) => candidate.input.form === passwordField.form
+    const sameFormCandidates = scoreUsernameCandidates(
+      candidates.filter((candidate) => candidate.input.form === passwordField.form),
+      { allowPromotionalLoginIdentifier: true }
     );
 
     return (
@@ -239,33 +282,52 @@ function pickUsernameField(passwordField: HTMLInputElement | null) {
   }
 
   if (passwordField) {
-    const scopedCandidates = scopedFormlessUsernameCandidates(scoredCandidates, passwordField);
+    const scoped = scopedFormlessUsernameCandidates(candidates, passwordField);
+    const scopedCandidates = scoreUsernameCandidates(scoped.candidates, {
+      allowPromotionalLoginIdentifier: scoped.allowPromotionalLoginIdentifier
+    });
     return scopedCandidates.find((candidate) => candidate.score > 0)?.input ?? null;
   }
 
-  return (
-    scoredCandidates.find((candidate) => candidate.score > 0)?.input ??
-    null
-  );
+  return scoreUsernameCandidates(candidates).find((candidate) => candidate.score > 0)?.input ?? null;
+}
+
+function scoreUsernameCandidates(
+  candidates: UsernameCandidate[],
+  options: UsernameScoreOptions = {}
+): ScoredUsernameCandidate[] {
+  return candidates
+    .map((candidate) => ({
+      ...candidate,
+      score: usernameScore(candidate.input, options)
+    }))
+    .filter((candidate) => candidate.score >= 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index);
 }
 
 function scopedFormlessUsernameCandidates(
-  scoredCandidates: Array<{ input: HTMLInputElement; score: number; index: number }>,
+  candidates: UsernameCandidate[],
   passwordField: HTMLInputElement
-) {
+): ScopedUsernameCandidates {
   const container = nearestFormlessCredentialContainer(passwordField);
   if (container) {
-    return scoredCandidates.filter(
-      (candidate) => candidate.input.form === null && container.contains(candidate.input)
-    );
+    return {
+      candidates: candidates.filter(
+        (candidate) => candidate.input.form === null && container.contains(candidate.input)
+      ),
+      allowPromotionalLoginIdentifier: hasCredentialContainerSignal(container)
+    };
   }
 
   const rootRun = rootLevelCredentialRun(passwordField);
   if (!rootRun.length) {
-    return [];
+    return { candidates: [], allowPromotionalLoginIdentifier: false };
   }
 
-  return scoredCandidates.filter((candidate) => rootRun.includes(candidate.input));
+  return {
+    candidates: candidates.filter((candidate) => rootRun.includes(candidate.input)),
+    allowPromotionalLoginIdentifier: false
+  };
 }
 
 function nearestFormlessCredentialContainer(input: HTMLInputElement) {
@@ -277,7 +339,9 @@ function nearestFormlessCredentialContainer(input: HTMLInputElement) {
       return null;
     }
 
-    const usernames = visibleFormlessUsernameInputs(container);
+    const usernames = visibleFormlessUsernameInputs(container, {
+      allowPromotionalLoginIdentifier: true
+    });
     if (usernames.length > 0) {
       const panelChildren = formLessCredentialPanelChildren(container);
       if (panelChildren.length > 1) {
@@ -302,7 +366,10 @@ function nearestFormlessCredentialContainer(input: HTMLInputElement) {
   return null;
 }
 
-function visibleFormlessUsernameInputs(container: Element) {
+function visibleFormlessUsernameInputs(
+  container: Element,
+  options: UsernameScoreOptions = {}
+) {
   return Array.from(
     container.querySelectorAll('input[type="text"], input[type="email"]')
   ).filter(
@@ -310,7 +377,7 @@ function visibleFormlessUsernameInputs(container: Element) {
       candidate instanceof HTMLInputElement &&
       candidate.form === null &&
       isWritableVisibleInput(candidate) &&
-      usernameScore(candidate) >= 0
+      usernameScore(candidate, options) >= 0
   );
 }
 
@@ -676,15 +743,17 @@ export function fillLoginForm(payload: {
   username?: string;
   password?: string;
 }) {
-  const password = pickPasswordField();
-  const username =
-    password === null && hasPasswordChangeContext() ? null : pickUsernameField(password);
+  const shouldFillPassword = typeof payload.password === "string";
+  const password = shouldFillPassword ? pickPasswordField() : null;
+  const passwordChangeContext =
+    shouldFillPassword && password === null && hasPasswordChangeContext();
+  const username = passwordChangeContext ? null : pickUsernameField(password);
 
   if (typeof payload.username === "string" && username) {
     writeFieldValue(username, payload.username);
   }
 
-  if (typeof payload.password === "string" && password) {
+  if (shouldFillPassword && password) {
     writeFieldValue(password, payload.password);
   }
 }
