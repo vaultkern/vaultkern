@@ -694,6 +694,23 @@ describe("fillLoginForm", () => {
     expect(inputValue("#repeat-password")).toBe("");
   });
 
+  it("does not fill root-level password change fields separated by labels", () => {
+    document.body.innerHTML = `
+      <label for="old-password">Current password</label>
+      <input id="old-password" type="password" name="password" value="" />
+      <label for="new-password">New password</label>
+      <input id="new-password" type="password" name="password" value="" />
+      <label for="repeat-password">Confirm password</label>
+      <input id="repeat-password" type="password" name="password" value="" />
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#old-password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
+    expect(inputValue("#repeat-password")).toBe("");
+  });
+
   it("keeps form-less login passwords separate from reset panels", () => {
     document.body.innerHTML = `
       <section>

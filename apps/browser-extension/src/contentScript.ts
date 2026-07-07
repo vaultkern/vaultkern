@@ -495,28 +495,56 @@ function credentialFieldCount(container: Element) {
 }
 
 function rootLevelPasswordRun(input: HTMLInputElement) {
-  if (input.parentElement?.tagName.toLowerCase() !== "body") {
+  const runElement = rootLevelRunElement(input);
+  if (!rootLevelRunParent(runElement)) {
     return [];
   }
 
   const passwords: HTMLInputElement[] = [input];
-  let previous = input.previousElementSibling;
-  while (previous instanceof HTMLInputElement && previous.type === "password") {
-    if (isVisibleFormlessPassword(previous)) {
-      passwords.unshift(previous);
-    }
-    previous = previous.previousElementSibling;
+  let previous = adjacentRootPasswordElement(runElement.previousElementSibling, "previous");
+  while (previous) {
+    passwords.unshift(previous);
+    previous = adjacentRootPasswordElement(
+      rootLevelRunElement(previous).previousElementSibling,
+      "previous"
+    );
   }
 
-  let next = input.nextElementSibling;
-  while (next instanceof HTMLInputElement && next.type === "password") {
-    if (isVisibleFormlessPassword(next)) {
-      passwords.push(next);
-    }
-    next = next.nextElementSibling;
+  let next = adjacentRootPasswordElement(runElement.nextElementSibling, "next");
+  while (next) {
+    passwords.push(next);
+    next = adjacentRootPasswordElement(rootLevelRunElement(next).nextElementSibling, "next");
   }
 
   return passwords.length > 1 ? passwords : [];
+}
+
+function adjacentRootPasswordElement(
+  candidate: Element | null,
+  direction: "next" | "previous"
+) {
+  let element = candidate;
+  while (
+    element?.tagName.toLowerCase() === "label" &&
+    passwordInputForRunElement(element) === null
+  ) {
+    element =
+      direction === "next" ? element.nextElementSibling : element.previousElementSibling;
+  }
+  return passwordInputForRunElement(element);
+}
+
+function passwordInputForRunElement(candidate: Element | null) {
+  if (isVisibleFormlessPassword(candidate)) {
+    return candidate;
+  }
+  if (candidate?.tagName.toLowerCase() !== "label") {
+    return null;
+  }
+  const inputs = Array.from(candidate.querySelectorAll('input[type="password"]')).filter(
+    isVisibleFormlessPassword
+  );
+  return inputs.length === 1 ? inputs[0] : null;
 }
 
 function pickPasswordField() {
