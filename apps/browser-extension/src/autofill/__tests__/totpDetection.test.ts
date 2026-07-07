@@ -52,6 +52,19 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#email-code") as HTMLInputElement).value).toBe("");
   });
 
+  it("does not fill generic one-time-code prompts without authenticator context", () => {
+    document.body.innerHTML = `
+      <form aria-label="Verification">
+        <label for="verification-code">Verification code</label>
+        <input id="verification-code" name="verification_code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#verification-code") as HTMLInputElement).value).toBe("");
+  });
+
   it("does not let generic MFA form context override SMS or email code labels", () => {
     document.body.innerHTML = `
       <form>

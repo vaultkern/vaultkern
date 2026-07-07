@@ -4,11 +4,13 @@ import { collectMatchingElements, FIELD_SELECTOR } from "./collectPageFields";
 function isWritableField(
   element: Element
 ): element is HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement {
+  const ownerWindow = element.ownerDocument.defaultView;
   if (
+    ownerWindow === null ||
     !(
-      element instanceof HTMLInputElement ||
-      element instanceof HTMLSelectElement ||
-      element instanceof HTMLTextAreaElement
+      element instanceof ownerWindow.HTMLInputElement ||
+      element instanceof ownerWindow.HTMLSelectElement ||
+      element instanceof ownerWindow.HTMLTextAreaElement
     )
   ) {
     return false;
@@ -30,9 +32,10 @@ function writeFieldValue(
   value: string
 ) {
   element.value = value;
+  const EventConstructor = element.ownerDocument.defaultView?.Event ?? Event;
 
   for (const eventName of ["input", "change", "blur"]) {
-    element.dispatchEvent(new Event(eventName, { bubbles: true }));
+    element.dispatchEvent(new EventConstructor(eventName, { bubbles: true }));
   }
 }
 

@@ -76,6 +76,28 @@ function pickPasswordField(
   return preferCurrentPasswordField(passwordFields);
 }
 
+function isCurrentPasswordField(field: AutofillTriageFieldResult) {
+  return field.reasons.includes("autocomplete:current-password");
+}
+
+function pickUnscopedPasswordAfterUsername(
+  fields: AutofillTriageFieldResult[],
+  usernameField: AutofillTriageFieldResult
+) {
+  if (usernameField.formOpid !== undefined || usernameField.containerOpid !== undefined) {
+    return null;
+  }
+
+  return (
+    fields.find(
+      (field) =>
+        field.qualifiedAs === "password" &&
+        field.elementNumber > usernameField.elementNumber &&
+        !isCurrentPasswordField(field)
+    ) ?? null
+  );
+}
+
 function pickUsernameField(
   fields: AutofillTriageFieldResult[],
   passwordField: AutofillTriageFieldResult | null
@@ -118,9 +140,26 @@ function isSingleStepEmailCandidate(field: AutofillTriageFieldResult) {
     field.viewable &&
     field.fillable &&
     field.tagName === "input" &&
-    field.htmlType === "email" &&
+    (field.htmlType === "email" ||
+      (field.htmlType === "text" && singleStepFieldHasEmailHint(field))) &&
     !hasBlockingUsernameFallbackReason(field)
   );
+}
+
+function singleStepFieldHasEmailHint(field: AutofillTriageFieldResult) {
+  const fieldText = [
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.labelText,
+    ...field.dataSetValues
+  ]
+    .map(normalizeHint)
+    .join(",");
+  return fieldText.includes("email");
 }
 
 function pickSingleStepEmailUsernameField(
@@ -349,7 +388,8 @@ export function createLoginFillPlan(
   const passwordField =
     typeof payload.password === "string"
       ? usernameField
-        ? pickPasswordField(fields, usernameField) ?? initialPasswordField
+        ? pickPasswordField(fields, usernameField) ??
+          pickUnscopedPasswordAfterUsername(fields, usernameField)
         : pickFirstPasswordField(fields)
       : null;
   const actions: AutofillFillAction[] = [];

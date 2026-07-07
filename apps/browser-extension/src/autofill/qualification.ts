@@ -126,6 +126,23 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
     .join(",");
 }
 
+function joinedFieldPromptText(field: AutofillFieldSnapshot) {
+  return [
+    field.htmlType,
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.inputMode,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.labelText,
+    ...field.dataSetValues
+  ]
+    .map(normalize)
+    .join(",");
+}
+
 function joinedFormTextParts(
   form: AutofillFormSnapshot | undefined,
   options: { includeAction: boolean }
@@ -442,6 +459,21 @@ function hasAuthenticatorTotpKeyword(text: string) {
   return AUTHENTICATOR_TOTP_KEYWORDS.some((keyword) => text.includes(keyword));
 }
 
+function hasStrongTotpContext(text: string) {
+  return (
+    hasAuthenticatorTotpKeyword(text) ||
+    text.includes("2fa") ||
+    text.includes("2factor") ||
+    text.includes("2step") ||
+    text.includes("mfa") ||
+    text.includes("otp") ||
+    text.includes("totp") ||
+    text.includes("onetime") ||
+    text.includes("twofactor") ||
+    text.includes("twostep")
+  );
+}
+
 function hasOutOfBandCodeSignal(text: string) {
   return (
     text.includes("sms") ||
@@ -519,10 +551,15 @@ function hasFieldCodeHint(
   );
 }
 
-function isTotpLike(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
+function isTotpLike(
+  field: AutofillFieldSnapshot,
+  fieldText: string,
+  fieldPromptText: string,
+  formText: string
+) {
   const autocomplete = fieldAutocompleteTokens(field);
   if ([...TOTP_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
-    return true;
+    return hasStrongTotpContext(`${fieldPromptText},${formText}`);
   }
   if (field.htmlType === "password") {
     return (
@@ -575,6 +612,7 @@ function qualificationForFillableField(
   reasons: string[]
 ): FieldQualification {
   const fieldText = joinedFieldText(field);
+  const fieldPromptText = joinedFieldPromptText(field);
   const formText = joinedFormText(form);
   const formPromptText = joinedFormPromptText(form);
   const autocomplete = fieldAutocompleteTokens(field);
@@ -714,13 +752,13 @@ function qualificationForFillableField(
     field.htmlType === "password" &&
     !autocomplete.has("current-password") &&
     hasPasswordMaskedCodeSignal(fieldText) &&
-    !isTotpLike(field, fieldText, formPromptText)
+    !isTotpLike(field, fieldText, fieldPromptText, formPromptText)
   ) {
     reasons.push("excluded:one-time-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  if (isTotpLike(field, fieldText, formPromptText)) {
+  if (isTotpLike(field, fieldText, fieldPromptText, formPromptText)) {
     if (autocomplete.has("one-time-code")) {
       reasons.push("autocomplete:one-time-code");
     }

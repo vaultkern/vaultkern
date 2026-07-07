@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { fillLoginForm } from "../../contentScript";
+import { applyFillPlan } from "../applyFillPlan";
+import { collectAutofillPageSnapshot } from "../collectPageFields";
+import { createLoginFillPlan } from "../fillPlan";
 
 function loadSmokeBody(fileName: string) {
   const smokePage = readFileSync(`smoke/${fileName}`, "utf8");
@@ -102,6 +105,20 @@ describe("login detection fill flow", () => {
     document.body.innerHTML = `
       <form>
         <input name="email" type="email" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+  });
+
+  it("falls back to a single text email field for username-first fill", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="text" />
       </form>
     `;
 
@@ -268,6 +285,33 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("keeps password fallback near an unscoped username when settings fields follow", () => {
+    document.body.innerHTML = `
+      <section>
+        <input name="login_email" type="email" autocomplete="username" />
+      </section>
+      <section>
+        <input name="login_password" type="password" />
+      </section>
+      <form id="settings">
+        <input name="current_password" type="password" autocomplete="current-password" />
+        <input name="new_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="login_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="login_password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+    expect((document.querySelector('input[name="current_password"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+  });
+
   it("does not fill username-first signup forms", () => {
     document.body.innerHTML = `
       <main>
@@ -286,6 +330,31 @@ describe("login detection fill flow", () => {
     );
     expect((document.querySelector('input[name="new_password"]') as HTMLInputElement).value).toBe(
       ""
+    );
+  });
+
+  it("applies fill plans to fields from another document realm", () => {
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const frameDocument = iframe.contentDocument!;
+    frameDocument.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" />
+        <input name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const plan = createLoginFillPlan(collectAutofillPageSnapshot(frameDocument), {
+      username: "alice@example.com",
+      password: "secret"
+    });
+    applyFillPlan(plan, frameDocument);
+
+    expect((frameDocument.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((frameDocument.querySelector('input[name="password"]') as HTMLInputElement).value).toBe(
+      "secret"
     );
   });
 
