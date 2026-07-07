@@ -365,6 +365,37 @@ describe("fillLoginForm", () => {
     expect(inputValue("#below-password")).toBe("secret-123");
   });
 
+  it("keeps negatively offset fields fillable when viewport geometry is visible", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="position: relative; margin-top: 200px;">
+          <input id="offset-email" type="email" autocomplete="username" style="position: absolute; top: -8px;" value="" />
+          <input id="offset-password" type="password" autocomplete="current-password" style="position: absolute; top: -8px;" value="" />
+        </div>
+      </form>
+    `;
+    const rect = {
+      x: 0,
+      y: 192,
+      width: 320,
+      height: 32,
+      top: 192,
+      right: 320,
+      bottom: 224,
+      left: 0,
+      toJSON: () => ({})
+    } as DOMRect;
+    for (const input of Array.from(document.querySelectorAll("input"))) {
+      vi.spyOn(input, "getClientRects").mockReturnValue([rect] as unknown as DOMRectList);
+      vi.spyOn(input, "getBoundingClientRect").mockReturnValue(rect);
+    }
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#offset-email")).toBe("alice@example.com");
+    expect(inputValue("#offset-password")).toBe("secret-123");
+  });
+
   it("field selection rejects search and verification code username candidates", () => {
     document.body.innerHTML = `
       <form>
@@ -399,6 +430,32 @@ describe("fillLoginForm", () => {
     document.body.innerHTML = `
       <form>
         <input id="account-field" type="text" name="user" value="" />
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice", password: "secret-123" });
+
+    expect(inputValue("#account-field")).toBe("alice");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("uses generic user fields as a form-less username fallback", () => {
+    document.body.innerHTML = `
+      <input id="account-field" type="text" name="user" value="" />
+      <input id="login-password" type="password" value="" />
+    `;
+
+    fillLoginForm({ username: "alice", password: "secret-123" });
+
+    expect(inputValue("#account-field")).toBe("alice");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("falls back to high-confidence usernames outside the password form", () => {
+    document.body.innerHTML = `
+      <input id="account-field" type="text" autocomplete="username" value="" />
+      <form>
         <input id="login-password" type="password" value="" />
       </form>
     `;

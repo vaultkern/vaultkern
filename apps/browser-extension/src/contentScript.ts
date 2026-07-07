@@ -16,16 +16,21 @@ function isWritableVisibleInput(input: HTMLInputElement) {
     return false;
   }
 
-  if (hasTinyExplicitSize(style) || hasOffscreenExplicitPosition(style)) {
+  if (hasTinyExplicitSize(style)) {
     return false;
   }
 
+  const hasLayoutBox = input.getClientRects().length > 0;
   const rect = input.getBoundingClientRect();
-  if (input.getClientRects().length > 0 && (rect.width < 2 || rect.height < 2)) {
+  if (hasLayoutBox && (rect.width < 2 || rect.height < 2)) {
     return false;
   }
 
-  if (input.getClientRects().length > 0 && (rect.right < 0 || rect.bottom < 0)) {
+  if (hasLayoutBox && (rect.right < 0 || rect.bottom < 0)) {
+    return false;
+  }
+
+  if (!hasLayoutBox && hasOffscreenExplicitPosition(style)) {
     return false;
   }
 
@@ -133,11 +138,18 @@ function pickUsernameField(passwordField: HTMLInputElement | null) {
     .sort((left, right) => right.score - left.score || left.index - right.index);
 
   if (passwordField?.form) {
-    return scoredCandidates.find((candidate) => candidate.input.form === passwordField.form)
-      ?.input;
+    return (
+      scoredCandidates.find((candidate) => candidate.input.form === passwordField.form)
+        ?.input ??
+      scoredCandidates.find((candidate) => candidate.input.form === null && candidate.score > 0)
+        ?.input
+    );
   }
 
-  return scoredCandidates.find((candidate) => candidate.score > 0)?.input;
+  return (
+    scoredCandidates.find((candidate) => candidate.score > 0)?.input ??
+    scoredCandidates[0]?.input
+  );
 }
 
 function isPasswordChangeField(input: HTMLInputElement) {
