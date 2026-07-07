@@ -35,6 +35,7 @@ export interface AutofillFieldSnapshot {
   ariaLabel?: string;
   ariaDescribedBy?: string;
   labelText?: string;
+  containerText?: string[];
   dataSetValues: string[];
   selectOptions?: string[];
   readonly: boolean;

@@ -253,9 +253,37 @@ function getHeadingText(form: HTMLFormElement) {
     precedingHeadings.push(heading);
   }
 
-  return [...precedingHeadings.slice(-1), ...ownedHeadings]
+  const contextualHeadings =
+    ownedHeadings.length > 0 ? ownedHeadings : precedingHeadings.slice(-1);
+  return contextualHeadings
     .map((heading) => cleanText(heading.textContent))
     .filter(Boolean);
+}
+
+function getOwnedHeadingText(container: Element) {
+  return Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+    .filter((heading) => heading.closest("form") === null)
+    .filter((heading) => getFieldVisibility(heading as HTMLElement).viewable)
+    .map((heading) => cleanText(heading.textContent))
+    .filter(Boolean);
+}
+
+function isElementNode(node: ParentNode | undefined): node is Element {
+  return node !== undefined && node.nodeType === 1 && "matches" in node;
+}
+
+function getContainerText(container: ParentNode | undefined) {
+  if (!isElementNode(container) || container.matches(FIELD_SELECTOR)) {
+    return [];
+  }
+  return [
+    container.id,
+    container.getAttribute("class"),
+    container.getAttribute("aria-label"),
+    ...getOwnedHeadingText(container)
+  ]
+    .map(optionalString)
+    .filter((value): value is string => typeof value === "string");
 }
 
 function getSubmitText(form: HTMLFormElement) {
@@ -476,6 +504,7 @@ function collectField(
     ariaLabel: optionalString(element.getAttribute("aria-label")),
     ariaDescribedBy: optionalString(element.getAttribute("aria-describedby")),
     labelText: getLabelText(element),
+    containerText: getContainerText(container),
     dataSetValues: getDatasetValues(element),
     selectOptions: getSelectOptions(element),
     readonly: "readOnly" in element ? element.readOnly : false,

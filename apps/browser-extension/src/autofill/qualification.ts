@@ -104,6 +104,7 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
     field.title,
     field.ariaLabel,
     field.labelText,
+    ...(field.containerText ?? []),
     ...field.dataSetValues
   ]
     .map(normalize)
@@ -112,7 +113,7 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
 
 function joinedFormText(
   form: AutofillFormSnapshot | undefined,
-  options: { includeImplicitAction?: boolean } = {}
+  options: { includeAction?: boolean; includeImplicitAction?: boolean } = {}
 ) {
   if (!form) {
     return "";
@@ -121,7 +122,8 @@ function joinedFormText(
     form.htmlId,
     form.htmlName,
     form.htmlClass,
-    form.htmlActionIsImplicit && options.includeImplicitAction === false
+    options.includeAction === false ||
+    (form.htmlActionIsImplicit && options.includeImplicitAction === false)
       ? undefined
       : formActionContext(form.htmlAction),
     form.htmlMethod,
@@ -165,6 +167,12 @@ function isAccountCreationPart(part: string) {
 
 function hasAccountCreationContext(text: string) {
   return normalizedParts(text).some(isAccountCreationPart);
+}
+
+function hasStrongAccountCreationContext(text: string) {
+  return normalizedParts(text).some(
+    (part) => isAccountCreationPart(part) && !part.includes("signup")
+  );
 }
 
 function fieldAutocompleteTokens(field: AutofillFieldSnapshot) {
@@ -329,11 +337,15 @@ function excludedReason(fieldText: string, formText: string) {
 
 function nonLoginReason(fieldText: string, formText: string) {
   const searchableText = `${fieldText},${formText}`;
-  if (NON_LOGIN_KEYWORDS.some((keyword) => searchableText.includes(keyword))) {
-    return "non-login:newsletter";
-  }
-  if (hasAccountCreationContext(searchableText)) {
+  const hasNewsletterContext = NON_LOGIN_KEYWORDS.some((keyword) => searchableText.includes(keyword));
+  if (
+    hasStrongAccountCreationContext(searchableText) ||
+    (!hasNewsletterContext && hasAccountCreationContext(searchableText))
+  ) {
     return "non-login:account-creation";
+  }
+  if (hasNewsletterContext) {
+    return "non-login:newsletter";
   }
   return null;
 }
@@ -395,6 +407,7 @@ function qualificationForFillableField(
 ): FieldQualification {
   const fieldText = joinedFieldText(field);
   const formText = joinedFormText(form);
+  const formPromptText = joinedFormText(form, { includeAction: false });
   const negativeFormText = joinedFormText(form, { includeImplicitAction: false });
   const autocomplete = fieldAutocompleteTokens(field);
 
@@ -434,19 +447,20 @@ function qualificationForFillableField(
   }
 
   const searchableText = `${fieldText},${formText}`;
+  const searchablePromptText = `${fieldText},${formPromptText}`;
   const nonLogin = nonLoginReason(fieldText, negativeFormText);
   const hasNewsletterPasswordContext = hasPasswordSibling(field, snapshot) || isPasswordLike(field);
   const hasNewsletterLoginContext =
     nonLogin === "non-login:newsletter" &&
-    (hasLoginContext(searchableText) || hasNewsletterPasswordContext) &&
+    (hasLoginContext(searchablePromptText) || hasNewsletterPasswordContext) &&
     (hasNewsletterPasswordContext || isUsernameLike(field, fieldText));
   const hasMixedCurrentPasswordLoginContext =
     nonLogin === "non-login:account-creation" &&
-    hasLoginContext(searchableText) &&
+    hasLoginContext(searchablePromptText) &&
     (autocomplete.has("current-password") || hasCurrentPasswordSibling(field, snapshot));
   const hasMixedPasswordLoginContext =
     nonLogin === "non-login:account-creation" &&
-    hasLoginContext(searchableText) &&
+    hasLoginContext(searchablePromptText) &&
     !hasNewPasswordSibling(field, snapshot) &&
     (isPasswordLike(field) || hasPasswordSibling(field, snapshot));
   if (

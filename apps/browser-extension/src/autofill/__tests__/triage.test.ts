@@ -972,6 +972,86 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").reasons).toContain("non-login:account-creation");
   });
 
+  it("keeps login routes from overriding standalone account creation forms", () => {
+    window.history.replaceState(null, "", "/login");
+    document.body.innerHTML = `
+      <form action="/login">
+        <h2>Create account</h2>
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").reasons).toContain("non-login:account-creation");
+  });
+
+  it("keeps login routes from overriding newsletter email forms", () => {
+    window.history.replaceState(null, "", "/login");
+    document.body.innerHTML = `
+      <form class="newsletter" action="/login">
+        <input name="email" type="email" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "email").reasons).toContain("non-login:newsletter");
+  });
+
+  it("prioritizes account creation over newsletter context", () => {
+    document.body.innerHTML = `
+      <form class="newsletter">
+        <h2>Create account</h2>
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").reasons).toContain("non-login:account-creation");
+  });
+
+  it("uses form-less container context when suppressing account creation cards", () => {
+    document.body.innerHTML = `
+      <div class="signup-card">
+        <h2>Create account</h2>
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+      </div>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").reasons).toContain("non-login:account-creation");
+  });
+
+  it("prefers owned form headings over preceding headings", () => {
+    document.body.innerHTML = `
+      <h2>Create account</h2>
+      <form>
+        <h2>Sign in</h2>
+        <input name="email" type="email" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+  });
+
   it("recognizes common create-account wording without suppressing registered-user logins", () => {
     document.body.innerHTML = `
       <form id="create-your-account">
