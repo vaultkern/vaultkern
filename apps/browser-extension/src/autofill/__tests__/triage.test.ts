@@ -363,6 +363,27 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
+  it("ignores hidden previous forms when bounding preceding form headings", () => {
+    document.body.innerHTML = `
+      <h2>Sign in</h2>
+      <form hidden>
+        <input name="template_email" type="email" />
+      </form>
+      <form id="visible-passwordless">
+        <input name="visible_email" type="email" />
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(
+      snapshot.forms.find((form) => form.htmlId === "visible-passwordless")?.headingText
+    ).toEqual(["Sign in"]);
+    expect(fieldByName(report, "template_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "visible_email").qualifiedAs).toBe("username");
+  });
+
   it("does not classify new-password fields or non-text controls as login candidates", () => {
     document.body.innerHTML = `
       <form>
@@ -565,6 +586,26 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "modal_password").qualifiedAs).toBe("password");
   });
 
+  it("treats whitespace-only form actions as implicit current-page actions", () => {
+    window.history.replaceState(null, "", "/forgot-password");
+    document.body.innerHTML = `
+      <form id="blank-action-login" action="   ">
+        <h2>Sign in</h2>
+        <input name="blank_action_email" type="email" />
+        <input name="blank_action_password" type="password" />
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "blank-action-login")).toMatchObject({
+      htmlActionIsImplicit: true
+    });
+    expect(fieldByName(report, "blank_action_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "blank_action_password").qualifiedAs).toBe("password");
+  });
+
   it("treats hash-only form actions as implicit current-page actions", () => {
     window.history.replaceState(null, "", "/forgot-password");
     document.body.innerHTML = `
@@ -626,6 +667,36 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "route_email").qualifiedAs).toBe("username");
+  });
+
+  it("preserves auth mode query parameters without using redirect targets as context", () => {
+    document.body.innerHTML = `
+      <form id="mode-login" action="/account?mode=login">
+        <input name="mode_login_email" type="email" />
+        <button type="submit">Continue</button>
+      </form>
+      <form id="mode-signup" action="/account?mode=signup">
+        <input name="mode_signup_email" type="email" />
+        <input name="mode_signup_password" type="password" />
+      </form>
+      <form id="redirect-only" action="/account?next=/login">
+        <input name="redirect_only_email" type="email" />
+      </form>
+      <form id="hint-only" action="/account?login_hint=user@example.com">
+        <input name="hint_email" type="email" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "mode_login_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "mode_signup_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "mode_signup_email").reasons).toContain(
+      "non-login:account-creation"
+    );
+    expect(fieldByName(report, "mode_signup_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "redirect_only_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "hint_email").qualifiedAs).toBe("ignored");
   });
 
   it("prefers accessible submit labels over visible button text", () => {

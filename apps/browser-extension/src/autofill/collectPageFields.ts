@@ -48,24 +48,25 @@ function getFieldTag(element: Element): AutofillFieldTag | null {
 
 function getFormAction(form: HTMLFormElement) {
   const rawAction = form.getAttribute("action");
-  if (!rawAction) {
+  const trimmedAction = rawAction?.trim();
+  if (!trimmedAction) {
     return form.ownerDocument.location.href;
   }
 
   try {
-    return new URL(rawAction, form.ownerDocument.baseURI).href;
+    return new URL(trimmedAction, form.ownerDocument.baseURI).href;
   } catch {
-    return rawAction;
+    return trimmedAction;
   }
 }
 
 function formActionIsImplicit(form: HTMLFormElement) {
   const rawAction = form.getAttribute("action");
-  if (!rawAction) {
+  if (rawAction === null) {
     return true;
   }
   const trimmed = rawAction.trim();
-  return trimmed.startsWith("#") || trimmed.startsWith("?");
+  return trimmed === "" || trimmed.startsWith("#") || trimmed.startsWith("?");
 }
 
 function labelTextWithoutNestedFields(label: Element) {
@@ -291,6 +292,7 @@ function getHeadingText(form: HTMLFormElement) {
   const previousForms = Array.from(scope.querySelectorAll("form")).filter(
     (candidate) =>
       candidate !== form &&
+      getFieldVisibility(candidate).viewable &&
       Boolean(candidate.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING)
   );
   const previousForm = previousForms[previousForms.length - 1];

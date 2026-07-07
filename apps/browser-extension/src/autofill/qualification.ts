@@ -56,6 +56,21 @@ const PASSWORD_MASKED_CODE_PARTS = [
   "2stepcode",
   "2factorcode"
 ];
+const AUTH_QUERY_CONTEXT_KEYS = new Set([
+  "action",
+  "auth",
+  "context",
+  "flow",
+  "form",
+  "intent",
+  "mode",
+  "page",
+  "screen",
+  "step",
+  "tab",
+  "type",
+  "view"
+]);
 
 export interface FieldQualification {
   qualifiedAs: AutofillFieldQualification;
@@ -67,6 +82,45 @@ function normalize(value: string | undefined) {
   return (value ?? "").toLowerCase().replace(/[\s_/-]+/g, "");
 }
 
+function hasAuthFlowContext(value: string | undefined) {
+  const normalized = normalize(value);
+  return (
+    hasLoginContext(normalized) ||
+    hasAccountCreationContext(normalized) ||
+    excludedReason("", normalized) !== null
+  );
+}
+
+function isQueryFlagValue(value: string) {
+  const normalized = normalize(value);
+  return normalized === "" || normalized === "1" || normalized === "true";
+}
+
+function authQueryContext(url: URL) {
+  const terms: string[] = [];
+  url.searchParams.forEach((value, key) => {
+    const normalizedKey = normalize(key);
+    const keyNamesAuthFlow = hasAuthFlowContext(key) && isQueryFlagValue(value);
+    const keyDescribesAuthMode =
+      AUTH_QUERY_CONTEXT_KEYS.has(normalizedKey) ||
+      normalizedKey.endsWith("mode") ||
+      normalizedKey.endsWith("action") ||
+      normalizedKey.endsWith("flow") ||
+      normalizedKey.endsWith("type") ||
+      normalizedKey.endsWith("view");
+
+    if (keyNamesAuthFlow) {
+      terms.push(key);
+      return;
+    }
+
+    if (keyDescribesAuthMode && hasAuthFlowContext(value)) {
+      terms.push(`${key}=${value}`);
+    }
+  });
+  return terms;
+}
+
 function formActionContext(value: string | undefined) {
   if (!value) {
     return undefined;
@@ -75,7 +129,7 @@ function formActionContext(value: string | undefined) {
   try {
     const url = new URL(value, "https://vaultkern.invalid");
     const hash = url.hash ? url.hash.slice(1) : undefined;
-    return [url.hostname, url.pathname, hash].filter(Boolean).join(",");
+    return [url.hostname, url.pathname, hash, ...authQueryContext(url)].filter(Boolean).join(",");
   } catch {
     return value.split(/[?#]/, 1)[0];
   }
