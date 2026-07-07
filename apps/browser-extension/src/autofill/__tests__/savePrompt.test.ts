@@ -32,6 +32,24 @@ describe("autofill save prompt capture", () => {
     expect(submission).not.toHaveProperty("newPassword");
   });
 
+  it("does not capture registrations with mismatched confirmation passwords", () => {
+    document.body.innerHTML = `
+      <form id="signup">
+        <h2>Create account</h2>
+        <input name="email" autocomplete="username" value="alice@example.com" />
+        <input name="new_password" type="password" autocomplete="new-password" value="new-secret" />
+        <input name="confirm_password" type="password" autocomplete="new-password" value="typo-secret" />
+      </form>
+    `;
+
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("#signup") as HTMLFormElement
+    );
+
+    expect(submission).toBeNull();
+  });
+
   it("uses shadow-aware field order when reading submitted values", () => {
     const host = document.createElement("div");
     const shadowRoot = host.attachShadow({ mode: "open" });
@@ -115,6 +133,24 @@ describe("autofill save prompt capture", () => {
       password: "old-secret",
       newPassword: "new-secret"
     });
+  });
+
+  it("does not capture password changes with mismatched confirmation passwords", () => {
+    document.body.innerHTML = `
+      <form id="change-password">
+        <h2>Change password</h2>
+        <input name="current_password" type="password" autocomplete="current-password" value="old-secret" />
+        <input name="new_password" type="password" autocomplete="new-password" value="new-secret" />
+        <input name="confirm_password" type="password" autocomplete="new-password" value="typo-secret" />
+      </form>
+    `;
+
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("#change-password") as HTMLFormElement
+    );
+
+    expect(submission).toBeNull();
   });
 
   it("preserves a save-only marker when parsing pending submissions", () => {

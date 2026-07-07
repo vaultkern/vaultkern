@@ -4249,6 +4249,48 @@ describe("content script fill message", () => {
     });
   });
 
+  it("captures submitted registration credentials inside open shadow roots", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const addListener = vi.fn();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    const host = document.createElement("div");
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <form>
+        <h2>Create account</h2>
+        <input name="email" type="email" autocomplete="username" value="alice@example.com" />
+        <input name="new_password" type="password" autocomplete="new-password" value="captured-secret" />
+      </form>
+    `;
+    document.body.append(host);
+
+    vi.resetModules();
+    await import("../contentScript");
+    root.querySelector("form")?.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true })
+    );
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_autofill_submission",
+        url: expect.any(String),
+        username: "alice@example.com",
+        password: "captured-secret",
+        saveOnly: true,
+        submittedAt: expect.any(Number)
+      });
+    });
+  });
+
   it("captures submitted registration credentials before page handlers clear fields", async () => {
     const sendMessage = vi.fn(async () => undefined);
     const addListener = vi.fn();

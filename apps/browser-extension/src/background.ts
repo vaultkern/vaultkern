@@ -27,6 +27,7 @@ let pendingAutofillSubmission: PendingAutofillSubmission | null = null;
 let pendingAutofillSubmissionsByTab = new Map<number, PendingAutofillSubmission>();
 const clearedPendingAutofillSubmissionKeys = new Set<string>();
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
+const PENDING_AUTOFILL_NAVIGATION_GRACE_MS = 2 * 60 * 1000;
 const PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY = "vaultkernPendingAutofillSubmission";
 const WEB_AUTHN_CONTENT_SCRIPT_FILE = "webauthnContentScript.js";
 const WEB_AUTHN_PAGE_HOOK_SCRIPT_FILE = "webauthnPageHook.js";
@@ -243,6 +244,17 @@ function clearPendingAutofillSubmissionForTab(tabId: number) {
   void persistPendingAutofillSubmission(pendingAutofillSubmission);
 }
 
+function clearExpiredPendingAutofillSubmissionForTab(tabId: number, now = Date.now()) {
+  const pendingSubmission = pendingAutofillSubmissionsByTab.get(tabId) ?? null;
+  if (!pendingSubmission) {
+    return;
+  }
+  if (now - pendingSubmission.submittedAt <= PENDING_AUTOFILL_NAVIGATION_GRACE_MS) {
+    return;
+  }
+  clearPendingAutofillSubmissionForTab(tabId);
+}
+
 function mergePersistedPendingAutofillSubmissions(store: {
   latest: PendingAutofillSubmission | null;
   byTab: Map<number, PendingAutofillSubmission>;
@@ -415,7 +427,7 @@ if (chromeApi?.runtime?.onMessage) {
 chromeApi?.tabs?.onUpdated?.addListener?.(
   (tabId: number, changeInfo: { url?: string }) => {
     if (typeof changeInfo.url === "string" && changeInfo.url.trim() !== "") {
-      clearPendingAutofillSubmissionForTab(tabId);
+      clearExpiredPendingAutofillSubmissionForTab(tabId);
     }
   }
 );

@@ -396,6 +396,63 @@ describe("background bridge", () => {
     ).resolves.toEqual({ pending: null });
   });
 
+  it("keeps fresh tab-scoped pending autofill submissions after submit redirects", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1710000005000);
+    const listeners: RuntimeMessageListener[] = [];
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener: vi.fn((listener: TabUpdatedListener) => {
+            tabUpdatedListeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        saveOnly: true,
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 7 } }
+    ).response();
+
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { url: "https://example.com/welcome" });
+    }
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 7
+      }).response()
+    ).resolves.toMatchObject({
+      pending: {
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        saveOnly: true
+      }
+    });
+  });
+
   it("does not restore navigation-cleared pending submissions from stale session storage", async () => {
     const listeners: RuntimeMessageListener[] = [];
     const tabUpdatedListeners: TabUpdatedListener[] = [];

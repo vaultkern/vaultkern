@@ -15,6 +15,7 @@ export function fillLoginForm(payload: {
 }
 
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+const autofillSubmissionListenerRoots = new WeakSet<EventTarget>();
 
 if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener(
@@ -54,15 +55,27 @@ if (chromeApi?.runtime?.onMessage) {
   );
 }
 
-if (chromeApi?.runtime?.sendMessage && typeof document !== "undefined") {
-  document.addEventListener(
+function documentForAutofillSubmissionRoot(root: Document | ShadowRoot) {
+  return root.nodeType === Node.DOCUMENT_NODE ? (root as Document) : root.ownerDocument;
+}
+
+function installAutofillSubmissionListener(root: Document | ShadowRoot) {
+  if (autofillSubmissionListenerRoots.has(root)) {
+    return;
+  }
+  autofillSubmissionListenerRoots.add(root);
+  root.addEventListener(
     "submit",
     (event) => {
       const submittedForm =
         event.target instanceof HTMLFormElement ? event.target : undefined;
-      const submission = collectAutofillSubmission(document, submittedForm, {
-        includeLoginSubmissions: false
-      });
+      const submission = collectAutofillSubmission(
+        documentForAutofillSubmissionRoot(root),
+        submittedForm,
+        {
+          includeLoginSubmissions: false
+        }
+      );
       queueMicrotask(() => {
         if (event.defaultPrevented) {
           return;
@@ -78,4 +91,14 @@ if (chromeApi?.runtime?.sendMessage && typeof document !== "undefined") {
     },
     { capture: true }
   );
+
+  root.querySelectorAll("*").forEach((element) => {
+    if (element.shadowRoot) {
+      installAutofillSubmissionListener(element.shadowRoot);
+    }
+  });
+}
+
+if (chromeApi?.runtime?.sendMessage && typeof document !== "undefined") {
+  installAutofillSubmissionListener(document);
 }
