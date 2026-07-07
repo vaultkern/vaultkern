@@ -5,8 +5,18 @@ import type {
   AutofillPageSnapshot
 } from "./types";
 import { getFieldFillability, getFieldVisibility } from "./visibility";
+import { localAutofillSiteRules } from "./siteRules.local";
+import {
+  matchAutofillSiteRule,
+  siteRuleFieldTypesForElement
+} from "./siteRules";
+import type { AutofillSiteRule, MatchedAutofillSiteRule } from "./siteRules";
 
 export const FIELD_SELECTOR = "input, select, textarea";
+
+export interface CollectAutofillPageSnapshotOptions {
+  siteRules?: AutofillSiteRule[];
+}
 
 export function collectMatchingElements(root: ParentNode, selector: string) {
   const elements: Element[] = [];
@@ -57,11 +67,6 @@ function getFormAction(form: HTMLFormElement) {
   } catch {
     return rawAction;
   }
-}
-
-function formActionIsImplicit(form: HTMLFormElement) {
-  const rawAction = form.getAttribute("action");
-  return !rawAction || rawAction.trim().startsWith("#");
 }
 
 function labelTextWithoutNestedFields(label: Element) {
@@ -140,7 +145,12 @@ function byDocumentOrder(left: Element, right: Element) {
 function getFormControlElements(form: HTMLFormElement) {
   const controls = new Set<Element>();
   Array.from(form.elements).forEach((element) => controls.add(element));
-  collectMatchingElements(form, "button, input").forEach((element) => controls.add(element));
+  collectMatchingElements(form, "button, input").forEach((element) => {
+    const associatedForm = (element as HTMLButtonElement | HTMLInputElement).form;
+    if (associatedForm === form) {
+      controls.add(element);
+    }
+  });
   return Array.from(controls).sort(byDocumentOrder);
 }
 
@@ -167,25 +177,8 @@ function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAr
 }
 
 function scopeForFormHeadings(form: HTMLFormElement): ParentNode {
-  let scope = form.parentElement;
-  if (scope) {
-    const semanticScope = scope.closest("section, article, main, aside");
-    if (semanticScope) {
-      return semanticScope;
-    }
-
-    while (scope) {
-      const tagName = scope.tagName.toLowerCase();
-      if (tagName === "body" || tagName === "html") {
-        break;
-      }
-      if (scope.querySelector("h1, h2, h3, h4, h5, h6")) {
-        return scope;
-      }
-      scope = scope.parentElement;
-    }
-
-    return form.parentElement;
+  if (form.parentElement) {
+    return form.parentElement.closest("section, article, main, aside") ?? form.parentElement;
   }
 
   const root = form.getRootNode();
@@ -240,8 +233,79 @@ function getHeadingText(form: HTMLFormElement) {
     .filter(Boolean);
 }
 
+function isElementNode(node: ParentNode | undefined): node is Element {
+  return node !== undefined && node.nodeType === 1 && "matches" in node;
+}
+
+function getOwnedHeadingText(container: ParentNode | undefined) {
+  if (container === undefined || !("querySelectorAll" in container)) {
+    return [];
+  }
+  return Array.from(container.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+    .filter((heading) => heading.closest("form") === null)
+    .filter((heading) => getFieldVisibility(heading as HTMLElement).viewable)
+    .map((heading) => cleanText(heading.textContent))
+    .filter(Boolean);
+}
+
+function getContainerText(container: ParentNode | undefined) {
+  if (container === undefined) {
+    return [];
+  }
+  const elementText = isElementNode(container)
+    ? [
+        container.id,
+        container.getAttribute("class"),
+        container.getAttribute("aria-label")
+      ]
+    : [];
+  return [...elementText, ...getOwnedHeadingText(container)]
+    .map(optionalString)
+    .filter((value): value is string => typeof value === "string");
+}
+
+function uniqueText(values: string[]) {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = value.toLowerCase();
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function isNewPasswordControl(element: Element) {
+  if (element.tagName.toLowerCase() !== "input") {
+    return false;
+  }
+  const input = element as HTMLInputElement;
+  if (input.type.toLowerCase() !== "password") {
+    return false;
+  }
+  const text = [
+    input.getAttribute("autocomplete"),
+    input.name,
+    input.id,
+    input.className,
+    input.placeholder,
+    input.title,
+    input.getAttribute("aria-label")
+  ]
+    .map((value) => (typeof value === "string" ? value.toLowerCase().replace(/[\s_/-]+/g, "") : ""))
+    .join(",");
+  return (
+    text.includes("newpassword") ||
+    text.includes("confirmpassword") ||
+    text.includes("passwordconfirmation") ||
+    text.includes("repeatpassword")
+  );
+}
+
 function getSubmitText(form: HTMLFormElement) {
-  const submitText = getFormControlElements(form).flatMap((element) => {
+  const controls = getFormControlElements(form);
+  const submitText = controls.flatMap((element) => {
     if (!getFieldVisibility(element as HTMLElement).viewable) {
       return [];
     }
@@ -250,7 +314,7 @@ function getSubmitText(form: HTMLFormElement) {
     }
     const tagName = element.tagName.toLowerCase();
     if (tagName === "button") {
-      const type = (element as HTMLButtonElement).type.toLowerCase();
+      const type = (element.getAttribute("type") ?? "submit").toLowerCase();
       if (type !== "submit") {
         return [];
       }
@@ -267,10 +331,20 @@ function getSubmitText(form: HTMLFormElement) {
     return [controlText(input, type === "image" ? input.alt : input.value)];
   }).filter(Boolean);
   const primarySubmitText = submitText[0];
-  if (primarySubmitText && isAccountCreationSubmitText(primarySubmitText)) {
-    return [primarySubmitText];
-  }
+  const accountCreationSubmitText = submitText.filter(isAccountCreationSubmitText);
   const loginSubmitText = submitText.filter(isLoginSubmitText);
+  if (primarySubmitText && isAccountCreationSubmitText(primarySubmitText)) {
+    return loginSubmitText.length > 0
+      ? [primarySubmitText, ...loginSubmitText]
+      : [primarySubmitText];
+  }
+  if (accountCreationSubmitText.length > 0 && controls.some(isNewPasswordControl)) {
+    return uniqueText([
+      ...(primarySubmitText ? [primarySubmitText] : []),
+      ...accountCreationSubmitText,
+      ...loginSubmitText
+    ]);
+  }
   return loginSubmitText.length > 0 ? loginSubmitText : submitText.slice(0, 1);
 }
 
@@ -286,7 +360,9 @@ function collectForms(documentRef: Document) {
       .map(optionalString)
       .filter(Boolean)
       .join(" ");
-    const htmlActionIsImplicit = formActionIsImplicit(formElement);
+    const htmlActionIsImplicit = !formElement.getAttribute("action");
+    const headingText = getHeadingText(formElement);
+    const submitText = getSubmitText(formElement);
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
       htmlId: optionalString(formElement.id),
@@ -296,7 +372,8 @@ function collectForms(documentRef: Document) {
       htmlActionIsImplicit,
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
       ariaLabel: optionalString(ariaLabel),
-      headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
+      headingText: [...headingText, ...submitText],
+      submitText
     };
     formByElement.set(formElement, snapshot);
     return snapshot;
@@ -318,15 +395,19 @@ function getSelectOptions(element: Element) {
   return Array.from((element as HTMLSelectElement).options).map((option) => option.value);
 }
 
+function isFocusedElement(element: Element) {
+  if (element.ownerDocument.activeElement === element) {
+    return true;
+  }
+
+  const root = element.getRootNode();
+  return root !== element.ownerDocument && "activeElement" in root && root.activeElement === element;
+}
+
 function getRootLevelFieldRunContainer(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
 ): ParentNode | undefined {
-  const labelParent =
-    element.parentElement?.tagName.toLowerCase() === "label"
-      ? element.parentElement
-      : null;
-  const runElement = labelParent ?? element;
-  const parent = runElement.parentElement;
+  const parent = element.parentElement;
   const parentTag = parent?.tagName.toLowerCase();
   if (parent === null || (parentTag !== "body" && parentTag !== "html")) {
     return undefined;
@@ -336,12 +417,12 @@ function getRootLevelFieldRunContainer(
     candidate.matches(FIELD_SELECTOR) ||
     ["label", "small", "span", "p"].includes(candidate.tagName.toLowerCase());
 
-  let first: Element = runElement;
+  let first: Element = element;
   while (first.previousElementSibling && isRunElement(first.previousElementSibling)) {
     first = first.previousElementSibling;
   }
 
-  let last: Element = runElement;
+  let last: Element = element;
   while (last.nextElementSibling && isRunElement(last.nextElementSibling)) {
     last = last.nextElementSibling;
   }
@@ -351,8 +432,6 @@ function getRootLevelFieldRunContainer(
   while (current) {
     if (current.matches(FIELD_SELECTOR)) {
       fieldCount += 1;
-    } else {
-      fieldCount += current.querySelectorAll(FIELD_SELECTOR).length;
     }
     if (current === last) {
       break;
@@ -382,12 +461,8 @@ function getFieldContainer(
     if (tagName === "body" || tagName === "html" || tagName === "form") {
       return undefined;
     }
-    const fieldCount = container.querySelectorAll(FIELD_SELECTOR).length;
-    if (fieldCount > 1) {
+    if (container.querySelectorAll(FIELD_SELECTOR).length > 1) {
       return container;
-    }
-    if (["section", "article", "main", "aside"].includes(tagName)) {
-      return undefined;
     }
     container = container.parentElement;
   }
@@ -433,7 +508,8 @@ function collectField(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
   index: number,
   formByElement: Map<HTMLFormElement, AutofillFormSnapshot>,
-  containerByElement: Map<ParentNode, string>
+  containerByElement: Map<ParentNode, string>,
+  siteRule: MatchedAutofillSiteRule | null
 ): AutofillFieldSnapshot | null {
   const tagName = getFieldTag(element);
   if (tagName === null) {
@@ -449,6 +525,7 @@ function collectField(
     tagName === "input"
       ? optionalString((element as HTMLInputElement).type.toLowerCase())
       : undefined;
+  const siteRuleTypes = siteRuleFieldTypesForElement(element, siteRule);
 
   return {
     opid: `field-${index}`,
@@ -468,10 +545,16 @@ function collectField(
     ariaLabel: optionalString(element.getAttribute("aria-label")),
     ariaDescribedBy: optionalString(element.getAttribute("aria-describedby")),
     labelText: getLabelText(element),
+    containerText: getContainerText(container),
     dataSetValues: getDatasetValues(element),
     selectOptions: getSelectOptions(element),
     readonly: "readOnly" in element ? element.readOnly : false,
     disabled: element.disabled,
+    focused: isFocusedElement(element),
+    siteRuleTypes,
+    siteRuleReasons: siteRuleTypes.map(
+      (fieldType) => `site-rule:${siteRule?.id}:${fieldType}`
+    ),
     viewable: visibility.viewable,
     viewableReasons: visibility.reasons,
     fillable: fillability.fillable,
@@ -479,19 +562,32 @@ function collectField(
   };
 }
 
-export function collectAutofillPageSnapshot(documentRef: Document = document): AutofillPageSnapshot {
+export function collectAutofillPageSnapshot(
+  documentRef: Document = document,
+  options: CollectAutofillPageSnapshotOptions = {}
+): AutofillPageSnapshot {
   const { forms, formByElement } = collectForms(documentRef);
   const containerByElement = new Map<ParentNode, string>();
+  const siteRule = matchAutofillSiteRule(
+    documentRef.location.href,
+    options.siteRules ?? localAutofillSiteRules
+  );
   const fields = collectMatchingElements(documentRef, FIELD_SELECTOR)
     .map((element, index) =>
       collectField(
         element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
         index,
         formByElement,
-        containerByElement
+        containerByElement,
+        siteRule
       )
     )
     .filter((field): field is AutofillFieldSnapshot => field !== null);
 
-  return { forms, fields };
+  return {
+    url: documentRef.location.href,
+    siteRule: siteRule ? { id: siteRule.id, disabled: siteRule.disabled } : undefined,
+    forms,
+    fields
+  };
 }

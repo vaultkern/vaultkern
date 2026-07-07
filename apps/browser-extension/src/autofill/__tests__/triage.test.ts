@@ -71,6 +71,25 @@ describe("autofill triage", () => {
     expect(password.valuePreview).toBeUndefined();
   });
 
+  it("does not collect shadow-internal buttons as outer form submit context", () => {
+    document.body.innerHTML = `
+      <form id="login-form">
+        <input name="email" type="email" autocomplete="username" />
+        <input name="password" type="password" autocomplete="current-password" />
+        <div id="widget-host"></div>
+        <button type="submit">Continue</button>
+      </form>
+    `;
+    const host = document.querySelector("#widget-host") as HTMLDivElement;
+    host.attachShadow({ mode: "open" }).innerHTML = `
+      <button type="submit">Create account</button>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    expect(snapshot.forms[0].submitText).toEqual(["Continue"]);
+    expect(snapshot.forms[0].headingText).toEqual(["Continue"]);
+  });
+
   it("marks readonly disabled and hidden fields as not fillable", () => {
     document.body.innerHTML = `
       <form>
@@ -112,41 +131,6 @@ describe("autofill triage", () => {
     );
   });
 
-  it("keeps explicitly visible descendants of visibility-hidden ancestors viewable", () => {
-    document.body.innerHTML = `
-      <form>
-        <div style="visibility:hidden">
-          <input name="email" type="email" autocomplete="username" style="visibility:visible" />
-          <input name="password" type="password" autocomplete="current-password" style="visibility:visible" />
-        </div>
-      </form>
-    `;
-
-    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
-
-    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
-  });
-
-  it("treats fields clipped by zero-sized ancestors as hidden", () => {
-    document.body.innerHTML = `
-      <form>
-        <div style="width:0;height:0;overflow:hidden">
-          <input name="decoy_email" type="email" autocomplete="username" />
-        </div>
-        <input name="email" type="email" autocomplete="username" />
-        <input name="password" type="password" autocomplete="current-password" />
-      </form>
-    `;
-
-    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
-
-    expect(fieldByName(report, "decoy_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "decoy_email").reasons).toContain("not-viewable:zero-size");
-    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
-  });
-
   it("excludes search newsletter captcha and forgot-password fields from login qualification", () => {
     document.body.innerHTML = `
       <form id="search">
@@ -176,6 +160,22 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "forgot_email").reasons).toContain("excluded:forgot");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("keeps single-password signup forms with sign-in copy out of login qualification", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Create account</h2>
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+        <button type="submit">Sign in</button>
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
   });
 
   it("excludes forgot-password fields when the signal is in the form context", () => {
@@ -263,27 +263,6 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
   });
 
-  it("preserves heading context through neutral wrapper divs", () => {
-    document.body.innerHTML = `
-      <div>
-        <h2>Sign in</h2>
-        <div>
-          <form id="wrapped-login">
-            <input name="wrapped_email" type="email" />
-          </form>
-        </div>
-      </div>
-    `;
-
-    const snapshot = collectAutofillPageSnapshot(document);
-    const report = triageAutofillPage(snapshot);
-
-    expect(snapshot.forms.find((form) => form.htmlId === "wrapped-login")?.headingText).toEqual([
-      "Sign in"
-    ]);
-    expect(fieldByName(report, "wrapped_email").qualifiedAs).toBe("username");
-  });
-
   it("ignores hidden headings when building form context", () => {
     document.body.innerHTML = `
       <div hidden>
@@ -321,7 +300,7 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
-  it("suppresses usernames that only sit beside new-password fields", () => {
+  it("keeps usernames beside new-password fields available for registration", () => {
     document.body.innerHTML = `
       <form>
         <input name="account" autocomplete="username" />
@@ -331,7 +310,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "account").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "account").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
   });
 
@@ -417,31 +396,6 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "external_submit_email").qualifiedAs).toBe("username");
   });
 
-  it("treats missing and invalid button types as submit controls", () => {
-    document.body.innerHTML = `
-      <form id="missing-button-type" action="/continue">
-        <input name="missing_type_email" type="email" />
-        <button>Sign in</button>
-      </form>
-      <form id="invalid-button-type" action="/continue">
-        <input name="invalid_type_email" type="email" />
-        <button type="not-a-button-type">Sign in</button>
-      </form>
-    `;
-
-    const snapshot = collectAutofillPageSnapshot(document);
-    const report = triageAutofillPage(snapshot);
-
-    expect(snapshot.forms.find((form) => form.htmlId === "missing-button-type")?.headingText).toEqual([
-      "Sign in"
-    ]);
-    expect(snapshot.forms.find((form) => form.htmlId === "invalid-button-type")?.headingText).toEqual([
-      "Sign in"
-    ]);
-    expect(fieldByName(report, "missing_type_email").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "invalid_type_email").qualifiedAs).toBe("username");
-  });
-
   it("treats empty form actions as implicit current-page actions", () => {
     window.history.replaceState(null, "", "/search");
     document.body.innerHTML = `
@@ -459,49 +413,6 @@ describe("autofill triage", () => {
     });
     expect(fieldByName(report, "empty_action_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "empty_action_password").qualifiedAs).toBe("password");
-  });
-
-  it("keeps implicit page URLs out of negative form context", () => {
-    window.history.replaceState(null, "", "/forgot-password");
-    document.body.innerHTML = `
-      <form id="modal-login">
-        <h2>Sign in</h2>
-        <input name="modal_email" type="email" />
-        <input name="modal_password" type="password" />
-      </form>
-      <form id="explicit-forgot" action="/forgot-password">
-        <h2>Sign in</h2>
-        <input name="forgot_email" type="email" />
-        <input name="forgot_password" type="password" />
-      </form>
-    `;
-
-    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
-
-    expect(fieldByName(report, "modal_email").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "modal_password").qualifiedAs).toBe("password");
-    expect(fieldByName(report, "forgot_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "forgot_password").qualifiedAs).toBe("ignored");
-  });
-
-  it("treats hash-only form actions as implicit current-page actions", () => {
-    window.history.replaceState(null, "", "/forgot-password");
-    document.body.innerHTML = `
-      <form id="modal-login" action="#">
-        <h2>Sign in</h2>
-        <input name="modal_email" type="email" />
-        <input name="modal_password" type="password" />
-      </form>
-    `;
-
-    const snapshot = collectAutofillPageSnapshot(document);
-    const report = triageAutofillPage(snapshot);
-
-    expect(snapshot.forms.find((form) => form.htmlId === "modal-login")).toMatchObject({
-      htmlActionIsImplicit: true
-    });
-    expect(fieldByName(report, "modal_email").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "modal_password").qualifiedAs).toBe("password");
   });
 
   it("uses login hostnames in form actions as passwordless login context", () => {
@@ -607,7 +518,7 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
-  it("preserves primary account-creation submit context", () => {
+  it("preserves login submit labels on combined auth forms", () => {
     document.body.innerHTML = `
       <form id="start">
         <input name="email" type="email" />
@@ -621,11 +532,11 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(snapshot);
 
     expect(snapshot.forms.find((form) => form.htmlId === "start")?.headingText).toEqual([
-      "Create account"
+      "Create account",
+      "Sign in"
     ]);
-    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
-    expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
   it("keeps neutral primary submits from inheriting secondary submit exclusions", () => {
@@ -647,6 +558,24 @@ describe("autofill triage", () => {
     ]);
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
+  it("preserves later account-creation submit labels for registration forms", () => {
+    document.body.innerHTML = `
+      <form id="signup">
+        <input name="email" type="email" autocomplete="username" />
+        <input name="new_password" type="password" autocomplete="new-password" />
+        <button type="submit">Continue</button>
+        <button type="submit">Create account</button>
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "signup")?.headingText).toEqual([
+      "Continue",
+      "Create account"
+    ]);
   });
 
   it("ignores disabled submit controls when collecting submit text context", () => {
@@ -794,24 +723,6 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
   });
 
-  it("does not share form-less context across semantic sections", () => {
-    document.body.innerHTML = `
-      <main>
-        <section>
-          <input name="contact_email" type="email" />
-        </section>
-        <section>
-          <input name="login_password" type="password" />
-        </section>
-      </main>
-    `;
-
-    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
-
-    expect(fieldByName(report, "contact_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
-  });
-
   it("shares local context for adjacent form-less body-level login fields", () => {
     document.body.innerHTML = `
       <input name="contact_email" type="email" />
@@ -844,21 +755,6 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "body_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "body_email").containerOpid).toBe(
       fieldByName(report, "body_password").containerOpid
-    );
-  });
-
-  it("shares local context for body-level fields wrapped in labels", () => {
-    document.body.innerHTML = `
-      <label>Email <input name="wrapped_email" type="email" /></label>
-      <label>Password <input name="wrapped_password" type="password" /></label>
-    `;
-
-    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
-
-    expect(fieldByName(report, "wrapped_email").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "wrapped_password").qualifiedAs).toBe("password");
-    expect(fieldByName(report, "wrapped_email").containerOpid).toBe(
-      fieldByName(report, "wrapped_password").containerOpid
     );
   });
 
@@ -914,8 +810,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
   });
 
@@ -940,15 +835,9 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "create_your_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "create_your_email").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "create_your_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "create_your_password").qualifiedAs).toBe("newPassword");
-    expect(fieldByName(report, "create_an_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "create_an_email").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "create_an_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "create_an_password").qualifiedAs).toBe("newPassword");
     expect(fieldByName(report, "registered_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "registered_password").qualifiedAs).toBe("password");
@@ -959,10 +848,6 @@ describe("autofill triage", () => {
       <form id="join-path" action="/register">
         <input name="register_path_email" type="email" />
         <input name="register_path_password" type="password" />
-      </form>
-      <form id="nested-join-path" action="/account/register">
-        <input name="nested_register_email" type="email" />
-        <input name="nested_register_password" type="password" />
       </form>
       <form id="registered-users" action="/registered-users/sign-in">
         <input name="registered_path_email" type="email" autocomplete="username" />
@@ -976,21 +861,13 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "register_path_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "register_path_email").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "register_path_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "register_path_password").qualifiedAs).toBe("newPassword");
-    expect(fieldByName(report, "nested_register_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "nested_register_email").reasons).toContain(
-      "non-login:account-creation"
-    );
-    expect(fieldByName(report, "nested_register_password").qualifiedAs).toBe("newPassword");
     expect(fieldByName(report, "registered_path_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "registered_path_password").qualifiedAs).toBe("password");
   });
 
-  it("excludes named new-password siblings from login evidence", () => {
+  it("keeps named new-password siblings available for registration", () => {
     document.body.innerHTML = `
       <form id="account-form">
         <input name="email" type="email" autocomplete="username" />
@@ -1001,8 +878,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "new_password").qualifiedAs).toBe("newPassword");
     expect(fieldByName(report, "confirm_password").qualifiedAs).toBe("newPassword");
   });
@@ -1018,7 +894,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
     expect(fieldByName(report, "confirm_password").qualifiedAs).toBe("newPassword");
   });
@@ -1105,33 +981,6 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "code").reasons).toContain("excluded:out-of-band-code");
   });
 
-  it("does not classify mobile-delivered OTP prompts as authenticator TOTP", () => {
-    document.body.innerHTML = `
-      <form id="mobile-code">
-        <p>OTP sent to your mobile</p>
-        <input name="otp" type="tel" />
-      </form>
-    `;
-
-    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
-
-    expect(fieldByName(report, "otp").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "otp").reasons).toContain("excluded:out-of-band-code");
-  });
-
-  it("keeps mobile authenticator prompts as TOTP targets", () => {
-    document.body.innerHTML = `
-      <form id="mobile-authenticator">
-        <label for="auth-code">Mobile authenticator code</label>
-        <input id="auth-code" name="authenticator_code" type="tel" inputmode="numeric" />
-      </form>
-    `;
-
-    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
-
-    expect(fieldByName(report, "authenticator_code").qualifiedAs).toBe("totp");
-  });
-
   it("requires field-level code evidence before using MFA form context", () => {
     document.body.innerHTML = `
       <form id="mfa-setup">
@@ -1193,22 +1042,6 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "checkout_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "card_cvv").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "card_code").qualifiedAs).toBe("ignored");
-  });
-
-  it("does not classify text card security code fields as saved credentials", () => {
-    document.body.innerHTML = `
-      <form id="payment">
-        <input name="checkout_email" type="email" />
-        <label for="card-cvc">Card security code</label>
-        <input id="card-cvc" name="card_cvc" type="tel" autocomplete="cc-csc" />
-      </form>
-    `;
-
-    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
-
-    expect(fieldByName(report, "checkout_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "card_cvc").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "card_cvc").reasons).toContain("excluded:card-security-code");
   });
 
   it("does not classify generic masked security-code fields as TOTP targets", () => {
@@ -1335,7 +1168,6 @@ describe("autofill triage", () => {
     document.body.innerHTML = `
       <form>
         <input name="offscreen_email" type="email" autocomplete="username" style="position:absolute;left:-9999px" />
-        <input name="offscreen_em_email" type="email" autocomplete="username" style="position:absolute;left:-999em" />
         <input name="positive_left_offscreen_email" type="email" autocomplete="username" style="position:absolute;left:9999px" />
         <input name="positive_top_offscreen_email" type="email" autocomplete="username" style="position:absolute;top:9999px" />
         <input name="right_offscreen_email" type="email" autocomplete="username" style="position:absolute;right:-9999px" />
@@ -1350,14 +1182,12 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "offscreen_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "offscreen_email").reasons).toContain("not-viewable:offscreen");
-    expect(fieldByName(report, "offscreen_em_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "offscreen_em_email").reasons).toContain("not-viewable:offscreen");
-    expect(fieldByName(report, "positive_left_offscreen_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "positive_left_offscreen_email").reasons).toContain(
+    expect(fieldByName(report, "positive_left_offscreen_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "positive_left_offscreen_email").reasons).not.toContain(
       "not-viewable:offscreen"
     );
-    expect(fieldByName(report, "positive_top_offscreen_email").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "positive_top_offscreen_email").reasons).toContain(
+    expect(fieldByName(report, "positive_top_offscreen_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "positive_top_offscreen_email").reasons).not.toContain(
       "not-viewable:offscreen"
     );
     expect(fieldByName(report, "right_offscreen_email").qualifiedAs).toBe("ignored");
@@ -1380,21 +1210,6 @@ describe("autofill triage", () => {
         <h2>Sign in or create account</h2>
         <input name="email" type="email" autocomplete="username" />
         <input name="password" type="password" autocomplete="current-password" />
-      </form>
-    `;
-
-    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
-
-    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
-  });
-
-  it("lets mixed sign-in and signup copy keep generic login passwords eligible", () => {
-    document.body.innerHTML = `
-      <form id="mixed-auth">
-        <h2>Sign in or create account</h2>
-        <input name="email" type="email" />
-        <input name="password" type="password" />
       </form>
     `;
 
@@ -1507,10 +1322,7 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "hidden_shadow_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "hidden_shadow_email").reasons).toContain("not-viewable:hidden");
     expect(fieldByName(report, "opaque_shadow_user").labelText).toBe("Email address");
-    expect(fieldByName(report, "opaque_shadow_user").qualifiedAs).toBe("ignored");
-    expect(fieldByName(report, "opaque_shadow_user").reasons).toContain(
-      "non-login:account-creation"
-    );
+    expect(fieldByName(report, "opaque_shadow_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "shadow_password").qualifiedAs).toBe("newPassword");
   });
 

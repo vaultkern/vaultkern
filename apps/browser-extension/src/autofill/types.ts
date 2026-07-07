@@ -18,6 +18,7 @@ export interface AutofillFormSnapshot {
   htmlMethod?: string;
   ariaLabel?: string;
   headingText: string[];
+  submitText?: string[];
 }
 
 export interface AutofillFieldSnapshot {
@@ -38,10 +39,14 @@ export interface AutofillFieldSnapshot {
   ariaLabel?: string;
   ariaDescribedBy?: string;
   labelText?: string;
+  containerText?: string[];
   dataSetValues: string[];
   selectOptions?: string[];
   readonly: boolean;
   disabled: boolean;
+  focused: boolean;
+  siteRuleTypes: AutofillFieldQualification[];
+  siteRuleReasons: string[];
   viewable: boolean;
   viewableReasons: string[];
   fillable: boolean;
@@ -49,6 +54,11 @@ export interface AutofillFieldSnapshot {
 }
 
 export interface AutofillPageSnapshot {
+  url?: string;
+  siteRule?: {
+    id: string;
+    disabled: boolean;
+  };
   forms: AutofillFormSnapshot[];
   fields: AutofillFieldSnapshot[];
 }

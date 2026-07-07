@@ -9,6 +9,10 @@ type StorageChangeListener = (
   changes: Record<string, unknown>,
   areaName: string
 ) => void;
+type TabUpdatedListener = (
+  tabId: number,
+  changeInfo: { status?: string; url?: string }
+) => void;
 
 function createContentScriptRegistry(initialIds: string[] = []) {
   const registeredIds = new Set(initialIds);
@@ -66,11 +70,12 @@ async function flushMicrotasks() {
 
 function sendRuntimeMessage(
   listeners: RuntimeMessageListener[],
-  message: unknown
+  message: unknown,
+  sender: unknown = {}
 ) {
   let response: unknown;
   const handled = listeners.some((listener) =>
-    listener(message, {}, (value) => {
+    listener(message, sender, (value) => {
       response = value;
     })
   );
@@ -209,6 +214,466 @@ function stableJson(value: unknown): string {
 }
 
 describe("background bridge", () => {
+  it("stores returns and clears a pending autofill submission", async () => {
+    const listeners: RuntimeMessageListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(listeners, {
+      type: "vaultkern_autofill_submission",
+      url: "https://example.com/login",
+      username: "alice",
+      password: "secret",
+      submittedAt: 1710000000000
+    }).response();
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request"
+      }).response()
+    ).resolves.toEqual({
+      pending: {
+        url: "https://example.com/login",
+        username: "alice",
+        password: "secret",
+        submittedAt: 1710000000000
+      }
+    });
+
+    await sendRuntimeMessage(listeners, {
+      type: "vaultkern_autofill_pending_clear"
+    }).response();
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request"
+      }).response()
+    ).resolves.toEqual({ pending: null });
+  });
+
+  it("scopes pending autofill submissions to their source tab", async () => {
+    const listeners: RuntimeMessageListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://one.example/login",
+        username: "alice",
+        password: "one-secret",
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 11 } }
+    ).response();
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://two.example/login",
+        username: "bob",
+        password: "two-secret",
+        submittedAt: 1710000001000
+      },
+      { tab: { id: 22 } }
+    ).response();
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 11
+      }).response()
+    ).resolves.toMatchObject({
+      pending: {
+        url: "https://one.example/login",
+        username: "alice",
+        password: "one-secret"
+      }
+    });
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 22
+      }).response()
+    ).resolves.toMatchObject({
+      pending: {
+        url: "https://two.example/login",
+        username: "bob",
+        password: "two-secret"
+      }
+    });
+
+    await sendRuntimeMessage(listeners, {
+      type: "vaultkern_autofill_pending_clear",
+      tabId: 11
+    }).response();
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 11
+      }).response()
+    ).resolves.toEqual({ pending: null });
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 22
+      }).response()
+    ).resolves.toMatchObject({
+      pending: {
+        url: "https://two.example/login",
+        username: "bob",
+        password: "two-secret"
+      }
+    });
+  });
+
+  it("clears tab-scoped pending autofill submissions after navigation", async () => {
+    const listeners: RuntimeMessageListener[] = [];
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener: vi.fn((listener: TabUpdatedListener) => {
+            tabUpdatedListeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 7 } }
+    ).response();
+
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { url: "https://example.com/settings" });
+    }
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 7
+      }).response()
+    ).resolves.toEqual({ pending: null });
+  });
+
+  it("keeps fresh tab-scoped pending autofill submissions after submit redirects", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1710000005000);
+    const listeners: RuntimeMessageListener[] = [];
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener: vi.fn((listener: TabUpdatedListener) => {
+            tabUpdatedListeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        saveOnly: true,
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 7 } }
+    ).response();
+
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { url: "https://example.com/welcome" });
+    }
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 7
+      }).response()
+    ).resolves.toMatchObject({
+      pending: {
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        saveOnly: true
+      }
+    });
+  });
+
+  it("does not restore navigation-cleared pending submissions from stale session storage", async () => {
+    const listeners: RuntimeMessageListener[] = [];
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+    const sessionItems: Record<string, unknown> = {};
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener: vi.fn((listener: TabUpdatedListener) => {
+            tabUpdatedListeners.push(listener);
+          })
+        }
+      },
+      storage: {
+        session: {
+          get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+            callback?.({ ...sessionItems });
+            return Promise.resolve({ ...sessionItems });
+          },
+          set(items: Record<string, unknown>, callback?: () => void) {
+            Object.assign(sessionItems, items);
+            callback?.();
+            return Promise.resolve();
+          },
+          remove(_keys: unknown, callback?: () => void) {
+            callback?.();
+            return Promise.resolve();
+          }
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 7 } }
+    ).response();
+    const staleSessionItems = { ...sessionItems };
+
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { url: "https://example.com/settings" });
+    }
+    Object.assign(sessionItems, staleSessionItems);
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 7
+      }).response()
+    ).resolves.toEqual({ pending: null });
+  });
+
+  it("keeps a pending autofill submission in session storage across background reloads", async () => {
+    const sessionItems: Record<string, unknown> = {};
+    const localSet = vi.fn();
+
+    function installChrome(listeners: RuntimeMessageListener[]) {
+      (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+        runtime: {
+          onMessage: {
+            addListener: vi.fn((listener: RuntimeMessageListener) => {
+              listeners.push(listener);
+            })
+          }
+        },
+        storage: {
+          session: {
+            get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+              callback?.({ ...sessionItems });
+              return Promise.resolve({ ...sessionItems });
+            },
+            set(items: Record<string, unknown>, callback?: () => void) {
+              Object.assign(sessionItems, items);
+              callback?.();
+              return Promise.resolve();
+            },
+            remove(keys: unknown, callback?: () => void) {
+              for (const key of Array.isArray(keys) ? keys : [keys]) {
+                if (typeof key === "string") {
+                  delete sessionItems[key];
+                }
+              }
+              callback?.();
+              return Promise.resolve();
+            }
+          },
+          local: {
+            get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+              callback?.({});
+              return Promise.resolve({});
+            },
+            set(items: Record<string, unknown>, callback?: () => void) {
+              localSet(items);
+              callback?.();
+              return Promise.resolve();
+            },
+            remove(keys: unknown, callback?: () => void) {
+              callback?.();
+              return Promise.resolve();
+            }
+          }
+        }
+      };
+    }
+
+    const firstListeners: RuntimeMessageListener[] = [];
+    installChrome(firstListeners);
+    await import("../background");
+
+    await expect(
+      sendRuntimeMessage(firstListeners, {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/login",
+        username: "alice",
+        password: "secret",
+        submittedAt: 1710000000000
+      }).response()
+    ).resolves.toEqual({ ok: true });
+    expect(sessionItems.vaultkernPendingAutofillSubmission).toEqual({
+      url: "https://example.com/login",
+      username: "alice",
+      password: "secret",
+      submittedAt: 1710000000000
+    });
+    expect(localSet).not.toHaveBeenCalled();
+
+    vi.resetModules();
+    const secondListeners: RuntimeMessageListener[] = [];
+    installChrome(secondListeners);
+    await import("../background");
+
+    await expect(
+      sendRuntimeMessage(secondListeners, {
+        type: "vaultkern_autofill_pending_request"
+      }).response()
+    ).resolves.toEqual({
+      pending: {
+        url: "https://example.com/login",
+        username: "alice",
+        password: "secret",
+        submittedAt: 1710000000000
+      }
+    });
+  });
+
+  it("prefers a newer in-memory pending autofill submission over older session storage", async () => {
+    const sessionItems: Record<string, unknown> = {
+      vaultkernPendingAutofillSubmission: {
+        url: "https://old.example/login",
+        username: "old",
+        password: "old-secret",
+        submittedAt: 1710000000000
+      }
+    };
+    const listeners: RuntimeMessageListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      },
+      storage: {
+        session: {
+          get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+            callback?.({ ...sessionItems });
+            return Promise.resolve({ ...sessionItems });
+          },
+          set(_items: Record<string, unknown>, callback?: () => void) {
+            callback?.();
+            return Promise.resolve();
+          },
+          remove(_keys: unknown, callback?: () => void) {
+            callback?.();
+            return Promise.resolve();
+          }
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(listeners, {
+      type: "vaultkern_autofill_submission",
+      url: "https://new.example/login",
+      username: "new",
+      password: "new-secret",
+      submittedAt: 1710000001000
+    }).response();
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request"
+      }).response()
+    ).resolves.toEqual({
+      pending: {
+        url: "https://new.example/login",
+        username: "new",
+        password: "new-secret",
+        submittedAt: 1710000001000
+      }
+    });
+  });
+
   it("keeps the native session alive after an unlocked session response", async () => {
     vi.useFakeTimers();
     const port = createPort();

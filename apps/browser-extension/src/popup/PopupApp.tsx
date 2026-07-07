@@ -4,6 +4,8 @@ import type { ReactNode } from "react";
 import type {
   EntryDetail,
   EntrySummary,
+  GroupTree,
+  SaveVaultResult,
   SessionState,
   UnlockCredentials,
   VaultReference
@@ -22,6 +24,7 @@ import { PopupStatusStrip } from "./PopupStatusStrip";
 import { SiteCandidateList } from "./SiteCandidateList";
 import { PopupVaultList } from "./PopupVaultList";
 import { popupErrorMessage, popupTheme } from "./theme";
+import type { PendingAutofillSubmission } from "../autofill/pendingSubmission";
 
 type SessionStateLike = Pick<
   SessionState,
@@ -44,9 +47,50 @@ export interface PopupClientLike {
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
   enableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
   unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
+  listGroups(vaultId: string): Promise<GroupTree>;
   listEntries(vaultId: string): Promise<EntrySummary[]>;
   getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
+  createEntry(
+    vaultId: string,
+    input: {
+      parentGroupId: string;
+      title: string;
+      username: string;
+      password: string;
+      url: string;
+      notes: string;
+      totpUri: string | null;
+      customFields: [];
+    }
+  ): Promise<EntryDetail>;
+  updateEntryFields(
+    vaultId: string,
+    entryId: string,
+    input: {
+      title: string;
+      username: string;
+      password: string;
+      url: string;
+      notes: string;
+      totpUri: string | null;
+      customFields: EntryDetail["customFields"];
+    }
+  ): Promise<EntryDetail>;
+  saveVault(vaultId: string): Promise<SaveVaultResult>;
 }
+
+type AutofillSavePrompt =
+  | {
+      mode: "save";
+      submission: PendingAutofillSubmission;
+      createdDetail?: EntryDetail;
+    }
+  | {
+      mode: "update";
+      submission: PendingAutofillSubmission;
+      entry: EntrySummary;
+      detail: EntryDetail;
+    };
 
 function limitRecentVaults(vaults: VaultReference[], limit: number) {
   return [...vaults]
@@ -144,6 +188,8 @@ export function PopupApp({
   findCandidates,
   fillEntry,
   activeSite,
+  loadPendingAutofillSubmission,
+  clearPendingAutofillSubmission,
   extensionSettingsStore,
   renderRuntimeErrorHelp,
   onUnlockComplete,
@@ -151,9 +197,11 @@ export function PopupApp({
   onWebAuthnUserVerificationComplete
 }: {
   client: PopupClientLike;
-  findCandidates: (vaultId: string) => Promise<EntrySummary[]>;
+  findCandidates: (vaultId: string, siteUrl?: string) => Promise<EntrySummary[]>;
   fillEntry: (vaultId: string, entryId: string) => Promise<void>;
   activeSite: () => Promise<string>;
+  loadPendingAutofillSubmission?: () => Promise<PendingAutofillSubmission | null>;
+  clearPendingAutofillSubmission?: () => Promise<void>;
   extensionSettingsStore?: ExtensionSettingsStore;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
   onUnlockComplete?: (
@@ -180,6 +228,12 @@ export function PopupApp({
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<EntryDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [pendingAutofillSubmission, setPendingAutofillSubmission] =
+    useState<PendingAutofillSubmission | null>(null);
+  const [autofillSavePrompt, setAutofillSavePrompt] =
+    useState<AutofillSavePrompt | null>(null);
+  const [autofillSaveError, setAutofillSaveError] = useState<string | null>(null);
+  const [savingAutofillPrompt, setSavingAutofillPrompt] = useState(false);
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [unlockErrorCause, setUnlockErrorCause] = useState<unknown>(null);
   const [recentVaults, setRecentVaults] = useState<VaultReference[]>([]);
@@ -219,6 +273,37 @@ export function PopupApp({
       recentVaults.find((vault) => vault.isCurrent) ??
       null
     );
+  }
+
+  function pendingPassword(submission: PendingAutofillSubmission) {
+    return submission.newPassword ?? submission.password;
+  }
+
+  function titleForPendingSubmission(submission: PendingAutofillSubmission) {
+    try {
+      return new URL(submission.url).host || submission.url;
+    } catch {
+      return submission.url;
+    }
+  }
+
+  function savedUrlForPendingSubmission(submission: PendingAutofillSubmission) {
+    try {
+      const url = new URL(submission.url);
+      url.search = "";
+      url.hash = "";
+      return url.href;
+    } catch {
+      return submission.url.split(/[?#]/, 1)[0] || submission.url;
+    }
+  }
+
+  function entryMatchesPendingUsername(
+    entry: EntrySummary,
+    submission: PendingAutofillSubmission
+  ) {
+    const submittedUsername = submission.username.trim();
+    return submittedUsername !== "" && entry.username === submittedUsername;
   }
 
   function canQuickUnlockVault(vault: VaultReference | null) {
@@ -415,9 +500,17 @@ export function PopupApp({
   }, [recentVaultsLoading, session?.currentVaultRefId, session?.unlocked]);
 
   useEffect(() => {
-    setSelectedPasskeyCredentialId(
-      passkeyCredentialOptions[0]?.credentialId ?? ""
-    );
+    setSelectedPasskeyCredentialId((currentCredentialId) => {
+      if (
+        currentCredentialId &&
+        passkeyCredentialOptions.some(
+          (option) => option.credentialId === currentCredentialId
+        )
+      ) {
+        return currentCredentialId;
+      }
+      return passkeyCredentialOptions[0]?.credentialId ?? "";
+    });
   }, [passkeyCredentialOptions]);
 
   useEffect(() => {
@@ -582,6 +675,171 @@ export function PopupApp({
     session?.unlocked,
     webAuthnCeremonyPrompt
   ]);
+
+  useEffect(() => {
+    if (
+      webAuthnCeremonyPrompt ||
+      !session?.unlocked ||
+      !session.activeVaultId ||
+      !loadPendingAutofillSubmission
+    ) {
+      setPendingAutofillSubmission(null);
+      setAutofillSavePrompt(null);
+      setAutofillSaveError(null);
+      return;
+    }
+
+    let cancelled = false;
+    loadPendingAutofillSubmission()
+      .then((submission) => {
+        if (!cancelled) {
+          setPendingAutofillSubmission(submission);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPendingAutofillSubmission(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    loadPendingAutofillSubmission,
+    session?.activeVaultId,
+    session?.unlocked,
+    webAuthnCeremonyPrompt
+  ]);
+
+  useEffect(() => {
+    if (!pendingAutofillSubmission || !session?.activeVaultId) {
+      setAutofillSavePrompt(null);
+      return;
+    }
+
+    let cancelled = false;
+    setAutofillSavePrompt(null);
+    if (pendingAutofillSubmission.saveOnly) {
+      setAutofillSavePrompt({
+        mode: "save",
+        submission: pendingAutofillSubmission
+      });
+      return;
+    }
+
+    findCandidates(session.activeVaultId, pendingAutofillSubmission.url)
+      .then(async (pendingCandidates) => {
+        if (cancelled) {
+          return;
+        }
+
+        const hasSubmittedUsername = pendingAutofillSubmission.username.trim() !== "";
+        const pendingCredentialPassword = pendingPassword(pendingAutofillSubmission);
+
+        if (!pendingCandidates.length) {
+          setAutofillSavePrompt({
+            mode: "save",
+            submission: pendingAutofillSubmission
+          });
+          return;
+        }
+
+        try {
+          if (hasSubmittedUsername) {
+            const matchingEntries = pendingCandidates.filter((entry) =>
+              entryMatchesPendingUsername(entry, pendingAutofillSubmission)
+            );
+            if (!matchingEntries.length) {
+              setAutofillSavePrompt({
+                mode: "save",
+                submission: pendingAutofillSubmission
+              });
+              return;
+            }
+            if (matchingEntries.length !== 1) {
+              void clearAutofillPrompt();
+              return;
+            }
+
+            const detail = await client.getEntryDetail(
+              session.activeVaultId,
+              matchingEntries[0].id
+            );
+            if (cancelled) {
+              return;
+            }
+            if (
+              typeof pendingAutofillSubmission.newPassword === "string" &&
+              detail.password !== pendingAutofillSubmission.password
+            ) {
+              void clearAutofillPrompt();
+              return;
+            }
+            if (detail.password === pendingCredentialPassword) {
+              void clearAutofillPrompt();
+              return;
+            }
+            setAutofillSavePrompt({
+              mode: "update",
+              submission: pendingAutofillSubmission,
+              entry: matchingEntries[0],
+              detail
+            });
+            return;
+          }
+
+          const candidateDetails = await Promise.all(
+            pendingCandidates.map(async (entry) => ({
+              entry,
+              detail: await client.getEntryDetail(session.activeVaultId, entry.id)
+            }))
+          );
+          if (cancelled) {
+            return;
+          }
+
+          const matchingDetails =
+            typeof pendingAutofillSubmission.newPassword === "string"
+              ? candidateDetails.filter(
+                  ({ detail }) => detail.password === pendingAutofillSubmission.password
+                )
+              : pendingCandidates.length === 1
+                ? candidateDetails
+                : [];
+          if (matchingDetails.length !== 1) {
+            void clearAutofillPrompt();
+            return;
+          }
+
+          const [{ entry, detail }] = matchingDetails;
+          if (detail.password === pendingCredentialPassword) {
+            void clearAutofillPrompt();
+            return;
+          }
+          setAutofillSavePrompt({
+            mode: "update",
+            submission: pendingAutofillSubmission,
+            entry,
+            detail
+          });
+        } catch {
+          if (!cancelled) {
+            setAutofillSavePrompt(null);
+          }
+        }
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setAutofillSavePrompt(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, findCandidates, pendingAutofillSubmission, session?.activeVaultId]);
 
   useEffect(() => {
     if (webAuthnCeremonyPrompt) {
@@ -858,6 +1116,80 @@ export function PopupApp({
 
     if (runtime?.openOptionsPage) {
       await runtime.openOptionsPage();
+    }
+  }
+
+  async function clearAutofillPrompt() {
+    await clearPendingAutofillSubmission?.();
+    setPendingAutofillSubmission(null);
+    setAutofillSavePrompt(null);
+    setAutofillSaveError(null);
+  }
+
+  async function refreshEntriesAfterAutofillSave(vaultId: string) {
+    const [nextEntries, nextCandidates] = await Promise.all([
+      client.listEntries(vaultId),
+      findCandidates(vaultId)
+    ]);
+    setEntries(nextEntries);
+    setCandidates(nextCandidates);
+  }
+
+  async function handleSavePendingLogin() {
+    if (!session?.activeVaultId || !autofillSavePrompt || savingAutofillPrompt) {
+      return;
+    }
+
+    setSavingAutofillPrompt(true);
+    setAutofillSaveError(null);
+
+    try {
+      if (autofillSavePrompt.mode === "save") {
+        if (!autofillSavePrompt.createdDetail) {
+          const groupTree = await client.listGroups(session.activeVaultId);
+          const createdDetail = await client.createEntry(session.activeVaultId, {
+            parentGroupId: groupTree.root.id,
+            title: titleForPendingSubmission(autofillSavePrompt.submission),
+            username: autofillSavePrompt.submission.username,
+            password: pendingPassword(autofillSavePrompt.submission),
+            url: savedUrlForPendingSubmission(autofillSavePrompt.submission),
+            notes: "",
+            totpUri: null,
+            customFields: []
+          });
+          setAutofillSavePrompt((currentPrompt) =>
+            currentPrompt === autofillSavePrompt && currentPrompt.mode === "save"
+              ? { ...currentPrompt, createdDetail }
+              : currentPrompt
+          );
+        }
+      } else {
+        await client.updateEntryFields(
+          session.activeVaultId,
+          autofillSavePrompt.entry.id,
+          {
+            title: autofillSavePrompt.detail.title,
+            username: autofillSavePrompt.detail.username,
+            password: pendingPassword(autofillSavePrompt.submission),
+            url:
+              autofillSavePrompt.detail.url ||
+              savedUrlForPendingSubmission(autofillSavePrompt.submission),
+            notes: autofillSavePrompt.detail.notes,
+            totpUri: autofillSavePrompt.detail.totpUri ?? null,
+            customFields: autofillSavePrompt.detail.customFields ?? []
+          }
+        );
+      }
+
+      await client.saveVault(session.activeVaultId);
+      await clearAutofillPrompt();
+      await refreshEntriesAfterAutofillSave(session.activeVaultId);
+    } catch (saveFailure) {
+      setAutofillSaveError(
+        popupErrorMessage(saveFailure, "Failed to save login")
+      );
+    } finally {
+      setSavingAutofillPrompt(false);
     }
   }
 
@@ -1211,6 +1543,39 @@ export function PopupApp({
         onOpenExtensionSettings={handleOpenExtensionSettings}
       />
       {entriesError ? <div role="alert">{entriesError}</div> : null}
+      {autofillSavePrompt ? (
+        <section style={passkeyPromptStyle} aria-live="polite">
+          <strong>
+            {autofillSavePrompt.mode === "save" ? "Save login?" : "Update password?"}
+          </strong>
+          <div style={{ color: popupTheme.colors.muted, fontSize: "0.86rem" }}>
+            {titleForPendingSubmission(autofillSavePrompt.submission)}
+          </div>
+          {autofillSaveError ? <div role="alert">{autofillSaveError}</div> : null}
+          <div style={{ display: "flex", gap: popupTheme.spacing.sm, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() => {
+                void handleSavePendingLogin();
+              }}
+              disabled={savingAutofillPrompt}
+              style={primaryActionStyle}
+            >
+              {autofillSavePrompt.mode === "save" ? "Save Login" : "Update Password"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void clearAutofillPrompt();
+              }}
+              disabled={savingAutofillPrompt}
+              style={secondaryActionStyle}
+            >
+              Dismiss
+            </button>
+          </div>
+        </section>
+      ) : null}
       <SiteCandidateList
         candidates={candidates}
         onFill={(entryId) => fillEntry(session.activeVaultId ?? "", entryId)}

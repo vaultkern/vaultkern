@@ -8,6 +8,7 @@ import type {
 export interface LoginFillPayload {
   username?: string;
   password?: string;
+  newPassword?: string;
   totp?: string;
 }
 
@@ -35,6 +36,138 @@ function candidateFields(reportFields: AutofillTriageFieldResult[]) {
     .sort(byDocumentOrder);
 }
 
+function siteRuleFields(reportFields: AutofillTriageFieldResult[]) {
+  return reportFields
+    .filter((field) => field.viewable && field.fillable && field.siteRuleTypes.length > 0)
+    .sort(byDocumentOrder);
+}
+
+function viewableSiteRuleFields(
+  reportFields: AutofillTriageFieldResult[],
+  fieldType: AutofillFieldQualification
+) {
+  return reportFields
+    .filter((field) => field.viewable && field.siteRuleTypes.includes(fieldType))
+    .sort(byDocumentOrder);
+}
+
+function firstViewableSiteRuleField(
+  reportFields: AutofillTriageFieldResult[],
+  fieldType: AutofillFieldQualification
+) {
+  return viewableSiteRuleFields(reportFields, fieldType)[0] ?? null;
+}
+
+function actionForSiteRuleField(
+  field: AutofillTriageFieldResult,
+  payload: LoginFillPayload,
+  skippedFieldTypes: ReadonlySet<AutofillFieldQualification> = new Set()
+): AutofillFillAction | null {
+  for (const fieldType of field.siteRuleTypes) {
+    if (skippedFieldTypes.has(fieldType)) {
+      continue;
+    }
+
+    const value =
+      fieldType === "username"
+        ? payload.username
+        : fieldType === "password" || fieldType === "currentPassword"
+          ? payload.password
+          : fieldType === "newPassword"
+            ? payload.newPassword
+            : fieldType === "totp"
+              ? payload.totp
+              : undefined;
+
+    if (typeof value === "string") {
+      return {
+        fieldOpid: field.opid,
+        elementNumber: field.elementNumber,
+        fieldType,
+        value
+      };
+    }
+  }
+
+  return null;
+}
+
+function createSplitSiteRuleTotpActions(
+  fields: AutofillTriageFieldResult[],
+  value: string
+) {
+  const totpFields = fields
+    .filter((field) => field.siteRuleTypes.includes("totp"))
+    .sort(byDocumentOrder);
+  const trimmedValue = value.trim();
+  const splitFields = pickSplitTotpFields(fields, totpFields, trimmedValue.length);
+
+  if (splitFields.length <= 1) {
+    return [];
+  }
+
+  return splitFields.map((field, index) => ({
+    fieldOpid: field.opid,
+    elementNumber: field.elementNumber,
+    fieldType: "totp" as const,
+    value: trimmedValue[index] ?? ""
+  }));
+}
+
+function createSiteRuleActions(
+  reportFields: AutofillTriageFieldResult[],
+  payload: LoginFillPayload
+) {
+  const fields = siteRuleFields(reportFields);
+  const usedFields = new Set<string>();
+  const skippedFieldTypes = new Set<AutofillFieldQualification>();
+  const actions: AutofillFillAction[] = [];
+
+  if (typeof payload.totp === "string") {
+    const totpFields = fields.filter((field) => field.siteRuleTypes.includes("totp"));
+    for (const action of createSplitSiteRuleTotpActions(fields, payload.totp)) {
+      usedFields.add(action.fieldOpid);
+      actions.push(action);
+    }
+    if (totpFields.length > 1) {
+      skippedFieldTypes.add("totp");
+    }
+  }
+
+  for (const field of fields) {
+    if (usedFields.has(field.opid)) {
+      continue;
+    }
+    const action = actionForSiteRuleField(field, payload, skippedFieldTypes);
+    if (action) {
+      usedFields.add(field.opid);
+      actions.push(action);
+    }
+  }
+
+  return actions;
+}
+
+function appendFallbackActions(
+  primaryActions: AutofillFillAction[],
+  fallbackActions: AutofillFillAction[]
+) {
+  const usedFieldOpids = new Set(primaryActions.map((action) => action.fieldOpid));
+  const primaryFieldTypes = new Set(primaryActions.map((action) => action.fieldType));
+
+  for (const action of fallbackActions) {
+    const repeatedFieldType = action.fieldType === "newPassword";
+    if (
+      usedFieldOpids.has(action.fieldOpid) ||
+      (!repeatedFieldType && primaryFieldTypes.has(action.fieldType))
+    ) {
+      continue;
+    }
+    usedFieldOpids.add(action.fieldOpid);
+    primaryActions.push(action);
+  }
+}
+
 function preferCurrentPasswordField(fields: AutofillTriageFieldResult[]) {
   return (
     fields.find((field) => field.reasons.includes("autocomplete:current-password")) ??
@@ -47,7 +180,34 @@ function pickFirstPasswordField(fields: AutofillTriageFieldResult[]) {
   return fields.find((field) => field.qualifiedAs === "password") ?? null;
 }
 
-function isSameFillScope(
+function scopedCredentialFields(
+  fields: AutofillTriageFieldResult[],
+  field: AutofillTriageFieldResult
+) {
+  if (field.formOpid) {
+    return fields.filter((candidate) => candidate.formOpid === field.formOpid);
+  }
+  if (field.containerOpid) {
+    return fields.filter(
+      (candidate) =>
+        candidate.formOpid === undefined && candidate.containerOpid === field.containerOpid
+    );
+  }
+  return [field];
+}
+
+function isRegistrationUsernameFallback(
+  field: AutofillTriageFieldResult,
+  fields: AutofillTriageFieldResult[]
+) {
+  const scopedFields = scopedCredentialFields(fields, field);
+  return (
+    scopedFields.some((candidate) => candidate.qualifiedAs === "newPassword") &&
+    !scopedFields.some((candidate) => candidate.qualifiedAs === "password")
+  );
+}
+
+function fieldScopeMatches(
   left: AutofillTriageFieldResult,
   right: AutofillTriageFieldResult
 ) {
@@ -69,73 +229,80 @@ function pickPasswordField(
   const passwordFields = fields.filter((field) => field.qualifiedAs === "password");
   if (usernameField) {
     return preferCurrentPasswordField(
-      passwordFields.filter((field) => isSameFillScope(field, usernameField))
+      passwordFields.filter((field) => fieldScopeMatches(field, usernameField))
     );
   }
 
   return preferCurrentPasswordField(passwordFields);
 }
 
-function pickUnscopedPasswordAfterUsername(
-  fields: AutofillTriageFieldResult[],
-  usernameField: AutofillTriageFieldResult
+function fieldHasSiblingNewPassword(
+  field: AutofillTriageFieldResult,
+  fields: AutofillTriageFieldResult[]
 ) {
-  if (usernameField.formOpid !== undefined || usernameField.containerOpid !== undefined) {
+  if (!field.formOpid) {
+    return false;
+  }
+  return fields.some(
+    (candidate) =>
+      candidate.qualifiedAs === "newPassword" &&
+      candidate.opid !== field.opid &&
+      candidate.formOpid === field.formOpid
+  );
+}
+
+function fieldHasSiblingUsername(
+  field: AutofillTriageFieldResult,
+  fields: AutofillTriageFieldResult[]
+) {
+  return fields.some(
+    (candidate) =>
+      candidate.qualifiedAs === "username" &&
+      candidate.opid !== field.opid &&
+      fieldScopeMatches(candidate, field)
+  );
+}
+
+function isUnsafeLoginPasswordField(
+  passwordField: AutofillTriageFieldResult,
+  fields: AutofillTriageFieldResult[]
+) {
+  return (
+    fieldHasSiblingNewPassword(passwordField, fields) &&
+    !isCurrentPasswordField(passwordField) &&
+    !fieldHasSiblingUsername(passwordField, fields)
+  );
+}
+
+function pickLoginPasswordField(fields: AutofillTriageFieldResult[]) {
+  const passwordField = pickPasswordField(fields);
+  if (!passwordField) {
     return null;
   }
 
+  if (isUnsafeLoginPasswordField(passwordField, fields)) {
+    return null;
+  }
+
+  return passwordField;
+}
+
+function pickFirstSafeLoginPasswordField(fields: AutofillTriageFieldResult[]) {
   return (
     fields.find(
-      (field) =>
-        field.qualifiedAs === "password" &&
-        field.elementNumber > usernameField.elementNumber &&
-        field.formOpid === undefined &&
-        field.containerOpid === undefined
+      (field) => field.qualifiedAs === "password" && !isUnsafeLoginPasswordField(field, fields)
     ) ?? null
   );
 }
 
-function usernameHintScore(field: AutofillTriageFieldResult) {
-  const fieldText = [
-    field.htmlName,
-    field.htmlId,
-    field.htmlClass,
-    field.autocomplete,
-    field.placeholder,
-    field.title,
-    field.ariaLabel,
-    field.labelText,
-    ...field.dataSetValues
-  ]
-    .map(normalizeHint)
-    .join(",");
-
-  let score = 0;
-  if (field.reasons.includes("autocomplete:username")) {
-    score += 100;
+function fieldForAction(
+  fields: AutofillTriageFieldResult[],
+  action: AutofillFillAction | undefined
+) {
+  if (!action) {
+    return null;
   }
-  if (field.reasons.includes("autocomplete:email")) {
-    score += 80;
-  }
-  if (field.htmlType === "email") {
-    score += 20;
-  }
-  if (fieldText.includes("username") || fieldText.includes("email")) {
-    score += 10;
-  }
-  if (fieldText.includes("login")) {
-    score += 5;
-  }
-  return score;
-}
-
-function pickPreferredUsernameField(fields: AutofillTriageFieldResult[]) {
-  return (
-    [...fields].sort(
-      (left, right) =>
-        usernameHintScore(right) - usernameHintScore(left) || byDocumentOrder(left, right)
-    )[0] ?? null
-  );
+  return fields.find((field) => field.opid === action.fieldOpid) ?? null;
 }
 
 function pickUsernameField(
@@ -147,40 +314,16 @@ function pickUsernameField(
     return null;
   }
 
-  if (passwordField?.formOpid) {
-    const sameFormUsername = pickPreferredUsernameField(
-      usernameFields.filter((field) => field.formOpid === passwordField.formOpid)
+  if (passwordField) {
+    const sameScopeUsername = usernameFields.find((field) =>
+      fieldScopeMatches(field, passwordField)
     );
-    return sameFormUsername;
+    if (sameScopeUsername) {
+      return sameScopeUsername;
+    }
   }
 
-  if (passwordField?.containerOpid) {
-    const sameContainerUsername = pickPreferredUsernameField(
-      usernameFields.filter(
-        (field) => field.formOpid === undefined && field.containerOpid === passwordField.containerOpid
-      )
-    );
-    return sameContainerUsername;
-  }
-
-  return pickPreferredUsernameField(usernameFields);
-}
-
-function hasScopedPasswordField(
-  fields: AutofillTriageFieldResult[],
-  usernameField: AutofillTriageFieldResult
-) {
-  return fields.some(
-    (field) => field.qualifiedAs === "password" && isSameFillScope(field, usernameField)
-  );
-}
-
-function pickUsernameFirstField(fields: AutofillTriageFieldResult[]) {
-  return pickPreferredUsernameField(
-    fields.filter(
-      (field) => field.qualifiedAs === "username" && !hasScopedPasswordField(fields, field)
-    )
-  );
+  return usernameFields.find((field) => !isRegistrationUsernameFallback(field, fields)) ?? null;
 }
 
 function hasBlockingUsernameFallbackReason(field: AutofillTriageFieldResult) {
@@ -195,26 +338,9 @@ function isSingleStepEmailCandidate(field: AutofillTriageFieldResult) {
     field.viewable &&
     field.fillable &&
     field.tagName === "input" &&
-    (field.htmlType === "email" ||
-      (field.htmlType === "text" && singleStepFieldHasEmailHint(field))) &&
+    field.htmlType === "email" &&
     !hasBlockingUsernameFallbackReason(field)
   );
-}
-
-function singleStepFieldHasEmailHint(field: AutofillTriageFieldResult) {
-  const fieldText = [
-    field.htmlName,
-    field.htmlId,
-    field.htmlClass,
-    field.placeholder,
-    field.title,
-    field.ariaLabel,
-    field.labelText,
-    ...field.dataSetValues
-  ]
-    .map(normalizeHint)
-    .join(",");
-  return fieldText.includes("email");
 }
 
 function pickSingleStepEmailUsernameField(
@@ -227,6 +353,419 @@ function pickSingleStepEmailUsernameField(
 
   const fallbackFields = fields.filter(isSingleStepEmailCandidate).sort(byDocumentOrder);
   return fallbackFields.length === 1 ? fallbackFields[0] : null;
+}
+
+function pickLoginPasswordFieldInForm(
+  fields: AutofillTriageFieldResult[],
+  formOpid: string | undefined
+) {
+  if (!formOpid) {
+    return null;
+  }
+  return pickLoginPasswordField(fields.filter((field) => fieldIsInForm(field, formOpid)));
+}
+
+function pickLoginPasswordFieldInScope(
+  fields: AutofillTriageFieldResult[],
+  anchorField: AutofillTriageFieldResult | null
+) {
+  if (!anchorField) {
+    return null;
+  }
+  return pickLoginPasswordField(fields.filter((field) => fieldScopeMatches(field, anchorField)));
+}
+
+function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | undefined) {
+  return field.formOpid === formOpid;
+}
+
+function credentialScopeKey(field: AutofillTriageFieldResult) {
+  if (field.formOpid !== undefined) {
+    return `form:${field.formOpid}`;
+  }
+  if (field.containerOpid !== undefined) {
+    return `container:${field.containerOpid}`;
+  }
+  return null;
+}
+
+function fieldIsInCredentialScope(
+  field: AutofillTriageFieldResult,
+  scopeKey: string
+) {
+  return credentialScopeKey(field) === scopeKey;
+}
+
+const CHANGE_PASSWORD_KEYWORDS = [
+  "changepassword",
+  "updatepassword",
+  "resetpassword",
+  "currentpassword",
+  "oldpassword",
+  "existingpassword"
+];
+const EXPLICIT_CHANGE_PASSWORD_KEYWORDS = [
+  "changepassword",
+  "updatepassword",
+  "resetpassword",
+  "forgotpassword"
+];
+
+function normalizeText(value: string | undefined) {
+  return (value ?? "").toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function searchableFieldText(field: AutofillTriageFieldResult) {
+  return [
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.autocomplete,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.labelText,
+    ...((field.containerText ?? []) as string[]),
+    field.formContext?.htmlId,
+    field.formContext?.htmlName,
+    field.formContext?.htmlClass,
+    field.formContext?.htmlAction,
+    field.formContext?.ariaLabel,
+    ...((field.formContext?.headingText ?? []) as string[])
+  ]
+    .map(normalizeText)
+    .join(",");
+}
+
+function formSearchText(formFields: AutofillTriageFieldResult[]) {
+  return formFields.map(searchableFieldText).join(",");
+}
+
+function isCurrentPasswordField(field: AutofillTriageFieldResult) {
+  const searchableText = searchableFieldText(field);
+  return (
+    field.siteRuleTypes.includes("currentPassword") ||
+    field.reasons.includes("autocomplete:current-password") ||
+    field.reasons.some((reason) => reason.endsWith(":currentPassword")) ||
+    searchableText.includes("currentpassword") ||
+    searchableText.includes("oldpassword") ||
+    searchableText.includes("existingpassword")
+  );
+}
+
+function formHasResetPasswordContext(formFields: AutofillTriageFieldResult[]) {
+  const searchableText = formSearchText(formFields);
+  return (
+    searchableText.includes("resetpassword") ||
+    searchableText.includes("changepassword") ||
+    searchableText.includes("updatepassword") ||
+    searchableText.includes("forgotpassword")
+  );
+}
+
+function formHasRegistrationContext(formFields: AutofillTriageFieldResult[]) {
+  const searchableText = formSearchText(formFields);
+  return (
+    searchableText.includes("register") ||
+    searchableText.includes("signup") ||
+    searchableText.includes("createaccount") ||
+    searchableText.includes("createyouraccount") ||
+    searchableText.includes("createanaccount") ||
+    searchableText.includes("createpassword") ||
+    searchableText.includes("join")
+  );
+}
+
+function formHasChangePasswordContext(formFields: AutofillTriageFieldResult[]) {
+  const searchableText = formSearchText(formFields);
+  return CHANGE_PASSWORD_KEYWORDS.some((keyword) => searchableText.includes(keyword));
+}
+
+function formHasExplicitChangePasswordContext(formFields: AutofillTriageFieldResult[]) {
+  const searchableText = formSearchText(formFields);
+  return EXPLICIT_CHANGE_PASSWORD_KEYWORDS.some((keyword) => searchableText.includes(keyword));
+}
+
+function pickCurrentPasswordField(formFields: AutofillTriageFieldResult[]) {
+  const passwordFields = formFields.filter((field) => field.qualifiedAs === "password");
+  return passwordFields.find(isCurrentPasswordField) ?? null;
+}
+
+function scopeQualifiesForPasswordChange(
+  fields: AutofillTriageFieldResult[],
+  scopeKey: string
+) {
+  const formFields = fields.filter((field) => fieldIsInCredentialScope(field, scopeKey));
+  const currentPasswordField = pickCurrentPasswordField(formFields);
+  const formNewPasswordFields = formFields.filter(
+    (field) => field.qualifiedAs === "newPassword"
+  );
+  if (!currentPasswordField || !formNewPasswordFields.length) {
+    return false;
+  }
+  if (
+    scopeKey.startsWith("container:") &&
+    formFields.filter(
+      (field) => field.qualifiedAs === "password" || field.qualifiedAs === "newPassword"
+    ).length < 3
+  ) {
+    return false;
+  }
+
+  const hasAutocompleteRoles =
+    (currentPasswordField.reasons.includes("autocomplete:current-password") ||
+      currentPasswordField.siteRuleTypes.includes("currentPassword")) &&
+    formNewPasswordFields.some((field) => field.reasons.includes("autocomplete:new-password"));
+  if (scopeKey.startsWith("container:")) {
+    return formHasExplicitChangePasswordContext(formFields);
+  }
+  return hasAutocompleteRoles || formHasChangePasswordContext(formFields);
+}
+
+function scopeHasCredentialCandidate(
+  fields: AutofillTriageFieldResult[],
+  scopeKey: string
+) {
+  return fields.some(
+    (field) =>
+      fieldIsInCredentialScope(field, scopeKey) &&
+      (field.qualifiedAs === "username" ||
+        field.qualifiedAs === "password" ||
+        field.qualifiedAs === "newPassword")
+  );
+}
+
+function pickPasswordChangeScopeKey(
+  fields: AutofillTriageFieldResult[],
+  allFields: AutofillTriageFieldResult[]
+) {
+  const newPasswordFields = fields.filter(
+    (field) => field.qualifiedAs === "newPassword" && credentialScopeKey(field) !== null
+  );
+  const scopeKeys = new Set(
+    newPasswordFields
+      .map(credentialScopeKey)
+      .filter((scopeKey): scopeKey is string => scopeKey !== null)
+  );
+
+  const focusedField = allFields.find((field) => field.focused && credentialScopeKey(field));
+  const focusedScopeKey = focusedField ? credentialScopeKey(focusedField) : null;
+  if (focusedScopeKey) {
+    if (scopeKeys.has(focusedScopeKey)) {
+      return scopeQualifiesForPasswordChange(fields, focusedScopeKey)
+        ? focusedScopeKey
+        : null;
+    }
+    if (scopeHasCredentialCandidate(fields, focusedScopeKey)) {
+      return null;
+    }
+  }
+
+  for (const scopeKey of scopeKeys) {
+    if (scopeQualifiesForPasswordChange(fields, scopeKey)) {
+      return scopeKey;
+    }
+  }
+
+  return null;
+}
+
+function createPasswordChangeActions(
+  fields: AutofillTriageFieldResult[],
+  scopeKey: string,
+  payload: LoginFillPayload
+): AutofillFillAction[] {
+  const formFields = fields.filter((field) => fieldIsInCredentialScope(field, scopeKey));
+  const currentPasswordField = pickCurrentPasswordField(formFields);
+  const actions: AutofillFillAction[] = [];
+
+  if (typeof payload.username === "string") {
+    const usernameField = formFields.find((field) => field.qualifiedAs === "username");
+    if (usernameField) {
+      actions.push({
+        fieldOpid: usernameField.opid,
+        elementNumber: usernameField.elementNumber,
+        fieldType: usernameField.qualifiedAs,
+        value: payload.username
+      });
+    }
+  }
+
+  if (currentPasswordField && typeof payload.password === "string") {
+    actions.push({
+      fieldOpid: currentPasswordField.opid,
+      elementNumber: currentPasswordField.elementNumber,
+      fieldType: currentPasswordField.qualifiedAs,
+      value: payload.password
+    });
+  }
+
+  if (typeof payload.newPassword === "string") {
+    for (const passwordField of formFields.filter((field) => field.qualifiedAs === "newPassword")) {
+      actions.push({
+        fieldOpid: passwordField.opid,
+        elementNumber: passwordField.elementNumber,
+        fieldType: passwordField.qualifiedAs,
+        value: payload.newPassword
+      });
+    }
+  }
+
+  return actions;
+}
+
+function hasCredentialSignal(field: AutofillTriageFieldResult) {
+  const searchableText = searchableFieldText(field);
+  const autocomplete = field.autocomplete ?? "";
+  return (
+    field.htmlType === "email" ||
+    field.htmlType === "password" ||
+    autocomplete.includes("username") ||
+    autocomplete.includes("email") ||
+    autocomplete.includes("current-password") ||
+    autocomplete.includes("new-password") ||
+    searchableText.includes("email") ||
+    searchableText.includes("username") ||
+    searchableText.includes("login") ||
+    searchableText.includes("password")
+  );
+}
+
+function fieldsInCredentialScope(fields: AutofillTriageFieldResult[], scopeKey: string) {
+  return fields.filter((field) => fieldIsInCredentialScope(field, scopeKey));
+}
+
+function scopeHasCurrentPassword(fields: AutofillTriageFieldResult[], scopeKey: string) {
+  return fields.some(
+    (field) =>
+      fieldIsInCredentialScope(field, scopeKey) &&
+      field.qualifiedAs === "password" &&
+      isCurrentPasswordField(field)
+  );
+}
+
+function scopeHasCredentialSignal(fields: AutofillTriageFieldResult[], scopeKey: string) {
+  return fields.some((field) => fieldIsInCredentialScope(field, scopeKey) && hasCredentialSignal(field));
+}
+
+function scopeHasNewsletterExclusion(fields: AutofillTriageFieldResult[], scopeKey: string) {
+  return fields.some((field) => {
+    if (!fieldIsInCredentialScope(field, scopeKey)) {
+      return false;
+    }
+    const searchableText = searchableFieldText(field);
+    return (
+      field.reasons.some((reason) => reason === "non-login:newsletter") ||
+      ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"].some((keyword) =>
+        searchableText.includes(keyword)
+      )
+    );
+  });
+}
+
+function pickRegistrationScopeKey(
+  fields: AutofillTriageFieldResult[],
+  allFields: AutofillTriageFieldResult[],
+  options: { allowSingleNewPassword?: boolean } = {}
+) {
+  const newPasswordFields = fields.filter(
+    (field) => field.qualifiedAs === "newPassword" && credentialScopeKey(field) !== null
+  );
+  if (!newPasswordFields.length) {
+    return null;
+  }
+
+  const focusedField = allFields.find((field) => field.focused && credentialScopeKey(field) !== null);
+  const focusedScopeKey = focusedField ? credentialScopeKey(focusedField) : null;
+  if (focusedScopeKey) {
+    const focusedRegistrationForm = newPasswordFields.some((field) =>
+      fieldIsInCredentialScope(field, focusedScopeKey)
+    );
+    if (focusedRegistrationForm && !scopeHasCurrentPassword(fields, focusedScopeKey)) {
+      const formFields = fieldsInCredentialScope(fields, focusedScopeKey);
+      if (formHasResetPasswordContext(formFields)) {
+        return null;
+      }
+      return focusedScopeKey;
+    }
+    if (scopeHasCredentialCandidate(fields, focusedScopeKey)) {
+      return null;
+    }
+    if (
+      !scopeHasNewsletterExclusion(allFields, focusedScopeKey) &&
+      scopeHasCredentialSignal(allFields, focusedScopeKey)
+    ) {
+      return null;
+    }
+  }
+
+  const loginPasswordFields = fields.filter((field) => field.qualifiedAs === "password");
+  if (!loginPasswordFields.length) {
+    const scopeKeys = new Set(
+      newPasswordFields
+        .map(credentialScopeKey)
+        .filter((scopeKey): scopeKey is string => scopeKey !== null)
+    );
+    for (const scopeKey of scopeKeys) {
+      if (scopeHasCurrentPassword(fields, scopeKey)) {
+        continue;
+      }
+      const formFields = fieldsInCredentialScope(fields, scopeKey);
+      const newPasswordCount = formFields.filter(
+        (field) => field.qualifiedAs === "newPassword"
+      ).length;
+      if (
+        formHasResetPasswordContext(formFields) ||
+        !formHasRegistrationContext(formFields) ||
+        (newPasswordCount < 2 && options.allowSingleNewPassword !== true)
+      ) {
+        continue;
+      }
+      return scopeKey;
+    }
+  }
+
+  return null;
+}
+
+function createRegistrationActions(
+  fields: AutofillTriageFieldResult[],
+  scopeKey: string,
+  payload: LoginFillPayload
+): AutofillFillAction[] {
+  const formFields = fieldsInCredentialScope(fields, scopeKey);
+  const actions: AutofillFillAction[] = [];
+
+  if (typeof payload.username === "string") {
+    const usernameField = formFields.find((field) => field.qualifiedAs === "username");
+    if (usernameField) {
+      actions.push({
+        fieldOpid: usernameField.opid,
+        elementNumber: usernameField.elementNumber,
+        fieldType: usernameField.qualifiedAs,
+        value: payload.username
+      });
+    }
+  }
+
+  const registrationPassword = payload.newPassword ?? payload.password;
+  if (typeof registrationPassword === "string") {
+    const passwordFields = scopeHasCurrentPassword(fields, scopeKey)
+      ? formFields.filter((field) => field.qualifiedAs === "newPassword")
+      : formFields.filter(
+          (field) => field.qualifiedAs === "newPassword" || field.qualifiedAs === "password"
+        );
+    for (const passwordField of passwordFields) {
+      actions.push({
+        fieldOpid: passwordField.opid,
+        elementNumber: passwordField.elementNumber,
+        fieldType: passwordField.qualifiedAs,
+        value: registrationPassword
+      });
+    }
+  }
+
+  return actions;
 }
 
 function pickTotpFields(fields: AutofillTriageFieldResult[]) {
@@ -302,8 +841,7 @@ function splitSequenceKeys(field: AutofillTriageFieldResult) {
 
 function splitSequenceMatches(
   seed: AutofillTriageFieldResult,
-  candidate: AutofillTriageFieldResult,
-  options: { allowAnonymousFallback?: boolean } = {}
+  candidate: AutofillTriageFieldResult
 ) {
   const seedKeys = splitSequenceKeys(seed);
   if (!seedKeys.length) {
@@ -312,7 +850,7 @@ function splitSequenceMatches(
 
   const candidateKeys = splitSequenceKeys(candidate);
   if (!candidateKeys.length) {
-    return options.allowAnonymousFallback === true && isAnonymousOneCharacterField(candidate);
+    return isAnonymousOneCharacterField(candidate);
   }
   return candidateKeys.some((key) => seedKeys.includes(key));
 }
@@ -350,15 +888,12 @@ function pickContiguousOneCharacterFields(
     return [];
   }
 
-  const seedSequenceKeys = splitSequenceKeys(seed);
   let startIndex = seedIndex;
   while (
     startIndex > 0 &&
     isContiguousSplitField(seed, sortedFields[startIndex - 1]) &&
     splitScopeMatches(seed, sortedFields[startIndex - 1]) &&
-    splitSequenceMatches(seed, sortedFields[startIndex - 1], {
-      allowAnonymousFallback: seedSequenceKeys.length === 0
-    })
+    splitSequenceMatches(seed, sortedFields[startIndex - 1])
   ) {
     startIndex -= 1;
   }
@@ -366,14 +901,9 @@ function pickContiguousOneCharacterFields(
   let endIndex = seedIndex;
   while (
     endIndex + 1 < sortedFields.length &&
-    !(
-      seedSequenceKeys.length > 0 &&
-      endIndex - startIndex + 1 >= valueLength &&
-      isAnonymousOneCharacterField(sortedFields[endIndex + 1])
-    ) &&
     isContiguousSplitField(seed, sortedFields[endIndex + 1]) &&
     splitScopeMatches(seed, sortedFields[endIndex + 1]) &&
-    splitSequenceMatches(seed, sortedFields[endIndex + 1], { allowAnonymousFallback: true })
+    splitSequenceMatches(seed, sortedFields[endIndex + 1])
   ) {
     endIndex += 1;
   }
@@ -441,26 +971,106 @@ export function createLoginFillPlan(
   payload: LoginFillPayload
 ): AutofillFillPlan {
   const report = triageAutofillPage(snapshot);
+  if (snapshot.siteRule?.disabled) {
+    return { actions: [] };
+  }
+  const siteRuleActions = createSiteRuleActions(report.fields, payload);
   const fields = candidateFields(report.fields);
-  const initialPasswordField =
-    typeof payload.password === "string" ? pickFirstPasswordField(fields) : null;
-  const usernameField =
-    typeof payload.username === "string"
-      ? pickUsernameField(fields, initialPasswordField) ??
-        pickUsernameFirstField(fields) ??
-        pickSingleStepEmailUsernameField(report.fields, null)
+  const actions: AutofillFillAction[] = [...siteRuleActions];
+  const siteRulePasswordField = fieldForAction(
+    report.fields,
+    siteRuleActions.find(
+      (action) => action.fieldType === "password" || action.fieldType === "currentPassword"
+    )
+  );
+  const siteRulePasswordChangeField = fieldForAction(
+    report.fields,
+    siteRuleActions.find(
+      (action) => action.fieldType === "currentPassword" || action.fieldType === "newPassword"
+    )
+  );
+  const siteRuleUsernameField = fieldForAction(
+    report.fields,
+    siteRuleActions.find((action) => action.fieldType === "username")
+  ) ?? firstViewableSiteRuleField(report.fields, "username");
+  const siteRulePasswordChangeScopeKey = siteRulePasswordChangeField
+    ? credentialScopeKey(siteRulePasswordChangeField)
+    : null;
+  const passwordChangeFields =
+    siteRulePasswordChangeScopeKey !== null
+      ? fields.filter((field) =>
+          fieldIsInCredentialScope(field, siteRulePasswordChangeScopeKey)
+        )
+      : fields;
+  const passwordChangeAllFields =
+    siteRulePasswordChangeScopeKey !== null
+      ? report.fields.filter((field) =>
+          fieldIsInCredentialScope(field, siteRulePasswordChangeScopeKey)
+        )
+      : report.fields;
+  const passwordChangeScopeKey =
+    typeof payload.password === "string" && typeof payload.newPassword === "string"
+      ? pickPasswordChangeScopeKey(passwordChangeFields, passwordChangeAllFields)
       : null;
+  const registrationScopeKey =
+    typeof payload.password === "string" || typeof payload.newPassword === "string"
+      ? pickRegistrationScopeKey(fields, report.fields, {
+          allowSingleNewPassword: typeof payload.newPassword === "string"
+        })
+      : null;
+
+  if (passwordChangeScopeKey !== null) {
+    appendFallbackActions(
+      actions,
+      createPasswordChangeActions(fields, passwordChangeScopeKey, payload)
+    );
+    if (typeof payload.totp === "string") {
+      appendFallbackActions(actions, createTotpActions(report.fields, payload.totp));
+    }
+    return { actions };
+  }
+
+  if (registrationScopeKey !== null) {
+    appendFallbackActions(
+      actions,
+      createRegistrationActions(fields, registrationScopeKey, payload)
+    );
+    if (typeof payload.totp === "string") {
+      appendFallbackActions(actions, createTotpActions(report.fields, payload.totp));
+    }
+    return { actions };
+  }
+
+  const initialPasswordField =
+    typeof payload.password === "string"
+      ? siteRulePasswordField ??
+        pickLoginPasswordFieldInScope(fields, siteRuleUsernameField) ??
+        pickLoginPasswordFieldInForm(fields, siteRuleUsernameField?.formOpid) ??
+        pickLoginPasswordField(fields)
+      : null;
+  const usernameField =
+    typeof payload.username === "string" && siteRuleUsernameField === null
+      ? pickUsernameField(fields, initialPasswordField) ??
+        pickSingleStepEmailUsernameField(report.fields, initialPasswordField)
+      : null;
+  const usernameAnchor = usernameField ?? siteRuleUsernameField;
   const passwordField =
     typeof payload.password === "string"
-      ? usernameField
-        ? pickPasswordField(fields, usernameField) ??
-          pickUnscopedPasswordAfterUsername(fields, usernameField)
-        : pickFirstPasswordField(fields)
+      ? siteRulePasswordField ??
+        (usernameAnchor
+          ? pickLoginPasswordFieldInScope(fields, usernameAnchor) ??
+            pickLoginPasswordFieldInForm(fields, usernameAnchor.formOpid) ??
+            pickLoginPasswordField(
+              fields.filter((field) => fieldScopeMatches(field, usernameAnchor))
+            ) ??
+            initialPasswordField
+        : pickFirstSafeLoginPasswordField(fields)
+        )
       : null;
-  const actions: AutofillFillAction[] = [];
 
+  const fallbackActions: AutofillFillAction[] = [];
   if (usernameField && typeof payload.username === "string") {
-    actions.push({
+    fallbackActions.push({
       fieldOpid: usernameField.opid,
       elementNumber: usernameField.elementNumber,
       fieldType: usernameField.qualifiedAs === "ignored" ? "username" : usernameField.qualifiedAs,
@@ -469,7 +1079,7 @@ export function createLoginFillPlan(
   }
 
   if (passwordField && typeof payload.password === "string") {
-    actions.push({
+    fallbackActions.push({
       fieldOpid: passwordField.opid,
       elementNumber: passwordField.elementNumber,
       fieldType: passwordField.qualifiedAs,
@@ -478,8 +1088,9 @@ export function createLoginFillPlan(
   }
 
   if (typeof payload.totp === "string") {
-    actions.push(...createTotpActions(report.fields, payload.totp));
+    fallbackActions.push(...createTotpActions(report.fields, payload.totp));
   }
 
+  appendFallbackActions(actions, fallbackActions);
   return { actions };
 }

@@ -185,10 +185,10 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       (left !== null || top !== null || right !== null || bottom !== null)
     ) {
       if (
-        (left !== null && Math.abs(left) >= 1000) ||
-        (top !== null && Math.abs(top) >= 1000) ||
-        (right !== null && Math.abs(right) >= 1000) ||
-        (bottom !== null && Math.abs(bottom) >= 1000)
+        (left !== null && left <= -1000) ||
+        (top !== null && top <= -1000) ||
+        (right !== null && right <= -1000) ||
+        (bottom !== null && bottom <= -1000)
       ) {
         addReason(reasons, "not-viewable:offscreen");
       }

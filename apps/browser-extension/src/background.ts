@@ -3,6 +3,8 @@ import {
   EXTENSION_SETTINGS_STORAGE_KEY,
   createChromeExtensionSettingsStore
 } from "./extensionSettings";
+import { pendingAutofillSubmissionFromUnknown } from "./autofill/pendingSubmission";
+import type { PendingAutofillSubmission } from "./autofill/pendingSubmission";
 import {
   attachWebAuthnProxy,
   currentPasskeyLedgerConnectionId,
@@ -21,7 +23,12 @@ let webAuthnProxySyncPromise: Promise<void> | null = null;
 let webAuthnProxySyncRequested = false;
 let passkeyProviderEnabled = false;
 let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
+let pendingAutofillSubmission: PendingAutofillSubmission | null = null;
+let pendingAutofillSubmissionsByTab = new Map<number, PendingAutofillSubmission>();
+const clearedPendingAutofillSubmissionKeys = new Set<string>();
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
+const PENDING_AUTOFILL_NAVIGATION_GRACE_MS = 2 * 60 * 1000;
+const PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY = "vaultkernPendingAutofillSubmission";
 const WEB_AUTHN_CONTENT_SCRIPT_FILE = "webauthnContentScript.js";
 const WEB_AUTHN_PAGE_HOOK_SCRIPT_FILE = "webauthnPageHook.js";
 const WEB_AUTHN_PAGE_HOOK_SCRIPT_ID = "vaultkern-webauthn-page-hook";
@@ -44,6 +51,303 @@ function isWebAuthnPageRequest(message: unknown) {
     message !== null &&
     (message as { type?: unknown }).type === "vaultkern_webauthn_page_request"
   );
+}
+
+function storageSession() {
+  return chromeApi?.storage?.session;
+}
+
+function objectRecordFromUnknown(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function storageGet(key: string): Promise<Record<string, unknown>> {
+  const storage = storageSession();
+  if (typeof storage?.get !== "function") {
+    return Promise.resolve({});
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (items: unknown) => {
+      if (!settled) {
+        settled = true;
+        resolve(objectRecordFromUnknown(items));
+      }
+    };
+
+    try {
+      const result = storage.get(key, settle);
+      if (typeof result?.then === "function") {
+        result.then(settle, () => settle({}));
+      }
+    } catch {
+      settle({});
+    }
+  });
+}
+
+function storageSet(items: Record<string, unknown>): Promise<void> {
+  const storage = storageSession();
+  if (typeof storage?.set !== "function") {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+
+    try {
+      const result = storage.set(items, settle);
+      if (typeof result?.then === "function") {
+        result.then(settle, settle);
+      }
+    } catch {
+      settle();
+    }
+  });
+}
+
+function storageRemove(key: string): Promise<void> {
+  const storage = storageSession();
+  if (typeof storage?.remove !== "function") {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+
+    try {
+      const result = storage.remove(key, settle);
+      if (typeof result?.then === "function") {
+        result.then(settle, settle);
+      }
+    } catch {
+      settle();
+    }
+  });
+}
+
+async function persistPendingAutofillSubmission(
+  submission: PendingAutofillSubmission | null
+) {
+  if (!submission && pendingAutofillSubmissionsByTab.size === 0) {
+    await storageRemove(PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY);
+    return;
+  }
+
+  await storageSet({
+    [PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY]: serializePendingAutofillSubmissions(submission)
+  });
+}
+
+function pendingAutofillSubmissionStoreFromUnknown(value: unknown) {
+  const legacySubmission = pendingAutofillSubmissionFromUnknown(value);
+  if (legacySubmission) {
+    return {
+      latest: legacySubmission,
+      byTab: new Map<number, PendingAutofillSubmission>()
+    };
+  }
+
+  const candidate = objectRecordFromUnknown(value);
+  const latest = pendingAutofillSubmissionFromUnknown(candidate.latest);
+  const byTab = new Map<number, PendingAutofillSubmission>();
+  const byTabRecord = objectRecordFromUnknown(candidate.byTab);
+  for (const [tabIdKey, submissionValue] of Object.entries(byTabRecord)) {
+    const tabId = Number(tabIdKey);
+    const submission = pendingAutofillSubmissionFromUnknown(submissionValue);
+    if (Number.isInteger(tabId) && tabId >= 0 && submission) {
+      byTab.set(tabId, submission);
+    }
+  }
+
+  return { latest, byTab };
+}
+
+function serializePendingAutofillSubmissions(
+  latest: PendingAutofillSubmission | null
+) {
+  if (pendingAutofillSubmissionsByTab.size === 0) {
+    return latest;
+  }
+
+  return {
+    latest,
+    byTab: Object.fromEntries(pendingAutofillSubmissionsByTab)
+  };
+}
+
+async function loadPersistedPendingAutofillSubmissions() {
+  const items = await storageGet(PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY);
+  return pendingAutofillSubmissionStoreFromUnknown(
+    items[PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY]
+  );
+}
+
+function newerPendingAutofillSubmission(
+  left: PendingAutofillSubmission | null,
+  right: PendingAutofillSubmission | null
+) {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  return right.submittedAt > left.submittedAt ? right : left;
+}
+
+function latestPendingAutofillSubmission() {
+  return Array.from(pendingAutofillSubmissionsByTab.values()).reduce(
+    newerPendingAutofillSubmission,
+    null as PendingAutofillSubmission | null
+  );
+}
+
+function pendingAutofillSubmissionKey(submission: PendingAutofillSubmission) {
+  return `${submission.submittedAt}:${submission.url}`;
+}
+
+function isClearedPendingAutofillSubmission(
+  submission: PendingAutofillSubmission | null
+) {
+  return submission
+    ? clearedPendingAutofillSubmissionKeys.has(pendingAutofillSubmissionKey(submission))
+    : false;
+}
+
+function clearPendingAutofillSubmissionForTab(tabId: number) {
+  const clearedSubmission = pendingAutofillSubmissionsByTab.get(tabId) ?? null;
+  if (!clearedSubmission) {
+    return;
+  }
+
+  clearedPendingAutofillSubmissionKeys.add(
+    pendingAutofillSubmissionKey(clearedSubmission)
+  );
+  pendingAutofillSubmissionsByTab.delete(tabId);
+  pendingAutofillSubmission = latestPendingAutofillSubmission();
+  void persistPendingAutofillSubmission(pendingAutofillSubmission);
+}
+
+function clearExpiredPendingAutofillSubmissionForTab(tabId: number, now = Date.now()) {
+  const pendingSubmission = pendingAutofillSubmissionsByTab.get(tabId) ?? null;
+  if (!pendingSubmission) {
+    return;
+  }
+  if (now - pendingSubmission.submittedAt <= PENDING_AUTOFILL_NAVIGATION_GRACE_MS) {
+    return;
+  }
+  clearPendingAutofillSubmissionForTab(tabId);
+}
+
+function mergePersistedPendingAutofillSubmissions(store: {
+  latest: PendingAutofillSubmission | null;
+  byTab: Map<number, PendingAutofillSubmission>;
+}) {
+  pendingAutofillSubmission = newerPendingAutofillSubmission(
+    pendingAutofillSubmission,
+    isClearedPendingAutofillSubmission(store.latest) ? null : store.latest
+  );
+  for (const [tabId, persistedSubmission] of store.byTab) {
+    if (isClearedPendingAutofillSubmission(persistedSubmission)) {
+      continue;
+    }
+    pendingAutofillSubmissionsByTab.set(
+      tabId,
+      newerPendingAutofillSubmission(
+        pendingAutofillSubmissionsByTab.get(tabId) ?? null,
+        persistedSubmission
+      )!
+    );
+  }
+}
+
+function tabIdFromMessage(message: unknown) {
+  const tabId = (message as { tabId?: unknown }).tabId;
+  return typeof tabId === "number" && Number.isInteger(tabId) && tabId >= 0
+    ? tabId
+    : undefined;
+}
+
+function tabIdFromSender(sender: unknown) {
+  const tabId = (sender as { tab?: { id?: unknown } } | null)?.tab?.id;
+  return typeof tabId === "number" && Number.isInteger(tabId) && tabId >= 0
+    ? tabId
+    : undefined;
+}
+
+function handleAutofillPendingMessage(
+  message: unknown,
+  sender: unknown,
+  sendResponse: (response: unknown) => void
+) {
+  if (typeof message !== "object" || message === null) {
+    return false;
+  }
+
+  const messageType = (message as { type?: unknown }).type;
+  if (messageType === "vaultkern_autofill_submission") {
+    pendingAutofillSubmission = pendingAutofillSubmissionFromUnknown(message);
+    if (pendingAutofillSubmission) {
+      clearedPendingAutofillSubmissionKeys.delete(
+        pendingAutofillSubmissionKey(pendingAutofillSubmission)
+      );
+    }
+    const tabId = tabIdFromSender(sender) ?? tabIdFromMessage(message);
+    if (pendingAutofillSubmission && tabId !== undefined) {
+      pendingAutofillSubmissionsByTab.set(tabId, pendingAutofillSubmission);
+    }
+    void persistPendingAutofillSubmission(pendingAutofillSubmission).then(() => {
+      sendResponse({ ok: pendingAutofillSubmission !== null });
+    });
+    return true;
+  }
+
+  if (messageType === "vaultkern_autofill_pending_request") {
+    const tabId = tabIdFromMessage(message);
+    void loadPersistedPendingAutofillSubmissions().then((persistedSubmissions) => {
+      mergePersistedPendingAutofillSubmissions(persistedSubmissions);
+      sendResponse({
+        pending:
+          tabId === undefined
+            ? pendingAutofillSubmission
+            : pendingAutofillSubmissionsByTab.get(tabId) ?? null
+      });
+    });
+    return true;
+  }
+
+  if (messageType === "vaultkern_autofill_pending_clear") {
+    const tabId = tabIdFromMessage(message);
+    if (tabId === undefined) {
+      pendingAutofillSubmission = null;
+      pendingAutofillSubmissionsByTab = new Map();
+    } else {
+      pendingAutofillSubmissionsByTab.delete(tabId);
+      pendingAutofillSubmission = latestPendingAutofillSubmission();
+    }
+    void persistPendingAutofillSubmission(null).then(() => {
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  return false;
 }
 
 function serializeError(error: unknown) {
@@ -84,13 +388,17 @@ const nativeBridge =
       )
     : null;
 
-if (chromeApi?.runtime?.onMessage && nativeBridge) {
+if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener(
     (
       message: unknown,
       sender: unknown,
       sendResponse: (response: unknown) => void
     ) => {
+      if (handleAutofillPendingMessage(message, sender, sendResponse)) {
+        return true;
+      }
+
       if (isWebAuthnPageRequest(message)) {
         if (webAuthnProxyAttached || webAuthnProxySyncPromise) {
           recordWebAuthnPageRequest(message, chromeApi, sender);
@@ -99,6 +407,10 @@ if (chromeApi?.runtime?.onMessage && nativeBridge) {
       }
 
       if (!isRuntimeCommand(message)) {
+        return false;
+      }
+
+      if (!nativeBridge) {
         return false;
       }
 
@@ -111,6 +423,14 @@ if (chromeApi?.runtime?.onMessage && nativeBridge) {
     }
   );
 }
+
+chromeApi?.tabs?.onUpdated?.addListener?.(
+  (tabId: number, changeInfo: { url?: string }) => {
+    if (typeof changeInfo.url === "string" && changeInfo.url.trim() !== "") {
+      clearExpiredPendingAutofillSubmissionForTab(tabId);
+    }
+  }
+);
 
 if (chromeApi?.webAuthenticationProxy) {
   chromeApi.webAuthenticationProxy.onRemoteSessionStateChange?.addListener?.(() => {
