@@ -833,6 +833,90 @@ describe("fillLoginForm", () => {
     expect(inputValue("#new-password")).toBe("");
   });
 
+  it("does not let unrelated password-change groups suppress username-first fills", () => {
+    document.body.innerHTML = `
+      <form id="username-step">
+        <input id="login-email" type="email" autocomplete="username" value="" />
+      </form>
+      <form id="change-password">
+        <label for="current-password">Current password</label>
+        <input id="current-password" type="password" name="current_password" value="" />
+        <label for="new-password">New password</label>
+        <input id="new-password" type="password" name="new_password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#login-email")).toBe("alice@example.com");
+    expect(inputValue("#current-password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
+  });
+
+  it("skips password-change usernames before username-first fills", () => {
+    document.body.innerHTML = `
+      <form id="change-password">
+        <input id="account-email" type="email" autocomplete="username" value="" />
+        <label for="current-password">Current password</label>
+        <input id="current-password" type="password" name="current_password" value="" />
+        <label for="new-password">New password</label>
+        <input id="new-password" type="password" name="new_password" value="" />
+      </form>
+      <form id="username-step">
+        <input id="login-email" type="email" autocomplete="username" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#account-email")).toBe("");
+    expect(inputValue("#login-email")).toBe("alice@example.com");
+    expect(inputValue("#current-password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
+  });
+
+  it("skips form-less password-change usernames before username-first fills", () => {
+    document.body.innerHTML = `
+      <section>
+        <input id="account-email" type="email" autocomplete="username" value="" />
+        <label for="current-password">Current password</label>
+        <input id="current-password" type="password" name="current_password" value="" />
+        <label for="new-password">New password</label>
+        <input id="new-password" type="password" name="new_password" value="" />
+      </section>
+      <section>
+        <input id="login-email" type="email" autocomplete="username" value="" />
+      </section>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#account-email")).toBe("");
+    expect(inputValue("#login-email")).toBe("alice@example.com");
+    expect(inputValue("#current-password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
+  });
+
+  it("does not let sibling form-less password-change panels suppress username-first fills", () => {
+    document.body.innerHTML = `
+      <div id="login-shell">
+        <section id="username-step">
+          <input id="login-email" type="email" autocomplete="username" value="" />
+        </section>
+        <section id="reset-panel">
+          <input id="current-password" type="password" name="current_password" value="" />
+          <input id="new-password" type="password" name="new_password" value="" />
+        </section>
+      </div>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#login-email")).toBe("alice@example.com");
+    expect(inputValue("#current-password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
+  });
+
   it("does not fill high-confidence usernames outside the password form", () => {
     document.body.innerHTML = `
       <input id="account-field" type="text" autocomplete="username" value="" />
@@ -1130,6 +1214,22 @@ describe("fillLoginForm", () => {
     fillLoginForm({ password: "secret-123" });
 
     expect(inputValue("#create-password")).toBe("");
+  });
+
+  it("uses form change context for generic current password fields", () => {
+    document.body.innerHTML = `
+      <form id="change-password">
+        <label for="password">Password</label>
+        <input id="password" type="password" name="password" value="" />
+        <label for="new-password">New password</label>
+        <input id="new-password" type="password" name="new_password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
   });
 
   it("treats confirm-your-password labels as confirmation fields", () => {

@@ -129,6 +129,10 @@ type ScoredUsernameCandidate = UsernameCandidate & {
   score: number;
 };
 
+type PickUsernameOptions = {
+  excludePasswordChangeContext?: boolean;
+};
+
 function isRejectedUsernameCandidate(input: HTMLInputElement) {
   if (input.type === "search") {
     return true;
@@ -250,13 +254,22 @@ function usernameScore(input: HTMLInputElement) {
   return score;
 }
 
-function pickUsernameField(passwordField: HTMLInputElement | null) {
-  const candidates = Array.from(
+function pickUsernameField(
+  passwordField: HTMLInputElement | null,
+  options: PickUsernameOptions = {}
+) {
+  let candidates = Array.from(
     document.querySelectorAll('input[type="text"], input[type="email"]')
   )
     .filter((input): input is HTMLInputElement => input instanceof HTMLInputElement)
     .filter(isWritableVisibleInput)
     .map((input, index) => ({ input, index }));
+
+  if (options.excludePasswordChangeContext) {
+    candidates = candidates.filter(
+      (candidate) => !isUsernameInsidePasswordChangeContext(candidate.input)
+    );
+  }
 
   if (passwordField?.form) {
     const sameFormCandidates = scoreUsernameCandidates(
@@ -449,6 +462,7 @@ function isFormlessCredentialInput(candidate: Element | null): candidate is HTML
 
 function isPasswordChangeField(input: HTMLInputElement) {
   const passwords = passwordChangeGroup(input);
+  const hasGroupChangeContext = hasPasswordChangeContextSignal(input);
 
   if (
     (hasNewPasswordSignal(input) || hasConfirmationPasswordSignal(input)) &&
@@ -465,13 +479,27 @@ function isPasswordChangeField(input: HTMLInputElement) {
   );
   return (
     hasNewOrConfirmation &&
-    passwords.some(
-      (candidate) =>
-        hasCurrentPasswordSignal(candidate) ||
-        hasConfirmationPasswordSignal(candidate) ||
-        fieldTokens(candidate).includes("change")
-    )
+    (hasGroupChangeContext ||
+      passwords.some(
+        (candidate) =>
+          hasCurrentPasswordSignal(candidate) ||
+          hasConfirmationPasswordSignal(candidate) ||
+          fieldTokens(candidate).includes("change")
+      ))
   );
+}
+
+function hasPasswordChangeContextSignal(input: HTMLInputElement) {
+  if (input.form && hasPasswordChangeContainerSignal(input.form)) {
+    return true;
+  }
+
+  if (input.form) {
+    return false;
+  }
+
+  const container = nearestFormlessPasswordContainer(input);
+  return Boolean(container && hasPasswordChangeContainerSignal(container));
 }
 
 function passwordChangeGroup(input: HTMLInputElement) {
@@ -561,6 +589,10 @@ function hasPasswordChangeContainerSignal(container: Element) {
     "change",
     "reset"
   ]);
+}
+
+function hasPasswordResetContainerSignal(container: Element) {
+  return hasContainerSignal(container, ["change", "reset"]);
 }
 
 function hasContainerSignal(container: Element, signals: string[]) {
@@ -733,6 +765,69 @@ function hasPasswordChangeContext() {
     .some(isPasswordChangeField);
 }
 
+function isUsernameInsidePasswordChangeContext(input: HTMLInputElement) {
+  if (input.form) {
+    return Array.from(document.querySelectorAll('input[type="password"]')).some(
+      (candidate): candidate is HTMLInputElement =>
+        candidate instanceof HTMLInputElement &&
+        candidate.form === input.form &&
+        isWritableVisibleInput(candidate) &&
+        isPasswordChangeField(candidate)
+    );
+  }
+
+  const credentialContainer = nearestFormlessCredentialContainer(input);
+  if (credentialContainer && hasFormlessPasswordChangeField(credentialContainer)) {
+    return true;
+  }
+
+  if (
+    rootLevelCredentialRun(input).some(
+      (candidate) => candidate.type === "password" && isPasswordChangeField(candidate)
+    )
+  ) {
+    return true;
+  }
+
+  let ancestor = input.parentElement;
+  while (ancestor) {
+    const tagName = ancestor.tagName.toLowerCase();
+    if (tagName === "body" || tagName === "html" || tagName === "form") {
+      return false;
+    }
+    if (usesAncestorPasswordChangeContextForUsername(ancestor)) {
+      if (hasFormlessPasswordChangeField(ancestor)) {
+        return true;
+      }
+    }
+    ancestor = ancestor.parentElement;
+  }
+  return false;
+}
+
+function usesAncestorPasswordChangeContextForUsername(ancestor: Element) {
+  if (hasPasswordResetContainerSignal(ancestor)) {
+    return true;
+  }
+
+  const panelChildren = formLessCredentialPanelChildren(ancestor);
+  return (
+    panelChildren.length > 1 &&
+    hasCredentialContainerSignal(ancestor) &&
+    hasOnlyWrappedCredentialFields(panelChildren)
+  );
+}
+
+function hasFormlessPasswordChangeField(container: Element) {
+  return Array.from(container.querySelectorAll('input[type="password"]')).some(
+    (candidate): candidate is HTMLInputElement =>
+      candidate instanceof HTMLInputElement &&
+      candidate.form === null &&
+      isWritableVisibleInput(candidate) &&
+      isPasswordChangeField(candidate)
+  );
+}
+
 function writeFieldValue(input: HTMLInputElement, value: string) {
   input.value = value;
 
@@ -749,7 +844,9 @@ export function fillLoginForm(payload: {
   const password = shouldFillPassword ? pickPasswordField() : null;
   const passwordChangeContext =
     shouldFillPassword && password === null && hasPasswordChangeContext();
-  const username = passwordChangeContext ? null : pickUsernameField(password);
+  const username = pickUsernameField(password, {
+    excludePasswordChangeContext: passwordChangeContext
+  });
 
   if (typeof payload.username === "string" && username) {
     writeFieldValue(username, payload.username);
