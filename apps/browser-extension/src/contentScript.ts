@@ -110,6 +110,10 @@ function normalizedFieldTokens(input: HTMLInputElement) {
   return fieldTokens(input).replace(/[^a-z0-9]+/g, "");
 }
 
+function autocompleteTokens(input: HTMLInputElement) {
+  return input.autocomplete.toLowerCase().split(/\s+/).filter(Boolean);
+}
+
 function labelTextForInput(input: HTMLInputElement) {
   const labels = Array.from(input.labels ?? []).map((label) => label.textContent ?? "");
   const labelledBy = (input.getAttribute("aria-labelledby") ?? "")
@@ -139,7 +143,8 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
   }
 
   const autocomplete = input.autocomplete.toLowerCase();
-  if (autocomplete === "one-time-code") {
+  const autocompleteTokenSet = new Set(autocompleteTokens(input));
+  if (autocompleteTokenSet.has("one-time-code")) {
     return true;
   }
 
@@ -286,7 +291,10 @@ function pickUsernameField(
     const scopedCandidates = scoreUsernameCandidates(
       scopedFormlessUsernameCandidates(candidates, passwordField)
     );
-    return scopedCandidates.find((candidate) => candidate.score > 0)?.input ?? null;
+    return (
+      scopedCandidates.find((candidate) => candidate.score > 0)?.input ??
+      (scopedCandidates.length === 1 ? scopedCandidates[0].input : null)
+    );
   }
 
   const scoredCandidates = scoreUsernameCandidates(candidates);
@@ -475,7 +483,10 @@ function isPasswordChangeField(input: HTMLInputElement) {
   }
 
   const hasNewOrConfirmation = passwords.some(
-    (candidate) => hasNewPasswordSignal(candidate) || hasConfirmationPasswordSignal(candidate)
+    (candidate) =>
+      hasNewPasswordSignal(candidate) ||
+      hasConfirmationPasswordSignal(candidate) ||
+      hasPasswordVerificationSignal(candidate)
   );
   return (
     hasNewOrConfirmation &&
@@ -484,6 +495,7 @@ function isPasswordChangeField(input: HTMLInputElement) {
         (candidate) =>
           hasCurrentPasswordSignal(candidate) ||
           hasConfirmationPasswordSignal(candidate) ||
+          hasPasswordVerificationSignal(candidate) ||
           fieldTokens(candidate).includes("change")
       ))
   );
@@ -644,8 +656,9 @@ function hasOnlyWrappedPasswordFields(panelChildren: Element[], container: Eleme
 function hasCurrentPasswordSignal(input: HTMLInputElement) {
   const tokens = fieldTokens(input);
   const normalizedTokens = normalizedFieldTokens(input);
+  const autocompleteTokenSet = new Set(autocompleteTokens(input));
   return (
-    input.autocomplete.toLowerCase() === "current-password" ||
+    autocompleteTokenSet.has("current-password") ||
     normalizedTokens.includes("currentpassword") ||
     normalizedTokens.includes("oldpassword") ||
     normalizedTokens.includes("existingpassword") ||
@@ -658,8 +671,9 @@ function hasNewPasswordSignal(input: HTMLInputElement) {
   const tokens = fieldTokens(input);
   const tokenSet = new Set(tokens.split(/[^a-z0-9]+/).filter(Boolean));
   const normalizedTokens = normalizedFieldTokens(input);
+  const autocompleteTokenSet = new Set(autocompleteTokens(input));
   return (
-    input.autocomplete.toLowerCase() === "new-password" ||
+    autocompleteTokenSet.has("new-password") ||
     normalizedTokens.includes("newpassword") ||
     tokens.includes("new password") ||
     (tokenSet.has("password") &&
@@ -677,10 +691,25 @@ function hasConfirmationPasswordSignal(input: HTMLInputElement) {
   return (
     normalizedTokens.includes("confirmpassword") ||
     normalizedTokens.includes("repeatpassword") ||
+    normalizedTokens.includes("reenterpassword") ||
     tokens.includes("confirm password") ||
     tokens.includes("repeat password") ||
     (tokenSet.has("password") &&
-      (tokenSet.has("confirm") || tokenSet.has("repeat")))
+      (tokenSet.has("confirm") ||
+        tokenSet.has("repeat") ||
+        tokenSet.has("reenter") ||
+        (tokenSet.has("re") && tokenSet.has("enter"))))
+  );
+}
+
+function hasPasswordVerificationSignal(input: HTMLInputElement) {
+  const tokens = fieldTokens(input);
+  const tokenSet = new Set(tokens.split(/[^a-z0-9]+/).filter(Boolean));
+  const normalizedTokens = normalizedFieldTokens(input);
+  return (
+    normalizedTokens.includes("verifypassword") ||
+    tokens.includes("verify password") ||
+    (tokenSet.has("password") && tokenSet.has("verify"))
   );
 }
 

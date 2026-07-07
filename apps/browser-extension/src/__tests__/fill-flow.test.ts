@@ -441,6 +441,20 @@ describe("fillLoginForm", () => {
     expect(inputValue("#postcode")).toBe("90210");
   });
 
+  it("rejects sectioned one-time-code username candidates", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="account-field" type="text" name="userid" value="" />
+        <input id="login-code" type="text" name="login_code" autocomplete="section-login one-time-code" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com" });
+
+    expect(inputValue("#account-field")).toBe("alice@example.com");
+    expect(inputValue("#login-code")).toBe("");
+  });
+
   it("rejects compound verification search and zip field names", () => {
     document.body.innerHTML = `
       <input id="verification-code" type="text" name="verificationCode" value="" />
@@ -642,6 +656,20 @@ describe("fillLoginForm", () => {
     fillLoginForm({ username: "alice", password: "secret-123" });
 
     expect(inputValue("#account-field")).toBe("alice");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
+  it("uses a single scoped form-less identifier as username fallback", () => {
+    document.body.innerHTML = `
+      <div id="login">
+        <input id="principal" type="text" name="userid" value="" />
+        <input id="login-password" type="password" value="" />
+      </div>
+    `;
+
+    fillLoginForm({ username: "alice", password: "secret-123" });
+
+    expect(inputValue("#principal")).toBe("alice");
     expect(inputValue("#login-password")).toBe("secret-123");
   });
 
@@ -1203,6 +1231,19 @@ describe("fillLoginForm", () => {
     expect(inputValue("#new-password")).toBe("");
   });
 
+  it("does not fill sectioned new-password reset fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="password">Password</label>
+        <input id="password" type="password" name="password" autocomplete="section-reset new-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#password")).toBe("");
+  });
+
   it("does not fill single create-password fields", () => {
     document.body.innerHTML = `
       <form>
@@ -1214,6 +1255,19 @@ describe("fillLoginForm", () => {
     fillLoginForm({ password: "secret-123" });
 
     expect(inputValue("#create-password")).toBe("");
+  });
+
+  it("fills single verify-password prompts as current-password prompts", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="password">Verify password</label>
+        <input id="password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#password")).toBe("secret-123");
   });
 
   it("uses form change context for generic current password fields", () => {
@@ -1238,6 +1292,38 @@ describe("fillLoginForm", () => {
         <label for="new-password">New password</label>
         <input id="new-password" type="password" autocomplete="new-password" value="" />
         <label for="second-password">Confirm your password</label>
+        <input id="second-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#new-password")).toBe("");
+    expect(inputValue("#second-password")).toBe("");
+  });
+
+  it("treats re-enter password labels as confirmation fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="new-password">New password</label>
+        <input id="new-password" type="password" autocomplete="new-password" value="" />
+        <label for="second-password">Re-enter password</label>
+        <input id="second-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#new-password")).toBe("");
+    expect(inputValue("#second-password")).toBe("");
+  });
+
+  it("treats verify password labels as confirmation fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="new-password">New password</label>
+        <input id="new-password" type="password" autocomplete="new-password" value="" />
+        <label for="second-password">Verify password</label>
         <input id="second-password" type="password" value="" />
       </form>
     `;
