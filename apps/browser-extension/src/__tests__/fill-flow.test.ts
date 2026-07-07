@@ -871,6 +871,19 @@ describe("fillLoginForm", () => {
     expect(inputValue("#confirm-password")).toBe("");
   });
 
+  it("does not fill single new-password reset fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="new-password">New password</label>
+        <input id="new-password" type="password" autocomplete="new-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#new-password")).toBe("");
+  });
+
   it("detects form-less password change groups when each field is wrapped", () => {
     document.body.innerHTML = `
       <div id="change-password">
@@ -894,6 +907,54 @@ describe("fillLoginForm", () => {
     expect(inputValue("#old-password")).toBe("");
     expect(inputValue("#new-password")).toBe("");
     expect(inputValue("#confirm-password")).toBe("");
+  });
+
+  it("detects wrapped form-less current and new password pairs", () => {
+    document.body.innerHTML = `
+      <div id="change-password">
+        <div>
+          <input id="current-password" type="password" name="current_password" value="" />
+        </div>
+        <div>
+          <input id="new-password" type="password" name="new_password" value="" />
+        </div>
+      </div>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#current-password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
+  });
+
+  it("detects form-associated password change controls outside the form element", () => {
+    document.body.innerHTML = `
+      <form id="change-password"></form>
+      <input id="current-password" form="change-password" type="password" name="current_password" value="" />
+      <input id="new-password" form="change-password" type="password" name="new_password" value="" />
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#current-password")).toBe("");
+    expect(inputValue("#new-password")).toBe("");
+  });
+
+  it("does not prefer labelled verification-code fields over account identifiers", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="code">Email verification code</label>
+        <input id="code" type="text" value="" />
+        <input id="account" type="text" name="account" value="" />
+        <input id="password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#code")).toBe("");
+    expect(inputValue("#account")).toBe("alice@example.com");
+    expect(inputValue("#password")).toBe("secret-123");
   });
 
   it("keeps form-less login passwords separate from sibling reset panels", () => {

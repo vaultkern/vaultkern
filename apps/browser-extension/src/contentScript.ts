@@ -102,6 +102,10 @@ function fieldTokens(input: HTMLInputElement) {
     .toLowerCase();
 }
 
+function normalizedFieldTokens(input: HTMLInputElement) {
+  return fieldTokens(input).replace(/[^a-z0-9]+/g, "");
+}
+
 function labelTextForInput(input: HTMLInputElement) {
   const labels = Array.from(input.labels ?? []).map((label) => label.textContent ?? "");
   const labelledBy = (input.getAttribute("aria-labelledby") ?? "")
@@ -156,6 +160,14 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
   }
   if (
     ["search", "otp", "totp", "2fa", "postcode", "zip"].some((token) =>
+      tokenSet.has(token)
+    )
+  ) {
+    return true;
+  }
+  if (
+    tokenSet.has("code") &&
+    ["verification", "security", "authentication", "authenticator"].some((token) =>
       tokenSet.has(token)
     )
   ) {
@@ -379,24 +391,35 @@ function isFormlessCredentialInput(candidate: Element | null): candidate is HTML
 function isPasswordChangeField(input: HTMLInputElement) {
   const passwords = passwordChangeGroup(input);
 
+  if (hasNewPasswordSignal(input) && !hasCurrentPasswordSignal(input)) {
+    return true;
+  }
   if (passwords.length < 2) {
     return false;
   }
 
-  return passwords.some((candidate) => {
-    const tokens = fieldTokens(candidate);
-    return ["old", "new", "repeat", "confirm", "change"].some(
-      (fragment) => tokens.includes(fragment)
-    );
-  });
+  const hasNewOrConfirmation = passwords.some(
+    (candidate) => hasNewPasswordSignal(candidate) || hasConfirmationPasswordSignal(candidate)
+  );
+  return (
+    hasNewOrConfirmation &&
+    passwords.some(
+      (candidate) =>
+        hasCurrentPasswordSignal(candidate) ||
+        hasConfirmationPasswordSignal(candidate) ||
+        fieldTokens(candidate).includes("change")
+    )
+  );
 }
 
 function passwordChangeGroup(input: HTMLInputElement) {
   const form = input.form;
   if (form) {
-    return Array.from(form.querySelectorAll('input[type="password"]')).filter(
+    return Array.from(document.querySelectorAll('input[type="password"]')).filter(
       (candidate): candidate is HTMLInputElement =>
-        candidate instanceof HTMLInputElement && isWritableVisibleInput(candidate)
+        candidate instanceof HTMLInputElement &&
+        candidate.form === form &&
+        isWritableVisibleInput(candidate)
     );
   }
 
@@ -433,7 +456,7 @@ function nearestFormlessPasswordContainer(input: HTMLInputElement) {
     if (passwords.length > 1) {
       const panelChildren = formLessCredentialPanelChildren(container);
       if (panelChildren.length > 1) {
-        if (hasOnlyWrappedPasswordFields(panelChildren)) {
+        if (hasOnlyWrappedPasswordFields(panelChildren, container)) {
           return container;
         }
         const inputPanel = panelChildren.find((panel) => panel.contains(input));
@@ -471,7 +494,7 @@ function hasCredentialContainerSignal(container: Element) {
     .join(" ")
     .toLowerCase()
     .replace(/[\s_-]+/g, "");
-  return ["login", "signin", "signon", "auth", "credential"].some((token) =>
+  return ["login", "signin", "signon", "auth", "credential", "change", "reset"].some((token) =>
     normalized.includes(token)
   );
 }
@@ -491,18 +514,55 @@ function hasOnlyWrappedCredentialFields(panelChildren: Element[]) {
   );
 }
 
-function hasOnlyWrappedPasswordFields(panelChildren: Element[]) {
+function hasOnlyWrappedPasswordFields(panelChildren: Element[], container: Element) {
   const passwordChildren = panelChildren.filter(
     (child) => visibleFormlessPasswords(child).length > 0
   );
+  const passwords = passwordChildren.flatMap((child) => visibleFormlessPasswords(child));
   return (
+    hasCredentialContainerSignal(container) &&
     passwordChildren.length > 1 &&
     passwordChildren.every((child) => visibleFormlessPasswords(child).length === 1) &&
-    passwordChildren.some((child) => {
-      const password = visibleFormlessPasswords(child)[0];
-      const tokens = password ? fieldTokens(password) : "";
-      return tokens.includes("confirm") || tokens.includes("repeat");
-    })
+    passwords.some(hasNewPasswordSignal) &&
+    (passwords.some(hasCurrentPasswordSignal) ||
+      passwords.some((password) => {
+        const tokens = fieldTokens(password);
+        return tokens.includes("confirm") || tokens.includes("repeat");
+      }))
+  );
+}
+
+function hasCurrentPasswordSignal(input: HTMLInputElement) {
+  const tokens = fieldTokens(input);
+  const normalizedTokens = normalizedFieldTokens(input);
+  return (
+    input.autocomplete.toLowerCase() === "current-password" ||
+    normalizedTokens.includes("currentpassword") ||
+    normalizedTokens.includes("oldpassword") ||
+    normalizedTokens.includes("existingpassword") ||
+    tokens.includes("current") ||
+    tokens.includes("old")
+  );
+}
+
+function hasNewPasswordSignal(input: HTMLInputElement) {
+  const tokens = fieldTokens(input);
+  const normalizedTokens = normalizedFieldTokens(input);
+  return (
+    input.autocomplete.toLowerCase() === "new-password" ||
+    normalizedTokens.includes("newpassword") ||
+    tokens.includes("new password")
+  );
+}
+
+function hasConfirmationPasswordSignal(input: HTMLInputElement) {
+  const tokens = fieldTokens(input);
+  const normalizedTokens = normalizedFieldTokens(input);
+  return (
+    normalizedTokens.includes("confirmpassword") ||
+    normalizedTokens.includes("repeatpassword") ||
+    tokens.includes("confirm password") ||
+    tokens.includes("repeat password")
   );
 }
 
