@@ -149,10 +149,61 @@ describe("totp autofill detection", () => {
     ).toEqual(["6", "5", "4", "3", "2", "1"]);
   });
 
+  it("keeps unrelated one-character fields out of numbered split TOTP groups", () => {
+    document.body.innerHTML = `
+      <form aria-label="Two-factor verification">
+        <input maxlength="1" />
+        <input name="digit_1" maxlength="1" inputmode="numeric" />
+        <input name="digit_2" maxlength="1" inputmode="numeric" />
+        <input name="digit_3" maxlength="1" inputmode="numeric" />
+        <input name="digit_4" maxlength="1" inputmode="numeric" />
+        <input name="digit_5" maxlength="1" inputmode="numeric" />
+        <input name="digit_6" maxlength="1" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "654321" });
+
+    expect((document.querySelector("form input") as HTMLInputElement).value).toBe("");
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>('input[name^="digit_"]')].map(
+        (field) => field.value
+      )
+    ).toEqual(["6", "5", "4", "3", "2", "1"]);
+  });
+
   it("does not fill recovery or backup code fields", () => {
     document.body.innerHTML = `
       <form>
         <label for="recovery-code">Recovery code</label>
+        <input id="recovery-code" name="recovery_code" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#recovery-code") as HTMLInputElement).value).toBe("");
+  });
+
+  it("fills authenticator codes in backup-branded login forms", () => {
+    document.body.innerHTML = `
+      <form id="backup-login">
+        <label for="authenticator-code">Authenticator code</label>
+        <input id="authenticator-code" name="code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#authenticator-code") as HTMLInputElement).value).toBe(
+      "123456"
+    );
+  });
+
+  it("does not fill authenticator recovery code fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="recovery-code">Authenticator recovery code</label>
         <input id="recovery-code" name="recovery_code" autocomplete="one-time-code" />
       </form>
     `;

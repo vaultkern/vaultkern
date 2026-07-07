@@ -289,7 +289,8 @@ function splitSequenceKeys(field: AutofillTriageFieldResult) {
 
 function splitSequenceMatches(
   seed: AutofillTriageFieldResult,
-  candidate: AutofillTriageFieldResult
+  candidate: AutofillTriageFieldResult,
+  options: { allowAnonymousFallback?: boolean } = {}
 ) {
   const seedKeys = splitSequenceKeys(seed);
   if (!seedKeys.length) {
@@ -298,7 +299,7 @@ function splitSequenceMatches(
 
   const candidateKeys = splitSequenceKeys(candidate);
   if (!candidateKeys.length) {
-    return isAnonymousOneCharacterField(candidate);
+    return options.allowAnonymousFallback === true && isAnonymousOneCharacterField(candidate);
   }
   return candidateKeys.some((key) => seedKeys.includes(key));
 }
@@ -341,7 +342,9 @@ function pickContiguousOneCharacterFields(
     startIndex > 0 &&
     isContiguousSplitField(seed, sortedFields[startIndex - 1]) &&
     splitScopeMatches(seed, sortedFields[startIndex - 1]) &&
-    splitSequenceMatches(seed, sortedFields[startIndex - 1])
+    splitSequenceMatches(seed, sortedFields[startIndex - 1], {
+      allowAnonymousFallback: splitSequenceKeys(seed).length === 0
+    })
   ) {
     startIndex -= 1;
   }
@@ -351,7 +354,7 @@ function pickContiguousOneCharacterFields(
     endIndex + 1 < sortedFields.length &&
     isContiguousSplitField(seed, sortedFields[endIndex + 1]) &&
     splitScopeMatches(seed, sortedFields[endIndex + 1]) &&
-    splitSequenceMatches(seed, sortedFields[endIndex + 1])
+    splitSequenceMatches(seed, sortedFields[endIndex + 1], { allowAnonymousFallback: true })
   ) {
     endIndex += 1;
   }

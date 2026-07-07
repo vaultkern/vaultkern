@@ -418,6 +418,10 @@ function recoveryCodeReason(
     return null;
   }
 
+  if (hasAuthenticatorTotpKeyword(searchableText)) {
+    return null;
+  }
+
   const hasCodeContext =
     autocomplete.has("one-time-code") ||
     fieldText.includes("code") ||
