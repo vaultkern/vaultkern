@@ -467,6 +467,27 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
+  it("preserves primary account-creation submit context", () => {
+    document.body.innerHTML = `
+      <form id="start">
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+        <button type="submit">Create account</button>
+        <button type="submit">Sign in</button>
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "start")?.headingText).toEqual([
+      "Create account"
+    ]);
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
+  });
+
   it("keeps neutral primary submits from inheriting secondary submit exclusions", () => {
     document.body.innerHTML = `
       <form id="login">
@@ -533,6 +554,23 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "subscriber_email").qualifiedAs).toBe("username");
+  });
+
+  it("uses image submit controls as passwordless login context", () => {
+    document.body.innerHTML = `
+      <form id="image-login" action="/continue">
+        <input name="image_email" type="email" />
+        <input type="image" alt="Sign in" />
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "image-login")?.headingText).toEqual([
+      "Sign in"
+    ]);
+    expect(fieldByName(report, "image_email").qualifiedAs).toBe("username");
   });
 
   it("requires login evidence before treating a generic email field as username", () => {
@@ -627,6 +665,23 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "contact_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "body_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "body_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "body_email").containerOpid).toBe(
+      fieldByName(report, "body_password").containerOpid
+    );
+  });
+
+  it("shares local context for labeled root-level login fields", () => {
+    document.body.innerHTML = `
+      <label for="body-email">Email</label>
+      <input id="body-email" name="body_email" type="email" />
+      <label for="body-password">Password</label>
+      <input id="body-password" name="body_password" type="password" />
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
     expect(fieldByName(report, "body_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "body_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "body_email").containerOpid).toBe(

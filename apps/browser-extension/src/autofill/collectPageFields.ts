@@ -115,6 +115,30 @@ function isLoginSubmitText(value: string) {
   );
 }
 
+function isAccountCreationSubmitText(value: string) {
+  const lower = value.toLowerCase();
+  const normalized = value.toLowerCase().replace(/[\s_/-]+/g, "");
+  return (
+    normalized.includes("createaccount") ||
+    normalized.includes("signup") ||
+    /\b(register|registration)\b/.test(lower)
+  );
+}
+
+function byDocumentOrder(left: Element, right: Element) {
+  if (left === right) {
+    return 0;
+  }
+  return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+}
+
+function getFormControlElements(form: HTMLFormElement) {
+  const controls = new Set<Element>();
+  Array.from(form.elements).forEach((element) => controls.add(element));
+  collectMatchingElements(form, "button, input").forEach((element) => controls.add(element));
+  return Array.from(controls).sort(byDocumentOrder);
+}
+
 function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
   const labels = new Set<Element>();
   const lookupRoot = lookupRootForElement(element);
@@ -195,7 +219,7 @@ function getHeadingText(form: HTMLFormElement) {
 }
 
 function getSubmitText(form: HTMLFormElement) {
-  const submitText = Array.from(form.elements).flatMap((element) => {
+  const submitText = getFormControlElements(form).flatMap((element) => {
     if (!getFieldVisibility(element as HTMLElement).viewable) {
       return [];
     }
@@ -215,11 +239,15 @@ function getSubmitText(form: HTMLFormElement) {
     }
     const input = element as HTMLInputElement;
     const type = input.type.toLowerCase();
-    if (type !== "submit") {
+    if (type !== "submit" && type !== "image") {
       return [];
     }
-    return [controlText(input, input.value)];
+    return [controlText(input, type === "image" ? input.alt : input.value)];
   }).filter(Boolean);
+  const primarySubmitText = submitText[0];
+  if (primarySubmitText && isAccountCreationSubmitText(primarySubmitText)) {
+    return [primarySubmitText];
+  }
   const loginSubmitText = submitText.filter(isLoginSubmitText);
   return loginSubmitText.length > 0 ? loginSubmitText : submitText.slice(0, 1);
 }
@@ -277,17 +305,33 @@ function getRootLevelFieldRunContainer(
     return undefined;
   }
 
+  const isRunElement = (candidate: Element) =>
+    candidate.matches(FIELD_SELECTOR) ||
+    ["label", "small", "span", "p"].includes(candidate.tagName.toLowerCase());
+
   let first: Element = element;
-  while (first.previousElementSibling?.matches(FIELD_SELECTOR)) {
+  while (first.previousElementSibling && isRunElement(first.previousElementSibling)) {
     first = first.previousElementSibling;
   }
 
   let last: Element = element;
-  while (last.nextElementSibling?.matches(FIELD_SELECTOR)) {
+  while (last.nextElementSibling && isRunElement(last.nextElementSibling)) {
     last = last.nextElementSibling;
   }
 
-  return first === last ? undefined : first;
+  let fieldCount = 0;
+  let current: Element | null = first;
+  while (current) {
+    if (current.matches(FIELD_SELECTOR)) {
+      fieldCount += 1;
+    }
+    if (current === last) {
+      break;
+    }
+    current = current.nextElementSibling;
+  }
+
+  return fieldCount > 1 ? first : undefined;
 }
 
 function getFieldContainer(
