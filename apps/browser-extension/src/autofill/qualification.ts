@@ -129,12 +129,16 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
 
 function joinedFormTextParts(
   form: AutofillFormSnapshot | undefined,
-  options: { includeAction: boolean }
+  options: { includeAction: boolean; includeSubmitText?: boolean }
 ) {
   if (!form) {
     return [];
   }
-  const headingText = form.headingText ?? [];
+  const submitText = new Set(form.submitText ?? []);
+  const headingText =
+    options.includeSubmitText === false
+      ? (form.headingText ?? []).filter((text) => !submitText.has(text))
+      : form.headingText ?? [];
   return [
     form.htmlId,
     form.htmlName,
@@ -148,6 +152,12 @@ function joinedFormTextParts(
 
 function joinedFormText(form: AutofillFormSnapshot | undefined) {
   return joinedFormTextParts(form, { includeAction: true })
+    .map(normalize)
+    .join(",");
+}
+
+function joinedFormNonSubmitText(form: AutofillFormSnapshot | undefined) {
+  return joinedFormTextParts(form, { includeAction: true, includeSubmitText: false })
     .map(normalize)
     .join(",");
 }
@@ -206,6 +216,17 @@ function hasNewPasswordSignal(candidate: AutofillFieldSnapshot) {
   );
 }
 
+function hasPasswordConfirmationSignal(candidate: AutofillFieldSnapshot) {
+  return normalizedParts(joinedFieldText(candidate)).some(
+    (part) =>
+      part.includes("confirmpassword") ||
+      part.includes("passwordconfirm") ||
+      part.includes("passwordconfirmation") ||
+      part.includes("repeatpassword") ||
+      part.includes("verifypassword")
+  );
+}
+
 function isAvailablePasswordSibling(candidate: AutofillFieldSnapshot) {
   const autocomplete = fieldAutocompleteTokens(candidate);
   const candidateText = joinedFieldText(candidate);
@@ -256,6 +277,22 @@ function isNewPasswordField(candidate: AutofillFieldSnapshot) {
 
 function hasNewPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
   return hasScopedField(field, snapshot, isNewPasswordField);
+}
+
+function isPasswordConfirmationField(candidate: AutofillFieldSnapshot) {
+  return (
+    candidate.htmlType === "password" &&
+    candidate.viewable &&
+    candidate.fillable &&
+    hasPasswordConfirmationSignal(candidate)
+  );
+}
+
+function hasPasswordConfirmationSibling(
+  field: AutofillFieldSnapshot,
+  snapshot: AutofillPageSnapshot
+) {
+  return hasScopedField(field, snapshot, isPasswordConfirmationField);
 }
 
 function isCurrentPasswordSibling(candidate: AutofillFieldSnapshot) {
@@ -586,6 +623,7 @@ function qualificationForFillableField(
 ): FieldQualification {
   const fieldText = joinedFieldText(field);
   const formText = joinedFormText(form);
+  const formNonSubmitText = joinedFormNonSubmitText(form);
   const formPromptText = joinedFormPromptText(form);
   const autocomplete = fieldAutocompleteTokens(field);
   const siteRuleType = field.siteRuleTypes.find((fieldType) => fieldType !== "ignored");
@@ -621,6 +659,7 @@ function qualificationForFillableField(
   }
 
   const searchableText = `${fieldText},${formText}`;
+  const searchableNonSubmitText = `${fieldText},${formNonSubmitText}`;
   const hasMixedLoginContext =
     hasLoginContext(searchableText) || !hasAccountCreationContext(searchableText);
   const nonLogin = nonLoginReason(fieldText, formText);
@@ -636,6 +675,13 @@ function qualificationForFillableField(
     nonLogin === "non-login:account-creation" &&
     hasLoginContext(searchableText) &&
     (isPasswordLike(field) || hasPasswordSibling(field, snapshot) || hasCurrentPasswordSibling(field, snapshot));
+  const isAccountCreationUsernameWithPassword =
+    nonLogin === "non-login:account-creation" &&
+    hasAccountCreationContext(searchableNonSubmitText) &&
+    isUsernameLike(field, fieldText) &&
+    (hasPasswordSibling(field, snapshot) ||
+      hasNewPasswordSibling(field, snapshot) ||
+      hasCurrentPasswordSibling(field, snapshot));
   const canUseCurrentPasswordInNonLoginContext =
     !nonLogin ||
     hasNewsletterLoginContext ||
@@ -648,6 +694,7 @@ function qualificationForFillableField(
   const canUseUsernameInNonLoginContext =
     !nonLogin ||
     isUsernameInCurrentPasswordForm ||
+    isAccountCreationUsernameWithPassword ||
     hasNewsletterLoginContext ||
     hasMixedCurrentPasswordLoginContext ||
     hasMixedLoginFormContext;
@@ -710,6 +757,7 @@ function qualificationForFillableField(
   if (
     nonLogin &&
     !isUsernameInCurrentPasswordForm &&
+    !isAccountCreationUsernameWithPassword &&
     !hasNewsletterLoginContext &&
     !hasMixedCurrentPasswordLoginContext &&
     !hasMixedLoginFormContext
@@ -748,7 +796,9 @@ function qualificationForFillableField(
     if (
       hasNewPasswordSibling(field, snapshot) &&
       !hasCurrentPasswordSibling(field, snapshot) &&
-      !autocomplete.has("current-password")
+      !autocomplete.has("current-password") &&
+      (hasAccountCreationContext(searchableText) ||
+        hasPasswordConfirmationSibling(field, snapshot))
     ) {
       reasons.push("non-login:account-creation");
       return { qualifiedAs: "newPassword", eligible: true, reasons };
@@ -786,13 +836,6 @@ function qualificationForFillableField(
     const needsLoginEvidence =
       (hasEmailSignal || hasPhoneSignal || hasGenericIdentifierSignal) &&
       !hasUsernameAutocomplete;
-    if (
-      hasNewPasswordSibling(field, snapshot) &&
-      !hasCurrentPasswordSibling(field, snapshot)
-    ) {
-      reasons.push("non-login:account-creation");
-      return { qualifiedAs: "ignored", eligible: false, reasons };
-    }
     if (
       needsLoginEvidence &&
       !hasPasswordSibling(field, snapshot) &&

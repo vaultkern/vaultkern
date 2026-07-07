@@ -275,6 +275,8 @@ function collectForms(documentRef: Document) {
       .filter(Boolean)
       .join(" ");
     const htmlActionIsImplicit = !formElement.getAttribute("action");
+    const headingText = getHeadingText(formElement);
+    const submitText = getSubmitText(formElement);
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
       htmlId: optionalString(formElement.id),
@@ -284,7 +286,8 @@ function collectForms(documentRef: Document) {
       htmlActionIsImplicit,
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
       ariaLabel: optionalString(ariaLabel),
-      headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
+      headingText: [...headingText, ...submitText],
+      submitText
     };
     formByElement.set(formElement, snapshot);
     return snapshot;

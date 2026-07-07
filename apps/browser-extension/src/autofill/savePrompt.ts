@@ -1,4 +1,8 @@
-import { collectAutofillPageSnapshot } from "./collectPageFields";
+import {
+  collectAutofillPageSnapshot,
+  collectMatchingElements,
+  FIELD_SELECTOR
+} from "./collectPageFields";
 import type { PendingAutofillSubmission } from "./pendingSubmission";
 import type { AutofillSiteRule } from "./siteRules";
 import { triageAutofillPage } from "./triage";
@@ -241,7 +245,7 @@ export function collectAutofillSubmission(
     return null;
   }
   const report = triageAutofillPage(snapshot);
-  const forms = Array.from(documentRef.querySelectorAll("form"));
+  const forms = collectMatchingElements(documentRef, "form");
   const submittedFormOpid =
     submittedForm === undefined
       ? undefined
@@ -257,7 +261,7 @@ export function collectAutofillSubmission(
     (field) =>
       submittedFormOpid === undefined || field.formOpid === submittedFormOpid
   );
-  const elements = Array.from(documentRef.querySelectorAll("input, select, textarea"));
+  const elements = collectMatchingElements(documentRef, FIELD_SELECTOR);
   const submittedAt = Date.now();
   const url = documentRef.location.href;
 

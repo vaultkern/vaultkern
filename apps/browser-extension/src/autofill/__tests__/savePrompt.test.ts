@@ -32,6 +32,32 @@ describe("autofill save prompt capture", () => {
     expect(submission).not.toHaveProperty("newPassword");
   });
 
+  it("uses shadow-aware field order when reading submitted values", () => {
+    const host = document.createElement("div");
+    const shadowRoot = host.attachShadow({ mode: "open" });
+    shadowRoot.innerHTML = `<input name="decoy" value="shadow-value" />`;
+    document.body.append(host);
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      `
+        <form id="login">
+          <input name="email" autocomplete="username" value="alice@example.com" />
+          <input name="password" type="password" autocomplete="current-password" value="secret-123" />
+        </form>
+      `
+    );
+
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("#login") as HTMLFormElement
+    );
+
+    expect(submission).toMatchObject({
+      username: "alice@example.com",
+      password: "secret-123"
+    });
+  });
+
   it("preserves a save-only marker when parsing pending submissions", () => {
     expect(
       pendingAutofillSubmissionFromUnknown({

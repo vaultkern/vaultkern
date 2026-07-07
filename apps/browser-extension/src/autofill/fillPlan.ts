@@ -437,6 +437,10 @@ function formHasRegistrationContext(formFields: AutofillTriageFieldResult[]) {
   );
 }
 
+function formHasRegistrationPasswordConfirmation(formFields: AutofillTriageFieldResult[]) {
+  return formFields.filter((field) => field.qualifiedAs === "newPassword").length > 1;
+}
+
 function formHasChangePasswordContext(formFields: AutofillTriageFieldResult[]) {
   const searchableText = formSearchText(formFields);
   return CHANGE_PASSWORD_KEYWORDS.some((keyword) => searchableText.includes(keyword));
@@ -625,7 +629,11 @@ function pickRegistrationFormOpid(
       return null;
     }
     const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
-    if (formHasResetPasswordContext(formFields) || !formHasRegistrationContext(formFields)) {
+    if (
+      formHasResetPasswordContext(formFields) ||
+      !formHasRegistrationContext(formFields) ||
+      !formHasRegistrationPasswordConfirmation(formFields)
+    ) {
       return null;
     }
     return formOpid;

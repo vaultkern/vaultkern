@@ -18,6 +18,7 @@ export interface AutofillFormSnapshot {
   htmlMethod?: string;
   ariaLabel?: string;
   headingText: string[];
+  submitText?: string[];
 }
 
 export interface AutofillFieldSnapshot {
