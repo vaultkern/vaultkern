@@ -294,7 +294,7 @@ function searchPartsForForm(form: AutofillFormSnapshot | undefined) {
     form.htmlId,
     form.htmlName,
     form.htmlClass,
-    formActionContext(form.htmlAction),
+    form.htmlActionIsImplicit ? undefined : formActionContext(form.htmlAction),
     form.htmlMethod,
     ...form.headingText
   ];
@@ -328,7 +328,13 @@ function excludedReason(fieldText: string, formText: string) {
   if (searchableText.includes("forgot")) {
     return "excluded:forgot";
   }
-  if (searchableText.includes("resetpassword") || searchableText.includes("passwordreset")) {
+  if (
+    searchableText.includes("resetpassword") ||
+    searchableText.includes("passwordreset") ||
+    normalizedParts(searchableText).some(
+      (part) => part.includes("reset") && part.includes("password")
+    )
+  ) {
     return "excluded:reset";
   }
   if (
@@ -652,6 +658,14 @@ function qualificationForFillableField(
   }
 
   if (isPasswordLike(field)) {
+    if (
+      hasNewPasswordSibling(field, snapshot) &&
+      !hasCurrentPasswordSibling(field, snapshot) &&
+      !autocomplete.has("current-password")
+    ) {
+      reasons.push("non-login:account-creation");
+      return { qualifiedAs: "newPassword", eligible: true, reasons };
+    }
     if (autocomplete.has("current-password")) {
       reasons.push("autocomplete:current-password");
     }
@@ -685,7 +699,10 @@ function qualificationForFillableField(
     const needsLoginEvidence =
       (hasEmailSignal || hasPhoneSignal || hasGenericIdentifierSignal) &&
       !hasUsernameAutocomplete;
-    if (hasNewPasswordSibling(field, snapshot) && !hasCurrentPasswordSibling(field, snapshot)) {
+    if (
+      hasNewPasswordSibling(field, snapshot) &&
+      !hasCurrentPasswordSibling(field, snapshot)
+    ) {
       reasons.push("non-login:account-creation");
       return { qualifiedAs: "ignored", eligible: false, reasons };
     }

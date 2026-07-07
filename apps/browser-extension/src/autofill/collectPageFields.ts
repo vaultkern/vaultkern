@@ -99,9 +99,9 @@ function controlText(
   primaryText: string | null | undefined
 ) {
   return (
-    optionalString(primaryText) ??
-    optionalString(element.getAttribute("aria-label")) ??
     getAriaLabelledByText(element) ??
+    optionalString(element.getAttribute("aria-label")) ??
+    optionalString(primaryText) ??
     optionalString(element.getAttribute("title"))
   );
 }
@@ -218,7 +218,7 @@ function getSubmitText(form: HTMLFormElement) {
     return [controlText(input, input.value)];
   }).filter(Boolean);
   const loginSubmitText = submitText.filter(isLoginSubmitText);
-  return loginSubmitText.length > 0 ? loginSubmitText : submitText;
+  return loginSubmitText.length > 0 ? loginSubmitText : submitText.slice(0, 1);
 }
 
 function collectForms(documentRef: Document) {
@@ -233,12 +233,14 @@ function collectForms(documentRef: Document) {
       .map(optionalString)
       .filter(Boolean)
       .join(" ");
+    const htmlActionIsImplicit = !formElement.hasAttribute("action");
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
       htmlId: optionalString(formElement.id),
       htmlName: optionalString(formElement.getAttribute("name")),
       htmlClass: optionalString(formElement.getAttribute("class")),
       htmlAction: getFormAction(formElement),
+      htmlActionIsImplicit,
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
       ariaLabel: optionalString(ariaLabel),
       headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
