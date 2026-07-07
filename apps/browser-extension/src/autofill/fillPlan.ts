@@ -43,6 +43,10 @@ function preferCurrentPasswordField(fields: AutofillTriageFieldResult[]) {
   );
 }
 
+function pickFirstPasswordField(fields: AutofillTriageFieldResult[]) {
+  return fields.find((field) => field.qualifiedAs === "password") ?? null;
+}
+
 function isSameFillScope(
   left: AutofillTriageFieldResult,
   right: AutofillTriageFieldResult
@@ -344,7 +348,9 @@ export function createLoginFillPlan(
       : null;
   const passwordField =
     typeof payload.password === "string"
-      ? pickPasswordField(fields, usernameField) ?? initialPasswordField
+      ? usernameField
+        ? pickPasswordField(fields, usernameField) ?? initialPasswordField
+        : pickFirstPasswordField(fields)
       : null;
   const actions: AutofillFillAction[] = [];
 

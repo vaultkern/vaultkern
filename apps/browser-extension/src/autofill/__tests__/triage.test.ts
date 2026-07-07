@@ -279,6 +279,22 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
   });
 
+  it("does not let username autocomplete override account creation context", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Create account</h2>
+        <input name="signup_email" type="email" autocomplete="username" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "signup_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "signup_email").reasons).toContain(
+      "non-login:account-creation"
+    );
+  });
+
   it("recognizes plain user identifiers when login evidence is present", () => {
     document.body.innerHTML = `
       <form>
@@ -485,7 +501,7 @@ describe("autofill triage", () => {
     ]);
     expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "email").reasons).toContain("non-login:account-creation");
-    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
   });
 
   it("keeps neutral primary submits from inheriting secondary submit exclusions", () => {
@@ -972,6 +988,7 @@ describe("autofill triage", () => {
   it("does not classify masked card security code fields as saved-password targets", () => {
     document.body.innerHTML = `
       <form id="payment">
+        <input name="checkout_email" type="email" />
         <label for="cvv">Card CVV</label>
         <input id="cvv" name="card_cvv" type="password" />
         <input name="card_code" type="password" autocomplete="cc-csc" />
@@ -980,6 +997,7 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
+    expect(fieldByName(report, "checkout_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "card_cvv").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "card_code").qualifiedAs).toBe("ignored");
   });
