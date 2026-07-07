@@ -1359,6 +1359,24 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "root_shadow_password").qualifiedAs).toBe("password");
   });
 
+  it("keeps form-less shadow-root field grouping local", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <input name="contact_email" type="email" />
+      <hr />
+      <input name="login_email" type="email" />
+      <input name="login_password" type="password" />
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "contact_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "login_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
+  });
+
   it("uses shadow-root labels and host visibility for collected fields", () => {
     const hiddenHost = document.createElement("div");
     hiddenHost.hidden = true;
@@ -1486,6 +1504,32 @@ describe("autofill triage", () => {
     expect(snapshot.forms.find((form) => form.htmlId === "newsletter-form")).toMatchObject({
       headingText: ["Subscribe to our newsletter"]
     });
+  });
+
+  it("uses preceding shadow-root headings for wrapped forms", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <h2>Create account</h2>
+      <div>
+        <form>
+          <input name="component_email" type="email" />
+          <input name="component_password" type="password" />
+        </form>
+      </div>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "component_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "component_email").reasons).toContain(
+      "non-login:account-creation"
+    );
+    expect(fieldByName(report, "component_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "component_password").reasons).toContain(
+      "non-login:account-creation"
+    );
   });
 
   it("uses only the nearest preceding heading for a form context", () => {

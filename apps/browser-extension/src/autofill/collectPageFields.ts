@@ -186,6 +186,18 @@ function scopeForFormHeadings(form: HTMLFormElement): ParentNode {
       scope = scope.parentElement;
     }
 
+    const root = form.getRootNode();
+    const shadowRoot = root as ParentNode & {
+      querySelector?: (selectors: string) => Element | null;
+    };
+    if (
+      root.nodeType === 11 &&
+      typeof shadowRoot.querySelector === "function" &&
+      shadowRoot.querySelector("h1, h2, h3, h4, h5, h6")
+    ) {
+      return shadowRoot;
+    }
+
     return form.parentElement;
   }
 
@@ -318,9 +330,8 @@ function getRootLevelFieldRunContainer(
       ? element.parentElement
       : null;
   const runElement = labelParent ?? element;
-  const parent = runElement.parentElement;
-  const parentTag = parent?.tagName.toLowerCase();
-  if (parent === null || (parentTag !== "body" && parentTag !== "html")) {
+  const parent = getRootLevelRunParent(runElement);
+  if (!parent) {
     return undefined;
   }
 
@@ -355,6 +366,21 @@ function getRootLevelFieldRunContainer(
   return fieldCount > 1 ? first : undefined;
 }
 
+function getRootLevelRunParent(element: Element): ParentNode | undefined {
+  const parent = element.parentElement;
+  const parentTag = parent?.tagName.toLowerCase();
+  if (parent && (parentTag === "body" || parentTag === "html")) {
+    return parent;
+  }
+
+  const parentNode = element.parentNode;
+  if (parentNode?.nodeType === 11 && "querySelectorAll" in parentNode) {
+    return parentNode as ParentNode;
+  }
+
+  return undefined;
+}
+
 function getFieldContainer(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
   form: AutofillFormSnapshot | undefined
@@ -384,14 +410,6 @@ function getFieldContainer(
     container = container.parentElement;
   }
 
-  const root = element.getRootNode();
-  if (
-    root.nodeType === 11 &&
-    "querySelectorAll" in root &&
-    root.querySelectorAll(FIELD_SELECTOR).length > 1
-  ) {
-    return root;
-  }
   return undefined;
 }
 
