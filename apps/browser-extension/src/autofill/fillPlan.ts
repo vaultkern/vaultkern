@@ -421,7 +421,7 @@ export function createLoginFillPlan(
   const report = triageAutofillPage(snapshot);
   const fields = candidateFields(report.fields);
   const initialPasswordField =
-    typeof payload.password === "string" ? pickPasswordField(fields) : null;
+    typeof payload.password === "string" ? pickFirstPasswordField(fields) : null;
   const usernameField =
     typeof payload.username === "string"
       ? pickUsernameField(fields, initialPasswordField) ??
