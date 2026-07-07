@@ -269,7 +269,10 @@ function nearestFormlessCredentialContainer(input: HTMLInputElement) {
     if (usernames.length > 0) {
       const panelChildren = formLessCredentialPanelChildren(container);
       if (panelChildren.length > 1) {
-        if (hasOnlyWrappedCredentialFields(panelChildren)) {
+        if (
+          hasOnlyWrappedCredentialFields(panelChildren) &&
+          hasCredentialContainerSignal(container)
+        ) {
           return container;
         }
         const inputPanel = panelChildren.find((panel) => panel.contains(input));
@@ -456,6 +459,21 @@ function formLessCredentialPanelChildren(container: Element) {
       (visibleFormlessPasswords(child).length > 0 || visibleFormlessUsernameInputs(child).length > 0)
     );
   });
+}
+
+function hasCredentialContainerSignal(container: Element) {
+  const normalized = [
+    container.id,
+    container.getAttribute("class") ?? "",
+    container.getAttribute("aria-label") ?? "",
+    container.getAttribute("role") ?? ""
+  ]
+    .join(" ")
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+  return ["login", "signin", "signon", "auth", "credential"].some((token) =>
+    normalized.includes(token)
+  );
 }
 
 function visibleFormlessPasswords(container: Element) {
