@@ -138,7 +138,12 @@ function byDocumentOrder(left: Element, right: Element) {
 function getFormControlElements(form: HTMLFormElement) {
   const controls = new Set<Element>();
   Array.from(form.elements).forEach((element) => controls.add(element));
-  collectMatchingElements(form, "button, input").forEach((element) => controls.add(element));
+  collectMatchingElements(form, "button, input").forEach((element) => {
+    const associatedForm = (element as HTMLButtonElement | HTMLInputElement).form;
+    if (associatedForm === form) {
+      controls.add(element);
+    }
+  });
   return Array.from(controls).sort(byDocumentOrder);
 }
 
@@ -256,6 +261,9 @@ function getHeadingText(form: HTMLFormElement) {
 function getSubmitText(form: HTMLFormElement) {
   const submitText = getFormControlElements(form).flatMap((element) => {
     if (!getFieldVisibility(element as HTMLElement).viewable) {
+      return [];
+    }
+    if (!getFieldFillability(element as HTMLElement).fillable) {
       return [];
     }
     if ((element as HTMLButtonElement | HTMLInputElement).disabled || element.matches(":disabled")) {

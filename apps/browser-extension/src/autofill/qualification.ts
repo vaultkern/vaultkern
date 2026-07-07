@@ -15,6 +15,7 @@ const ACCOUNT_CREATION_EXACT_PARTS = new Set([
   "registration",
   "signup",
   "createaccount",
+  "createnewaccount",
   "createyouraccount",
   "createanaccount",
   "createpassword",
@@ -27,6 +28,8 @@ const NEW_PASSWORD_PARTS = [
   "confirmpassword",
   "passwordconfirmation",
   "passwordconfirm",
+  "passwordagain",
+  "password2",
   "repeatpassword",
   "verifypassword"
 ];
@@ -77,6 +80,19 @@ function formActionContext(value: string | undefined) {
   }
 }
 
+function formActionPathContext(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    const url = new URL(value, "https://vaultkern.invalid");
+    return url.pathname;
+  } catch {
+    return value.split(/[?#]/, 1)[0];
+  }
+}
+
 function joinedFieldText(field: AutofillFieldSnapshot) {
   return [
     field.htmlType,
@@ -120,14 +136,15 @@ function normalizedParts(text: string) {
 }
 
 function isRegisterAccountCreationPart(part: string) {
-  if (part.startsWith("registered")) {
+  const routePart = part.replace(/\.[a-z0-9]+$/i, "");
+  if (routePart.startsWith("registered")) {
     return false;
   }
   return (
-    part.startsWith("register") ||
-    part.startsWith("registration") ||
-    part.endsWith("register") ||
-    part.endsWith("registration")
+    routePart.startsWith("register") ||
+    routePart.startsWith("registration") ||
+    routePart.endsWith("register") ||
+    routePart.endsWith("registration")
   );
 }
 
@@ -137,6 +154,7 @@ function isAccountCreationPart(part: string) {
     isRegisterAccountCreationPart(part) ||
     part.includes("signup") ||
     part.includes("createaccount") ||
+    part.includes("createnewaccount") ||
     part.includes("createyouraccount") ||
     part.includes("createanaccount") ||
     part.includes("createpassword") ||
@@ -255,7 +273,7 @@ function searchPartsForForm(form: AutofillFormSnapshot | undefined) {
     form.htmlId,
     form.htmlName,
     form.htmlClass,
-    form.htmlActionIsImplicit ? undefined : formActionContext(form.htmlAction),
+    form.htmlActionIsImplicit ? undefined : formActionPathContext(form.htmlAction),
     form.htmlMethod,
     ...form.headingText
   ];
@@ -283,6 +301,7 @@ function hasAnyKeyword(text: string, keywords: string[]) {
 
 function excludedReason(fieldText: string, formText: string) {
   const searchableText = `${fieldText},${formText}`;
+  const searchableParts = normalizedParts(searchableText);
   if (fieldText.includes("captcha")) {
     return "excluded:captcha";
   }
@@ -292,9 +311,9 @@ function excludedReason(fieldText: string, formText: string) {
   if (
     searchableText.includes("resetpassword") ||
     searchableText.includes("passwordreset") ||
-    normalizedParts(searchableText).some(
-      (part) => part.includes("reset") && part.includes("password")
-    )
+    searchableParts.some((part) => part.includes("reset") && part.includes("password")) ||
+    (searchableParts.some((part) => part.includes("reset")) &&
+      searchableParts.some((part) => part.includes("password")))
   ) {
     return "excluded:reset";
   }
@@ -416,10 +435,11 @@ function qualificationForFillableField(
 
   const searchableText = `${fieldText},${formText}`;
   const nonLogin = nonLoginReason(fieldText, negativeFormText);
+  const hasNewsletterPasswordContext = hasPasswordSibling(field, snapshot) || isPasswordLike(field);
   const hasNewsletterLoginContext =
     nonLogin === "non-login:newsletter" &&
-    hasLoginContext(searchableText) &&
-    (hasPasswordSibling(field, snapshot) || isUsernameLike(field, fieldText));
+    (hasLoginContext(searchableText) || hasNewsletterPasswordContext) &&
+    (hasNewsletterPasswordContext || isUsernameLike(field, fieldText));
   const hasMixedCurrentPasswordLoginContext =
     nonLogin === "non-login:account-creation" &&
     hasLoginContext(searchableText) &&
