@@ -143,6 +143,22 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("keeps single-password signup forms with sign-in copy out of login qualification", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Create account</h2>
+        <input name="email" type="email" />
+        <input name="password" type="password" />
+        <button type="submit">Sign in</button>
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("newPassword");
+  });
+
   it("excludes forgot-password fields when the signal is in the form context", () => {
     document.body.innerHTML = `
       <form id="forgot" action="/forgot-password">

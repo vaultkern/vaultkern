@@ -197,6 +197,26 @@ function hasAccountCreationContext(text: string) {
   return normalizedParts(text).some(isAccountCreationPart);
 }
 
+function isAccountCreationIdentityPart(part: string) {
+  return (
+    part === "register" ||
+    part === "registration" ||
+    part === "signup" ||
+    part === "createaccount" ||
+    part === "createyouraccount" ||
+    part === "createanaccount" ||
+    isRegisterAccountCreationPart(part) ||
+    part.includes("signup") ||
+    part.includes("createaccount") ||
+    part.includes("createyouraccount") ||
+    part.includes("createanaccount")
+  );
+}
+
+function hasAccountCreationIdentityContext(text: string) {
+  return normalizedParts(text).some(isAccountCreationIdentityPart);
+}
+
 function fieldAutocompleteTokens(field: AutofillFieldSnapshot) {
   return new Set(
     (field.autocomplete ?? "")
@@ -264,6 +284,14 @@ function hasScopedField(
 
 function hasPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
   return hasScopedField(field, snapshot, isAvailablePasswordSibling);
+}
+
+function hasOtherPasswordSibling(field: AutofillFieldSnapshot, snapshot: AutofillPageSnapshot) {
+  return hasScopedField(
+    field,
+    snapshot,
+    (candidate) => candidate.opid !== field.opid && isAvailablePasswordSibling(candidate)
+  );
 }
 
 function isNewPasswordField(candidate: AutofillFieldSnapshot) {
@@ -587,7 +615,8 @@ function isTotpLike(field: AutofillFieldSnapshot, fieldText: string, formText: s
 
   return (
     hasTotpKeyword(formText) &&
-    hasFieldCodeHint(field, fieldText, autocomplete) &&
+    (hasFieldCodeHint(field, fieldText, autocomplete) ||
+      hasAuthenticatorTotpKeyword(formText)) &&
     hasNumericCodeShape(field, fieldText)
   );
 }
@@ -671,13 +700,25 @@ function qualificationForFillableField(
     nonLogin === "non-login:account-creation" &&
     hasLoginContext(searchableText) &&
     (autocomplete.has("current-password") || hasCurrentPasswordSibling(field, snapshot));
+  const hasAccountCreationPasswordWithoutCurrentEvidence =
+    nonLogin === "non-login:account-creation" &&
+    isPasswordLike(field) &&
+    !autocomplete.has("current-password") &&
+    !hasCurrentPasswordSibling(field, snapshot) &&
+    !hasLoginContext(searchableNonSubmitText) &&
+    hasAccountCreationContext(searchableNonSubmitText);
   const hasMixedLoginFormContext =
     nonLogin === "non-login:account-creation" &&
     hasLoginContext(searchableText) &&
-    (isPasswordLike(field) || hasPasswordSibling(field, snapshot) || hasCurrentPasswordSibling(field, snapshot));
+    !hasAccountCreationPasswordWithoutCurrentEvidence &&
+    ((isPasswordLike(field) &&
+      (!hasAccountCreationContext(searchableNonSubmitText) ||
+        hasLoginContext(searchableNonSubmitText))) ||
+      hasOtherPasswordSibling(field, snapshot) ||
+      hasCurrentPasswordSibling(field, snapshot));
   const isAccountCreationUsernameWithPassword =
     nonLogin === "non-login:account-creation" &&
-    hasAccountCreationContext(searchableNonSubmitText) &&
+    hasAccountCreationIdentityContext(searchableNonSubmitText) &&
     isUsernameLike(field, fieldText) &&
     (hasPasswordSibling(field, snapshot) ||
       hasNewPasswordSibling(field, snapshot) ||
@@ -747,9 +788,15 @@ function qualificationForFillableField(
     return { qualifiedAs: "password", eligible: true, reasons };
   }
 
-  if (isNewPasswordLike(field, fieldText, formText)) {
+  if (
+    isNewPasswordLike(field, fieldText, formText) ||
+    hasAccountCreationPasswordWithoutCurrentEvidence
+  ) {
     if (autocomplete.has("new-password")) {
       reasons.push("autocomplete:new-password");
+    }
+    if (hasAccountCreationPasswordWithoutCurrentEvidence) {
+      reasons.push("non-login:account-creation");
     }
     return { qualifiedAs: "newPassword", eligible: true, reasons };
   }
@@ -839,7 +886,8 @@ function qualificationForFillableField(
     if (
       needsLoginEvidence &&
       !hasPasswordSibling(field, snapshot) &&
-      !hasLoginContext(formText)
+      !hasLoginContext(formText) &&
+      !isAccountCreationUsernameWithPassword
     ) {
       return { qualifiedAs: "ignored", eligible: false, reasons };
     }

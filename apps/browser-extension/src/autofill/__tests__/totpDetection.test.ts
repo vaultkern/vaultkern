@@ -104,6 +104,18 @@ describe("totp autofill detection", () => {
     );
   });
 
+  it("uses authenticator form context for numeric code fields without code-like names", () => {
+    document.body.innerHTML = `
+      <form aria-label="Authenticator code">
+        <input id="token" name="token" inputmode="numeric" maxlength="6" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#token") as HTMLInputElement).value).toBe("123456");
+  });
+
   it("splits a TOTP value across one-character fields in document order", () => {
     document.body.innerHTML = `
       <form aria-label="Two-factor verification">

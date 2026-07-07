@@ -60,13 +60,13 @@ if (chromeApi?.runtime?.sendMessage && typeof document !== "undefined") {
     (event) => {
       const submittedForm =
         event.target instanceof HTMLFormElement ? event.target : undefined;
+      const submission = collectAutofillSubmission(document, submittedForm, {
+        includeLoginSubmissions: false
+      });
       queueMicrotask(() => {
         if (event.defaultPrevented) {
           return;
         }
-        const submission = collectAutofillSubmission(document, submittedForm, {
-          includeLoginSubmissions: false
-        });
         if (!submission) {
           return;
         }

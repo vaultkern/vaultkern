@@ -60,6 +60,26 @@ describe("registration detection fill flow", () => {
     ).toBe("generated-secret");
   });
 
+  it("fills email-only registration usernames without autocomplete hints", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Create account</h2>
+        <input id="email" name="email" type="email" />
+        <input id="new-password" name="password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    (document.querySelector("#email") as HTMLInputElement).focus();
+
+    fillLoginForm({ username: "new@example.com", password: "generated-secret" });
+
+    expect((document.querySelector("#email") as HTMLInputElement).value).toBe(
+      "new@example.com"
+    );
+    expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe(
+      "generated-secret"
+    );
+  });
+
   it("recognizes spaced create-account headings as registration context", () => {
     document.body.innerHTML = `
       <form>
