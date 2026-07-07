@@ -544,6 +544,22 @@ function formLessCredentialPanelChildren(container: Element) {
 }
 
 function hasCredentialContainerSignal(container: Element) {
+  return hasContainerSignal(container, ["login", "signin", "signon", "auth", "credential"]);
+}
+
+function hasPasswordChangeContainerSignal(container: Element) {
+  return hasContainerSignal(container, [
+    "login",
+    "signin",
+    "signon",
+    "auth",
+    "credential",
+    "change",
+    "reset"
+  ]);
+}
+
+function hasContainerSignal(container: Element, signals: string[]) {
   const normalized = [
     container.id,
     container.getAttribute("class") ?? "",
@@ -553,9 +569,7 @@ function hasCredentialContainerSignal(container: Element) {
     .join(" ")
     .toLowerCase()
     .replace(/[\s_-]+/g, "");
-  return ["login", "signin", "signon", "auth", "credential", "change", "reset"].some((token) =>
-    normalized.includes(token)
-  );
+  return signals.some((token) => normalized.includes(token));
 }
 
 function visibleFormlessPasswords(container: Element) {
@@ -579,7 +593,7 @@ function hasOnlyWrappedPasswordFields(panelChildren: Element[], container: Eleme
   );
   const passwords = passwordChildren.flatMap((child) => visibleFormlessPasswords(child));
   return (
-    hasCredentialContainerSignal(container) &&
+    hasPasswordChangeContainerSignal(container) &&
     passwordChildren.length > 1 &&
     passwordChildren.every((child) => visibleFormlessPasswords(child).length === 1) &&
     passwords.some(hasNewPasswordSignal) &&

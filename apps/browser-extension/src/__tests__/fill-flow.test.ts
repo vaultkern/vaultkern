@@ -1003,6 +1003,24 @@ describe("fillLoginForm", () => {
     expect(inputValue("#login-password")).toBe("secret-123");
   });
 
+  it("does not use reset containers to pair form-less username and password panels", () => {
+    document.body.innerHTML = `
+      <main id="reset-flow">
+        <section>
+          <label>Email <input id="reset-email" type="email" autocomplete="username" value="" /></label>
+        </section>
+        <section>
+          <input id="login-password" type="password" autocomplete="current-password" value="" />
+        </section>
+      </main>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret-123" });
+
+    expect(inputValue("#reset-email")).toBe("");
+    expect(inputValue("#login-password")).toBe("secret-123");
+  });
+
   it("scopes form-less username pairing to the password container", () => {
     document.body.innerHTML = `
       <input id="unrelated-username" type="text" autocomplete="username" value="" />
