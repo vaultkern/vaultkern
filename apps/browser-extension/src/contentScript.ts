@@ -1,10 +1,12 @@
 import { applyFillPlan } from "./autofill/applyFillPlan";
 import { collectAutofillPageSnapshot } from "./autofill/collectPageFields";
 import { createLoginFillPlan } from "./autofill/fillPlan";
+import { collectAutofillSubmission } from "./autofill/savePrompt";
 
 export function fillLoginForm(payload: {
   username?: string;
   password?: string;
+  newPassword?: string;
   totp?: string;
 }) {
   const snapshot = collectAutofillPageSnapshot(document);
@@ -17,7 +19,13 @@ const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
 if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener(
     (
-      message: { type?: string; username?: string; password?: string; totp?: string },
+      message: {
+        type?: string;
+        username?: string;
+        password?: string;
+        newPassword?: string;
+        totp?: string;
+      },
       _sender: unknown,
       _sendResponse: (response?: unknown) => void
     ) => {
@@ -27,19 +35,45 @@ if (chromeApi?.runtime?.onMessage) {
 
       const hasUsername = typeof message.username === "string";
       const hasPassword = typeof message.password === "string";
+      const hasNewPassword = typeof message.newPassword === "string";
       const hasTotp = typeof message.totp === "string";
 
-      if (!hasUsername && !hasPassword && !hasTotp) {
+      if (!hasUsername && !hasPassword && !hasNewPassword && !hasTotp) {
         return false;
       }
 
       fillLoginForm({
         username: hasUsername ? message.username : undefined,
         password: hasPassword ? message.password : undefined,
+        newPassword: hasNewPassword ? message.newPassword : undefined,
         totp: hasTotp ? message.totp : undefined
       });
 
       return false;
     }
+  );
+}
+
+if (chromeApi?.runtime?.sendMessage && typeof document !== "undefined") {
+  document.addEventListener(
+    "submit",
+    (event) => {
+      const submittedForm =
+        event.target instanceof HTMLFormElement ? event.target : undefined;
+      queueMicrotask(() => {
+        if (event.defaultPrevented) {
+          return;
+        }
+        const submission = collectAutofillSubmission(document, submittedForm);
+        if (!submission) {
+          return;
+        }
+        void chromeApi.runtime.sendMessage({
+          type: "vaultkern_autofill_submission",
+          ...submission
+        });
+      });
+    },
+    { capture: true }
   );
 }

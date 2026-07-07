@@ -15,6 +15,8 @@ describe("Chrome smoke server", () => {
     expect(new URL(smokeUrl(8877, "passkey-login.html")).hostname).toBe(
       SMOKE_HOST
     );
+    expect(new URL(smokeUrl(8877, "noisy-login.html")).hostname).toBe(SMOKE_HOST);
+    expect(new URL(smokeUrl(8877, "totp.html")).hostname).toBe(SMOKE_HOST);
   });
 
   it("waits for asynchronously persisted WebAuthn debug events", async () => {

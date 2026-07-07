@@ -12,6 +12,7 @@ const USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
 const NEW_PASSWORD_AUTOCOMPLETE = new Set(["new-password"]);
 const TOTP_AUTOCOMPLETE = new Set(["one-time-code"]);
 const NON_LOGIN_KEYWORDS = ["newsletter", "subscribe", "subscription", "unsubscribe", "mailinglist"];
+const CURRENT_PASSWORD_KEYWORDS = ["currentpassword", "oldpassword", "existingpassword"];
 const ACCOUNT_CREATION_EXACT_PARTS = new Set([
   "register",
   "registration",
@@ -133,6 +134,7 @@ function joinedFormTextParts(
   if (!form) {
     return [];
   }
+  const headingText = form.headingText ?? [];
   return [
     form.htmlId,
     form.htmlName,
@@ -140,7 +142,7 @@ function joinedFormTextParts(
     options.includeAction ? formActionContext(form.htmlAction) : undefined,
     form.htmlMethod,
     form.ariaLabel,
-    ...form.headingText
+    ...headingText
   ];
 }
 
@@ -275,13 +277,14 @@ function searchPartsForForm(form: AutofillFormSnapshot | undefined) {
   if (!form) {
     return [];
   }
+  const headingText = form.headingText ?? [];
   return [
     form.htmlId,
     form.htmlName,
     form.htmlClass,
     formActionContext(form.htmlAction),
     form.htmlMethod,
-    ...form.headingText
+    ...headingText
   ];
 }
 
@@ -497,6 +500,13 @@ function isPasswordLike(field: AutofillFieldSnapshot) {
   return field.tagName === "input" && field.htmlType === "password";
 }
 
+function isCurrentPasswordLike(field: AutofillFieldSnapshot, fieldText: string) {
+  if (!isPasswordLike(field)) {
+    return false;
+  }
+  return CURRENT_PASSWORD_KEYWORDS.some((keyword) => fieldText.includes(keyword));
+}
+
 function isNewPasswordLike(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
   const autocomplete = fieldAutocompleteTokens(field);
   if ([...NEW_PASSWORD_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
@@ -519,6 +529,15 @@ function qualificationForFillableField(
   const formText = joinedFormText(form);
   const formPromptText = joinedFormPromptText(form);
   const autocomplete = fieldAutocompleteTokens(field);
+  const siteRuleType = field.siteRuleTypes.find((fieldType) => fieldType !== "ignored");
+
+  if (siteRuleType) {
+    return {
+      qualifiedAs: siteRuleType === "currentPassword" ? "password" : siteRuleType,
+      eligible: true,
+      reasons
+    };
+  }
 
   if (isSearchField(field, form)) {
     reasons.push("excluded:search");
@@ -571,6 +590,10 @@ function qualificationForFillableField(
 
   if (autocomplete.has("current-password") && isPasswordLike(field)) {
     reasons.push("autocomplete:current-password");
+    return { qualifiedAs: "password", eligible: true, reasons };
+  }
+
+  if (isCurrentPasswordLike(field, fieldText)) {
     return { qualifiedAs: "password", eligible: true, reasons };
   }
 
@@ -679,9 +702,48 @@ export function qualifyAutofillField(
   snapshot: AutofillPageSnapshot,
   form: AutofillFormSnapshot | undefined
 ): FieldQualification {
-  const reasons = [...field.viewableReasons, ...field.fillableReasons];
+  const reasons = [
+    ...field.viewableReasons,
+    ...field.fillableReasons,
+    ...field.siteRuleReasons
+  ];
 
-  if (!field.viewable || !field.fillable) {
+  if (!field.viewable) {
+    return {
+      qualifiedAs: "ignored",
+      eligible: false,
+      reasons
+    };
+  }
+
+  if (!field.fillable) {
+    const fieldText = joinedFieldText(field);
+    const formText = joinedFormText(form);
+    const autocomplete = fieldAutocompleteTokens(field);
+    const siteRuleType = field.siteRuleTypes.find((fieldType) => fieldType !== "ignored");
+
+    if (field.readonly && siteRuleType === "username") {
+      return { qualifiedAs: "username", eligible: true, reasons };
+    }
+
+    if (
+      field.readonly &&
+      !isSearchField(field, fieldText) &&
+      !excludedReason(fieldText, formText) &&
+      !nonLoginReason(fieldText, formText) &&
+      isUsernameLike(field, fieldText)
+    ) {
+      if (autocomplete.has("username")) {
+        reasons.push("autocomplete:username");
+      } else if (autocomplete.has("email")) {
+        reasons.push("autocomplete:email");
+      }
+      if (hasPasswordSibling(field, snapshot)) {
+        reasons.push("form-has-password");
+      }
+      return { qualifiedAs: "username", eligible: true, reasons };
+    }
+
     return {
       qualifiedAs: "ignored",
       eligible: false,

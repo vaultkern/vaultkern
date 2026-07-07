@@ -4,6 +4,7 @@ import { createChromeExtensionSettingsStore } from "./extensionSettings";
 import { renderNativeHostHelp } from "./nativeHostHelp";
 import { PopupApp } from "./popup/PopupApp";
 import { extensionTransport } from "./runtimeBridge";
+import { pendingAutofillSubmissionFromUnknown } from "./autofill/pendingSubmission";
 
 const client = new RuntimeClient(extensionTransport);
 const extensionSettingsStore = createChromeExtensionSettingsStore();
@@ -14,7 +15,11 @@ async function getActiveTab() {
   return tabs[0] as { id?: number; url?: string } | undefined;
 }
 
-export async function requestFillCandidates(vaultId: string) {
+export async function requestFillCandidates(vaultId: string, siteUrl?: string) {
+  if (siteUrl) {
+    return client.findFillCandidates(vaultId, siteUrl);
+  }
+
   const tab = await getActiveTab();
 
   if (!tab?.url) {
@@ -72,6 +77,31 @@ export async function activeSiteLabel() {
   } catch {
     return tab.url;
   }
+}
+
+export async function loadPendingAutofillSubmission() {
+  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+  if (typeof chromeApi?.runtime?.sendMessage !== "function") {
+    return null;
+  }
+
+  const response = await chromeApi.runtime.sendMessage({
+    type: "vaultkern_autofill_pending_request"
+  });
+  return pendingAutofillSubmissionFromUnknown(
+    (response as { pending?: unknown } | null)?.pending
+  );
+}
+
+export async function clearPendingAutofillSubmission() {
+  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+  if (typeof chromeApi?.runtime?.sendMessage !== "function") {
+    return;
+  }
+
+  await chromeApi.runtime.sendMessage({
+    type: "vaultkern_autofill_pending_clear"
+  });
 }
 
 function webAuthnPromptSiteLabel() {
@@ -271,6 +301,8 @@ export function PopupShell() {
       activeSite={activeSiteLabel}
       findCandidates={requestFillCandidates}
       fillEntry={fillSelectedEntry}
+      loadPendingAutofillSubmission={loadPendingAutofillSubmission}
+      clearPendingAutofillSubmission={clearPendingAutofillSubmission}
       onUnlockComplete={notifyUnlockComplete}
       onWebAuthnPresenceComplete={notifyPresenceComplete}
       onWebAuthnUserVerificationComplete={notifyUserVerificationComplete}

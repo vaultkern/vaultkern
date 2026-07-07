@@ -32,11 +32,12 @@ apps/browser-extension/smoke/username-first-login.html
 apps/browser-extension/smoke/password-step-login.html
 apps/browser-extension/smoke/noisy-login.html
 apps/browser-extension/smoke/register.html
+apps/browser-extension/smoke/change-password.html
 apps/browser-extension/smoke/totp.html
 apps/browser-extension/smoke/totp-split.html
 ```
 
-These pages are covered by unit tests. They verify username-first login, password-only login steps, noisy pages with search, newsletter, and registration fields that should not receive login credentials, registration forms with new-password confirmation, and TOTP pages using both single-code and split-code layouts.
+These pages are covered by unit tests. They verify username-first login, password-only login steps, noisy pages with search, newsletter, and registration fields that should not receive login credentials, registration forms with new-password confirmation, password-change forms with current/new/confirm fields, and TOTP pages using both single-code and split-code layouts.
 
 ## Manual Verification
 
