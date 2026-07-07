@@ -76,6 +76,19 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#email-code") as HTMLInputElement).value).toBe("");
   });
 
+  it("keeps SMS form context ahead of generic authentication-code labels", () => {
+    document.body.innerHTML = `
+      <form aria-label="SMS verification">
+        <label for="auth-code">Authentication code</label>
+        <input id="auth-code" name="auth_code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#auth-code") as HTMLInputElement).value).toBe("");
+  });
+
   it("recognizes authenticator-app code prompts as TOTP", () => {
     document.body.innerHTML = `
       <form>
@@ -168,6 +181,30 @@ describe("totp autofill detection", () => {
         <input id="email" class="mfa-field" type="email" autocomplete="username" />
         <input id="password" class="mfa-field" type="password" autocomplete="current-password" />
         <input id="otp-code" class="mfa-field" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({
+      username: "alice@example.com",
+      password: "secret-123",
+      totp: "123456"
+    });
+
+    expect((document.querySelector("#email") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#password") as HTMLInputElement).value).toBe(
+      "secret-123"
+    );
+    expect((document.querySelector("#otp-code") as HTMLInputElement).value).toBe("123456");
+  });
+
+  it("does not treat shared MFA styling as enough field-level code evidence", () => {
+    document.body.innerHTML = `
+      <form aria-label="Two-factor verification">
+        <input id="email" class="mfa-field" type="text" name="email" />
+        <input id="password" type="password" autocomplete="current-password" />
+        <input id="otp-code" name="code" inputmode="numeric" autocomplete="one-time-code" />
       </form>
     `;
 
@@ -328,6 +365,18 @@ describe("totp autofill detection", () => {
     fillLoginForm({ password: "account-secret", totp: "123456" });
 
     expect((document.querySelector("#otp-password") as HTMLInputElement).value).toBe("123456");
+  });
+
+  it("fills masked security-code fields when the form has 2FA context", () => {
+    document.body.innerHTML = `
+      <form aria-label="2FA verification">
+        <input id="security-code" type="password" name="security_code" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "account-secret", totp: "123456" });
+
+    expect((document.querySelector("#security-code") as HTMLInputElement).value).toBe("123456");
   });
 
   it("uses form aria labels as MFA context for generic split code fields", () => {

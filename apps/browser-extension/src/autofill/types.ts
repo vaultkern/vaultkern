@@ -14,6 +14,7 @@ export interface AutofillFormSnapshot {
   htmlName?: string;
   htmlClass?: string;
   htmlAction?: string;
+  htmlActionIsImplicit?: boolean;
   htmlMethod?: string;
   ariaLabel?: string;
   headingText: string[];

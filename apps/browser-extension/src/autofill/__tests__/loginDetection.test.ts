@@ -206,6 +206,139 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("fills username-like fields in mixed sign-in forms without username autocomplete", () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>Create account or sign in</h1>
+        <form>
+          <input name="email" type="email" />
+          <input name="password" type="password" autocomplete="current-password" />
+        </form>
+      </main>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+  });
+
+  it("fills mixed sign-in forms when the password omits autocomplete", () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>Create account or sign in</h1>
+        <form>
+          <input name="email" type="email" />
+          <input name="password" type="password" />
+        </form>
+      </main>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+  });
+
+  it("prefers the same form-less container when pairing login fields", () => {
+    document.body.innerHTML = `
+      <input name="unrelated_username" autocomplete="username" />
+      <div>
+        <input name="login_email" type="email" />
+        <input name="login_password" type="password" />
+      </div>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="unrelated_username"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+    expect((document.querySelector('input[name="login_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="login_password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+  });
+
+  it("preserves password fills for unscoped form-less login fields", () => {
+    document.body.innerHTML = `
+      <section>
+        <input name="login_email" type="email" autocomplete="username" />
+      </section>
+      <section>
+        <input name="login_password" type="password" />
+      </section>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="login_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="login_password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+  });
+
+  it("does not fill username-first signup forms", () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>Create account</h1>
+        <form>
+          <input name="signup_user" autocomplete="username" />
+          <input name="new_password" type="password" autocomplete="new-password" />
+        </form>
+      </main>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="signup_user"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+    expect((document.querySelector('input[name="new_password"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+  });
+
+  it("scopes current-password preference to the selected login form", () => {
+    document.body.innerHTML = `
+      <form id="login">
+        <input name="login_email" type="email" />
+        <input name="login_password" type="password" />
+      </form>
+      <form id="settings">
+        <input name="current_password" type="password" autocomplete="current-password" />
+        <input name="new_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="login_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="login_password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+    expect((document.querySelector('input[name="current_password"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+    expect((document.querySelector('input[name="new_password"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+  });
+
   it("fills the checked-in username-first smoke page", () => {
     loadSmokeBody("username-first-login.html");
 

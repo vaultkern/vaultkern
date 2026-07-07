@@ -109,9 +109,9 @@ function controlText(
   primaryText: string | null | undefined
 ) {
   return (
-    optionalString(primaryText) ??
-    optionalString(element.getAttribute("aria-label")) ??
     getAriaLabelledByText(element) ??
+    optionalString(element.getAttribute("aria-label")) ??
+    optionalString(primaryText) ??
     optionalString(element.getAttribute("title"))
   );
 }
@@ -123,6 +123,30 @@ function isLoginSubmitText(value: string) {
     normalized.includes("signin") ||
     normalized.includes("signon")
   );
+}
+
+function isAccountCreationSubmitText(value: string) {
+  const lower = value.toLowerCase();
+  const normalized = value.toLowerCase().replace(/[\s_/-]+/g, "");
+  return (
+    normalized.includes("createaccount") ||
+    normalized.includes("signup") ||
+    /\b(register|registration)\b/.test(lower)
+  );
+}
+
+function byDocumentOrder(left: Element, right: Element) {
+  if (left === right) {
+    return 0;
+  }
+  return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+}
+
+function getFormControlElements(form: HTMLFormElement) {
+  const controls = new Set<Element>();
+  Array.from(form.elements).forEach((element) => controls.add(element));
+  collectMatchingElements(form, "button, input").forEach((element) => controls.add(element));
+  return Array.from(controls).sort(byDocumentOrder);
 }
 
 function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
@@ -205,8 +229,11 @@ function getHeadingText(form: HTMLFormElement) {
 }
 
 function getSubmitText(form: HTMLFormElement) {
-  const submitText = Array.from(form.elements).flatMap((element) => {
+  const submitText = getFormControlElements(form).flatMap((element) => {
     if (!getFieldVisibility(element as HTMLElement).viewable) {
+      return [];
+    }
+    if ((element as HTMLButtonElement | HTMLInputElement).disabled || element.matches(":disabled")) {
       return [];
     }
     const tagName = element.tagName.toLowerCase();
@@ -222,13 +249,17 @@ function getSubmitText(form: HTMLFormElement) {
     }
     const input = element as HTMLInputElement;
     const type = input.type.toLowerCase();
-    if (type !== "submit") {
+    if (type !== "submit" && type !== "image") {
       return [];
     }
-    return [controlText(input, input.value)];
+    return [controlText(input, type === "image" ? input.alt : input.value)];
   }).filter(Boolean);
+  const primarySubmitText = submitText[0];
+  if (primarySubmitText && isAccountCreationSubmitText(primarySubmitText)) {
+    return [primarySubmitText];
+  }
   const loginSubmitText = submitText.filter(isLoginSubmitText);
-  return loginSubmitText.length > 0 ? loginSubmitText : submitText;
+  return loginSubmitText.length > 0 ? loginSubmitText : submitText.slice(0, 1);
 }
 
 function collectForms(documentRef: Document) {
@@ -243,12 +274,14 @@ function collectForms(documentRef: Document) {
       .map(optionalString)
       .filter(Boolean)
       .join(" ");
+    const htmlActionIsImplicit = !formElement.getAttribute("action");
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
       htmlId: optionalString(formElement.id),
       htmlName: optionalString(formElement.getAttribute("name")),
       htmlClass: optionalString(formElement.getAttribute("class")),
       htmlAction: getFormAction(formElement),
+      htmlActionIsImplicit,
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
       ariaLabel: optionalString(ariaLabel),
       headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
@@ -282,17 +315,33 @@ function getRootLevelFieldRunContainer(
     return undefined;
   }
 
+  const isRunElement = (candidate: Element) =>
+    candidate.matches(FIELD_SELECTOR) ||
+    ["label", "small", "span", "p"].includes(candidate.tagName.toLowerCase());
+
   let first: Element = element;
-  while (first.previousElementSibling?.matches(FIELD_SELECTOR)) {
+  while (first.previousElementSibling && isRunElement(first.previousElementSibling)) {
     first = first.previousElementSibling;
   }
 
   let last: Element = element;
-  while (last.nextElementSibling?.matches(FIELD_SELECTOR)) {
+  while (last.nextElementSibling && isRunElement(last.nextElementSibling)) {
     last = last.nextElementSibling;
   }
 
-  return first === last ? undefined : first;
+  let fieldCount = 0;
+  let current: Element | null = first;
+  while (current) {
+    if (current.matches(FIELD_SELECTOR)) {
+      fieldCount += 1;
+    }
+    if (current === last) {
+      break;
+    }
+    current = current.nextElementSibling;
+  }
+
+  return fieldCount > 1 ? first : undefined;
 }
 
 function getFieldContainer(

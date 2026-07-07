@@ -70,15 +70,14 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
   if (inputType === "hidden") {
     addReason(reasons, "not-viewable:hidden");
   }
-  if (isUnslottedShadowHostChild(element)) {
-    addReason(reasons, "not-viewable:unslotted");
-  }
-
   for (
     let current: HTMLElement | null = element;
     current;
     current = parentElementOrShadowHost(current)
   ) {
+    if (isUnslottedShadowHostChild(current)) {
+      addReason(reasons, "not-viewable:unslotted");
+    }
     if (current.hidden) {
       addReason(reasons, "not-viewable:hidden");
     }
@@ -93,6 +92,8 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const position = current.style.position || style?.position;
     const left = numericCssValue(current.style.left || style?.left);
     const top = numericCssValue(current.style.top || style?.top);
+    const right = numericCssValue(current.style.right || style?.right);
+    const bottom = numericCssValue(current.style.bottom || style?.bottom);
     const width = numericCssValue(current.style.width || style?.width);
     const height = numericCssValue(current.style.height || style?.height);
     if (
@@ -107,8 +108,16 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (opacity === 0) {
       addReason(reasons, "not-viewable:transparent");
     }
-    if ((position === "absolute" || position === "fixed") && (left !== null || top !== null)) {
-      if ((left !== null && left <= -1000) || (top !== null && top <= -1000)) {
+    if (
+      (position === "absolute" || position === "fixed") &&
+      (left !== null || top !== null || right !== null || bottom !== null)
+    ) {
+      if (
+        (left !== null && Math.abs(left) >= 1000) ||
+        (top !== null && Math.abs(top) >= 1000) ||
+        (right !== null && Math.abs(right) >= 1000) ||
+        (bottom !== null && Math.abs(bottom) >= 1000)
+      ) {
         addReason(reasons, "not-viewable:offscreen");
       }
     }
