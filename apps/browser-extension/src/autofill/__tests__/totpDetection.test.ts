@@ -213,6 +213,19 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#recovery-code") as HTMLInputElement).value).toBe("");
   });
 
+  it("does not fill authenticator backup code fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="backup-code">Authenticator backup code</label>
+        <input id="backup-code" name="backup_code" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#backup-code") as HTMLInputElement).value).toBe("");
+  });
+
   it("does not fill an ambiguous generic code field", () => {
     document.body.innerHTML = `
       <form>
@@ -711,6 +724,19 @@ describe("totp autofill detection", () => {
     fillLoginForm({ totp: "123456" });
 
     expect((document.querySelector("#promo-code") as HTMLInputElement).value).toBe("");
+  });
+
+  it("fills bounded numeric authenticator fields as a single TOTP code", () => {
+    document.body.innerHTML = `
+      <form aria-label="Authenticator app">
+        <label for="token">Enter value</label>
+        <input id="token" name="token" inputmode="numeric" maxlength="6" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#token") as HTMLInputElement).value).toBe("123456");
   });
 
   it("fills the checked-in single-field TOTP smoke page", () => {

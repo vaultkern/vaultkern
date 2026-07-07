@@ -411,14 +411,16 @@ function recoveryCodeReason(
   autocomplete: Set<string>
 ) {
   const searchableText = `${fieldText},${formText}`;
-  const hasRecoveryMarker = RECOVERY_CODE_KEYWORDS.some((keyword) =>
-    searchableText.includes(keyword)
+  const fieldHasRecoveryMarker = RECOVERY_CODE_KEYWORDS.some((keyword) =>
+    fieldText.includes(keyword)
   );
+  const formHasRecoveryMarker = RECOVERY_CODE_KEYWORDS.some((keyword) => formText.includes(keyword));
+  const hasRecoveryMarker = fieldHasRecoveryMarker || formHasRecoveryMarker;
   if (!hasRecoveryMarker) {
     return null;
   }
 
-  if (hasAuthenticatorTotpKeyword(searchableText)) {
+  if (!fieldHasRecoveryMarker && hasAuthenticatorTotpKeyword(searchableText)) {
     return null;
   }
 
@@ -583,6 +585,7 @@ function hasFieldCodeHint(
   return (
     autocomplete.has("one-time-code") ||
     field.maxLength === 1 ||
+    (field.maxLength !== undefined && field.maxLength >= 4 && field.maxLength <= 8) ||
     fieldText.includes("digit") ||
     fieldText.includes("code") ||
     fieldText.includes("otp") ||

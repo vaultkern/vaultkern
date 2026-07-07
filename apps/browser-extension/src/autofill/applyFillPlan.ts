@@ -35,7 +35,7 @@ function writeFieldValue(
   const EventConstructor = element.ownerDocument.defaultView?.Event ?? Event;
 
   for (const eventName of ["input", "change", "blur"]) {
-    element.dispatchEvent(new EventConstructor(eventName, { bubbles: true }));
+    element.dispatchEvent(new EventConstructor(eventName, { bubbles: true, composed: true }));
   }
 }
 

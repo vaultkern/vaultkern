@@ -202,6 +202,30 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("dispatches composed events when filling shadow-root fields", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <form>
+        <input name="shadow_email" type="email" autocomplete="username" />
+      </form>
+    `;
+    const events: string[] = [];
+    for (const eventName of ["input", "change", "blur"]) {
+      host.addEventListener(eventName, (event) => {
+        events.push(`${event.type}:${String(event.composed)}`);
+      });
+    }
+
+    fillLoginForm({ username: "alice@example.com" });
+
+    expect((root.querySelector('input[name="shadow_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect(events).toEqual(["input:true", "change:true", "blur:true"]);
+  });
+
   it("honors current-password autocomplete in mixed sign-in and create-account copy", () => {
     document.body.innerHTML = `
       <main>
@@ -424,6 +448,30 @@ describe("login detection fill flow", () => {
       ""
     );
     expect((document.querySelector('input[name="new_password"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+  });
+
+  it("keeps password-step fills from jumping to another form for username pairing", () => {
+    document.body.innerHTML = `
+      <form id="password-step">
+        <input name="password_step_password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="profile">
+        <input name="profile_email" type="email" autocomplete="username" />
+        <input name="profile_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect(
+      (document.querySelector('input[name="password_step_password"]') as HTMLInputElement).value
+    ).toBe("secret");
+    expect((document.querySelector('input[name="profile_email"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+    expect((document.querySelector('input[name="profile_password"]') as HTMLInputElement).value).toBe(
       ""
     );
   });

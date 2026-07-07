@@ -151,9 +151,7 @@ function pickUsernameField(
     const sameFormUsername = pickPreferredUsernameField(
       usernameFields.filter((field) => field.formOpid === passwordField.formOpid)
     );
-    if (sameFormUsername) {
-      return sameFormUsername;
-    }
+    return sameFormUsername;
   }
 
   if (passwordField?.containerOpid) {
@@ -162,9 +160,7 @@ function pickUsernameField(
         (field) => field.formOpid === undefined && field.containerOpid === passwordField.containerOpid
       )
     );
-    if (sameContainerUsername) {
-      return sameContainerUsername;
-    }
+    return sameContainerUsername;
   }
 
   return pickPreferredUsernameField(usernameFields);
