@@ -76,10 +76,6 @@ function pickPasswordField(
   return preferCurrentPasswordField(passwordFields);
 }
 
-function isCurrentPasswordField(field: AutofillTriageFieldResult) {
-  return field.reasons.includes("autocomplete:current-password");
-}
-
 function pickUnscopedPasswordAfterUsername(
   fields: AutofillTriageFieldResult[],
   usernameField: AutofillTriageFieldResult
@@ -93,8 +89,52 @@ function pickUnscopedPasswordAfterUsername(
       (field) =>
         field.qualifiedAs === "password" &&
         field.elementNumber > usernameField.elementNumber &&
-        !isCurrentPasswordField(field)
+        field.formOpid === undefined &&
+        field.containerOpid === undefined
     ) ?? null
+  );
+}
+
+function usernameHintScore(field: AutofillTriageFieldResult) {
+  const fieldText = [
+    field.htmlName,
+    field.htmlId,
+    field.htmlClass,
+    field.autocomplete,
+    field.placeholder,
+    field.title,
+    field.ariaLabel,
+    field.labelText,
+    ...field.dataSetValues
+  ]
+    .map(normalizeHint)
+    .join(",");
+
+  let score = 0;
+  if (field.reasons.includes("autocomplete:username")) {
+    score += 100;
+  }
+  if (field.reasons.includes("autocomplete:email")) {
+    score += 80;
+  }
+  if (field.htmlType === "email") {
+    score += 20;
+  }
+  if (fieldText.includes("username") || fieldText.includes("email")) {
+    score += 10;
+  }
+  if (fieldText.includes("login")) {
+    score += 5;
+  }
+  return score;
+}
+
+function pickPreferredUsernameField(fields: AutofillTriageFieldResult[]) {
+  return (
+    [...fields].sort(
+      (left, right) =>
+        usernameHintScore(right) - usernameHintScore(left) || byDocumentOrder(left, right)
+    )[0] ?? null
   );
 }
 
@@ -108,8 +148,8 @@ function pickUsernameField(
   }
 
   if (passwordField?.formOpid) {
-    const sameFormUsername = usernameFields.find(
-      (field) => field.formOpid === passwordField.formOpid
+    const sameFormUsername = pickPreferredUsernameField(
+      usernameFields.filter((field) => field.formOpid === passwordField.formOpid)
     );
     if (sameFormUsername) {
       return sameFormUsername;
@@ -117,15 +157,17 @@ function pickUsernameField(
   }
 
   if (passwordField?.containerOpid) {
-    const sameContainerUsername = usernameFields.find(
-      (field) => field.formOpid === undefined && field.containerOpid === passwordField.containerOpid
+    const sameContainerUsername = pickPreferredUsernameField(
+      usernameFields.filter(
+        (field) => field.formOpid === undefined && field.containerOpid === passwordField.containerOpid
+      )
     );
     if (sameContainerUsername) {
       return sameContainerUsername;
     }
   }
 
-  return usernameFields[0];
+  return pickPreferredUsernameField(usernameFields);
 }
 
 function hasBlockingUsernameFallbackReason(field: AutofillTriageFieldResult) {

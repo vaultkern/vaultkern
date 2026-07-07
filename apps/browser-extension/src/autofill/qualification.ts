@@ -478,7 +478,6 @@ function hasStrongTotpContext(text: string) {
     text.includes("mfa") ||
     text.includes("otp") ||
     text.includes("totp") ||
-    text.includes("onetime") ||
     text.includes("twofactor") ||
     text.includes("twostep")
   );

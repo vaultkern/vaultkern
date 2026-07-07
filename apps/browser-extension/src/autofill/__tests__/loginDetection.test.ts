@@ -285,6 +285,26 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("preserves current-password fills for unscoped form-less login fields", () => {
+    document.body.innerHTML = `
+      <section>
+        <input name="login_email" type="email" autocomplete="username" />
+      </section>
+      <section>
+        <input name="login_password" type="password" autocomplete="current-password" />
+      </section>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="login_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="login_password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+  });
+
   it("keeps password fallback near an unscoped username when settings fields follow", () => {
     document.body.innerHTML = `
       <section>
@@ -383,6 +403,26 @@ describe("login detection fill flow", () => {
     );
     expect((document.querySelector('input[name="new_password"]') as HTMLInputElement).value).toBe(
       ""
+    );
+  });
+
+  it("prefers explicit username hints inside a shared form-less container", () => {
+    document.body.innerHTML = `
+      <div>
+        <input name="user" type="text" />
+        <input name="login_email" type="email" autocomplete="username" />
+        <input name="login_password" type="password" />
+      </div>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="user"]') as HTMLInputElement).value).toBe("");
+    expect((document.querySelector('input[name="login_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="login_password"]') as HTMLInputElement).value).toBe(
+      "secret"
     );
   });
 
