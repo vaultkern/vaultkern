@@ -173,7 +173,7 @@ function isRejectedUsernameCandidate(input: HTMLInputElement) {
   ) {
     return true;
   }
-  return tokenSet.has("code") && !hasUsernameSignal;
+  return false;
 }
 
 function usernameScore(input: HTMLInputElement) {
@@ -245,7 +245,7 @@ function pickUsernameField(passwordField: HTMLInputElement | null) {
 
   return (
     scoredCandidates.find((candidate) => candidate.score > 0)?.input ??
-    scoredCandidates[0]?.input
+    null
   );
 }
 
@@ -342,7 +342,13 @@ function rootLevelCredentialRun(input: HTMLInputElement) {
 
 function rootLevelRunElement(input: HTMLInputElement) {
   const parent = input.parentElement;
-  return parent?.tagName.toLowerCase() === "label" ? parent : input;
+  if (parent?.tagName.toLowerCase() === "label") {
+    return parent;
+  }
+  if (parent && rootLevelRunParent(parent) && credentialInputForRunElement(parent) === input) {
+    return parent;
+  }
+  return input;
 }
 
 function rootLevelRunParent(element: Element) {
@@ -357,8 +363,10 @@ function adjacentRootCredentialElement(
 ) {
   let element = candidate;
   while (
-    element?.tagName.toLowerCase() === "label" &&
-    credentialInputForRunElement(element) === null
+    element &&
+    (isIgnorableRootRunSeparator(element) ||
+      (element.tagName.toLowerCase() === "label" &&
+        credentialInputForRunElement(element) === null))
   ) {
     element =
       direction === "next" ? element.nextElementSibling : element.previousElementSibling;
@@ -366,11 +374,16 @@ function adjacentRootCredentialElement(
   return element;
 }
 
+function isIgnorableRootRunSeparator(element: Element) {
+  return ["br", "wbr"].includes(element.tagName.toLowerCase());
+}
+
 function credentialInputForRunElement(candidate: Element | null) {
   if (isFormlessCredentialInput(candidate)) {
     return candidate;
   }
-  if (candidate?.tagName.toLowerCase() !== "label") {
+  const tagName = candidate?.tagName.toLowerCase();
+  if (!tagName || !["article", "div", "fieldset", "label", "section"].includes(tagName)) {
     return null;
   }
   const inputs = Array.from(candidate.querySelectorAll("input")).filter(
@@ -391,7 +404,10 @@ function isFormlessCredentialInput(candidate: Element | null): candidate is HTML
 function isPasswordChangeField(input: HTMLInputElement) {
   const passwords = passwordChangeGroup(input);
 
-  if (hasNewPasswordSignal(input) && !hasCurrentPasswordSignal(input)) {
+  if (
+    (hasNewPasswordSignal(input) || hasConfirmationPasswordSignal(input)) &&
+    !hasCurrentPasswordSignal(input)
+  ) {
     return true;
   }
   if (passwords.length < 2) {
@@ -437,6 +453,7 @@ function isVisibleFormlessPassword(candidate: Element): candidate is HTMLInputEl
   return (
     candidate instanceof HTMLInputElement &&
     candidate.form === null &&
+    candidate.type === "password" &&
     isWritableVisibleInput(candidate)
   );
 }
@@ -603,8 +620,10 @@ function adjacentRootPasswordElement(
 ) {
   let element = candidate;
   while (
-    element?.tagName.toLowerCase() === "label" &&
-    passwordInputForRunElement(element) === null
+    element &&
+    (isIgnorableRootRunSeparator(element) ||
+      (element.tagName.toLowerCase() === "label" &&
+        passwordInputForRunElement(element) === null))
   ) {
     element =
       direction === "next" ? element.nextElementSibling : element.previousElementSibling;
@@ -616,7 +635,8 @@ function passwordInputForRunElement(candidate: Element | null) {
   if (isVisibleFormlessPassword(candidate)) {
     return candidate;
   }
-  if (candidate?.tagName.toLowerCase() !== "label") {
+  const tagName = candidate?.tagName.toLowerCase();
+  if (!tagName || !["article", "div", "fieldset", "label", "section"].includes(tagName)) {
     return null;
   }
   const inputs = Array.from(candidate.querySelectorAll('input[type="password"]')).filter(
