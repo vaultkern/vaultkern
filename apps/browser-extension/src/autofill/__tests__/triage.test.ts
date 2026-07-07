@@ -284,6 +284,44 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "wrapped_email").qualifiedAs).toBe("username");
   });
 
+  it("keeps climbing past wrappers with only later headings", () => {
+    document.body.innerHTML = `
+      <div>
+        <h2>Sign in</h2>
+        <div>
+          <form>
+            <input name="email" type="email" />
+          </form>
+          <h2>Help</h2>
+        </div>
+      </div>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+  });
+
+  it("keeps parent auth headings with neutral subheadings", () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>Create account</h1>
+        <h2>Your details</h2>
+        <form>
+          <input name="email" type="email" />
+          <input name="password" type="password" />
+        </form>
+      </main>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms[0].headingText).toEqual(["Create account", "Your details"]);
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
+  });
+
   it("ignores hidden headings when building form context", () => {
     document.body.innerHTML = `
       <div hidden>
@@ -780,6 +818,32 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "login_text_email").qualifiedAs).toBe("username");
   });
 
+  it("does not use status login text as passwordless login evidence", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Last login</h2>
+        <input name="email" type="email" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
+  });
+
+  it("uses hash-routed login pages as implicit passwordless login context", () => {
+    window.history.replaceState(null, "", "/#/login");
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+  });
+
   it("requires login evidence before treating autocomplete email as username", () => {
     document.body.innerHTML = `
       <form id="contact">
@@ -880,6 +944,19 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "body_email").containerOpid).toBe(
       fieldByName(report, "body_password").containerOpid
     );
+  });
+
+  it("uses single-field form-less container context for passwordless logins", () => {
+    document.body.innerHTML = `
+      <div class="login">
+        <input name="email" type="email" />
+        <button type="submit">Sign in</button>
+      </div>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
   });
 
   it("shares local context for labeled root-level login fields", () => {
@@ -1450,6 +1527,29 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "transparent_email").reasons).toContain("not-viewable:transparent");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats stylesheet-clipped zero-size ancestors as not viewable", () => {
+    document.head.innerHTML = `
+      <style>
+        .honeypot { width: 0; height: 0; overflow: hidden; }
+      </style>
+    `;
+    document.body.innerHTML = `
+      <form>
+        <div class="honeypot">
+          <input name="decoy_email" type="email" />
+        </div>
+        <input name="real_user" type="email" autocomplete="username" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "decoy_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "decoy_email").reasons).toContain("not-viewable:zero-size");
+    expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
   });
 
   it("lets current-password fields override mixed sign-in and signup copy", () => {

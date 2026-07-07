@@ -172,6 +172,26 @@ function getLabelText(element: HTMLInputElement | HTMLSelectElement | HTMLTextAr
   return optionalString(labelText);
 }
 
+function headingCanApplyToForm(heading: Element, form: HTMLFormElement) {
+  if (!getFieldVisibility(heading as HTMLElement).viewable) {
+    return false;
+  }
+  const ownerForm = heading.closest("form");
+  if (ownerForm === form) {
+    return true;
+  }
+  if (ownerForm !== null) {
+    return false;
+  }
+  return Boolean(heading.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING);
+}
+
+function scopeHasContextualHeading(scope: ParentNode, form: HTMLFormElement) {
+  return Array.from(scope.querySelectorAll("h1, h2, h3, h4, h5, h6")).some((heading) =>
+    headingCanApplyToForm(heading, form)
+  );
+}
+
 function scopeForFormHeadings(form: HTMLFormElement): ParentNode {
   let scope = form.parentElement;
   if (scope) {
@@ -185,7 +205,7 @@ function scopeForFormHeadings(form: HTMLFormElement): ParentNode {
       if (tagName === "body" || tagName === "html") {
         break;
       }
-      if (scope.querySelector("h1, h2, h3, h4, h5, h6")) {
+      if (scopeHasContextualHeading(scope, form)) {
         return scope;
       }
       scope = scope.parentElement;
@@ -212,6 +232,44 @@ function scopeForFormHeadings(form: HTMLFormElement): ParentNode {
   }
 
   return form;
+}
+
+function isAuthenticationHeadingText(value: string) {
+  const lower = value.toLowerCase();
+  const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
+  const compact = tokens.join("");
+  if (tokens.includes("last") && tokens.includes("login")) {
+    return false;
+  }
+  return (
+    tokens.includes("login") ||
+    compact.startsWith("login") ||
+    compact.includes("signin") ||
+    compact.includes("signon") ||
+    isAccountCreationSubmitText(value) ||
+    compact.includes("forgotpassword") ||
+    compact.includes("passwordreset") ||
+    compact.includes("accountrecovery") ||
+    compact.includes("recoveraccount")
+  );
+}
+
+function contextualPrecedingHeadings(precedingHeadings: Element[]) {
+  const nearestHeading = precedingHeadings.at(-1);
+  if (!nearestHeading) {
+    return [];
+  }
+
+  const nearestText = cleanText(nearestHeading.textContent);
+  if (isAuthenticationHeadingText(nearestText)) {
+    return [nearestHeading];
+  }
+
+  const parentAuthHeading = precedingHeadings
+    .slice(0, -1)
+    .reverse()
+    .find((heading) => isAuthenticationHeadingText(cleanText(heading.textContent)));
+  return parentAuthHeading ? [parentAuthHeading, nearestHeading] : [nearestHeading];
 }
 
 function getHeadingText(form: HTMLFormElement) {
@@ -254,7 +312,7 @@ function getHeadingText(form: HTMLFormElement) {
   }
 
   const contextualHeadings =
-    ownedHeadings.length > 0 ? ownedHeadings : precedingHeadings.slice(-1);
+    ownedHeadings.length > 0 ? ownedHeadings : contextualPrecedingHeadings(precedingHeadings);
   return contextualHeadings
     .map((heading) => cleanText(heading.textContent))
     .filter(Boolean);
@@ -280,14 +338,15 @@ function getContainerText(container: ParentNode | undefined) {
     container.id,
     container.getAttribute("class"),
     container.getAttribute("aria-label"),
-    ...getOwnedHeadingText(container)
+    ...getOwnedHeadingText(container),
+    ...getContainerSubmitText(container)
   ]
     .map(optionalString)
     .filter((value): value is string => typeof value === "string");
 }
 
-function getSubmitText(form: HTMLFormElement) {
-  const submitText = getFormControlElements(form).flatMap((element) => {
+function collectSubmitText(elements: Element[]) {
+  return elements.flatMap((element) => {
     if (!getFieldVisibility(element as HTMLElement).viewable) {
       return [];
     }
@@ -315,12 +374,29 @@ function getSubmitText(form: HTMLFormElement) {
     }
     return [controlText(input, type === "image" ? input.alt : input.value)];
   }).filter(Boolean);
+}
+
+function pickSubmitText(submitText: string[]) {
   const primarySubmitText = submitText[0];
   if (primarySubmitText && isAccountCreationSubmitText(primarySubmitText)) {
     return [primarySubmitText];
   }
   const loginSubmitText = submitText.filter(isLoginSubmitText);
   return loginSubmitText.length > 0 ? loginSubmitText : submitText.slice(0, 1);
+}
+
+function getContainerSubmitText(container: Element) {
+  const controls = collectMatchingElements(container, "button, input").filter((element) => {
+    if (element.closest("form")) {
+      return false;
+    }
+    return (element as HTMLButtonElement | HTMLInputElement).form === null;
+  });
+  return pickSubmitText(collectSubmitText(controls));
+}
+
+function getSubmitText(form: HTMLFormElement) {
+  return pickSubmitText(collectSubmitText(getFormControlElements(form)));
 }
 
 function collectForms(documentRef: Document) {
@@ -437,7 +513,7 @@ function getFieldContainer(
       return undefined;
     }
     const fieldCount = container.querySelectorAll(FIELD_SELECTOR).length;
-    if (fieldCount > 1) {
+    if (fieldCount > 1 || (fieldCount === 1 && getContainerText(container).length > 0)) {
       return container;
     }
     if (["section", "article", "main", "aside"].includes(tagName)) {

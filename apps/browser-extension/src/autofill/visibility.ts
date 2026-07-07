@@ -111,7 +111,11 @@ function isClippedZeroSizeAncestor(
   if (width !== 0 || height !== 0) {
     return false;
   }
+  const style = current.ownerDocument.defaultView?.getComputedStyle(current);
   const overflow = [
+    style?.overflow,
+    style?.overflowX,
+    style?.overflowY,
     current.style.overflow,
     current.style.overflowX,
     current.style.overflowY

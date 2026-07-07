@@ -74,7 +74,8 @@ function formActionContext(value: string | undefined) {
 
   try {
     const url = new URL(value, "https://vaultkern.invalid");
-    return `${url.hostname},${url.pathname}`;
+    const hash = url.hash ? url.hash.slice(1) : undefined;
+    return [url.hostname, url.pathname, hash].filter(Boolean).join(",");
   } catch {
     return value.split(/[?#]/, 1)[0];
   }
@@ -109,6 +110,10 @@ function joinedFieldText(field: AutofillFieldSnapshot) {
   ]
     .map(normalize)
     .join(",");
+}
+
+function joinedFieldContainerText(field: AutofillFieldSnapshot) {
+  return (field.containerText ?? []).map(normalize).join(",");
 }
 
 function joinedFormText(
@@ -307,6 +312,28 @@ function hasAnyKeyword(text: string, keywords: string[]) {
   return keywords.some((keyword) => text.includes(keyword));
 }
 
+function isLoginContextPart(part: string) {
+  const routePart = part.replace(/\.[a-z0-9]+$/i, "");
+  if (
+    routePart.startsWith("lastlogin") ||
+    routePart.startsWith("previouslogin") ||
+    routePart.startsWith("recentlogin")
+  ) {
+    return false;
+  }
+  return (
+    routePart === "login" ||
+    routePart.startsWith("login") ||
+    routePart.endsWith("login") ||
+    routePart === "signin" ||
+    routePart.startsWith("signin") ||
+    routePart.endsWith("signin") ||
+    routePart === "signon" ||
+    routePart.startsWith("signon") ||
+    routePart.endsWith("signon")
+  );
+}
+
 function excludedReason(fieldText: string, formText: string) {
   const searchableText = `${fieldText},${formText}`;
   const searchableParts = normalizedParts(searchableText);
@@ -392,7 +419,7 @@ function isUsernameLike(field: AutofillFieldSnapshot, fieldText: string) {
 }
 
 function hasLoginContext(text: string) {
-  return hasAnyKeyword(text, ["login", "signin", "signon"]);
+  return normalizedParts(text).some(isLoginContextPart);
 }
 
 function isPasswordLike(field: AutofillFieldSnapshot) {
@@ -448,6 +475,7 @@ function qualificationForFillableField(
 
   const searchableText = `${fieldText},${formText}`;
   const searchablePromptText = `${fieldText},${formPromptText}`;
+  const loginEvidenceText = `${joinedFieldContainerText(field)},${formText}`;
   const nonLogin = nonLoginReason(fieldText, negativeFormText);
   const hasNewsletterPasswordContext = hasPasswordSibling(field, snapshot) || isPasswordLike(field);
   const hasNewsletterLoginContext =
@@ -525,7 +553,7 @@ function qualificationForFillableField(
     if (
       needsLoginEvidence &&
       !hasPasswordSibling(field, snapshot) &&
-      !hasLoginContext(formText)
+      !hasLoginContext(loginEvidenceText)
     ) {
       return { qualifiedAs: "ignored", eligible: false, reasons };
     }
