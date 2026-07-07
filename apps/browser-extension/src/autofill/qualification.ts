@@ -205,6 +205,7 @@ function joinedFormText(
     (form.htmlActionIsImplicit && options.includeImplicitAction === false)
       ? undefined
       : formActionContext(form.htmlAction),
+    options.includeAction === false ? undefined : formActionContext(form.htmlSubmitAction),
     options.includeAction !== false &&
     form.htmlActionIsImplicit &&
     options.includeImplicitAction === false
@@ -219,6 +220,12 @@ function joinedFormText(
 
 function joinedFormPromptText(form: AutofillFormSnapshot | undefined) {
   return (form?.headingText ?? []).map(normalize).join(",");
+}
+
+function joinedFieldPromptText(field: AutofillFieldSnapshot) {
+  return [field.placeholder, field.title, field.ariaLabel, field.labelText]
+    .map(normalize)
+    .join(",");
 }
 
 function normalizedParts(text: string) {
@@ -372,6 +379,7 @@ function searchPartsForForm(form: AutofillFormSnapshot | undefined) {
     form.htmlName,
     form.htmlClass,
     form.htmlActionIsImplicit ? undefined : formActionPathContext(form.htmlAction),
+    formActionPathContext(form.htmlSubmitAction),
     form.htmlMethod,
     ...form.headingText
   ];
@@ -534,13 +542,13 @@ function qualificationForFillableField(
   reasons: string[]
 ): FieldQualification {
   const fieldText = joinedFieldText(field);
+  const fieldPromptText = joinedFieldPromptText(field);
   const formText = joinedFormText(form);
-  const formPromptText = joinedFormText(form, { includeAction: false });
   const visiblePromptText = `${joinedFieldContainerText(field)},${joinedFormPromptText(form)}`;
   const negativeFormText = joinedFormText(form, { includeImplicitAction: false });
   const autocomplete = fieldAutocompleteTokens(field);
   const hasScopedPasswordEvidence = isPasswordLike(field) || hasPasswordSibling(field, snapshot);
-  const loginEvidenceText = `${joinedFieldContainerText(field)},${formText}`;
+  const loginEvidenceText = `${fieldPromptText},${joinedFieldContainerText(field)},${formText}`;
 
   if (isSearchField(field, form, hasScopedPasswordEvidence, hasLoginContext(loginEvidenceText))) {
     reasons.push("excluded:search");
@@ -577,13 +585,12 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  const searchableText = `${fieldText},${formText}`;
-  const searchablePromptText = `${fieldText},${formPromptText}`;
   const nonLogin = nonLoginReason(fieldText, negativeFormText);
   const hasNewsletterPasswordContext = hasPasswordSibling(field, snapshot) || isPasswordLike(field);
+  const newsletterLoginPromptText = `${fieldPromptText},${visiblePromptText}`;
   const hasNewsletterLoginContext =
     nonLogin === "non-login:newsletter" &&
-    (hasLoginContext(searchablePromptText) || hasNewsletterPasswordContext) &&
+    (hasLoginContext(newsletterLoginPromptText) || hasNewsletterPasswordContext) &&
     (hasNewsletterPasswordContext || isUsernameLike(field, fieldText));
   const hasMixedCurrentPasswordLoginContext =
     nonLogin === "non-login:account-creation" &&

@@ -268,6 +268,18 @@ function isOutsideRenderedArea(element: HTMLElement, position: string | undefine
   return rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height;
 }
 
+function isOutsideViewport(element: HTMLElement) {
+  const rect = element.getBoundingClientRect();
+  if (!hasUsableRenderedRect(rect)) {
+    return null;
+  }
+  const { width, height } = viewportSize(element);
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+  return rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height;
+}
+
 function hasExtremePositionFallback(...values: Array<number | null>) {
   return values.some((value) => value !== null && Math.abs(value) >= FALLBACK_OFFSCREEN_OFFSET_PX);
 }
@@ -305,6 +317,11 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const remPx = numericCssValue(rootStyle?.fontSize) ?? emPx;
     const inlineDisplay = current.style.display;
     const inlineVisibility = current.style.visibility;
+    const inlineStyle = current.style as CSSStyleDeclaration & { contentVisibility?: string };
+    const contentVisibility =
+      inlineStyle.contentVisibility ||
+      (style as (CSSStyleDeclaration & { contentVisibility?: string }) | undefined)
+        ?.contentVisibility;
     const opacity = computedCssValue(style?.opacity, current.style.opacity);
     const position = current.style.position || style?.position;
     const clip = current.style.clip || style?.clip;
@@ -325,6 +342,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (
       inlineDisplay === "none" ||
       style?.display === "none" ||
+      contentVisibility === "hidden" ||
       (hasHiddenVisibility &&
         !(
           current !== element &&
@@ -345,9 +363,11 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       (left !== null || top !== null || right !== null || bottom !== null)
     ) {
       const outsideRenderedArea = isOutsideRenderedArea(current, position);
+      const hasExtremePosition = hasExtremePositionFallback(left, top, right, bottom);
       if (
         outsideRenderedArea === true ||
-        (outsideRenderedArea === null && hasExtremePositionFallback(left, top, right, bottom))
+        (outsideRenderedArea === null && hasExtremePosition) ||
+        (outsideRenderedArea === false && hasExtremePosition && isOutsideViewport(current) === true)
       ) {
         addReason(reasons, "not-viewable:offscreen");
       }

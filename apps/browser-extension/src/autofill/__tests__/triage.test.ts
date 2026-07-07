@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { collectAutofillPageSnapshot } from "../collectPageFields";
 import { triageAutofillPage } from "../triage";
@@ -14,6 +14,11 @@ describe("autofill triage", () => {
     document.head.innerHTML = "";
     window.history.replaceState(null, "", "/");
     document.body.innerHTML = "";
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("classifies a standard login form and keeps the field context explainable", () => {
@@ -482,6 +487,23 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "external_submit_email").qualifiedAs).toBe("username");
   });
 
+  it("uses submitter formaction as passwordless login context", () => {
+    document.body.innerHTML = `
+      <form id="submitter-route" action="/continue">
+        <input name="submitter_email" type="email" />
+        <button type="submit" formaction="/login">Continue</button>
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "submitter-route")).toMatchObject({
+      htmlSubmitAction: new URL("/login", document.location.href).href
+    });
+    expect(fieldByName(report, "submitter_email").qualifiedAs).toBe("username");
+  });
+
   it("includes external image submit controls in form context", () => {
     document.body.innerHTML = `
       <form id="image-submit-context" action="/continue">
@@ -497,6 +519,28 @@ describe("autofill triage", () => {
       headingText: ["Sign in"]
     });
     expect(fieldByName(report, "image_submit_email").qualifiedAs).toBe("username");
+  });
+
+  it("preserves local context for external form-associated controls", () => {
+    document.body.innerHTML = `
+      <form id="login" action="/login"></form>
+      <div id="external-signup">
+        <h2>Create account</h2>
+        <input form="login" name="external_email" type="email" />
+        <input form="login" name="external_password" type="password" />
+      </div>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "external_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "external_email").reasons).toContain(
+      "non-login:account-creation"
+    );
+    expect(fieldByName(report, "external_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "external_password").reasons).toContain(
+      "non-login:account-creation"
+    );
   });
 
   it("treats missing and invalid button types as submit controls", () => {
@@ -1040,6 +1084,23 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "login_email").qualifiedAs).toBe("username");
   });
 
+  it("uses visible field prompts as passwordless login evidence", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="prompt-email">Sign in with email</label>
+        <input id="prompt-email" name="prompt_email" type="email" />
+      </form>
+      <form>
+        <input name="placeholder_email" type="email" placeholder="Sign in with email" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "prompt_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "placeholder_email").qualifiedAs).toBe("username");
+  });
+
   it("does not treat search substrings in login URLs as search context", () => {
     window.history.replaceState(null, "", "/search");
     document.body.innerHTML = `
@@ -1158,6 +1219,23 @@ describe("autofill triage", () => {
     );
   });
 
+  it("splits root-level form-less runs at section headings", () => {
+    document.body.innerHTML = `
+      <h2>Contact</h2>
+      <input name="contact_email" type="email" />
+      <h2>Sign in</h2>
+      <input name="login_password" type="password" />
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "contact_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "contact_email").containerOpid).not.toBe(
+      fieldByName(report, "login_password").containerOpid
+    );
+  });
+
   it("uses single-field form-less container context for passwordless logins", () => {
     document.body.innerHTML = `
       <div class="login">
@@ -1169,6 +1247,27 @@ describe("autofill triage", () => {
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+  });
+
+  it("climbs past generic single-field wrappers to shared form-less context", () => {
+    document.body.innerHTML = `
+      <div class="login">
+        <div class="field">
+          <input name="wrapped_email" type="email" />
+        </div>
+        <div class="field">
+          <input name="wrapped_password" type="password" />
+        </div>
+      </div>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "wrapped_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "wrapped_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "wrapped_email").containerOpid).toBe(
+      fieldByName(report, "wrapped_password").containerOpid
+    );
   });
 
   it("uses root-level submit text as passwordless form-less login context", () => {
@@ -1352,6 +1451,19 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "email").reasons).toContain("non-login:newsletter");
+  });
+
+  it("keeps internal login identifiers from overriding newsletter copy", () => {
+    document.body.innerHTML = `
+      <form class="newsletter">
+        <input name="login_email" type="email" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "login_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "login_email").reasons).toContain("non-login:newsletter");
   });
 
   it("prioritizes account creation over newsletter context", () => {
@@ -1859,6 +1971,41 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("does not let offscreen fields define the rendered area", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="scroll_width_honeypot" type="email" autocomplete="username" style="position:absolute;left:9999px;top:10px;width:20px;height:20px" />
+        <input name="real_user" type="email" autocomplete="username" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const honeypot = document.querySelector<HTMLInputElement>("[name=scroll_width_honeypot]")!;
+    vi.spyOn(honeypot, "getBoundingClientRect").mockReturnValue({
+      x: 9999,
+      y: 10,
+      width: 20,
+      height: 20,
+      left: 9999,
+      top: 10,
+      right: 10019,
+      bottom: 30,
+      toJSON: () => ({})
+    } as DOMRect);
+    vi.spyOn(document.documentElement, "scrollWidth", "get").mockReturnValue(10100);
+    vi.spyOn(document.body, "scrollWidth", "get").mockReturnValue(10100);
+    vi.stubGlobal("innerWidth", 1280);
+    vi.stubGlobal("innerHeight", 720);
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "scroll_width_honeypot").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "scroll_width_honeypot").reasons).toContain(
+      "not-viewable:offscreen"
+    );
+    expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("keeps positioned login fields viewable when their rendered rect intersects the viewport", () => {
     document.body.innerHTML = `
       <form>
@@ -1918,6 +2065,25 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "decoy_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "decoy_email").reasons).toContain("not-viewable:zero-size");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+  });
+
+  it("treats content-visibility hidden ancestors as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="content-visibility:hidden">
+          <input name="content_hidden_email" type="email" autocomplete="username" />
+        </div>
+        <input name="real_user" type="email" autocomplete="username" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "content_hidden_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "content_hidden_email").reasons).toContain("not-viewable:css");
+    expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
   it("treats clipped and transformed zero-size fields as not viewable", () => {

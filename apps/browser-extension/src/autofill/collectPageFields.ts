@@ -8,6 +8,24 @@ import { getFieldFillability, getFieldVisibility } from "./visibility";
 
 const FIELD_SELECTOR = "input, select, textarea";
 const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
+const GENERIC_CONTAINER_TOKENS = new Set([
+  "col",
+  "column",
+  "container",
+  "control",
+  "controls",
+  "field",
+  "fields",
+  "form",
+  "formfield",
+  "formgroup",
+  "group",
+  "input",
+  "inputfield",
+  "item",
+  "row",
+  "wrapper"
+]);
 
 function collectMatchingElements(root: ParentNode, selector: string) {
   const elements: Element[] = [];
@@ -398,35 +416,55 @@ function getContainerText(container: ParentNode | undefined, field?: Element) {
     .filter((value): value is string => typeof value === "string");
 }
 
+function isGenericContainerText(value: string) {
+  const tokens = value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  return tokens.length > 0 && tokens.every((token) => GENERIC_CONTAINER_TOKENS.has(token));
+}
+
+function getContainerBoundaryText(container: ParentNode | undefined, field?: Element) {
+  return getContainerText(container, field).filter((value) => !isGenericContainerText(value));
+}
+
+function isUsableSubmitControl(element: Element) {
+  if (!getFieldVisibility(element as HTMLElement).viewable) {
+    return false;
+  }
+  if (!getFieldFillability(element as HTMLElement).fillable) {
+    return false;
+  }
+  if ((element as HTMLButtonElement | HTMLInputElement).disabled || element.matches(":disabled")) {
+    return false;
+  }
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === "button") {
+    const type = (element as HTMLButtonElement).type.toLowerCase();
+    return type === "submit";
+  }
+  if (tagName !== "input") {
+    return false;
+  }
+  const input = element as HTMLInputElement;
+  const type = input.type.toLowerCase();
+  return type === "submit" || type === "image";
+}
+
+function submitControlText(element: Element) {
+  if (!isUsableSubmitControl(element)) {
+    return undefined;
+  }
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === "button") {
+    return controlText(element, element.textContent);
+  }
+  const input = element as HTMLInputElement;
+  const type = input.type.toLowerCase();
+  return controlText(input, type === "image" ? input.alt : input.value);
+}
+
 function collectSubmitText(elements: Element[]) {
-  return elements.flatMap((element) => {
-    if (!getFieldVisibility(element as HTMLElement).viewable) {
-      return [];
-    }
-    if (!getFieldFillability(element as HTMLElement).fillable) {
-      return [];
-    }
-    if ((element as HTMLButtonElement | HTMLInputElement).disabled || element.matches(":disabled")) {
-      return [];
-    }
-    const tagName = element.tagName.toLowerCase();
-    if (tagName === "button") {
-      const type = (element as HTMLButtonElement).type.toLowerCase();
-      if (type !== "submit") {
-        return [];
-      }
-      return [controlText(element, element.textContent)];
-    }
-    if (tagName !== "input") {
-      return [];
-    }
-    const input = element as HTMLInputElement;
-    const type = input.type.toLowerCase();
-    if (type !== "submit" && type !== "image") {
-      return [];
-    }
-    return [controlText(input, type === "image" ? input.alt : input.value)];
-  }).filter(Boolean);
+  return elements
+    .map(submitControlText)
+    .filter((value): value is string => typeof value === "string");
 }
 
 function pickSubmitText(submitText: string[]) {
@@ -452,6 +490,21 @@ function getSubmitText(form: HTMLFormElement) {
   return pickSubmitText(collectSubmitText(getFormControlElements(form)));
 }
 
+function getSubmitAction(form: HTMLFormElement) {
+  const primarySubmit = getFormControlElements(form).find(isUsableSubmitControl);
+  const rawAction = primarySubmit?.getAttribute("formaction");
+  const trimmedAction = rawAction?.trim();
+  if (!trimmedAction) {
+    return undefined;
+  }
+
+  try {
+    return new URL(trimmedAction, form.ownerDocument.baseURI).href;
+  } catch {
+    return trimmedAction;
+  }
+}
+
 function collectForms(documentRef: Document) {
   const formByElement = new Map<HTMLFormElement, AutofillFormSnapshot>();
   const forms = collectMatchingElements(documentRef, "form").map((form, index) => {
@@ -465,6 +518,7 @@ function collectForms(documentRef: Document) {
       htmlAction: getFormAction(formElement),
       htmlActionAttribute: optionalString(formElement.getAttribute("action")),
       htmlActionIsImplicit,
+      htmlSubmitAction: getSubmitAction(formElement),
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
       headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
     };
@@ -504,8 +558,11 @@ function getRootLevelFieldRunContainer(
   const runElements = getRootLevelRunElements(runElement);
   const fieldCount = countFieldsInElements(runElements);
   const submitText = collectRootLevelRunSubmitText(runElements);
+  const headingText = collectRootLevelRunHeadingText(runElements, element);
 
-  return fieldCount > 1 || submitText.length > 0 ? runElements[0] : undefined;
+  return fieldCount > 1 || submitText.length > 0 || headingText.length > 0
+    ? runElements[0]
+    : undefined;
 }
 
 function getRootLevelRunParent(element: Element): ParentNode | undefined {
@@ -533,18 +590,30 @@ function isRootLevelRunElement(candidate: Element) {
   );
 }
 
+function isHeadingElement(candidate: Element) {
+  return candidate.matches(HEADING_SELECTOR);
+}
+
 function isRootLevelRunAnchor(element: Element) {
   return isRootLevelRunElement(element) && getRootLevelRunParent(element) !== undefined;
 }
 
 function getRootLevelRunElements(runElement: Element) {
   let first: Element = runElement;
-  while (first.previousElementSibling && isRootLevelRunElement(first.previousElementSibling)) {
-    first = first.previousElementSibling;
+  if (!isHeadingElement(runElement)) {
+    while (first.previousElementSibling && isRootLevelRunElement(first.previousElementSibling)) {
+      first = first.previousElementSibling;
+      if (isHeadingElement(first)) {
+        break;
+      }
+    }
   }
 
   let last: Element = runElement;
   while (last.nextElementSibling && isRootLevelRunElement(last.nextElementSibling)) {
+    if (isHeadingElement(last.nextElementSibling)) {
+      break;
+    }
     last = last.nextElementSibling;
   }
 
@@ -611,9 +680,10 @@ function getRootLevelRunHeadingText(anchor: Element, field?: Element) {
 
 function getFieldContainer(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
-  form: AutofillFormSnapshot | undefined
+  form: AutofillFormSnapshot | undefined,
+  formElement: HTMLFormElement | null
 ): ParentNode | undefined {
-  if (form !== undefined) {
+  if (form !== undefined && formElement?.contains(element)) {
     return undefined;
   }
 
@@ -629,7 +699,10 @@ function getFieldContainer(
       return undefined;
     }
     const fieldCount = container.querySelectorAll(FIELD_SELECTOR).length;
-    if (fieldCount > 1 || (fieldCount === 1 && getContainerText(container, element).length > 0)) {
+    if (
+      fieldCount > 1 ||
+      (fieldCount === 1 && getContainerBoundaryText(container, element).length > 0)
+    ) {
       return container;
     }
     if (["section", "article", "main", "aside"].includes(tagName)) {
@@ -672,8 +745,9 @@ function collectField(
 
   const visibility = getFieldVisibility(element);
   const fillability = getFieldFillability(element);
-  const form = element.form ? formByElement.get(element.form) : undefined;
-  const container = getFieldContainer(element, form);
+  const formElement = element.form;
+  const form = formElement ? formByElement.get(formElement) : undefined;
+  const container = getFieldContainer(element, form, formElement);
   const containerOpid = getContainerOpid(container, containerByElement);
   const htmlType =
     tagName === "input"
