@@ -276,7 +276,11 @@ function pickUsernameField(passwordField: HTMLInputElement | null) {
     return scopedCandidates.find((candidate) => candidate.score > 0)?.input ?? null;
   }
 
-  return scoreUsernameCandidates(candidates).find((candidate) => candidate.score > 0)?.input ?? null;
+  const scoredCandidates = scoreUsernameCandidates(candidates);
+  return (
+    scoredCandidates.find((candidate) => candidate.score > 0)?.input ??
+    (scoredCandidates.length === 1 ? scoredCandidates[0].input : null)
+  );
 }
 
 function scoreUsernameCandidates(
@@ -620,22 +624,31 @@ function hasCurrentPasswordSignal(input: HTMLInputElement) {
 
 function hasNewPasswordSignal(input: HTMLInputElement) {
   const tokens = fieldTokens(input);
+  const tokenSet = new Set(tokens.split(/[^a-z0-9]+/).filter(Boolean));
   const normalizedTokens = normalizedFieldTokens(input);
   return (
     input.autocomplete.toLowerCase() === "new-password" ||
     normalizedTokens.includes("newpassword") ||
-    tokens.includes("new password")
+    tokens.includes("new password") ||
+    (tokenSet.has("password") &&
+      (tokenSet.has("new") ||
+        tokenSet.has("create") ||
+        tokenSet.has("set") ||
+        tokenSet.has("choose")))
   );
 }
 
 function hasConfirmationPasswordSignal(input: HTMLInputElement) {
   const tokens = fieldTokens(input);
+  const tokenSet = new Set(tokens.split(/[^a-z0-9]+/).filter(Boolean));
   const normalizedTokens = normalizedFieldTokens(input);
   return (
     normalizedTokens.includes("confirmpassword") ||
     normalizedTokens.includes("repeatpassword") ||
     tokens.includes("confirm password") ||
-    tokens.includes("repeat password")
+    tokens.includes("repeat password") ||
+    (tokenSet.has("password") &&
+      (tokenSet.has("confirm") || tokenSet.has("repeat")))
   );
 }
 

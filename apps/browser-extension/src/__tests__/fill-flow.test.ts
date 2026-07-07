@@ -802,6 +802,19 @@ describe("fillLoginForm", () => {
     expect(inputValue("#unrelated-password")).toBe("");
   });
 
+  it("uses a single safe scoreless field for username-only fills", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="access-code">Access code</label>
+        <input id="access-code" type="text" name="access_code" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "ACME-42" });
+
+    expect(inputValue("#access-code")).toBe("ACME-42");
+  });
+
   it("does not let unrelated password-change groups suppress username-only fills", () => {
     document.body.innerHTML = `
       <form id="username-step">
@@ -1104,6 +1117,35 @@ describe("fillLoginForm", () => {
     fillLoginForm({ password: "secret-123" });
 
     expect(inputValue("#new-password")).toBe("");
+  });
+
+  it("does not fill single create-password fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="create-password">Create password</label>
+        <input id="create-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#create-password")).toBe("");
+  });
+
+  it("treats confirm-your-password labels as confirmation fields", () => {
+    document.body.innerHTML = `
+      <form>
+        <label for="new-password">New password</label>
+        <input id="new-password" type="password" autocomplete="new-password" value="" />
+        <label for="second-password">Confirm your password</label>
+        <input id="second-password" type="password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret-123" });
+
+    expect(inputValue("#new-password")).toBe("");
+    expect(inputValue("#second-password")).toBe("");
   });
 
   it("detects form-less password change groups when each field is wrapped", () => {
