@@ -344,7 +344,7 @@ export function createLoginFillPlan(
       : null;
   const passwordField =
     typeof payload.password === "string"
-      ? pickPasswordField(fields, usernameField) ?? (usernameField ? null : initialPasswordField)
+      ? pickPasswordField(fields, usernameField) ?? initialPasswordField
       : null;
   const actions: AutofillFillAction[] = [];
 

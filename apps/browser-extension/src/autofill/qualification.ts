@@ -448,7 +448,8 @@ function hasOutOfBandCodeSignal(text: string) {
     text.includes("emailcode") ||
     text.includes("emailotp") ||
     text.includes("emailverification") ||
-    text.includes("senttoyouremail")
+    text.includes("senttoyouremail") ||
+    text.includes("senttoyourphone")
   );
 }
 
@@ -458,12 +459,14 @@ function outOfBandCodeReason(
   autocomplete: Set<string>
 ) {
   const searchableText = `${fieldText},${formText}`;
-  const hasCodeContext =
+  const hasFieldCodeContext =
     autocomplete.has("one-time-code") ||
-    searchableText.includes("code") ||
-    searchableText.includes("verification") ||
-    searchableText.includes("onetime");
-  if (!hasCodeContext) {
+    fieldText.includes("code") ||
+    fieldText.includes("otp") ||
+    fieldText.includes("totp") ||
+    fieldText.includes("verification") ||
+    fieldText.includes("onetime");
+  if (!hasFieldCodeContext) {
     return null;
   }
 
@@ -496,13 +499,33 @@ function hasNumericCodeShape(field: AutofillFieldSnapshot, fieldText: string) {
   );
 }
 
+function hasFieldCodeHint(
+  field: AutofillFieldSnapshot,
+  fieldText: string,
+  autocomplete: Set<string>
+) {
+  return (
+    autocomplete.has("one-time-code") ||
+    field.maxLength === 1 ||
+    fieldText.includes("digit") ||
+    fieldText.includes("code") ||
+    fieldText.includes("otp") ||
+    fieldText.includes("totp") ||
+    fieldText.includes("onetime")
+  );
+}
+
 function isTotpLike(field: AutofillFieldSnapshot, fieldText: string, formText: string) {
   const autocomplete = fieldAutocompleteTokens(field);
   if ([...TOTP_AUTOCOMPLETE].some((token) => autocomplete.has(token))) {
     return true;
   }
   if (field.htmlType === "password") {
-    return !autocomplete.has("current-password") && hasPasswordMaskedCodeSignal(fieldText);
+    return (
+      !autocomplete.has("current-password") &&
+      hasPasswordMaskedCodeSignal(fieldText) &&
+      (hasTotpKeyword(fieldText) || hasAuthenticatorTotpKeyword(formText))
+    );
   }
 
   if (!isTotpInputControl(field)) {
@@ -513,7 +536,11 @@ function isTotpLike(field: AutofillFieldSnapshot, fieldText: string, formText: s
     return true;
   }
 
-  return hasTotpKeyword(formText) && hasNumericCodeShape(field, fieldText);
+  return (
+    hasTotpKeyword(formText) &&
+    hasFieldCodeHint(field, fieldText, autocomplete) &&
+    hasNumericCodeShape(field, fieldText)
+  );
 }
 
 function isPasswordLike(field: AutofillFieldSnapshot) {
@@ -529,7 +556,7 @@ function isNewPasswordLike(field: AutofillFieldSnapshot, fieldText: string, form
     return false;
   }
   const searchableText = `${fieldText},${formText}`;
-  return hasAccountCreationContext(searchableText);
+  return hasAccountCreationContext(searchableText) && !hasLoginContext(searchableText);
 }
 
 function qualificationForFillableField(
@@ -586,10 +613,15 @@ function qualificationForFillableField(
     nonLogin === "non-login:account-creation" &&
     hasLoginContext(searchableText) &&
     (autocomplete.has("current-password") || hasCurrentPasswordSibling(field, snapshot));
+  const hasMixedLoginFormContext =
+    nonLogin === "non-login:account-creation" &&
+    hasLoginContext(searchableText) &&
+    (isPasswordLike(field) || hasPasswordSibling(field, snapshot) || hasCurrentPasswordSibling(field, snapshot));
   const canUseCurrentPasswordInNonLoginContext =
     !nonLogin ||
     hasNewsletterLoginContext ||
-    hasMixedCurrentPasswordLoginContext;
+    hasMixedCurrentPasswordLoginContext ||
+    hasMixedLoginFormContext;
   const isUsernameInCurrentPasswordForm =
     isUsernameLike(field, fieldText) &&
     hasMixedLoginContext &&
@@ -642,7 +674,8 @@ function qualificationForFillableField(
     nonLogin &&
     !isUsernameInCurrentPasswordForm &&
     !hasNewsletterLoginContext &&
-    !hasMixedCurrentPasswordLoginContext
+    !hasMixedCurrentPasswordLoginContext &&
+    !hasMixedLoginFormContext
   ) {
     reasons.push(nonLogin);
     return { qualifiedAs: "ignored", eligible: false, reasons };
@@ -651,6 +684,16 @@ function qualificationForFillableField(
   const outOfBandCode = outOfBandCodeReason(fieldText, formPromptText, autocomplete);
   if (outOfBandCode) {
     reasons.push(outOfBandCode);
+    return { qualifiedAs: "ignored", eligible: false, reasons };
+  }
+
+  if (
+    field.htmlType === "password" &&
+    !autocomplete.has("current-password") &&
+    hasPasswordMaskedCodeSignal(fieldText) &&
+    !isTotpLike(field, fieldText, formPromptText)
+  ) {
+    reasons.push("excluded:one-time-code");
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 

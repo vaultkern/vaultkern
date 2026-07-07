@@ -205,6 +205,27 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("fills mixed sign-in forms when the password omits autocomplete", () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>Create account or sign in</h1>
+        <form>
+          <input name="email" type="email" />
+          <input name="password" type="password" />
+        </form>
+      </main>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+  });
+
   it("prefers the same form-less container when pairing login fields", () => {
     document.body.innerHTML = `
       <input name="unrelated_username" autocomplete="username" />
@@ -224,6 +245,47 @@ describe("login detection fill flow", () => {
     );
     expect((document.querySelector('input[name="login_password"]') as HTMLInputElement).value).toBe(
       "secret"
+    );
+  });
+
+  it("preserves password fills for unscoped form-less login fields", () => {
+    document.body.innerHTML = `
+      <section>
+        <input name="login_email" type="email" autocomplete="username" />
+      </section>
+      <section>
+        <input name="login_password" type="password" />
+      </section>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="login_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="login_password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+  });
+
+  it("does not fill username-first signup forms", () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>Create account</h1>
+        <form>
+          <input name="signup_user" autocomplete="username" />
+          <input name="new_password" type="password" autocomplete="new-password" />
+        </form>
+      </main>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="signup_user"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+    expect((document.querySelector('input[name="new_password"]') as HTMLInputElement).value).toBe(
+      ""
     );
   });
 

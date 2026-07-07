@@ -854,6 +854,33 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "phone_otp").qualifiedAs).toBe("totp");
   });
 
+  it("does not classify phone-delivered one-time codes as authenticator TOTP", () => {
+    document.body.innerHTML = `
+      <form id="sms-code">
+        <label for="phone-code">Code sent to your phone</label>
+        <input id="phone-code" name="code" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "code").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "code").reasons).toContain("excluded:out-of-band-code");
+  });
+
+  it("requires field-level code evidence before using MFA form context", () => {
+    document.body.innerHTML = `
+      <form id="mfa-setup">
+        <h2>Two factor authentication setup</h2>
+        <input name="phone" type="tel" inputmode="numeric" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "phone").qualifiedAs).toBe("ignored");
+  });
+
   it("does not classify password-masked OTP fields as saved-password targets", () => {
     document.body.innerHTML = `
       <form id="verification">
@@ -900,6 +927,35 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "card_cvv").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "card_code").qualifiedAs).toBe("ignored");
+  });
+
+  it("does not classify generic masked security-code fields as TOTP targets", () => {
+    document.body.innerHTML = `
+      <form id="verification">
+        <input name="security_code" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "security_code").qualifiedAs).toBe("ignored");
+  });
+
+  it("does not apply SMS code exclusions to normal password fields", () => {
+    document.body.innerHTML = `
+      <form id="combined-login">
+        <h2>SMS verification</h2>
+        <input name="password" type="password" />
+        <label for="sms-code">SMS code</label>
+        <input id="sms-code" name="sms_code" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "sms_code").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "sms_code").reasons).toContain("excluded:out-of-band-code");
   });
 
   it("does not apply non-login exclusions to unresolved describedby IDs", () => {
