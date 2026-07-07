@@ -420,7 +420,18 @@ function recoveryCodeReason(
     return null;
   }
 
-  if (!fieldHasRecoveryMarker && hasAuthenticatorTotpKeyword(searchableText)) {
+  const formHasRecoveryCodePrompt =
+    formHasRecoveryMarker &&
+    (formText.includes("code") ||
+      formText.includes("otp") ||
+      formText.includes("totp") ||
+      formText.includes("onetime"));
+
+  if (
+    !fieldHasRecoveryMarker &&
+    hasAuthenticatorTotpKeyword(searchableText) &&
+    !formHasRecoveryCodePrompt
+  ) {
     return null;
   }
 
@@ -499,6 +510,7 @@ function hasOutOfBandCodeSignal(text: string) {
     text.includes("sms") ||
     text.includes("textmessage") ||
     text.includes("mobile") ||
+    hasPhoneVerificationCodeSignal(text) ||
     text.includes("emailcode") ||
     text.includes("emailotp") ||
     text.includes("emailverification") ||
@@ -512,6 +524,7 @@ function hasDirectedOutOfBandCodeSignal(text: string) {
   return (
     text.includes("sms") ||
     text.includes("textmessage") ||
+    hasPhoneVerificationCodeSignal(text) ||
     text.includes("emailcode") ||
     text.includes("emailotp") ||
     text.includes("emailverification") ||
@@ -519,6 +532,17 @@ function hasDirectedOutOfBandCodeSignal(text: string) {
     text.includes("senttoyourmobile") ||
     text.includes("senttoyourphone")
   );
+}
+
+function hasPhoneVerificationCodeSignal(text: string) {
+  const hasPhoneContext = text.includes("phone") || text.includes("mobile");
+  const hasCodeContext =
+    text.includes("code") ||
+    text.includes("otp") ||
+    text.includes("onetime") ||
+    text.includes("verification") ||
+    text.includes("verify");
+  return hasPhoneContext && hasCodeContext && !hasAuthenticatorTotpKeyword(text);
 }
 
 function outOfBandCodeReason(

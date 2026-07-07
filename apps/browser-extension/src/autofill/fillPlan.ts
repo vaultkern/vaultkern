@@ -166,6 +166,23 @@ function pickUsernameField(
   return pickPreferredUsernameField(usernameFields);
 }
 
+function hasScopedPasswordField(
+  fields: AutofillTriageFieldResult[],
+  usernameField: AutofillTriageFieldResult
+) {
+  return fields.some(
+    (field) => field.qualifiedAs === "password" && isSameFillScope(field, usernameField)
+  );
+}
+
+function pickUsernameFirstField(fields: AutofillTriageFieldResult[]) {
+  return pickPreferredUsernameField(
+    fields.filter(
+      (field) => field.qualifiedAs === "username" && !hasScopedPasswordField(fields, field)
+    )
+  );
+}
+
 function hasBlockingUsernameFallbackReason(field: AutofillTriageFieldResult) {
   return field.reasons.some(
     (reason) => reason.startsWith("excluded:") || reason.startsWith("non-login:")
@@ -430,6 +447,7 @@ export function createLoginFillPlan(
   const usernameField =
     typeof payload.username === "string"
       ? pickUsernameField(fields, initialPasswordField) ??
+        pickUsernameFirstField(fields) ??
         pickSingleStepEmailUsernameField(report.fields, null)
       : null;
   const passwordField =

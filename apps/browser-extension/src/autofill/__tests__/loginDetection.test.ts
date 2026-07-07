@@ -123,6 +123,28 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("keeps username-first explicit fields ahead of unrelated password forms", () => {
+    document.body.innerHTML = `
+      <main>
+        <form id="settings">
+          <input name="settings_password" type="password" autocomplete="current-password" />
+        </form>
+        <form id="username-step">
+          <input name="email" type="email" autocomplete="username" />
+        </form>
+      </main>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="settings_password"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+  });
+
   it("falls back to a single generic email field for username-first fill", () => {
     document.body.innerHTML = `
       <form>
@@ -522,6 +544,32 @@ describe("login detection fill flow", () => {
     expect((document.querySelector('input[name="login_password"]') as HTMLInputElement).value).toBe(
       "secret"
     );
+  });
+
+  it("does not fill form-level authenticator recovery code prompts", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Authenticator backup code</h2>
+        <label for="code">Code</label>
+        <input id="code" name="code" autocomplete="one-time-code" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector('input[name="code"]') as HTMLInputElement).value).toBe("");
+  });
+
+  it("does not fill phone verification OTP prompts", () => {
+    document.body.innerHTML = `
+      <form aria-label="Phone verification">
+        <input name="otp" autocomplete="one-time-code" inputmode="numeric" />
+      </form>
+    `;
+
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector('input[name="otp"]') as HTMLInputElement).value).toBe("");
   });
 
   it("fills the checked-in username-first smoke page", () => {
