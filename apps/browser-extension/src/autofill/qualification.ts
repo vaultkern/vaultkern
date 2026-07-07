@@ -145,7 +145,7 @@ function joinedFieldPromptText(field: AutofillFieldSnapshot) {
 
 function joinedFormTextParts(
   form: AutofillFormSnapshot | undefined,
-  options: { includeAction: boolean }
+  options: { includeAction: boolean; includeImplicitAction?: boolean }
 ) {
   if (!form) {
     return [];
@@ -154,15 +154,25 @@ function joinedFormTextParts(
     form.htmlId,
     form.htmlName,
     form.htmlClass,
-    options.includeAction ? formActionContext(form.htmlAction) : undefined,
+    !options.includeAction
+      ? undefined
+      : form.htmlActionIsImplicit && options.includeImplicitAction === false
+      ? undefined
+      : formActionContext(form.htmlAction),
     form.htmlMethod,
     form.ariaLabel,
     ...form.headingText
   ];
 }
 
-function joinedFormText(form: AutofillFormSnapshot | undefined) {
-  return joinedFormTextParts(form, { includeAction: true })
+function joinedFormText(
+  form: AutofillFormSnapshot | undefined,
+  options: { includeImplicitAction?: boolean } = {}
+) {
+  return joinedFormTextParts(form, {
+    includeAction: true,
+    includeImplicitAction: options.includeImplicitAction
+  })
     .map(normalize)
     .join(",");
 }
@@ -615,6 +625,7 @@ function qualificationForFillableField(
   const fieldPromptText = joinedFieldPromptText(field);
   const formText = joinedFormText(form);
   const formPromptText = joinedFormPromptText(form);
+  const negativeFormText = joinedFormText(form, { includeImplicitAction: false });
   const autocomplete = fieldAutocompleteTokens(field);
 
   if (isSearchField(field, form)) {
@@ -622,7 +633,7 @@ function qualificationForFillableField(
     return { qualifiedAs: "ignored", eligible: false, reasons };
   }
 
-  const excluded = excludedReason(fieldText, formText);
+  const excluded = excludedReason(fieldText, negativeFormText);
   if (excluded) {
     reasons.push(excluded);
     return { qualifiedAs: "ignored", eligible: false, reasons };
@@ -651,7 +662,7 @@ function qualificationForFillableField(
   const searchableText = `${fieldText},${formText}`;
   const hasMixedLoginContext =
     hasLoginContext(searchableText) || !hasAccountCreationContext(searchableText);
-  const nonLogin = nonLoginReason(fieldText, formText);
+  const nonLogin = nonLoginReason(fieldText, negativeFormText);
   const hasNewsletterLoginContext =
     nonLogin === "non-login:newsletter" &&
     hasLoginContext(searchableText) &&

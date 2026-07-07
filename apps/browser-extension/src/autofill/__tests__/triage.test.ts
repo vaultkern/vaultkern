@@ -380,6 +380,29 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "empty_action_password").qualifiedAs).toBe("password");
   });
 
+  it("keeps implicit page URLs out of negative form context", () => {
+    window.history.replaceState(null, "", "/forgot-password");
+    document.body.innerHTML = `
+      <form id="modal-login">
+        <h2>Sign in</h2>
+        <input name="modal_email" type="email" />
+        <input name="modal_password" type="password" />
+      </form>
+      <form id="explicit-forgot" action="/forgot-password">
+        <h2>Sign in</h2>
+        <input name="forgot_email" type="email" />
+        <input name="forgot_password" type="password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "modal_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "modal_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "forgot_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "forgot_password").qualifiedAs).toBe("ignored");
+  });
+
   it("uses login hostnames in form actions as passwordless login context", () => {
     document.body.innerHTML = `
       <form id="auth-host" action="https://login.example.com/">
@@ -702,6 +725,21 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "body_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "body_email").containerOpid).toBe(
       fieldByName(report, "body_password").containerOpid
+    );
+  });
+
+  it("shares local context for body-level fields wrapped in labels", () => {
+    document.body.innerHTML = `
+      <label>Email <input name="wrapped_email" type="email" /></label>
+      <label>Password <input name="wrapped_password" type="password" /></label>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "wrapped_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "wrapped_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "wrapped_email").containerOpid).toBe(
+      fieldByName(report, "wrapped_password").containerOpid
     );
   });
 
