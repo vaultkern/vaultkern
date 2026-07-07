@@ -922,7 +922,9 @@ export function createLoginFillPlan(
       ? pickPasswordChangeFormOpid(passwordChangeFields, passwordChangeAllFields)
       : null;
   const registrationFormOpid =
-    typeof payload.password === "string" ? pickRegistrationFormOpid(fields, report.fields) : null;
+    typeof payload.password === "string" || typeof payload.newPassword === "string"
+      ? pickRegistrationFormOpid(fields, report.fields)
+      : null;
 
   if (passwordChangeFormOpid !== null) {
     appendFallbackActions(

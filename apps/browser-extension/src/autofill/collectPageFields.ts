@@ -309,6 +309,15 @@ function getSelectOptions(element: Element) {
   return Array.from((element as HTMLSelectElement).options).map((option) => option.value);
 }
 
+function isFocusedElement(element: Element) {
+  if (element.ownerDocument.activeElement === element) {
+    return true;
+  }
+
+  const root = element.getRootNode();
+  return root !== element.ownerDocument && "activeElement" in root && root.activeElement === element;
+}
+
 function getRootLevelFieldRunContainer(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
 ): ParentNode | undefined {
@@ -454,7 +463,7 @@ function collectField(
     selectOptions: getSelectOptions(element),
     readonly: "readOnly" in element ? element.readOnly : false,
     disabled: element.disabled,
-    focused: element.ownerDocument.activeElement === element,
+    focused: isFocusedElement(element),
     siteRuleTypes,
     siteRuleReasons: siteRuleTypes.map(
       (fieldType) => `site-rule:${siteRule?.id}:${fieldType}`

@@ -167,23 +167,34 @@ function hasSiteRuleType(
 
 function pickUsernameField(
   fields: AutofillTriageFieldResult[],
-  passwordField: AutofillTriageFieldResult | null
+  passwordField: AutofillTriageFieldResult | null,
+  elements: Element[]
 ) {
   const usernameFields = fields.filter(isCaptureUsernameField);
+  const preferSubmittedUsername = (candidates: AutofillTriageFieldResult[]) =>
+    candidates.find((field) => field.viewable && fieldValue(elements, field) !== "") ??
+    candidates.find((field) => field.viewable) ??
+    candidates.find((field) => fieldValue(elements, field) !== "") ??
+    candidates[0] ??
+    null;
+
   if (passwordField?.formOpid) {
+    const sameFormUsernames = usernameFields.filter(
+      (field) => field.formOpid === passwordField.formOpid
+    );
+    const sameFormRuleUsernames = sameFormUsernames.filter((field) =>
+      hasSiteRuleType(field, "username")
+    );
     const sameFormUsername =
-      usernameFields.find(
-        (field) => field.formOpid === passwordField.formOpid && hasSiteRuleType(field, "username")
-      ) ??
-      usernameFields.find((field) => field.formOpid === passwordField.formOpid);
+      preferSubmittedUsername(sameFormRuleUsernames) ??
+      preferSubmittedUsername(sameFormUsernames);
     if (sameFormUsername) {
       return sameFormUsername;
     }
   }
   return (
-    usernameFields.find((field) => hasSiteRuleType(field, "username")) ??
-    usernameFields[0] ??
-    null
+    preferSubmittedUsername(usernameFields.filter((field) => hasSiteRuleType(field, "username"))) ??
+    preferSubmittedUsername(usernameFields)
   );
 }
 
@@ -276,7 +287,7 @@ export function collectAutofillSubmission(
     if (password !== "" && newPassword !== "") {
       const username = fieldValue(
         elements,
-        pickUsernameField(fieldsForUsername, passwordChangeFields.currentPasswordField)
+        pickUsernameField(fieldsForUsername, passwordChangeFields.currentPasswordField, elements)
       );
       return {
         url,
@@ -296,7 +307,7 @@ export function collectAutofillSubmission(
     const password = fieldValue(elements, registrationPasswordField, { trim: false });
     const username = fieldValue(
       elements,
-      pickUsernameField(fieldsForUsername, registrationPasswordField)
+      pickUsernameField(fieldsForUsername, registrationPasswordField, elements)
     );
 
     if (password !== "") {
@@ -324,7 +335,7 @@ export function collectAutofillSubmission(
     fields.find((field) => field.qualifiedAs === "password") ??
     null;
   const password = fieldValue(elements, passwordField, { trim: false });
-  const username = fieldValue(elements, pickUsernameField(fieldsForUsername, passwordField));
+  const username = fieldValue(elements, pickUsernameField(fieldsForUsername, passwordField, elements));
 
   if (password === "") {
     return null;

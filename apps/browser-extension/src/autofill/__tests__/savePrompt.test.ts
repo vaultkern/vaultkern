@@ -58,6 +58,26 @@ describe("autofill save prompt capture", () => {
     });
   });
 
+  it("prefers visible submitted usernames over hidden same-form fallbacks", () => {
+    document.body.innerHTML = `
+      <form id="login">
+        <input type="hidden" name="email" value="hidden@example.com" />
+        <input name="email" type="email" autocomplete="username" value="alice@example.com" />
+        <input name="password" type="password" autocomplete="current-password" value="secret-123" />
+      </form>
+    `;
+
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("#login") as HTMLFormElement
+    );
+
+    expect(submission).toMatchObject({
+      username: "alice@example.com",
+      password: "secret-123"
+    });
+  });
+
   it("preserves a save-only marker when parsing pending submissions", () => {
     expect(
       pendingAutofillSubmissionFromUnknown({
