@@ -112,6 +112,41 @@ describe("autofill triage", () => {
     );
   });
 
+  it("keeps explicitly visible descendants of visibility-hidden ancestors viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="visibility:hidden">
+          <input name="email" type="email" autocomplete="username" style="visibility:visible" />
+          <input name="password" type="password" autocomplete="current-password" style="visibility:visible" />
+        </div>
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
+  it("treats fields clipped by zero-sized ancestors as hidden", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="width:0;height:0;overflow:hidden">
+          <input name="decoy_email" type="email" autocomplete="username" />
+        </div>
+        <input name="email" type="email" autocomplete="username" />
+        <input name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "decoy_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "decoy_email").reasons).toContain("not-viewable:zero-size");
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
   it("excludes search newsletter captcha and forgot-password fields from login qualification", () => {
     document.body.innerHTML = `
       <form id="search">
@@ -431,6 +466,26 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "modal_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "forgot_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "forgot_password").qualifiedAs).toBe("ignored");
+  });
+
+  it("treats hash-only form actions as implicit current-page actions", () => {
+    window.history.replaceState(null, "", "/forgot-password");
+    document.body.innerHTML = `
+      <form id="modal-login" action="#">
+        <h2>Sign in</h2>
+        <input name="modal_email" type="email" />
+        <input name="modal_password" type="password" />
+      </form>
+    `;
+
+    const snapshot = collectAutofillPageSnapshot(document);
+    const report = triageAutofillPage(snapshot);
+
+    expect(snapshot.forms.find((form) => form.htmlId === "modal-login")).toMatchObject({
+      htmlActionIsImplicit: true
+    });
+    expect(fieldByName(report, "modal_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "modal_password").qualifiedAs).toBe("password");
   });
 
   it("uses login hostnames in form actions as passwordless login context", () => {
@@ -896,6 +951,10 @@ describe("autofill triage", () => {
         <input name="register_path_email" type="email" />
         <input name="register_path_password" type="password" />
       </form>
+      <form id="nested-join-path" action="/account/register">
+        <input name="nested_register_email" type="email" />
+        <input name="nested_register_password" type="password" />
+      </form>
       <form id="registered-users" action="/registered-users/sign-in">
         <input name="registered_path_email" type="email" autocomplete="username" />
         <input
@@ -913,6 +972,11 @@ describe("autofill triage", () => {
       "non-login:account-creation"
     );
     expect(fieldByName(report, "register_path_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "nested_register_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "nested_register_email").reasons).toContain(
+      "non-login:account-creation"
+    );
+    expect(fieldByName(report, "nested_register_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "registered_path_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "registered_path_password").qualifiedAs).toBe("password");
   });

@@ -59,6 +59,11 @@ function getFormAction(form: HTMLFormElement) {
   }
 }
 
+function formActionIsImplicit(form: HTMLFormElement) {
+  const rawAction = form.getAttribute("action");
+  return !rawAction || rawAction.trim().startsWith("#");
+}
+
 function labelTextWithoutNestedFields(label: Element) {
   const clone = label.cloneNode(true) as Element;
   clone.querySelectorAll(FIELD_SELECTOR).forEach((field) => field.remove());
@@ -274,7 +279,7 @@ function collectForms(documentRef: Document) {
   const formByElement = new Map<HTMLFormElement, AutofillFormSnapshot>();
   const forms = collectMatchingElements(documentRef, "form").map((form, index) => {
     const formElement = form as HTMLFormElement;
-    const htmlActionIsImplicit = !formElement.getAttribute("action");
+    const htmlActionIsImplicit = formActionIsImplicit(formElement);
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
       htmlId: optionalString(formElement.id),

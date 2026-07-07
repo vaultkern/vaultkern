@@ -92,6 +92,33 @@ function isUnslottedShadowHostChild(element: HTMLElement) {
   );
 }
 
+function hasExplicitVisibleDescendantOverride(element: HTMLElement, ancestor: HTMLElement) {
+  let current: HTMLElement | null = element;
+  while (current && current !== ancestor) {
+    if (current.style.visibility === "visible") {
+      return true;
+    }
+    current = parentElementOrShadowHost(current);
+  }
+  return false;
+}
+
+function isClippedZeroSizeAncestor(
+  current: HTMLElement,
+  width: number | null,
+  height: number | null
+) {
+  if (width !== 0 || height !== 0) {
+    return false;
+  }
+  const overflow = [
+    current.style.overflow,
+    current.style.overflowX,
+    current.style.overflowY
+  ].join(" ");
+  return overflow.includes("hidden") || overflow.includes("clip");
+}
+
 export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult {
   const reasons: string[] = [];
   const inputType =
@@ -134,12 +161,19 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const bottom = computedCssValue(style?.bottom, current.style.bottom, cssUnits);
     const width = computedCssValue(style?.width, current.style.width, cssUnits);
     const height = computedCssValue(style?.height, current.style.height, cssUnits);
+    const hasHiddenVisibility =
+      inlineVisibility === "hidden" ||
+      style?.visibility === "hidden" ||
+      style?.visibility === "collapse";
     if (
       inlineDisplay === "none" ||
-      inlineVisibility === "hidden" ||
       style?.display === "none" ||
-      style?.visibility === "hidden" ||
-      style?.visibility === "collapse"
+      (hasHiddenVisibility &&
+        !(
+          current !== element &&
+          style?.visibility === "hidden" &&
+          hasExplicitVisibleDescendantOverride(element, current)
+        ))
     ) {
       addReason(reasons, "not-viewable:css");
     }
@@ -159,7 +193,10 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
         addReason(reasons, "not-viewable:offscreen");
       }
     }
-    if (current === element && width === 0 && height === 0) {
+    if (
+      (current === element && width === 0 && height === 0) ||
+      (current !== element && isClippedZeroSizeAncestor(current, width, height))
+    ) {
       addReason(reasons, "not-viewable:zero-size");
     }
   }

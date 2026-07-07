@@ -123,7 +123,12 @@ function isRegisterAccountCreationPart(part: string) {
   if (part.startsWith("registered")) {
     return false;
   }
-  return part.startsWith("register") || part.startsWith("registration");
+  return (
+    part.startsWith("register") ||
+    part.startsWith("registration") ||
+    part.endsWith("register") ||
+    part.endsWith("registration")
+  );
 }
 
 function isAccountCreationPart(part: string) {
