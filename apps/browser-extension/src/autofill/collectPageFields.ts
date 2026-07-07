@@ -291,7 +291,12 @@ function getSelectOptions(element: Element) {
 function getRootLevelFieldRunContainer(
   element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
 ): ParentNode | undefined {
-  const parent = element.parentElement;
+  const labelParent =
+    element.parentElement?.tagName.toLowerCase() === "label"
+      ? element.parentElement
+      : null;
+  const runElement = labelParent ?? element;
+  const parent = runElement.parentElement;
   const parentTag = parent?.tagName.toLowerCase();
   if (parent === null || (parentTag !== "body" && parentTag !== "html")) {
     return undefined;
@@ -301,12 +306,12 @@ function getRootLevelFieldRunContainer(
     candidate.matches(FIELD_SELECTOR) ||
     ["label", "small", "span", "p"].includes(candidate.tagName.toLowerCase());
 
-  let first: Element = element;
+  let first: Element = runElement;
   while (first.previousElementSibling && isRunElement(first.previousElementSibling)) {
     first = first.previousElementSibling;
   }
 
-  let last: Element = element;
+  let last: Element = runElement;
   while (last.nextElementSibling && isRunElement(last.nextElementSibling)) {
     last = last.nextElementSibling;
   }
@@ -316,6 +321,8 @@ function getRootLevelFieldRunContainer(
   while (current) {
     if (current.matches(FIELD_SELECTOR)) {
       fieldCount += 1;
+    } else {
+      fieldCount += current.querySelectorAll(FIELD_SELECTOR).length;
     }
     if (current === last) {
       break;
