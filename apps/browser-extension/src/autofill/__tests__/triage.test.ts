@@ -514,7 +514,12 @@ describe("autofill triage", () => {
   });
 
   it("does not treat search substrings in login URLs as search context", () => {
+    window.history.replaceState(null, "", "/search");
     document.body.innerHTML = `
+      <form id="implicit-login">
+        <input name="implicit_email" type="email" autocomplete="username" />
+        <input name="implicit_password" type="password" autocomplete="current-password" />
+      </form>
       <form id="login" action="https://research.example.com/login">
         <input name="email" type="email" autocomplete="username" />
         <input name="password" type="password" autocomplete="current-password" />
@@ -527,6 +532,8 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
+    expect(fieldByName(report, "implicit_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "implicit_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "redirect_email").qualifiedAs).toBe("username");
@@ -731,12 +738,18 @@ describe("autofill triage", () => {
       <form action="/password-reset">
         <input name="password" type="password" />
       </form>
+      <form id="reset-copy">
+        <h2>Reset your password</h2>
+        <input name="new_password" type="password" />
+      </form>
     `;
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "password").reasons).toContain("excluded:reset");
+    expect(fieldByName(report, "new_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "new_password").reasons).toContain("excluded:reset");
   });
 
   it("does not match tel inside unrelated words", () => {
@@ -905,6 +918,8 @@ describe("autofill triage", () => {
     document.body.innerHTML = `
       <form>
         <input name="offscreen_email" type="email" autocomplete="username" style="position:absolute;left:-9999px" />
+        <input name="right_offscreen_email" type="email" autocomplete="username" style="position:absolute;right:-9999px" />
+        <input name="bottom_offscreen_email" type="email" autocomplete="username" style="position:absolute;bottom:-9999px" />
         <input name="transparent_email" type="email" autocomplete="username" style="opacity:0" />
         <input name="real_user" type="email" autocomplete="username" />
         <input name="real_password" type="password" autocomplete="current-password" />
@@ -915,6 +930,14 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "offscreen_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "offscreen_email").reasons).toContain("not-viewable:offscreen");
+    expect(fieldByName(report, "right_offscreen_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "right_offscreen_email").reasons).toContain(
+      "not-viewable:offscreen"
+    );
+    expect(fieldByName(report, "bottom_offscreen_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "bottom_offscreen_email").reasons).toContain(
+      "not-viewable:offscreen"
+    );
     expect(fieldByName(report, "transparent_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "transparent_email").reasons).toContain("not-viewable:transparent");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");

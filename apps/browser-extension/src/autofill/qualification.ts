@@ -229,7 +229,7 @@ function searchPartsForForm(form: AutofillFormSnapshot | undefined) {
     form.htmlId,
     form.htmlName,
     form.htmlClass,
-    formActionContext(form.htmlAction),
+    form.htmlActionIsImplicit ? undefined : formActionContext(form.htmlAction),
     form.htmlMethod,
     ...form.headingText
   ];
@@ -263,7 +263,13 @@ function excludedReason(fieldText: string, formText: string) {
   if (searchableText.includes("forgot")) {
     return "excluded:forgot";
   }
-  if (searchableText.includes("resetpassword") || searchableText.includes("passwordreset")) {
+  if (
+    searchableText.includes("resetpassword") ||
+    searchableText.includes("passwordreset") ||
+    normalizedParts(searchableText).some(
+      (part) => part.includes("reset") && part.includes("password")
+    )
+  ) {
     return "excluded:reset";
   }
   if (

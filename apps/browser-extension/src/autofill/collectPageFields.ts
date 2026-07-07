@@ -226,12 +226,14 @@ function collectForms(documentRef: Document) {
   const formByElement = new Map<HTMLFormElement, AutofillFormSnapshot>();
   const forms = collectMatchingElements(documentRef, "form").map((form, index) => {
     const formElement = form as HTMLFormElement;
+    const htmlActionIsImplicit = !formElement.hasAttribute("action");
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
       htmlId: optionalString(formElement.id),
       htmlName: optionalString(formElement.getAttribute("name")),
       htmlClass: optionalString(formElement.getAttribute("class")),
       htmlAction: getFormAction(formElement),
+      htmlActionIsImplicit,
       htmlMethod: optionalString(formElement.getAttribute("method")?.toLowerCase()),
       headingText: [...getHeadingText(formElement), ...getSubmitText(formElement)]
     };
