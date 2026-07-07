@@ -199,6 +199,9 @@ function getSubmitText(form: HTMLFormElement) {
     if (!getFieldVisibility(element as HTMLElement).viewable) {
       return [];
     }
+    if ((element as HTMLButtonElement | HTMLInputElement).disabled || element.matches(":disabled")) {
+      return [];
+    }
     const tagName = element.tagName.toLowerCase();
     if (tagName === "button") {
       const type = (element.getAttribute("type") ?? "submit").toLowerCase();
@@ -233,7 +236,7 @@ function collectForms(documentRef: Document) {
       .map(optionalString)
       .filter(Boolean)
       .join(" ");
-    const htmlActionIsImplicit = !formElement.hasAttribute("action");
+    const htmlActionIsImplicit = !formElement.getAttribute("action");
     const snapshot: AutofillFormSnapshot = {
       opid: `form-${index}`,
       htmlId: optionalString(formElement.id),

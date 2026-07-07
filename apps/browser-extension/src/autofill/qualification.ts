@@ -206,11 +206,13 @@ function hasNewPasswordSignal(candidate: AutofillFieldSnapshot) {
 
 function isAvailablePasswordSibling(candidate: AutofillFieldSnapshot) {
   const autocomplete = fieldAutocompleteTokens(candidate);
+  const candidateText = joinedFieldText(candidate);
   return (
     candidate.htmlType === "password" &&
     candidate.viewable &&
     candidate.fillable &&
     !hasNewPasswordSignal(candidate) &&
+    !hasPasswordMaskedCodeSignal(candidateText) &&
     !autocomplete.has("one-time-code")
   );
 }
@@ -580,10 +582,14 @@ function qualificationForFillableField(
     nonLogin === "non-login:newsletter" &&
     hasLoginContext(searchableText) &&
     (hasPasswordSibling(field, snapshot) || isUsernameLike(field, fieldText));
+  const hasMixedCurrentPasswordLoginContext =
+    nonLogin === "non-login:account-creation" &&
+    hasLoginContext(searchableText) &&
+    (autocomplete.has("current-password") || hasCurrentPasswordSibling(field, snapshot));
   const canUseCurrentPasswordInNonLoginContext =
     !nonLogin ||
     hasNewsletterLoginContext ||
-    (nonLogin === "non-login:account-creation" && hasLoginContext(searchableText));
+    hasMixedCurrentPasswordLoginContext;
   const isUsernameInCurrentPasswordForm =
     isUsernameLike(field, fieldText) &&
     hasMixedLoginContext &&
@@ -635,7 +641,8 @@ function qualificationForFillableField(
   if (
     nonLogin &&
     !isUsernameInCurrentPasswordForm &&
-    !hasNewsletterLoginContext
+    !hasNewsletterLoginContext &&
+    !hasMixedCurrentPasswordLoginContext
   ) {
     reasons.push(nonLogin);
     return { qualifiedAs: "ignored", eligible: false, reasons };
