@@ -419,10 +419,16 @@ function qualificationForFillableField(
     nonLogin === "non-login:account-creation" &&
     hasLoginContext(searchableText) &&
     (autocomplete.has("current-password") || hasCurrentPasswordSibling(field, snapshot));
+  const hasMixedPasswordLoginContext =
+    nonLogin === "non-login:account-creation" &&
+    hasLoginContext(searchableText) &&
+    !hasNewPasswordSibling(field, snapshot) &&
+    (isPasswordLike(field) || hasPasswordSibling(field, snapshot));
   if (
     nonLogin &&
     !hasNewsletterLoginContext &&
-    !hasMixedCurrentPasswordLoginContext
+    !hasMixedCurrentPasswordLoginContext &&
+    !hasMixedPasswordLoginContext
   ) {
     reasons.push(nonLogin);
     return { qualifiedAs: "ignored", eligible: false, reasons };
