@@ -9,6 +9,10 @@ type StorageChangeListener = (
   changes: Record<string, unknown>,
   areaName: string
 ) => void;
+type TabUpdatedListener = (
+  tabId: number,
+  changeInfo: { status?: string; url?: string }
+) => void;
 
 function createContentScriptRegistry(initialIds: string[] = []) {
   const registeredIds = new Set(initialIds);
@@ -343,6 +347,120 @@ describe("background bridge", () => {
         password: "two-secret"
       }
     });
+  });
+
+  it("clears tab-scoped pending autofill submissions after navigation", async () => {
+    const listeners: RuntimeMessageListener[] = [];
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener: vi.fn((listener: TabUpdatedListener) => {
+            tabUpdatedListeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 7 } }
+    ).response();
+
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { url: "https://example.com/settings" });
+    }
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 7
+      }).response()
+    ).resolves.toEqual({ pending: null });
+  });
+
+  it("does not restore navigation-cleared pending submissions from stale session storage", async () => {
+    const listeners: RuntimeMessageListener[] = [];
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+    const sessionItems: Record<string, unknown> = {};
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener: vi.fn((listener: TabUpdatedListener) => {
+            tabUpdatedListeners.push(listener);
+          })
+        }
+      },
+      storage: {
+        session: {
+          get(_key: unknown, callback?: (items: Record<string, unknown>) => void) {
+            callback?.({ ...sessionItems });
+            return Promise.resolve({ ...sessionItems });
+          },
+          set(items: Record<string, unknown>, callback?: () => void) {
+            Object.assign(sessionItems, items);
+            callback?.();
+            return Promise.resolve();
+          },
+          remove(_keys: unknown, callback?: () => void) {
+            callback?.();
+            return Promise.resolve();
+          }
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 7 } }
+    ).response();
+    const staleSessionItems = { ...sessionItems };
+
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { url: "https://example.com/settings" });
+    }
+    Object.assign(sessionItems, staleSessionItems);
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 7
+      }).response()
+    ).resolves.toEqual({ pending: null });
   });
 
   it("keeps a pending autofill submission in session storage across background reloads", async () => {

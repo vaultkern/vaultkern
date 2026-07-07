@@ -80,6 +80,25 @@ describe("registration detection fill flow", () => {
     );
   });
 
+  it("fills standalone registration forms with a single new-password field", () => {
+    document.body.innerHTML = `
+      <form>
+        <h2>Create account</h2>
+        <input id="email" name="email" type="email" autocomplete="username" />
+        <input id="new-password" name="password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "new@example.com", newPassword: "generated-secret" });
+
+    expect((document.querySelector("#email") as HTMLInputElement).value).toBe(
+      "new@example.com"
+    );
+    expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe(
+      "generated-secret"
+    );
+  });
+
   it("recognizes spaced create-account headings as registration context", () => {
     document.body.innerHTML = `
       <form>

@@ -8,6 +8,8 @@ import type { AutofillSiteRule } from "./siteRules";
 import { triageAutofillPage } from "./triage";
 import type { AutofillFieldQualification, AutofillTriageFieldResult } from "./types";
 
+const CAPTURE_USERNAME_INPUT_TYPES = new Set(["email", "number", "tel", "text", "url"]);
+
 export interface CollectAutofillSubmissionOptions {
   siteRules?: AutofillSiteRule[];
   includeLoginSubmissions?: boolean;
@@ -88,6 +90,13 @@ function isCaptureUsernameField(field: AutofillTriageFieldResult) {
   }
 
   const autocomplete = fieldAutocompleteTokens(field);
+  const htmlType = field.htmlType ?? "text";
+  if (!CAPTURE_USERNAME_INPUT_TYPES.has(htmlType)) {
+    return (
+      htmlType === "hidden" && (autocomplete.has("username") || autocomplete.has("email"))
+    );
+  }
+
   if (autocomplete.has("username") || autocomplete.has("email")) {
     return true;
   }

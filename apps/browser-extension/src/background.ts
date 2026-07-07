@@ -25,6 +25,7 @@ let passkeyProviderEnabled = false;
 let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
 let pendingAutofillSubmission: PendingAutofillSubmission | null = null;
 let pendingAutofillSubmissionsByTab = new Map<number, PendingAutofillSubmission>();
+const clearedPendingAutofillSubmissionKeys = new Set<string>();
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
 const PENDING_AUTOFILL_SUBMISSION_STORAGE_KEY = "vaultkernPendingAutofillSubmission";
 const WEB_AUTHN_CONTENT_SCRIPT_FILE = "webauthnContentScript.js";
@@ -216,15 +217,44 @@ function latestPendingAutofillSubmission() {
   );
 }
 
+function pendingAutofillSubmissionKey(submission: PendingAutofillSubmission) {
+  return `${submission.submittedAt}:${submission.url}`;
+}
+
+function isClearedPendingAutofillSubmission(
+  submission: PendingAutofillSubmission | null
+) {
+  return submission
+    ? clearedPendingAutofillSubmissionKeys.has(pendingAutofillSubmissionKey(submission))
+    : false;
+}
+
+function clearPendingAutofillSubmissionForTab(tabId: number) {
+  const clearedSubmission = pendingAutofillSubmissionsByTab.get(tabId) ?? null;
+  if (!clearedSubmission) {
+    return;
+  }
+
+  clearedPendingAutofillSubmissionKeys.add(
+    pendingAutofillSubmissionKey(clearedSubmission)
+  );
+  pendingAutofillSubmissionsByTab.delete(tabId);
+  pendingAutofillSubmission = latestPendingAutofillSubmission();
+  void persistPendingAutofillSubmission(pendingAutofillSubmission);
+}
+
 function mergePersistedPendingAutofillSubmissions(store: {
   latest: PendingAutofillSubmission | null;
   byTab: Map<number, PendingAutofillSubmission>;
 }) {
   pendingAutofillSubmission = newerPendingAutofillSubmission(
     pendingAutofillSubmission,
-    store.latest
+    isClearedPendingAutofillSubmission(store.latest) ? null : store.latest
   );
   for (const [tabId, persistedSubmission] of store.byTab) {
+    if (isClearedPendingAutofillSubmission(persistedSubmission)) {
+      continue;
+    }
     pendingAutofillSubmissionsByTab.set(
       tabId,
       newerPendingAutofillSubmission(
@@ -261,6 +291,11 @@ function handleAutofillPendingMessage(
   const messageType = (message as { type?: unknown }).type;
   if (messageType === "vaultkern_autofill_submission") {
     pendingAutofillSubmission = pendingAutofillSubmissionFromUnknown(message);
+    if (pendingAutofillSubmission) {
+      clearedPendingAutofillSubmissionKeys.delete(
+        pendingAutofillSubmissionKey(pendingAutofillSubmission)
+      );
+    }
     const tabId = tabIdFromSender(sender) ?? tabIdFromMessage(message);
     if (pendingAutofillSubmission && tabId !== undefined) {
       pendingAutofillSubmissionsByTab.set(tabId, pendingAutofillSubmission);
@@ -376,6 +411,14 @@ if (chromeApi?.runtime?.onMessage) {
     }
   );
 }
+
+chromeApi?.tabs?.onUpdated?.addListener?.(
+  (tabId: number, changeInfo: { url?: string }) => {
+    if (typeof changeInfo.url === "string" && changeInfo.url.trim() !== "") {
+      clearPendingAutofillSubmissionForTab(tabId);
+    }
+  }
+);
 
 if (chromeApi?.webAuthenticationProxy) {
   chromeApi.webAuthenticationProxy.onRemoteSessionStateChange?.addListener?.(() => {

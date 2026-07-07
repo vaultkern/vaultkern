@@ -95,6 +95,28 @@ describe("autofill save prompt capture", () => {
     expect(submission).toBeNull();
   });
 
+  it("does not capture submit controls as password-change usernames", () => {
+    document.body.innerHTML = `
+      <form id="change-password">
+        <h2>Change password</h2>
+        <input name="current_password" type="password" autocomplete="current-password" value="old-secret" />
+        <input name="new_password" type="password" autocomplete="new-password" value="new-secret" />
+        <input type="submit" name="login" value="Change password" />
+      </form>
+    `;
+
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("#change-password") as HTMLFormElement
+    );
+
+    expect(submission).toMatchObject({
+      username: "",
+      password: "old-secret",
+      newPassword: "new-secret"
+    });
+  });
+
   it("preserves a save-only marker when parsing pending submissions", () => {
     expect(
       pendingAutofillSubmissionFromUnknown({

@@ -38,6 +38,29 @@ describe("password change detection fill flow", () => {
     ).toBe("new-secret");
   });
 
+  it("fills container-scoped password change widgets without a form", () => {
+    document.body.innerHTML = `
+      <section id="account-panel">
+        <h2>Change password</h2>
+        <input id="current-password" name="current_password" type="password" autocomplete="current-password" />
+        <input id="new-password" name="new_password" type="password" autocomplete="new-password" />
+        <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
+      </section>
+    `;
+
+    fillLoginForm({ password: "old-secret", newPassword: "new-secret" });
+
+    expect((document.querySelector("#current-password") as HTMLInputElement).value).toBe(
+      "old-secret"
+    );
+    expect((document.querySelector("#new-password") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+    expect((document.querySelector("#confirm-password") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+  });
+
   it("fills the username in a change-password form when one is required", () => {
     document.body.innerHTML = `
       <form>

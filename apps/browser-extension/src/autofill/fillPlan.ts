@@ -364,6 +364,23 @@ function fieldIsInForm(field: AutofillTriageFieldResult, formOpid: string | unde
   return field.formOpid === formOpid;
 }
 
+function credentialScopeKey(field: AutofillTriageFieldResult) {
+  if (field.formOpid !== undefined) {
+    return `form:${field.formOpid}`;
+  }
+  if (field.containerOpid !== undefined) {
+    return `container:${field.containerOpid}`;
+  }
+  return null;
+}
+
+function fieldIsInCredentialScope(
+  field: AutofillTriageFieldResult,
+  scopeKey: string
+) {
+  return credentialScopeKey(field) === scopeKey;
+}
+
 const CHANGE_PASSWORD_KEYWORDS = [
   "changepassword",
   "updatepassword",
@@ -437,10 +454,6 @@ function formHasRegistrationContext(formFields: AutofillTriageFieldResult[]) {
   );
 }
 
-function formHasRegistrationPasswordConfirmation(formFields: AutofillTriageFieldResult[]) {
-  return formFields.filter((field) => field.qualifiedAs === "newPassword").length > 1;
-}
-
 function formHasChangePasswordContext(formFields: AutofillTriageFieldResult[]) {
   const searchableText = formSearchText(formFields);
   return CHANGE_PASSWORD_KEYWORDS.some((keyword) => searchableText.includes(keyword));
@@ -451,16 +464,24 @@ function pickCurrentPasswordField(formFields: AutofillTriageFieldResult[]) {
   return passwordFields.find(isCurrentPasswordField) ?? null;
 }
 
-function formQualifiesForPasswordChange(
+function scopeQualifiesForPasswordChange(
   fields: AutofillTriageFieldResult[],
-  formOpid: string
+  scopeKey: string
 ) {
-  const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
+  const formFields = fields.filter((field) => fieldIsInCredentialScope(field, scopeKey));
   const currentPasswordField = pickCurrentPasswordField(formFields);
   const formNewPasswordFields = formFields.filter(
     (field) => field.qualifiedAs === "newPassword"
   );
   if (!currentPasswordField || !formNewPasswordFields.length) {
+    return false;
+  }
+  if (
+    scopeKey.startsWith("container:") &&
+    formFields.filter(
+      (field) => field.qualifiedAs === "password" || field.qualifiedAs === "newPassword"
+    ).length < 3
+  ) {
     return false;
   }
 
@@ -471,30 +492,48 @@ function formQualifiesForPasswordChange(
   return hasAutocompleteRoles || formHasChangePasswordContext(formFields);
 }
 
-function pickPasswordChangeFormOpid(
+function scopeHasCredentialCandidate(
+  fields: AutofillTriageFieldResult[],
+  scopeKey: string
+) {
+  return fields.some(
+    (field) =>
+      fieldIsInCredentialScope(field, scopeKey) &&
+      (field.qualifiedAs === "username" ||
+        field.qualifiedAs === "password" ||
+        field.qualifiedAs === "newPassword")
+  );
+}
+
+function pickPasswordChangeScopeKey(
   fields: AutofillTriageFieldResult[],
   allFields: AutofillTriageFieldResult[]
 ) {
   const newPasswordFields = fields.filter(
-    (field) => field.qualifiedAs === "newPassword" && field.formOpid !== undefined
+    (field) => field.qualifiedAs === "newPassword" && credentialScopeKey(field) !== null
   );
-  const formOpids = new Set(newPasswordFields.map((field) => field.formOpid));
+  const scopeKeys = new Set(
+    newPasswordFields
+      .map(credentialScopeKey)
+      .filter((scopeKey): scopeKey is string => scopeKey !== null)
+  );
 
-  const focusedField = allFields.find((field) => field.focused && field.formOpid !== undefined);
-  if (focusedField?.formOpid) {
-    if (formOpids.has(focusedField.formOpid)) {
-      return formQualifiesForPasswordChange(fields, focusedField.formOpid)
-        ? focusedField.formOpid
+  const focusedField = allFields.find((field) => field.focused && credentialScopeKey(field));
+  const focusedScopeKey = focusedField ? credentialScopeKey(focusedField) : null;
+  if (focusedScopeKey) {
+    if (scopeKeys.has(focusedScopeKey)) {
+      return scopeQualifiesForPasswordChange(fields, focusedScopeKey)
+        ? focusedScopeKey
         : null;
     }
-    if (formHasCredentialCandidate(fields, focusedField.formOpid)) {
+    if (scopeHasCredentialCandidate(fields, focusedScopeKey)) {
       return null;
     }
   }
 
-  for (const formOpid of formOpids) {
-    if (formOpid && formQualifiesForPasswordChange(fields, formOpid)) {
-      return formOpid;
+  for (const scopeKey of scopeKeys) {
+    if (scopeQualifiesForPasswordChange(fields, scopeKey)) {
+      return scopeKey;
     }
   }
 
@@ -503,10 +542,10 @@ function pickPasswordChangeFormOpid(
 
 function createPasswordChangeActions(
   fields: AutofillTriageFieldResult[],
-  formOpid: string | undefined,
+  scopeKey: string,
   payload: LoginFillPayload
 ): AutofillFillAction[] {
-  const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
+  const formFields = fields.filter((field) => fieldIsInCredentialScope(field, scopeKey));
   const currentPasswordField = pickCurrentPasswordField(formFields);
   const actions: AutofillFillAction[] = [];
 
@@ -593,7 +632,8 @@ function formHasCredentialSignal(
 
 function pickRegistrationFormOpid(
   fields: AutofillTriageFieldResult[],
-  allFields: AutofillTriageFieldResult[]
+  allFields: AutofillTriageFieldResult[],
+  options: { allowSingleNewPassword?: boolean } = {}
 ) {
   const newPasswordFields = fields.filter(
     (field) => field.qualifiedAs === "newPassword" && field.formOpid !== undefined
@@ -629,10 +669,13 @@ function pickRegistrationFormOpid(
       return null;
     }
     const formFields = fields.filter((field) => fieldIsInForm(field, formOpid));
+    const newPasswordCount = formFields.filter(
+      (field) => field.qualifiedAs === "newPassword"
+    ).length;
     if (
       formHasResetPasswordContext(formFields) ||
       !formHasRegistrationContext(formFields) ||
-      !formHasRegistrationPasswordConfirmation(formFields)
+      (newPasswordCount < 2 && options.allowSingleNewPassword !== true)
     ) {
       return null;
     }
@@ -907,29 +950,36 @@ export function createLoginFillPlan(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "username")
   ) ?? firstViewableSiteRuleField(report.fields, "username");
+  const siteRulePasswordChangeScopeKey = siteRulePasswordChangeField
+    ? credentialScopeKey(siteRulePasswordChangeField)
+    : null;
   const passwordChangeFields =
-    siteRulePasswordChangeField?.formOpid !== undefined
-      ? fields.filter((field) => fieldIsInForm(field, siteRulePasswordChangeField.formOpid))
+    siteRulePasswordChangeScopeKey !== null
+      ? fields.filter((field) =>
+          fieldIsInCredentialScope(field, siteRulePasswordChangeScopeKey)
+        )
       : fields;
   const passwordChangeAllFields =
-    siteRulePasswordChangeField?.formOpid !== undefined
+    siteRulePasswordChangeScopeKey !== null
       ? report.fields.filter((field) =>
-          fieldIsInForm(field, siteRulePasswordChangeField.formOpid)
+          fieldIsInCredentialScope(field, siteRulePasswordChangeScopeKey)
         )
       : report.fields;
-  const passwordChangeFormOpid =
+  const passwordChangeScopeKey =
     typeof payload.password === "string" && typeof payload.newPassword === "string"
-      ? pickPasswordChangeFormOpid(passwordChangeFields, passwordChangeAllFields)
+      ? pickPasswordChangeScopeKey(passwordChangeFields, passwordChangeAllFields)
       : null;
   const registrationFormOpid =
     typeof payload.password === "string" || typeof payload.newPassword === "string"
-      ? pickRegistrationFormOpid(fields, report.fields)
+      ? pickRegistrationFormOpid(fields, report.fields, {
+          allowSingleNewPassword: typeof payload.newPassword === "string"
+        })
       : null;
 
-  if (passwordChangeFormOpid !== null) {
+  if (passwordChangeScopeKey !== null) {
     appendFallbackActions(
       actions,
-      createPasswordChangeActions(fields, passwordChangeFormOpid, payload)
+      createPasswordChangeActions(fields, passwordChangeScopeKey, payload)
     );
     if (typeof payload.totp === "string") {
       appendFallbackActions(actions, createTotpActions(report.fields, payload.totp));
