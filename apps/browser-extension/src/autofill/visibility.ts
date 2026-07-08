@@ -584,6 +584,44 @@ function filterOpacityValue(value: string | undefined) {
   return found ? opacity : null;
 }
 
+function cssFilterPaintCollapseColor(value: string | undefined): CssColorRgba | null {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return null;
+  }
+
+  let collapsedColor: CssColorRgba | null = null;
+  let collapsedAlpha = 1;
+  for (const match of normalized.matchAll(/([a-z-]+)\(([^)]*)\)/g)) {
+    const name = match[1];
+    const body = match[2];
+    if (name === "brightness") {
+      const brightness = cssOpacityValue(body);
+      if (brightness !== null && brightness <= 0) {
+        collapsedColor = { r: 0, g: 0, b: 0, a: collapsedAlpha };
+      }
+      continue;
+    }
+    if (collapsedColor === null) {
+      continue;
+    }
+    if (name === "opacity") {
+      const opacity = cssOpacityValue(body);
+      if (opacity !== null) {
+        collapsedAlpha *= opacity;
+        collapsedColor = { ...collapsedColor, a: collapsedAlpha };
+      }
+      continue;
+    }
+    if (name === "blur") {
+      continue;
+    }
+    return null;
+  }
+
+  return collapsedColor;
+}
+
 function localCssUrlReferenceIds(value: string | undefined) {
   const references: string[] = [];
   const normalized = value?.trim();
@@ -1171,6 +1209,15 @@ function fieldChromePaintBlendsIntoBackground(
 ) {
   const background = fieldEffectiveBackgroundColor(style, current);
   const textColor = cssColorRgba(fieldTextPaintColor(style, current));
+  const collapsedFilterColor = cssFilterPaintCollapseColor(
+    cssPropertyValue(style, current, "filter")
+  );
+  if (collapsedFilterColor !== null) {
+    return !cssColorContrastsWithBackground(
+      collapsedFilterColor,
+      nearestOpaqueAncestorBackgroundColor(current)
+    );
+  }
   return (
     !fieldHasPlaceholderText(current) &&
     fieldTextPaintBlendsWithBackground(style, current) &&
