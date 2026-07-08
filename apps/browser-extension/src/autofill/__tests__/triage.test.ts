@@ -2847,6 +2847,79 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields missed by ancestor masks as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <mask id="rightMask">
+            <rect x="320" y="0" width="80" height="40" fill="white" />
+          </mask>
+        </svg>
+        <label id="css-mask-label" for="ancestor-css-mask-password">Password</label>
+        <div id="ancestor-css-mask" style="width:400px;height:40px;mask-image:linear-gradient(black,black);mask-size:80px 100%;mask-repeat:no-repeat;mask-position:320px 0">
+          <input id="ancestor-css-mask-password" name="ancestor_css_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <label id="svg-mask-label" for="ancestor-svg-mask-password">Password</label>
+        <div id="ancestor-svg-mask" style="width:400px;height:40px;mask:url(#rightMask)">
+          <input id="ancestor-svg-mask-password" name="ancestor_svg_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const cssMaskPassword = document.querySelector(
+      "#ancestor-css-mask-password"
+    ) as HTMLInputElement;
+    const svgMaskPassword = document.querySelector(
+      "#ancestor-svg-mask-password"
+    ) as HTMLInputElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    const cssMaskLabel = document.querySelector("#css-mask-label") as HTMLLabelElement;
+    const svgMaskLabel = document.querySelector("#svg-mask-label") as HTMLLabelElement;
+    stubElementRect(cssMaskPassword, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(svgMaskPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    stubElementRect(realPassword, elementRect({ left: 24, top: 152, width: 185, height: 21 }));
+    stubElementRect(cssMaskLabel, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(svgMaskLabel, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    stubElementRect(
+      document.querySelector("#ancestor-css-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-svg-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 88, width: 400, height: 40 })
+    );
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return cssMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return svgMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 152 && y <= 173) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    for (const name of ["ancestor_css_mask_password", "ancestor_svg_mask_password"]) {
+      expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
+      expect(fieldByName(report, name).reasons).toContain("not-viewable:transparent");
+    }
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("lets current-password fields override mixed sign-in and signup copy", () => {
     document.body.innerHTML = `
       <form id="mixed-auth">

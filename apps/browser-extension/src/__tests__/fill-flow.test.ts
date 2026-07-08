@@ -1015,6 +1015,97 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not treat visible labels as enough for ancestor-masked password decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <mask id="rightMask">
+            <rect x="320" y="0" width="80" height="40" fill="white" />
+          </mask>
+        </svg>
+        <label id="css-mask-label" for="ancestor-css-mask-password">Password</label>
+        <div id="ancestor-css-mask" style="width:400px;height:40px;mask-image:linear-gradient(black,black);mask-size:80px 100%;mask-repeat:no-repeat;mask-position:320px 0">
+          <input id="ancestor-css-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <label id="svg-mask-label" for="ancestor-svg-mask-password">Password</label>
+        <div id="ancestor-svg-mask" style="width:400px;height:40px;mask:url(#rightMask)">
+          <input id="ancestor-svg-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const cssMaskPassword = document.querySelector(
+      "#ancestor-css-mask-password"
+    ) as HTMLInputElement;
+    const svgMaskPassword = document.querySelector(
+      "#ancestor-svg-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const cssMaskLabel = document.querySelector("#css-mask-label") as HTMLLabelElement;
+    const svgMaskLabel = document.querySelector("#svg-mask-label") as HTMLLabelElement;
+    stubElementRect(cssMaskPassword, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(svgMaskPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 152, width: 185, height: 21 }));
+    stubElementRect(cssMaskLabel, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(svgMaskLabel, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    stubElementRect(
+      document.querySelector("#ancestor-css-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-svg-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 88, width: 400, height: 40 })
+    );
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return cssMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return svgMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 152 && y <= 173) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(cssMaskPassword.value).toBe("");
+    expect(svgMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
+  it("fills password fields when an ancestor mask contains the control", () => {
+    document.body.innerHTML = `
+      <form>
+        <div id="ancestor-mask" style="width:400px;height:40px;mask-image:linear-gradient(black,black);mask-size:240px 100%;mask-repeat:no-repeat;mask-position:0 0">
+          <input id="login-password" type="password" autocomplete="current-password" />
+        </div>
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector("#ancestor-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#login-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill near-total clipped password decoys", () => {
     document.body.innerHTML = `
       <style>

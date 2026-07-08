@@ -2012,6 +2012,155 @@ function maskPositionSuppressesPaint(
   });
 }
 
+function maskAxisVisibleBounds(
+  axisSize: number,
+  imageSize: number,
+  offset: number | null,
+  repeatsAxis: boolean
+) {
+  if (offset === null || repeatsAxis) {
+    return { start: 0, end: axisSize };
+  }
+  return {
+    start: Math.max(0, offset),
+    end: Math.min(axisSize, offset + imageSize)
+  };
+}
+
+function maskLayerVisibleBounds(
+  positionValue: string | undefined,
+  sizeValue: string | undefined,
+  repeatValue: string | undefined,
+  current: HTMLElement,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const rect = current.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return null;
+  }
+
+  const size = maskLayerSize(sizeValue, rect, units);
+  const position = positionValue?.trim() || "0% 0%";
+  const x = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "x"),
+    rect.width,
+    size.width,
+    units
+  );
+  const y = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "y"),
+    rect.height,
+    size.height,
+    units
+  );
+  const xBounds = maskAxisVisibleBounds(
+    rect.width,
+    size.width,
+    x,
+    maskRepeatRepeatsAxis(repeatValue, "x")
+  );
+  const yBounds = maskAxisVisibleBounds(
+    rect.height,
+    size.height,
+    y,
+    maskRepeatRepeatsAxis(repeatValue, "y")
+  );
+  return {
+    left: xBounds.start,
+    top: yBounds.start,
+    right: xBounds.end,
+    bottom: yBounds.end
+  };
+}
+
+function cssMaskVisibleBounds(
+  current: HTMLElement,
+  imageValue: string | undefined,
+  positionValue: string | undefined,
+  sizeValue: string | undefined,
+  repeatValue: string | undefined,
+  modeValue: string | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const trimmed = imageValue?.trim();
+  const normalized = trimmed?.toLowerCase();
+  if (!normalized || normalized === "none") {
+    return null;
+  }
+
+  const imageLayers = splitCssCommaList(trimmed ?? "");
+  const positionLayers = splitCssCommaList(positionValue?.trim().toLowerCase() ?? "");
+  const sizeLayers = splitCssCommaList(sizeValue?.trim().toLowerCase() ?? "");
+  const repeatLayers = splitCssCommaList(repeatValue?.trim().toLowerCase() ?? "");
+  const bounds = imageLayers.flatMap((layer, index) => {
+    const svgBounds = svgMaskVisibleBounds(current, layer, units);
+    if (svgBounds !== null) {
+      return [svgBounds];
+    }
+    if (maskImageFullySuppressesPaint(layer, modeValue)) {
+      return [];
+    }
+    const layerBounds = maskLayerVisibleBounds(
+      maskLayerValue(positionLayers, index),
+      maskLayerValue(sizeLayers, index),
+      maskLayerValue(repeatLayers, index),
+      current,
+      units
+    );
+    return layerBounds === null ? [] : [layerBounds];
+  });
+  return unionBounds(bounds);
+}
+
+function maskStyleVisibleBounds(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  units: { emPx?: number; remPx?: number }
+) {
+  const maskMode = cssPropertyValue(style, current, "mask-mode");
+  const webkitMaskMode = cssPropertyValue(style, current, "-webkit-mask-mode") || maskMode;
+  return unionBounds(
+    [
+      cssMaskVisibleBounds(
+        current,
+        cssPropertyValue(style, current, "mask-image"),
+        cssPropertyValue(style, current, "mask-position"),
+        cssPropertyValue(style, current, "mask-size"),
+        cssPropertyValue(style, current, "mask-repeat"),
+        maskMode,
+        units
+      ),
+      cssMaskVisibleBounds(
+        current,
+        cssPropertyValue(style, current, "-webkit-mask-image"),
+        cssPropertyValue(style, current, "-webkit-mask-position"),
+        cssPropertyValue(style, current, "-webkit-mask-size"),
+        cssPropertyValue(style, current, "-webkit-mask-repeat"),
+        webkitMaskMode,
+        units
+      ),
+      cssMaskVisibleBounds(
+        current,
+        cssPropertyValue(style, current, "mask"),
+        cssPropertyValue(style, current, "mask-position"),
+        cssPropertyValue(style, current, "mask-size"),
+        cssPropertyValue(style, current, "mask-repeat"),
+        maskMode,
+        units
+      ),
+      cssMaskVisibleBounds(
+        current,
+        cssPropertyValue(style, current, "-webkit-mask"),
+        cssPropertyValue(style, current, "-webkit-mask-position"),
+        cssPropertyValue(style, current, "-webkit-mask-size"),
+        cssPropertyValue(style, current, "-webkit-mask-repeat"),
+        webkitMaskMode,
+        units
+      )
+    ].filter((bounds): bounds is RectBounds => bounds !== null)
+  );
+}
+
 function svgElementOpacityValue(
   shape: Element,
   attribute: string,
@@ -2082,6 +2231,69 @@ function svgMaskShapeSuppressesPaint(
     svgClipShapeSuppressesField(current, shape, units) ||
     svgPaintSuppressesMask(shape, shapeStyle)
   );
+}
+
+function svgMaskShapeVisibleBounds(
+  current: HTMLElement,
+  shape: Element,
+  units: { emPx?: number; remPx?: number },
+  seen: Set<Element> = new Set()
+): RectBounds | null {
+  if (seen.has(shape)) {
+    return null;
+  }
+  seen.add(shape);
+
+  const tagName = shape.tagName.toLowerCase();
+  const shapeStyle = shape.ownerDocument.defaultView?.getComputedStyle(shape);
+  if (svgMaskOpacitySuppressesPaint(shape, shapeStyle)) {
+    return null;
+  }
+  if (tagName === "use") {
+    const href =
+      shape.getAttribute("href") ??
+      shape.getAttribute("xlink:href") ??
+      shape.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+    const targetId = href?.startsWith("#") ? href.slice(1) : null;
+    const target = targetId ? current.ownerDocument.getElementById(targetId) : null;
+    return target === null ? null : svgMaskShapeVisibleBounds(current, target, units, seen);
+  }
+  if (shape.children.length > 0 && (tagName === "g" || tagName === "svg" || tagName === "mask")) {
+    return unionBounds(
+      Array.from(shape.children)
+        .map((child) => svgMaskShapeVisibleBounds(current, child, units, seen))
+        .filter((bounds): bounds is RectBounds => bounds !== null)
+    );
+  }
+  if (svgPaintSuppressesMask(shape, shapeStyle)) {
+    return null;
+  }
+  return svgClipShapeVisibleBounds(current, shape, units);
+}
+
+function svgMaskVisibleBounds(
+  current: HTMLElement,
+  value: string | undefined,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const bounds = localCssUrlReferenceIds(value)
+    .map((id) => {
+      const mask = current.ownerDocument.getElementById(id);
+      if (!mask || mask.tagName.toLowerCase() !== "mask") {
+        return null;
+      }
+      const maskStyle = mask.ownerDocument.defaultView?.getComputedStyle(mask);
+      if (svgMaskOpacitySuppressesPaint(mask, maskStyle)) {
+        return null;
+      }
+      return unionBounds(
+        Array.from(mask.children)
+          .map((shape) => svgMaskShapeVisibleBounds(current, shape, units))
+          .filter((shapeBounds): shapeBounds is RectBounds => shapeBounds !== null)
+      );
+    })
+    .filter((maskBounds): maskBounds is RectBounds => maskBounds !== null);
+  return unionBounds(bounds);
 }
 
 function svgMaskSuppressesPaint(
@@ -3238,6 +3450,23 @@ function ancestorClipStyleSuppressesField(
     (bounds): bounds is RectBounds =>
       bounds !== null && boundsOverlapSuppressesField(bounds, fieldBounds)
   );
+}
+
+function ancestorMaskStyleSuppressesField(
+  element: HTMLElement,
+  current: HTMLElement,
+  style: CSSStyleDeclaration | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  if (current === element) {
+    return false;
+  }
+  const fieldBounds = elementRectRelativeToAncestor(element, current);
+  if (fieldBounds === null) {
+    return false;
+  }
+  const maskBounds = maskStyleVisibleBounds(style, current, units);
+  return maskBounds !== null && boundsOverlapSuppressesField(maskBounds, fieldBounds);
 }
 
 function splitCssTopLevel(value: string, shouldSplit: (char: string) => boolean) {
@@ -4907,6 +5136,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       isEffectivelyTransparent(cumulativeOpacity * cumulativeFilterOpacity) ||
       svgFilterSuppressesPaint(current, filter, cssUnits, element) ||
       maskStyleSuppressesPaint(style, current, cssUnits) ||
+      ancestorMaskStyleSuppressesField(element, current, style, cssUnits) ||
       (current === element &&
         isCredentialLikeField(element) &&
         (fieldChromePaintIsTransparent(style, current, cssUnits) ||
