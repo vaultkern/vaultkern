@@ -602,6 +602,13 @@ function cssFilterPaintCollapseColor(value: string | undefined): CssColorRgba | 
       }
       continue;
     }
+    if (name === "contrast") {
+      const contrast = cssOpacityValue(body);
+      if (contrast !== null && contrast <= 0) {
+        collapsedColor = { r: 128, g: 128, b: 128, a: collapsedAlpha };
+      }
+      continue;
+    }
     if (collapsedColor === null) {
       continue;
     }

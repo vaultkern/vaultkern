@@ -464,6 +464,9 @@ describe("fillLoginForm", () => {
         <div style="background:black">
           <input id="filter-darkened-password" type="password" autocomplete="current-password" style="filter:brightness(0);background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
         </div>
+        <div style="background:rgb(128, 128, 128)">
+          <input id="filter-contrast-password" type="password" autocomplete="current-password" style="filter:contrast(0);background:white;color:black;border:1px solid white" />
+        </div>
         <input id="font-zero-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;font-size:0;outline:0;box-shadow:none;text-shadow:none" />
         <input id="text-indent-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;text-indent:-9999px;outline:0;box-shadow:none;text-shadow:none" />
         <input id="occluded-password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:88px;width:185px;height:21px" />
@@ -723,6 +726,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#same-color-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#same-color-border-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#filter-darkened-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#filter-contrast-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#font-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#text-indent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#occluded-password") as HTMLInputElement).value).toBe("");
