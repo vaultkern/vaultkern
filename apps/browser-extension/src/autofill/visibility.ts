@@ -1337,17 +1337,57 @@ function fieldChromePaintIsTransparent(
   );
 }
 
-function nearestOpaqueAncestorBackgroundColor(current: HTMLElement) {
+interface AncestorBackgroundPaint {
+  color: CssColorRgba;
+  element: HTMLElement | null;
+}
+
+function nearestOpaqueAncestorBackground(current: HTMLElement): AncestorBackgroundPaint {
   let ancestor = parentElementOrShadowHost(current);
   while (ancestor) {
     const style = ancestor.ownerDocument.defaultView?.getComputedStyle(ancestor);
     const color = elementBackgroundPaintColor(style, ancestor);
     if (cssColorIsOpaque(color)) {
-      return color;
+      return { color, element: ancestor };
     }
     ancestor = parentElementOrShadowHost(ancestor);
   }
-  return { r: 255, g: 255, b: 255, a: 1 };
+  return { color: { r: 255, g: 255, b: 255, a: 1 }, element: null };
+}
+
+function nearestOpaqueAncestorBackgroundColor(current: HTMLElement) {
+  return nearestOpaqueAncestorBackground(current).color;
+}
+
+function cssFilterChainForPaintSource(current: HTMLElement | null) {
+  const filters: string[] = [];
+  for (
+    let paintSource: HTMLElement | null = current;
+    paintSource;
+    paintSource = parentElementOrShadowHost(paintSource)
+  ) {
+    const style = paintSource.ownerDocument.defaultView?.getComputedStyle(paintSource);
+    const filter = cssPropertyValue(style, paintSource, "filter");
+    if (isMeaningfulCssValue(filter)) {
+      filters.push(filter);
+    }
+  }
+  return filters.join(" ");
+}
+
+function cssBlendModeForPaintSource(current: HTMLElement | null) {
+  for (
+    let paintSource: HTMLElement | null = current;
+    paintSource;
+    paintSource = parentElementOrShadowHost(paintSource)
+  ) {
+    const style = paintSource.ownerDocument.defaultView?.getComputedStyle(paintSource);
+    const blendMode = cssPropertyValue(style, paintSource, "mix-blend-mode");
+    if (cssBlendMode(blendMode) !== "normal") {
+      return blendMode;
+    }
+  }
+  return "";
 }
 
 function fieldHasPlaceholderText(current: HTMLElement) {
@@ -1442,13 +1482,18 @@ function fieldChromePaintBlendsIntoBackground(
   current: HTMLElement,
   units: { emPx?: number; remPx?: number }
 ) {
-  const filter = cssPropertyValue(style, current, "filter");
-  const blendMode = cssPropertyValue(style, current, "mix-blend-mode");
+  const filter = cssFilterChainForPaintSource(current);
+  const blendMode = cssBlendModeForPaintSource(current);
   const backgroundImage = cssPropertyValue(style, current, "background-image");
   const hasUnmodeledBackgroundImage =
     !cssPaintListLooksEmpty(backgroundImage) &&
     cssBackgroundImageSolidColor(backgroundImage) === null;
-  const ancestorBackground = nearestOpaqueAncestorBackgroundColor(current);
+  const backgroundPaint = nearestOpaqueAncestorBackground(current);
+  const ancestorBackground =
+    cssFilterPaintColor(
+      cssFilterChainForPaintSource(backgroundPaint.element),
+      backgroundPaint.color
+    ) ?? backgroundPaint.color;
   const ownBackground = fieldOwnBackgroundColor(style, current);
   const paintedOwnBackground = cssPaintColorOnBackground(
     filter,

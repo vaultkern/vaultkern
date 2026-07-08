@@ -468,13 +468,27 @@ describe("fillLoginForm", () => {
         <div style="background:black">
           <input id="filter-darkened-password" type="password" autocomplete="current-password" style="filter:brightness(0);background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
         </div>
+        <div style="background:black;filter:brightness(0)">
+          <input id="ancestor-filter-darkened-password" type="password" autocomplete="current-password" style="background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
+        </div>
         <div style="background:rgb(128, 128, 128)">
           <input id="filter-contrast-password" type="password" autocomplete="current-password" style="filter:contrast(0);background:white;color:black;border:1px solid white" />
         </div>
+        <div style="background:rgb(128, 128, 128);filter:contrast(0)">
+          <input id="ancestor-filter-contrast-password" type="password" autocomplete="current-password" style="background:white;color:black;border:1px solid white" />
+        </div>
         <input id="filter-inverted-password" type="password" autocomplete="current-password" style="filter:invert(1);background:black;color:black;-webkit-text-fill-color:black;border:1px solid black" />
         <input id="blend-screen-password" type="password" autocomplete="current-password" style="mix-blend-mode:screen;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black" />
+        <div style="mix-blend-mode:screen">
+          <input id="ancestor-blend-screen-password" type="password" autocomplete="current-password" style="background:black;color:black;-webkit-text-fill-color:black;border:1px solid black" />
+        </div>
         <div style="background:black">
           <input id="blend-multiply-password" type="password" autocomplete="current-password" style="mix-blend-mode:multiply;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
+        </div>
+        <div style="background:black">
+          <div style="mix-blend-mode:multiply">
+            <input id="ancestor-blend-multiply-password" type="password" autocomplete="current-password" style="background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
+          </div>
         </div>
         <div style="background-image:linear-gradient(black, black)">
           <input id="gradient-backdrop-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
@@ -740,10 +754,22 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#same-color-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#same-color-border-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#filter-darkened-password") as HTMLInputElement).value).toBe("");
+    expect(
+      (document.querySelector("#ancestor-filter-darkened-password") as HTMLInputElement).value
+    ).toBe("");
     expect((document.querySelector("#filter-contrast-password") as HTMLInputElement).value).toBe("");
+    expect(
+      (document.querySelector("#ancestor-filter-contrast-password") as HTMLInputElement).value
+    ).toBe("");
     expect((document.querySelector("#filter-inverted-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#blend-screen-password") as HTMLInputElement).value).toBe("");
+    expect(
+      (document.querySelector("#ancestor-blend-screen-password") as HTMLInputElement).value
+    ).toBe("");
     expect((document.querySelector("#blend-multiply-password") as HTMLInputElement).value).toBe("");
+    expect(
+      (document.querySelector("#ancestor-blend-multiply-password") as HTMLInputElement).value
+    ).toBe("");
     expect((document.querySelector("#gradient-backdrop-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#font-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#text-indent-password") as HTMLInputElement).value).toBe("");

@@ -1665,13 +1665,27 @@ describe("autofill triage", () => {
         <div style="background:black">
           <input name="filter_darkened_password" type="password" autocomplete="current-password" style="filter:brightness(0);background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
         </div>
+        <div style="background:black;filter:brightness(0)">
+          <input name="ancestor_filter_darkened_password" type="password" autocomplete="current-password" style="background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
+        </div>
         <div style="background:rgb(128, 128, 128)">
           <input name="filter_contrast_password" type="password" autocomplete="current-password" style="filter:contrast(0);background:white;color:black;border:1px solid white" />
         </div>
+        <div style="background:rgb(128, 128, 128);filter:contrast(0)">
+          <input name="ancestor_filter_contrast_password" type="password" autocomplete="current-password" style="background:white;color:black;border:1px solid white" />
+        </div>
         <input name="filter_inverted_password" type="password" autocomplete="current-password" style="filter:invert(1);background:black;color:black;-webkit-text-fill-color:black;border:1px solid black" />
         <input name="blend_screen_password" type="password" autocomplete="current-password" style="mix-blend-mode:screen;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black" />
+        <div style="mix-blend-mode:screen">
+          <input name="ancestor_blend_screen_password" type="password" autocomplete="current-password" style="background:black;color:black;-webkit-text-fill-color:black;border:1px solid black" />
+        </div>
         <div style="background:black">
           <input name="blend_multiply_password" type="password" autocomplete="current-password" style="mix-blend-mode:multiply;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
+        </div>
+        <div style="background:black">
+          <div style="mix-blend-mode:multiply">
+            <input name="ancestor_blend_multiply_password" type="password" autocomplete="current-password" style="background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
+          </div>
         </div>
         <div style="background-image:linear-gradient(black, black)">
           <input name="gradient_backdrop_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
@@ -1750,10 +1764,14 @@ describe("autofill triage", () => {
       "same_color_password",
       "same_color_border_password",
       "filter_darkened_password",
+      "ancestor_filter_darkened_password",
       "filter_contrast_password",
+      "ancestor_filter_contrast_password",
       "filter_inverted_password",
       "blend_screen_password",
+      "ancestor_blend_screen_password",
       "blend_multiply_password",
+      "ancestor_blend_multiply_password",
       "gradient_backdrop_password",
       "font_zero_password",
       "text_indent_password"
@@ -1789,14 +1807,28 @@ describe("autofill triage", () => {
           <input name="contrast_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
         </div>
         <input name="visible_darkened_password" type="password" autocomplete="current-password" style="filter:brightness(0);background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
+        <div style="filter:brightness(0)">
+          <input name="visible_ancestor_darkened_password" type="password" autocomplete="current-password" style="background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
+        </div>
         <input name="visible_contrast_password" type="password" autocomplete="current-password" style="filter:contrast(0);background:white;color:black;border:1px solid white" />
+        <div style="filter:contrast(0)">
+          <input name="visible_ancestor_contrast_password" type="password" autocomplete="current-password" style="background:white;color:black;border:1px solid white" />
+        </div>
         <div style="background:black">
           <input name="visible_inverted_password" type="password" autocomplete="current-password" style="filter:invert(1);background:black;color:black;-webkit-text-fill-color:black;border:1px solid black" />
         </div>
         <div style="background:black">
           <input name="visible_screen_blend_password" type="password" autocomplete="current-password" style="mix-blend-mode:screen;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
         </div>
+        <div style="background:black">
+          <div style="mix-blend-mode:screen">
+            <input name="visible_ancestor_screen_blend_password" type="password" autocomplete="current-password" style="background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
+          </div>
+        </div>
         <input name="visible_multiply_blend_password" type="password" autocomplete="current-password" style="mix-blend-mode:multiply;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black" />
+        <div style="mix-blend-mode:multiply">
+          <input name="visible_ancestor_multiply_blend_password" type="password" autocomplete="current-password" style="background:black;color:black;-webkit-text-fill-color:black;border:1px solid black" />
+        </div>
         <div style="background-image:linear-gradient(black, black)">
           <input name="visible_gradient_backdrop_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white;outline:0;box-shadow:none;text-shadow:none" />
         </div>
@@ -1832,8 +1864,20 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "visible_darkened_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
+    expect(fieldByName(report, "visible_ancestor_darkened_password").qualifiedAs).toBe(
+      "password"
+    );
+    expect(fieldByName(report, "visible_ancestor_darkened_password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
     expect(fieldByName(report, "visible_contrast_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "visible_contrast_password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "visible_ancestor_contrast_password").qualifiedAs).toBe(
+      "password"
+    );
+    expect(fieldByName(report, "visible_ancestor_contrast_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
     expect(fieldByName(report, "visible_inverted_password").qualifiedAs).toBe("password");
@@ -1844,8 +1888,20 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "visible_screen_blend_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
+    expect(fieldByName(report, "visible_ancestor_screen_blend_password").qualifiedAs).toBe(
+      "password"
+    );
+    expect(fieldByName(report, "visible_ancestor_screen_blend_password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
     expect(fieldByName(report, "visible_multiply_blend_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "visible_multiply_blend_password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "visible_ancestor_multiply_blend_password").qualifiedAs).toBe(
+      "password"
+    );
+    expect(fieldByName(report, "visible_ancestor_multiply_blend_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
     expect(fieldByName(report, "visible_gradient_backdrop_password").qualifiedAs).toBe("password");
