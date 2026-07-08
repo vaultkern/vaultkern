@@ -1624,6 +1624,7 @@ describe("autofill triage", () => {
         <input name="radial_shape_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(circle, transparent, transparent)" />
         <input name="conic_from_mask_password" type="password" autocomplete="current-password" style="mask-image:conic-gradient(from 0deg, transparent, transparent)" />
         <input name="linear_color_space_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(in oklab, transparent, transparent)" />
+        <input name="color_function_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(color(srgb 0 0 0 / 0), color(srgb 0 0 0 / 0))" />
         <input name="black_luminance_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black, black);mask-mode:luminance" />
         <input name="radial_black_luminance_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(circle, black, black);mask-mode:luminance" />
         <input name="stop_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
@@ -1749,6 +1750,7 @@ describe("autofill triage", () => {
       "radial_shape_mask_password",
       "conic_from_mask_password",
       "linear_color_space_mask_password",
+      "color_function_mask_password",
       "black_luminance_mask_password",
       "radial_black_luminance_mask_password",
       "stop_mask_password",

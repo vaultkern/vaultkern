@@ -1002,11 +1002,19 @@ function svgFilterSuppressesPaint(
 
 function cssColorLooksTransparent(value: string) {
   const normalized = value.trim().toLowerCase();
+  const functionalColor = normalized.match(/^([a-z][a-z0-9-]*)\((.*)\)$/);
+  const functionalColorAlpha =
+    functionalColor && functionalColor[2].includes("/")
+      ? cssAlphaChannel(
+          splitCssFunctionArgs(functionalColor[2].slice(functionalColor[2].lastIndexOf("/") + 1))[0]
+        )
+      : null;
   return (
     normalized === "transparent" ||
     normalized.startsWith("transparent ") ||
     /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(normalized) ||
     /^rgba?\([^)]*\/\s*0(?:%|\.0+)?\s*\)$/.test(normalized) ||
+    (functionalColorAlpha !== null && functionalColorAlpha <= MIN_VISIBLE_OPACITY) ||
     (/^#[0-9a-f]{4}$/.test(normalized) && normalized.endsWith("0")) ||
     (/^#[0-9a-f]{8}$/.test(normalized) && normalized.endsWith("00"))
   );

@@ -417,6 +417,7 @@ describe("fillLoginForm", () => {
         <input id="mask-radial-shape-password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(circle, transparent, transparent)" />
         <input id="mask-conic-password" type="password" autocomplete="current-password" style="mask-image:conic-gradient(from 0deg, transparent, transparent)" />
         <input id="mask-color-space-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(in oklab, transparent, transparent)" />
+        <input id="mask-color-function-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(color(srgb 0 0 0 / 0), color(srgb 0 0 0 / 0))" />
         <input id="mask-luminance-black-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black, black);mask-mode:luminance" />
         <input id="mask-stop-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
         <svg width="0" height="0" aria-hidden="true">
@@ -736,6 +737,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#mask-radial-shape-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-conic-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-color-space-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-color-function-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-luminance-black-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-stop-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-url-password") as HTMLInputElement).value).toBe("");
