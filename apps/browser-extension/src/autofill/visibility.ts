@@ -154,12 +154,12 @@ function isLargeOffscreenOffset(value: number | null) {
   return value !== null && Math.abs(value) >= OFFSCREEN_OFFSET_PX;
 }
 
-function isNonZeroOffset(value: number | null) {
-  return value !== null && Math.abs(value) > 0;
-}
-
 function isNegativeOffset(value: number | null) {
   return value !== null && value < 0;
+}
+
+function isPositiveOffset(value: number | null) {
+  return value !== null && value > 0;
 }
 
 function isMeaningfulCssValue(value: string) {
@@ -387,6 +387,70 @@ function hasMeaningfulClientRect(rect: DOMRect) {
   return rect.width > 0 && rect.height > 0;
 }
 
+function viewportSize(element: HTMLElement) {
+  const view = element.ownerDocument.defaultView;
+  const documentElement = element.ownerDocument.documentElement;
+  return {
+    width: view?.innerWidth ?? documentElement.clientWidth,
+    height: view?.innerHeight ?? documentElement.clientHeight
+  };
+}
+
+function viewportExitForRect(element: HTMLElement) {
+  const rect = element.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return null;
+  }
+  const viewport = viewportSize(element);
+  return {
+    rect,
+    viewportWidth: viewport.width,
+    viewportHeight: viewport.height,
+    beforeX: rect.right <= 0,
+    afterX: viewport.width > 0 && rect.left >= viewport.width,
+    beforeY: rect.bottom <= 0,
+    afterY: viewport.height > 0 && rect.top >= viewport.height
+  };
+}
+
+type ViewportExit = NonNullable<ReturnType<typeof viewportExitForRect>>;
+
+function inverseOffset(value: number | null) {
+  return value === null ? null : -value;
+}
+
+function horizontalOffsetMatchesViewportExit(
+  viewportExit: ViewportExit | null,
+  offset: number | null
+) {
+  if (viewportExit === null || offset === null) {
+    return false;
+  }
+  if (viewportExit.beforeX && isNegativeOffset(offset)) {
+    return viewportExit.rect.right - offset > 0;
+  }
+  if (viewportExit.afterX && isPositiveOffset(offset)) {
+    return viewportExit.rect.left - offset < viewportExit.viewportWidth;
+  }
+  return false;
+}
+
+function verticalOffsetMatchesViewportExit(
+  viewportExit: ViewportExit | null,
+  offset: number | null
+) {
+  if (viewportExit === null || offset === null) {
+    return false;
+  }
+  if (viewportExit.beforeY && isNegativeOffset(offset)) {
+    return viewportExit.rect.bottom - offset > 0;
+  }
+  if (viewportExit.afterY && isPositiveOffset(offset)) {
+    return viewportExit.rect.top - offset < viewportExit.viewportHeight;
+  }
+  return false;
+}
+
 function rectsIntersect(left: DOMRect, right: DOMRect) {
   return (
     left.left < right.right &&
@@ -404,11 +468,6 @@ function isFullyClippedByAncestor(element: HTMLElement, ancestor: HTMLElement) {
     hasMeaningfulClientRect(ancestorRect) &&
     !rectsIntersect(elementRect, ancestorRect)
   );
-}
-
-function isEntirelyBeforeViewport(element: HTMLElement) {
-  const rect = element.getBoundingClientRect();
-  return hasMeaningfulClientRect(rect) && (rect.right <= 0 || rect.bottom <= 0);
 }
 
 function splitCssTopLevel(value: string, shouldSplit: (char: string) => boolean) {
@@ -591,6 +650,14 @@ function cssCoordinateNumber(value: string, units: { emPx?: number; remPx?: numb
   return cssInsetPercent(value) ?? numericCssValue(value, units);
 }
 
+function cssCoordinateToPx(
+  value: string,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number }
+) {
+  return cssLengthToPx(value, axisSize, units) ?? cssCoordinateNumber(value, units);
+}
+
 function insetPairSuppressesField(
   first: string,
   second: string,
@@ -665,28 +732,31 @@ function clipPathFullyClips(
 
   const polygonMatch = normalized.match(/^polygon\((.*)\)$/);
   if (polygonMatch) {
+    const rect = current.getBoundingClientRect();
     const points = splitCssCommaList(polygonMatch[1]).flatMap((point) => {
       const [x, y] = splitCssFunctionArgs(point);
-      const parsedX = x === undefined ? null : cssCoordinateNumber(x, units);
-      const parsedY = y === undefined ? null : cssCoordinateNumber(y, units);
+      const parsedX = x === undefined ? null : cssCoordinateToPx(x, rect.width, units);
+      const parsedY = y === undefined ? null : cssCoordinateToPx(y, rect.height, units);
       return parsedX === null || parsedY === null ? [] : [{ x: parsedX, y: parsedY }];
     });
     if (points.length < 3) {
       return false;
     }
-    const area = points.reduce((sum, point, index) => {
+    const doubledArea = points.reduce((sum, point, index) => {
       const next = points[(index + 1) % points.length];
       return sum + point.x * next.y - next.x * point.y;
     }, 0);
+    const area = Math.abs(doubledArea) / 2;
     const xValues = points.map((point) => point.x);
     const yValues = points.map((point) => point.y);
     const width = Math.max(...xValues) - Math.min(...xValues);
     const height = Math.max(...yValues) - Math.min(...yValues);
+    const rectArea = rect.width * rect.height;
     return (
-      Math.abs(area) <= Number.EPSILON ||
+      area <= Number.EPSILON ||
       width <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
       height <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
-      Math.abs(area) <= 10000 * MIN_CLIPPED_VISIBLE_FRACTION * MIN_CLIPPED_VISIBLE_FRACTION
+      (rectArea > 0 && area <= rectArea * MIN_CLIPPED_VISIBLE_FRACTION)
     );
   }
 
@@ -706,7 +776,14 @@ function legacyClipFullyClips(value: string, units: { emPx?: number; remPx?: num
   if (top === null || right === null || bottom === null || left === null) {
     return false;
   }
-  return right <= left || bottom <= top;
+  const visibleWidth = right - left;
+  const visibleHeight = bottom - top;
+  return (
+    visibleWidth <= 0 ||
+    visibleHeight <= 0 ||
+    visibleWidth <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    visibleHeight <= MIN_CREDENTIAL_FIELD_SIZE_PX
+  );
 }
 
 function hasFullyClippingStyle(
@@ -785,6 +862,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
   if (inputType === "hidden") {
     addReason(reasons, "not-viewable:hidden");
   }
+  const viewportExit = viewportExitForRect(element);
   for (
     let current: HTMLElement | null = element;
     current;
@@ -821,24 +899,24 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const bottom = computedCssValue(style?.bottom, current.style.bottom, cssUnits);
     const marginLeft = computedCssValue(style?.marginLeft, current.style.marginLeft, cssUnits);
     const marginTop = computedCssValue(style?.marginTop, current.style.marginTop, cssUnits);
-    const marginRight = computedCssValue(style?.marginRight, current.style.marginRight, cssUnits);
-    const marginBottom = computedCssValue(
-      style?.marginBottom,
-      current.style.marginBottom,
-      cssUnits
-    );
     const width = computedCssValue(style?.width, current.style.width, cssUnits);
     const height = computedCssValue(style?.height, current.style.height, cssUnits);
     const transform = combinedTranslateOffset(style, current, cssUnits);
-    const hasTransformOffset =
-      transform !== null && (isNonZeroOffset(transform.x) || isNonZeroOffset(transform.y));
-    const hasPositionOffset =
-      position !== undefined &&
-      position !== "static" &&
-      [left, top, right, bottom].some(isNonZeroOffset);
-    const hasNegativeMargin = [marginLeft, marginTop, marginRight, marginBottom].some(
-      isNegativeOffset
-    );
+    const isPositioned =
+      position !== undefined && position !== "" && position !== "static";
+    const hasDirectionalTransformOffset =
+      transform !== null &&
+      (horizontalOffsetMatchesViewportExit(viewportExit, transform.x) ||
+        verticalOffsetMatchesViewportExit(viewportExit, transform.y));
+    const hasDirectionalPositionOffset =
+      isPositioned &&
+      (horizontalOffsetMatchesViewportExit(viewportExit, left) ||
+        horizontalOffsetMatchesViewportExit(viewportExit, inverseOffset(right)) ||
+        verticalOffsetMatchesViewportExit(viewportExit, top) ||
+        verticalOffsetMatchesViewportExit(viewportExit, inverseOffset(bottom)));
+    const hasDirectionalMarginOffset =
+      horizontalOffsetMatchesViewportExit(viewportExit, marginLeft) ||
+      verticalOffsetMatchesViewportExit(viewportExit, marginTop);
     const hasHiddenVisibility =
       inlineVisibility === "hidden" ||
       style?.visibility === "hidden" ||
@@ -877,9 +955,10 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       addReason(reasons, "not-viewable:offscreen");
     }
     if (
-      current === element &&
-      isEntirelyBeforeViewport(element) &&
-      (hasTransformOffset || hasPositionOffset || hasNegativeMargin)
+      viewportExit !== null &&
+      (hasDirectionalTransformOffset ||
+        hasDirectionalPositionOffset ||
+        hasDirectionalMarginOffset)
     ) {
       addReason(reasons, "not-viewable:offscreen");
     }

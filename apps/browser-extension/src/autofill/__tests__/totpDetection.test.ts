@@ -140,6 +140,23 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#token") as HTMLInputElement).value).toBe("123456");
   });
 
+  it("fills the focused authenticator-code scope instead of declining multiple candidates", () => {
+    document.body.innerHTML = `
+      <form id="first" aria-label="Authenticator code">
+        <input id="first-code" name="code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+      <form id="second" aria-label="Authenticator code">
+        <input id="second-code" name="code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    (document.querySelector("#second-code") as HTMLInputElement).focus();
+    fillLoginForm({ totp: "123456" });
+
+    expect((document.querySelector("#first-code") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#second-code") as HTMLInputElement).value).toBe("123456");
+  });
+
   it("splits a TOTP value across one-character fields in document order", () => {
     document.body.innerHTML = `
       <form aria-label="Two-factor verification">

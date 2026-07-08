@@ -1316,22 +1316,71 @@ describe("autofill triage", () => {
   it("treats fields whose final rect is before the viewport as not viewable", () => {
     document.body.innerHTML = `
       <form>
+        <div style="transform:translateX(-500px)">
+          <input name="parent_translated_password" type="password" autocomplete="current-password" />
+        </div>
+        <div style="position:relative;left:-9999px">
+          <input name="parent_relative_password" type="password" autocomplete="current-password" />
+        </div>
         <input name="translated_password" type="password" autocomplete="current-password" style="transform:translateX(-500px)" />
         <input name="relative_password" type="password" autocomplete="current-password" style="position:relative;left:-9999px" />
         <input name="margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:-9999px" />
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
-    for (const name of ["translated_password", "relative_password", "margin_password"]) {
+    for (const name of [
+      "parent_translated_password",
+      "translated_password"
+    ]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
-        elementRect({ left: -520, top: 40, width: 185, height: 21 })
+        elementRect({ left: -476, top: 40, width: 185, height: 21 })
+      );
+    }
+    for (const name of [
+      "parent_relative_password",
+      "relative_password",
+      "margin_password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: -9975, top: 40, width: 185, height: 21 })
       );
     }
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    for (const name of ["translated_password", "relative_password", "margin_password"]) {
+    for (const name of [
+      "parent_translated_password",
+      "parent_relative_password",
+      "translated_password",
+      "relative_password",
+      "margin_password"
+    ]) {
+      expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
+      expect(fieldByName(report, name).reasons).toContain("not-viewable:offscreen");
+    }
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats fields whose final rect is after the viewport as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="relative_password" type="password" autocomplete="current-password" style="position:relative;left:9999px" />
+        <input name="margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:9999px" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const name of ["relative_password", "margin_password"]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 10024, top: 40, width: 185, height: 21 })
+      );
+    }
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    for (const name of ["relative_password", "margin_password"]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:offscreen");
     }
@@ -1472,12 +1521,18 @@ describe("autofill triage", () => {
         <input name="calc_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% - 4px) 0 0)" />
         <input name="circle_password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
         <input name="polygon_strip_password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
+        <input name="polygon_percent_password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 10% 0, 10% 30%, 0 30%)" />
+        <input name="legacy_strip_password" type="password" autocomplete="current-password" style="position:absolute;clip:rect(0 4px 100px 0)" />
         <div style="width:2px;height:2px;overflow:hidden">
           <input name="ancestor_clipped_password" type="password" autocomplete="current-password" />
         </div>
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
+    stubElementRect(
+      document.querySelector('input[name="polygon_percent_password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -1495,6 +1550,14 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "polygon_strip_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "polygon_strip_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "polygon_percent_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "polygon_percent_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "legacy_strip_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "legacy_strip_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "ancestor_clipped_password").qualifiedAs).toBe("ignored");

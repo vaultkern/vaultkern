@@ -1113,6 +1113,7 @@ export function createLoginFillPlan(
     intent.kind === "login" ||
     ((intent.kind === "usernameFirst" || intent.kind === "passwordStep") &&
       intentUsesFocusedScope) ||
+    (intent.kind === "totp" && intentUsesFocusedScope) ||
     intent.kind === "registration" ||
     intent.kind === "passwordChange";
   const primaryScopeKey = siteRuleAnchorScopeKey ?? intentScopeKey;
@@ -1224,7 +1225,9 @@ export function createLoginFillPlan(
   }
 
   if (typeof payload.totp === "string") {
-    fallbackActions.push(...createTotpActions(report.fields, payload.totp));
+    const totpActionFields =
+      intent.kind === "totp" && shouldUseResolvedScope ? intentAllFields : report.fields;
+    fallbackActions.push(...createTotpActions(totpActionFields, payload.totp));
   }
 
   appendFallbackActions(actions, fallbackActions);

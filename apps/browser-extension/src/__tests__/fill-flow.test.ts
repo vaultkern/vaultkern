@@ -336,9 +336,17 @@ describe("fillLoginForm", () => {
   it("does not fill visually suppressed password decoys", () => {
     document.body.innerHTML = `
       <form>
+        <div id="parent-translated" style="transform:translateX(-500px)">
+          <input id="parent-translated-password" type="password" autocomplete="current-password" />
+        </div>
+        <div id="parent-relative" style="position:relative;left:-9999px">
+          <input id="parent-relative-password" type="password" autocomplete="current-password" />
+        </div>
         <input id="rect-translated-password" type="password" autocomplete="current-password" style="transform:translateX(-500px)" />
         <input id="relative-password" type="password" autocomplete="current-password" style="position:relative;left:-9999px" />
+        <input id="positive-relative-password" type="password" autocomplete="current-password" style="position:relative;left:9999px" />
         <input id="margin-password" type="password" autocomplete="current-password" style="display:block;margin-left:-9999px" />
+        <input id="positive-margin-password" type="password" autocomplete="current-password" style="display:block;margin-left:9999px" />
         <input id="translated-password" type="password" autocomplete="current-password" style="translate:-9999px" />
         <input id="longhand-scaled-password" type="password" autocomplete="current-password" style="scale:0" />
         <input id="filter-password" type="password" autocomplete="current-password" style="filter:opacity(0)" />
@@ -349,18 +357,41 @@ describe("fillLoginForm", () => {
         <input id="login-password" type="password" autocomplete="current-password" />
       </form>
     `;
-    for (const id of ["rect-translated-password", "relative-password", "margin-password"]) {
+    for (const id of [
+      "parent-translated-password",
+      "rect-translated-password"
+    ]) {
       stubElementRect(
         document.querySelector(`#${id}`) as HTMLInputElement,
-        elementRect({ left: -520, top: 40, width: 185, height: 21 })
+        elementRect({ left: -476, top: 40, width: 185, height: 21 })
+      );
+    }
+    for (const id of [
+      "parent-relative-password",
+      "relative-password",
+      "margin-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: -9975, top: 40, width: 185, height: 21 })
+      );
+    }
+    for (const id of ["positive-relative-password", "positive-margin-password"]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 10024, top: 40, width: 185, height: 21 })
       );
     }
 
     fillLoginForm({ password: "secret" });
 
+    expect((document.querySelector("#parent-translated-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#parent-relative-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#rect-translated-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#relative-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#positive-relative-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#margin-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#positive-margin-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#translated-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-scaled-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#filter-password") as HTMLInputElement).value).toBe("");
@@ -378,12 +409,18 @@ describe("fillLoginForm", () => {
         <input id="calc-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% - 4px) 0 0)" />
         <input id="circle-password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
         <input id="polygon-strip-password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
+        <input id="polygon-percent-password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 10% 0, 10% 30%, 0 30%)" />
+        <input id="legacy-strip-password" type="password" autocomplete="current-password" style="position:absolute;clip:rect(0 4px 100px 0)" />
         <div style="width:2px;height:2px;overflow:hidden">
           <input id="ancestor-clipped-password" type="password" autocomplete="current-password" />
         </div>
         <input id="login-password" type="password" autocomplete="current-password" />
       </form>
     `;
+    stubElementRect(
+      document.querySelector("#polygon-percent-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
 
     fillLoginForm({ password: "secret" });
 
@@ -391,6 +428,8 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#calc-inset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#circle-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#polygon-strip-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#polygon-percent-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#legacy-strip-password") as HTMLInputElement).value).toBe("");
     expect(
       (document.querySelector("#ancestor-clipped-password") as HTMLInputElement).value
     ).toBe("");
