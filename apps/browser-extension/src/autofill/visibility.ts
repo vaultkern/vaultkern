@@ -1877,7 +1877,8 @@ function cssMaskLinearGradientPaintedRanges(
   body: string,
   axisSize: number,
   modeValue: string | undefined,
-  units: { emPx?: number; remPx?: number }
+  units: { emPx?: number; remPx?: number },
+  repeatsGradient = false
 ) {
   const parts = splitCssCommaList(body);
   let direction: LinearMaskGradientDirection = { axis: "y", reverse: false };
@@ -1901,6 +1902,46 @@ function cssMaskLinearGradientPaintedRanges(
   if (points.length < 2) {
     return null;
   }
+
+  if (repeatsGradient) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    const period = last.offset - first.offset;
+    if (period <= 0) {
+      return null;
+    }
+
+    const baseRanges: Array<{ start: number; end: number }> = [];
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const left = points[index];
+      const right = points[index + 1];
+      if (left.paints || right.paints) {
+        const start = Math.min(left.offset, right.offset);
+        const end = Math.max(left.offset, right.offset);
+        if (end > start) {
+          baseRanges.push({ start, end });
+        }
+      }
+    }
+
+    const ranges: Array<{ start: number; end: number }> = [];
+    for (const range of baseRanges) {
+      const firstShift = Math.floor((0 - range.end) / period) * period;
+      for (
+        let shift = firstShift;
+        range.start + shift < axisSize;
+        shift += period
+      ) {
+        const start = Math.max(0, range.start + shift);
+        const end = Math.min(axisSize, range.end + shift);
+        if (end > start) {
+          ranges.push({ start, end });
+        }
+      }
+    }
+    return { direction, ranges };
+  }
+
   const ranges: Array<{ start: number; end: number }> = [];
   const addRange = (start: number, end: number) => {
     const rangeStart = Math.min(start, end);
@@ -1939,10 +1980,15 @@ function cssMaskLinearGradientVisibleBounds(
   units: { emPx?: number; remPx?: number }
 ): RectBounds | null {
   const normalized = layer.trim().toLowerCase();
-  if (!normalized.startsWith("linear-gradient(")) {
+  const gradientName = normalized.startsWith("linear-gradient(")
+    ? "linear-gradient"
+    : normalized.startsWith("repeating-linear-gradient(")
+      ? "repeating-linear-gradient"
+      : null;
+  if (gradientName === null) {
     return null;
   }
-  const body = cssFunctionBody(normalized, "linear-gradient");
+  const body = cssFunctionBody(normalized, gradientName);
   if (body === null) {
     return null;
   }
@@ -1982,7 +2028,13 @@ function cssMaskLinearGradientVisibleBounds(
   }
 
   const axisSize = bodyAxisSize(body, size);
-  const painted = cssMaskLinearGradientPaintedRanges(body, axisSize, modeValue, units);
+  const painted = cssMaskLinearGradientPaintedRanges(
+    body,
+    axisSize,
+    modeValue,
+    units,
+    gradientName === "repeating-linear-gradient"
+  );
   if (painted === null || painted.ranges.length === 0) {
     return null;
   }

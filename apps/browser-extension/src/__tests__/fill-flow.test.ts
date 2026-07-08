@@ -1161,6 +1161,60 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not treat visible labels as enough for repeating-gradient ancestor mask decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="repeating-mask-label" for="repeating-mask-password">Password</label>
+        <div id="ancestor-repeating-mask" style="width:400px;height:40px;mask-image:repeating-linear-gradient(to right, transparent 0 240px, black 240px 400px)">
+          <input id="repeating-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const repeatingMaskPassword = document.querySelector(
+      "#repeating-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const repeatingMaskLabel = document.querySelector(
+      "#repeating-mask-label"
+    ) as HTMLLabelElement;
+    stubElementRect(
+      repeatingMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      repeatingMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-repeating-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return repeatingMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(repeatingMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("does not fill near-total clipped password decoys", () => {
     document.body.innerHTML = `
       <style>
