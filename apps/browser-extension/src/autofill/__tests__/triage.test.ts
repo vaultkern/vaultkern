@@ -3603,6 +3603,65 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields with only sparse repeated linear mask tiles as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="sparse-tiled-mask-label" for="sparse-tiled-mask-password">Password</label>
+        <div id="ancestor-sparse-tiled-mask" style="width:400px;height:40px;mask-image:linear-gradient(to right, black 0 1px, transparent 1px 40px);mask-size:40px 100%;mask-repeat:repeat">
+          <input id="sparse-tiled-mask-password" name="sparse_tiled_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const sparseTiledMaskPassword = document.querySelector(
+      "#sparse-tiled-mask-password"
+    ) as HTMLInputElement;
+    const sparseTiledMaskLabel = document.querySelector(
+      "#sparse-tiled-mask-label"
+    ) as HTMLLabelElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    stubElementRect(
+      sparseTiledMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      sparseTiledMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-sparse-tiled-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(realPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return sparseTiledMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(fieldByName(report, "sparse_tiled_mask_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "sparse_tiled_mask_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats fields hidden by hard-stop ancestor masks as not viewable", () => {
     document.body.innerHTML = `
       <form>

@@ -1744,6 +1744,60 @@ describe("fillLoginForm", () => {
     expect(loginPassword.value).toBe("secret");
   });
 
+  it("does not treat sparse repeated linear mask tiles as visible password targets", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="sparse-tiled-mask-label" for="sparse-tiled-mask-password">Password</label>
+        <div id="ancestor-sparse-tiled-mask" style="width:400px;height:40px;mask-image:linear-gradient(to right, black 0 1px, transparent 1px 40px);mask-size:40px 100%;mask-repeat:repeat">
+          <input id="sparse-tiled-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const sparseTiledMaskPassword = document.querySelector(
+      "#sparse-tiled-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const sparseTiledMaskLabel = document.querySelector(
+      "#sparse-tiled-mask-label"
+    ) as HTMLLabelElement;
+    stubElementRect(
+      sparseTiledMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      sparseTiledMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-sparse-tiled-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return sparseTiledMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(sparseTiledMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("does not treat visible labels as enough for hard-stop ancestor mask decoys", () => {
     document.body.innerHTML = `
       <form>

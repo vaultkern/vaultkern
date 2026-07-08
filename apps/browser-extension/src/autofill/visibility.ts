@@ -2223,6 +2223,27 @@ function intervalOverlapLength(
   return Math.max(0, Math.min(leftEnd, rightEnd) - Math.max(leftStart, rightStart));
 }
 
+function unionIntervalLength(intervals: Array<{ start: number; end: number }>) {
+  const sorted = intervals
+    .filter((interval) => interval.end > interval.start)
+    .sort((left, right) => left.start - right.start);
+  let total = 0;
+  let active: { start: number; end: number } | null = null;
+  for (const interval of sorted) {
+    if (active === null) {
+      active = { ...interval };
+      continue;
+    }
+    if (interval.start <= active.end) {
+      active.end = Math.max(active.end, interval.end);
+      continue;
+    }
+    total += active.end - active.start;
+    active = { ...interval };
+  }
+  return active === null ? total : total + active.end - active.start;
+}
+
 function linearMaskLayerSuppressesField(
   layer: string,
   positionValue: string | undefined,
@@ -2257,9 +2278,6 @@ function linearMaskLayerSuppressesField(
   }
   const repeatsX = maskRepeatRepeatsAxis(repeatValue, "x");
   const repeatsY = maskRepeatRepeatsAxis(repeatValue, "y");
-  if ((repeatsX && size.width < rect.width) || (repeatsY && size.height < rect.height)) {
-    return null;
-  }
 
   const position = positionValue?.trim() || "0% 0%";
   const x = maskPositionOffsetToPx(
@@ -2305,11 +2323,35 @@ function linearMaskLayerSuppressesField(
     return true;
   }
 
-  const paintedLength = painted.ranges.reduce((total, range) => {
+  const axisRepeats = painted.direction.axis === "x" ? repeatsX : repeatsY;
+  const paintedIntervals = painted.ranges.flatMap((range) => {
     const start = painted.direction.reverse ? axisSize - range.end : range.start;
     const end = painted.direction.reverse ? axisSize - range.start : range.end;
-    return total + intervalOverlapLength(fieldStart, fieldEnd, start, end);
-  }, 0);
+    if (!axisRepeats) {
+      const overlap = intervalOverlapLength(fieldStart, fieldEnd, start, end);
+      return overlap > 0
+        ? [{ start: Math.max(fieldStart, start), end: Math.min(fieldEnd, end) }]
+        : [];
+    }
+    if (axisSize <= 0) {
+      return [];
+    }
+    const intervals: Array<{ start: number; end: number }> = [];
+    const firstShift = Math.floor((fieldStart - end) / axisSize) * axisSize;
+    for (let shift = firstShift; start + shift < fieldEnd; shift += axisSize) {
+      const shiftedStart = start + shift;
+      const shiftedEnd = end + shift;
+      const overlap = intervalOverlapLength(fieldStart, fieldEnd, shiftedStart, shiftedEnd);
+      if (overlap > 0) {
+        intervals.push({
+          start: Math.max(fieldStart, shiftedStart),
+          end: Math.min(fieldEnd, shiftedEnd)
+        });
+      }
+    }
+    return intervals;
+  });
+  const paintedLength = unionIntervalLength(paintedIntervals);
 
   return (
     paintedLength <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
