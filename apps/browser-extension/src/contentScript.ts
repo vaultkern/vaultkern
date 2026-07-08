@@ -59,7 +59,9 @@ if (chromeApi?.runtime?.onMessage) {
 }
 
 function documentForAutofillSubmissionRoot(root: Document | ShadowRoot) {
-  return root.nodeType === Node.DOCUMENT_NODE ? (root as Document) : root.ownerDocument;
+  return root.nodeType === Node.DOCUMENT_NODE
+    ? (root as Document)
+    : root.ownerDocument ?? undefined;
 }
 
 function allowSyntheticAutofillSubmitForTests() {

@@ -8,6 +8,8 @@ export interface FieldFillabilityResult {
   reasons: string[];
 }
 
+const OFFSCREEN_OFFSET_PX = 1000;
+
 function addReason(reasons: string[], reason: string) {
   if (!reasons.includes(reason)) {
     reasons.push(reason);
@@ -63,10 +65,10 @@ function parentElementOrShadowHost(element: HTMLElement) {
     return element.parentElement;
   }
 
-  const root = element.getRootNode();
-  if (root.nodeType === 11 && "host" in root) {
-    const host = root.host;
-    if (host && host.nodeType === 1) {
+  const root = element.getRootNode() as Node & { host?: unknown };
+  if (root.nodeType === Node.DOCUMENT_FRAGMENT_NODE && "host" in root) {
+    const host = root.host as Node | undefined;
+    if (host?.nodeType === Node.ELEMENT_NODE) {
       return host as HTMLElement;
     }
   }
@@ -117,6 +119,10 @@ function isClippedZeroSizeAncestor(
     current.style.overflowY
   ].join(" ");
   return overflow.includes("hidden") || overflow.includes("clip");
+}
+
+function isLargeOffscreenOffset(value: number | null) {
+  return value !== null && Math.abs(value) >= OFFSCREEN_OFFSET_PX;
 }
 
 export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult {
@@ -184,12 +190,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       (position === "absolute" || position === "fixed") &&
       (left !== null || top !== null || right !== null || bottom !== null)
     ) {
-      if (
-        (left !== null && left <= -1000) ||
-        (top !== null && top <= -1000) ||
-        (right !== null && right <= -1000) ||
-        (bottom !== null && bottom <= -1000)
-      ) {
+      if ([left, top, right, bottom].some(isLargeOffscreenOffset)) {
         addReason(reasons, "not-viewable:offscreen");
       }
     }

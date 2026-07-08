@@ -717,6 +717,7 @@ export function PopupApp({
       setAutofillSavePrompt(null);
       return;
     }
+    const activeVaultId = session.activeVaultId;
 
     let cancelled = false;
     setAutofillSavePrompt(null);
@@ -728,7 +729,7 @@ export function PopupApp({
       return;
     }
 
-    findCandidates(session.activeVaultId, pendingAutofillSubmission.url)
+    findCandidates(activeVaultId, pendingAutofillSubmission.url)
       .then(async (pendingCandidates) => {
         if (cancelled) {
           return;
@@ -763,7 +764,7 @@ export function PopupApp({
             }
 
             const detail = await client.getEntryDetail(
-              session.activeVaultId,
+              activeVaultId,
               matchingEntries[0].id
             );
             if (cancelled) {
@@ -792,7 +793,7 @@ export function PopupApp({
           const candidateDetails = await Promise.all(
             pendingCandidates.map(async (entry) => ({
               entry,
-              detail: await client.getEntryDetail(session.activeVaultId, entry.id)
+              detail: await client.getEntryDetail(activeVaultId, entry.id)
             }))
           );
           if (cancelled) {
@@ -1548,7 +1549,7 @@ export function PopupApp({
           <strong>
             {autofillSavePrompt.mode === "save" ? "Save login?" : "Update password?"}
           </strong>
-          <div style={{ color: popupTheme.colors.muted, fontSize: "0.86rem" }}>
+          <div style={{ color: popupTheme.colors.textMuted, fontSize: "0.86rem" }}>
             {titleForPendingSubmission(autofillSavePrompt.submission)}
           </div>
           {autofillSaveError ? <div role="alert">{autofillSaveError}</div> : null}

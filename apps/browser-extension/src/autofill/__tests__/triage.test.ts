@@ -1182,12 +1182,12 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "offscreen_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "offscreen_email").reasons).toContain("not-viewable:offscreen");
-    expect(fieldByName(report, "positive_left_offscreen_email").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "positive_left_offscreen_email").reasons).not.toContain(
+    expect(fieldByName(report, "positive_left_offscreen_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "positive_left_offscreen_email").reasons).toContain(
       "not-viewable:offscreen"
     );
-    expect(fieldByName(report, "positive_top_offscreen_email").qualifiedAs).toBe("username");
-    expect(fieldByName(report, "positive_top_offscreen_email").reasons).not.toContain(
+    expect(fieldByName(report, "positive_top_offscreen_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "positive_top_offscreen_email").reasons).toContain(
       "not-viewable:offscreen"
     );
     expect(fieldByName(report, "right_offscreen_email").qualifiedAs).toBe("ignored");

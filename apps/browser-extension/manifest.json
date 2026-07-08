@@ -7,6 +7,7 @@
     "nativeMessaging",
     "tabs",
     "activeTab",
+    "alarms",
     "scripting",
     "webAuthenticationProxy"
   ],

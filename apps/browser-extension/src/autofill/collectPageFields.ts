@@ -84,9 +84,18 @@ function cssEscape(value: string) {
   return value.replace(/["\\]/g, "\\$&");
 }
 
+function isQueryableParentNode(node: Node): node is ParentNode {
+  const candidate = node as Partial<ParentNode>;
+  return typeof candidate.querySelectorAll === "function" && "children" in candidate;
+}
+
+function isPresentString(value: string | null | undefined): value is string {
+  return typeof value === "string" && value !== "";
+}
+
 function lookupRootForElement(element: Element): ParentNode {
   const root = element.getRootNode();
-  return "querySelectorAll" in root ? root : element.ownerDocument;
+  return isQueryableParentNode(root) ? root : element.ownerDocument;
 }
 
 function getElementByIdInRoot(root: ParentNode, id: string) {
@@ -182,7 +191,7 @@ function scopeForFormHeadings(form: HTMLFormElement): ParentNode {
   }
 
   const root = form.getRootNode();
-  if (root.nodeType === 11 && "querySelectorAll" in root) {
+  if (root.nodeType === Node.DOCUMENT_FRAGMENT_NODE && isQueryableParentNode(root)) {
     return root;
   }
 
@@ -230,7 +239,7 @@ function getHeadingText(form: HTMLFormElement) {
 
   return [...precedingHeadings.slice(-1), ...ownedHeadings]
     .map((heading) => cleanText(heading.textContent))
-    .filter(Boolean);
+    .filter(isPresentString);
 }
 
 function isElementNode(node: ParentNode | undefined): node is Element {
@@ -245,7 +254,7 @@ function getOwnedHeadingText(container: ParentNode | undefined) {
     .filter((heading) => heading.closest("form") === null)
     .filter((heading) => getFieldVisibility(heading as HTMLElement).viewable)
     .map((heading) => cleanText(heading.textContent))
-    .filter(Boolean);
+    .filter(isPresentString);
 }
 
 function getContainerText(container: ParentNode | undefined) {
@@ -329,7 +338,7 @@ function getSubmitText(form: HTMLFormElement) {
       return [];
     }
     return [controlText(input, type === "image" ? input.alt : input.value)];
-  }).filter(Boolean);
+  }).filter(isPresentString);
   const primarySubmitText = submitText[0];
   const accountCreationSubmitText = submitText.filter(isAccountCreationSubmitText);
   const loginSubmitText = submitText.filter(isLoginSubmitText);
@@ -358,7 +367,7 @@ function collectForms(documentRef: Document) {
       getAriaLabelledByText(formElement, lookupRoot)
     ]
       .map(optionalString)
-      .filter(Boolean)
+      .filter(isPresentString)
       .join(" ");
     const htmlActionIsImplicit = !formElement.getAttribute("action");
     const headingText = getHeadingText(formElement);
@@ -469,8 +478,8 @@ function getFieldContainer(
 
   const root = element.getRootNode();
   if (
-    root.nodeType === 11 &&
-    "querySelectorAll" in root &&
+    root.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+    isQueryableParentNode(root) &&
     root.querySelectorAll(FIELD_SELECTOR).length > 1
   ) {
     return root;
@@ -498,10 +507,11 @@ function getContainerOpid(
 
 function getMaxLength(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
   const tagName = element.tagName.toLowerCase();
-  if (tagName !== "input" && tagName !== "textarea") {
+  if (tagName === "select") {
     return undefined;
   }
-  return element.maxLength > 0 ? element.maxLength : undefined;
+  const textElement = element as HTMLInputElement | HTMLTextAreaElement;
+  return textElement.maxLength > 0 ? textElement.maxLength : undefined;
 }
 
 function collectField(

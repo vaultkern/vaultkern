@@ -1025,7 +1025,7 @@ export function qualifyAutofillField(
 
     if (
       field.readonly &&
-      !isSearchField(field, fieldText) &&
+      !isSearchField(field, form) &&
       !excludedReason(fieldText, formText) &&
       !nonLoginReason(fieldText, formText) &&
       isUsernameLike(field, fieldText)

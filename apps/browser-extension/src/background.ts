@@ -26,8 +26,12 @@ let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
 let pendingAutofillSubmission: PendingAutofillSubmission | null = null;
 let pendingAutofillSubmissionsByTab = new Map<number, PendingAutofillSubmission>();
 let pendingAutofillTabUrls = new Map<number, string>();
+let pendingAutofillExpiryTimersByTab = new Map<number, ReturnType<typeof setTimeout>>();
+let pendingAutofillGlobalExpiryTimer: ReturnType<typeof setTimeout> | null = null;
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
 const PENDING_AUTOFILL_NAVIGATION_GRACE_MS = 2 * 60 * 1000;
+const PENDING_AUTOFILL_ALARM_PREFIX = "vaultkern-autofill-pending:";
+const PENDING_AUTOFILL_GLOBAL_ALARM = `${PENDING_AUTOFILL_ALARM_PREFIX}global`;
 const WEB_AUTHN_CONTENT_SCRIPT_FILE = "webauthnContentScript.js";
 const WEB_AUTHN_PAGE_HOOK_SCRIPT_FILE = "webauthnPageHook.js";
 const WEB_AUTHN_PAGE_HOOK_SCRIPT_ID = "vaultkern-webauthn-page-hook";
@@ -84,6 +88,22 @@ function pendingAutofillSubmissionIsExpired(
   return now - submission.submittedAt > PENDING_AUTOFILL_NAVIGATION_GRACE_MS;
 }
 
+function pendingAutofillExpiryTime(submission: PendingAutofillSubmission) {
+  return submission.submittedAt + PENDING_AUTOFILL_NAVIGATION_GRACE_MS + 1;
+}
+
+function pendingAutofillTabAlarmName(tabId: number) {
+  return `${PENDING_AUTOFILL_ALARM_PREFIX}tab:${tabId}`;
+}
+
+function tabIdFromPendingAutofillAlarmName(name: string) {
+  if (!name.startsWith(`${PENDING_AUTOFILL_ALARM_PREFIX}tab:`)) {
+    return undefined;
+  }
+  const tabId = Number.parseInt(name.slice(`${PENDING_AUTOFILL_ALARM_PREFIX}tab:`.length), 10);
+  return Number.isInteger(tabId) && tabId >= 0 ? tabId : undefined;
+}
+
 function pendingAutofillSubmissionMatchesUrl(
   submission: PendingAutofillSubmission,
   tabUrl: string | undefined
@@ -102,6 +122,59 @@ function trackPendingAutofillTabUrl(tabId: number, tabUrl: string | undefined) {
   }
 }
 
+function clearPendingAutofillExpiryForTab(tabId: number) {
+  const timer = pendingAutofillExpiryTimersByTab.get(tabId);
+  if (timer) {
+    clearTimeout(timer);
+  }
+  pendingAutofillExpiryTimersByTab.delete(tabId);
+  void chromeApi?.alarms?.clear?.(pendingAutofillTabAlarmName(tabId));
+}
+
+function clearGlobalPendingAutofillExpiry() {
+  if (pendingAutofillGlobalExpiryTimer) {
+    clearTimeout(pendingAutofillGlobalExpiryTimer);
+    pendingAutofillGlobalExpiryTimer = null;
+  }
+  void chromeApi?.alarms?.clear?.(PENDING_AUTOFILL_GLOBAL_ALARM);
+}
+
+function schedulePendingAutofillExpiryForTab(
+  tabId: number,
+  submission: PendingAutofillSubmission
+) {
+  clearPendingAutofillExpiryForTab(tabId);
+  const when = pendingAutofillExpiryTime(submission);
+  const timer = setTimeout(() => {
+    pendingAutofillExpiryTimersByTab.delete(tabId);
+    clearInvalidPendingAutofillSubmissionForTab(
+      tabId,
+      pendingAutofillTabUrls.get(tabId)
+    );
+  }, Math.max(0, when - Date.now()));
+  (timer as { unref?: () => void }).unref?.();
+  pendingAutofillExpiryTimersByTab.set(tabId, timer);
+  void chromeApi?.alarms?.create?.(pendingAutofillTabAlarmName(tabId), { when });
+}
+
+function scheduleGlobalPendingAutofillExpiry(submission: PendingAutofillSubmission) {
+  clearGlobalPendingAutofillExpiry();
+  const when = pendingAutofillExpiryTime(submission);
+  pendingAutofillGlobalExpiryTimer = setTimeout(() => {
+    pendingAutofillGlobalExpiryTimer = null;
+    clearExpiredGlobalPendingAutofillSubmission();
+  }, Math.max(0, when - Date.now()));
+  (pendingAutofillGlobalExpiryTimer as { unref?: () => void }).unref?.();
+  void chromeApi?.alarms?.create?.(PENDING_AUTOFILL_GLOBAL_ALARM, { when });
+}
+
+function clearAllPendingAutofillExpiry() {
+  for (const tabId of pendingAutofillExpiryTimersByTab.keys()) {
+    clearPendingAutofillExpiryForTab(tabId);
+  }
+  clearGlobalPendingAutofillExpiry();
+}
+
 function recomputeLatestPendingAutofillSubmission(now = Date.now()) {
   if (
     pendingAutofillSubmission &&
@@ -114,6 +187,7 @@ function recomputeLatestPendingAutofillSubmission(now = Date.now()) {
     if (pendingAutofillSubmissionIsExpired(submission, now)) {
       pendingAutofillSubmissionsByTab.delete(tabId);
       pendingAutofillTabUrls.delete(tabId);
+      clearPendingAutofillExpiryForTab(tabId);
     }
   }
 
@@ -127,6 +201,7 @@ function clearPendingAutofillSubmissionForTab(tabId: number) {
   const clearedSubmission = pendingAutofillSubmissionsByTab.get(tabId) ?? null;
   pendingAutofillSubmissionsByTab.delete(tabId);
   pendingAutofillTabUrls.delete(tabId);
+  clearPendingAutofillExpiryForTab(tabId);
   if (!clearedSubmission) {
     return;
   }
@@ -134,6 +209,17 @@ function clearPendingAutofillSubmissionForTab(tabId: number) {
     pendingAutofillSubmission = null;
   }
   recomputeLatestPendingAutofillSubmission();
+}
+
+function clearExpiredGlobalPendingAutofillSubmission(now = Date.now()) {
+  if (
+    pendingAutofillSubmission &&
+    pendingAutofillSubmissionIsExpired(pendingAutofillSubmission, now)
+  ) {
+    pendingAutofillSubmission = null;
+    clearGlobalPendingAutofillExpiry();
+  }
+  recomputeLatestPendingAutofillSubmission(now);
 }
 
 function clearInvalidPendingAutofillSubmissionForTab(
@@ -199,6 +285,10 @@ function handleAutofillPendingMessage(
         tabId,
         tabUrlFromSender(sender) ?? tabUrlFromMessage(message) ?? pendingAutofillSubmission.url
       );
+      clearGlobalPendingAutofillExpiry();
+      schedulePendingAutofillExpiryForTab(tabId, pendingAutofillSubmission);
+    } else if (pendingAutofillSubmission) {
+      scheduleGlobalPendingAutofillExpiry(pendingAutofillSubmission);
     }
     sendResponse({ ok: pendingAutofillSubmission !== null });
     return true;
@@ -228,6 +318,7 @@ function handleAutofillPendingMessage(
       pendingAutofillSubmission = null;
       pendingAutofillSubmissionsByTab = new Map();
       pendingAutofillTabUrls = new Map();
+      clearAllPendingAutofillExpiry();
     } else {
       clearPendingAutofillSubmissionForTab(tabId);
     }
@@ -323,6 +414,21 @@ chromeApi?.tabs?.onUpdated?.addListener?.(
 
 chromeApi?.tabs?.onRemoved?.addListener?.((tabId: number) => {
   clearPendingAutofillSubmissionForTab(tabId);
+});
+
+chromeApi?.alarms?.onAlarm?.addListener?.((alarm: { name?: string }) => {
+  if (alarm.name === PENDING_AUTOFILL_GLOBAL_ALARM) {
+    clearExpiredGlobalPendingAutofillSubmission();
+    return;
+  }
+
+  if (typeof alarm.name !== "string") {
+    return;
+  }
+  const tabId = tabIdFromPendingAutofillAlarmName(alarm.name);
+  if (tabId !== undefined) {
+    clearInvalidPendingAutofillSubmissionForTab(tabId, pendingAutofillTabUrls.get(tabId));
+  }
 });
 
 if (chromeApi?.webAuthenticationProxy) {

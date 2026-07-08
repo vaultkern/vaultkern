@@ -13,6 +13,7 @@ type TabUpdatedListener = (
   tabId: number,
   changeInfo: { status?: string; url?: string }
 ) => void;
+type AlarmListener = (alarm: { name: string }) => void;
 
 function createContentScriptRegistry(initialIds: string[] = []) {
   const registeredIds = new Set(initialIds);
@@ -539,6 +540,65 @@ describe("background bridge", () => {
     ).response();
 
     vi.setSystemTime(1710000000000 + 2 * 60 * 1000 + 1);
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 7,
+        tabUrl: "https://example.com/welcome"
+      }).response()
+    ).resolves.toEqual({ pending: null });
+  });
+
+  it("actively clears tab-scoped pending autofill submissions when their ttl alarm fires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1710000000000);
+    const listeners: RuntimeMessageListener[] = [];
+    const alarmListeners: AlarmListener[] = [];
+    const alarmsCreate = vi.fn();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      },
+      alarms: {
+        create: alarmsCreate,
+        clear: vi.fn(),
+        onAlarm: {
+          addListener: vi.fn((listener: AlarmListener) => {
+            alarmListeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        saveOnly: true,
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 7, url: "https://example.com/signup" } }
+    ).response();
+
+    const [alarmName, alarmInfo] = alarmsCreate.mock.calls[0];
+    expect(alarmName).toContain("7");
+    expect(alarmInfo).toEqual({ when: 1710000120001 });
+
+    vi.setSystemTime(1710000120001);
+    for (const listener of alarmListeners) {
+      listener({ name: alarmName });
+    }
 
     await expect(
       sendRuntimeMessage(listeners, {
