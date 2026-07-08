@@ -3037,6 +3037,65 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields hidden by repeating-radial ancestor masks as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="repeating-radial-mask-label" for="repeating-radial-mask-password">Password</label>
+        <div id="ancestor-repeating-radial-mask" style="width:400px;height:40px;mask-image:repeating-radial-gradient(circle at 360px 20px, black 0 40px, transparent 40px 400px)">
+          <input id="repeating-radial-mask-password" name="repeating_radial_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const repeatingRadialMaskPassword = document.querySelector(
+      "#repeating-radial-mask-password"
+    ) as HTMLInputElement;
+    const repeatingRadialMaskLabel = document.querySelector(
+      "#repeating-radial-mask-label"
+    ) as HTMLLabelElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    stubElementRect(
+      repeatingRadialMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      repeatingRadialMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-repeating-radial-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(realPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return repeatingRadialMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(fieldByName(report, "repeating_radial_mask_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "repeating_radial_mask_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("lets current-password fields override mixed sign-in and signup copy", () => {
     document.body.innerHTML = `
       <form id="mixed-auth">

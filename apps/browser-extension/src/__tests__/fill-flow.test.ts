@@ -1237,6 +1237,60 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not treat visible labels as enough for repeating-radial ancestor mask decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="repeating-radial-mask-label" for="repeating-radial-mask-password">Password</label>
+        <div id="ancestor-repeating-radial-mask" style="width:400px;height:40px;mask-image:repeating-radial-gradient(circle at 360px 20px, black 0 40px, transparent 40px 400px)">
+          <input id="repeating-radial-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const repeatingRadialMaskPassword = document.querySelector(
+      "#repeating-radial-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const repeatingRadialMaskLabel = document.querySelector(
+      "#repeating-radial-mask-label"
+    ) as HTMLLabelElement;
+    stubElementRect(
+      repeatingRadialMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      repeatingRadialMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-repeating-radial-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return repeatingRadialMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(repeatingRadialMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("does not treat visible labels as enough for repeating-gradient ancestor mask decoys", () => {
     document.body.innerHTML = `
       <form>

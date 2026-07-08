@@ -2148,7 +2148,8 @@ function cssMaskRadialGradientPaintedRanges(
   body: string,
   axisSize: number,
   modeValue: string | undefined,
-  units: { emPx?: number; remPx?: number }
+  units: { emPx?: number; remPx?: number },
+  repeatsGradient = false
 ) {
   const parts = splitCssCommaList(body);
   const stopParts = cssColorStopColor(parts[0] ?? "") === null ? parts.slice(1) : parts;
@@ -2181,6 +2182,45 @@ function cssMaskRadialGradientPaintedRanges(
     previousOffset = Math.max(previousOffset, point.offset);
     return { ...point, offset: previousOffset };
   });
+
+  if (repeatsGradient) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    const period = last.offset - first.offset;
+    if (period <= 0) {
+      return null;
+    }
+
+    const baseRanges: Array<{ start: number; end: number }> = [];
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const left = points[index];
+      const right = points[index + 1];
+      if (left.paints || right.paints) {
+        const start = Math.min(left.offset, right.offset);
+        const end = Math.max(left.offset, right.offset);
+        if (end > start) {
+          baseRanges.push({ start, end });
+        }
+      }
+    }
+
+    const ranges: Array<{ start: number; end: number }> = [];
+    for (const range of baseRanges) {
+      const firstShift = Math.floor((0 - range.end) / period) * period;
+      for (
+        let shift = firstShift;
+        range.start + shift < axisSize;
+        shift += period
+      ) {
+        const start = Math.max(0, range.start + shift);
+        const end = Math.min(axisSize, range.end + shift);
+        if (end > start) {
+          ranges.push({ start, end });
+        }
+      }
+    }
+    return ranges;
+  }
 
   const ranges: Array<{ start: number; end: number }> = [];
   const addRange = (start: number, end: number) => {
@@ -2222,7 +2262,9 @@ function cssMaskRadialGradientVisibleBounds(
   const normalized = layer.trim().toLowerCase();
   const gradientName = normalized.startsWith("radial-gradient(")
     ? "radial-gradient"
-    : null;
+    : normalized.startsWith("repeating-radial-gradient(")
+      ? "repeating-radial-gradient"
+      : null;
   if (gradientName === null) {
     return null;
   }
@@ -2283,7 +2325,8 @@ function cssMaskRadialGradientVisibleBounds(
     body,
     Math.max(size.width, size.height),
     modeValue,
-    units
+    units,
+    gradientName === "repeating-radial-gradient"
   );
   if (paintedRanges === null || paintedRanges.length === 0) {
     return null;
