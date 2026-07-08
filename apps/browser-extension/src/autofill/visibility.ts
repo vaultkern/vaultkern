@@ -8069,8 +8069,11 @@ function evenOddSubpathsSuppressField(
   const polygons = svgPathDataToSubpathPoints(value)
     .map((points) => transformSvgPoints(points, matrix))
     .filter((points) => points.length >= 3);
-  if (polygons.length < 2) {
+  if (polygons.length === 0) {
     return false;
+  }
+  if (polygons.length === 1) {
+    return evenOddPolygonPointsSuppressField(polygons[0], rect);
   }
   return fieldLocalSamplePoints(rect).every((sample) => {
     const containingPolygons = polygons.filter((polygon) =>
@@ -8086,8 +8089,36 @@ function evenOddPolygonPointsSuppressField(
 ) {
   return (
     points.length >= 3 &&
-    fieldLocalSamplePoints(rect).every((sample) => !pointInsidePolygon(sample, points))
+    (evenOddClosedSegmentsCancel(points) ||
+      fieldLocalSamplePoints(rect).every((sample) => !pointInsidePolygon(sample, points)))
   );
+}
+
+function evenOddSegmentPointKey(point: { x: number; y: number }) {
+  return `${Math.round(point.x * 1000) / 1000},${Math.round(point.y * 1000) / 1000}`;
+}
+
+function evenOddSegmentKey(
+  start: { x: number; y: number },
+  end: { x: number; y: number }
+) {
+  const startKey = evenOddSegmentPointKey(start);
+  const endKey = evenOddSegmentPointKey(end);
+  if (startKey === endKey) {
+    return null;
+  }
+  return startKey < endKey ? `${startKey}|${endKey}` : `${endKey}|${startKey}`;
+}
+
+function evenOddClosedSegmentsCancel(points: Array<{ x: number; y: number }>) {
+  const counts = new Map<string, number>();
+  for (let index = 0; index < points.length; index += 1) {
+    const key = evenOddSegmentKey(points[index], points[(index + 1) % points.length]);
+    if (key !== null) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  return counts.size > 0 && Array.from(counts.values()).every((count) => count % 2 === 0);
 }
 
 function svgShapeUsesEvenOdd(shape: Element) {
