@@ -1921,6 +1921,14 @@ function svgClipShapeSuppressesField(
   }
   seen.add(shape);
 
+  const shapeStyle = shape.ownerDocument.defaultView?.getComputedStyle(shape);
+  const inlineStyle = (shape as SVGElement).style;
+  const display = shapeStyle?.display || inlineStyle?.display;
+  const visibility = shapeStyle?.visibility || inlineStyle?.visibility;
+  if (display === "none" || visibility === "hidden" || visibility === "collapse") {
+    return true;
+  }
+
   const rect = current.getBoundingClientRect();
   const tagName = shape.tagName.toLowerCase();
   const matrix = svgElementTransformMatrix(shape, inheritedMatrix, units);
