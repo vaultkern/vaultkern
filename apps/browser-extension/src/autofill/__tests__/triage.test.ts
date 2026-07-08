@@ -1445,6 +1445,7 @@ describe("autofill triage", () => {
         <input name="url_mask_password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input name="tiny_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
+        <input name="positioned_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:-9999px 0" />
         <input name="svg_filter_password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
         <input name="svg_filter_discrete_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroDiscrete)" />
         <input name="svg_filter_matrix_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
@@ -1473,6 +1474,10 @@ describe("autofill triage", () => {
       document.querySelector('input[name="rotate_y_password"]') as HTMLInputElement,
       elementRect({ left: 24, top: 40, width: 0, height: 21 })
     );
+    stubElementRect(
+      document.querySelector('input[name="positioned_mask_password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -1483,6 +1488,7 @@ describe("autofill triage", () => {
       "url_mask_password",
       "zero_mask_password",
       "tiny_mask_password",
+      "positioned_mask_password",
       "svg_filter_password",
       "svg_filter_discrete_password",
       "svg_filter_matrix_password",
@@ -1509,14 +1515,23 @@ describe("autofill triage", () => {
       <form>
         <input name="email" type="email" autocomplete="username" />
         <input name="password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:repeat" />
+        <input name="positioned_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:100% 0" />
       </form>
     `;
+    stubElementRect(
+      document.querySelector('input[name="positioned_password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "positioned_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "positioned_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
   });

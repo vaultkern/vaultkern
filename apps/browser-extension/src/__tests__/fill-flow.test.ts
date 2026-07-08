@@ -366,6 +366,7 @@ describe("fillLoginForm", () => {
         <input id="mask-url-password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input id="mask-zero-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input id="mask-tiny-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
+        <input id="mask-position-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:-9999px 0" />
         <svg width="0" height="0" aria-hidden="true">
           <filter id="alphaZero"><feComponentTransfer><feFuncA type="table" tableValues="0 0" /></feComponentTransfer></filter>
           <filter id="alphaZeroDiscrete"><feComponentTransfer><feFuncA type="discrete" tableValues="0 0" /></feComponentTransfer></filter>
@@ -455,6 +456,10 @@ describe("fillLoginForm", () => {
       document.querySelector("#rotate-y-password") as HTMLInputElement,
       elementRect({ left: 24, top: 40, width: 0, height: 21 })
     );
+    stubElementRect(
+      document.querySelector("#mask-position-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
 
     fillLoginForm({ password: "secret" });
 
@@ -481,6 +486,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#mask-url-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-tiny-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-position-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-discrete-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-matrix-password") as HTMLInputElement).value).toBe("");

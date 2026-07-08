@@ -715,6 +715,169 @@ function maskSizeSuppressesPaint(
   });
 }
 
+function maskLayerValue(layers: string[], index: number) {
+  return layers[index] ?? layers[layers.length - 1];
+}
+
+function maskDimensionToPx(
+  value: string | undefined,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value?.trim().toLowerCase();
+  if (
+    !normalized ||
+    normalized === "auto" ||
+    normalized === "cover" ||
+    normalized === "contain"
+  ) {
+    return axisSize;
+  }
+  return cssLengthToPx(normalized, axisSize, units) ?? axisSize;
+}
+
+function maskLayerSize(
+  value: string | undefined,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+) {
+  const [width, height] = splitCssFunctionArgs(value?.trim().toLowerCase() ?? "auto");
+  return {
+    width: maskDimensionToPx(width, rect.width, units),
+    height: maskDimensionToPx(height, rect.height, units)
+  };
+}
+
+function isPositionKeyword(value: string | undefined) {
+  return (
+    value === "left" ||
+    value === "right" ||
+    value === "top" ||
+    value === "bottom" ||
+    value === "center"
+  );
+}
+
+function maskPositionAxisComponent(value: string, axis: "x" | "y") {
+  const tokens = splitCssFunctionArgs(value.trim().toLowerCase());
+  if (tokens.length === 0) {
+    return "0%";
+  }
+  const axisKeywords = axis === "x" ? ["left", "right"] : ["top", "bottom"];
+  const oppositeKeywords = axis === "x" ? ["top", "bottom"] : ["left", "right"];
+  const keywordIndex = tokens.findIndex((token) => axisKeywords.includes(token));
+  if (keywordIndex >= 0) {
+    const offset = tokens[keywordIndex + 1];
+    return offset !== undefined && !isPositionKeyword(offset)
+      ? `${tokens[keywordIndex]} ${offset}`
+      : tokens[keywordIndex];
+  }
+  if (axis === "x") {
+    if (oppositeKeywords.includes(tokens[0])) {
+      return "50%";
+    }
+    return tokens[0];
+  }
+  if (tokens.length === 1) {
+    return "50%";
+  }
+  if (oppositeKeywords.includes(tokens[0]) || tokens[0] === "center") {
+    return tokens[1] ?? "50%";
+  }
+  return tokens[1] ?? "50%";
+}
+
+function maskPositionOffsetToPx(
+  value: string,
+  axisSize: number,
+  imageSize: number,
+  units: { emPx?: number; remPx?: number }
+) {
+  const [origin, offsetToken = "0"] = splitCssFunctionArgs(value.trim().toLowerCase());
+  const range = axisSize - imageSize;
+  if (origin === "left" || origin === "top") {
+    return cssLengthToPx(offsetToken, range, units) ?? 0;
+  }
+  if (origin === "right" || origin === "bottom") {
+    return range - (cssLengthToPx(offsetToken, range, units) ?? 0);
+  }
+  if (origin === "center") {
+    return range / 2 + (cssLengthToPx(offsetToken, range, units) ?? 0);
+  }
+  return cssLengthToPx(value, range, units);
+}
+
+function visibleAxisOverlap(axisSize: number, imageSize: number, offset: number) {
+  const start = Math.max(0, offset);
+  const end = Math.min(axisSize, offset + imageSize);
+  return Math.max(0, end - start);
+}
+
+function maskAxisPositionSuppressesPaint(
+  axisSize: number,
+  imageSize: number,
+  offset: number | null,
+  repeatsAxis: boolean
+) {
+  if (offset === null || repeatsAxis) {
+    return false;
+  }
+  const overlap = visibleAxisOverlap(axisSize, imageSize, offset);
+  return (
+    overlap <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    (axisSize > 0 && overlap <= axisSize * MIN_CLIPPED_VISIBLE_FRACTION)
+  );
+}
+
+function maskPositionSuppressesPaint(
+  value: string | undefined,
+  sizeValue: string | undefined,
+  repeatValue: string | undefined,
+  current: HTMLElement,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  const rect = current.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return false;
+  }
+  const sizeLayers = splitCssCommaList(sizeValue?.trim().toLowerCase() ?? "");
+  const repeatLayers = splitCssCommaList(repeatValue?.trim().toLowerCase() ?? "");
+  return splitCssCommaList(normalized).some((layer, index) => {
+    const size = maskLayerSize(maskLayerValue(sizeLayers, index), rect, units);
+    const repeatLayer = maskLayerValue(repeatLayers, index);
+    const x = maskPositionOffsetToPx(
+      maskPositionAxisComponent(layer, "x"),
+      rect.width,
+      size.width,
+      units
+    );
+    const y = maskPositionOffsetToPx(
+      maskPositionAxisComponent(layer, "y"),
+      rect.height,
+      size.height,
+      units
+    );
+    return (
+      maskAxisPositionSuppressesPaint(
+        rect.width,
+        size.width,
+        x,
+        maskRepeatRepeatsAxis(repeatLayer, "x")
+      ) ||
+      maskAxisPositionSuppressesPaint(
+        rect.height,
+        size.height,
+        y,
+        maskRepeatRepeatsAxis(repeatLayer, "y")
+      )
+    );
+  });
+}
+
 function svgElementOpacityValue(shape: Element, attribute: string) {
   const styled = shape as SVGElement;
   return (
@@ -811,6 +974,20 @@ function maskStyleSuppressesPaint(
     maskSizeSuppressesPaint(
       cssPropertyValue(style, current, "-webkit-mask-size"),
       cssPropertyValue(style, current, "-webkit-mask-repeat"),
+      units
+    ) ||
+    maskPositionSuppressesPaint(
+      cssPropertyValue(style, current, "mask-position"),
+      cssPropertyValue(style, current, "mask-size"),
+      cssPropertyValue(style, current, "mask-repeat"),
+      current,
+      units
+    ) ||
+    maskPositionSuppressesPaint(
+      cssPropertyValue(style, current, "-webkit-mask-position"),
+      cssPropertyValue(style, current, "-webkit-mask-size"),
+      cssPropertyValue(style, current, "-webkit-mask-repeat"),
+      current,
       units
     )
   );
