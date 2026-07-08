@@ -467,6 +467,13 @@ function rotationTurnsBackfaceAway(value: string | undefined) {
     return false;
   }
 
+  for (const matrix of normalized.matchAll(/matrix3d\(([^)]*)\)/g)) {
+    const values = splitCssFunctionArgs(matrix[1]).map((arg) => numericCssValue(arg));
+    if ((values[10] ?? 1) < 0) {
+      return true;
+    }
+  }
+
   for (const transform of normalized.matchAll(/(rotate3d|rotatex|rotatey)\(([^)]*)\)/g)) {
     const name = transform[1];
     const args = splitCssFunctionArgs(transform[2]);
@@ -574,7 +581,30 @@ function svgFilterSuppressesPaint(current: HTMLElement, value: string | undefine
           (type === "table" &&
             tableValues.length > 0 &&
             tableValues.every((value) => Number.isFinite(value) && value <= 0)) ||
+          (type === "discrete" &&
+            tableValues.length > 0 &&
+            tableValues.every((value) => Number.isFinite(value) && value <= 0)) ||
           (type === "linear" && slope <= 0 && intercept <= 0)
+        );
+      })
+    ) {
+      return true;
+    }
+    const colorMatrices = Array.from(filter.querySelectorAll("*")).filter(
+      (child) => child.tagName.toLowerCase() === "fecolormatrix"
+    );
+    if (
+      colorMatrices.some((matrix) => {
+        const type = matrix.getAttribute("type")?.toLowerCase() ?? "matrix";
+        const values = (matrix.getAttribute("values") ?? "")
+          .trim()
+          .split(/[\s,]+/)
+          .filter(Boolean)
+          .map(Number);
+        return (
+          type === "matrix" &&
+          values.length >= 20 &&
+          values.slice(15, 20).every((value) => Number.isFinite(value) && value <= 0)
         );
       })
     ) {
@@ -588,11 +618,30 @@ function cssColorLooksTransparent(value: string) {
   const normalized = value.trim().toLowerCase();
   return (
     normalized === "transparent" ||
+    normalized.startsWith("transparent ") ||
     /^rgba?\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(normalized) ||
     /^rgba?\([^)]*\/\s*0(?:%|\.0+)?\s*\)$/.test(normalized) ||
-    /^#[0-9a-f]{4}$/.test(normalized) && normalized.endsWith("0") ||
-    /^#[0-9a-f]{8}$/.test(normalized) && normalized.endsWith("00")
+    (/^#[0-9a-f]{4}$/.test(normalized) && normalized.endsWith("0")) ||
+    (/^#[0-9a-f]{8}$/.test(normalized) && normalized.endsWith("00"))
   );
+}
+
+function cssColorLooksBlack(value: string | null) {
+  const normalized = (value ?? "black").trim().toLowerCase();
+  if (normalized === "black" || normalized === "#000" || normalized === "#000000") {
+    return true;
+  }
+  const rgbMatch = normalized.match(/^rgba?\(([^)]*)\)$/);
+  if (!rgbMatch) {
+    return false;
+  }
+  const channels = rgbMatch[1]
+    .replace(/\//g, " ")
+    .split(/[,\s]+/)
+    .filter(Boolean)
+    .slice(0, 3)
+    .map(Number);
+  return channels.length === 3 && channels.every((channel) => channel === 0);
 }
 
 function maskImageFullyTransparent(value: string | undefined) {
@@ -600,7 +649,7 @@ function maskImageFullyTransparent(value: string | undefined) {
   if (!normalized || normalized === "none") {
     return false;
   }
-  const gradientMatch = normalized.match(/^linear-gradient\((.*)\)$/);
+  const gradientMatch = normalized.match(/^[a-z-]*gradient\((.*)\)$/);
   if (!gradientMatch) {
     return false;
   }
@@ -629,6 +678,73 @@ function maskSizeFullyCollapses(
   });
 }
 
+function svgElementOpacityValue(shape: Element, attribute: string) {
+  const styled = shape as SVGElement;
+  return (
+    cssOpacityValue(shape.getAttribute(attribute) ?? undefined) ??
+    cssOpacityValue(styled.style?.getPropertyValue(attribute)) ??
+    1
+  );
+}
+
+function svgPaintSuppressesMask(shape: Element) {
+  const opacity = svgElementOpacityValue(shape, "opacity");
+  const fillOpacity = svgElementOpacityValue(shape, "fill-opacity");
+  const fill = shape.getAttribute("fill") ?? (shape as SVGElement).style?.fill ?? null;
+  return (
+    isEffectivelyTransparent(opacity * fillOpacity) ||
+    cssColorLooksTransparent(fill ?? "") ||
+    cssColorLooksBlack(fill)
+  );
+}
+
+function svgMaskShapeSuppressesPaint(
+  current: HTMLElement,
+  shape: Element,
+  units: { emPx?: number; remPx?: number },
+  seen: Set<Element> = new Set()
+): boolean {
+  if (seen.has(shape)) {
+    return true;
+  }
+  seen.add(shape);
+
+  const tagName = shape.tagName.toLowerCase();
+  if (tagName === "use") {
+    const href =
+      shape.getAttribute("href") ??
+      shape.getAttribute("xlink:href") ??
+      shape.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+    const targetId = href?.startsWith("#") ? href.slice(1) : null;
+    const target = targetId ? current.ownerDocument.getElementById(targetId) : null;
+    return target === null || svgMaskShapeSuppressesPaint(current, target, units, seen);
+  }
+  if (shape.children.length > 0 && (tagName === "g" || tagName === "svg" || tagName === "mask")) {
+    return Array.from(shape.children).every((child) =>
+      svgMaskShapeSuppressesPaint(current, child, units, seen)
+    );
+  }
+  return svgClipShapeSuppressesField(current, shape, units) || svgPaintSuppressesMask(shape);
+}
+
+function svgMaskSuppressesPaint(
+  current: HTMLElement,
+  value: string | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  return localCssUrlReferenceIds(value).some((id) => {
+    const mask = current.ownerDocument.getElementById(id);
+    if (!mask || mask.tagName.toLowerCase() !== "mask") {
+      return false;
+    }
+    const shapes = Array.from(mask.children);
+    return (
+      shapes.length === 0 ||
+      shapes.every((shape) => svgMaskShapeSuppressesPaint(current, shape, units))
+    );
+  });
+}
+
 function maskStyleSuppressesPaint(
   style: CSSStyleDeclaration | undefined,
   current: HTMLElement,
@@ -646,6 +762,9 @@ function maskStyleSuppressesPaint(
   if (maskImages.some(maskImageFullyTransparent)) {
     return true;
   }
+  if (maskImages.some((maskImage) => svgMaskSuppressesPaint(current, maskImage, units))) {
+    return true;
+  }
   return (
     maskSizeFullyCollapses(cssPropertyValue(style, current, "mask-size"), units) ||
     maskSizeFullyCollapses(cssPropertyValue(style, current, "-webkit-mask-size"), units)
@@ -653,7 +772,7 @@ function maskStyleSuppressesPaint(
 }
 
 function isEffectivelyTransparent(value: number | null) {
-  return value !== null && value <= MIN_VISIBLE_OPACITY;
+  return value !== null && value <= MIN_VISIBLE_OPACITY + 1e-9;
 }
 
 function hasMeaningfulClientRect(rect: DOMRect) {
@@ -664,7 +783,8 @@ function viewportSize(element: HTMLElement) {
   const view = element.ownerDocument.defaultView;
   const documentElement = element.ownerDocument.documentElement;
   return {
-    width: view?.innerWidth ?? documentElement.clientWidth
+    width: view?.innerWidth ?? documentElement.clientWidth,
+    height: view?.innerHeight ?? documentElement.clientHeight
   };
 }
 
@@ -677,8 +797,10 @@ function viewportExitForRect(element: HTMLElement) {
   return {
     rect,
     viewportWidth: viewport.width,
+    viewportHeight: viewport.height,
     beforeX: rect.right <= 0,
-    afterX: viewport.width > 0 && rect.left >= viewport.width
+    afterX: viewport.width > 0 && rect.left >= viewport.width,
+    beforeY: rect.bottom <= 0
   };
 }
 
@@ -702,6 +824,19 @@ function horizontalOffsetMatchesViewportExit(
     return viewportExit.rect.left - offset < viewportExit.viewportWidth;
   }
   return false;
+}
+
+function verticalOffsetMovesBeforeViewport(
+  viewportExit: ViewportExit | null,
+  offset: number | null
+) {
+  return (
+    viewportExit !== null &&
+    viewportExit.beforeY &&
+    offset !== null &&
+    isNegativeOffset(offset) &&
+    viewportExit.rect.bottom - offset > 0
+  );
 }
 
 function rectsIntersect(left: DOMRect, right: DOMRect) {
@@ -956,13 +1091,87 @@ function svgLengthToPx(
   return cssLengthToPx(value, axisSize, units) ?? numericCssValue(value, units) ?? 0;
 }
 
+function svgPointListToPoints(
+  value: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+) {
+  const tokens = value.trim().split(/[\s,]+/).filter(Boolean);
+  const points: Array<{ x: number; y: number }> = [];
+  for (let index = 0; index + 1 < tokens.length; index += 2) {
+    points.push({
+      x: svgLengthToPx(tokens[index], rect.width, units),
+      y: svgLengthToPx(tokens[index + 1], rect.height, units)
+    });
+  }
+  return points;
+}
+
+function svgPathDataToPoints(value: string) {
+  const numbers = (value.match(/-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi) ?? []).map(Number);
+  const points: Array<{ x: number; y: number }> = [];
+  for (let index = 0; index + 1 < numbers.length; index += 2) {
+    const x = numbers[index];
+    const y = numbers[index + 1];
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      points.push({ x, y });
+    }
+  }
+  return points;
+}
+
+function polygonArea(points: Array<{ x: number; y: number }>) {
+  const doubledArea = points.reduce((sum, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return sum + point.x * next.y - next.x * point.y;
+  }, 0);
+  return Math.abs(doubledArea) / 2;
+}
+
+function pointRegionSuppressesField(
+  points: Array<{ x: number; y: number }>,
+  rect: DOMRect,
+  requiresArea: boolean
+) {
+  if (points.length < (requiresArea ? 3 : 2)) {
+    return true;
+  }
+  const xValues = points.map((point) => point.x);
+  const yValues = points.map((point) => point.y);
+  const width = Math.max(...xValues) - Math.min(...xValues);
+  const height = Math.max(...yValues) - Math.min(...yValues);
+  const area = polygonArea(points);
+  const rectArea = rect.width * rect.height;
+  return (
+    width <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    height <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    (requiresArea && area <= Number.EPSILON) ||
+    (rectArea > 0 && area <= rectArea * MIN_CLIPPED_VISIBLE_FRACTION)
+  );
+}
+
 function svgClipShapeSuppressesField(
   current: HTMLElement,
   shape: Element,
-  units: { emPx?: number; remPx?: number }
-) {
+  units: { emPx?: number; remPx?: number },
+  seen: Set<Element> = new Set()
+): boolean {
+  if (seen.has(shape)) {
+    return true;
+  }
+  seen.add(shape);
+
   const rect = current.getBoundingClientRect();
   const tagName = shape.tagName.toLowerCase();
+  if (tagName === "use") {
+    const href =
+      shape.getAttribute("href") ??
+      shape.getAttribute("xlink:href") ??
+      shape.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+    const targetId = href?.startsWith("#") ? href.slice(1) : null;
+    const target = targetId ? current.ownerDocument.getElementById(targetId) : null;
+    return target === null || svgClipShapeSuppressesField(current, target, units, seen);
+  }
   if (tagName === "rect") {
     const width = svgLengthToPx(shape.getAttribute("width"), rect.width, units);
     const height = svgLengthToPx(shape.getAttribute("height"), rect.height, units);
@@ -978,6 +1187,19 @@ function svgClipShapeSuppressesField(
     return (
       radiusX * 2 <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
       radiusY * 2 <= MIN_CREDENTIAL_FIELD_SIZE_PX
+    );
+  }
+  if (tagName === "polygon" || tagName === "polyline") {
+    const points = svgPointListToPoints(shape.getAttribute("points") ?? "", rect, units);
+    return pointRegionSuppressesField(points, rect, tagName === "polygon");
+  }
+  if (tagName === "path") {
+    const points = svgPathDataToPoints(shape.getAttribute("d") ?? "");
+    return pointRegionSuppressesField(points, rect, true);
+  }
+  if (shape.children.length > 0 && (tagName === "g" || tagName === "svg")) {
+    return Array.from(shape.children).every((child) =>
+      svgClipShapeSuppressesField(current, child, units, seen)
     );
   }
   return false;
@@ -1054,25 +1276,7 @@ function clipPathFullyClips(
       const parsedY = y === undefined ? null : cssCoordinateToPx(y, rect.height, units);
       return parsedX === null || parsedY === null ? [] : [{ x: parsedX, y: parsedY }];
     });
-    if (points.length < 3) {
-      return false;
-    }
-    const doubledArea = points.reduce((sum, point, index) => {
-      const next = points[(index + 1) % points.length];
-      return sum + point.x * next.y - next.x * point.y;
-    }, 0);
-    const area = Math.abs(doubledArea) / 2;
-    const xValues = points.map((point) => point.x);
-    const yValues = points.map((point) => point.y);
-    const width = Math.max(...xValues) - Math.min(...xValues);
-    const height = Math.max(...yValues) - Math.min(...yValues);
-    const rectArea = rect.width * rect.height;
-    return (
-      area <= Number.EPSILON ||
-      width <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
-      height <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
-      (rectArea > 0 && area <= rectArea * MIN_CLIPPED_VISIBLE_FRACTION)
-    );
+    return pointRegionSuppressesField(points, rect, true);
   }
 
   return false;
@@ -1183,6 +1387,8 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     addReason(reasons, "not-viewable:hidden");
   }
   const viewportExit = viewportExitForRect(element);
+  let cumulativeOpacity = 1;
+  let cumulativeFilterOpacity = 1;
   for (
     let current: HTMLElement | null = element;
     current;
@@ -1219,20 +1425,31 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const right = computedCssValue(style?.right, current.style.right, cssUnits);
     const bottom = computedCssValue(style?.bottom, current.style.bottom, cssUnits);
     const marginLeft = computedCssValue(style?.marginLeft, current.style.marginLeft, cssUnits);
+    const marginTop = computedCssValue(style?.marginTop, current.style.marginTop, cssUnits);
     const width = computedCssValue(style?.width, current.style.width, cssUnits);
     const height = computedCssValue(style?.height, current.style.height, cssUnits);
     const transform = combinedTranslateOffset(style, current, cssUnits);
     const isPositioned =
       position !== undefined && position !== "" && position !== "static";
+    if (opacity !== null) {
+      cumulativeOpacity *= opacity;
+    }
+    if (filterOpacity !== null) {
+      cumulativeFilterOpacity *= filterOpacity;
+    }
     const hasDirectionalTransformOffset =
       transform !== null &&
-      horizontalOffsetMatchesViewportExit(viewportExit, transform.x);
+      (horizontalOffsetMatchesViewportExit(viewportExit, transform.x) ||
+        verticalOffsetMovesBeforeViewport(viewportExit, transform.y));
     const hasDirectionalPositionOffset =
       isPositioned &&
       (horizontalOffsetMatchesViewportExit(viewportExit, left) ||
-        horizontalOffsetMatchesViewportExit(viewportExit, inverseOffset(right)));
+        horizontalOffsetMatchesViewportExit(viewportExit, inverseOffset(right)) ||
+        verticalOffsetMovesBeforeViewport(viewportExit, top) ||
+        verticalOffsetMovesBeforeViewport(viewportExit, inverseOffset(bottom)));
     const hasDirectionalMarginOffset =
-      horizontalOffsetMatchesViewportExit(viewportExit, marginLeft);
+      horizontalOffsetMatchesViewportExit(viewportExit, marginLeft) ||
+      verticalOffsetMovesBeforeViewport(viewportExit, marginTop);
     const hasHiddenVisibility =
       inlineVisibility === "hidden" ||
       style?.visibility === "hidden" ||
@@ -1252,7 +1469,9 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     }
     if (
       isEffectivelyTransparent(opacity) ||
+      isEffectivelyTransparent(cumulativeOpacity) ||
       isEffectivelyTransparent(filterOpacity) ||
+      isEffectivelyTransparent(cumulativeFilterOpacity) ||
       svgFilterSuppressesPaint(current, filter) ||
       maskStyleSuppressesPaint(style, current, cssUnits)
     ) {

@@ -1369,6 +1369,10 @@ describe("autofill triage", () => {
         <input name="margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:-9999px" />
         <input name="percent_translate_password" type="password" autocomplete="current-password" style="translate:-800%" />
         <input name="calc_translate_password" type="password" autocomplete="current-password" style="translate:calc(-100% - 500px)" />
+        <input name="translated_y_password" type="password" autocomplete="current-password" style="transform:translateY(-500px)" />
+        <input name="longhand_translated_y_password" type="password" autocomplete="current-password" style="translate:0 -500px" />
+        <input name="relative_y_password" type="password" autocomplete="current-password" style="position:relative;top:-500px" />
+        <input name="margin_y_password" type="password" autocomplete="current-password" style="display:block;margin-top:-500px" />
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
@@ -1393,6 +1397,17 @@ describe("autofill triage", () => {
         elementRect({ left: -9975, top: 40, width: 185, height: 21 })
       );
     }
+    for (const name of [
+      "translated_y_password",
+      "longhand_translated_y_password",
+      "relative_y_password",
+      "margin_y_password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: -520, width: 185, height: 21 })
+      );
+    }
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -1403,7 +1418,11 @@ describe("autofill triage", () => {
       "relative_password",
       "margin_password",
       "percent_translate_password",
-      "calc_translate_password"
+      "calc_translate_password",
+      "translated_y_password",
+      "longhand_translated_y_password",
+      "relative_y_password",
+      "margin_y_password"
     ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:offscreen");
@@ -1416,13 +1435,32 @@ describe("autofill triage", () => {
       <form>
         <svg width="0" height="0" aria-hidden="true">
           <filter id="alphaZero"><feComponentTransfer><feFuncA type="table" tableValues="0 0" /></feComponentTransfer></filter>
+          <filter id="alphaZeroDiscrete"><feComponentTransfer><feFuncA type="discrete" tableValues="0 0" /></feComponentTransfer></filter>
+          <filter id="alphaZeroMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0 0" /></filter>
+          <mask id="blackMask"><rect width="100%" height="100%" fill="black" /></mask>
         </svg>
         <input name="transparent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
+        <input name="radial_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(transparent, transparent)" />
+        <input name="stop_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
+        <input name="url_mask_password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input name="svg_filter_password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
+        <input name="svg_filter_discrete_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroDiscrete)" />
+        <input name="svg_filter_matrix_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
+        <div style="opacity:0.1">
+          <div style="opacity:0.1">
+            <input name="cumulative_opacity_password" type="password" autocomplete="current-password" />
+          </div>
+        </div>
+        <div style="filter:opacity(10%)">
+          <div style="filter:opacity(10%)">
+            <input name="cumulative_filter_password" type="password" autocomplete="current-password" />
+          </div>
+        </div>
         <input name="rotate_x_password" type="password" autocomplete="current-password" style="rotate:x 90deg" />
         <input name="rotate_y_password" type="password" autocomplete="current-password" style="rotate:y 90deg" />
         <input name="backface_password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:rotateY(180deg)" />
+        <input name="backface_matrix_password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:matrix3d(-1,0,0,0,0,1,0,0,0,0,-1,0,0,0,0,1)" />
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
@@ -1439,13 +1477,25 @@ describe("autofill triage", () => {
 
     for (const name of [
       "transparent_mask_password",
+      "radial_mask_password",
+      "stop_mask_password",
+      "url_mask_password",
       "zero_mask_password",
-      "svg_filter_password"
+      "svg_filter_password",
+      "svg_filter_discrete_password",
+      "svg_filter_matrix_password",
+      "cumulative_opacity_password",
+      "cumulative_filter_password"
     ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:transparent");
     }
-    for (const name of ["rotate_x_password", "rotate_y_password", "backface_password"]) {
+    for (const name of [
+      "rotate_x_password",
+      "rotate_y_password",
+      "backface_password",
+      "backface_matrix_password"
+    ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:zero-size");
     }
@@ -1609,6 +1659,10 @@ describe("autofill triage", () => {
         <svg width="0" height="0" aria-hidden="true">
           <clipPath id="zeroClip"><rect width="0" height="0" /></clipPath>
           <clipPath id="stripClip"><rect width="4" height="100" /></clipPath>
+          <rect id="zeroRect" width="0" height="0" />
+          <clipPath id="zeroPolygonClip"><polygon points="0,0 0,0 0,0" /></clipPath>
+          <clipPath id="zeroPathClip"><path d="M0 0Z" /></clipPath>
+          <clipPath id="zeroUseClip"><use href="#zeroRect" /></clipPath>
         </svg>
         <input name="inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
         <input name="calc_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% - 4px) 0 0)" />
@@ -1618,6 +1672,9 @@ describe("autofill triage", () => {
         <input name="legacy_strip_password" type="password" autocomplete="current-password" style="position:absolute;clip:rect(0 4px 100px 0)" />
         <input name="url_zero_password" type="password" autocomplete="current-password" style="clip-path:url(#zeroClip)" />
         <input name="url_strip_password" type="password" autocomplete="current-password" style="clip-path:url(#stripClip)" />
+        <input name="url_polygon_password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPolygonClip)" />
+        <input name="url_path_password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPathClip)" />
+        <input name="url_use_password" type="password" autocomplete="current-password" style="clip-path:url(#zeroUseClip)" />
         <div style="width:2px;height:2px;overflow:hidden">
           <input name="ancestor_clipped_password" type="password" autocomplete="current-password" />
         </div>
@@ -1661,6 +1718,18 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "url_strip_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "url_strip_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_polygon_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_polygon_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_path_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_path_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_use_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_use_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "ancestor_clipped_password").qualifiedAs).toBe("ignored");

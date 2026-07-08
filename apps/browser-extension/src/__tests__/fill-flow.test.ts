@@ -349,15 +349,40 @@ describe("fillLoginForm", () => {
         <input id="positive-margin-password" type="password" autocomplete="current-password" style="display:block;margin-left:9999px" />
         <input id="percent-translate-password" type="password" autocomplete="current-password" style="translate:-800%" />
         <input id="calc-translate-password" type="password" autocomplete="current-password" style="translate:calc(-100% - 500px)" />
+        <input id="translated-y-password" type="password" autocomplete="current-password" style="transform:translateY(-500px)" />
+        <input id="longhand-translated-y-password" type="password" autocomplete="current-password" style="translate:0 -500px" />
+        <input id="relative-y-password" type="password" autocomplete="current-password" style="position:relative;top:-500px" />
+        <input id="margin-y-password" type="password" autocomplete="current-password" style="display:block;margin-top:-500px" />
         <input id="mask-transparent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
+        <input id="mask-radial-password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(transparent, transparent)" />
+        <input id="mask-stop-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
+        <svg width="0" height="0" aria-hidden="true">
+          <mask id="blackMask"><rect width="100%" height="100%" fill="black" /></mask>
+        </svg>
+        <input id="mask-url-password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input id="mask-zero-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <svg width="0" height="0" aria-hidden="true">
           <filter id="alphaZero"><feComponentTransfer><feFuncA type="table" tableValues="0 0" /></feComponentTransfer></filter>
+          <filter id="alphaZeroDiscrete"><feComponentTransfer><feFuncA type="discrete" tableValues="0 0" /></feComponentTransfer></filter>
+          <filter id="alphaZeroMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0 0" /></filter>
         </svg>
         <input id="svg-filter-password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
+        <input id="svg-filter-discrete-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroDiscrete)" />
+        <input id="svg-filter-matrix-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
+        <div style="opacity:0.1">
+          <div style="opacity:0.1">
+            <input id="cumulative-opacity-password" type="password" autocomplete="current-password" />
+          </div>
+        </div>
+        <div style="filter:opacity(10%)">
+          <div style="filter:opacity(10%)">
+            <input id="cumulative-filter-password" type="password" autocomplete="current-password" />
+          </div>
+        </div>
         <input id="rotate-x-password" type="password" autocomplete="current-password" style="rotate:x 90deg" />
         <input id="rotate-y-password" type="password" autocomplete="current-password" style="rotate:y 90deg" />
         <input id="backface-password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:rotateY(180deg)" />
+        <input id="backface-matrix-password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:matrix3d(-1,0,0,0,0,1,0,0,0,0,-1,0,0,0,0,1)" />
         <input id="translated-password" type="password" autocomplete="current-password" style="translate:-9999px" />
         <input id="longhand-scaled-password" type="password" autocomplete="current-password" style="scale:0" />
         <input id="filter-password" type="password" autocomplete="current-password" style="filter:opacity(0)" />
@@ -395,6 +420,17 @@ describe("fillLoginForm", () => {
         elementRect({ left: 10024, top: 40, width: 185, height: 21 })
       );
     }
+    for (const id of [
+      "translated-y-password",
+      "longhand-translated-y-password",
+      "relative-y-password",
+      "margin-y-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: -520, width: 185, height: 21 })
+      );
+    }
     stubElementRect(
       document.querySelector("#rotate-x-password") as HTMLInputElement,
       elementRect({ left: 24, top: 40, width: 185, height: 0 })
@@ -415,12 +451,24 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#positive-margin-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#percent-translate-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#calc-translate-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#translated-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#longhand-translated-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#relative-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#margin-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-transparent-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-radial-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-stop-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-url-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-discrete-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-matrix-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#cumulative-opacity-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#cumulative-filter-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#rotate-x-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#rotate-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#backface-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#backface-matrix-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#translated-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-scaled-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#filter-password") as HTMLInputElement).value).toBe("");
@@ -437,6 +485,10 @@ describe("fillLoginForm", () => {
         <svg width="0" height="0" aria-hidden="true">
           <clipPath id="zeroClip"><rect width="0" height="0" /></clipPath>
           <clipPath id="stripClip"><rect width="4" height="100" /></clipPath>
+          <rect id="zeroRect" width="0" height="0" />
+          <clipPath id="zeroPolygonClip"><polygon points="0,0 0,0 0,0" /></clipPath>
+          <clipPath id="zeroPathClip"><path d="M0 0Z" /></clipPath>
+          <clipPath id="zeroUseClip"><use href="#zeroRect" /></clipPath>
         </svg>
         <input id="inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
         <input id="calc-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% - 4px) 0 0)" />
@@ -446,6 +498,9 @@ describe("fillLoginForm", () => {
         <input id="legacy-strip-password" type="password" autocomplete="current-password" style="position:absolute;clip:rect(0 4px 100px 0)" />
         <input id="url-zero-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroClip)" />
         <input id="url-strip-password" type="password" autocomplete="current-password" style="clip-path:url(#stripClip)" />
+        <input id="url-polygon-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPolygonClip)" />
+        <input id="url-path-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPathClip)" />
+        <input id="url-use-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroUseClip)" />
         <div style="width:2px;height:2px;overflow:hidden">
           <input id="ancestor-clipped-password" type="password" autocomplete="current-password" />
         </div>
@@ -467,6 +522,9 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#legacy-strip-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-strip-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-polygon-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-path-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-use-password") as HTMLInputElement).value).toBe("");
     expect(
       (document.querySelector("#ancestor-clipped-password") as HTMLInputElement).value
     ).toBe("");
