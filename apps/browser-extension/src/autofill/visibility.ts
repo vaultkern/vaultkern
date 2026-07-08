@@ -1874,6 +1874,224 @@ function cssRgbColor(value: string): CssColorRgba | null {
   return { r, g, b, a };
 }
 
+function cssColorFunctionChannel(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return null;
+  }
+  if (normalized.endsWith("%")) {
+    const parsed = Number.parseFloat(normalized.slice(0, -1));
+    return Number.isFinite(parsed) ? clampCssColorChannel((parsed * 255) / 100) : null;
+  }
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? clampCssColorChannel(parsed * 255) : null;
+}
+
+function cssFunctionColorAlpha(tokens: string[]) {
+  const slashIndex = tokens.indexOf("/");
+  return slashIndex < 0 ? 1 : cssAlphaChannel(tokens[slashIndex + 1]);
+}
+
+function cssColorFunctionColor(value: string): CssColorRgba | null {
+  const body = cssFunctionBody(value.trim().toLowerCase(), "color");
+  if (body === null) {
+    return null;
+  }
+
+  const tokens = splitCssFunctionArgs(body);
+  const colorSpace = tokens[0];
+  if (
+    colorSpace !== "srgb" &&
+    colorSpace !== "srgb-linear" &&
+    colorSpace !== "display-p3" &&
+    colorSpace !== "a98-rgb" &&
+    colorSpace !== "prophoto-rgb" &&
+    colorSpace !== "rec2020"
+  ) {
+    return null;
+  }
+  const r = cssColorFunctionChannel(tokens[1]);
+  const g = cssColorFunctionChannel(tokens[2]);
+  const b = cssColorFunctionChannel(tokens[3]);
+  const a = cssFunctionColorAlpha(tokens);
+  return r === null || g === null || b === null || a === null ? null : { r, g, b, a };
+}
+
+function cssLabLightness(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return null;
+  }
+  if (normalized.endsWith("%")) {
+    const parsed = Number.parseFloat(normalized.slice(0, -1));
+    return Number.isFinite(parsed) ? Math.min(100, Math.max(0, parsed)) : null;
+  }
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? Math.min(100, Math.max(0, parsed)) : null;
+}
+
+function cssLabAxis(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return null;
+  }
+  if (normalized.endsWith("%")) {
+    const parsed = Number.parseFloat(normalized.slice(0, -1));
+    return Number.isFinite(parsed) ? parsed * 1.25 : null;
+  }
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function cssOklabLightness(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return null;
+  }
+  if (normalized.endsWith("%")) {
+    const parsed = Number.parseFloat(normalized.slice(0, -1));
+    return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed / 100)) : null;
+  }
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : null;
+}
+
+function cssOklabAxis(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return null;
+  }
+  if (normalized.endsWith("%")) {
+    const parsed = Number.parseFloat(normalized.slice(0, -1));
+    return Number.isFinite(parsed) ? parsed * 0.004 : null;
+  }
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function cssLinearSrgbChannelToRgb(value: number) {
+  const clamped = Math.min(1, Math.max(0, value));
+  const encoded =
+    clamped <= 0.0031308 ? 12.92 * clamped : 1.055 * clamped ** (1 / 2.4) - 0.055;
+  return clampCssColorChannel(encoded * 255);
+}
+
+function cssLinearSrgbToColor(
+  r: number,
+  g: number,
+  b: number,
+  a: number
+): CssColorRgba {
+  return {
+    r: cssLinearSrgbChannelToRgb(r),
+    g: cssLinearSrgbChannelToRgb(g),
+    b: cssLinearSrgbChannelToRgb(b),
+    a
+  };
+}
+
+function cssOklabToRgb(l: number, a: number, b: number, alpha: number): CssColorRgba {
+  const lPrime = l + 0.3963377774 * a + 0.2158037573 * b;
+  const mPrime = l - 0.1055613458 * a - 0.0638541728 * b;
+  const sPrime = l - 0.0894841775 * a - 1.291485548 * b;
+  const long = lPrime ** 3;
+  const medium = mPrime ** 3;
+  const short = sPrime ** 3;
+  return cssLinearSrgbToColor(
+    4.0767416621 * long - 3.3077115913 * medium + 0.2309699292 * short,
+    -1.2684380046 * long + 2.6097574011 * medium - 0.3413193965 * short,
+    -0.0041960863 * long - 0.7034186147 * medium + 1.707614701 * short,
+    alpha
+  );
+}
+
+function cssLabToRgb(l: number, a: number, b: number, alpha: number): CssColorRgba {
+  const fy = (l + 16) / 116;
+  const fx = fy + a / 500;
+  const fz = fy - b / 200;
+  const epsilon = 216 / 24389;
+  const kappa = 24389 / 27;
+  const convert = (value: number) => {
+    const cubed = value ** 3;
+    return cubed > epsilon ? cubed : (116 * value - 16) / kappa;
+  };
+  const d50X = 0.96422 * convert(fx);
+  const d50Y = convert(fy);
+  const d50Z = 0.82521 * convert(fz);
+  const d65X = 0.9555766 * d50X - 0.0230393 * d50Y + 0.0631636 * d50Z;
+  const d65Y = -0.0282895 * d50X + 1.0099416 * d50Y + 0.0210077 * d50Z;
+  const d65Z = 0.0122982 * d50X - 0.020483 * d50Y + 1.3299098 * d50Z;
+  return cssLinearSrgbToColor(
+    3.2404542 * d65X - 1.5371385 * d65Y - 0.4985314 * d65Z,
+    -0.969266 * d65X + 1.8760108 * d65Y + 0.041556 * d65Z,
+    0.0556434 * d65X - 0.2040259 * d65Y + 1.0572252 * d65Z,
+    alpha
+  );
+}
+
+function cssModernLabColor(value: string): CssColorRgba | null {
+  const normalized = value.trim().toLowerCase();
+  const oklabBody = cssFunctionBody(normalized, "oklab");
+  if (oklabBody !== null) {
+    const tokens = splitCssFunctionArgs(oklabBody);
+    const l = cssOklabLightness(tokens[0]);
+    const a = cssOklabAxis(tokens[1]);
+    const b = cssOklabAxis(tokens[2]);
+    const alpha = cssFunctionColorAlpha(tokens);
+    return l === null || a === null || b === null || alpha === null
+      ? null
+      : cssOklabToRgb(l, a, b, alpha);
+  }
+
+  const oklchBody = cssFunctionBody(normalized, "oklch");
+  if (oklchBody !== null) {
+    const tokens = splitCssFunctionArgs(oklchBody);
+    const l = cssOklabLightness(tokens[0]);
+    const chroma = cssOklabAxis(tokens[1]);
+    const hue = cssAngleToDegrees(tokens[2]) ?? 0;
+    const alpha = cssFunctionColorAlpha(tokens);
+    return l === null || chroma === null || alpha === null
+      ? null
+      : cssOklabToRgb(
+          l,
+          chroma * Math.cos((hue * Math.PI) / 180),
+          chroma * Math.sin((hue * Math.PI) / 180),
+          alpha
+        );
+  }
+
+  const labBody = cssFunctionBody(normalized, "lab");
+  if (labBody !== null) {
+    const tokens = splitCssFunctionArgs(labBody);
+    const l = cssLabLightness(tokens[0]);
+    const a = cssLabAxis(tokens[1]);
+    const b = cssLabAxis(tokens[2]);
+    const alpha = cssFunctionColorAlpha(tokens);
+    return l === null || a === null || b === null || alpha === null
+      ? null
+      : cssLabToRgb(l, a, b, alpha);
+  }
+
+  const lchBody = cssFunctionBody(normalized, "lch");
+  if (lchBody !== null) {
+    const tokens = splitCssFunctionArgs(lchBody);
+    const l = cssLabLightness(tokens[0]);
+    const chroma = cssLabAxis(tokens[1]);
+    const hue = cssAngleToDegrees(tokens[2]) ?? 0;
+    const alpha = cssFunctionColorAlpha(tokens);
+    return l === null || chroma === null || alpha === null
+      ? null
+      : cssLabToRgb(
+          l,
+          chroma * Math.cos((hue * Math.PI) / 180),
+          chroma * Math.sin((hue * Math.PI) / 180),
+          alpha
+        );
+  }
+
+  return null;
+}
+
 function cssColorRgba(value: string): CssColorRgba | null {
   const normalized = value.trim().toLowerCase();
   if (!normalized) {
@@ -1888,7 +2106,13 @@ function cssColorRgba(value: string): CssColorRgba | null {
   if (normalized === "white") {
     return { r: 255, g: 255, b: 255, a: 1 };
   }
-  return cssHexColor(normalized) ?? cssRgbColor(normalized) ?? cssBasicNamedColor(normalized);
+  return (
+    cssHexColor(normalized) ??
+    cssRgbColor(normalized) ??
+    cssColorFunctionColor(normalized) ??
+    cssModernLabColor(normalized) ??
+    cssBasicNamedColor(normalized)
+  );
 }
 
 function cssBasicNamedColor(value: string): CssColorRgba | null {
@@ -1969,26 +2193,62 @@ function cssColorPaintedOverBackground(
 
 type CssBlendMode =
   | "normal"
+  | "color"
+  | "color-burn"
+  | "color-dodge"
   | "multiply"
+  | "overlay"
+  | "hard-light"
   | "screen"
   | "darken"
   | "lighten"
+  | "luminosity"
   | "difference"
-  | "exclusion";
+  | "exclusion"
+  | "hue"
+  | "plus-darker"
+  | "plus-lighter"
+  | "saturation"
+  | "soft-light";
 
 function cssBlendMode(value: string | undefined): CssBlendMode {
   const normalized = value?.trim().toLowerCase();
   if (
+    normalized === "color" ||
+    normalized === "color-burn" ||
+    normalized === "color-dodge" ||
     normalized === "multiply" ||
+    normalized === "overlay" ||
+    normalized === "hard-light" ||
     normalized === "screen" ||
     normalized === "darken" ||
     normalized === "lighten" ||
+    normalized === "luminosity" ||
     normalized === "difference" ||
-    normalized === "exclusion"
+    normalized === "exclusion" ||
+    normalized === "hue" ||
+    normalized === "plus-darker" ||
+    normalized === "plus-lighter" ||
+    normalized === "saturation" ||
+    normalized === "soft-light"
   ) {
     return normalized;
   }
   return "normal";
+}
+
+function cssBlendSoftLightChannel(source: number, backdrop: number) {
+  const sourceUnit = source / 255;
+  const backdropUnit = backdrop / 255;
+  const d =
+    backdropUnit <= 0.25
+      ? ((16 * backdropUnit - 12) * backdropUnit + 4) * backdropUnit
+      : Math.sqrt(backdropUnit);
+  const result =
+    sourceUnit <= 0.5
+      ? backdropUnit - (1 - 2 * sourceUnit) * backdropUnit * (1 - backdropUnit)
+      : backdropUnit + (2 * sourceUnit - 1) * (d - backdropUnit);
+  return clampCssColorChannel(result * 255);
 }
 
 function cssBlendChannel(source: number, backdrop: number, mode: CssBlendMode) {
@@ -1997,6 +2257,37 @@ function cssBlendChannel(source: number, backdrop: number, mode: CssBlendMode) {
   }
   if (mode === "screen") {
     return 255 - ((255 - source) * (255 - backdrop)) / 255;
+  }
+  if (mode === "overlay") {
+    return backdrop <= 127.5
+      ? (2 * source * backdrop) / 255
+      : 255 - (2 * (255 - source) * (255 - backdrop)) / 255;
+  }
+  if (mode === "hard-light") {
+    return source <= 127.5
+      ? (2 * source * backdrop) / 255
+      : 255 - (2 * (255 - source) * (255 - backdrop)) / 255;
+  }
+  if (mode === "soft-light") {
+    return cssBlendSoftLightChannel(source, backdrop);
+  }
+  if (mode === "color-dodge") {
+    if (backdrop <= 0) {
+      return 0;
+    }
+    if (source >= 255) {
+      return 255;
+    }
+    return clampCssColorChannel((backdrop * 255) / (255 - source));
+  }
+  if (mode === "color-burn") {
+    if (backdrop >= 255) {
+      return 255;
+    }
+    if (source <= 0) {
+      return 0;
+    }
+    return clampCssColorChannel(255 - ((255 - backdrop) * 255) / source);
   }
   if (mode === "darken") {
     return Math.min(source, backdrop);
@@ -2010,7 +2301,102 @@ function cssBlendChannel(source: number, backdrop: number, mode: CssBlendMode) {
   if (mode === "exclusion") {
     return backdrop + source - (2 * backdrop * source) / 255;
   }
+  if (mode === "plus-lighter") {
+    return Math.min(255, backdrop + source);
+  }
+  if (mode === "plus-darker") {
+    return Math.max(0, backdrop + source - 255);
+  }
   return source;
+}
+
+type CssNormalizedRgb = [number, number, number];
+
+function cssBlendLum(color: CssNormalizedRgb) {
+  return color[0] * 0.3 + color[1] * 0.59 + color[2] * 0.11;
+}
+
+function cssBlendSat(color: CssNormalizedRgb) {
+  return Math.max(...color) - Math.min(...color);
+}
+
+function cssBlendClipColor(color: CssNormalizedRgb): CssNormalizedRgb {
+  const lum = cssBlendLum(color);
+  let clipped: CssNormalizedRgb = [...color];
+  const min = Math.min(...clipped);
+  if (min < 0) {
+    clipped = clipped.map(
+      (channel) => lum + ((channel - lum) * lum) / (lum - min)
+    ) as CssNormalizedRgb;
+  }
+  const max = Math.max(...clipped);
+  if (max > 1) {
+    clipped = clipped.map(
+      (channel) => lum + ((channel - lum) * (1 - lum)) / (max - lum)
+    ) as CssNormalizedRgb;
+  }
+  return clipped.map((channel) => Math.min(1, Math.max(0, channel))) as CssNormalizedRgb;
+}
+
+function cssBlendSetLum(color: CssNormalizedRgb, lum: number) {
+  const delta = lum - cssBlendLum(color);
+  return cssBlendClipColor(color.map((channel) => channel + delta) as CssNormalizedRgb);
+}
+
+function cssBlendSetSat(color: CssNormalizedRgb, saturation: number): CssNormalizedRgb {
+  const sorted = [0, 1, 2].sort((left, right) => color[left] - color[right]);
+  const result: CssNormalizedRgb = [...color];
+  const minIndex = sorted[0];
+  const midIndex = sorted[1];
+  const maxIndex = sorted[2];
+  if (result[maxIndex] > result[minIndex]) {
+    result[midIndex] =
+      ((result[midIndex] - result[minIndex]) * saturation) /
+      (result[maxIndex] - result[minIndex]);
+    result[maxIndex] = saturation;
+  } else {
+    result[midIndex] = 0;
+    result[maxIndex] = 0;
+  }
+  result[minIndex] = 0;
+  return result;
+}
+
+function cssColorBlendHslMode(
+  source: CssColorRgba,
+  backdrop: CssColorRgba,
+  mode: CssBlendMode
+): CssColorRgba | null {
+  const sourceChannels: CssNormalizedRgb = [source.r / 255, source.g / 255, source.b / 255];
+  const backdropChannels: CssNormalizedRgb = [
+    backdrop.r / 255,
+    backdrop.g / 255,
+    backdrop.b / 255
+  ];
+  let blended: CssNormalizedRgb | null = null;
+  if (mode === "hue") {
+    blended = cssBlendSetLum(
+      cssBlendSetSat(sourceChannels, cssBlendSat(backdropChannels)),
+      cssBlendLum(backdropChannels)
+    );
+  } else if (mode === "saturation") {
+    blended = cssBlendSetLum(
+      cssBlendSetSat(backdropChannels, cssBlendSat(sourceChannels)),
+      cssBlendLum(backdropChannels)
+    );
+  } else if (mode === "color") {
+    blended = cssBlendSetLum(sourceChannels, cssBlendLum(backdropChannels));
+  } else if (mode === "luminosity") {
+    blended = cssBlendSetLum(backdropChannels, cssBlendLum(sourceChannels));
+  }
+  return blended === null
+    ? null
+    : {
+        r: clampCssColorChannel(blended[0] * 255),
+        g: clampCssColorChannel(blended[1] * 255),
+        b: clampCssColorChannel(blended[2] * 255),
+        a: source.a
+      };
 }
 
 function cssColorBlendedOverBackground(
@@ -2023,7 +2409,8 @@ function cssColorBlendedOverBackground(
   }
   const mode = cssBlendMode(blendMode);
   const alpha = clampCssAlphaChannel(color.a);
-  const blended = {
+  const hslBlend = cssColorBlendHslMode(color, background, mode);
+  const blended = hslBlend ?? {
     r: cssBlendChannel(color.r, background.r, mode),
     g: cssBlendChannel(color.g, background.g, mode),
     b: cssBlendChannel(color.b, background.b, mode)

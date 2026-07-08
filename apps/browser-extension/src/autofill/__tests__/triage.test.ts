@@ -1918,6 +1918,89 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats extended blend-mode credential decoys as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="color_dodge_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:color-dodge" />
+        <div style="background:black">
+          <input name="color_burn_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white;outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:color-burn" />
+        </div>
+        <input name="plus_lighter_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:plus-lighter" />
+        <div style="background:rgb(64,64,64)">
+          <input name="overlay_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:rgb(128,128,128);color:rgb(128,128,128);-webkit-text-fill-color:rgb(128,128,128);border:1px solid rgb(128,128,128);outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:overlay" />
+          <input name="hard_light_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:rgb(128,128,128);color:rgb(128,128,128);-webkit-text-fill-color:rgb(128,128,128);border:1px solid rgb(128,128,128);outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:hard-light" />
+          <input name="soft_light_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:rgb(128,128,128);color:rgb(128,128,128);-webkit-text-fill-color:rgb(128,128,128);border:1px solid rgb(128,128,128);outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:soft-light" />
+        </div>
+        <div style="background:rgb(128,128,128)">
+          <input name="hue_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:hue" />
+          <input name="saturation_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:saturation" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const [index, name] of [
+      "color_dodge_password",
+      "color_burn_password",
+      "plus_lighter_password",
+      "overlay_password",
+      "hard_light_password",
+      "soft_light_password",
+      "hue_password",
+      "saturation_password",
+      "real_password"
+    ].entries()) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40 + index * 40, width: 185, height: 21 })
+      );
+    }
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    for (const name of [
+      "color_dodge_password",
+      "color_burn_password",
+      "plus_lighter_password",
+      "overlay_password",
+      "hard_light_password",
+      "soft_light_password",
+      "hue_password",
+      "saturation_password"
+    ]) {
+      expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
+      expect(fieldByName(report, name).reasons).toContain("not-viewable:transparent");
+    }
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats modern CSS color-function credential decoys as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="srgb_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:color(srgb 1 1 1);color:color(srgb 1 1 1);-webkit-text-fill-color:color(srgb 1 1 1);border:1px solid color(srgb 1 1 1);outline:0;box-shadow:none;text-shadow:none" />
+        <input name="oklab_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:oklab(1 0 0);color:oklab(1 0 0);-webkit-text-fill-color:oklab(1 0 0);border:1px solid oklab(1 0 0);outline:0;box-shadow:none;text-shadow:none" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const [index, name] of [
+      "srgb_password",
+      "oklab_password",
+      "real_password"
+    ].entries()) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40 + index * 40, width: 185, height: 21 })
+      );
+    }
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    for (const name of ["srgb_password", "oklab_password"]) {
+      expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
+      expect(fieldByName(report, name).reasons).toContain("not-viewable:transparent");
+    }
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("keeps flattened preserve-3d backface fields viewable", () => {
     document.body.innerHTML = `
       <form>

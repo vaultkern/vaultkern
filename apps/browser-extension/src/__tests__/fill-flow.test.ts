@@ -385,6 +385,86 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys hidden by extended blend modes", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="color-dodge-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:color-dodge" />
+        <div style="background:black">
+          <input id="color-burn-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white;outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:color-burn" />
+        </div>
+        <input id="plus-lighter-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:plus-lighter" />
+        <div style="background:rgb(64,64,64)">
+          <input id="overlay-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:rgb(128,128,128);color:rgb(128,128,128);-webkit-text-fill-color:rgb(128,128,128);border:1px solid rgb(128,128,128);outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:overlay" />
+          <input id="hard-light-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:rgb(128,128,128);color:rgb(128,128,128);-webkit-text-fill-color:rgb(128,128,128);border:1px solid rgb(128,128,128);outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:hard-light" />
+          <input id="soft-light-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:rgb(128,128,128);color:rgb(128,128,128);-webkit-text-fill-color:rgb(128,128,128);border:1px solid rgb(128,128,128);outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:soft-light" />
+        </div>
+        <div style="background:rgb(128,128,128)">
+          <input id="hue-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:hue" />
+          <input id="saturation-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;mix-blend-mode:saturation" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const [index, id] of [
+      "color-dodge-password",
+      "color-burn-password",
+      "plus-lighter-password",
+      "overlay-password",
+      "hard-light-password",
+      "soft-light-password",
+      "hue-password",
+      "saturation-password",
+      "login-password"
+    ].entries()) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40 + index * 40, width: 185, height: 21 })
+      );
+    }
+
+    fillLoginForm({ password: "secret" });
+
+    for (const id of [
+      "color-dodge-password",
+      "color-burn-password",
+      "plus-lighter-password",
+      "overlay-password",
+      "hard-light-password",
+      "soft-light-password",
+      "hue-password",
+      "saturation-password"
+    ]) {
+      expect((document.querySelector(`#${id}`) as HTMLInputElement).value).toBe("");
+    }
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("does not fill password decoys hidden by modern CSS color functions", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="srgb-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:color(srgb 1 1 1);color:color(srgb 1 1 1);-webkit-text-fill-color:color(srgb 1 1 1);border:1px solid color(srgb 1 1 1);outline:0;box-shadow:none;text-shadow:none" />
+        <input id="oklab-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:oklab(1 0 0);color:oklab(1 0 0);-webkit-text-fill-color:oklab(1 0 0);border:1px solid oklab(1 0 0);outline:0;box-shadow:none;text-shadow:none" />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const [index, id] of [
+      "srgb-password",
+      "oklab-password",
+      "login-password"
+    ].entries()) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40 + index * 40, width: 185, height: 21 })
+      );
+    }
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#srgb-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#oklab-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys clipped away by rounded overflow ancestors", () => {
     document.body.innerHTML = `
       <form>
