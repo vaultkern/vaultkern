@@ -1618,6 +1618,7 @@ describe("autofill triage", () => {
           <filter id="objectOffsetSource" primitiveUnits="objectBoundingBox"><feOffset dx="-3" dy="0" /></filter>
           <mask id="blackMask"><rect width="100%" height="100%" fill="black" /></mask>
           <mask id="transparentGroupMask"><g opacity="0"><rect width="100%" height="100%" fill="white" /></g></mask>
+          <mask id="nestedOpacityMask"><g opacity="0.1"><rect opacity="0.1" width="100%" height="100%" fill="white" /></g></mask>
         </svg>
         <input name="transparent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
         <input name="radial_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(transparent, transparent)" />
@@ -1631,6 +1632,7 @@ describe("autofill triage", () => {
         <input name="composite_exclude_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black),linear-gradient(black,black);mask-composite:exclude" />
         <input name="url_mask_password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input name="group_opacity_mask_password" type="password" autocomplete="current-password" style="mask:url(#transparentGroupMask)" />
+        <input name="nested_opacity_mask_password" type="password" autocomplete="current-password" style="mask:url(#nestedOpacityMask)" />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input name="zero_percent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input name="tiny_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
@@ -1759,6 +1761,7 @@ describe("autofill triage", () => {
       "composite_exclude_mask_password",
       "url_mask_password",
       "group_opacity_mask_password",
+      "nested_opacity_mask_password",
       "zero_mask_password",
       "zero_percent_mask_password",
       "tiny_mask_password",

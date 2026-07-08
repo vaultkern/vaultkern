@@ -424,9 +424,11 @@ describe("fillLoginForm", () => {
         <svg width="0" height="0" aria-hidden="true">
           <mask id="blackMask"><rect width="100%" height="100%" fill="black" /></mask>
           <mask id="transparentGroupMask"><g opacity="0"><rect width="100%" height="100%" fill="white" /></g></mask>
+          <mask id="nestedOpacityMask"><g opacity="0.1"><rect opacity="0.1" width="100%" height="100%" fill="white" /></g></mask>
         </svg>
         <input id="mask-url-password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input id="mask-group-opacity-password" type="password" autocomplete="current-password" style="mask:url(#transparentGroupMask)" />
+        <input id="mask-nested-opacity-password" type="password" autocomplete="current-password" style="mask:url(#nestedOpacityMask)" />
         <input id="mask-zero-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input id="mask-zero-percent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input id="mask-tiny-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
@@ -745,6 +747,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#mask-composite-exclude-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-url-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-group-opacity-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-nested-opacity-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-percent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-tiny-password") as HTMLInputElement).value).toBe("");

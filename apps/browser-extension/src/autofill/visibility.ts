@@ -3608,23 +3608,27 @@ function svgElementOpacityValue(
   );
 }
 
-function svgMaskOpacitySuppressesPaint(
+function svgMaskPaintOpacityValue(
   shape: Element,
   style: CSSStyleDeclaration | undefined
 ) {
   const opacity = svgElementOpacityValue(shape, "opacity", style);
   const fillOpacity = svgElementOpacityValue(shape, "fill-opacity", style);
-  return isEffectivelyTransparent(opacity * fillOpacity);
+  return opacity * fillOpacity;
 }
 
-function svgPaintSuppressesMask(shape: Element, style: CSSStyleDeclaration | undefined) {
+function svgPaintSuppressesMask(
+  shape: Element,
+  style: CSSStyleDeclaration | undefined,
+  effectiveOpacity = svgMaskPaintOpacityValue(shape, style)
+) {
   const fill =
     shape.getAttribute("fill") ??
     (shape as SVGElement).style?.fill ??
     style?.getPropertyValue("fill") ??
     null;
   return (
-    svgMaskOpacitySuppressesPaint(shape, style) ||
+    isEffectivelyTransparent(effectiveOpacity) ||
     cssColorLooksTransparent(fill ?? "") ||
     cssColorLooksBlack(fill)
   );
@@ -3635,7 +3639,8 @@ function svgMaskShapeSuppressesPaint(
   shape: Element,
   units: { emPx?: number; remPx?: number },
   seen: Set<Element> = new Set(),
-  inheritedMatrix: SvgMatrix2d = identitySvgMatrix()
+  inheritedMatrix: SvgMatrix2d = identitySvgMatrix(),
+  inheritedOpacity = 1
 ): boolean {
   if (seen.has(shape)) {
     return true;
@@ -3645,7 +3650,8 @@ function svgMaskShapeSuppressesPaint(
   const tagName = shape.tagName.toLowerCase();
   const shapeStyle = shape.ownerDocument.defaultView?.getComputedStyle(shape);
   const matrix = svgElementTransformMatrix(shape, inheritedMatrix, units);
-  if (svgMaskOpacitySuppressesPaint(shape, shapeStyle)) {
+  const effectiveOpacity = inheritedOpacity * svgMaskPaintOpacityValue(shape, shapeStyle);
+  if (isEffectivelyTransparent(effectiveOpacity)) {
     return true;
   }
   if (tagName === "use") {
@@ -3661,17 +3667,17 @@ function svgMaskShapeSuppressesPaint(
     );
     return (
       target === null ||
-      svgMaskShapeSuppressesPaint(current, target, units, seen, useMatrix)
+      svgMaskShapeSuppressesPaint(current, target, units, seen, useMatrix, effectiveOpacity)
     );
   }
   if (shape.children.length > 0 && (tagName === "g" || tagName === "svg" || tagName === "mask")) {
     return Array.from(shape.children).every((child) =>
-      svgMaskShapeSuppressesPaint(current, child, units, seen, matrix)
+      svgMaskShapeSuppressesPaint(current, child, units, seen, matrix, effectiveOpacity)
     );
   }
   return (
     svgClipShapeSuppressesField(current, shape, units, new Set(), inheritedMatrix) ||
-    svgPaintSuppressesMask(shape, shapeStyle)
+    svgPaintSuppressesMask(shape, shapeStyle, effectiveOpacity)
   );
 }
 
@@ -3680,7 +3686,8 @@ function svgMaskShapeVisibleBounds(
   shape: Element,
   units: { emPx?: number; remPx?: number },
   seen: Set<Element> = new Set(),
-  inheritedMatrix: SvgMatrix2d = identitySvgMatrix()
+  inheritedMatrix: SvgMatrix2d = identitySvgMatrix(),
+  inheritedOpacity = 1
 ): RectBounds | null {
   if (seen.has(shape)) {
     return null;
@@ -3690,7 +3697,8 @@ function svgMaskShapeVisibleBounds(
   const tagName = shape.tagName.toLowerCase();
   const shapeStyle = shape.ownerDocument.defaultView?.getComputedStyle(shape);
   const matrix = svgElementTransformMatrix(shape, inheritedMatrix, units);
-  if (svgMaskOpacitySuppressesPaint(shape, shapeStyle)) {
+  const effectiveOpacity = inheritedOpacity * svgMaskPaintOpacityValue(shape, shapeStyle);
+  if (isEffectivelyTransparent(effectiveOpacity)) {
     return null;
   }
   if (tagName === "use") {
@@ -3706,16 +3714,18 @@ function svgMaskShapeVisibleBounds(
     );
     return target === null
       ? null
-      : svgMaskShapeVisibleBounds(current, target, units, seen, useMatrix);
+      : svgMaskShapeVisibleBounds(current, target, units, seen, useMatrix, effectiveOpacity);
   }
   if (shape.children.length > 0 && (tagName === "g" || tagName === "svg" || tagName === "mask")) {
     return unionBounds(
       Array.from(shape.children)
-        .map((child) => svgMaskShapeVisibleBounds(current, child, units, seen, matrix))
+        .map((child) =>
+          svgMaskShapeVisibleBounds(current, child, units, seen, matrix, effectiveOpacity)
+        )
         .filter((bounds): bounds is RectBounds => bounds !== null)
     );
   }
-  if (svgPaintSuppressesMask(shape, shapeStyle)) {
+  if (svgPaintSuppressesMask(shape, shapeStyle, effectiveOpacity)) {
     return null;
   }
   return svgClipShapeVisibleBounds(current, shape, units, new Set(), inheritedMatrix);
@@ -3733,12 +3743,22 @@ function svgMaskVisibleBounds(
         return null;
       }
       const maskStyle = mask.ownerDocument.defaultView?.getComputedStyle(mask);
-      if (svgMaskOpacitySuppressesPaint(mask, maskStyle)) {
+      const maskOpacity = svgMaskPaintOpacityValue(mask, maskStyle);
+      if (isEffectivelyTransparent(maskOpacity)) {
         return null;
       }
       return unionBounds(
         Array.from(mask.children)
-          .map((shape) => svgMaskShapeVisibleBounds(current, shape, units))
+          .map((shape) =>
+            svgMaskShapeVisibleBounds(
+              current,
+              shape,
+              units,
+              new Set(),
+              identitySvgMatrix(),
+              maskOpacity
+            )
+          )
           .filter((shapeBounds): shapeBounds is RectBounds => shapeBounds !== null)
       );
     })
@@ -3757,13 +3777,23 @@ function svgMaskSuppressesPaint(
       return false;
     }
     const maskStyle = mask.ownerDocument.defaultView?.getComputedStyle(mask);
-    if (svgMaskOpacitySuppressesPaint(mask, maskStyle)) {
+    const maskOpacity = svgMaskPaintOpacityValue(mask, maskStyle);
+    if (isEffectivelyTransparent(maskOpacity)) {
       return true;
     }
     const shapes = Array.from(mask.children);
     return (
       shapes.length === 0 ||
-      shapes.every((shape) => svgMaskShapeSuppressesPaint(current, shape, units))
+      shapes.every((shape) =>
+        svgMaskShapeSuppressesPaint(
+          current,
+          shape,
+          units,
+          new Set(),
+          identitySvgMatrix(),
+          maskOpacity
+        )
+      )
     );
   });
 }
