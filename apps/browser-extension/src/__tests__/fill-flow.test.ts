@@ -353,6 +353,8 @@ describe("fillLoginForm", () => {
         <input id="longhand-translated-y-password" type="password" autocomplete="current-password" style="translate:0 -500px" />
         <input id="translated-y-after-password" type="password" autocomplete="current-password" style="transform:translateY(900px)" />
         <input id="longhand-translated-y-after-password" type="password" autocomplete="current-password" style="translate:0 900px" />
+        <input id="fixed-below-password" type="password" autocomplete="current-password" style="position:fixed;top:900px" />
+        <input id="fixed-bottom-below-password" type="password" autocomplete="current-password" style="position:fixed;bottom:-900px" />
         <input id="relative-y-password" type="password" autocomplete="current-password" style="position:relative;top:-500px" />
         <input id="margin-y-password" type="password" autocomplete="current-password" style="display:block;margin-top:-500px" />
         <input id="mask-transparent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
@@ -434,7 +436,12 @@ describe("fillLoginForm", () => {
         elementRect({ left: 24, top: -520, width: 185, height: 21 })
       );
     }
-    for (const id of ["translated-y-after-password", "longhand-translated-y-after-password"]) {
+    for (const id of [
+      "translated-y-after-password",
+      "longhand-translated-y-after-password",
+      "fixed-below-password",
+      "fixed-bottom-below-password"
+    ]) {
       stubElementRect(
         document.querySelector(`#${id}`) as HTMLInputElement,
         elementRect({ left: 24, top: 920, width: 185, height: 21 })
@@ -464,6 +471,8 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#longhand-translated-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#translated-y-after-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-translated-y-after-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#fixed-below-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#fixed-bottom-below-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#relative-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#margin-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-transparent-password") as HTMLInputElement).value).toBe("");

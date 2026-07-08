@@ -884,7 +884,7 @@ function verticalOffsetMovesBeforeViewport(
   );
 }
 
-function verticalTransformMovesAfterViewport(
+function verticalOffsetMovesAfterViewport(
   viewportExit: ViewportExit | null,
   offset: number | null
 ) {
@@ -1541,13 +1541,18 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       transform !== null &&
       (horizontalOffsetMatchesViewportExit(viewportExit, transform.x) ||
         verticalOffsetMovesBeforeViewport(viewportExit, transform.y) ||
-        verticalTransformMovesAfterViewport(viewportExit, transform.y));
+        verticalOffsetMovesAfterViewport(viewportExit, transform.y));
+    const hasFixedPositionAfterViewportOffset =
+      position === "fixed" &&
+      (verticalOffsetMovesAfterViewport(viewportExit, top) ||
+        verticalOffsetMovesAfterViewport(viewportExit, inverseOffset(bottom)));
     const hasDirectionalPositionOffset =
       isPositioned &&
       (horizontalOffsetMatchesViewportExit(viewportExit, left) ||
         horizontalOffsetMatchesViewportExit(viewportExit, inverseOffset(right)) ||
         verticalOffsetMovesBeforeViewport(viewportExit, top) ||
-        verticalOffsetMovesBeforeViewport(viewportExit, inverseOffset(bottom)));
+        verticalOffsetMovesBeforeViewport(viewportExit, inverseOffset(bottom)) ||
+        hasFixedPositionAfterViewportOffset);
     const hasDirectionalMarginOffset =
       horizontalOffsetMatchesViewportExit(viewportExit, marginLeft) ||
       verticalOffsetMovesBeforeViewport(viewportExit, marginTop);

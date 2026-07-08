@@ -1526,12 +1526,19 @@ describe("autofill triage", () => {
       <form>
         <input name="translated_y_password" type="password" autocomplete="current-password" style="transform:translateY(900px)" />
         <input name="longhand_translated_y_password" type="password" autocomplete="current-password" style="translate:0 900px" />
+        <input name="fixed_below_password" type="password" autocomplete="current-password" style="position:fixed;top:900px" />
+        <input name="fixed_bottom_below_password" type="password" autocomplete="current-password" style="position:fixed;bottom:-900px" />
         <input name="relative_password" type="password" autocomplete="current-password" style="position:relative;left:9999px" />
         <input name="margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:9999px" />
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
-    for (const name of ["translated_y_password", "longhand_translated_y_password"]) {
+    for (const name of [
+      "translated_y_password",
+      "longhand_translated_y_password",
+      "fixed_below_password",
+      "fixed_bottom_below_password"
+    ]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
         elementRect({ left: 24, top: 920, width: 185, height: 21 })
@@ -1549,6 +1556,8 @@ describe("autofill triage", () => {
     for (const name of [
       "translated_y_password",
       "longhand_translated_y_password",
+      "fixed_below_password",
+      "fixed_bottom_below_password",
       "relative_password",
       "margin_password"
     ]) {
