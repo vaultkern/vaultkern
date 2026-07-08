@@ -1928,11 +1928,13 @@ describe("autofill triage", () => {
         <svg width="0" height="0" aria-hidden="true">
           <clipPath id="fullObjectClip" clipPathUnits="objectBoundingBox"><rect width="1" height="1" /></clipPath>
           <clipPath id="fullPathClip"><path d="M0 0 H185 V21 H0 Z" /></clipPath>
+          <clipPath id="fullNestedClip"><rect width="185" height="21" clip-path="url(#fullPathClip)" /></clipPath>
         </svg>
         <input name="email" type="email" autocomplete="username" style="clip-path:inset(0)" />
         <input name="object_email" type="email" autocomplete="username" style="clip-path:url(#fullObjectClip)" />
         <input name="path_email" type="email" autocomplete="username" style='clip-path:path("M0 0 H185 V21 H0 Z")' />
         <input name="url_path_email" type="email" autocomplete="username" style="clip-path:url(#fullPathClip)" />
+        <input name="nested_url_email" type="email" autocomplete="username" style="clip-path:url(#fullNestedClip)" />
         <input name="password" type="password" autocomplete="current-password" />
       </form>
       <input name="visible_circle_probe" type="text" style="clip-path:circle(closest-side at 50% 50%)" />
@@ -1942,6 +1944,7 @@ describe("autofill triage", () => {
       object_email: 80,
       path_email: 100,
       url_path_email: 120,
+      nested_url_email: 140,
       visible_circle_probe: 160,
       visible_ellipse_probe: 200
     };
@@ -1950,6 +1953,7 @@ describe("autofill triage", () => {
       "object_email",
       "path_email",
       "url_path_email",
+      "nested_url_email",
       "visible_circle_probe",
       "visible_ellipse_probe"
     ]) {
@@ -1978,6 +1982,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "url_path_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "url_path_email").reasons).not.toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "nested_url_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "nested_url_email").reasons).not.toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "visible_circle_probe").reasons).not.toContain(
@@ -2093,6 +2101,11 @@ describe("autofill triage", () => {
           <clipPath id="defsUseZeroClip"><defs><rect id="defsZeroRect" width="0" height="0" /></defs><use href="#defsZeroRect" /></clipPath>
           <clipPath id="anchorZeroClip"><a><rect width="0" height="0" /></a></clipPath>
           <clipPath id="metadataZeroClip"><title>decorative title</title><rect width="0" height="0" /></clipPath>
+          <rect id="visibleRect" width="200" height="30" />
+          <clipPath id="nestedAttrZeroClip"><rect width="200" height="30" clip-path="url(#zeroClip)" /></clipPath>
+          <clipPath id="nestedStyleZeroClip"><rect width="200" height="30" style="clip-path:url(#zeroClip)" /></clipPath>
+          <clipPath id="nestedGroupZeroClip"><g clip-path="url(#zeroClip)"><rect width="200" height="30" /></g></clipPath>
+          <clipPath id="nestedUseZeroClip"><use href="#visibleRect" clip-path="url(#zeroClip)" /></clipPath>
           <clipPath id="emptyGroupClip"><g></g></clipPath>
           <clipPath id="lineClip"><line x1="0" y1="0" x2="200" y2="0" /></clipPath>
           <clipPath id="emptyTextClip"><text></text></clipPath>
@@ -2126,6 +2139,10 @@ describe("autofill triage", () => {
         <input name="url_defs_use_password" type="password" autocomplete="current-password" style="clip-path:url(#defsUseZeroClip)" />
         <input name="url_anchor_password" type="password" autocomplete="current-password" style="clip-path:url(#anchorZeroClip)" />
         <input name="url_metadata_password" type="password" autocomplete="current-password" style="clip-path:url(#metadataZeroClip)" />
+        <input name="url_nested_attr_password" type="password" autocomplete="current-password" style="clip-path:url(#nestedAttrZeroClip)" />
+        <input name="url_nested_style_password" type="password" autocomplete="current-password" style="clip-path:url(#nestedStyleZeroClip)" />
+        <input name="url_nested_group_password" type="password" autocomplete="current-password" style="clip-path:url(#nestedGroupZeroClip)" />
+        <input name="url_nested_use_password" type="password" autocomplete="current-password" style="clip-path:url(#nestedUseZeroClip)" />
         <input name="url_empty_group_password" type="password" autocomplete="current-password" style="clip-path:url(#emptyGroupClip)" />
         <input name="url_line_password" type="password" autocomplete="current-password" style="clip-path:url(#lineClip)" />
         <input name="url_empty_text_password" type="password" autocomplete="current-password" style="clip-path:url(#emptyTextClip)" />
@@ -2276,6 +2293,22 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "url_metadata_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "url_metadata_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_nested_attr_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_nested_attr_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_nested_style_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_nested_style_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_nested_group_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_nested_group_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_nested_use_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_nested_use_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "url_empty_group_password").qualifiedAs).toBe("ignored");

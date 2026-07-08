@@ -2593,6 +2593,15 @@ function svgClipElementIsContainer(tagName: string) {
   return tagName === "g" || tagName === "svg" || tagName === "a" || tagName === "switch";
 }
 
+function svgElementClipPathValues(shape: Element, style: CSSStyleDeclaration | undefined) {
+  const inlineStyle = (shape as SVGElement).style;
+  return [
+    shape.getAttribute("clip-path") ?? "",
+    inlineStyle?.getPropertyValue("clip-path") ?? "",
+    style?.getPropertyValue("clip-path") ?? ""
+  ].filter(isMeaningfulCssValue);
+}
+
 function svgClipShapeSuppressesField(
   current: HTMLElement,
   shape: Element,
@@ -2618,6 +2627,13 @@ function svgClipShapeSuppressesField(
   const tagName = shape.tagName.toLowerCase();
   const matrix = svgElementTransformMatrix(shape, inheritedMatrix, units);
   if (svgClipElementIsNonRendering(tagName)) {
+    return true;
+  }
+  if (
+    svgElementClipPathValues(shape, shapeStyle).some((clipPath) =>
+      svgClipPathFullyClips(current, clipPath, units, seen)
+    )
+  ) {
     return true;
   }
   if (tagName === "use") {
@@ -2772,7 +2788,8 @@ function svgClipShapeSuppressesField(
 function svgClipPathFullyClips(
   current: HTMLElement,
   value: string,
-  units: { emPx?: number; remPx?: number }
+  units: { emPx?: number; remPx?: number },
+  seen: Set<Element> = new Set()
 ) {
   const [id] = localCssUrlReferenceIds(value);
   if (!id) {
@@ -2782,6 +2799,10 @@ function svgClipPathFullyClips(
   if (!clipPath) {
     return false;
   }
+  if (seen.has(clipPath)) {
+    return true;
+  }
+  seen.add(clipPath);
   const shapes = Array.from(clipPath.children);
   const rect = current.getBoundingClientRect();
   const coordinateSpace =
@@ -2800,7 +2821,7 @@ function svgClipPathFullyClips(
         current,
         shape,
         units,
-        new Set(),
+        seen,
         clipPathMatrix,
         coordinateSpace
       )

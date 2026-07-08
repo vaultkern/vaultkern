@@ -708,6 +708,11 @@ describe("fillLoginForm", () => {
           <clipPath id="defsUseZeroClip"><defs><rect id="defsZeroRect" width="0" height="0" /></defs><use href="#defsZeroRect" /></clipPath>
           <clipPath id="anchorZeroClip"><a><rect width="0" height="0" /></a></clipPath>
           <clipPath id="metadataZeroClip"><title>decorative title</title><rect width="0" height="0" /></clipPath>
+          <rect id="visibleRect" width="200" height="30" />
+          <clipPath id="nestedAttrZeroClip"><rect width="200" height="30" clip-path="url(#zeroClip)" /></clipPath>
+          <clipPath id="nestedStyleZeroClip"><rect width="200" height="30" style="clip-path:url(#zeroClip)" /></clipPath>
+          <clipPath id="nestedGroupZeroClip"><g clip-path="url(#zeroClip)"><rect width="200" height="30" /></g></clipPath>
+          <clipPath id="nestedUseZeroClip"><use href="#visibleRect" clip-path="url(#zeroClip)" /></clipPath>
           <clipPath id="emptyGroupClip"><g></g></clipPath>
           <clipPath id="lineClip"><line x1="0" y1="0" x2="200" y2="0" /></clipPath>
           <clipPath id="emptyTextClip"><text></text></clipPath>
@@ -747,6 +752,10 @@ describe("fillLoginForm", () => {
         <input id="url-defs-use-password" type="password" autocomplete="current-password" style="clip-path:url(#defsUseZeroClip)" />
         <input id="url-anchor-password" type="password" autocomplete="current-password" style="clip-path:url(#anchorZeroClip)" />
         <input id="url-metadata-password" type="password" autocomplete="current-password" style="clip-path:url(#metadataZeroClip)" />
+        <input id="url-nested-attr-password" type="password" autocomplete="current-password" style="clip-path:url(#nestedAttrZeroClip)" />
+        <input id="url-nested-style-password" type="password" autocomplete="current-password" style="clip-path:url(#nestedStyleZeroClip)" />
+        <input id="url-nested-group-password" type="password" autocomplete="current-password" style="clip-path:url(#nestedGroupZeroClip)" />
+        <input id="url-nested-use-password" type="password" autocomplete="current-password" style="clip-path:url(#nestedUseZeroClip)" />
         <input id="url-empty-group-password" type="password" autocomplete="current-password" style="clip-path:url(#emptyGroupClip)" />
         <input id="url-line-password" type="password" autocomplete="current-password" style="clip-path:url(#lineClip)" />
         <input id="url-empty-text-password" type="password" autocomplete="current-password" style="clip-path:url(#emptyTextClip)" />
@@ -836,6 +845,10 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#url-defs-use-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-anchor-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-metadata-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-nested-attr-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-nested-style-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-nested-group-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-nested-use-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-empty-group-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-line-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-empty-text-password") as HTMLInputElement).value).toBe("");
@@ -862,8 +875,9 @@ describe("fillLoginForm", () => {
       <form>
         <svg width="0" height="0" aria-hidden="true">
           <clipPath id="visibleClip"><rect x="0" y="0" width="200" height="30" /></clipPath>
+          <clipPath id="nestedVisibleClip"><rect x="0" y="0" width="200" height="30" clip-path="url(#visibleClip)" /></clipPath>
         </svg>
-        <input id="login-password" type="password" autocomplete="current-password" style="clip-path:url(#visibleClip)" />
+        <input id="login-password" type="password" autocomplete="current-password" style="clip-path:url(#nestedVisibleClip)" />
       </form>
     `;
     stubElementRect(
