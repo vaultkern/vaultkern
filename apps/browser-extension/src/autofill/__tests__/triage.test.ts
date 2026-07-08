@@ -1606,6 +1606,9 @@ describe("autofill triage", () => {
           <filter id="alphaZeroDiscrete"><feComponentTransfer><feFuncA type="discrete" tableValues="0 0" /></feComponentTransfer></filter>
           <filter id="alphaZeroGamma"><feComponentTransfer><feFuncA type="gamma" amplitude="0" offset="0" /></feComponentTransfer></filter>
           <filter id="alphaZeroMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0 0" /></filter>
+          <filter id="alphaTenLinear"><feComponentTransfer><feFuncA type="linear" slope="0.1" intercept="0" /></feComponentTransfer></filter>
+          <filter id="alphaTenTable"><feComponentTransfer><feFuncA type="table" tableValues="0.1 0.1" /></feComponentTransfer></filter>
+          <filter id="alphaTenMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0.1 0" /></filter>
           <filter id="floodAlphaZero"><feFlood flood-opacity="0" /></filter>
           <filter id="floodTransparent"><feFlood flood-color="transparent" /></filter>
           <filter id="sourceOut"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="out" /></filter>
@@ -1654,6 +1657,16 @@ describe("autofill triage", () => {
           <div style="filter:opacity(10%)">
             <input name="cumulative_filter_password" type="password" autocomplete="current-password" />
           </div>
+        </div>
+        <div style="opacity:0.1">
+          <div style="filter:opacity(10%)">
+            <input name="mixed_opacity_filter_password" type="password" autocomplete="current-password" />
+          </div>
+        </div>
+        <div style="opacity:0.1">
+          <input name="mixed_svg_linear_filter_password" type="password" autocomplete="current-password" style="filter:url(#alphaTenLinear)" />
+          <input name="mixed_svg_table_filter_password" type="password" autocomplete="current-password" style="filter:url(#alphaTenTable)" />
+          <input name="mixed_svg_matrix_filter_password" type="password" autocomplete="current-password" style="filter:url(#alphaTenMatrix)" />
         </div>
         <input name="rotate_x_password" type="password" autocomplete="current-password" style="rotate:x 90deg" />
         <input name="rotate_y_password" type="password" autocomplete="current-password" style="rotate:y 90deg" />
@@ -1760,6 +1773,10 @@ describe("autofill triage", () => {
       "ancestor_svg_filter_offset_password",
       "cumulative_opacity_password",
       "cumulative_filter_password",
+      "mixed_opacity_filter_password",
+      "mixed_svg_linear_filter_password",
+      "mixed_svg_table_filter_password",
+      "mixed_svg_matrix_filter_password",
       "paintless_password",
       "same_color_password",
       "same_color_border_password",
@@ -2708,6 +2725,9 @@ describe("autofill triage", () => {
       <form>
         <svg width="0" height="0" aria-hidden="true">
           <clipPath id="rightRectClip"><rect x="320" y="0" width="80" height="40" /></clipPath>
+          <clipPath id="rightEvenOddPathClip">
+            <path clip-rule="evenodd" d="M0 0 L400 0 L400 40 L0 40 Z M0 0 L240 0 L240 40 L0 40 Z" />
+          </clipPath>
         </svg>
         <label id="inset-label" for="ancestor-inset-password">Password</label>
         <div id="ancestor-inset-clip" style="width:400px;height:40px;clip-path:inset(0 0 0 320px)">
@@ -2721,6 +2741,14 @@ describe("autofill triage", () => {
         <div id="ancestor-url-clip" style="width:400px;height:40px;clip-path:url(#rightRectClip)">
           <input id="ancestor-url-password" name="ancestor_url_password" type="password" autocomplete="current-password" />
         </div>
+        <label id="css-path-label" for="ancestor-css-path-password">Password</label>
+        <div id="ancestor-css-path-clip" style='width:400px;height:40px;clip-path:path(evenodd, "M0 0 L400 0 L400 40 L0 40 Z M0 0 L240 0 L240 40 L0 40 Z")'>
+          <input id="ancestor-css-path-password" name="ancestor_css_path_password" type="password" autocomplete="current-password" />
+        </div>
+        <label id="svg-path-label" for="ancestor-svg-path-password">Password</label>
+        <div id="ancestor-svg-path-clip" style="width:400px;height:40px;clip-path:url(#rightEvenOddPathClip)">
+          <input id="ancestor-svg-path-password" name="ancestor_svg_path_password" type="password" autocomplete="current-password" />
+        </div>
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
@@ -2732,16 +2760,28 @@ describe("autofill triage", () => {
       'input[name="real_password"]'
     ) as HTMLInputElement;
     const urlPassword = document.querySelector("#ancestor-url-password") as HTMLInputElement;
+    const cssPathPassword = document.querySelector(
+      "#ancestor-css-path-password"
+    ) as HTMLInputElement;
+    const svgPathPassword = document.querySelector(
+      "#ancestor-svg-path-password"
+    ) as HTMLInputElement;
     const insetLabel = document.querySelector("#inset-label") as HTMLLabelElement;
     const polygonLabel = document.querySelector("#polygon-label") as HTMLLabelElement;
     const urlLabel = document.querySelector("#url-label") as HTMLLabelElement;
+    const cssPathLabel = document.querySelector("#css-path-label") as HTMLLabelElement;
+    const svgPathLabel = document.querySelector("#svg-path-label") as HTMLLabelElement;
     stubElementRect(insetPassword, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
     stubElementRect(polygonPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
     stubElementRect(urlPassword, elementRect({ left: 24, top: 152, width: 185, height: 21 }));
-    stubElementRect(realPassword, elementRect({ left: 24, top: 208, width: 185, height: 21 }));
+    stubElementRect(cssPathPassword, elementRect({ left: 24, top: 208, width: 185, height: 21 }));
+    stubElementRect(svgPathPassword, elementRect({ left: 24, top: 264, width: 185, height: 21 }));
+    stubElementRect(realPassword, elementRect({ left: 24, top: 320, width: 185, height: 21 }));
     stubElementRect(insetLabel, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
     stubElementRect(polygonLabel, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
     stubElementRect(urlLabel, elementRect({ left: 24, top: 152, width: 185, height: 21 }));
+    stubElementRect(cssPathLabel, elementRect({ left: 24, top: 208, width: 185, height: 21 }));
+    stubElementRect(svgPathLabel, elementRect({ left: 24, top: 264, width: 185, height: 21 }));
     stubElementRect(
       document.querySelector("#ancestor-inset-clip") as HTMLDivElement,
       elementRect({ left: 0, top: 32, width: 400, height: 40 })
@@ -2753,6 +2793,14 @@ describe("autofill triage", () => {
     stubElementRect(
       document.querySelector("#ancestor-url-clip") as HTMLDivElement,
       elementRect({ left: 0, top: 144, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-css-path-clip") as HTMLDivElement,
+      elementRect({ left: 0, top: 200, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-svg-path-clip") as HTMLDivElement,
+      elementRect({ left: 0, top: 256, width: 400, height: 40 })
     );
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
@@ -2768,6 +2816,12 @@ describe("autofill triage", () => {
           return urlLabel;
         }
         if (x >= 24 && x <= 209 && y >= 208 && y <= 229) {
+          return cssPathLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 264 && y <= 285) {
+          return svgPathLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 320 && y <= 341) {
           return realPassword;
         }
         return document.body;
@@ -2783,7 +2837,9 @@ describe("autofill triage", () => {
     for (const name of [
       "ancestor_inset_password",
       "ancestor_polygon_password",
-      "ancestor_url_password"
+      "ancestor_url_password",
+      "ancestor_css_path_password",
+      "ancestor_svg_path_password"
     ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:clipped");

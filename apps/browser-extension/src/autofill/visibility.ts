@@ -712,6 +712,116 @@ function svgFilterFloodSuppressesPaint(primitive: Element) {
   return isEffectivelyTransparent(floodOpacity) || cssColorLooksTransparent(floodColor);
 }
 
+function svgNumberList(value: string | null) {
+  const numbers = (value ?? "")
+    .trim()
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .map(Number);
+  return numbers.every((number) => Number.isFinite(number)) ? numbers : null;
+}
+
+function svgAlphaUpperBound(value: number) {
+  return clampCssAlphaChannel(value);
+}
+
+function svgAlphaTransferOpacityValue(func: Element) {
+  const type = func.getAttribute("type")?.toLowerCase() ?? "identity";
+  if (type === "identity") {
+    return 1;
+  }
+
+  if (type === "table" || type === "discrete") {
+    const tableValues = svgNumberList(func.getAttribute("tableValues"));
+    return tableValues !== null && tableValues.length > 0
+      ? svgAlphaUpperBound(Math.max(...tableValues))
+      : null;
+  }
+
+  if (type === "linear") {
+    const slope = Number(func.getAttribute("slope") ?? "1");
+    const intercept = Number(func.getAttribute("intercept") ?? "0");
+    return Number.isFinite(slope) && Number.isFinite(intercept)
+      ? svgAlphaUpperBound(Math.max(intercept, slope + intercept))
+      : null;
+  }
+
+  if (type === "gamma") {
+    const amplitude = Number(func.getAttribute("amplitude") ?? "1");
+    const offset = Number(func.getAttribute("offset") ?? "0");
+    return Number.isFinite(amplitude) && Number.isFinite(offset)
+      ? svgAlphaUpperBound(Math.max(offset, amplitude + offset))
+      : null;
+  }
+
+  return null;
+}
+
+function svgColorMatrixAlphaOpacityValue(matrix: Element) {
+  const type = matrix.getAttribute("type")?.toLowerCase() ?? "matrix";
+  if (type === "saturate" || type === "huerotate") {
+    return 1;
+  }
+  if (type !== "matrix") {
+    return null;
+  }
+
+  const values = svgNumberList(matrix.getAttribute("values"));
+  if (values === null || values.length < 20) {
+    return null;
+  }
+
+  const [red, green, blue, alpha, offset] = values.slice(15, 20);
+  if (red <= 0 && green <= 0 && blue <= 0 && alpha >= 0 && offset >= 0) {
+    return svgAlphaUpperBound(alpha + offset);
+  }
+  if ([red, green, blue, alpha, offset].every((value) => value <= 0)) {
+    return 0;
+  }
+  return null;
+}
+
+function svgFilterOpacityValue(filterTarget: HTMLElement, value: string | undefined) {
+  let opacity = 1;
+  let found = false;
+  for (const id of localCssUrlReferenceIds(value)) {
+    const filter = filterTarget.ownerDocument.getElementById(id);
+    if (!filter) {
+      continue;
+    }
+
+    for (const func of Array.from(filter.querySelectorAll("*")).filter(
+      (child) => child.tagName.toLowerCase() === "fefunca"
+    )) {
+      const alpha = svgAlphaTransferOpacityValue(func);
+      if (alpha !== null) {
+        opacity *= alpha;
+        found = true;
+      }
+    }
+
+    for (const matrix of Array.from(filter.querySelectorAll("*")).filter(
+      (child) => child.tagName.toLowerCase() === "fecolormatrix"
+    )) {
+      const alpha = svgColorMatrixAlphaOpacityValue(matrix);
+      if (alpha !== null) {
+        opacity *= alpha;
+        found = true;
+      }
+    }
+  }
+
+  return found ? opacity : null;
+}
+
+function paintFilterOpacityValue(filterTarget: HTMLElement, value: string | undefined) {
+  const cssOpacity = filterOpacityValue(value);
+  const svgOpacity = svgFilterOpacityValue(filterTarget, value);
+  return cssOpacity === null && svgOpacity === null
+    ? null
+    : (cssOpacity ?? 1) * (svgOpacity ?? 1);
+}
+
 function svgFilterPrimitiveUnits(primitive: Element): SvgClipCoordinateSpace {
   return primitive.closest("filter")?.getAttribute("primitiveUnits")?.trim() ===
     "objectBoundingBox"
@@ -2372,7 +2482,7 @@ function pseudoElementCoversPoint(
     visibility !== "hidden" &&
     visibility !== "collapse" &&
     !isEffectivelyTransparent(opacity) &&
-    !isEffectivelyTransparent(filterOpacityValue(filter)) &&
+    !isEffectivelyTransparent(paintFilterOpacityValue(candidate, filter)) &&
     pseudoElementMayPaintAboveElement(element, style, pseudoElement) &&
     cssStylePaintsVisibleBox(style, cssUnits) &&
     boundsContainPoint(pseudoElementBounds(candidateRect, style, cssUnits), point)
@@ -2434,7 +2544,7 @@ function elementPaintsOverlay(
     style?.visibility !== "hidden" &&
     style?.visibility !== "collapse" &&
     !isEffectivelyTransparent(opacity) &&
-    !isEffectivelyTransparent(filterOpacityValue(filter)) &&
+    !isEffectivelyTransparent(paintFilterOpacityValue(current, filter)) &&
     !svgFilterSuppressesPaint(current, filter, cssUnits) &&
     !maskStyleSuppressesPaint(style, current, cssUnits) &&
     (!fieldBackgroundPaintIsTransparent(style, current) ||
@@ -2465,9 +2575,16 @@ function elementCumulativePaintIsVisible(element: HTMLElement) {
       return false;
     }
     opacity *= cssOpacityValue(style?.opacity) ?? cssOpacityValue(current.style.opacity) ?? 1;
-    const currentFilterOpacity = filterOpacityValue(cssPropertyValue(style, current, "filter"));
+    const currentFilterOpacity = paintFilterOpacityValue(
+      current,
+      cssPropertyValue(style, current, "filter")
+    );
     filterOpacity *= currentFilterOpacity ?? 1;
-    if (isEffectivelyTransparent(opacity) || isEffectivelyTransparent(filterOpacity)) {
+    if (
+      isEffectivelyTransparent(opacity) ||
+      isEffectivelyTransparent(filterOpacity) ||
+      isEffectivelyTransparent(opacity * filterOpacity)
+    ) {
       return false;
     }
   }
@@ -4716,7 +4833,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const inlineVisibility = current.style.visibility;
     const opacity = cssOpacityValue(style?.opacity) ?? cssOpacityValue(current.style.opacity);
     const filter = cssPropertyValue(style, current, "filter");
-    const filterOpacity = filterOpacityValue(filter);
+    const filterOpacity = paintFilterOpacityValue(current, filter);
     const contentVisibility = cssPropertyValue(style, current, "content-visibility")
       .trim()
       .toLowerCase();
@@ -4787,6 +4904,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       isEffectivelyTransparent(cumulativeOpacity) ||
       isEffectivelyTransparent(filterOpacity) ||
       isEffectivelyTransparent(cumulativeFilterOpacity) ||
+      isEffectivelyTransparent(cumulativeOpacity * cumulativeFilterOpacity) ||
       svgFilterSuppressesPaint(current, filter, cssUnits, element) ||
       maskStyleSuppressesPaint(style, current, cssUnits) ||
       (current === element &&

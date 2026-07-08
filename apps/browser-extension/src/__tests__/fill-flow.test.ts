@@ -435,6 +435,7 @@ describe("fillLoginForm", () => {
           <filter id="alphaZeroDiscrete"><feComponentTransfer><feFuncA type="discrete" tableValues="0 0" /></feComponentTransfer></filter>
           <filter id="alphaZeroGamma"><feComponentTransfer><feFuncA type="gamma" amplitude="0" offset="0" /></feComponentTransfer></filter>
           <filter id="alphaZeroMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0 0" /></filter>
+          <filter id="alphaTenLinear"><feComponentTransfer><feFuncA type="linear" slope="0.1" intercept="0" /></feComponentTransfer></filter>
           <filter id="floodAlphaZero"><feFlood flood-opacity="0" /></filter>
           <filter id="sourceOut"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="out" /></filter>
           <filter id="arithmeticZero"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="arithmetic" k1="0" k2="0" k3="0" k4="0" /></filter>
@@ -457,6 +458,14 @@ describe("fillLoginForm", () => {
           <div style="filter:opacity(10%)">
             <input id="cumulative-filter-password" type="password" autocomplete="current-password" />
           </div>
+        </div>
+        <div style="opacity:0.1">
+          <div style="filter:opacity(10%)">
+            <input id="mixed-opacity-filter-password" type="password" autocomplete="current-password" />
+          </div>
+        </div>
+        <div style="opacity:0.1">
+          <input id="mixed-svg-filter-opacity-password" type="password" autocomplete="current-password" style="filter:url(#alphaTenLinear)" />
         </div>
         <input id="rotate-x-password" type="password" autocomplete="current-password" style="rotate:x 90deg" />
         <input id="rotate-y-password" type="password" autocomplete="current-password" style="rotate:y 90deg" />
@@ -746,6 +755,8 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#svg-filter-offset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#cumulative-opacity-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#cumulative-filter-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mixed-opacity-filter-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mixed-svg-filter-opacity-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#rotate-x-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#rotate-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#backface-password") as HTMLInputElement).value).toBe("");
@@ -867,6 +878,9 @@ describe("fillLoginForm", () => {
       <form>
         <svg width="0" height="0" aria-hidden="true">
           <clipPath id="rightRectClip"><rect x="320" y="0" width="80" height="40" /></clipPath>
+          <clipPath id="rightEvenOddPathClip">
+            <path clip-rule="evenodd" d="M0 0 L400 0 L400 40 L0 40 Z M0 0 L240 0 L240 40 L0 40 Z" />
+          </clipPath>
         </svg>
         <label id="inset-label" for="ancestor-inset-password">Password</label>
         <div id="ancestor-inset-clip" style="width:400px;height:40px;clip-path:inset(0 0 0 320px)">
@@ -880,6 +894,14 @@ describe("fillLoginForm", () => {
         <div id="ancestor-url-clip" style="width:400px;height:40px;clip-path:url(#rightRectClip)">
           <input id="ancestor-url-password" type="password" autocomplete="current-password" />
         </div>
+        <label id="css-path-label" for="ancestor-css-path-password">Password</label>
+        <div id="ancestor-css-path-clip" style='width:400px;height:40px;clip-path:path(evenodd, "M0 0 L400 0 L400 40 L0 40 Z M0 0 L240 0 L240 40 L0 40 Z")'>
+          <input id="ancestor-css-path-password" type="password" autocomplete="current-password" />
+        </div>
+        <label id="svg-path-label" for="ancestor-svg-path-password">Password</label>
+        <div id="ancestor-svg-path-clip" style="width:400px;height:40px;clip-path:url(#rightEvenOddPathClip)">
+          <input id="ancestor-svg-path-password" type="password" autocomplete="current-password" />
+        </div>
         <input id="login-password" type="password" autocomplete="current-password" />
       </form>
     `;
@@ -888,17 +910,29 @@ describe("fillLoginForm", () => {
       "#ancestor-polygon-password"
     ) as HTMLInputElement;
     const urlPassword = document.querySelector("#ancestor-url-password") as HTMLInputElement;
+    const cssPathPassword = document.querySelector(
+      "#ancestor-css-path-password"
+    ) as HTMLInputElement;
+    const svgPathPassword = document.querySelector(
+      "#ancestor-svg-path-password"
+    ) as HTMLInputElement;
     const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
     const insetLabel = document.querySelector("#inset-label") as HTMLLabelElement;
     const polygonLabel = document.querySelector("#polygon-label") as HTMLLabelElement;
     const urlLabel = document.querySelector("#url-label") as HTMLLabelElement;
+    const cssPathLabel = document.querySelector("#css-path-label") as HTMLLabelElement;
+    const svgPathLabel = document.querySelector("#svg-path-label") as HTMLLabelElement;
     stubElementRect(insetPassword, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
     stubElementRect(polygonPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
     stubElementRect(urlPassword, elementRect({ left: 24, top: 152, width: 185, height: 21 }));
-    stubElementRect(loginPassword, elementRect({ left: 24, top: 208, width: 185, height: 21 }));
+    stubElementRect(cssPathPassword, elementRect({ left: 24, top: 208, width: 185, height: 21 }));
+    stubElementRect(svgPathPassword, elementRect({ left: 24, top: 264, width: 185, height: 21 }));
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 320, width: 185, height: 21 }));
     stubElementRect(insetLabel, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
     stubElementRect(polygonLabel, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
     stubElementRect(urlLabel, elementRect({ left: 24, top: 152, width: 185, height: 21 }));
+    stubElementRect(cssPathLabel, elementRect({ left: 24, top: 208, width: 185, height: 21 }));
+    stubElementRect(svgPathLabel, elementRect({ left: 24, top: 264, width: 185, height: 21 }));
     stubElementRect(
       document.querySelector("#ancestor-inset-clip") as HTMLDivElement,
       elementRect({ left: 0, top: 32, width: 400, height: 40 })
@@ -910,6 +944,14 @@ describe("fillLoginForm", () => {
     stubElementRect(
       document.querySelector("#ancestor-url-clip") as HTMLDivElement,
       elementRect({ left: 0, top: 144, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-css-path-clip") as HTMLDivElement,
+      elementRect({ left: 0, top: 200, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-svg-path-clip") as HTMLDivElement,
+      elementRect({ left: 0, top: 256, width: 400, height: 40 })
     );
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
@@ -925,6 +967,12 @@ describe("fillLoginForm", () => {
           return urlLabel;
         }
         if (x >= 24 && x <= 209 && y >= 208 && y <= 229) {
+          return cssPathLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 264 && y <= 285) {
+          return svgPathLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 320 && y <= 341) {
           return loginPassword;
         }
         return document.body;
@@ -940,6 +988,8 @@ describe("fillLoginForm", () => {
     expect(insetPassword.value).toBe("");
     expect(polygonPassword.value).toBe("");
     expect(urlPassword.value).toBe("");
+    expect(cssPathPassword.value).toBe("");
+    expect(svgPathPassword.value).toBe("");
     expect(loginPassword.value).toBe("secret");
   });
 
