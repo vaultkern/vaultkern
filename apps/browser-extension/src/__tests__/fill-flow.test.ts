@@ -1484,6 +1484,60 @@ describe("fillLoginForm", () => {
     expect(loginPassword.value).toBe("secret");
   });
 
+  it("does not treat tiny conic ancestor mask wedges as visible password targets", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="conic-tiny-mask-label" for="conic-tiny-mask-password">Password</label>
+        <div id="ancestor-conic-tiny-mask" style="width:400px;height:40px;mask-image:conic-gradient(from -10deg at -200px 20px, transparent 0deg 9.5deg, black 9.5deg 10.5deg, transparent 10.5deg 360deg)">
+          <input id="conic-tiny-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const conicTinyMaskPassword = document.querySelector(
+      "#conic-tiny-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const conicTinyMaskLabel = document.querySelector(
+      "#conic-tiny-mask-label"
+    ) as HTMLLabelElement;
+    stubElementRect(
+      conicTinyMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      conicTinyMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-conic-tiny-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return conicTinyMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(conicTinyMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("fills password fields when a radial ancestor mask contains the control", () => {
     document.body.innerHTML = `
       <form>

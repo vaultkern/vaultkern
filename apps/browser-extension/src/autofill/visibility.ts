@@ -2543,7 +2543,8 @@ function radialMaskLayerSuppressesField(
 
   const offsetX = x ?? 0;
   const offsetY = y ?? 0;
-  for (const sample of rectBoundsSamplePoints(fieldBounds)) {
+  const samples = rectBoundsSamplePoints(fieldBounds);
+  for (const sample of samples) {
     const sampleX = sample.x - offsetX;
     const sampleY = sample.y - offsetY;
     if (sampleX < 0 || sampleY < 0 || sampleX > size.width || sampleY > size.height) {
@@ -2810,7 +2811,9 @@ function conicMaskLayerSuppressesField(
 
   const offsetX = x ?? 0;
   const offsetY = y ?? 0;
-  for (const sample of rectBoundsSamplePoints(fieldBounds)) {
+  const samples = rectBoundsSamplePoints(fieldBounds);
+  let paintedSamples = 0;
+  for (const sample of samples) {
     const sampleX = sample.x - offsetX;
     const sampleY = sample.y - offsetY;
     if (sampleX < 0 || sampleY < 0 || sampleX > size.width || sampleY > size.height) {
@@ -2821,11 +2824,11 @@ function conicMaskLayerSuppressesField(
     );
     const relativeAngle = normalizeDegrees(angle - fromAngle);
     if (radialPaintedRangesContainDistance(paintedRanges, relativeAngle)) {
-      return false;
+      paintedSamples += 1;
     }
   }
 
-  return true;
+  return paintedSamples < Math.ceil(samples.length / 2);
 }
 
 function bodyAxisSize(

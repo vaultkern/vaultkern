@@ -3341,6 +3341,65 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields with only tiny conic ancestor mask wedges as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="conic-tiny-mask-label" for="conic-tiny-mask-password">Password</label>
+        <div id="ancestor-conic-tiny-mask" style="width:400px;height:40px;mask-image:conic-gradient(from -10deg at -200px 20px, transparent 0deg 9.5deg, black 9.5deg 10.5deg, transparent 10.5deg 360deg)">
+          <input id="conic-tiny-mask-password" name="conic_tiny_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const conicTinyMaskPassword = document.querySelector(
+      "#conic-tiny-mask-password"
+    ) as HTMLInputElement;
+    const conicTinyMaskLabel = document.querySelector(
+      "#conic-tiny-mask-label"
+    ) as HTMLLabelElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    stubElementRect(
+      conicTinyMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      conicTinyMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-conic-tiny-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(realPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return conicTinyMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(fieldByName(report, "conic_tiny_mask_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "conic_tiny_mask_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats fields hidden by repeating-radial ancestor masks as not viewable", () => {
     document.body.innerHTML = `
       <form>
