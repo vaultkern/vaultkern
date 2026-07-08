@@ -2050,6 +2050,37 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats credential fields clipped to tiny SVG filter regions as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="tinyFilterRegion" x="0" y="0" width="0.01" height="0.01" filterUnits="objectBoundingBox">
+            <feOffset dx="0" dy="0" />
+          </filter>
+        </svg>
+        <input name="tiny_filter_region_password" type="password" autocomplete="current-password" style="filter:url(#tinyFilterRegion)" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const [index, name] of [
+      "tiny_filter_region_password",
+      "real_password"
+    ].entries()) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40 + index * 40, width: 185, height: 21 })
+      );
+    }
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "tiny_filter_region_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "tiny_filter_region_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("keeps flattened preserve-3d backface fields viewable", () => {
     document.body.innerHTML = `
       <form>

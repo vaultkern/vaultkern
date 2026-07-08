@@ -511,6 +511,33 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys clipped to tiny SVG filter regions", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="tinyFilterRegion" x="0" y="0" width="0.01" height="0.01" filterUnits="objectBoundingBox">
+            <feOffset dx="0" dy="0" />
+          </filter>
+        </svg>
+        <input id="tiny-filter-region-password" type="password" autocomplete="current-password" style="filter:url(#tinyFilterRegion)" />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const [index, id] of ["tiny-filter-region-password", "login-password"].entries()) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40 + index * 40, width: 185, height: 21 })
+      );
+    }
+
+    fillLoginForm({ password: "secret" });
+
+    expect(
+      (document.querySelector("#tiny-filter-region-password") as HTMLInputElement).value
+    ).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys clipped away by rounded overflow ancestors", () => {
     document.body.innerHTML = `
       <form>

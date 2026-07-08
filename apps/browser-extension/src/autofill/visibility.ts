@@ -1840,6 +1840,73 @@ function svgFilterHasUninspectableImagePaint(filter: Element) {
   );
 }
 
+function svgFilterRegionLengthToPx(
+  value: string,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number },
+  coordinateSpace: SvgClipCoordinateSpace
+) {
+  return coordinateSpace === "objectBoundingBox"
+    ? svgNormalizedLength(value, units) * axisSize
+    : cssLengthToPx(value, axisSize, units) ?? numericCssValue(value, units) ?? 0;
+}
+
+function svgFilterRegionVisibleBounds(
+  filterTarget: HTMLElement,
+  filter: Element,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const targetRect = filterTarget.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(targetRect)) {
+    return null;
+  }
+
+  const coordinateSpace =
+    filter.getAttribute("filterUnits")?.trim() === "userSpaceOnUse"
+      ? "userSpaceOnUse"
+      : "objectBoundingBox";
+  const x = svgFilterRegionLengthToPx(
+    filter.getAttribute("x") ?? "-10%",
+    targetRect.width,
+    units,
+    coordinateSpace
+  );
+  const y = svgFilterRegionLengthToPx(
+    filter.getAttribute("y") ?? "-10%",
+    targetRect.height,
+    units,
+    coordinateSpace
+  );
+  const width = svgFilterRegionLengthToPx(
+    filter.getAttribute("width") ?? "120%",
+    targetRect.width,
+    units,
+    coordinateSpace
+  );
+  const height = svgFilterRegionLengthToPx(
+    filter.getAttribute("height") ?? "120%",
+    targetRect.height,
+    units,
+    coordinateSpace
+  );
+  return { left: x, top: y, right: x + width, bottom: y + height };
+}
+
+function svgFilterRegionSuppressesPaint(
+  filterTarget: HTMLElement,
+  affectedElement: HTMLElement,
+  filter: Element,
+  units: { emPx?: number; remPx?: number }
+) {
+  const filterBounds = svgFilterRegionVisibleBounds(filterTarget, filter, units);
+  const affectedBounds = elementRectRelativeToAncestor(affectedElement, filterTarget);
+  return (
+    filterBounds !== null &&
+    affectedBounds !== null &&
+    boundsOverlapSuppressesField(filterBounds, affectedBounds)
+  );
+}
+
 function svgFilterSuppressesPaint(
   filterTarget: HTMLElement,
   value: string | undefined,
@@ -1857,6 +1924,9 @@ function svgFilterSuppressesPaint(
       isCredentialLikeField(affectedElement) &&
       svgFilterHasUninspectableImagePaint(filter)
     ) {
+      return true;
+    }
+    if (svgFilterRegionSuppressesPaint(filterTarget, affectedElement, filter, units)) {
       return true;
     }
     if (isEffectivelyTransparent(svgFilterGraphOpacityValue(filter))) {
