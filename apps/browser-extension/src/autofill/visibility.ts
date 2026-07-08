@@ -768,7 +768,7 @@ function cssFilterPaintCollapseColor(value: string | undefined): CssColorRgba | 
       }
       continue;
     }
-    if (name === "blur") {
+    if (name === "blur" || name === "drop-shadow") {
       continue;
     }
     return null;
@@ -994,7 +994,7 @@ function cssFilterFunctionPaintColor(
   if (name === "hue-rotate") {
     return cssFilterHueRotateColor(color, body);
   }
-  if (name === "blur") {
+  if (name === "blur" || name === "drop-shadow") {
     return color;
   }
   return null;

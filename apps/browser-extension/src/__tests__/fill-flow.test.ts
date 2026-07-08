@@ -529,6 +529,22 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys hidden by CSS filter chains ending in drop-shadow", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="background:black">
+          <input id="drop-shadow-filter-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white;outline:0;box-shadow:none;text-shadow:none;filter:brightness(0) drop-shadow(0 0 0 black)" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#drop-shadow-filter-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys hidden by SVG saturation filters", () => {
     document.body.innerHTML = `
       <form>
