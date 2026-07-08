@@ -144,12 +144,6 @@ function isMeaningfulCssValue(value: string) {
   return normalized !== "" && normalized !== "auto" && normalized !== "none";
 }
 
-function hasClippingStyle(current: HTMLElement, style: CSSStyleDeclaration | undefined) {
-  const clipPath = cssPropertyValue(style, current, "clip-path");
-  const clip = cssPropertyValue(style, current, "clip");
-  return isMeaningfulCssValue(clipPath) || isMeaningfulCssValue(clip);
-}
-
 function hasClippingOverflow(current: HTMLElement, style: CSSStyleDeclaration | undefined) {
   const overflow = [
     cssPropertyValue(style, current, "overflow"),
@@ -216,28 +210,6 @@ function hasMeaningfulClientRect(rect: DOMRect) {
   return rect.width > 0 && rect.height > 0;
 }
 
-function viewportSize(documentRef: Document) {
-  const view = documentRef.defaultView;
-  return {
-    width: view?.innerWidth ?? documentRef.documentElement.clientWidth,
-    height: view?.innerHeight ?? documentRef.documentElement.clientHeight
-  };
-}
-
-function isOutsideViewport(element: HTMLElement) {
-  const rect = element.getBoundingClientRect();
-  if (!hasMeaningfulClientRect(rect)) {
-    return false;
-  }
-  const viewport = viewportSize(element.ownerDocument);
-  return (
-    rect.right <= 0 ||
-    rect.bottom <= 0 ||
-    rect.left >= viewport.width ||
-    rect.top >= viewport.height
-  );
-}
-
 function rectsIntersect(left: DOMRect, right: DOMRect) {
   return (
     left.left < right.right &&
@@ -254,6 +226,106 @@ function isFullyClippedByAncestor(element: HTMLElement, ancestor: HTMLElement) {
     hasMeaningfulClientRect(elementRect) &&
     hasMeaningfulClientRect(ancestorRect) &&
     !rectsIntersect(elementRect, ancestorRect)
+  );
+}
+
+function splitCssFunctionArgs(value: string) {
+  return value
+    .trim()
+    .split(/[,\s]+/)
+    .filter(Boolean);
+}
+
+function expandBoxValues(values: string[]) {
+  const top = values[0] ?? "0";
+  const right = values[1] ?? top;
+  const bottom = values[2] ?? top;
+  const left = values[3] ?? right;
+  return { top, right, bottom, left };
+}
+
+function cssInsetPercent(value: string) {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed.endsWith("%")) {
+    return null;
+  }
+  const parsed = Number.parseFloat(trimmed.slice(0, -1));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function cssInsetLength(
+  value: string,
+  units: { emPx?: number; remPx?: number }
+) {
+  const percent = cssInsetPercent(value);
+  return percent === null ? numericCssValue(value, units) : null;
+}
+
+function insetPairFullyClips(
+  first: string,
+  second: string,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number }
+) {
+  const firstPercent = cssInsetPercent(first);
+  const secondPercent = cssInsetPercent(second);
+  if (firstPercent !== null || secondPercent !== null) {
+    return (firstPercent ?? 0) + (secondPercent ?? 0) >= 100;
+  }
+
+  const firstLength = cssInsetLength(first, units);
+  const secondLength = cssInsetLength(second, units);
+  return (
+    axisSize > 0 &&
+    firstLength !== null &&
+    secondLength !== null &&
+    firstLength + secondLength >= axisSize
+  );
+}
+
+function clipPathFullyClips(
+  current: HTMLElement,
+  value: string,
+  units: { emPx?: number; remPx?: number }
+) {
+  const match = value.trim().toLowerCase().match(/^inset\((.*)\)$/);
+  if (!match) {
+    return false;
+  }
+  const inset = expandBoxValues(splitCssFunctionArgs(match[1]));
+  const rect = current.getBoundingClientRect();
+  return (
+    insetPairFullyClips(inset.left, inset.right, rect.width, units) ||
+    insetPairFullyClips(inset.top, inset.bottom, rect.height, units)
+  );
+}
+
+function legacyClipFullyClips(value: string, units: { emPx?: number; remPx?: number }) {
+  const match = value.trim().toLowerCase().match(/^rect\((.*)\)$/);
+  if (!match) {
+    return false;
+  }
+  const rect = expandBoxValues(splitCssFunctionArgs(match[1]));
+  const top = numericCssValue(rect.top, units);
+  const right = numericCssValue(rect.right, units);
+  const bottom = numericCssValue(rect.bottom, units);
+  const left = numericCssValue(rect.left, units);
+  if (top === null || right === null || bottom === null || left === null) {
+    return false;
+  }
+  return right <= left || bottom <= top;
+}
+
+function hasFullyClippingStyle(
+  current: HTMLElement,
+  style: CSSStyleDeclaration | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const clipPath = cssPropertyValue(style, current, "clip-path");
+  const clip = cssPropertyValue(style, current, "clip");
+  return (
+    (isMeaningfulCssValue(clipPath) && clipPathFullyClips(current, clipPath, units)) ||
+    (isMeaningfulCssValue(clip) && legacyClipFullyClips(clip, units))
   );
 }
 
@@ -322,7 +394,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (opacity === 0) {
       addReason(reasons, "not-viewable:transparent");
     }
-    if (hasClippingStyle(current, style)) {
+    if (hasFullyClippingStyle(current, style, cssUnits)) {
       addReason(reasons, "not-viewable:clipped");
     }
     if (
@@ -337,9 +409,6 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       transform &&
       (isLargeOffscreenOffset(transform.x) || isLargeOffscreenOffset(transform.y))
     ) {
-      addReason(reasons, "not-viewable:offscreen");
-    }
-    if (current === element && isOutsideViewport(element)) {
       addReason(reasons, "not-viewable:offscreen");
     }
     if (

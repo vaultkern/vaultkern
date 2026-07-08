@@ -9,6 +9,32 @@ function fieldByName(report: ReturnType<typeof triageAutofillPage>, htmlName: st
   return field!;
 }
 
+function elementRect(partial: {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}): DOMRect {
+  return {
+    x: partial.left,
+    y: partial.top,
+    left: partial.left,
+    top: partial.top,
+    width: partial.width,
+    height: partial.height,
+    right: partial.left + partial.width,
+    bottom: partial.top + partial.height,
+    toJSON: () => ({})
+  } as DOMRect;
+}
+
+function stubElementRect(element: Element, rect: DOMRect) {
+  Object.defineProperty(element, "getBoundingClientRect", {
+    configurable: true,
+    value: () => rect
+  });
+}
+
 describe("autofill triage", () => {
   beforeEach(() => {
     window.history.replaceState(null, "", "/");
@@ -1228,6 +1254,49 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "transparent_email").reasons).toContain("not-viewable:transparent");
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("keeps below-fold document-flow login fields viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" />
+        <input name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector('input[name="email"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 1208, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector('input[name="password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 1240, width: 185, height: 21 })
+    );
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "email").reasons).not.toContain("not-viewable:offscreen");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "password").reasons).not.toContain("not-viewable:offscreen");
+  });
+
+  it("keeps no-op clipped visible login fields viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" style="clip-path:inset(0)" />
+        <input name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector('input[name="email"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "email").reasons).not.toContain("not-viewable:clipped");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
   it("lets current-password fields override mixed sign-in and signup copy", () => {
