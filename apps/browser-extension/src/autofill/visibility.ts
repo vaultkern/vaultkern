@@ -1141,6 +1141,68 @@ function viewportExitForRect(element: HTMLElement) {
   };
 }
 
+function hitTargetBelongsToElement(element: HTMLElement, target: Element) {
+  if (target === element || element.contains(target)) {
+    return true;
+  }
+
+  const ownerWindow = element.ownerDocument.defaultView;
+  return Boolean(
+    ownerWindow &&
+      target instanceof ownerWindow.HTMLLabelElement &&
+      target.control === element
+  );
+}
+
+function visibleViewportSamplePoints(element: HTMLElement) {
+  const rect = element.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return [];
+  }
+
+  const viewport = viewportSize(element);
+  const left = Math.max(rect.left, 0);
+  const right = Math.min(rect.right, viewport.width);
+  const top = Math.max(rect.top, 0);
+  const bottom = Math.min(rect.bottom, viewport.height);
+  const width = right - left;
+  const height = bottom - top;
+  if (width <= 0 || height <= 0) {
+    return [];
+  }
+
+  const insetX = Math.min(4, width / 2);
+  const insetY = Math.min(4, height / 2);
+  return [
+    { x: left + width / 2, y: top + height / 2 },
+    { x: left + insetX, y: top + insetY },
+    { x: right - insetX, y: top + insetY },
+    { x: left + insetX, y: bottom - insetY },
+    { x: right - insetX, y: bottom - insetY }
+  ];
+}
+
+function isFullyOccludedByHitTesting(element: HTMLElement) {
+  const elementFromPoint = element.ownerDocument.elementFromPoint;
+  if (typeof elementFromPoint !== "function") {
+    return false;
+  }
+
+  let checkedPoints = 0;
+  for (const point of visibleViewportSamplePoints(element)) {
+    const target = elementFromPoint.call(element.ownerDocument, point.x, point.y);
+    if (!target) {
+      continue;
+    }
+    checkedPoints += 1;
+    if (hitTargetBelongsToElement(element, target)) {
+      return false;
+    }
+  }
+
+  return checkedPoints > 0;
+}
+
 type ViewportExit = NonNullable<ReturnType<typeof viewportExitForRect>>;
 
 function inverseOffset(value: number | null) {
@@ -2116,6 +2178,13 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     }
     if (current === element && isTinyCredentialField(element, width, height)) {
       addReason(reasons, "not-viewable:tiny");
+    }
+    if (
+      current === element &&
+      isCredentialLikeField(element) &&
+      isFullyOccludedByHitTesting(element)
+    ) {
+      addReason(reasons, "not-viewable:occluded");
     }
     if (
       current !== element &&

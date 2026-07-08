@@ -1584,6 +1584,50 @@ describe("autofill triage", () => {
     );
   });
 
+  it("treats fully occluded credential fields as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="covered_password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:88px;width:185px;height:21px" />
+        <div id="cover" style="position:absolute;left:0;top:80px;width:260px;height:48px;background:white"></div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const coveredPassword = document.querySelector(
+      'input[name="covered_password"]'
+    ) as HTMLInputElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    const cover = document.querySelector("#cover") as HTMLDivElement;
+    stubElementRect(coveredPassword, elementRect({ left: 24, top: 88, width: 185, height: 21 }));
+    stubElementRect(realPassword, elementRect({ left: 24, top: 140, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 88 && y <= 109) {
+          return cover;
+        }
+        if (x >= 24 && x <= 209 && y >= 140 && y <= 161) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(fieldByName(report, "covered_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "covered_password").reasons).toContain(
+      "not-viewable:occluded"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats fields whose final rect is after the viewport as not viewable", () => {
     document.body.innerHTML = `
       <form>
