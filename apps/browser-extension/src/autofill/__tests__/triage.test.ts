@@ -3055,6 +3055,30 @@ describe("autofill triage", () => {
     );
   });
 
+  it("keeps fields viewable when CSS mask-mode selects alpha masking", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <mask id="sourceMask">
+            <rect width="200" height="30" fill="black" />
+          </mask>
+        </svg>
+        <input name="password" type="password" autocomplete="current-password" style="mask-image:url(#sourceMask);mask-mode:alpha" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector('input[name="password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+  });
+
   it("keeps stylesheet visibility-visible descendants of hidden ancestors viewable", () => {
     document.body.innerHTML = `
       <style>

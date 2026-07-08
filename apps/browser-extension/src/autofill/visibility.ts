@@ -5452,11 +5452,17 @@ function cssMaskVisibleBounds(
   const sizeLayers = splitCssCommaList(sizeValue?.trim().toLowerCase() ?? "");
   const repeatLayers = splitCssCommaList(repeatValue?.trim().toLowerCase() ?? "");
   const clipLayers = splitCssCommaList(clipValue?.trim().toLowerCase() ?? "");
+  const modeLayers = splitCssCommaList(modeValue?.trim().toLowerCase() ?? "");
   const bounds = imageLayers.flatMap((layer, index) => {
     const clipBounds = maskClipVisibleBounds(current, maskLayerValue(clipLayers, index), units);
     const applyClip = (layerBounds: RectBounds) =>
       clipBounds === null ? layerBounds : intersectBounds(layerBounds, clipBounds);
-    const svgBounds = svgMaskVisibleBounds(current, layer, units);
+    const svgBounds = svgMaskVisibleBounds(
+      current,
+      layer,
+      units,
+      maskLayerValue(modeLayers, index)
+    );
     if (svgBounds !== null) {
       const clipped = applyClip(svgBounds);
       return clipped === null ? [] : [clipped];
@@ -5701,8 +5707,17 @@ function svgPaintSuppressesMask(
 
 function svgMaskPaintsByLuminance(
   mask: Element,
-  style: CSSStyleDeclaration | undefined
+  style: CSSStyleDeclaration | undefined,
+  modeValue: string | undefined
 ) {
+  const mode = modeValue?.trim().toLowerCase();
+  if (mode === "alpha") {
+    return false;
+  }
+  if (mode === "luminance") {
+    return true;
+  }
+
   const inlineStyle = (mask as SVGElement).style;
   const maskType = (
     mask.getAttribute("mask-type") ??
@@ -5849,7 +5864,8 @@ function svgMaskShapeVisibleBounds(
 function svgMaskVisibleBounds(
   current: HTMLElement,
   value: string | undefined,
-  units: { emPx?: number; remPx?: number }
+  units: { emPx?: number; remPx?: number },
+  modeValue?: string
 ): RectBounds | null {
   const bounds = localCssUrlReferenceIds(value)
     .map((id) => {
@@ -5859,7 +5875,7 @@ function svgMaskVisibleBounds(
       }
       const maskStyle = mask.ownerDocument.defaultView?.getComputedStyle(mask);
       const maskOpacity = svgMaskPaintOpacityValue(mask, maskStyle);
-      const paintsByLuminance = svgMaskPaintsByLuminance(mask, maskStyle);
+      const paintsByLuminance = svgMaskPaintsByLuminance(mask, maskStyle, modeValue);
       if (isEffectivelyTransparent(maskOpacity)) {
         return null;
       }
@@ -5886,7 +5902,8 @@ function svgMaskVisibleBounds(
 function svgMaskSuppressesPaint(
   current: HTMLElement,
   value: string | undefined,
-  units: { emPx?: number; remPx?: number }
+  units: { emPx?: number; remPx?: number },
+  modeValue?: string
 ) {
   return localCssUrlReferenceIds(value).some((id) => {
     const mask = current.ownerDocument.getElementById(id);
@@ -5895,7 +5912,7 @@ function svgMaskSuppressesPaint(
     }
     const maskStyle = mask.ownerDocument.defaultView?.getComputedStyle(mask);
     const maskOpacity = svgMaskPaintOpacityValue(mask, maskStyle);
-    const paintsByLuminance = svgMaskPaintsByLuminance(mask, maskStyle);
+    const paintsByLuminance = svgMaskPaintsByLuminance(mask, maskStyle, modeValue);
     if (isEffectivelyTransparent(maskOpacity)) {
       return true;
     }
@@ -5933,6 +5950,15 @@ function maskStyleSuppressesPaint(
   }
   const maskMode = cssPropertyValue(style, current, "mask-mode");
   const webkitMaskMode = cssPropertyValue(style, current, "-webkit-mask-mode") || maskMode;
+  const maskSources = [
+    { image: cssPropertyValue(style, current, "mask-image"), mode: maskMode },
+    {
+      image: cssPropertyValue(style, current, "-webkit-mask-image"),
+      mode: webkitMaskMode
+    },
+    { image: cssPropertyValue(style, current, "mask"), mode: maskMode },
+    { image: cssPropertyValue(style, current, "-webkit-mask"), mode: webkitMaskMode }
+  ].filter((source) => isMeaningfulCssValue(source.image));
   if (
     maskImages.some((maskImage) =>
       maskImageFullySuppressesPaint(maskImage, `${maskMode}, ${webkitMaskMode}`)
@@ -5955,7 +5981,11 @@ function maskStyleSuppressesPaint(
   ) {
     return true;
   }
-  if (maskImages.some((maskImage) => svgMaskSuppressesPaint(current, maskImage, units))) {
+  if (
+    maskSources.some((source) =>
+      svgMaskSuppressesPaint(current, source.image, units, source.mode)
+    )
+  ) {
     return true;
   }
   return (
