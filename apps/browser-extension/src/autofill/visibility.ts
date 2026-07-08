@@ -6785,6 +6785,16 @@ function verticalOffsetMovesAfterViewport(
   );
 }
 
+function largeVerticalOffsetMovesAfterViewport(
+  viewportExit: ViewportExit | null,
+  offset: number | null
+) {
+  return (
+    isLargeOffscreenOffset(offset) &&
+    verticalOffsetMovesAfterViewport(viewportExit, offset)
+  );
+}
+
 function rectsIntersect(left: DOMRect, right: DOMRect) {
   return (
     left.left < right.right &&
@@ -9320,10 +9330,13 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
         horizontalOffsetMatchesViewportExit(viewportExit, inverseOffset(right)) ||
         verticalOffsetMovesBeforeViewport(viewportExit, top) ||
         verticalOffsetMovesBeforeViewport(viewportExit, inverseOffset(bottom)) ||
+        largeVerticalOffsetMovesAfterViewport(viewportExit, top) ||
+        largeVerticalOffsetMovesAfterViewport(viewportExit, inverseOffset(bottom)) ||
         hasFixedPositionAfterViewportOffset);
     const hasDirectionalMarginOffset =
       horizontalOffsetMatchesViewportExit(viewportExit, marginLeft) ||
-      verticalOffsetMovesBeforeViewport(viewportExit, marginTop);
+      verticalOffsetMovesBeforeViewport(viewportExit, marginTop) ||
+      largeVerticalOffsetMovesAfterViewport(viewportExit, marginTop);
     const hasMotionPathViewportExit =
       viewportExit !== null &&
       hasMotionPathOffset(style, current) &&

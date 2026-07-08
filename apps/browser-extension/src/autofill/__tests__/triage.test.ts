@@ -2929,6 +2929,9 @@ describe("autofill triage", () => {
         <input name="longhand_translated_y_password" type="password" autocomplete="current-password" style="translate:0 900px" />
         <input name="fixed_below_password" type="password" autocomplete="current-password" style="position:fixed;top:900px" />
         <input name="fixed_bottom_below_password" type="password" autocomplete="current-password" style="position:fixed;bottom:-900px" />
+        <input name="relative_y_below_password" type="password" autocomplete="current-password" style="position:relative;top:9999px" />
+        <input name="relative_bottom_below_password" type="password" autocomplete="current-password" style="position:relative;bottom:-9999px" />
+        <input name="margin_y_below_password" type="password" autocomplete="current-password" style="display:block;margin-top:9999px" />
         <input name="relative_password" type="password" autocomplete="current-password" style="position:relative;left:9999px" />
         <input name="margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:9999px" />
         <input name="real_password" type="password" autocomplete="current-password" />
@@ -2945,6 +2948,16 @@ describe("autofill triage", () => {
         elementRect({ left: 24, top: 920, width: 185, height: 21 })
       );
     }
+    for (const name of [
+      "relative_y_below_password",
+      "relative_bottom_below_password",
+      "margin_y_below_password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: 10024, width: 185, height: 21 })
+      );
+    }
     for (const name of ["relative_password", "margin_password"]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
@@ -2959,6 +2972,9 @@ describe("autofill triage", () => {
       "longhand_translated_y_password",
       "fixed_below_password",
       "fixed_bottom_below_password",
+      "relative_y_below_password",
+      "relative_bottom_below_password",
+      "margin_y_below_password",
       "relative_password",
       "margin_password"
     ]) {

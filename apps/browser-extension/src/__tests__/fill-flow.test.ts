@@ -705,6 +705,38 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys moved far below the viewport by large vertical offsets", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="relative-top-password" type="password" autocomplete="current-password" style="position:relative;top:9999px" />
+        <input id="relative-bottom-password" type="password" autocomplete="current-password" style="position:relative;bottom:-9999px" />
+        <input id="margin-top-password" type="password" autocomplete="current-password" style="display:block;margin-top:9999px" />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const id of [
+      "relative-top-password",
+      "relative-bottom-password",
+      "margin-top-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: 10024, width: 185, height: 21 })
+      );
+    }
+    stubElementRect(
+      document.querySelector("#login-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#relative-top-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#relative-bottom-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#margin-top-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys hidden by SVG blend filters", () => {
     document.body.innerHTML = `
       <form>
