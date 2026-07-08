@@ -3111,6 +3111,65 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields hidden by implicit-stop ancestor masks as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="implicit-stop-mask-label" for="implicit-stop-mask-password">Password</label>
+        <div id="ancestor-implicit-stop-mask" style="width:400px;height:40px;mask-image:linear-gradient(to right, transparent, transparent 60%, black 60%, black)">
+          <input id="implicit-stop-mask-password" name="implicit_stop_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const implicitStopMaskPassword = document.querySelector(
+      "#implicit-stop-mask-password"
+    ) as HTMLInputElement;
+    const implicitStopMaskLabel = document.querySelector(
+      "#implicit-stop-mask-label"
+    ) as HTMLLabelElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    stubElementRect(
+      implicitStopMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      implicitStopMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-implicit-stop-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(realPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return implicitStopMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(fieldByName(report, "implicit_stop_mask_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "implicit_stop_mask_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats zero-sized fields and inert container fields as unavailable", () => {
     document.body.innerHTML = `
       <form>

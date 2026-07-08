@@ -1808,6 +1808,7 @@ function maskColorStopPaints(value: string, modeValue: string | undefined) {
 }
 
 type LinearMaskGradientDirection = { axis: "x" | "y"; reverse: boolean };
+type CssMaskGradientPoint = { offset: number | null; paints: boolean };
 
 function linearMaskGradientDirection(value: string): LinearMaskGradientDirection | null {
   const tokens = splitCssFunctionArgs(value.trim().toLowerCase());
@@ -1851,7 +1852,7 @@ function cssMaskLinearGradientStopPoints(
   axisSize: number,
   modeValue: string | undefined,
   units: { emPx?: number; remPx?: number }
-) {
+): CssMaskGradientPoint[] | null {
   const normalized = value.trim().toLowerCase();
   const color = cssColorStopColor(normalized);
   if (color === null) {
@@ -1859,11 +1860,11 @@ function cssMaskLinearGradientStopPoints(
   }
 
   const positions = splitCssFunctionArgs(normalized.slice(color.length).trim());
+  const paints = maskColorStopPaints(color, modeValue);
   if (positions.length === 0) {
-    return null;
+    return [{ offset: null, paints }];
   }
 
-  const paints = maskColorStopPaints(color, modeValue);
   const points = positions.slice(0, 2).map((position) => {
     const offset = cssLengthToPx(position, axisSize, units);
     return offset === null ? null : { offset, paints };
@@ -1871,6 +1872,53 @@ function cssMaskLinearGradientStopPoints(
   return points.every((point): point is { offset: number; paints: boolean } => point !== null)
     ? points
     : null;
+}
+
+function normalizeCssMaskGradientStopOffsets(
+  points: CssMaskGradientPoint[],
+  axisSize: number
+): Array<{ offset: number; paints: boolean }> | null {
+  if (points.length === 0) {
+    return [];
+  }
+
+  const offsets = points.map((point) => point.offset);
+  if (offsets[0] === null) {
+    offsets[0] = 0;
+  }
+  if (offsets[offsets.length - 1] === null) {
+    offsets[offsets.length - 1] = axisSize;
+  }
+
+  let index = 0;
+  while (index < offsets.length) {
+    if (offsets[index] !== null) {
+      index += 1;
+      continue;
+    }
+
+    const startIndex = index - 1;
+    let endIndex = index + 1;
+    while (endIndex < offsets.length && offsets[endIndex] === null) {
+      endIndex += 1;
+    }
+    const start = startIndex >= 0 ? offsets[startIndex] : null;
+    const end = endIndex < offsets.length ? offsets[endIndex] : null;
+    if (start === null || end === null) {
+      return null;
+    }
+
+    const step = (end - start) / (endIndex - startIndex);
+    for (let fillIndex = index; fillIndex < endIndex; fillIndex += 1) {
+      offsets[fillIndex] = start + step * (fillIndex - startIndex);
+    }
+    index = endIndex + 1;
+  }
+
+  return points.map((point, pointIndex) => {
+    const offset = offsets[pointIndex];
+    return offset === null ? null : { ...point, offset };
+  }).filter((point): point is { offset: number; paints: boolean } => point !== null);
 }
 
 function cssMaskLinearGradientPaintedRanges(
@@ -1891,17 +1939,22 @@ function cssMaskLinearGradientPaintedRanges(
     return null;
   }
 
-  let points: Array<{ offset: number; paints: boolean }> = [];
+  const rawPoints: CssMaskGradientPoint[] = [];
   for (const part of stopParts) {
     const stopPoints = cssMaskLinearGradientStopPoints(part, axisSize, modeValue, units);
     if (stopPoints === null) {
       return null;
     }
-    points.push(...stopPoints);
+    rawPoints.push(...stopPoints);
   }
-  if (points.length < 2) {
+  if (rawPoints.length < 2) {
     return null;
   }
+  const normalizedPoints = normalizeCssMaskGradientStopOffsets(rawPoints, axisSize);
+  if (normalizedPoints === null) {
+    return null;
+  }
+  let points = normalizedPoints;
   let previousOffset = points[0].offset;
   points = points.map((point, index) => {
     if (index === 0) {
