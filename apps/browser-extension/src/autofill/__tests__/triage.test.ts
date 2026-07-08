@@ -1895,6 +1895,7 @@ describe("autofill triage", () => {
           <clipPath id="zeroUseClip"><use href="#zeroRect" /></clipPath>
           <clipPath id="emptyGroupClip"><g></g></clipPath>
           <clipPath id="lineClip"><line x1="0" y1="0" x2="200" y2="0" /></clipPath>
+          <clipPath id="emptyTextClip"><text></text></clipPath>
         </svg>
         <input name="inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
         <input name="rounded_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49% round 2px)" />
@@ -1914,6 +1915,7 @@ describe("autofill triage", () => {
         <input name="url_use_password" type="password" autocomplete="current-password" style="clip-path:url(#zeroUseClip)" />
         <input name="url_empty_group_password" type="password" autocomplete="current-password" style="clip-path:url(#emptyGroupClip)" />
         <input name="url_line_password" type="password" autocomplete="current-password" style="clip-path:url(#lineClip)" />
+        <input name="url_empty_text_password" type="password" autocomplete="current-password" style="clip-path:url(#emptyTextClip)" />
         <div style="width:2px;height:2px;overflow:hidden">
           <input name="ancestor_clipped_password" type="password" autocomplete="current-password" />
         </div>
@@ -2003,6 +2005,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "url_line_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "url_line_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_empty_text_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_empty_text_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "ancestor_clipped_password").qualifiedAs).toBe("ignored");

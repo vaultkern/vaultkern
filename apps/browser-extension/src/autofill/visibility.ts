@@ -2011,6 +2011,9 @@ function svgClipShapeSuppressesField(
       false
     );
   }
+  if (tagName === "text") {
+    return shape.textContent?.trim() === "";
+  }
   if (tagName === "polygon" || tagName === "polyline") {
     const points = svgPointListToPoints(shape.getAttribute("points") ?? "", rect, units);
     return pointRegionSuppressesField(
