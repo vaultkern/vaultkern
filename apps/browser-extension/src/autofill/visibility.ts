@@ -2545,6 +2545,170 @@ function maskImageFullySuppressesPaint(value: string | undefined, modeValue: str
   );
 }
 
+function cssUrlValues(value: string | undefined) {
+  const references: string[] = [];
+  const normalized = value?.trim();
+  if (!normalized) {
+    return references;
+  }
+  for (const match of normalized.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/gi)) {
+    references.push(match[2]);
+  }
+  return references;
+}
+
+function dataSvgPayload(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed.toLowerCase().startsWith("data:image/svg+xml")) {
+    return null;
+  }
+  const commaIndex = trimmed.indexOf(",");
+  if (commaIndex < 0) {
+    return null;
+  }
+  const metadata = trimmed.slice(0, commaIndex).toLowerCase();
+  const payload = trimmed.slice(commaIndex + 1);
+  try {
+    return metadata.includes(";base64")
+      ? globalThis.atob(payload)
+      : decodeURIComponent(payload);
+  } catch {
+    return null;
+  }
+}
+
+function svgPaintValue(
+  shape: Element,
+  style: CSSStyleDeclaration | undefined,
+  property: string,
+  fallback: string
+) {
+  const inlineStyle = (shape as SVGElement).style;
+  for (const value of [
+    shape.getAttribute(property),
+    inlineStyle?.getPropertyValue(property),
+    style?.getPropertyValue(property)
+  ]) {
+    if (value?.trim()) {
+      return value;
+    }
+  }
+  return fallback;
+}
+
+function svgStrokePaintsAlpha(
+  shape: Element,
+  style: CSSStyleDeclaration | undefined,
+  effectiveOpacity: number
+) {
+  const stroke = svgPaintValue(shape, style, "stroke", "none");
+  if (stroke.trim().toLowerCase() === "none" || cssColorLooksTransparent(stroke)) {
+    return false;
+  }
+  const strokeOpacity = svgElementOpacityValue(shape, "stroke-opacity", style);
+  const strokeWidth = svgPaintValue(shape, style, "stroke-width", "1");
+  return (
+    !isEffectivelyTransparent(effectiveOpacity * strokeOpacity) &&
+    !cssLengthLooksZero(strokeWidth)
+  );
+}
+
+function svgAlphaPaintSuppressesMask(
+  shape: Element,
+  style: CSSStyleDeclaration | undefined,
+  effectiveOpacity: number
+) {
+  const fill = svgPaintValue(shape, style, "fill", "black");
+  const fillPaints =
+    fill.trim().toLowerCase() !== "none" &&
+    !cssColorLooksTransparent(fill) &&
+    !isEffectivelyTransparent(effectiveOpacity);
+  return !fillPaints && !svgStrokePaintsAlpha(shape, style, effectiveOpacity);
+}
+
+function svgAlphaMaskShapeSuppressesPaint(
+  shape: Element,
+  seen: Set<Element> = new Set(),
+  inheritedOpacity = 1
+): boolean {
+  if (seen.has(shape)) {
+    return true;
+  }
+  seen.add(shape);
+
+  const tagName = shape.tagName.toLowerCase();
+  const shapeStyle = shape.ownerDocument.defaultView?.getComputedStyle(shape);
+  const inlineStyle = (shape as SVGElement).style;
+  const display =
+    shape.getAttribute("display") ??
+    inlineStyle?.getPropertyValue("display") ??
+    shapeStyle?.getPropertyValue("display");
+  const visibility =
+    shape.getAttribute("visibility") ??
+    inlineStyle?.getPropertyValue("visibility") ??
+    shapeStyle?.getPropertyValue("visibility");
+  if (display === "none" || visibility === "hidden" || visibility === "collapse") {
+    return true;
+  }
+
+  const effectiveOpacity = inheritedOpacity * svgMaskPaintOpacityValue(shape, shapeStyle);
+  if (isEffectivelyTransparent(effectiveOpacity)) {
+    return true;
+  }
+  if (tagName === "use") {
+    const href =
+      shape.getAttribute("href") ??
+      shape.getAttribute("xlink:href") ??
+      shape.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+    const targetId = href?.startsWith("#") ? href.slice(1) : null;
+    const target = targetId ? shape.ownerDocument.getElementById(targetId) : null;
+    return target === null || svgAlphaMaskShapeSuppressesPaint(target, seen, effectiveOpacity);
+  }
+  if (shape.children.length > 0 && (tagName === "g" || tagName === "svg")) {
+    return Array.from(shape.children).every((child) =>
+      svgAlphaMaskShapeSuppressesPaint(child, seen, effectiveOpacity)
+    );
+  }
+  if (svgClipElementIsNonRendering(tagName)) {
+    return true;
+  }
+  return svgAlphaPaintSuppressesMask(shape, shapeStyle, effectiveOpacity);
+}
+
+function dataSvgImageSuppressesAlphaMask(
+  current: HTMLElement,
+  value: string
+) {
+  const payload = dataSvgPayload(value);
+  if (payload === null) {
+    return false;
+  }
+  const DOMParserConstructor = current.ownerDocument.defaultView?.DOMParser;
+  if (!DOMParserConstructor) {
+    return false;
+  }
+  const document = new DOMParserConstructor().parseFromString(payload, "image/svg+xml");
+  const root = document.documentElement;
+  if (root.querySelector("parsererror") || root.tagName.toLowerCase() !== "svg") {
+    return false;
+  }
+  const children = Array.from(root.children);
+  return (
+    children.length === 0 ||
+    children.every((child) => svgAlphaMaskShapeSuppressesPaint(child))
+  );
+}
+
+function dataSvgMaskImageFullySuppressesPaint(current: HTMLElement, value: string | undefined) {
+  const layers = splitCssCommaList(value?.trim() ?? "").filter(isMeaningfulCssValue);
+  return (
+    layers.length > 0 &&
+    layers.every((layer) =>
+      cssUrlValues(layer).some((url) => dataSvgImageSuppressesAlphaMask(current, url))
+    )
+  );
+}
+
 function maskImageFullyPaints(value: string, modeValue: string | undefined) {
   const normalized = value.trim().toLowerCase();
   if (!normalized || normalized === "none") {
@@ -4396,7 +4560,8 @@ function maskStyleSuppressesPaint(
   if (
     maskImages.some((maskImage) =>
       maskImageFullySuppressesPaint(maskImage, `${maskMode}, ${webkitMaskMode}`)
-    )
+    ) ||
+    maskImages.some((maskImage) => dataSvgMaskImageFullySuppressesPaint(current, maskImage))
   ) {
     return true;
   }

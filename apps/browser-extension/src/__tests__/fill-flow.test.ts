@@ -443,6 +443,7 @@ describe("fillLoginForm", () => {
         <input id="mask-fill-none-password" type="password" autocomplete="current-password" style="mask:url(#fillNoneMask)" />
         <input id="mask-display-none-password" type="password" autocomplete="current-password" style="mask:url(#displayNoneMask)" />
         <input id="mask-hidden-shape-password" type="password" autocomplete="current-password" style="mask:url(#hiddenShapeMask)" />
+        <input id="mask-data-svg-password" type="password" autocomplete="current-password" style='mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22transparent%22%2F%3E%3C%2Fsvg%3E")' />
         <input id="mask-zero-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input id="mask-zero-percent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input id="mask-tiny-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
@@ -828,6 +829,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#mask-fill-none-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-display-none-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-hidden-shape-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-data-svg-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-percent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-tiny-password") as HTMLInputElement).value).toBe("");
