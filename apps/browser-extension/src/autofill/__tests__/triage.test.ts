@@ -1400,10 +1400,14 @@ describe("autofill triage", () => {
         <input name="margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:-9999px" />
         <input name="percent_translate_password" type="password" autocomplete="current-password" style="translate:-800%" />
         <input name="calc_translate_password" type="password" autocomplete="current-password" style="translate:calc(-100% - 500px)" />
+        <input name="viewport_translate_x_password" type="password" autocomplete="current-password" style="transform:translateX(-100vw)" />
         <input name="translated_y_password" type="password" autocomplete="current-password" style="transform:translateY(-500px)" />
         <input name="longhand_translated_y_password" type="password" autocomplete="current-password" style="translate:0 -500px" />
+        <input name="viewport_translate_y_password" type="password" autocomplete="current-password" style="translate:0 -100vh" />
         <input name="relative_y_password" type="password" autocomplete="current-password" style="position:relative;top:-500px" />
+        <input name="viewport_relative_password" type="password" autocomplete="current-password" style="position:relative;left:-100vw" />
         <input name="margin_y_password" type="password" autocomplete="current-password" style="display:block;margin-top:-500px" />
+        <input name="viewport_margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:-100vw" />
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
@@ -1411,7 +1415,8 @@ describe("autofill triage", () => {
       "parent_translated_password",
       "translated_password",
       "percent_translate_password",
-      "calc_translate_password"
+      "calc_translate_password",
+      "viewport_translate_x_password"
     ]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
@@ -1428,9 +1433,16 @@ describe("autofill triage", () => {
         elementRect({ left: -9975, top: 40, width: 185, height: 21 })
       );
     }
+    for (const name of ["viewport_relative_password", "viewport_margin_password"]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: -1000, top: 40, width: 185, height: 21 })
+      );
+    }
     for (const name of [
       "translated_y_password",
       "longhand_translated_y_password",
+      "viewport_translate_y_password",
       "relative_y_password",
       "margin_y_password"
     ]) {
@@ -1450,10 +1462,14 @@ describe("autofill triage", () => {
       "margin_password",
       "percent_translate_password",
       "calc_translate_password",
+      "viewport_translate_x_password",
       "translated_y_password",
       "longhand_translated_y_password",
+      "viewport_translate_y_password",
       "relative_y_password",
-      "margin_y_password"
+      "viewport_relative_password",
+      "margin_y_password",
+      "viewport_margin_password"
     ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:offscreen");

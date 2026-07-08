@@ -15,6 +15,13 @@ const MIN_CLIPPED_VISIBLE_FRACTION = 0.05;
 const MIN_VISIBLE_OPACITY = 0.01;
 const TRANSFORM_COLLAPSE_EPSILON = 0.001;
 
+interface CssNumericUnits {
+  emPx?: number;
+  remPx?: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+}
+
 function addReason(reasons: string[], reason: string) {
   if (!reasons.includes(reason)) {
     reasons.push(reason);
@@ -23,7 +30,7 @@ function addReason(reasons: string[], reason: string) {
 
 function numericCssValue(
   value: string | undefined,
-  units: { emPx?: number; remPx?: number } = {}
+  units: CssNumericUnits = {}
 ) {
   const trimmed = value?.trim().toLowerCase();
   if (!trimmed || trimmed === "auto") {
@@ -48,6 +55,22 @@ function numericCssValue(
   }
   if (unit === "rem") {
     return parsed * (units.remPx ?? units.emPx ?? 16);
+  }
+  if (unit === "vw" || unit === "svw" || unit === "lvw" || unit === "dvw") {
+    return units.viewportWidth === undefined ? parsed : (parsed * units.viewportWidth) / 100;
+  }
+  if (unit === "vh" || unit === "svh" || unit === "lvh" || unit === "dvh") {
+    return units.viewportHeight === undefined ? parsed : (parsed * units.viewportHeight) / 100;
+  }
+  if (unit === "vmin") {
+    return units.viewportWidth === undefined || units.viewportHeight === undefined
+      ? parsed
+      : (parsed * Math.min(units.viewportWidth, units.viewportHeight)) / 100;
+  }
+  if (unit === "vmax") {
+    return units.viewportWidth === undefined || units.viewportHeight === undefined
+      ? parsed
+      : (parsed * Math.max(units.viewportWidth, units.viewportHeight)) / 100;
   }
 
   return parsed;
@@ -1503,7 +1526,7 @@ function cssRadiusVisibleSizeIsTiny(value: string, units: { emPx?: number; remPx
 function cssLengthToPx(
   value: string,
   axisSize: number,
-  units: { emPx?: number; remPx?: number }
+  units: CssNumericUnits
 ): number | null {
   const normalized = value.trim().toLowerCase();
   const percent = cssInsetPercent(normalized);
@@ -2211,6 +2234,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     );
     const emPx = numericCssValue(style?.fontSize || current.style.fontSize) ?? 16;
     const remPx = numericCssValue(rootStyle?.fontSize) ?? emPx;
+    const viewport = viewportSize(current);
     const inlineDisplay = current.style.display;
     const inlineVisibility = current.style.visibility;
     const opacity = cssOpacityValue(style?.opacity) ?? cssOpacityValue(current.style.opacity);
@@ -2220,7 +2244,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       .trim()
       .toLowerCase();
     const position = current.style.position || style?.position;
-    const cssUnits = { emPx, remPx };
+    const cssUnits = { emPx, remPx, viewportWidth: viewport.width, viewportHeight: viewport.height };
     const left = computedCssValue(style?.left, current.style.left, cssUnits);
     const top = computedCssValue(style?.top, current.style.top, cssUnits);
     const right = computedCssValue(style?.right, current.style.right, cssUnits);

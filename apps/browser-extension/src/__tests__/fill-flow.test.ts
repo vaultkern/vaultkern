@@ -351,12 +351,16 @@ describe("fillLoginForm", () => {
         <input id="calc-translate-password" type="password" autocomplete="current-password" style="translate:calc(-100% - 500px)" />
         <input id="translated-y-password" type="password" autocomplete="current-password" style="transform:translateY(-500px)" />
         <input id="longhand-translated-y-password" type="password" autocomplete="current-password" style="translate:0 -500px" />
+        <input id="viewport-translated-x-password" type="password" autocomplete="current-password" style="transform:translateX(-100vw)" />
+        <input id="viewport-translated-y-password" type="password" autocomplete="current-password" style="translate:0 -100vh" />
         <input id="translated-y-after-password" type="password" autocomplete="current-password" style="transform:translateY(900px)" />
         <input id="longhand-translated-y-after-password" type="password" autocomplete="current-password" style="translate:0 900px" />
         <input id="fixed-below-password" type="password" autocomplete="current-password" style="position:fixed;top:900px" />
         <input id="fixed-bottom-below-password" type="password" autocomplete="current-password" style="position:fixed;bottom:-900px" />
         <input id="relative-y-password" type="password" autocomplete="current-password" style="position:relative;top:-500px" />
+        <input id="viewport-relative-password" type="password" autocomplete="current-password" style="position:relative;left:-100vw" />
         <input id="margin-y-password" type="password" autocomplete="current-password" style="display:block;margin-top:-500px" />
+        <input id="viewport-margin-password" type="password" autocomplete="current-password" style="display:block;margin-left:-100vw" />
         <input id="mask-transparent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
         <input id="mask-radial-password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(transparent, transparent)" />
         <input id="mask-stop-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
@@ -412,7 +416,8 @@ describe("fillLoginForm", () => {
       "parent-translated-password",
       "rect-translated-password",
       "percent-translate-password",
-      "calc-translate-password"
+      "calc-translate-password",
+      "viewport-translated-x-password"
     ]) {
       stubElementRect(
         document.querySelector(`#${id}`) as HTMLInputElement,
@@ -429,6 +434,12 @@ describe("fillLoginForm", () => {
         elementRect({ left: -9975, top: 40, width: 185, height: 21 })
       );
     }
+    for (const id of ["viewport-relative-password", "viewport-margin-password"]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: -1000, top: 40, width: 185, height: 21 })
+      );
+    }
     for (const id of ["positive-relative-password", "positive-margin-password"]) {
       stubElementRect(
         document.querySelector(`#${id}`) as HTMLInputElement,
@@ -438,6 +449,7 @@ describe("fillLoginForm", () => {
     for (const id of [
       "translated-y-password",
       "longhand-translated-y-password",
+      "viewport-translated-y-password",
       "relative-y-password",
       "margin-y-password"
     ]) {
@@ -526,12 +538,16 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#calc-translate-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#translated-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-translated-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#viewport-translated-x-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#viewport-translated-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#translated-y-after-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-translated-y-after-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#fixed-below-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#fixed-bottom-below-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#relative-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#viewport-relative-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#margin-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#viewport-margin-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-transparent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-radial-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-stop-password") as HTMLInputElement).value).toBe("");
