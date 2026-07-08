@@ -1827,6 +1827,7 @@ describe("autofill triage", () => {
         </div>
         <input name="translated_password" type="password" autocomplete="current-password" style="translate:-9999px" />
         <input name="longhand_scaled_password" type="password" autocomplete="current-password" style="scale:0" />
+        <input name="zoom_zero_password" type="password" autocomplete="current-password" style="zoom:0" />
         <div style="transform:scale(0)">
           <input name="ancestor_scaled_password" type="password" autocomplete="current-password" />
         </div>
@@ -1835,6 +1836,10 @@ describe("autofill triage", () => {
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
+    stubElementRect(
+      document.querySelector('input[name="zoom_zero_password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 0, height: 0 })
+    );
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -1860,6 +1865,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "longhand_scaled_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "longhand_scaled_password").reasons).toContain(
+      "not-viewable:zero-size"
+    );
+    expect(fieldByName(report, "zoom_zero_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "zoom_zero_password").reasons).toContain(
       "not-viewable:zero-size"
     );
     expect(fieldByName(report, "scaled_password").qualifiedAs).toBe("ignored");

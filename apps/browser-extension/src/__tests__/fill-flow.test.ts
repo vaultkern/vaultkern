@@ -405,6 +405,7 @@ describe("fillLoginForm", () => {
         <div id="pointer-events-cover" style="position:absolute;left:0;top:164px;width:260px;height:48px;background:white;pointer-events:none"></div>
         <input id="translated-password" type="password" autocomplete="current-password" style="translate:-9999px" />
         <input id="longhand-scaled-password" type="password" autocomplete="current-password" style="scale:0" />
+        <input id="zoom-zero-password" type="password" autocomplete="current-password" style="zoom:0" />
         <input id="filter-password" type="password" autocomplete="current-password" style="filter:opacity(0)" />
         <input id="scaled-password" type="password" autocomplete="current-password" style="transform:scale(0)" />
         <div style="transform:scale(0)">
@@ -482,6 +483,10 @@ describe("fillLoginForm", () => {
     stubElementRect(
       document.querySelector("#mask-position-password") as HTMLInputElement,
       elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#zoom-zero-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 0, height: 0 })
     );
     const originalElementFromPoint = document.elementFromPoint;
     const occludedPassword = document.querySelector("#occluded-password") as HTMLInputElement;
@@ -577,6 +582,7 @@ describe("fillLoginForm", () => {
     ).toBe("");
     expect((document.querySelector("#translated-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-scaled-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#zoom-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#filter-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#scaled-password") as HTMLInputElement).value).toBe("");
     expect(

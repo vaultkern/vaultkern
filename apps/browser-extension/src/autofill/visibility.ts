@@ -402,6 +402,11 @@ function transformStyleFullyCollapses(
   );
 }
 
+function zoomStyleFullyCollapses(style: CSSStyleDeclaration | undefined, current: HTMLElement) {
+  const zoom = cssOpacityValue(cssPropertyValue(style, current, "zoom"));
+  return zoom !== null && zoom <= TRANSFORM_COLLAPSE_EPSILON;
+}
+
 function cssAngleDegrees(value: string | undefined) {
   const match = value?.trim().toLowerCase().match(/^(-?\d+(?:\.\d+)?)(deg|turn|rad|grad)?$/);
   if (!match) {
@@ -2374,6 +2379,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     }
     if (
       transformStyleFullyCollapses(style, current, cssUnits) ||
+      zoomStyleFullyCollapses(style, current) ||
       rotateStyleFullyCollapses(style, current) ||
       backfaceStyleHidesElement(style, current)
     ) {
