@@ -1208,6 +1208,9 @@ describe("autofill triage", () => {
         <input name="bottom_offscreen_email" type="email" autocomplete="username" style="position:absolute;bottom:-9999px" />
         <input name="transformed_email" type="email" autocomplete="username" style="transform:translateX(-9999px)" />
         <input name="clip_path_email" type="email" autocomplete="username" style="clip-path:inset(50%)" />
+        <input name="circle_clip_email" type="email" autocomplete="username" style="clip-path:circle(0)" />
+        <input name="ellipse_clip_email" type="email" autocomplete="username" style="clip-path:ellipse(0 0)" />
+        <input name="polygon_clip_email" type="email" autocomplete="username" style="clip-path:polygon(0 0, 0 0, 0 0)" />
         <input name="legacy_clip_email" type="email" autocomplete="username" style="position:absolute;clip:rect(0 0 0 0)" />
         <div class="computed-clip-box">
           <input name="computed_overflow_email" type="email" autocomplete="username" />
@@ -1244,6 +1247,12 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "clip_path_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "clip_path_email").reasons).toContain("not-viewable:clipped");
+    expect(fieldByName(report, "circle_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "circle_clip_email").reasons).toContain("not-viewable:clipped");
+    expect(fieldByName(report, "ellipse_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "ellipse_clip_email").reasons).toContain("not-viewable:clipped");
+    expect(fieldByName(report, "polygon_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "polygon_clip_email").reasons).toContain("not-viewable:clipped");
     expect(fieldByName(report, "legacy_clip_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "legacy_clip_email").reasons).toContain("not-viewable:clipped");
     expect(fieldByName(report, "computed_overflow_email").qualifiedAs).toBe("ignored");
@@ -1280,6 +1289,32 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").reasons).not.toContain("not-viewable:offscreen");
   });
 
+  it("treats tiny credential fields as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="tiny_password" type="password" autocomplete="current-password" style="width:1px;height:1px" />
+        <input name="tiny_rect_password" type="password" autocomplete="current-password" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector('input[name="tiny_password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 8, height: 6 })
+    );
+    stubElementRect(
+      document.querySelector('input[name="tiny_rect_password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 72, width: 8, height: 6 })
+    );
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "tiny_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "tiny_password").reasons).toContain("not-viewable:tiny");
+    expect(fieldByName(report, "tiny_rect_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "tiny_rect_password").reasons).toContain("not-viewable:tiny");
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("keeps no-op clipped visible login fields viewable", () => {
     document.body.innerHTML = `
       <form>
@@ -1297,6 +1332,30 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "email").reasons).not.toContain("not-viewable:clipped");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+  });
+
+  it("keeps stylesheet visibility-visible descendants of hidden ancestors viewable", () => {
+    document.body.innerHTML = `
+      <style>
+        .host {
+          visibility: hidden;
+        }
+        .shown {
+          visibility: visible;
+        }
+      </style>
+      <form class="host">
+        <input class="shown" name="email" type="email" autocomplete="username" />
+        <input class="shown" name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "email").reasons).not.toContain("not-viewable:css");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "password").reasons).not.toContain("not-viewable:css");
   });
 
   it("lets current-password fields override mixed sign-in and signup copy", () => {

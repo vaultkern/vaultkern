@@ -10,6 +10,7 @@ export interface FieldFillabilityResult {
 
 const OFFSCREEN_OFFSET_PX = 1000;
 const CLIPPED_ANCESTOR_MAX_VISIBLE_SIZE_PX = 1;
+const MIN_CREDENTIAL_FIELD_SIZE_PX = 8;
 
 function addReason(reasons: string[], reason: string) {
   if (!reasons.includes(reason)) {
@@ -115,7 +116,8 @@ function isUnslottedShadowHostChild(element: HTMLElement) {
 function hasExplicitVisibleDescendantOverride(element: HTMLElement, ancestor: HTMLElement) {
   let current: HTMLElement | null = element;
   while (current && current !== ancestor) {
-    if (current.style.visibility === "visible") {
+    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    if (current.style.visibility === "visible" || style?.visibility === "visible") {
       return true;
     }
     current = parentElementOrShadowHost(current);
@@ -261,6 +263,19 @@ function cssInsetLength(
   return percent === null ? numericCssValue(value, units) : null;
 }
 
+function cssLengthOrPercentIsZero(value: string, units: { emPx?: number; remPx?: number }) {
+  const percent = cssInsetPercent(value);
+  if (percent !== null) {
+    return percent <= 0;
+  }
+  const length = numericCssValue(value, units);
+  return length !== null && length <= 0;
+}
+
+function cssCoordinateNumber(value: string, units: { emPx?: number; remPx?: number }) {
+  return cssInsetPercent(value) ?? numericCssValue(value, units);
+}
+
 function insetPairFullyClips(
   first: string,
   second: string,
@@ -288,16 +303,53 @@ function clipPathFullyClips(
   value: string,
   units: { emPx?: number; remPx?: number }
 ) {
-  const match = value.trim().toLowerCase().match(/^inset\((.*)\)$/);
-  if (!match) {
-    return false;
+  const normalized = value.trim().toLowerCase();
+  const insetMatch = normalized.match(/^inset\((.*)\)$/);
+  if (insetMatch) {
+    const inset = expandBoxValues(splitCssFunctionArgs(insetMatch[1]));
+    const rect = current.getBoundingClientRect();
+    return (
+      insetPairFullyClips(inset.left, inset.right, rect.width, units) ||
+      insetPairFullyClips(inset.top, inset.bottom, rect.height, units)
+    );
   }
-  const inset = expandBoxValues(splitCssFunctionArgs(match[1]));
-  const rect = current.getBoundingClientRect();
-  return (
-    insetPairFullyClips(inset.left, inset.right, rect.width, units) ||
-    insetPairFullyClips(inset.top, inset.bottom, rect.height, units)
-  );
+
+  const circleMatch = normalized.match(/^circle\((.*)\)$/);
+  if (circleMatch) {
+    const [radius] = splitCssFunctionArgs(circleMatch[1]);
+    return radius !== undefined && cssLengthOrPercentIsZero(radius, units);
+  }
+
+  const ellipseMatch = normalized.match(/^ellipse\((.*)\)$/);
+  if (ellipseMatch) {
+    const [radiusX, radiusY] = splitCssFunctionArgs(ellipseMatch[1]);
+    return (
+      radiusX !== undefined &&
+      radiusY !== undefined &&
+      (cssLengthOrPercentIsZero(radiusX, units) ||
+        cssLengthOrPercentIsZero(radiusY, units))
+    );
+  }
+
+  const polygonMatch = normalized.match(/^polygon\((.*)\)$/);
+  if (polygonMatch) {
+    const points = polygonMatch[1].split(",").flatMap((point) => {
+      const [x, y] = splitCssFunctionArgs(point);
+      const parsedX = x === undefined ? null : cssCoordinateNumber(x, units);
+      const parsedY = y === undefined ? null : cssCoordinateNumber(y, units);
+      return parsedX === null || parsedY === null ? [] : [{ x: parsedX, y: parsedY }];
+    });
+    if (points.length < 3) {
+      return false;
+    }
+    const area = points.reduce((sum, point, index) => {
+      const next = points[(index + 1) % points.length];
+      return sum + point.x * next.y - next.x * point.y;
+    }, 0);
+    return Math.abs(area) <= Number.EPSILON;
+  }
+
+  return false;
 }
 
 function legacyClipFullyClips(value: string, units: { emPx?: number; remPx?: number }) {
@@ -326,6 +378,59 @@ function hasFullyClippingStyle(
   return (
     (isMeaningfulCssValue(clipPath) && clipPathFullyClips(current, clipPath, units)) ||
     (isMeaningfulCssValue(clip) && legacyClipFullyClips(clip, units))
+  );
+}
+
+function credentialHintText(element: HTMLElement) {
+  const field = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+  return [
+    element.tagName.toLowerCase() === "input" ? (element as HTMLInputElement).type : undefined,
+    field.autocomplete,
+    field.name,
+    element.id,
+    element.className,
+    element.getAttribute("aria-label")
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join(",")
+    .toLowerCase();
+}
+
+function isCredentialLikeField(element: HTMLElement) {
+  const tagName = element.tagName.toLowerCase();
+  if (tagName !== "input" && tagName !== "textarea") {
+    return false;
+  }
+
+  const text = credentialHintText(element);
+  return (
+    text.includes("password") ||
+    text.includes("username") ||
+    text.includes("userid") ||
+    text.includes("login") ||
+    text.includes("email")
+  );
+}
+
+function isTinyCredentialField(
+  element: HTMLElement,
+  width: number | null,
+  height: number | null
+) {
+  if (!isCredentialLikeField(element)) {
+    return false;
+  }
+  const rect = element.getBoundingClientRect();
+  if (
+    hasMeaningfulClientRect(rect) &&
+    (rect.width <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+      rect.height <= MIN_CREDENTIAL_FIELD_SIZE_PX)
+  ) {
+    return true;
+  }
+  return (
+    (width !== null && width <= MIN_CREDENTIAL_FIELD_SIZE_PX) ||
+    (height !== null && height <= MIN_CREDENTIAL_FIELD_SIZE_PX)
   );
 }
 
@@ -416,6 +521,9 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       (current !== element && isClippedZeroSizeAncestor(current, width, height, style))
     ) {
       addReason(reasons, "not-viewable:zero-size");
+    }
+    if (current === element && isTinyCredentialField(element, width, height)) {
+      addReason(reasons, "not-viewable:tiny");
     }
     if (
       current !== element &&

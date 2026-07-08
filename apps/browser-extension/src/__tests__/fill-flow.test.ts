@@ -242,6 +242,34 @@ describe("fillLoginForm", () => {
     ).toBe("secret");
   });
 
+  it("does not fill fully clipped password decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="decoy-password" type="password" autocomplete="current-password" style="clip-path:circle(0)" />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("does not fill tiny password decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="decoy-password" type="password" autocomplete="current-password" style="width:1px;height:1px" />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("dispatches input change and blur events for updated fields", () => {
     document.body.innerHTML = `
       <form>
