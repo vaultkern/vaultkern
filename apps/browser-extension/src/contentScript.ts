@@ -16,6 +16,7 @@ export function fillLoginForm(payload: {
 
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
 const autofillSubmissionListenerRoots = new WeakSet<EventTarget>();
+const openShadowRootDiscoveryRoots = new WeakSet<Document | ShadowRoot>();
 const dynamicShadowPatchKey = Symbol.for("vaultkern.autofill.dynamicShadowPatch");
 const dynamicShadowInstallerKey = Symbol.for("vaultkern.autofill.dynamicShadowInstaller");
 
@@ -61,6 +62,73 @@ function documentForAutofillSubmissionRoot(root: Document | ShadowRoot) {
   return root.nodeType === Node.DOCUMENT_NODE ? (root as Document) : root.ownerDocument;
 }
 
+function allowSyntheticAutofillSubmitForTests() {
+  return (
+    (globalThis as typeof globalThis & {
+      __vaultkernAllowSyntheticAutofillSubmitForTests?: boolean;
+    }).__vaultkernAllowSyntheticAutofillSubmitForTests === true
+  );
+}
+
+function shouldCaptureAutofillSubmit(event: Event) {
+  return event.isTrusted || allowSyntheticAutofillSubmitForTests();
+}
+
+function installOpenShadowRoot(root: ShadowRoot) {
+  installAutofillSubmissionListener(root);
+}
+
+function installOpenShadowRootsFromElement(element: Element) {
+  if (element.shadowRoot) {
+    installOpenShadowRoot(element.shadowRoot);
+  }
+  element.querySelectorAll("*").forEach((descendant) => {
+    if (descendant.shadowRoot) {
+      installOpenShadowRoot(descendant.shadowRoot);
+    }
+  });
+}
+
+function installOpenShadowRootAutofillListeners(root: Document | ShadowRoot) {
+  root.querySelectorAll("*").forEach((element) => {
+    installOpenShadowRootsFromElement(element);
+  });
+}
+
+function discoverOpenShadowRootsFromEvent(event: Event) {
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+  for (const target of path) {
+    if (typeof ShadowRoot !== "undefined" && target instanceof ShadowRoot) {
+      installOpenShadowRoot(target);
+    } else if (target instanceof Element) {
+      installOpenShadowRootsFromElement(target);
+    }
+  }
+}
+
+function installOpenShadowRootDiscovery(root: Document | ShadowRoot) {
+  if (openShadowRootDiscoveryRoots.has(root)) {
+    return;
+  }
+  openShadowRootDiscoveryRoots.add(root);
+
+  for (const eventType of ["click", "focusin", "input", "keydown"]) {
+    root.addEventListener(eventType, discoverOpenShadowRootsFromEvent, { capture: true });
+  }
+
+  if (typeof MutationObserver === "function") {
+    new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        mutation.addedNodes.forEach((node) => {
+          if (node instanceof Element) {
+            installOpenShadowRootsFromElement(node);
+          }
+        });
+      }
+    }).observe(root, { childList: true, subtree: true });
+  }
+}
+
 function installAutofillSubmissionListener(root: Document | ShadowRoot) {
   if (autofillSubmissionListenerRoots.has(root)) {
     return;
@@ -69,6 +137,9 @@ function installAutofillSubmissionListener(root: Document | ShadowRoot) {
   root.addEventListener(
     "submit",
     (event) => {
+      if (!shouldCaptureAutofillSubmit(event)) {
+        return;
+      }
       const submittedForm =
         event.target instanceof HTMLFormElement ? event.target : undefined;
       const submission = collectAutofillSubmission(
@@ -94,11 +165,8 @@ function installAutofillSubmissionListener(root: Document | ShadowRoot) {
     { capture: true }
   );
 
-  root.querySelectorAll("*").forEach((element) => {
-    if (element.shadowRoot) {
-      installAutofillSubmissionListener(element.shadowRoot);
-    }
-  });
+  installOpenShadowRootAutofillListeners(root);
+  installOpenShadowRootDiscovery(root);
 }
 
 function installDynamicShadowRootAutofillListener() {

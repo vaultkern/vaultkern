@@ -94,10 +94,17 @@ export async function loadPendingAutofillSubmission() {
     return null;
   }
 
-  const tabId = await activeTabId();
+  let tab: { id?: number; url?: string } | undefined;
+  try {
+    tab = await getActiveTab();
+  } catch {
+    tab = undefined;
+  }
+  const tabId = typeof tab?.id === "number" ? tab.id : undefined;
   const response = await chromeApi.runtime.sendMessage({
     type: "vaultkern_autofill_pending_request",
-    ...(tabId === undefined ? {} : { tabId })
+    ...(tabId === undefined ? {} : { tabId }),
+    ...(typeof tab?.url === "string" ? { tabUrl: tab.url } : {})
   });
   return pendingAutofillSubmissionFromUnknown(
     (response as { pending?: unknown } | null)?.pending

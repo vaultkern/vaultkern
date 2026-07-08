@@ -58,6 +58,9 @@ beforeEach(() => {
   delete (globalThis as typeof globalThis & {
     __vaultkernWebAuthnContentScriptInstalled?: boolean;
   }).__vaultkernWebAuthnContentScriptInstalled;
+  delete (globalThis as typeof globalThis & {
+    __vaultkernAllowSyntheticAutofillSubmitForTests?: boolean;
+  }).__vaultkernAllowSyntheticAutofillSubmitForTests;
   runtimeClientMocks.getSessionState.mockReset();
   runtimeClientMocks.listRecentVaults.mockReset();
   runtimeClientMocks.preloadCurrentVault.mockReset();
@@ -3932,6 +3935,12 @@ describe("PopupShell fill flow", () => {
 });
 
 describe("content script fill message", () => {
+  function allowSyntheticAutofillSubmitEvents() {
+    (globalThis as typeof globalThis & {
+      __vaultkernAllowSyntheticAutofillSubmitForTests?: boolean;
+    }).__vaultkernAllowSyntheticAutofillSubmitForTests = true;
+  }
+
   it("fills the page when the content script receives entry detail", async () => {
     const addListener = vi.fn((listener: (message: unknown) => void) => {
       listener({
@@ -4209,6 +4218,36 @@ describe("content script fill message", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
+  it("does not capture script-dispatched registration submits", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const addListener = vi.fn();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        },
+        sendMessage
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <h2>Create account</h2>
+        <input name="email" type="email" autocomplete="username" value="alice@example.com" />
+        <input name="new_password" type="password" autocomplete="new-password" value="captured-secret" />
+      </form>
+    `;
+
+    await import("../contentScript");
+    document.querySelector("form")?.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true })
+    );
+    await Promise.resolve();
+
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
   it("captures submitted registration credentials when page handlers stop propagation", async () => {
     const sendMessage = vi.fn(async () => undefined);
     const addListener = vi.fn();
@@ -4233,6 +4272,7 @@ describe("content script fill message", () => {
       event.stopPropagation();
     });
 
+    allowSyntheticAutofillSubmitEvents();
     await import("../contentScript");
     document.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
@@ -4275,6 +4315,7 @@ describe("content script fill message", () => {
     document.body.append(host);
 
     vi.resetModules();
+    allowSyntheticAutofillSubmitEvents();
     await import("../contentScript");
     root.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
@@ -4295,6 +4336,7 @@ describe("content script fill message", () => {
   it("captures submitted registration credentials inside dynamically attached shadow roots", async () => {
     const sendMessage = vi.fn(async () => undefined);
     const addListener = vi.fn();
+    const pageAttachShadow = Element.prototype.attachShadow;
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -4305,12 +4347,13 @@ describe("content script fill message", () => {
       }
     };
 
+    allowSyntheticAutofillSubmitEvents();
     vi.resetModules();
     await import("../contentScript");
 
     const host = document.createElement("div");
     document.body.append(host);
-    const root = host.attachShadow({ mode: "open" });
+    const root = pageAttachShadow.call(host, { mode: "open" });
     root.innerHTML = `
       <form>
         <h2>Create account</h2>
@@ -4318,6 +4361,9 @@ describe("content script fill message", () => {
         <input name="new_password" type="password" autocomplete="new-password" value="captured-secret" />
       </form>
     `;
+    root.querySelector('input[name="email"]')?.dispatchEvent(
+      new Event("input", { bubbles: true, composed: true })
+    );
     root.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
     );
@@ -4359,6 +4405,7 @@ describe("content script fill message", () => {
       (document.querySelector('input[name="new_password"]') as HTMLInputElement).value = "";
     });
 
+    allowSyntheticAutofillSubmitEvents();
     await import("../contentScript");
     document.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
@@ -4397,6 +4444,7 @@ describe("content script fill message", () => {
       </form>
     `;
 
+    allowSyntheticAutofillSubmitEvents();
     await import("../contentScript");
     document.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
@@ -4435,6 +4483,7 @@ describe("content script fill message", () => {
       </form>
     `;
 
+    allowSyntheticAutofillSubmitEvents();
     await import("../contentScript");
     document.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
@@ -4472,6 +4521,7 @@ describe("content script fill message", () => {
       </form>
     `;
 
+    allowSyntheticAutofillSubmitEvents();
     await import("../contentScript");
     document.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })
@@ -4481,7 +4531,7 @@ describe("content script fill message", () => {
       expect(sendMessage).toHaveBeenCalledWith({
         type: "vaultkern_autofill_submission",
         url: expect.any(String),
-        username: "alice@example.com",
+        username: "",
         password: "reset-secret",
         submittedAt: expect.any(Number)
       });
@@ -4509,6 +4559,7 @@ describe("content script fill message", () => {
       </form>
     `;
 
+    allowSyntheticAutofillSubmitEvents();
     await import("../contentScript");
     document.querySelector("form")?.dispatchEvent(
       new Event("submit", { bubbles: true, cancelable: true })

@@ -215,6 +215,8 @@ function stableJson(value: unknown): string {
 
 describe("background bridge", () => {
   it("stores returns and clears a pending autofill submission", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1710000000500);
     const listeners: RuntimeMessageListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -262,6 +264,8 @@ describe("background bridge", () => {
   });
 
   it("scopes pending autofill submissions to their source tab", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1710000002000);
     const listeners: RuntimeMessageListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -451,6 +455,98 @@ describe("background bridge", () => {
         saveOnly: true
       }
     });
+  });
+
+  it("clears fresh tab-scoped pending autofill submissions after cross-host navigation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1710000005000);
+    const listeners: RuntimeMessageListener[] = [];
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener: vi.fn((listener: TabUpdatedListener) => {
+            tabUpdatedListeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        saveOnly: true,
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 7, url: "https://example.com/signup" } }
+    ).response();
+
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { url: "https://other.example/welcome" });
+    }
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 7,
+        tabUrl: "https://other.example/welcome"
+      }).response()
+    ).resolves.toEqual({ pending: null });
+  });
+
+  it("expires tab-scoped pending autofill submissions when requested after ttl", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1710000000000);
+    const listeners: RuntimeMessageListener[] = [];
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener: vi.fn((listener: RuntimeMessageListener) => {
+            listeners.push(listener);
+          })
+        }
+      }
+    };
+
+    await import("../background");
+
+    await sendRuntimeMessage(
+      listeners,
+      {
+        type: "vaultkern_autofill_submission",
+        url: "https://example.com/signup",
+        username: "alice",
+        password: "generated-secret",
+        saveOnly: true,
+        submittedAt: 1710000000000
+      },
+      { tab: { id: 7, url: "https://example.com/signup" } }
+    ).response();
+
+    vi.setSystemTime(1710000000000 + 2 * 60 * 1000 + 1);
+
+    await expect(
+      sendRuntimeMessage(listeners, {
+        type: "vaultkern_autofill_pending_request",
+        tabId: 7,
+        tabUrl: "https://example.com/welcome"
+      }).response()
+    ).resolves.toEqual({ pending: null });
   });
 
   it("does not restore navigation-cleared pending submissions from stale session storage", async () => {

@@ -25,6 +25,7 @@ let passkeyProviderEnabled = false;
 let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
 let pendingAutofillSubmission: PendingAutofillSubmission | null = null;
 let pendingAutofillSubmissionsByTab = new Map<number, PendingAutofillSubmission>();
+let pendingAutofillTabUrls = new Map<number, string>();
 const NATIVE_KEEP_ALIVE_INTERVAL_MS = 20_000;
 const PENDING_AUTOFILL_NAVIGATION_GRACE_MS = 2 * 60 * 1000;
 const WEB_AUTHN_CONTENT_SCRIPT_FILE = "webauthnContentScript.js";
@@ -64,31 +65,95 @@ function newerPendingAutofillSubmission(
   return right.submittedAt > left.submittedAt ? right : left;
 }
 
-function latestPendingAutofillSubmission() {
-  return Array.from(pendingAutofillSubmissionsByTab.values()).reduce(
+function hostFromUrl(url: string | undefined) {
+  if (typeof url !== "string" || url.trim() === "") {
+    return undefined;
+  }
+  try {
+    const host = new URL(url).host;
+    return host === "" ? null : host;
+  } catch {
+    return null;
+  }
+}
+
+function pendingAutofillSubmissionIsExpired(
+  submission: PendingAutofillSubmission,
+  now = Date.now()
+) {
+  return now - submission.submittedAt > PENDING_AUTOFILL_NAVIGATION_GRACE_MS;
+}
+
+function pendingAutofillSubmissionMatchesUrl(
+  submission: PendingAutofillSubmission,
+  tabUrl: string | undefined
+) {
+  const tabHost = hostFromUrl(tabUrl);
+  if (tabHost === undefined) {
+    return true;
+  }
+  const submissionHost = hostFromUrl(submission.url);
+  return submissionHost !== undefined && submissionHost !== null && submissionHost === tabHost;
+}
+
+function trackPendingAutofillTabUrl(tabId: number, tabUrl: string | undefined) {
+  if (typeof tabUrl === "string" && tabUrl.trim() !== "") {
+    pendingAutofillTabUrls.set(tabId, tabUrl);
+  }
+}
+
+function recomputeLatestPendingAutofillSubmission(now = Date.now()) {
+  if (
+    pendingAutofillSubmission &&
+    pendingAutofillSubmissionIsExpired(pendingAutofillSubmission, now)
+  ) {
+    pendingAutofillSubmission = null;
+  }
+
+  for (const [tabId, submission] of pendingAutofillSubmissionsByTab.entries()) {
+    if (pendingAutofillSubmissionIsExpired(submission, now)) {
+      pendingAutofillSubmissionsByTab.delete(tabId);
+      pendingAutofillTabUrls.delete(tabId);
+    }
+  }
+
+  pendingAutofillSubmission = Array.from(pendingAutofillSubmissionsByTab.values()).reduce(
     newerPendingAutofillSubmission,
-    null as PendingAutofillSubmission | null
+    pendingAutofillSubmission
   );
 }
 
 function clearPendingAutofillSubmissionForTab(tabId: number) {
   const clearedSubmission = pendingAutofillSubmissionsByTab.get(tabId) ?? null;
+  pendingAutofillSubmissionsByTab.delete(tabId);
+  pendingAutofillTabUrls.delete(tabId);
   if (!clearedSubmission) {
     return;
   }
-  pendingAutofillSubmissionsByTab.delete(tabId);
-  pendingAutofillSubmission = latestPendingAutofillSubmission();
+  if (pendingAutofillSubmission === clearedSubmission) {
+    pendingAutofillSubmission = null;
+  }
+  recomputeLatestPendingAutofillSubmission();
 }
 
-function clearExpiredPendingAutofillSubmissionForTab(tabId: number, now = Date.now()) {
+function clearInvalidPendingAutofillSubmissionForTab(
+  tabId: number,
+  tabUrl: string | undefined,
+  now = Date.now()
+) {
   const pendingSubmission = pendingAutofillSubmissionsByTab.get(tabId) ?? null;
   if (!pendingSubmission) {
     return;
   }
-  if (now - pendingSubmission.submittedAt <= PENDING_AUTOFILL_NAVIGATION_GRACE_MS) {
-    return;
+  if (
+    pendingAutofillSubmissionIsExpired(pendingSubmission, now) ||
+    !pendingAutofillSubmissionMatchesUrl(
+      pendingSubmission,
+      tabUrl ?? pendingAutofillTabUrls.get(tabId)
+    )
+  ) {
+    clearPendingAutofillSubmissionForTab(tabId);
   }
-  clearPendingAutofillSubmissionForTab(tabId);
 }
 
 function tabIdFromMessage(message: unknown) {
@@ -98,11 +163,21 @@ function tabIdFromMessage(message: unknown) {
     : undefined;
 }
 
+function tabUrlFromMessage(message: unknown) {
+  const tabUrl = (message as { tabUrl?: unknown }).tabUrl;
+  return typeof tabUrl === "string" && tabUrl.trim() !== "" ? tabUrl : undefined;
+}
+
 function tabIdFromSender(sender: unknown) {
   const tabId = (sender as { tab?: { id?: unknown } } | null)?.tab?.id;
   return typeof tabId === "number" && Number.isInteger(tabId) && tabId >= 0
     ? tabId
     : undefined;
+}
+
+function tabUrlFromSender(sender: unknown) {
+  const tabUrl = (sender as { tab?: { url?: unknown } } | null)?.tab?.url;
+  return typeof tabUrl === "string" && tabUrl.trim() !== "" ? tabUrl : undefined;
 }
 
 function handleAutofillPendingMessage(
@@ -120,6 +195,10 @@ function handleAutofillPendingMessage(
     const tabId = tabIdFromSender(sender) ?? tabIdFromMessage(message);
     if (pendingAutofillSubmission && tabId !== undefined) {
       pendingAutofillSubmissionsByTab.set(tabId, pendingAutofillSubmission);
+      trackPendingAutofillTabUrl(
+        tabId,
+        tabUrlFromSender(sender) ?? tabUrlFromMessage(message) ?? pendingAutofillSubmission.url
+      );
     }
     sendResponse({ ok: pendingAutofillSubmission !== null });
     return true;
@@ -127,6 +206,13 @@ function handleAutofillPendingMessage(
 
   if (messageType === "vaultkern_autofill_pending_request") {
     const tabId = tabIdFromMessage(message);
+    const tabUrl = tabUrlFromMessage(message);
+    if (tabId !== undefined) {
+      trackPendingAutofillTabUrl(tabId, tabUrl);
+      clearInvalidPendingAutofillSubmissionForTab(tabId, tabUrl);
+    } else {
+      recomputeLatestPendingAutofillSubmission();
+    }
     sendResponse({
       pending:
         tabId === undefined
@@ -141,9 +227,9 @@ function handleAutofillPendingMessage(
     if (tabId === undefined) {
       pendingAutofillSubmission = null;
       pendingAutofillSubmissionsByTab = new Map();
+      pendingAutofillTabUrls = new Map();
     } else {
-      pendingAutofillSubmissionsByTab.delete(tabId);
-      pendingAutofillSubmission = latestPendingAutofillSubmission();
+      clearPendingAutofillSubmissionForTab(tabId);
     }
     sendResponse({ ok: true });
     return true;
@@ -229,10 +315,15 @@ if (chromeApi?.runtime?.onMessage) {
 chromeApi?.tabs?.onUpdated?.addListener?.(
   (tabId: number, changeInfo: { url?: string }) => {
     if (typeof changeInfo.url === "string" && changeInfo.url.trim() !== "") {
-      clearExpiredPendingAutofillSubmissionForTab(tabId);
+      trackPendingAutofillTabUrl(tabId, changeInfo.url);
+      clearInvalidPendingAutofillSubmissionForTab(tabId, changeInfo.url);
     }
   }
 );
+
+chromeApi?.tabs?.onRemoved?.addListener?.((tabId: number) => {
+  clearPendingAutofillSubmissionForTab(tabId);
+});
 
 if (chromeApi?.webAuthenticationProxy) {
   chromeApi.webAuthenticationProxy.onRemoteSessionStateChange?.addListener?.(() => {

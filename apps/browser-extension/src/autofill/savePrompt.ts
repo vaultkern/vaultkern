@@ -92,9 +92,7 @@ function isCaptureUsernameField(field: AutofillTriageFieldResult) {
   const autocomplete = fieldAutocompleteTokens(field);
   const htmlType = field.htmlType ?? "text";
   if (!CAPTURE_USERNAME_INPUT_TYPES.has(htmlType)) {
-    return (
-      htmlType === "hidden" && (autocomplete.has("username") || autocomplete.has("email"))
-    );
+    return htmlType === "hidden" && hasSiteRuleType(field, "username");
   }
 
   if (autocomplete.has("username") || autocomplete.has("email")) {
