@@ -1225,10 +1225,14 @@ describe("autofill triage", () => {
           <clipPath id="offsetRectClip"><rect x="-9999" y="0" width="200" height="30" /></clipPath>
           <clipPath id="translatedRectClip"><rect width="200" height="30" transform="translate(-9999 0)" /></clipPath>
           <clipPath id="classTranslatedRectClip"><rect class="clip-off" width="200" height="30" /></clipPath>
+          <clipPath id="objectStripClip" clipPathUnits="objectBoundingBox"><rect width="0.01" height="1" /></clipPath>
+          <clipPath id="objectOffsetClip" clipPathUnits="objectBoundingBox"><rect x="2" width="1" height="1" /></clipPath>
         </svg>
         <input name="offset_url_clip_email" type="email" autocomplete="username" style="clip-path:url(#offsetRectClip)" />
         <input name="translated_url_clip_email" type="email" autocomplete="username" style="clip-path:url(#translatedRectClip)" />
         <input name="class_translated_url_clip_email" type="email" autocomplete="username" style="clip-path:url(#classTranslatedRectClip)" />
+        <input name="object_strip_clip_email" type="email" autocomplete="username" style="clip-path:url(#objectStripClip)" />
+        <input name="object_offset_clip_email" type="email" autocomplete="username" style="clip-path:url(#objectOffsetClip)" />
         <div class="computed-clip-box">
           <input name="computed_overflow_email" type="email" autocomplete="username" />
         </div>
@@ -1241,6 +1245,8 @@ describe("autofill triage", () => {
       "offset_url_clip_email",
       "translated_url_clip_email",
       "class_translated_url_clip_email",
+      "object_strip_clip_email",
+      "object_offset_clip_email",
       "circle_keyword_clip_email",
       "ellipse_keyword_clip_email",
       "geometry_box_inset_clip_email",
@@ -1338,6 +1344,14 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "class_translated_url_clip_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "class_translated_url_clip_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "object_strip_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "object_strip_clip_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "object_offset_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "object_offset_clip_email").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "computed_overflow_email").qualifiedAs).toBe("ignored");
@@ -1877,13 +1891,22 @@ describe("autofill triage", () => {
   it("keeps no-op clipped visible login fields viewable", () => {
     document.body.innerHTML = `
       <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <clipPath id="fullObjectClip" clipPathUnits="objectBoundingBox"><rect width="1" height="1" /></clipPath>
+        </svg>
         <input name="email" type="email" autocomplete="username" style="clip-path:inset(0)" />
+        <input name="object_email" type="email" autocomplete="username" style="clip-path:url(#fullObjectClip)" />
         <input name="password" type="password" autocomplete="current-password" />
       </form>
       <input name="visible_circle_probe" type="text" style="clip-path:circle(closest-side at 50% 50%)" />
       <input name="visible_ellipse_probe" type="text" style="clip-path:ellipse(closest-side closest-side at 50% 50%)" />
     `;
-    for (const name of ["email", "visible_circle_probe", "visible_ellipse_probe"]) {
+    for (const name of [
+      "email",
+      "object_email",
+      "visible_circle_probe",
+      "visible_ellipse_probe"
+    ]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
         elementRect({
@@ -1893,6 +1916,8 @@ describe("autofill triage", () => {
               ? 120
               : name === "visible_ellipse_probe"
                 ? 160
+                : name === "object_email"
+                  ? 80
                 : 40,
           width: 185,
           height: 21
@@ -1904,6 +1929,10 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "email").reasons).not.toContain("not-viewable:clipped");
+    expect(fieldByName(report, "object_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "object_email").reasons).not.toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "visible_circle_probe").reasons).not.toContain(
       "not-viewable:clipped"
     );

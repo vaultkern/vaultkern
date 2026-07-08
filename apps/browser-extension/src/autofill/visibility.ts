@@ -1894,13 +1894,34 @@ function insetBoxTokens(value: string) {
   return roundIndex < 0 ? tokens : tokens.slice(0, roundIndex);
 }
 
-function svgLengthToPx(
+type SvgClipCoordinateSpace = "userSpaceOnUse" | "objectBoundingBox";
+
+function svgNormalizedLength(
   value: string | null,
-  axisSize: number,
   units: { emPx?: number; remPx?: number }
 ) {
   if (value === null) {
     return 0;
+  }
+  const normalized = value.trim().toLowerCase();
+  const percent = cssInsetPercent(normalized);
+  if (percent !== null) {
+    return percent / 100;
+  }
+  return numericCssValue(normalized, units) ?? 0;
+}
+
+function svgLengthToPx(
+  value: string | null,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number },
+  coordinateSpace: SvgClipCoordinateSpace = "userSpaceOnUse"
+) {
+  if (value === null) {
+    return 0;
+  }
+  if (coordinateSpace === "objectBoundingBox") {
+    return svgNormalizedLength(value, units);
   }
   return cssLengthToPx(value, axisSize, units) ?? numericCssValue(value, units) ?? 0;
 }
@@ -1979,10 +2000,11 @@ function svgTransformMatrix(
 function svgUsePositionMatrix(
   shape: Element,
   rect: DOMRect,
-  units: { emPx?: number; remPx?: number }
+  units: { emPx?: number; remPx?: number },
+  coordinateSpace: SvgClipCoordinateSpace
 ) {
-  const x = svgLengthToPx(shape.getAttribute("x"), rect.width, units);
-  const y = svgLengthToPx(shape.getAttribute("y"), rect.height, units);
+  const x = svgLengthToPx(shape.getAttribute("x"), rect.width, units, coordinateSpace);
+  const y = svgLengthToPx(shape.getAttribute("y"), rect.height, units, coordinateSpace);
   return { a: 1, b: 0, c: 0, d: 1, e: x, f: y };
 }
 
@@ -2041,14 +2063,15 @@ function visibleBoundsOverlap(
 function svgPointListToPoints(
   value: string,
   rect: DOMRect,
-  units: { emPx?: number; remPx?: number }
+  units: { emPx?: number; remPx?: number },
+  coordinateSpace: SvgClipCoordinateSpace = "userSpaceOnUse"
 ) {
   const tokens = value.trim().split(/[\s,]+/).filter(Boolean);
   const points: Array<{ x: number; y: number }> = [];
   for (let index = 0; index + 1 < tokens.length; index += 2) {
     points.push({
-      x: svgLengthToPx(tokens[index], rect.width, units),
-      y: svgLengthToPx(tokens[index + 1], rect.height, units)
+      x: svgLengthToPx(tokens[index], rect.width, units, coordinateSpace),
+      y: svgLengthToPx(tokens[index + 1], rect.height, units, coordinateSpace)
     });
   }
   return points;
@@ -2312,7 +2335,8 @@ function svgClipShapeSuppressesField(
   shape: Element,
   units: { emPx?: number; remPx?: number },
   seen: Set<Element> = new Set(),
-  inheritedMatrix: SvgMatrix2d = identitySvgMatrix()
+  inheritedMatrix: SvgMatrix2d = identitySvgMatrix(),
+  coordinateSpace: SvgClipCoordinateSpace = "userSpaceOnUse"
 ): boolean {
   if (seen.has(shape)) {
     return true;
@@ -2337,16 +2361,30 @@ function svgClipShapeSuppressesField(
       shape.getAttributeNS("http://www.w3.org/1999/xlink", "href");
     const targetId = href?.startsWith("#") ? href.slice(1) : null;
     const target = targetId ? current.ownerDocument.getElementById(targetId) : null;
-    const useMatrix = svgMatrixMultiply(matrix, svgUsePositionMatrix(shape, rect, units));
+    const useMatrix = svgMatrixMultiply(
+      matrix,
+      svgUsePositionMatrix(shape, rect, units, coordinateSpace)
+    );
     return (
-      target === null || svgClipShapeSuppressesField(current, target, units, seen, useMatrix)
+      target === null ||
+      svgClipShapeSuppressesField(current, target, units, seen, useMatrix, coordinateSpace)
     );
   }
   if (tagName === "rect") {
-    const x = svgLengthToPx(shape.getAttribute("x"), rect.width, units);
-    const y = svgLengthToPx(shape.getAttribute("y"), rect.height, units);
-    const width = svgLengthToPx(shape.getAttribute("width"), rect.width, units);
-    const height = svgLengthToPx(shape.getAttribute("height"), rect.height, units);
+    const x = svgLengthToPx(shape.getAttribute("x"), rect.width, units, coordinateSpace);
+    const y = svgLengthToPx(shape.getAttribute("y"), rect.height, units, coordinateSpace);
+    const width = svgLengthToPx(
+      shape.getAttribute("width"),
+      rect.width,
+      units,
+      coordinateSpace
+    );
+    const height = svgLengthToPx(
+      shape.getAttribute("height"),
+      rect.height,
+      units,
+      coordinateSpace
+    );
     return pointRegionSuppressesField(
       transformSvgPoints(
         [
@@ -2362,9 +2400,14 @@ function svgClipShapeSuppressesField(
     );
   }
   if (tagName === "circle") {
-    const radius = svgLengthToPx(shape.getAttribute("r"), Math.min(rect.width, rect.height), units);
-    const cx = svgLengthToPx(shape.getAttribute("cx"), rect.width, units);
-    const cy = svgLengthToPx(shape.getAttribute("cy"), rect.height, units);
+    const radius = svgLengthToPx(
+      shape.getAttribute("r"),
+      Math.min(rect.width, rect.height),
+      units,
+      coordinateSpace
+    );
+    const cx = svgLengthToPx(shape.getAttribute("cx"), rect.width, units, coordinateSpace);
+    const cy = svgLengthToPx(shape.getAttribute("cy"), rect.height, units, coordinateSpace);
     return pointRegionSuppressesField(
       transformSvgPoints(
         [
@@ -2380,10 +2423,20 @@ function svgClipShapeSuppressesField(
     );
   }
   if (tagName === "ellipse") {
-    const radiusX = svgLengthToPx(shape.getAttribute("rx"), rect.width, units);
-    const radiusY = svgLengthToPx(shape.getAttribute("ry"), rect.height, units);
-    const cx = svgLengthToPx(shape.getAttribute("cx"), rect.width, units);
-    const cy = svgLengthToPx(shape.getAttribute("cy"), rect.height, units);
+    const radiusX = svgLengthToPx(
+      shape.getAttribute("rx"),
+      rect.width,
+      units,
+      coordinateSpace
+    );
+    const radiusY = svgLengthToPx(
+      shape.getAttribute("ry"),
+      rect.height,
+      units,
+      coordinateSpace
+    );
+    const cx = svgLengthToPx(shape.getAttribute("cx"), rect.width, units, coordinateSpace);
+    const cy = svgLengthToPx(shape.getAttribute("cy"), rect.height, units, coordinateSpace);
     return pointRegionSuppressesField(
       transformSvgPoints(
         [
@@ -2403,12 +2456,12 @@ function svgClipShapeSuppressesField(
       transformSvgPoints(
         [
           {
-            x: svgLengthToPx(shape.getAttribute("x1"), rect.width, units),
-            y: svgLengthToPx(shape.getAttribute("y1"), rect.height, units)
+            x: svgLengthToPx(shape.getAttribute("x1"), rect.width, units, coordinateSpace),
+            y: svgLengthToPx(shape.getAttribute("y1"), rect.height, units, coordinateSpace)
           },
           {
-            x: svgLengthToPx(shape.getAttribute("x2"), rect.width, units),
-            y: svgLengthToPx(shape.getAttribute("y2"), rect.height, units)
+            x: svgLengthToPx(shape.getAttribute("x2"), rect.width, units, coordinateSpace),
+            y: svgLengthToPx(shape.getAttribute("y2"), rect.height, units, coordinateSpace)
           }
         ],
         matrix
@@ -2421,7 +2474,12 @@ function svgClipShapeSuppressesField(
     return shape.textContent?.trim() === "";
   }
   if (tagName === "polygon" || tagName === "polyline") {
-    const points = svgPointListToPoints(shape.getAttribute("points") ?? "", rect, units);
+    const points = svgPointListToPoints(
+      shape.getAttribute("points") ?? "",
+      rect,
+      units,
+      coordinateSpace
+    );
     return pointRegionSuppressesField(
       transformSvgPoints(points, matrix),
       rect,
@@ -2439,7 +2497,7 @@ function svgClipShapeSuppressesField(
   if (tagName === "g" || tagName === "svg") {
     const children = Array.from(shape.children);
     return children.length === 0 || children.every((child) =>
-      svgClipShapeSuppressesField(current, child, units, seen, matrix)
+      svgClipShapeSuppressesField(current, child, units, seen, matrix, coordinateSpace)
     );
   }
   return false;
@@ -2459,11 +2517,27 @@ function svgClipPathFullyClips(
     return false;
   }
   const shapes = Array.from(clipPath.children);
-  const clipPathMatrix = svgElementTransformMatrix(clipPath, identitySvgMatrix(), units);
+  const rect = current.getBoundingClientRect();
+  const coordinateSpace =
+    clipPath.getAttribute("clipPathUnits")?.trim() === "objectBoundingBox"
+      ? "objectBoundingBox"
+      : "userSpaceOnUse";
+  const baseMatrix =
+    coordinateSpace === "objectBoundingBox"
+      ? { a: rect.width, b: 0, c: 0, d: rect.height, e: 0, f: 0 }
+      : identitySvgMatrix();
+  const clipPathMatrix = svgElementTransformMatrix(clipPath, baseMatrix, units);
   return (
     shapes.length === 0 ||
     shapes.every((shape) =>
-      svgClipShapeSuppressesField(current, shape, units, new Set(), clipPathMatrix)
+      svgClipShapeSuppressesField(
+        current,
+        shape,
+        units,
+        new Set(),
+        clipPathMatrix,
+        coordinateSpace
+      )
     )
   );
 }

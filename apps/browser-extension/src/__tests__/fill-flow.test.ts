@@ -797,6 +797,27 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("fills password fields under a full object-bounding-box url clip path", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <clipPath id="visibleObjectClip" clipPathUnits="objectBoundingBox">
+            <rect x="0" y="0" width="1" height="1" />
+          </clipPath>
+        </svg>
+        <input id="login-password" type="password" autocomplete="current-password" style="clip-path:url(#visibleObjectClip)" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector("#login-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("fills borderless password fields when the text paint remains visible", () => {
     document.body.innerHTML = `
       <form>
