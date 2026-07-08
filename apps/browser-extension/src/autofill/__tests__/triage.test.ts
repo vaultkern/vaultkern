@@ -2179,6 +2179,69 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields covered by sibling pseudo-elements as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="pseudo_sibling_covered_password" type="password" autocomplete="current-password" />
+        <div id="sibling-pseudo-cover" style="position:absolute;left:24px;top:40px;width:1px;height:1px;z-index:10"></div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const coveredPassword = document.querySelector(
+      'input[name="pseudo_sibling_covered_password"]'
+    ) as HTMLInputElement;
+    const pseudoCover = document.querySelector("#sibling-pseudo-cover") as HTMLDivElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    stubElementRect(coveredPassword, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(pseudoCover, elementRect({ left: 24, top: 40, width: 1, height: 1 }));
+    stubElementRect(realPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const pseudoStyle = stubPseudoElementStyle(pseudoCover, "::before", {
+      content: '""',
+      display: "block",
+      visibility: "visible",
+      opacity: "1",
+      position: "absolute",
+      left: "0px",
+      top: "0px",
+      width: "185px",
+      height: "21px",
+      background: "rgb(255, 255, 255)",
+      "background-color": "rgb(255, 255, 255)",
+      "background-image": "none",
+      "box-shadow": "none",
+      filter: "none",
+      "z-index": "1"
+    });
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return coveredPassword;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+    pseudoStyle.mockRestore();
+
+    expect(fieldByName(report, "pseudo_sibling_covered_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "pseudo_sibling_covered_password").reasons).toContain(
+      "not-viewable:occluded"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("keeps credential fields viewable under lower z-index painted siblings", () => {
     document.body.innerHTML = `
       <form>

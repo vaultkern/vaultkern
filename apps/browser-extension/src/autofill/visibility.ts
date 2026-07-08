@@ -4318,9 +4318,19 @@ function paintedOverlayCoversPoint(element: HTMLElement, point: { x: number; y: 
       if (
         candidate === element ||
         element.contains(candidate) ||
-        !elementMayPaintAboveElement(element, candidate) ||
-        !elementVisualCoversPoint(candidate, style, candidateRect, point)
+        !elementMayPaintAboveElement(element, candidate)
       ) {
+        continue;
+      }
+
+      if (
+        ancestorPseudoElementCoversPoint(element, candidate, candidateRect, point) &&
+        elementCumulativePaintIsVisible(candidate)
+      ) {
+        return true;
+      }
+
+      if (!elementVisualCoversPoint(candidate, style, candidateRect, point)) {
         continue;
       }
 
