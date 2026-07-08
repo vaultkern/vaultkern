@@ -3784,6 +3784,16 @@ function cssColorLooksBlack(value: string | null) {
   return channels.length === 3 && channels.every((channel) => channel === 0);
 }
 
+function cssRgbaLooksBlack(color: CssColorRgba | null) {
+  return (
+    color !== null &&
+    color.a > MIN_VISIBLE_OPACITY &&
+    color.r <= 1 &&
+    color.g <= 1 &&
+    color.b <= 1
+  );
+}
+
 function cssColorStopColor(value: string) {
   const normalized = value.trim().toLowerCase();
   if (!normalized) {
@@ -4188,13 +4198,31 @@ function dataSvgImageSuppressesAlphaMask(
   return parsed.root.children.length === 0 || svgAlphaMaskShapeSuppressesPaint(parsed.root);
 }
 
-function dataSvgMaskImageFullySuppressesPaint(current: HTMLElement, value: string | undefined) {
+function dataSvgMaskImageLayerSuppressesPaint(
+  current: HTMLElement,
+  layer: string,
+  modeValue: string | undefined
+) {
+  return cssUrlValues(layer).some((url) => {
+    if (dataSvgImageSuppressesAlphaMask(current, url)) {
+      return true;
+    }
+    return (
+      maskModePaintsByLuminance(modeValue) &&
+      cssRgbaLooksBlack(dataSvgBackgroundImageSolidColor(current, layer))
+    );
+  });
+}
+
+function dataSvgMaskImageFullySuppressesPaint(
+  current: HTMLElement,
+  value: string | undefined,
+  modeValue?: string
+) {
   const layers = splitCssCommaList(value?.trim() ?? "").filter(isMeaningfulCssValue);
   return (
     layers.length > 0 &&
-    layers.every((layer) =>
-      cssUrlValues(layer).some((url) => dataSvgImageSuppressesAlphaMask(current, url))
-    )
+    layers.every((layer) => dataSvgMaskImageLayerSuppressesPaint(current, layer, modeValue))
   );
 }
 
@@ -6222,7 +6250,9 @@ function maskStyleSuppressesPaint(
     maskImages.some((maskImage) =>
       maskImageFullySuppressesPaint(maskImage, `${maskMode}, ${webkitMaskMode}`)
     ) ||
-    maskImages.some((maskImage) => dataSvgMaskImageFullySuppressesPaint(current, maskImage))
+    maskSources.some((source) =>
+      dataSvgMaskImageFullySuppressesPaint(current, source.image, source.mode)
+    )
   ) {
     return true;
   }
