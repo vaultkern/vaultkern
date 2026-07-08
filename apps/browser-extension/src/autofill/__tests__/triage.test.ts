@@ -2932,6 +2932,15 @@ describe("autofill triage", () => {
         <input name="relative_y_below_password" type="password" autocomplete="current-password" style="position:relative;top:9999px" />
         <input name="relative_bottom_below_password" type="password" autocomplete="current-password" style="position:relative;bottom:-9999px" />
         <input name="margin_y_below_password" type="password" autocomplete="current-password" style="display:block;margin-top:9999px" />
+        <div style="padding-left:9999px">
+          <input name="padding_left_password" type="password" autocomplete="current-password" />
+        </div>
+        <div style="padding-top:9999px">
+          <input name="padding_top_password" type="password" autocomplete="current-password" />
+        </div>
+        <div style="border-left:9999px solid transparent">
+          <input name="border_left_password" type="password" autocomplete="current-password" />
+        </div>
         <input name="relative_password" type="password" autocomplete="current-password" style="position:relative;left:9999px" />
         <input name="margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:9999px" />
         <input name="real_password" type="password" autocomplete="current-password" />
@@ -2958,6 +2967,16 @@ describe("autofill triage", () => {
         elementRect({ left: 24, top: 10024, width: 185, height: 21 })
       );
     }
+    for (const name of ["padding_left_password", "border_left_password"]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 10024, top: 40, width: 185, height: 21 })
+      );
+    }
+    stubElementRect(
+      document.querySelector('input[name="padding_top_password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 10024, width: 185, height: 21 })
+    );
     for (const name of ["relative_password", "margin_password"]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
@@ -2975,6 +2994,9 @@ describe("autofill triage", () => {
       "relative_y_below_password",
       "relative_bottom_below_password",
       "margin_y_below_password",
+      "padding_left_password",
+      "padding_top_password",
+      "border_left_password",
       "relative_password",
       "margin_password"
     ]) {

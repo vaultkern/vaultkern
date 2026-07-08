@@ -6795,6 +6795,18 @@ function largeVerticalOffsetMovesAfterViewport(
   );
 }
 
+function sumPositiveOffsets(...values: Array<number | null>) {
+  let total = 0;
+  let found = false;
+  for (const value of values) {
+    if (value !== null && value > 0) {
+      total += value;
+      found = true;
+    }
+  }
+  return found ? total : null;
+}
+
 function rectsIntersect(left: DOMRect, right: DOMRect) {
   return (
     left.left < right.right &&
@@ -9304,6 +9316,34 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       viewport.width,
       cssUnits
     );
+    const paddingLeft = computedCssLengthValue(
+      style?.paddingLeft,
+      current.style.paddingLeft,
+      viewport.width,
+      cssUnits
+    );
+    const paddingTop = computedCssLengthValue(
+      style?.paddingTop,
+      current.style.paddingTop,
+      viewport.width,
+      cssUnits
+    );
+    const borderLeft = computedCssLengthValue(
+      style?.borderLeftWidth,
+      current.style.borderLeftWidth,
+      viewport.width,
+      cssUnits
+    );
+    const borderTop = computedCssLengthValue(
+      style?.borderTopWidth,
+      current.style.borderTopWidth,
+      viewport.height,
+      cssUnits
+    );
+    const ancestorBoxOffsetX =
+      current === element ? null : sumPositiveOffsets(paddingLeft, borderLeft);
+    const ancestorBoxOffsetY =
+      current === element ? null : sumPositiveOffsets(paddingTop, borderTop);
     const width = computedCssValue(style?.width, current.style.width, cssUnits);
     const height = computedCssValue(style?.height, current.style.height, cssUnits);
     const transform = combinedTranslateOffset(style, current, cssUnits);
@@ -9337,6 +9377,9 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       horizontalOffsetMatchesViewportExit(viewportExit, marginLeft) ||
       verticalOffsetMovesBeforeViewport(viewportExit, marginTop) ||
       largeVerticalOffsetMovesAfterViewport(viewportExit, marginTop);
+    const hasDirectionalAncestorBoxOffset =
+      horizontalOffsetMatchesViewportExit(viewportExit, ancestorBoxOffsetX) ||
+      largeVerticalOffsetMovesAfterViewport(viewportExit, ancestorBoxOffsetY);
     const hasMotionPathViewportExit =
       viewportExit !== null &&
       hasMotionPathOffset(style, current) &&
@@ -9404,6 +9447,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       (hasDirectionalTransformOffset ||
         hasDirectionalPositionOffset ||
         hasDirectionalMarginOffset ||
+        hasDirectionalAncestorBoxOffset ||
         hasMotionPathViewportExit)
     ) {
       addReason(reasons, "not-viewable:offscreen");

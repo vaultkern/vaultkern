@@ -737,6 +737,44 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys moved out of view by large ancestor box offsets", () => {
+    document.body.innerHTML = `
+      <form>
+        <div id="padding-left-host" style="padding-left:9999px">
+          <input id="padding-left-password" type="password" autocomplete="current-password" />
+        </div>
+        <div id="padding-top-host" style="padding-top:9999px">
+          <input id="padding-top-password" type="password" autocomplete="current-password" />
+        </div>
+        <div id="border-left-host" style="border-left:9999px solid transparent">
+          <input id="border-left-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const id of ["padding-left-password", "border-left-password"]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 10024, top: 40, width: 185, height: 21 })
+      );
+    }
+    stubElementRect(
+      document.querySelector("#padding-top-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 10024, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#login-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#padding-left-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#padding-top-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#border-left-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys hidden by SVG blend filters", () => {
     document.body.innerHTML = `
       <form>
