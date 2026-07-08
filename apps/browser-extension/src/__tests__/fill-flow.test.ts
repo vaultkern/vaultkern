@@ -586,6 +586,7 @@ describe("fillLoginForm", () => {
           <clipPath id="zeroPolygonClip"><polygon points="0,0 0,0 0,0" /></clipPath>
           <clipPath id="zeroPathClip"><path d="M0 0Z" /></clipPath>
           <clipPath id="zeroUseClip"><use href="#zeroRect" /></clipPath>
+          <clipPath id="emptyGroupClip"><g></g></clipPath>
         </svg>
         <input id="inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
         <input id="rounded-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49% round 2px)" />
@@ -609,6 +610,7 @@ describe("fillLoginForm", () => {
         <input id="url-polygon-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPolygonClip)" />
         <input id="url-path-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPathClip)" />
         <input id="url-use-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroUseClip)" />
+        <input id="url-empty-group-password" type="password" autocomplete="current-password" style="clip-path:url(#emptyGroupClip)" />
         <div style="width:2px;height:2px;overflow:hidden">
           <input id="ancestor-clipped-password" type="password" autocomplete="current-password" />
         </div>
@@ -663,6 +665,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#url-polygon-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-path-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-use-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-empty-group-password") as HTMLInputElement).value).toBe("");
     expect(
       (document.querySelector("#ancestor-clipped-password") as HTMLInputElement).value
     ).toBe("");

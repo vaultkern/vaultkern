@@ -1967,8 +1967,9 @@ function svgClipShapeSuppressesField(
     const points = svgPathDataToPoints(shape.getAttribute("d") ?? "");
     return pathRegionSuppressesField(transformSvgPoints(points, matrix), rect);
   }
-  if (shape.children.length > 0 && (tagName === "g" || tagName === "svg")) {
-    return Array.from(shape.children).every((child) =>
+  if (tagName === "g" || tagName === "svg") {
+    const children = Array.from(shape.children);
+    return children.length === 0 || children.every((child) =>
       svgClipShapeSuppressesField(current, child, units, seen, matrix)
     );
   }
