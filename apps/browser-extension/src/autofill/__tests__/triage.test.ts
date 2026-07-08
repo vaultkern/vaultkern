@@ -134,7 +134,6 @@ describe("autofill triage", () => {
         </div>
       </form>
     `;
-
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "readonly_user")).toMatchObject({
@@ -173,7 +172,6 @@ describe("autofill triage", () => {
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
-
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "query").qualifiedAs).toBe("ignored");
@@ -1212,6 +1210,12 @@ describe("autofill triage", () => {
         <input name="ellipse_clip_email" type="email" autocomplete="username" style="clip-path:ellipse(0 0)" />
         <input name="polygon_clip_email" type="email" autocomplete="username" style="clip-path:polygon(0 0, 0 0, 0 0)" />
         <input name="legacy_clip_email" type="email" autocomplete="username" style="position:absolute;clip:rect(0 0 0 0)" />
+        <svg width="0" height="0" aria-hidden="true">
+          <clipPath id="offsetRectClip"><rect x="-9999" y="0" width="200" height="30" /></clipPath>
+          <clipPath id="translatedRectClip"><rect width="200" height="30" transform="translate(-9999 0)" /></clipPath>
+        </svg>
+        <input name="offset_url_clip_email" type="email" autocomplete="username" style="clip-path:url(#offsetRectClip)" />
+        <input name="translated_url_clip_email" type="email" autocomplete="username" style="clip-path:url(#translatedRectClip)" />
         <div class="computed-clip-box">
           <input name="computed_overflow_email" type="email" autocomplete="username" />
         </div>
@@ -1220,6 +1224,12 @@ describe("autofill triage", () => {
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
+    for (const name of ["offset_url_clip_email", "translated_url_clip_email"]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40, width: 185, height: 21 })
+      );
+    }
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -1255,6 +1265,14 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "polygon_clip_email").reasons).toContain("not-viewable:clipped");
     expect(fieldByName(report, "legacy_clip_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "legacy_clip_email").reasons).toContain("not-viewable:clipped");
+    expect(fieldByName(report, "offset_url_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "offset_url_clip_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "translated_url_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "translated_url_clip_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "computed_overflow_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "computed_overflow_email").reasons).toContain(
       "not-viewable:clipped"

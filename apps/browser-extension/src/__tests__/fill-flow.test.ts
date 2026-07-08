@@ -515,6 +515,10 @@ describe("fillLoginForm", () => {
         <svg width="0" height="0" aria-hidden="true">
           <clipPath id="zeroClip"><rect width="0" height="0" /></clipPath>
           <clipPath id="stripClip"><rect width="4" height="100" /></clipPath>
+          <clipPath id="offsetRectClip"><rect x="-9999" y="0" width="200" height="30" /></clipPath>
+          <clipPath id="offsetCircleClip"><circle cx="-9999" cy="10" r="20" /></clipPath>
+          <clipPath id="translatedRectClip"><rect width="200" height="30" transform="translate(-9999 0)" /></clipPath>
+          <clipPath id="scaledRectClip"><rect width="200" height="30" transform="scale(0)" /></clipPath>
           <rect id="zeroRect" width="0" height="0" />
           <clipPath id="zeroPolygonClip"><polygon points="0,0 0,0 0,0" /></clipPath>
           <clipPath id="zeroPathClip"><path d="M0 0Z" /></clipPath>
@@ -533,6 +537,10 @@ describe("fillLoginForm", () => {
         <input id="legacy-strip-password" type="password" autocomplete="current-password" style="position:absolute;clip:rect(0 4px 100px 0)" />
         <input id="url-zero-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroClip)" />
         <input id="url-strip-password" type="password" autocomplete="current-password" style="clip-path:url(#stripClip)" />
+        <input id="url-offset-rect-password" type="password" autocomplete="current-password" style="clip-path:url(#offsetRectClip)" />
+        <input id="url-offset-circle-password" type="password" autocomplete="current-password" style="clip-path:url(#offsetCircleClip)" />
+        <input id="url-translated-rect-password" type="password" autocomplete="current-password" style="clip-path:url(#translatedRectClip)" />
+        <input id="url-scaled-rect-password" type="password" autocomplete="current-password" style="clip-path:url(#scaledRectClip)" />
         <input id="url-polygon-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPolygonClip)" />
         <input id="url-path-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPathClip)" />
         <input id="url-use-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroUseClip)" />
@@ -552,6 +560,17 @@ describe("fillLoginForm", () => {
       document.querySelector("#polygon-percent-password") as HTMLInputElement,
       elementRect({ left: 24, top: 40, width: 185, height: 21 })
     );
+    for (const id of [
+      "url-offset-rect-password",
+      "url-offset-circle-password",
+      "url-translated-rect-password",
+      "url-scaled-rect-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40, width: 185, height: 21 })
+      );
+    }
 
     fillLoginForm({ password: "secret" });
 
@@ -568,6 +587,10 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#legacy-strip-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-strip-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-offset-rect-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-offset-circle-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-translated-rect-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-scaled-rect-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-polygon-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-path-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-use-password") as HTMLInputElement).value).toBe("");
@@ -580,6 +603,25 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#strict-contained-password") as HTMLInputElement).value).toBe(
       ""
     );
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("fills password fields when a url clip path leaves the control visible", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <clipPath id="visibleClip"><rect x="0" y="0" width="200" height="30" /></clipPath>
+        </svg>
+        <input id="login-password" type="password" autocomplete="current-password" style="clip-path:url(#visibleClip)" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector("#login-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+
+    fillLoginForm({ password: "secret" });
+
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
