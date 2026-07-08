@@ -868,75 +868,161 @@ function cssFilterHueRotateColor(
   };
 }
 
+interface CssFilterFunctionCall {
+  name: string;
+  body: string;
+  raw: string;
+}
+
+function cssFilterFunctionCalls(value: string | undefined): CssFilterFunctionCall[] | null {
+  const normalized = value?.trim();
+  if (!normalized || normalized.toLowerCase() === "none") {
+    return [];
+  }
+
+  const calls: CssFilterFunctionCall[] = [];
+  let index = 0;
+  while (index < normalized.length) {
+    while (index < normalized.length && /\s/.test(normalized[index])) {
+      index += 1;
+    }
+    if (index >= normalized.length) {
+      break;
+    }
+
+    const nameStart = index;
+    while (index < normalized.length && /[a-zA-Z-]/.test(normalized[index])) {
+      index += 1;
+    }
+    if (nameStart === index) {
+      return null;
+    }
+    const name = normalized.slice(nameStart, index).toLowerCase();
+
+    while (index < normalized.length && /\s/.test(normalized[index])) {
+      index += 1;
+    }
+    if (normalized[index] !== "(") {
+      return null;
+    }
+
+    let depth = 1;
+    let quote: string | null = null;
+    const bodyStart = index + 1;
+    index = bodyStart;
+    for (; index < normalized.length; index += 1) {
+      const char = normalized[index];
+      if (quote !== null) {
+        if (char === quote && normalized[index - 1] !== "\\") {
+          quote = null;
+        }
+        continue;
+      }
+      if (char === "'" || char === '"') {
+        quote = char;
+        continue;
+      }
+      if (char === "(") {
+        depth += 1;
+        continue;
+      }
+      if (char !== ")") {
+        continue;
+      }
+      depth -= 1;
+      if (depth === 0) {
+        calls.push({
+          name,
+          body: normalized.slice(bodyStart, index),
+          raw: normalized.slice(nameStart, index + 1)
+        });
+        index += 1;
+        break;
+      }
+    }
+
+    if (depth !== 0) {
+      return null;
+    }
+  }
+
+  return calls;
+}
+
+function cssFilterFunctionPaintColor(
+  name: string,
+  body: string,
+  color: CssColorRgba
+): CssColorRgba | null {
+  const amount = cssFilterAmount(body);
+  if (name === "opacity") {
+    return { ...color, a: clampCssAlphaChannel(color.a * amount) };
+  }
+  if (name === "brightness") {
+    return {
+      ...color,
+      r: clampCssColorChannel(color.r * amount),
+      g: clampCssColorChannel(color.g * amount),
+      b: clampCssColorChannel(color.b * amount)
+    };
+  }
+  if (name === "contrast") {
+    return {
+      ...color,
+      r: clampCssColorChannel((color.r - 128) * amount + 128),
+      g: clampCssColorChannel((color.g - 128) * amount + 128),
+      b: clampCssColorChannel((color.b - 128) * amount + 128)
+    };
+  }
+  if (name === "invert") {
+    return {
+      ...color,
+      r: clampCssColorChannel(color.r * (1 - amount) + (255 - color.r) * amount),
+      g: clampCssColorChannel(color.g * (1 - amount) + (255 - color.g) * amount),
+      b: clampCssColorChannel(color.b * (1 - amount) + (255 - color.b) * amount)
+    };
+  }
+  if (name === "grayscale") {
+    return cssFilterGrayscaleColor(color, amount);
+  }
+  if (name === "saturate") {
+    return cssFilterSaturateColor(color, amount);
+  }
+  if (name === "sepia") {
+    return cssFilterSepiaColor(color, amount);
+  }
+  if (name === "hue-rotate") {
+    return cssFilterHueRotateColor(color, body);
+  }
+  if (name === "blur") {
+    return color;
+  }
+  return null;
+}
+
 function cssFilterPaintColor(value: string | undefined, color: CssColorRgba | null) {
   if (color === null) {
     return null;
   }
 
-  const normalized = value?.trim().toLowerCase();
-  if (!normalized || normalized === "none") {
+  const calls = cssFilterFunctionCalls(value);
+  if (calls === null) {
+    return null;
+  }
+  if (calls.length === 0) {
     return color;
   }
 
   let result = { ...color };
-  for (const match of normalized.matchAll(/([a-z-]+)\(([^)]*)\)/g)) {
-    const name = match[1];
-    const amount = cssFilterAmount(match[2]);
-    if (name === "opacity") {
-      result = { ...result, a: clampCssAlphaChannel(result.a * amount) };
-      continue;
+  for (const call of calls) {
+    if (call.name === "url") {
+      return null;
     }
-    if (name === "brightness") {
-      result = {
-        ...result,
-        r: clampCssColorChannel(result.r * amount),
-        g: clampCssColorChannel(result.g * amount),
-        b: clampCssColorChannel(result.b * amount)
-      };
-      continue;
+    const filtered = cssFilterFunctionPaintColor(call.name, call.body, result);
+    if (filtered === null) {
+      return null;
     }
-    if (name === "contrast") {
-      result = {
-        ...result,
-        r: clampCssColorChannel((result.r - 128) * amount + 128),
-        g: clampCssColorChannel((result.g - 128) * amount + 128),
-        b: clampCssColorChannel((result.b - 128) * amount + 128)
-      };
-      continue;
-    }
-    if (name === "invert") {
-      result = {
-        ...result,
-        r: clampCssColorChannel(result.r * (1 - amount) + (255 - result.r) * amount),
-        g: clampCssColorChannel(result.g * (1 - amount) + (255 - result.g) * amount),
-        b: clampCssColorChannel(result.b * (1 - amount) + (255 - result.b) * amount)
-      };
-      continue;
-    }
-    if (name === "grayscale") {
-      result = cssFilterGrayscaleColor(result, amount);
-      continue;
-    }
-    if (name === "saturate") {
-      result = cssFilterSaturateColor(result, amount);
-      continue;
-    }
-    if (name === "sepia") {
-      result = cssFilterSepiaColor(result, amount);
-      continue;
-    }
-    if (name === "hue-rotate") {
-      const hueRotated = cssFilterHueRotateColor(result, match[2]);
-      if (hueRotated === null) {
-        return null;
-      }
-      result = hueRotated;
-      continue;
-    }
-    if (name === "blur") {
-      continue;
-    }
-    return null;
+    result = filtered;
   }
 
   return result;
@@ -2060,6 +2146,37 @@ function dataSvgFilterPaintColor(
   return found ? filteredColor : null;
 }
 
+function svgUrlFilterPaintColor(
+  filterTarget: HTMLElement,
+  value: string,
+  color: CssColorRgba
+) {
+  let filteredColor: CssColorRgba | null = color;
+  let found = false;
+
+  for (const id of localCssUrlReferenceIds(value)) {
+    const filter = filterTarget.ownerDocument.getElementById(id);
+    if (!filter) {
+      continue;
+    }
+    filteredColor = svgFilterGraphPaintCollapseColorValue(filter, filteredColor);
+    if (filteredColor === null) {
+      return null;
+    }
+    found = true;
+  }
+
+  for (const filter of dataSvgFilterElements(filterTarget, value)) {
+    filteredColor = svgFilterGraphPaintCollapseColorValue(filter, filteredColor);
+    if (filteredColor === null) {
+      return null;
+    }
+    found = true;
+  }
+
+  return found ? filteredColor : null;
+}
+
 function paintFilterOpacityValue(filterTarget: HTMLElement, value: string | undefined) {
   const cssOpacity = filterOpacityValue(value);
   const svgOpacity = svgFilterOpacityValue(filterTarget, value);
@@ -2082,10 +2199,36 @@ function paintFilterColor(
   value: string | undefined,
   color: CssColorRgba | null
 ) {
+  if (color === null) {
+    return null;
+  }
+
+  const calls = cssFilterFunctionCalls(value);
+  if (calls !== null) {
+    let result = { ...color };
+    for (const call of calls) {
+      if (call.name === "url") {
+        const filtered = svgUrlFilterPaintColor(filterTarget, call.raw, result);
+        if (filtered === null) {
+          return null;
+        }
+        result = filtered;
+        continue;
+      }
+      const filtered = cssFilterFunctionPaintColor(call.name, call.body, result);
+      if (filtered === null) {
+        return null;
+      }
+      result = filtered;
+    }
+    return result;
+  }
+
   const cssColor = cssFilterPaintColor(value, color);
   if (cssColor !== null) {
     return cssColor;
   }
+
   return (
     svgFilterPaintColor(filterTarget, value, color) ??
     dataSvgFilterPaintColor(filterTarget, value, color)
