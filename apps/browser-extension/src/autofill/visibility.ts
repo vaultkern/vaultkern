@@ -1167,21 +1167,37 @@ function maskPositionSuppressesPaint(
   });
 }
 
-function svgElementOpacityValue(shape: Element, attribute: string) {
+function svgElementOpacityValue(
+  shape: Element,
+  attribute: string,
+  style: CSSStyleDeclaration | undefined
+) {
   const styled = shape as SVGElement;
   return (
     cssOpacityValue(shape.getAttribute(attribute) ?? undefined) ??
     cssOpacityValue(styled.style?.getPropertyValue(attribute)) ??
+    cssOpacityValue(style?.getPropertyValue(attribute)) ??
     1
   );
 }
 
-function svgPaintSuppressesMask(shape: Element) {
-  const opacity = svgElementOpacityValue(shape, "opacity");
-  const fillOpacity = svgElementOpacityValue(shape, "fill-opacity");
-  const fill = shape.getAttribute("fill") ?? (shape as SVGElement).style?.fill ?? null;
+function svgMaskOpacitySuppressesPaint(
+  shape: Element,
+  style: CSSStyleDeclaration | undefined
+) {
+  const opacity = svgElementOpacityValue(shape, "opacity", style);
+  const fillOpacity = svgElementOpacityValue(shape, "fill-opacity", style);
+  return isEffectivelyTransparent(opacity * fillOpacity);
+}
+
+function svgPaintSuppressesMask(shape: Element, style: CSSStyleDeclaration | undefined) {
+  const fill =
+    shape.getAttribute("fill") ??
+    (shape as SVGElement).style?.fill ??
+    style?.getPropertyValue("fill") ??
+    null;
   return (
-    isEffectivelyTransparent(opacity * fillOpacity) ||
+    svgMaskOpacitySuppressesPaint(shape, style) ||
     cssColorLooksTransparent(fill ?? "") ||
     cssColorLooksBlack(fill)
   );
@@ -1199,6 +1215,10 @@ function svgMaskShapeSuppressesPaint(
   seen.add(shape);
 
   const tagName = shape.tagName.toLowerCase();
+  const shapeStyle = shape.ownerDocument.defaultView?.getComputedStyle(shape);
+  if (svgMaskOpacitySuppressesPaint(shape, shapeStyle)) {
+    return true;
+  }
   if (tagName === "use") {
     const href =
       shape.getAttribute("href") ??
@@ -1213,7 +1233,10 @@ function svgMaskShapeSuppressesPaint(
       svgMaskShapeSuppressesPaint(current, child, units, seen)
     );
   }
-  return svgClipShapeSuppressesField(current, shape, units) || svgPaintSuppressesMask(shape);
+  return (
+    svgClipShapeSuppressesField(current, shape, units) ||
+    svgPaintSuppressesMask(shape, shapeStyle)
+  );
 }
 
 function svgMaskSuppressesPaint(
@@ -1225,6 +1248,10 @@ function svgMaskSuppressesPaint(
     const mask = current.ownerDocument.getElementById(id);
     if (!mask || mask.tagName.toLowerCase() !== "mask") {
       return false;
+    }
+    const maskStyle = mask.ownerDocument.defaultView?.getComputedStyle(mask);
+    if (svgMaskOpacitySuppressesPaint(mask, maskStyle)) {
+      return true;
     }
     const shapes = Array.from(mask.children);
     return (

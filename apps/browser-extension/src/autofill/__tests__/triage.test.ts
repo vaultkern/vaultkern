@@ -1562,6 +1562,7 @@ describe("autofill triage", () => {
           <filter id="nearOffsetSource"><feOffset dx="-500" dy="0" /></filter>
           <filter id="objectOffsetSource" primitiveUnits="objectBoundingBox"><feOffset dx="-3" dy="0" /></filter>
           <mask id="blackMask"><rect width="100%" height="100%" fill="black" /></mask>
+          <mask id="transparentGroupMask"><g opacity="0"><rect width="100%" height="100%" fill="white" /></g></mask>
         </svg>
         <input name="transparent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
         <input name="radial_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(transparent, transparent)" />
@@ -1572,6 +1573,7 @@ describe("autofill triage", () => {
         <input name="radial_black_luminance_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(circle, black, black);mask-mode:luminance" />
         <input name="stop_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
         <input name="url_mask_password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
+        <input name="group_opacity_mask_password" type="password" autocomplete="current-password" style="mask:url(#transparentGroupMask)" />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input name="zero_percent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input name="tiny_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
@@ -1654,6 +1656,7 @@ describe("autofill triage", () => {
       "radial_black_luminance_mask_password",
       "stop_mask_password",
       "url_mask_password",
+      "group_opacity_mask_password",
       "zero_mask_password",
       "zero_percent_mask_password",
       "tiny_mask_password",
@@ -1696,9 +1699,11 @@ describe("autofill triage", () => {
         <svg width="0" height="0" aria-hidden="true">
           <filter id="alphaVisibleGamma"><feComponentTransfer><feFuncA type="gamma" amplitude="1" offset="0" /></feComponentTransfer></filter>
           <filter id="smallOffset"><feOffset dx="4" dy="0" /></filter>
+          <mask id="visibleGroupMask"><g opacity="1"><rect width="100%" height="100%" fill="white" /></g></mask>
         </svg>
         <input name="email" type="email" autocomplete="username" />
         <input name="password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:repeat" />
+        <input name="group_mask_password" type="password" autocomplete="current-password" style="mask:url(#visibleGroupMask)" />
         <input name="positioned_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:100% 0" />
         <input name="gamma_filtered_password" type="password" autocomplete="current-password" style="filter:url(#alphaVisibleGamma)" />
         <input name="offset_filtered_password" type="password" autocomplete="current-password" style="filter:url(#smallOffset)" />
@@ -1718,6 +1723,10 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "group_mask_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "group_mask_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
     expect(fieldByName(report, "positioned_password").qualifiedAs).toBe("password");
