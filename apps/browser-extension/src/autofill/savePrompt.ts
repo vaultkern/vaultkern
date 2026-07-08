@@ -104,6 +104,10 @@ function isCaptureUsernameField(field: AutofillTriageFieldResult) {
     return true;
   }
 
+  if (!field.fillable) {
+    return false;
+  }
+
   if (autocomplete.has("username") || autocomplete.has("email")) {
     return true;
   }

@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fillLoginForm } from "../contentScript";
+import { applyFillPlan } from "../autofill/applyFillPlan";
 
 const runtimeClientMocks = vi.hoisted(() => ({
   getSessionState: vi.fn(),
@@ -268,6 +269,70 @@ describe("fillLoginForm", () => {
 
     expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("does not fill visually suppressed password decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="filter-password" type="password" autocomplete="current-password" style="filter:opacity(0)" />
+        <input id="scaled-password" type="password" autocomplete="current-password" style="transform:scale(0)" />
+        <div style="transform:scale(0)">
+          <input id="ancestor-scaled-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#filter-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#scaled-password") as HTMLInputElement).value).toBe("");
+    expect(
+      (document.querySelector("#ancestor-scaled-password") as HTMLInputElement).value
+    ).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("does not fill non-interactive password decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="decoy-password" type="password" autocomplete="current-password" style="pointer-events:none" />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("rechecks field safety immediately before writing a fill plan", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const password = document.querySelector("#login-password") as HTMLInputElement;
+    const fillPlan = {
+      actions: [
+        {
+          fieldOpid: "field-0",
+          elementNumber: 0,
+          fieldType: "password" as const,
+          value: "secret"
+        }
+      ]
+    };
+
+    password.style.display = "none";
+    applyFillPlan(fillPlan, document);
+    expect(password.value).toBe("");
+
+    password.style.display = "";
+    password.style.pointerEvents = "none";
+    applyFillPlan(fillPlan, document);
+    expect(password.value).toBe("");
   });
 
   it("dispatches input change and blur events for updated fields", () => {

@@ -11,6 +11,8 @@ export interface FieldFillabilityResult {
 const OFFSCREEN_OFFSET_PX = 1000;
 const CLIPPED_ANCESTOR_MAX_VISIBLE_SIZE_PX = 1;
 const MIN_CREDENTIAL_FIELD_SIZE_PX = 8;
+const MIN_VISIBLE_OPACITY = 0.01;
+const TRANSFORM_COLLAPSE_EPSILON = 0.001;
 
 function addReason(reasons: string[], reason: string) {
   if (!reasons.includes(reason)) {
@@ -56,6 +58,19 @@ function computedCssValue(
   units: { emPx?: number; remPx?: number } = {}
 ) {
   return numericCssValue(computed, units) ?? numericCssValue(inline, units);
+}
+
+function cssOpacityValue(value: string | undefined) {
+  const trimmed = value?.trim().toLowerCase();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.endsWith("%")) {
+    const parsed = Number.parseFloat(trimmed.slice(0, -1));
+    return Number.isFinite(parsed) ? parsed / 100 : null;
+  }
+  const parsed = Number.parseFloat(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function cssPropertyValue(
@@ -107,10 +122,7 @@ function isClosedDetailsContent(element: HTMLElement, current: HTMLElement) {
 }
 
 function isUnslottedShadowHostChild(element: HTMLElement) {
-  return Boolean(
-    element.parentElement?.shadowRoot &&
-      !element.assignedSlot
-  );
+  return Boolean(element.parentElement?.shadowRoot && !element.assignedSlot);
 }
 
 function hasExplicitVisibleDescendantOverride(element: HTMLElement, ancestor: HTMLElement) {
@@ -182,7 +194,9 @@ function transformTranslateOffset(
   let x = 0;
   let y = 0;
   let found = false;
-  const transforms = normalized.matchAll(/(matrix3d|matrix|translate3d|translatex|translatey|translate)\(([^)]*)\)/g);
+  const transforms = normalized.matchAll(
+    /(matrix3d|matrix|translate3d|translatex|translatey|translate)\(([^)]*)\)/g
+  );
   for (const transform of transforms) {
     const name = transform[1];
     const args = transform[2].split(/[,\s]+/).filter(Boolean);
@@ -206,6 +220,92 @@ function transformTranslateOffset(
   }
 
   return found ? { x, y } : null;
+}
+
+function isCollapsedScale(value: number | null) {
+  return value !== null && Math.abs(value) <= TRANSFORM_COLLAPSE_EPSILON;
+}
+
+function transformFullyCollapses(
+  value: string | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return false;
+  }
+
+  const transforms = normalized.matchAll(
+    /(matrix3d|matrix|scale3d|scalex|scaley|scale)\(([^)]*)\)/g
+  );
+  for (const transform of transforms) {
+    const name = transform[1];
+    const values = transform[2]
+      .split(/[,\s]+/)
+      .filter(Boolean)
+      .map((arg) => numericCssValue(arg, units));
+
+    if (name === "matrix") {
+      const [a, b, c, d] = values;
+      if (a !== null && b !== null && c !== null && d !== null) {
+        const determinant = a * d - b * c;
+        if (Math.abs(determinant) <= TRANSFORM_COLLAPSE_EPSILON) {
+          return true;
+        }
+      }
+    } else if (name === "matrix3d") {
+      const [m11, m12, , , m21, m22] = values;
+      if (m11 !== null && m12 !== null && m21 !== null && m22 !== null) {
+        const determinant = m11 * m22 - m12 * m21;
+        if (Math.abs(determinant) <= TRANSFORM_COLLAPSE_EPSILON) {
+          return true;
+        }
+      }
+    } else if (name === "scale") {
+      const scaleX = values[0] ?? null;
+      const scaleY = values[1] ?? scaleX;
+      if (isCollapsedScale(scaleX) || isCollapsedScale(scaleY)) {
+        return true;
+      }
+    } else if (name === "scale3d") {
+      if (isCollapsedScale(values[0] ?? null) || isCollapsedScale(values[1] ?? null)) {
+        return true;
+      }
+    } else if (name === "scalex") {
+      if (isCollapsedScale(values[0] ?? null)) {
+        return true;
+      }
+    } else if (name === "scaley") {
+      if (isCollapsedScale(values[0] ?? null)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function filterOpacityValue(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return null;
+  }
+
+  let opacity = 1;
+  let found = false;
+  for (const match of normalized.matchAll(/opacity\(([^)]*)\)/g)) {
+    const value = cssOpacityValue(match[1]);
+    if (value !== null) {
+      opacity *= value;
+      found = true;
+    }
+  }
+
+  return found ? opacity : null;
+}
+
+function isEffectivelyTransparent(value: number | null) {
+  return value !== null && value <= MIN_VISIBLE_OPACITY;
 }
 
 function hasMeaningfulClientRect(rect: DOMRect) {
@@ -467,7 +567,11 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const remPx = numericCssValue(rootStyle?.fontSize) ?? emPx;
     const inlineDisplay = current.style.display;
     const inlineVisibility = current.style.visibility;
-    const opacity = computedCssValue(style?.opacity, current.style.opacity);
+    const opacity = cssOpacityValue(style?.opacity) ?? cssOpacityValue(current.style.opacity);
+    const filterOpacity = filterOpacityValue(cssPropertyValue(style, current, "filter"));
+    const contentVisibility = cssPropertyValue(style, current, "content-visibility")
+      .trim()
+      .toLowerCase();
     const position = current.style.position || style?.position;
     const cssUnits = { emPx, remPx };
     const left = computedCssValue(style?.left, current.style.left, cssUnits);
@@ -487,6 +591,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (
       inlineDisplay === "none" ||
       style?.display === "none" ||
+      contentVisibility === "hidden" ||
       (hasHiddenVisibility &&
         !(
           current !== element &&
@@ -496,7 +601,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     ) {
       addReason(reasons, "not-viewable:css");
     }
-    if (opacity === 0) {
+    if (isEffectivelyTransparent(opacity) || isEffectivelyTransparent(filterOpacity)) {
       addReason(reasons, "not-viewable:transparent");
     }
     if (hasFullyClippingStyle(current, style, cssUnits)) {
@@ -515,6 +620,9 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       (isLargeOffscreenOffset(transform.x) || isLargeOffscreenOffset(transform.y))
     ) {
       addReason(reasons, "not-viewable:offscreen");
+    }
+    if (transformFullyCollapses(cssPropertyValue(style, current, "transform"), cssUnits)) {
+      addReason(reasons, "not-viewable:zero-size");
     }
     if (
       (current === element && width === 0 && height === 0) ||
@@ -543,9 +651,14 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
 export function getFieldFillability(element: HTMLElement): FieldFillabilityResult {
   const reasons: string[] = [];
   const field = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+  const style = element.ownerDocument.defaultView?.getComputedStyle(element);
 
   if (field.disabled || element.matches(":disabled")) {
     reasons.push("not-fillable:disabled");
+  }
+
+  if ((style?.pointerEvents || element.style.pointerEvents) === "none") {
+    reasons.push("not-fillable:pointer-events");
   }
 
   for (

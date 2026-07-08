@@ -138,6 +138,28 @@ describe("autofill save prompt capture", () => {
     });
   });
 
+  it("does not use non-interactive usernames as registration capture defaults", () => {
+    document.body.innerHTML = `
+      <form id="signup">
+        <h2>Create account</h2>
+        <input name="pointer_email" type="email" autocomplete="username" style="pointer-events:none" value="attacker@example.com" />
+        <input name="readonly_email" type="email" autocomplete="username" readonly value="readonly@example.com" />
+        <input name="new_password" type="password" autocomplete="new-password" value="new-secret" />
+      </form>
+    `;
+
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("#signup") as HTMLFormElement
+    );
+
+    expect(submission).toMatchObject({
+      username: "",
+      password: "new-secret",
+      saveOnly: true
+    });
+  });
+
   it("does not capture hidden new-password fields as submissions", () => {
     document.body.innerHTML = `
       <form id="signup">

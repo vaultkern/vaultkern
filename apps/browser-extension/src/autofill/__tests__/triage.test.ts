@@ -1358,6 +1358,54 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").reasons).not.toContain("not-viewable:css");
   });
 
+  it("treats visually suppressed credential fields as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="faint_email" type="email" autocomplete="username" style="opacity:0.005" />
+        <input name="percent_opacity_email" type="email" autocomplete="username" style="opacity:1%" />
+        <input name="filter_email" type="email" autocomplete="username" style="filter:opacity(0)" />
+        <div style="content-visibility:hidden">
+          <input name="content_hidden_email" type="email" autocomplete="username" />
+        </div>
+        <div style="transform:scale(0)">
+          <input name="ancestor_scaled_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="scaled_password" type="password" autocomplete="current-password" style="transform:scale(0)" />
+        <input name="real_user" type="email" autocomplete="username" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "faint_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "faint_email").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "percent_opacity_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "percent_opacity_email").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "filter_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "filter_email").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "content_hidden_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "content_hidden_email").reasons).toContain(
+      "not-viewable:css"
+    );
+    expect(fieldByName(report, "scaled_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "scaled_password").reasons).toContain(
+      "not-viewable:zero-size"
+    );
+    expect(fieldByName(report, "ancestor_scaled_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "ancestor_scaled_password").reasons).toContain(
+      "not-viewable:zero-size"
+    );
+    expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("lets current-password fields override mixed sign-in and signup copy", () => {
     document.body.innerHTML = `
       <form id="mixed-auth">

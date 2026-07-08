@@ -1,5 +1,6 @@
 import type { AutofillFillPlan } from "./fillPlan";
 import { collectMatchingElements, FIELD_SELECTOR } from "./collectPageFields";
+import { getFieldFillability, getFieldVisibility } from "./visibility";
 
 function isWritableField(
   element: Element
@@ -21,6 +22,10 @@ function isWritableField(
   }
 
   if ("readOnly" in element && element.readOnly) {
+    return false;
+  }
+
+  if (!getFieldVisibility(element).viewable || !getFieldFillability(element).fillable) {
     return false;
   }
 
