@@ -1589,6 +1589,8 @@ describe("autofill triage", () => {
       <form>
         <input name="covered_password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:88px;width:185px;height:21px" />
         <div id="cover" style="position:absolute;left:0;top:80px;width:260px;height:48px;background:white"></div>
+        <input name="pointer_events_covered_password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:172px;width:185px;height:21px" />
+        <div id="pointer-events-cover" style="position:absolute;left:0;top:164px;width:260px;height:48px;background:white;pointer-events:none"></div>
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
@@ -1598,8 +1600,17 @@ describe("autofill triage", () => {
     const realPassword = document.querySelector(
       'input[name="real_password"]'
     ) as HTMLInputElement;
+    const pointerEventsCoveredPassword = document.querySelector(
+      'input[name="pointer_events_covered_password"]'
+    ) as HTMLInputElement;
     const cover = document.querySelector("#cover") as HTMLDivElement;
+    const pointerEventsCover = document.querySelector("#pointer-events-cover") as HTMLDivElement;
     stubElementRect(coveredPassword, elementRect({ left: 24, top: 88, width: 185, height: 21 }));
+    stubElementRect(
+      pointerEventsCoveredPassword,
+      elementRect({ left: 24, top: 172, width: 185, height: 21 })
+    );
+    stubElementRect(pointerEventsCover, elementRect({ left: 0, top: 164, width: 260, height: 48 }));
     stubElementRect(realPassword, elementRect({ left: 24, top: 140, width: 185, height: 21 }));
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
@@ -1607,6 +1618,9 @@ describe("autofill triage", () => {
       value: (x: number, y: number) => {
         if (x >= 24 && x <= 209 && y >= 88 && y <= 109) {
           return cover;
+        }
+        if (x >= 24 && x <= 209 && y >= 172 && y <= 193) {
+          return pointerEventsCoveredPassword;
         }
         if (x >= 24 && x <= 209 && y >= 140 && y <= 161) {
           return realPassword;
@@ -1625,7 +1639,47 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "covered_password").reasons).toContain(
       "not-viewable:occluded"
     );
+    expect(fieldByName(report, "pointer_events_covered_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "pointer_events_covered_password").reasons).toContain(
+      "not-viewable:occluded"
+    );
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("keeps credential fields viewable under lower z-index painted siblings", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="visible_password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:88px;width:185px;height:21px" />
+        <div id="background-cover" style="position:absolute;left:0;top:80px;width:260px;height:48px;background:white;pointer-events:none;z-index:-1"></div>
+      </form>
+    `;
+    const visiblePassword = document.querySelector(
+      'input[name="visible_password"]'
+    ) as HTMLInputElement;
+    const backgroundCover = document.querySelector("#background-cover") as HTMLDivElement;
+    stubElementRect(visiblePassword, elementRect({ left: 24, top: 88, width: 185, height: 21 }));
+    stubElementRect(backgroundCover, elementRect({ left: 0, top: 80, width: 260, height: 48 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 88 && y <= 109) {
+          return visiblePassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(fieldByName(report, "visible_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "visible_password").reasons).not.toContain(
+      "not-viewable:occluded"
+    );
   });
 
   it("treats fields whose final rect is after the viewport as not viewable", () => {

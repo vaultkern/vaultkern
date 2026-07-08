@@ -1203,6 +1203,155 @@ function isFullyOccludedByHitTesting(element: HTMLElement) {
   return checkedPoints > 0;
 }
 
+function pointInsideRect(point: { x: number; y: number }, rect: DOMRect) {
+  return (
+    hasMeaningfulClientRect(rect) &&
+    point.x >= rect.left &&
+    point.x <= rect.right &&
+    point.y >= rect.top &&
+    point.y <= rect.bottom
+  );
+}
+
+function numericZIndex(value: string | undefined) {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "auto") {
+    return null;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function documentFollows(element: HTMLElement, candidate: HTMLElement) {
+  const followingFlag = element.ownerDocument.defaultView?.Node.DOCUMENT_POSITION_FOLLOWING;
+  return Boolean(
+    followingFlag !== undefined &&
+      (element.compareDocumentPosition(candidate) & followingFlag) !== 0
+  );
+}
+
+function elementPaintsOverlay(
+  current: HTMLElement,
+  style: CSSStyleDeclaration | undefined
+) {
+  const rootStyle = current.ownerDocument.defaultView?.getComputedStyle(
+    current.ownerDocument.documentElement
+  );
+  const emPx = numericCssValue(style?.fontSize || current.style.fontSize) ?? 16;
+  const remPx = numericCssValue(rootStyle?.fontSize) ?? emPx;
+  const cssUnits = { emPx, remPx };
+  const opacity = cssOpacityValue(style?.opacity) ?? cssOpacityValue(current.style.opacity);
+  const filter = cssPropertyValue(style, current, "filter");
+  return (
+    style?.display !== "none" &&
+    style?.visibility !== "hidden" &&
+    style?.visibility !== "collapse" &&
+    !isEffectivelyTransparent(opacity) &&
+    !isEffectivelyTransparent(filterOpacityValue(filter)) &&
+    !svgFilterSuppressesPaint(current, filter) &&
+    !maskStyleSuppressesPaint(style, current, cssUnits) &&
+    (!fieldBackgroundPaintIsTransparent(style, current) ||
+      !fieldBorderPaintIsTransparent(style, current, cssUnits) ||
+      !fieldOutlinePaintIsTransparent(style, current, cssUnits) ||
+      !cssPaintListLooksEmpty(cssPropertyValue(style, current, "box-shadow")) ||
+      ["canvas", "iframe", "img", "object", "svg", "video"].includes(
+        current.tagName.toLowerCase()
+      ))
+  );
+}
+
+function elementCumulativePaintIsVisible(element: HTMLElement) {
+  let opacity = 1;
+  let filterOpacity = 1;
+  for (
+    let current: HTMLElement | null = element;
+    current;
+    current = parentElementOrShadowHost(current)
+  ) {
+    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    if (
+      current.hidden ||
+      style?.display === "none" ||
+      style?.visibility === "hidden" ||
+      style?.visibility === "collapse"
+    ) {
+      return false;
+    }
+    opacity *= cssOpacityValue(style?.opacity) ?? cssOpacityValue(current.style.opacity) ?? 1;
+    const currentFilterOpacity = filterOpacityValue(cssPropertyValue(style, current, "filter"));
+    filterOpacity *= currentFilterOpacity ?? 1;
+    if (isEffectivelyTransparent(opacity) || isEffectivelyTransparent(filterOpacity)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function elementMayPaintAboveElement(element: HTMLElement, candidate: HTMLElement) {
+  const style = candidate.ownerDocument.defaultView?.getComputedStyle(candidate);
+  const elementStyle = element.ownerDocument.defaultView?.getComputedStyle(element);
+  const candidateZIndex = numericZIndex(style?.zIndex || candidate.style.zIndex);
+  const elementZIndex = numericZIndex(elementStyle?.zIndex || element.style.zIndex);
+  if (candidateZIndex !== null && candidateZIndex < (elementZIndex ?? 0)) {
+    return false;
+  }
+  if (candidateZIndex !== null && candidateZIndex > (elementZIndex ?? 0)) {
+    return true;
+  }
+  if (candidateZIndex === null && elementZIndex !== null) {
+    return elementZIndex <= 0 && documentFollows(element, candidate);
+  }
+
+  return documentFollows(element, candidate);
+}
+
+function occlusionScanRoots(element: HTMLElement): ParentNode[] {
+  const roots: ParentNode[] = [element.ownerDocument];
+  const root = element.getRootNode();
+  if (root !== element.ownerDocument && "querySelectorAll" in root) {
+    roots.push(root as ParentNode);
+  }
+  return roots;
+}
+
+function paintedOverlayCoversPoint(element: HTMLElement, point: { x: number; y: number }) {
+  const ownerWindow = element.ownerDocument.defaultView;
+  if (!ownerWindow) {
+    return false;
+  }
+  for (const root of occlusionScanRoots(element)) {
+    for (const candidate of Array.from(root.querySelectorAll("*"))) {
+      if (
+        !(candidate instanceof ownerWindow.HTMLElement) ||
+        candidate === element ||
+        candidate.contains(element) ||
+        element.contains(candidate) ||
+        !elementMayPaintAboveElement(element, candidate) ||
+        !pointInsideRect(point, candidate.getBoundingClientRect())
+      ) {
+        continue;
+      }
+
+      const style = candidate.ownerDocument.defaultView?.getComputedStyle(candidate);
+      if (
+        elementPaintsOverlay(candidate, style) &&
+        elementCumulativePaintIsVisible(candidate)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isFullyOccludedByPaintedOverlay(element: HTMLElement) {
+  const points = visibleViewportSamplePoints(element);
+  return (
+    points.length > 0 &&
+    points.every((point) => paintedOverlayCoversPoint(element, point))
+  );
+}
+
 type ViewportExit = NonNullable<ReturnType<typeof viewportExitForRect>>;
 
 function inverseOffset(value: number | null) {
@@ -2182,7 +2331,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (
       current === element &&
       isCredentialLikeField(element) &&
-      isFullyOccludedByHitTesting(element)
+      (isFullyOccludedByHitTesting(element) || isFullyOccludedByPaintedOverlay(element))
     ) {
       addReason(reasons, "not-viewable:occluded");
     }
