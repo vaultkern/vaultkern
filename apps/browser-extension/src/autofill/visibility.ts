@@ -1424,9 +1424,16 @@ function svgElementTransformMatrix(
   units: { emPx?: number; remPx?: number }
 ) {
   const styled = shape as SVGElement;
+  const computedTransform =
+    shape.ownerDocument.defaultView?.getComputedStyle(shape).getPropertyValue("transform") ??
+    "";
+  if (isMeaningfulCssValue(computedTransform)) {
+    return svgMatrixMultiply(inherited, svgTransformMatrix(computedTransform, units));
+  }
+
   const attributeTransform = svgTransformMatrix(shape.getAttribute("transform"), units);
-  const styleTransform = svgTransformMatrix(styled.style?.getPropertyValue("transform"), units);
-  return svgMatrixMultiply(svgMatrixMultiply(inherited, attributeTransform), styleTransform);
+  const inlineTransform = svgTransformMatrix(styled.style?.getPropertyValue("transform"), units);
+  return svgMatrixMultiply(svgMatrixMultiply(inherited, attributeTransform), inlineTransform);
 }
 
 function transformSvgPoint(matrix: SvgMatrix2d, point: { x: number; y: number }) {

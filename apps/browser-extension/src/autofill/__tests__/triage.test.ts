@@ -1198,6 +1198,9 @@ describe("autofill triage", () => {
           overflow: hidden;
         }
       </style>
+      <style>
+        .clip-off { transform: translate(-9999px, 0); }
+      </style>
       <form>
         <input name="offscreen_email" type="email" autocomplete="username" style="position:absolute;left:-9999px" />
         <input name="positive_left_offscreen_email" type="email" autocomplete="username" style="position:absolute;left:9999px" />
@@ -1213,9 +1216,11 @@ describe("autofill triage", () => {
         <svg width="0" height="0" aria-hidden="true">
           <clipPath id="offsetRectClip"><rect x="-9999" y="0" width="200" height="30" /></clipPath>
           <clipPath id="translatedRectClip"><rect width="200" height="30" transform="translate(-9999 0)" /></clipPath>
+          <clipPath id="classTranslatedRectClip"><rect class="clip-off" width="200" height="30" /></clipPath>
         </svg>
         <input name="offset_url_clip_email" type="email" autocomplete="username" style="clip-path:url(#offsetRectClip)" />
         <input name="translated_url_clip_email" type="email" autocomplete="username" style="clip-path:url(#translatedRectClip)" />
+        <input name="class_translated_url_clip_email" type="email" autocomplete="username" style="clip-path:url(#classTranslatedRectClip)" />
         <div class="computed-clip-box">
           <input name="computed_overflow_email" type="email" autocomplete="username" />
         </div>
@@ -1224,7 +1229,11 @@ describe("autofill triage", () => {
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
-    for (const name of ["offset_url_clip_email", "translated_url_clip_email"]) {
+    for (const name of [
+      "offset_url_clip_email",
+      "translated_url_clip_email",
+      "class_translated_url_clip_email"
+    ]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
         elementRect({ left: 24, top: 40, width: 185, height: 21 })
@@ -1271,6 +1280,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "translated_url_clip_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "translated_url_clip_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "class_translated_url_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "class_translated_url_clip_email").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "computed_overflow_email").qualifiedAs).toBe("ignored");
