@@ -1893,17 +1893,29 @@ describe("autofill triage", () => {
       <form>
         <svg width="0" height="0" aria-hidden="true">
           <clipPath id="fullObjectClip" clipPathUnits="objectBoundingBox"><rect width="1" height="1" /></clipPath>
+          <clipPath id="fullPathClip"><path d="M0 0 H185 V21 H0 Z" /></clipPath>
         </svg>
         <input name="email" type="email" autocomplete="username" style="clip-path:inset(0)" />
         <input name="object_email" type="email" autocomplete="username" style="clip-path:url(#fullObjectClip)" />
+        <input name="path_email" type="email" autocomplete="username" style='clip-path:path("M0 0 H185 V21 H0 Z")' />
+        <input name="url_path_email" type="email" autocomplete="username" style="clip-path:url(#fullPathClip)" />
         <input name="password" type="password" autocomplete="current-password" />
       </form>
       <input name="visible_circle_probe" type="text" style="clip-path:circle(closest-side at 50% 50%)" />
       <input name="visible_ellipse_probe" type="text" style="clip-path:ellipse(closest-side closest-side at 50% 50%)" />
     `;
+    const topByFieldName: Record<string, number> = {
+      object_email: 80,
+      path_email: 100,
+      url_path_email: 120,
+      visible_circle_probe: 160,
+      visible_ellipse_probe: 200
+    };
     for (const name of [
       "email",
       "object_email",
+      "path_email",
+      "url_path_email",
       "visible_circle_probe",
       "visible_ellipse_probe"
     ]) {
@@ -1911,14 +1923,7 @@ describe("autofill triage", () => {
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
         elementRect({
           left: 24,
-          top:
-            name === "visible_circle_probe"
-              ? 120
-              : name === "visible_ellipse_probe"
-                ? 160
-                : name === "object_email"
-                  ? 80
-                : 40,
+          top: topByFieldName[name] ?? 40,
           width: 185,
           height: 21
         })
@@ -1931,6 +1936,14 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "email").reasons).not.toContain("not-viewable:clipped");
     expect(fieldByName(report, "object_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "object_email").reasons).not.toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "path_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "path_email").reasons).not.toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_path_email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "url_path_email").reasons).not.toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "visible_circle_probe").reasons).not.toContain(

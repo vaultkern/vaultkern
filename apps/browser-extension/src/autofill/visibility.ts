@@ -2077,7 +2077,7 @@ function svgPointListToPoints(
   return points;
 }
 
-function svgPathDataToPoints(value: string) {
+function numericSvgPathPoints(value: string) {
   const numbers = (value.match(/-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi) ?? []).map(Number);
   const points: Array<{ x: number; y: number }> = [];
   for (let index = 0; index + 1 < numbers.length; index += 2) {
@@ -2087,6 +2087,177 @@ function svgPathDataToPoints(value: string) {
       points.push({ x, y });
     }
   }
+  return points;
+}
+
+function svgPathTokens(value: string) {
+  return value.match(/[a-zA-Z]|[-+]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi) ?? [];
+}
+
+function isSvgPathCommand(token: string | undefined) {
+  return token !== undefined && /^[a-zA-Z]$/.test(token);
+}
+
+function svgPathDataToPoints(value: string) {
+  const tokens = svgPathTokens(value);
+  const points: Array<{ x: number; y: number }> = [];
+  let index = 0;
+  let command = "";
+  let current = { x: 0, y: 0 };
+  let subpathStart = { x: 0, y: 0 };
+
+  const hasNumber = () => index < tokens.length && !isSvgPathCommand(tokens[index]);
+  const readNumber = () => {
+    if (!hasNumber()) {
+      return null;
+    }
+    const parsed = Number(tokens[index]);
+    index += 1;
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const pushPoint = (point: { x: number; y: number }) => {
+    current = point;
+    points.push({ ...point });
+  };
+  const readPoint = (relative: boolean) => {
+    const x = readNumber();
+    const y = readNumber();
+    if (x === null || y === null) {
+      return null;
+    }
+    return relative ? { x: current.x + x, y: current.y + y } : { x, y };
+  };
+  const readControlPoint = (relative: boolean) => {
+    const point = readPoint(relative);
+    if (point === null) {
+      return null;
+    }
+    points.push({ ...point });
+    return point;
+  };
+
+  while (index < tokens.length) {
+    if (isSvgPathCommand(tokens[index])) {
+      command = tokens[index];
+      index += 1;
+    }
+    if (!command) {
+      return numericSvgPathPoints(value);
+    }
+
+    const relative = command === command.toLowerCase();
+    switch (command.toLowerCase()) {
+      case "m": {
+        const first = readPoint(relative);
+        if (first === null) {
+          return numericSvgPathPoints(value);
+        }
+        pushPoint(first);
+        subpathStart = first;
+        command = relative ? "l" : "L";
+        while (hasNumber()) {
+          const point = readPoint(relative);
+          if (point === null) {
+            return numericSvgPathPoints(value);
+          }
+          pushPoint(point);
+        }
+        break;
+      }
+      case "l":
+        while (hasNumber()) {
+          const point = readPoint(relative);
+          if (point === null) {
+            return numericSvgPathPoints(value);
+          }
+          pushPoint(point);
+        }
+        break;
+      case "h":
+        while (hasNumber()) {
+          const x = readNumber();
+          if (x === null) {
+            return numericSvgPathPoints(value);
+          }
+          pushPoint({ x: relative ? current.x + x : x, y: current.y });
+        }
+        break;
+      case "v":
+        while (hasNumber()) {
+          const y = readNumber();
+          if (y === null) {
+            return numericSvgPathPoints(value);
+          }
+          pushPoint({ x: current.x, y: relative ? current.y + y : y });
+        }
+        break;
+      case "c":
+        while (hasNumber()) {
+          const first = readControlPoint(relative);
+          const second = readControlPoint(relative);
+          const end = readPoint(relative);
+          if (first === null || second === null || end === null) {
+            return numericSvgPathPoints(value);
+          }
+          pushPoint(end);
+        }
+        break;
+      case "s":
+      case "q":
+        while (hasNumber()) {
+          const control = readControlPoint(relative);
+          const end = readPoint(relative);
+          if (control === null || end === null) {
+            return numericSvgPathPoints(value);
+          }
+          pushPoint(end);
+        }
+        break;
+      case "t":
+        while (hasNumber()) {
+          const end = readPoint(relative);
+          if (end === null) {
+            return numericSvgPathPoints(value);
+          }
+          pushPoint(end);
+        }
+        break;
+      case "a":
+        while (hasNumber()) {
+          const radiusX = readNumber();
+          const radiusY = readNumber();
+          const rotation = readNumber();
+          const largeArc = readNumber();
+          const sweep = readNumber();
+          const x = readNumber();
+          const y = readNumber();
+          if (
+            radiusX === null ||
+            radiusY === null ||
+            rotation === null ||
+            largeArc === null ||
+            sweep === null ||
+            x === null ||
+            y === null
+          ) {
+            return numericSvgPathPoints(value);
+          }
+          points.push({
+            x: relative ? current.x + radiusX : radiusX,
+            y: relative ? current.y + radiusY : radiusY
+          });
+          pushPoint({ x: relative ? current.x + x : x, y: relative ? current.y + y : y });
+        }
+        break;
+      case "z":
+        pushPoint(subpathStart);
+        command = "";
+        break;
+      default:
+        return numericSvgPathPoints(value);
+    }
+  }
+
   return points;
 }
 
