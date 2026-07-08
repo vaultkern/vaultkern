@@ -2910,6 +2910,68 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields missed by rotated svg clip paths as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <clipPath id="rotatedLeftRectClip"><rect x="0" y="0" width="80" height="40" transform="rotate(180 200 20)" /></clipPath>
+        </svg>
+        <label id="rotated-clip-label" for="rotated-clip-password">Password</label>
+        <div id="ancestor-rotated-clip" style="width:400px;height:40px;clip-path:url(#rotatedLeftRectClip)">
+          <input id="rotated-clip-password" name="rotated_clip_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const rotatedClipPassword = document.querySelector(
+      "#rotated-clip-password"
+    ) as HTMLInputElement;
+    const rotatedClipLabel = document.querySelector(
+      "#rotated-clip-label"
+    ) as HTMLLabelElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    stubElementRect(
+      rotatedClipPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      rotatedClipLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-rotated-clip") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(realPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return rotatedClipLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(fieldByName(report, "rotated_clip_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "rotated_clip_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats fields missed by ancestor masks as not viewable", () => {
     document.body.innerHTML = `
       <form>

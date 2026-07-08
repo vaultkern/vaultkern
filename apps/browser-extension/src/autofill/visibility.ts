@@ -4708,7 +4708,7 @@ function svgTransformMatrix(
   }
 
   let matrix = identitySvgMatrix();
-  for (const transform of normalized.matchAll(/(matrix|translate|scale)\(([^)]*)\)/g)) {
+  for (const transform of normalized.matchAll(/(matrix|translate|scale|rotate)\(([^)]*)\)/g)) {
     const name = transform[1];
     const args = splitCssFunctionArgs(transform[2]);
     let next: SvgMatrix2d | null = null;
@@ -4730,6 +4730,25 @@ function svgTransformMatrix(
       const y = args[1] === undefined ? x : svgTransformArg(args[1], units);
       if (x !== null && y !== null) {
         next = { a: x, b: 0, c: 0, d: y, e: 0, f: 0 };
+      }
+    } else if (name === "rotate") {
+      const angle = svgTransformArg(args[0], units);
+      if (angle !== null) {
+        const radians = (angle * Math.PI) / 180;
+        const cos = Math.cos(radians);
+        const sin = Math.sin(radians);
+        const cx = args[1] === undefined ? 0 : svgTransformArg(args[1], units);
+        const cy = args[2] === undefined ? 0 : svgTransformArg(args[2], units);
+        if (cx !== null && cy !== null) {
+          next = {
+            a: cos,
+            b: sin,
+            c: -sin,
+            d: cos,
+            e: cx - cos * cx + sin * cy,
+            f: cy - sin * cx - cos * cy
+          };
+        }
       }
     }
 

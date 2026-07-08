@@ -1041,6 +1041,63 @@ describe("fillLoginForm", () => {
     expect(loginPassword.value).toBe("secret");
   });
 
+  it("does not treat visible labels as enough for rotated svg clip path decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <clipPath id="rotatedLeftRectClip"><rect x="0" y="0" width="80" height="40" transform="rotate(180 200 20)" /></clipPath>
+        </svg>
+        <label id="rotated-clip-label" for="rotated-clip-password">Password</label>
+        <div id="ancestor-rotated-clip" style="width:400px;height:40px;clip-path:url(#rotatedLeftRectClip)">
+          <input id="rotated-clip-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const rotatedClipPassword = document.querySelector(
+      "#rotated-clip-password"
+    ) as HTMLInputElement;
+    const rotatedClipLabel = document.querySelector(
+      "#rotated-clip-label"
+    ) as HTMLLabelElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    stubElementRect(
+      rotatedClipPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      rotatedClipLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-rotated-clip") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return rotatedClipLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(rotatedClipPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("fills password fields when an ancestor clip path contains the control", () => {
     document.body.innerHTML = `
       <form>
