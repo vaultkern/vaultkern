@@ -792,6 +792,28 @@ function cssFilterGrayscaleColor(color: CssColorRgba, amount: number) {
   };
 }
 
+function cssFilterSaturateColor(color: CssColorRgba, amount: number) {
+  const saturation = Math.max(0, amount);
+  return {
+    ...color,
+    r: clampCssColorChannel(
+      color.r * (0.213 + 0.787 * saturation) +
+        color.g * (0.715 - 0.715 * saturation) +
+        color.b * (0.072 - 0.072 * saturation)
+    ),
+    g: clampCssColorChannel(
+      color.r * (0.213 - 0.213 * saturation) +
+        color.g * (0.715 + 0.285 * saturation) +
+        color.b * (0.072 - 0.072 * saturation)
+    ),
+    b: clampCssColorChannel(
+      color.r * (0.213 - 0.213 * saturation) +
+        color.g * (0.715 - 0.715 * saturation) +
+        color.b * (0.072 + 0.928 * saturation)
+    )
+  };
+}
+
 function cssFilterPaintColor(value: string | undefined, color: CssColorRgba | null) {
   if (color === null) {
     return null;
@@ -839,6 +861,10 @@ function cssFilterPaintColor(value: string | undefined, color: CssColorRgba | nu
     }
     if (name === "grayscale") {
       result = cssFilterGrayscaleColor(result, amount);
+      continue;
+    }
+    if (name === "saturate") {
+      result = cssFilterSaturateColor(result, amount);
       continue;
     }
     if (name === "blur") {
