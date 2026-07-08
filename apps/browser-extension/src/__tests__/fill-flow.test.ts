@@ -625,11 +625,17 @@ describe("fillLoginForm", () => {
         <input id="circle-password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
         <input id="polygon-strip-password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
         <input id="polygon-percent-password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 10% 0, 10% 30%, 0 30%)" />
+        <input id="circle-offset-password" type="password" autocomplete="current-password" style="clip-path:circle(50% at -9999px 50%)" />
+        <input id="ellipse-offset-password" type="password" autocomplete="current-password" style="clip-path:ellipse(50% 50% at -9999px 50%)" />
         <input id="css-path-password" type="password" autocomplete="current-password" style='clip-path:path("M0 0Z")' />
         <input id="css-path-strip-password" type="password" autocomplete="current-password" style='clip-path:path("M0 0 L4 0 L4 100 L0 100 Z")' />
         <input id="clip-path-rect-password" type="password" autocomplete="current-password" style="clip-path:rect(0 4px 100px 0)" />
         <input id="clip-path-xywh-password" type="password" autocomplete="current-password" style="clip-path:xywh(0 0 4px 100%)" />
+        <input id="clip-path-offset-xywh-password" type="password" autocomplete="current-password" style="clip-path:xywh(-9999px 0 200px 30px)" />
+        <input id="clip-path-offset-rect-password" type="password" autocomplete="current-password" style="clip-path:rect(0 -9990px 30px -10000px)" />
+        <input id="inset-offset-password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% + 9799px) calc(100% - 30px) -9999px)" />
         <input id="legacy-strip-password" type="password" autocomplete="current-password" style="position:absolute;clip:rect(0 4px 100px 0)" />
+        <input id="legacy-offset-password" type="password" autocomplete="current-password" style="position:absolute;clip:rect(0 -9990px 30px -10000px)" />
         <input id="url-zero-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroClip)" />
         <input id="url-strip-password" type="password" autocomplete="current-password" style="clip-path:url(#stripClip)" />
         <input id="url-offset-rect-password" type="password" autocomplete="current-password" style="clip-path:url(#offsetRectClip)" />
@@ -683,6 +689,19 @@ describe("fillLoginForm", () => {
         elementRect({ left: 24, top: 40, width: 185, height: 21 })
       );
     }
+    for (const id of [
+      "circle-offset-password",
+      "ellipse-offset-password",
+      "clip-path-offset-xywh-password",
+      "clip-path-offset-rect-password",
+      "inset-offset-password",
+      "legacy-offset-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: 1208, width: 185, height: 21 })
+      );
+    }
 
     fillLoginForm({ password: "secret" });
 
@@ -692,11 +711,17 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#circle-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#polygon-strip-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#polygon-percent-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#circle-offset-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#ellipse-offset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#css-path-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#css-path-strip-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#clip-path-rect-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#clip-path-xywh-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#clip-path-offset-xywh-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#clip-path-offset-rect-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#inset-offset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#legacy-strip-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#legacy-offset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-strip-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-offset-rect-password") as HTMLInputElement).value).toBe("");

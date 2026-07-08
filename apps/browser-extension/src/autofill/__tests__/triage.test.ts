@@ -1907,11 +1907,17 @@ describe("autofill triage", () => {
         <input name="circle_password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
         <input name="polygon_strip_password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
         <input name="polygon_percent_password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 10% 0, 10% 30%, 0 30%)" />
+        <input name="circle_offset_password" type="password" autocomplete="current-password" style="clip-path:circle(50% at -9999px 50%)" />
+        <input name="ellipse_offset_password" type="password" autocomplete="current-password" style="clip-path:ellipse(50% 50% at -9999px 50%)" />
         <input name="css_path_password" type="password" autocomplete="current-password" style='clip-path:path("M0 0Z")' />
         <input name="css_path_strip_password" type="password" autocomplete="current-password" style='clip-path:path("M0 0 L4 0 L4 100 L0 100 Z")' />
         <input name="clip_path_rect_password" type="password" autocomplete="current-password" style="clip-path:rect(0 4px 100px 0)" />
         <input name="clip_path_xywh_password" type="password" autocomplete="current-password" style="clip-path:xywh(0 0 4px 100%)" />
+        <input name="clip_path_offset_xywh_password" type="password" autocomplete="current-password" style="clip-path:xywh(-9999px 0 200px 30px)" />
+        <input name="clip_path_offset_rect_password" type="password" autocomplete="current-password" style="clip-path:rect(0 -9990px 30px -10000px)" />
+        <input name="inset_offset_password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% + 9799px) calc(100% - 30px) -9999px)" />
         <input name="legacy_strip_password" type="password" autocomplete="current-password" style="position:absolute;clip:rect(0 4px 100px 0)" />
+        <input name="legacy_offset_password" type="password" autocomplete="current-password" style="position:absolute;clip:rect(0 -9990px 30px -10000px)" />
         <input name="url_zero_password" type="password" autocomplete="current-password" style="clip-path:url(#zeroClip)" />
         <input name="url_strip_password" type="password" autocomplete="current-password" style="clip-path:url(#stripClip)" />
         <input name="url_polygon_password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPolygonClip)" />
@@ -1953,6 +1959,19 @@ describe("autofill triage", () => {
         elementRect({ left: 24, top: 40, width: 185, height: 21 })
       );
     }
+    for (const name of [
+      "circle_offset_password",
+      "ellipse_offset_password",
+      "clip_path_offset_xywh_password",
+      "clip_path_offset_rect_password",
+      "inset_offset_password",
+      "legacy_offset_password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: 1208, width: 185, height: 21 })
+      );
+    }
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -1980,6 +1999,14 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "polygon_percent_password").reasons).toContain(
       "not-viewable:clipped"
     );
+    expect(fieldByName(report, "circle_offset_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "circle_offset_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "ellipse_offset_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "ellipse_offset_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "css_path_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "css_path_password").reasons).toContain(
       "not-viewable:clipped"
@@ -1996,8 +2023,24 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "clip_path_xywh_password").reasons).toContain(
       "not-viewable:clipped"
     );
+    expect(fieldByName(report, "clip_path_offset_xywh_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "clip_path_offset_xywh_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "clip_path_offset_rect_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "clip_path_offset_rect_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "inset_offset_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "inset_offset_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "legacy_strip_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "legacy_strip_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "legacy_offset_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "legacy_offset_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "url_zero_password").qualifiedAs).toBe("ignored");
