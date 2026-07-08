@@ -1656,6 +1656,7 @@ describe("autofill triage", () => {
         <input name="backface_password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:rotateY(180deg)" />
         <input name="backface_matrix_password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:matrix3d(-1,0,0,0,0,1,0,0,0,0,-1,0,0,0,0,1)" />
         <input name="paintless_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:transparent;-webkit-text-fill-color:transparent;outline:0;box-shadow:none;text-shadow:none" />
+        <input name="same_color_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
         <input name="font_zero_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;font-size:0;outline:0;box-shadow:none;text-shadow:none" />
         <input name="text_indent_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;text-indent:-9999px;outline:0;box-shadow:none;text-shadow:none" />
         <input name="real_password" type="password" autocomplete="current-password" />
@@ -1725,6 +1726,7 @@ describe("autofill triage", () => {
       "cumulative_opacity_password",
       "cumulative_filter_password",
       "paintless_password",
+      "same_color_password",
       "font_zero_password",
       "text_indent_password"
     ]) {
@@ -1753,6 +1755,9 @@ describe("autofill triage", () => {
         </svg>
         <input name="email" type="email" autocomplete="username" />
         <input name="password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:repeat" />
+        <div style="background:black">
+          <input name="contrast_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
+        </div>
         <input name="group_mask_password" type="password" autocomplete="current-password" style="mask:url(#visibleGroupMask)" />
         <input name="positioned_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:100% 0" />
         <input name="gamma_filtered_password" type="password" autocomplete="current-password" style="filter:url(#alphaVisibleGamma)" />
@@ -1773,6 +1778,10 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "contrast_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "contrast_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
     expect(fieldByName(report, "group_mask_password").qualifiedAs).toBe("password");

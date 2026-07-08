@@ -770,6 +770,122 @@ function cssColorLooksTransparent(value: string) {
   );
 }
 
+interface CssColorRgba {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+function clampCssColorChannel(value: number) {
+  return Math.min(255, Math.max(0, value));
+}
+
+function clampCssAlphaChannel(value: number) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function cssColorChannel(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.endsWith("%")) {
+    const parsed = Number.parseFloat(trimmed.slice(0, -1));
+    return Number.isFinite(parsed) ? clampCssColorChannel((parsed * 255) / 100) : null;
+  }
+  const parsed = Number.parseFloat(trimmed);
+  return Number.isFinite(parsed) ? clampCssColorChannel(parsed) : null;
+}
+
+function cssAlphaChannel(value: string | undefined) {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return 1;
+  }
+  if (trimmed.endsWith("%")) {
+    const parsed = Number.parseFloat(trimmed.slice(0, -1));
+    return Number.isFinite(parsed) ? clampCssAlphaChannel(parsed / 100) : null;
+  }
+  const parsed = Number.parseFloat(trimmed);
+  return Number.isFinite(parsed) ? clampCssAlphaChannel(parsed) : null;
+}
+
+function cssHexColor(value: string): CssColorRgba | null {
+  const normalized = value.trim().toLowerCase();
+  const match = normalized.match(/^#([0-9a-f]{3,8})$/);
+  if (!match) {
+    return null;
+  }
+
+  const hex = match[1];
+  if (hex.length === 3 || hex.length === 4) {
+    const r = Number.parseInt(hex[0] + hex[0], 16);
+    const g = Number.parseInt(hex[1] + hex[1], 16);
+    const b = Number.parseInt(hex[2] + hex[2], 16);
+    const a = hex.length === 4 ? Number.parseInt(hex[3] + hex[3], 16) / 255 : 1;
+    return { r, g, b, a };
+  }
+  if (hex.length === 6 || hex.length === 8) {
+    const r = Number.parseInt(hex.slice(0, 2), 16);
+    const g = Number.parseInt(hex.slice(2, 4), 16);
+    const b = Number.parseInt(hex.slice(4, 6), 16);
+    const a = hex.length === 8 ? Number.parseInt(hex.slice(6, 8), 16) / 255 : 1;
+    return { r, g, b, a };
+  }
+  return null;
+}
+
+function cssRgbColor(value: string): CssColorRgba | null {
+  const normalized = value.trim().toLowerCase();
+  const body = cssFunctionBody(normalized, "rgb") ?? cssFunctionBody(normalized, "rgba");
+  if (body === null) {
+    return null;
+  }
+
+  const channels = splitCssFunctionArgs(body.replace(/\//g, " "));
+  if (channels.length < 3) {
+    return null;
+  }
+  const r = cssColorChannel(channels[0]);
+  const g = cssColorChannel(channels[1]);
+  const b = cssColorChannel(channels[2]);
+  const a = cssAlphaChannel(channels[3]);
+  if (r === null || g === null || b === null || a === null) {
+    return null;
+  }
+  return { r, g, b, a };
+}
+
+function cssColorRgba(value: string): CssColorRgba | null {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === "transparent") {
+    return { r: 0, g: 0, b: 0, a: 0 };
+  }
+  if (normalized === "black") {
+    return { r: 0, g: 0, b: 0, a: 1 };
+  }
+  if (normalized === "white") {
+    return { r: 255, g: 255, b: 255, a: 1 };
+  }
+  return cssHexColor(normalized) ?? cssRgbColor(normalized);
+}
+
+function cssColorIsOpaque(color: CssColorRgba | null): color is CssColorRgba {
+  return color !== null && color.a >= 0.99;
+}
+
+function cssColorsMatch(left: CssColorRgba | null, right: CssColorRgba | null) {
+  if (!cssColorIsOpaque(left) || !cssColorIsOpaque(right)) {
+    return false;
+  }
+  return (
+    Math.abs(left.r - right.r) <= 1 &&
+    Math.abs(left.g - right.g) <= 1 &&
+    Math.abs(left.b - right.b) <= 1
+  );
+}
+
 function cssPaintListLooksEmpty(value: string) {
   const normalized = value.trim().toLowerCase();
   return (
@@ -807,6 +923,16 @@ function cssLinePaints(
   );
 }
 
+function fieldTextPaintColor(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  const textFillColor = cssPropertyValue(style, current, "-webkit-text-fill-color");
+  return isMeaningfulCssValue(textFillColor) && textFillColor.toLowerCase() !== "currentcolor"
+    ? textFillColor
+    : cssPropertyValue(style, current, "color");
+}
+
 function fieldTextPaintIsSuppressed(
   style: CSSStyleDeclaration | undefined,
   current: HTMLElement,
@@ -831,12 +957,7 @@ function fieldTextPaintIsSuppressed(
     return true;
   }
 
-  const textFillColor = cssPropertyValue(style, current, "-webkit-text-fill-color");
-  const textColor =
-    isMeaningfulCssValue(textFillColor) && textFillColor.toLowerCase() !== "currentcolor"
-      ? textFillColor
-      : cssPropertyValue(style, current, "color");
-  return cssColorLooksTransparent(textColor);
+  return cssColorLooksTransparent(fieldTextPaintColor(style, current));
 }
 
 function fieldBackgroundPaintIsTransparent(
@@ -875,6 +996,84 @@ function fieldChromePaintIsTransparent(
   return (
     fieldTextPaintIsSuppressed(style, current, units) &&
     fieldBackgroundPaintIsTransparent(style, current) &&
+    fieldBorderPaintIsTransparent(style, current, units) &&
+    fieldOutlinePaintIsTransparent(style, current, units) &&
+    cssPaintListLooksEmpty(cssPropertyValue(style, current, "box-shadow")) &&
+    cssPaintListLooksEmpty(cssPropertyValue(style, current, "text-shadow"))
+  );
+}
+
+function nearestOpaqueAncestorBackgroundColor(current: HTMLElement) {
+  let ancestor = parentElementOrShadowHost(current);
+  while (ancestor) {
+    const style = ancestor.ownerDocument.defaultView?.getComputedStyle(ancestor);
+    const color = cssColorRgba(cssPropertyValue(style, ancestor, "background-color"));
+    if (cssColorIsOpaque(color)) {
+      return color;
+    }
+    ancestor = parentElementOrShadowHost(ancestor);
+  }
+  return { r: 255, g: 255, b: 255, a: 1 };
+}
+
+function fieldHasPlaceholderText(current: HTMLElement) {
+  const tagName = current.tagName.toLowerCase();
+  if (tagName !== "input" && tagName !== "textarea") {
+    return false;
+  }
+  return (current.getAttribute("placeholder") ?? "").trim() !== "";
+}
+
+function fieldOwnBackgroundColor(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return cssColorRgba(cssPropertyValue(style, current, "background-color"));
+}
+
+function fieldEffectiveBackgroundColor(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  const ownBackground = fieldOwnBackgroundColor(style, current);
+  return cssColorIsOpaque(ownBackground)
+    ? ownBackground
+    : nearestOpaqueAncestorBackgroundColor(current);
+}
+
+function fieldBackgroundPaintBlendsWithAncestor(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  if (!cssPaintListLooksEmpty(cssPropertyValue(style, current, "background-image"))) {
+    return false;
+  }
+  const ownBackground = fieldOwnBackgroundColor(style, current);
+  return (
+    !cssColorIsOpaque(ownBackground) ||
+    cssColorsMatch(ownBackground, nearestOpaqueAncestorBackgroundColor(current))
+  );
+}
+
+function fieldTextPaintBlendsWithBackground(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return cssColorsMatch(
+    cssColorRgba(fieldTextPaintColor(style, current)),
+    fieldEffectiveBackgroundColor(style, current)
+  );
+}
+
+function fieldChromePaintBlendsIntoBackground(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  units: { emPx?: number; remPx?: number }
+) {
+  return (
+    !fieldHasPlaceholderText(current) &&
+    fieldTextPaintBlendsWithBackground(style, current) &&
+    fieldBackgroundPaintBlendsWithAncestor(style, current) &&
     fieldBorderPaintIsTransparent(style, current, units) &&
     fieldOutlinePaintIsTransparent(style, current, units) &&
     cssPaintListLooksEmpty(cssPropertyValue(style, current, "box-shadow")) &&
@@ -3552,7 +3751,8 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       maskStyleSuppressesPaint(style, current, cssUnits) ||
       (current === element &&
         isCredentialLikeField(element) &&
-        fieldChromePaintIsTransparent(style, current, cssUnits))
+        (fieldChromePaintIsTransparent(style, current, cssUnits) ||
+          fieldChromePaintBlendsIntoBackground(style, current, cssUnits)))
     ) {
       addReason(reasons, "not-viewable:transparent");
     }
