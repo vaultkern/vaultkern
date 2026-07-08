@@ -2090,7 +2090,7 @@ function fieldTextPaintIsSuppressed(
   units: { emPx?: number; remPx?: number }
 ) {
   const fontSize = numericCssValue(cssPropertyValue(style, current, "font-size"), units);
-  if (fontSize !== null && fontSize <= 0) {
+  if (fontSize !== null && fontSize <= MIN_CREDENTIAL_FIELD_SIZE_PX) {
     return true;
   }
 

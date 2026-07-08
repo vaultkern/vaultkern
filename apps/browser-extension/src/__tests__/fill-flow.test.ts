@@ -517,6 +517,7 @@ describe("fillLoginForm", () => {
         <input id="paintless-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:transparent;-webkit-text-fill-color:transparent;outline:0;box-shadow:none;text-shadow:none" />
         <input id="same-color-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
         <input id="same-color-border-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:1px solid white;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
+        <input id="tiny-font-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;-webkit-text-fill-color:black;font-size:1px;outline:0;box-shadow:none;text-shadow:none" />
         <div style="background:black">
           <input id="filter-darkened-password" type="password" autocomplete="current-password" style="filter:brightness(0);background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
         </div>
@@ -861,6 +862,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#paintless-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#same-color-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#same-color-border-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#tiny-font-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#filter-darkened-password") as HTMLInputElement).value).toBe("");
     expect(
       (document.querySelector("#ancestor-filter-darkened-password") as HTMLInputElement).value

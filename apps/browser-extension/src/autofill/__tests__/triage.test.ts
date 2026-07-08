@@ -1756,6 +1756,7 @@ describe("autofill triage", () => {
         <input name="paintless_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:transparent;-webkit-text-fill-color:transparent;outline:0;box-shadow:none;text-shadow:none" />
         <input name="same_color_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
         <input name="same_color_border_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:1px solid white;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
+        <input name="tiny_font_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;-webkit-text-fill-color:black;font-size:1px;outline:0;box-shadow:none;text-shadow:none" />
         <div style="background:black">
           <input name="filter_darkened_password" type="password" autocomplete="current-password" style="filter:brightness(0);background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
         </div>
@@ -1877,6 +1878,7 @@ describe("autofill triage", () => {
       "paintless_password",
       "same_color_password",
       "same_color_border_password",
+      "tiny_font_password",
       "filter_darkened_password",
       "ancestor_filter_darkened_password",
       "filter_contrast_password",
