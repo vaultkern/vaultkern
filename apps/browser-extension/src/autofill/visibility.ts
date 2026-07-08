@@ -668,21 +668,49 @@ function maskImageFullyTransparent(value: string | undefined) {
   return colorStops.length > 0 && colorStops.every(cssColorLooksTransparent);
 }
 
-function maskSizeFullyCollapses(
+function maskRepeatRepeatsAxis(value: string | undefined, axis: "x" | "y") {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  if (normalized === "repeat-x") {
+    return axis === "x";
+  }
+  if (normalized === "repeat-y") {
+    return axis === "y";
+  }
+
+  const tokens = splitCssFunctionArgs(normalized);
+  const first = tokens[0] ?? "repeat";
+  const second = tokens[1] ?? first;
+  const axisValue = axis === "x" ? first : second;
+  return axisValue !== "no-repeat";
+}
+
+function maskSizeSuppressesPaint(
   value: string | undefined,
+  repeatValue: string | undefined,
   units: { emPx?: number; remPx?: number }
 ) {
   const normalized = value?.trim().toLowerCase();
   if (!normalized || normalized === "auto") {
     return false;
   }
-  return splitCssCommaList(normalized).some((layer) => {
+  const repeatLayers = splitCssCommaList(repeatValue?.trim().toLowerCase() ?? "");
+  return splitCssCommaList(normalized).some((layer, index) => {
+    const repeatLayer = repeatLayers[index] ?? repeatLayers[repeatLayers.length - 1];
     const [width, height = width] = splitCssFunctionArgs(layer);
     const widthPx = width === undefined ? null : cssLengthToPx(width, 0, units);
     const heightPx = height === undefined ? null : cssLengthToPx(height, 0, units);
     return (
       (widthPx !== null && widthPx <= 0) ||
-      (heightPx !== null && heightPx <= 0)
+      (heightPx !== null && heightPx <= 0) ||
+      (widthPx !== null &&
+        widthPx <= MIN_CREDENTIAL_FIELD_SIZE_PX &&
+        !maskRepeatRepeatsAxis(repeatLayer, "x")) ||
+      (heightPx !== null &&
+        heightPx <= MIN_CREDENTIAL_FIELD_SIZE_PX &&
+        !maskRepeatRepeatsAxis(repeatLayer, "y"))
     );
   });
 }
@@ -775,8 +803,16 @@ function maskStyleSuppressesPaint(
     return true;
   }
   return (
-    maskSizeFullyCollapses(cssPropertyValue(style, current, "mask-size"), units) ||
-    maskSizeFullyCollapses(cssPropertyValue(style, current, "-webkit-mask-size"), units)
+    maskSizeSuppressesPaint(
+      cssPropertyValue(style, current, "mask-size"),
+      cssPropertyValue(style, current, "mask-repeat"),
+      units
+    ) ||
+    maskSizeSuppressesPaint(
+      cssPropertyValue(style, current, "-webkit-mask-size"),
+      cssPropertyValue(style, current, "-webkit-mask-repeat"),
+      units
+    )
   );
 }
 

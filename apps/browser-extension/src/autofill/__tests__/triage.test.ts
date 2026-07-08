@@ -1444,6 +1444,7 @@ describe("autofill triage", () => {
         <input name="stop_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
         <input name="url_mask_password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
+        <input name="tiny_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
         <input name="svg_filter_password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
         <input name="svg_filter_discrete_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroDiscrete)" />
         <input name="svg_filter_matrix_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
@@ -1481,6 +1482,7 @@ describe("autofill triage", () => {
       "stop_mask_password",
       "url_mask_password",
       "zero_mask_password",
+      "tiny_mask_password",
       "svg_filter_password",
       "svg_filter_discrete_password",
       "svg_filter_matrix_password",
@@ -1500,6 +1502,23 @@ describe("autofill triage", () => {
       expect(fieldByName(report, name).reasons).toContain("not-viewable:zero-size");
     }
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("keeps repeated paint masks viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" />
+        <input name="password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:repeat" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
   });
 
   it("treats fields whose final rect is after the viewport as not viewable", () => {
