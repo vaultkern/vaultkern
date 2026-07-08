@@ -2582,6 +2582,7 @@ describe("autofill triage", () => {
           <clipPath id="zeroUseClip"><use href="#zeroRect" /></clipPath>
           <clipPath id="defsUseZeroClip"><defs><rect id="defsZeroRect" width="0" height="0" /></defs><use href="#defsZeroRect" /></clipPath>
           <clipPath id="anchorZeroClip"><a><rect width="0" height="0" /></a></clipPath>
+          <clipPath id="switchZeroClip"><switch><rect width="0" height="0" /><rect width="200" height="30" /></switch></clipPath>
           <clipPath id="metadataZeroClip"><title>decorative title</title><rect width="0" height="0" /></clipPath>
           <rect id="visibleRect" width="200" height="30" />
           <clipPath id="nestedAttrZeroClip"><rect width="200" height="30" clip-path="url(#zeroClip)" /></clipPath>
@@ -2621,6 +2622,7 @@ describe("autofill triage", () => {
         <input name="url_use_password" type="password" autocomplete="current-password" style="clip-path:url(#zeroUseClip)" />
         <input name="url_defs_use_password" type="password" autocomplete="current-password" style="clip-path:url(#defsUseZeroClip)" />
         <input name="url_anchor_password" type="password" autocomplete="current-password" style="clip-path:url(#anchorZeroClip)" />
+        <input name="url_switch_password" type="password" autocomplete="current-password" style="clip-path:url(#switchZeroClip)" />
         <input name="url_metadata_password" type="password" autocomplete="current-password" style="clip-path:url(#metadataZeroClip)" />
         <input name="url_nested_attr_password" type="password" autocomplete="current-password" style="clip-path:url(#nestedAttrZeroClip)" />
         <input name="url_nested_style_password" type="password" autocomplete="current-password" style="clip-path:url(#nestedStyleZeroClip)" />
@@ -2784,6 +2786,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "url_anchor_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "url_anchor_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_switch_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_switch_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "url_metadata_password").qualifiedAs).toBe("ignored");

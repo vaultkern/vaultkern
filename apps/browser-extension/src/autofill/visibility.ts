@@ -4710,6 +4710,12 @@ function svgClipShapeVisibleBounds(
       ? { left: 0, top: 0, right: 0, bottom: 0 }
       : svgClipShapeVisibleBounds(current, target, units, seen, useMatrix, coordinateSpace);
   }
+  if (tagName === "switch") {
+    const firstChild = shape.children[0];
+    return firstChild === undefined
+      ? { left: 0, top: 0, right: 0, bottom: 0 }
+      : svgClipShapeVisibleBounds(current, firstChild, units, seen, matrix, coordinateSpace);
+  }
   if (tagName === "rect") {
     const x = svgLengthToPx(shape.getAttribute("x"), rect.width, units, coordinateSpace);
     const y = svgLengthToPx(shape.getAttribute("y"), rect.height, units, coordinateSpace);
@@ -5922,7 +5928,7 @@ function svgClipElementIsNonRendering(tagName: string) {
 }
 
 function svgClipElementIsContainer(tagName: string) {
-  return tagName === "g" || tagName === "svg" || tagName === "a" || tagName === "switch";
+  return tagName === "g" || tagName === "svg" || tagName === "a";
 }
 
 function svgElementClipPathValues(shape: Element, style: CSSStyleDeclaration | undefined) {
@@ -5982,6 +5988,13 @@ function svgClipShapeSuppressesField(
     return (
       target === null ||
       svgClipShapeSuppressesField(current, target, units, seen, useMatrix, coordinateSpace)
+    );
+  }
+  if (tagName === "switch") {
+    const firstChild = shape.children[0];
+    return (
+      firstChild === undefined ||
+      svgClipShapeSuppressesField(current, firstChild, units, seen, matrix, coordinateSpace)
     );
   }
   if (tagName === "rect") {

@@ -2042,6 +2042,7 @@ describe("fillLoginForm", () => {
           <clipPath id="zeroUseClip"><use href="#zeroRect" /></clipPath>
           <clipPath id="defsUseZeroClip"><defs><rect id="defsZeroRect" width="0" height="0" /></defs><use href="#defsZeroRect" /></clipPath>
           <clipPath id="anchorZeroClip"><a><rect width="0" height="0" /></a></clipPath>
+          <clipPath id="switchZeroClip"><switch><rect width="0" height="0" /><rect width="200" height="30" /></switch></clipPath>
           <clipPath id="metadataZeroClip"><title>decorative title</title><rect width="0" height="0" /></clipPath>
           <rect id="visibleRect" width="200" height="30" />
           <clipPath id="nestedAttrZeroClip"><rect width="200" height="30" clip-path="url(#zeroClip)" /></clipPath>
@@ -2087,6 +2088,7 @@ describe("fillLoginForm", () => {
         <input id="url-use-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroUseClip)" />
         <input id="url-defs-use-password" type="password" autocomplete="current-password" style="clip-path:url(#defsUseZeroClip)" />
         <input id="url-anchor-password" type="password" autocomplete="current-password" style="clip-path:url(#anchorZeroClip)" />
+        <input id="url-switch-password" type="password" autocomplete="current-password" style="clip-path:url(#switchZeroClip)" />
         <input id="url-metadata-password" type="password" autocomplete="current-password" style="clip-path:url(#metadataZeroClip)" />
         <input id="url-nested-attr-password" type="password" autocomplete="current-password" style="clip-path:url(#nestedAttrZeroClip)" />
         <input id="url-nested-style-password" type="password" autocomplete="current-password" style="clip-path:url(#nestedStyleZeroClip)" />
@@ -2194,6 +2196,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#url-use-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-defs-use-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-anchor-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-switch-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-metadata-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-nested-attr-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-nested-style-password") as HTMLInputElement).value).toBe("");
