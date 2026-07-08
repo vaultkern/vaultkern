@@ -2854,6 +2854,9 @@ describe("autofill triage", () => {
           <mask id="rightMask">
             <rect x="320" y="0" width="80" height="40" fill="white" />
           </mask>
+          <mask id="rightEvenOddMask">
+            <path fill="white" fill-rule="evenodd" d="M0 0 L400 0 L400 40 L0 40 Z M0 0 L240 0 L240 40 L0 40 Z" />
+          </mask>
         </svg>
         <label id="css-mask-label" for="ancestor-css-mask-password">Password</label>
         <div id="ancestor-css-mask" style="width:400px;height:40px;mask-image:linear-gradient(black,black);mask-size:80px 100%;mask-repeat:no-repeat;mask-position:320px 0">
@@ -2862,6 +2865,14 @@ describe("autofill triage", () => {
         <label id="svg-mask-label" for="ancestor-svg-mask-password">Password</label>
         <div id="ancestor-svg-mask" style="width:400px;height:40px;mask:url(#rightMask)">
           <input id="ancestor-svg-mask-password" name="ancestor_svg_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <label id="css-gradient-mask-label" for="ancestor-css-gradient-mask-password">Password</label>
+        <div id="ancestor-css-gradient-mask" style="width:400px;height:40px;mask-image:linear-gradient(to right, transparent 0 240px, black 240px 100%)">
+          <input id="ancestor-css-gradient-mask-password" name="ancestor_css_gradient_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <label id="svg-evenodd-mask-label" for="ancestor-svg-evenodd-mask-password">Password</label>
+        <div id="ancestor-svg-evenodd-mask" style="width:400px;height:40px;mask:url(#rightEvenOddMask)">
+          <input id="ancestor-svg-evenodd-mask-password" name="ancestor_svg_evenodd_mask_password" type="password" autocomplete="current-password" />
         </div>
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
@@ -2872,16 +2883,44 @@ describe("autofill triage", () => {
     const svgMaskPassword = document.querySelector(
       "#ancestor-svg-mask-password"
     ) as HTMLInputElement;
+    const cssGradientMaskPassword = document.querySelector(
+      "#ancestor-css-gradient-mask-password"
+    ) as HTMLInputElement;
+    const svgEvenOddMaskPassword = document.querySelector(
+      "#ancestor-svg-evenodd-mask-password"
+    ) as HTMLInputElement;
     const realPassword = document.querySelector(
       'input[name="real_password"]'
     ) as HTMLInputElement;
     const cssMaskLabel = document.querySelector("#css-mask-label") as HTMLLabelElement;
     const svgMaskLabel = document.querySelector("#svg-mask-label") as HTMLLabelElement;
+    const cssGradientMaskLabel = document.querySelector(
+      "#css-gradient-mask-label"
+    ) as HTMLLabelElement;
+    const svgEvenOddMaskLabel = document.querySelector(
+      "#svg-evenodd-mask-label"
+    ) as HTMLLabelElement;
     stubElementRect(cssMaskPassword, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
     stubElementRect(svgMaskPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
-    stubElementRect(realPassword, elementRect({ left: 24, top: 152, width: 185, height: 21 }));
+    stubElementRect(
+      cssGradientMaskPassword,
+      elementRect({ left: 24, top: 152, width: 185, height: 21 })
+    );
+    stubElementRect(
+      svgEvenOddMaskPassword,
+      elementRect({ left: 24, top: 208, width: 185, height: 21 })
+    );
+    stubElementRect(realPassword, elementRect({ left: 24, top: 264, width: 185, height: 21 }));
     stubElementRect(cssMaskLabel, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
     stubElementRect(svgMaskLabel, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    stubElementRect(
+      cssGradientMaskLabel,
+      elementRect({ left: 24, top: 152, width: 185, height: 21 })
+    );
+    stubElementRect(
+      svgEvenOddMaskLabel,
+      elementRect({ left: 24, top: 208, width: 185, height: 21 })
+    );
     stubElementRect(
       document.querySelector("#ancestor-css-mask") as HTMLDivElement,
       elementRect({ left: 0, top: 32, width: 400, height: 40 })
@@ -2889,6 +2928,14 @@ describe("autofill triage", () => {
     stubElementRect(
       document.querySelector("#ancestor-svg-mask") as HTMLDivElement,
       elementRect({ left: 0, top: 88, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-css-gradient-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 144, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-svg-evenodd-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 200, width: 400, height: 40 })
     );
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
@@ -2901,6 +2948,12 @@ describe("autofill triage", () => {
           return svgMaskLabel;
         }
         if (x >= 24 && x <= 209 && y >= 152 && y <= 173) {
+          return cssGradientMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 208 && y <= 229) {
+          return svgEvenOddMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 264 && y <= 285) {
           return realPassword;
         }
         return document.body;
@@ -2913,7 +2966,12 @@ describe("autofill triage", () => {
       value: originalElementFromPoint
     });
 
-    for (const name of ["ancestor_css_mask_password", "ancestor_svg_mask_password"]) {
+    for (const name of [
+      "ancestor_css_mask_password",
+      "ancestor_svg_mask_password",
+      "ancestor_css_gradient_mask_password",
+      "ancestor_svg_evenodd_mask_password"
+    ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:transparent");
     }

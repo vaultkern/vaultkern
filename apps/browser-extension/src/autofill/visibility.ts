@@ -1798,6 +1798,225 @@ function maskImageFullySuppressesPaint(value: string | undefined, modeValue: str
   );
 }
 
+function maskColorStopPaints(value: string, modeValue: string | undefined) {
+  const color = cssColorRgba(value);
+  return (
+    !cssColorLooksTransparent(value) &&
+    (color === null || color.a > MIN_VISIBLE_OPACITY) &&
+    !(maskModePaintsByLuminance(modeValue) && cssColorLooksBlack(value))
+  );
+}
+
+type LinearMaskGradientDirection = { axis: "x" | "y"; reverse: boolean };
+
+function linearMaskGradientDirection(value: string): LinearMaskGradientDirection | null {
+  const tokens = splitCssFunctionArgs(value.trim().toLowerCase());
+  if (tokens.length === 2 && tokens[0] === "to") {
+    if (tokens[1] === "right") {
+      return { axis: "x", reverse: false };
+    }
+    if (tokens[1] === "left") {
+      return { axis: "x", reverse: true };
+    }
+    if (tokens[1] === "bottom") {
+      return { axis: "y", reverse: false };
+    }
+    if (tokens[1] === "top") {
+      return { axis: "y", reverse: true };
+    }
+  }
+
+  const angle = tokens[0]?.match(/^(-?\d+(?:\.\d+)?)deg$/);
+  if (!angle) {
+    return null;
+  }
+  const normalizedAngle = ((Number.parseFloat(angle[1]) % 360) + 360) % 360;
+  if (Math.abs(normalizedAngle - 90) <= 0.001) {
+    return { axis: "x", reverse: false };
+  }
+  if (Math.abs(normalizedAngle - 270) <= 0.001) {
+    return { axis: "x", reverse: true };
+  }
+  if (Math.abs(normalizedAngle - 180) <= 0.001) {
+    return { axis: "y", reverse: true };
+  }
+  if (normalizedAngle <= 0.001 || Math.abs(normalizedAngle - 360) <= 0.001) {
+    return { axis: "y", reverse: false };
+  }
+  return null;
+}
+
+function cssMaskLinearGradientStopPoints(
+  value: string,
+  axisSize: number,
+  modeValue: string | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value.trim().toLowerCase();
+  const color = cssColorStopColor(normalized);
+  if (color === null) {
+    return null;
+  }
+
+  const positions = splitCssFunctionArgs(normalized.slice(color.length).trim());
+  if (positions.length === 0) {
+    return null;
+  }
+
+  const paints = maskColorStopPaints(color, modeValue);
+  const points = positions.slice(0, 2).map((position) => {
+    const offset = cssLengthToPx(position, axisSize, units);
+    return offset === null ? null : { offset, paints };
+  });
+  return points.every((point): point is { offset: number; paints: boolean } => point !== null)
+    ? points
+    : null;
+}
+
+function cssMaskLinearGradientPaintedRanges(
+  body: string,
+  axisSize: number,
+  modeValue: string | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const parts = splitCssCommaList(body);
+  let direction: LinearMaskGradientDirection = { axis: "y", reverse: false };
+  let stopParts = parts;
+  const parsedDirection = linearMaskGradientDirection(parts[0] ?? "");
+  if (parsedDirection !== null) {
+    direction = parsedDirection;
+    stopParts = parts.slice(1);
+  } else if (cssColorStopColor(parts[0] ?? "") === null) {
+    return null;
+  }
+
+  const points: Array<{ offset: number; paints: boolean }> = [];
+  for (const part of stopParts) {
+    const stopPoints = cssMaskLinearGradientStopPoints(part, axisSize, modeValue, units);
+    if (stopPoints === null) {
+      return null;
+    }
+    points.push(...stopPoints);
+  }
+  if (points.length < 2) {
+    return null;
+  }
+  const ranges: Array<{ start: number; end: number }> = [];
+  const addRange = (start: number, end: number) => {
+    const rangeStart = Math.min(start, end);
+    const rangeEnd = Math.max(start, end);
+    if (rangeEnd > rangeStart) {
+      ranges.push({ start: rangeStart, end: rangeEnd });
+    }
+  };
+
+  const [first] = points;
+  if (first.paints && first.offset > 0) {
+    addRange(0, first.offset);
+  }
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const left = points[index];
+    const right = points[index + 1];
+    if (left.paints || right.paints) {
+      addRange(left.offset, right.offset);
+    }
+  }
+  const last = points[points.length - 1];
+  if (last.paints && last.offset < axisSize) {
+    addRange(last.offset, axisSize);
+  }
+
+  return { direction, ranges };
+}
+
+function cssMaskLinearGradientVisibleBounds(
+  layer: string,
+  positionValue: string | undefined,
+  sizeValue: string | undefined,
+  repeatValue: string | undefined,
+  current: HTMLElement,
+  modeValue: string | undefined,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const normalized = layer.trim().toLowerCase();
+  if (!normalized.startsWith("linear-gradient(")) {
+    return null;
+  }
+  const body = cssFunctionBody(normalized, "linear-gradient");
+  if (body === null) {
+    return null;
+  }
+
+  const rect = current.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return null;
+  }
+  const size = maskLayerSize(sizeValue, rect, units);
+  if (size.width <= 0 || size.height <= 0) {
+    return null;
+  }
+  const repeatsX = maskRepeatRepeatsAxis(repeatValue, "x");
+  const repeatsY = maskRepeatRepeatsAxis(repeatValue, "y");
+  if ((repeatsX && size.width < rect.width) || (repeatsY && size.height < rect.height)) {
+    return null;
+  }
+
+  const position = positionValue?.trim() || "0% 0%";
+  const x = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "x"),
+    rect.width,
+    size.width,
+    units
+  );
+  const y = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "y"),
+    rect.height,
+    size.height,
+    units
+  );
+  if (
+    (x === null && Math.abs(rect.width - size.width) > 0.001) ||
+    (y === null && Math.abs(rect.height - size.height) > 0.001)
+  ) {
+    return null;
+  }
+
+  const axisSize = bodyAxisSize(body, size);
+  const painted = cssMaskLinearGradientPaintedRanges(body, axisSize, modeValue, units);
+  if (painted === null || painted.ranges.length === 0) {
+    return null;
+  }
+
+  const bounds = painted.ranges.map((range): RectBounds => {
+    const start = painted.direction.reverse ? axisSize - range.end : range.start;
+    const end = painted.direction.reverse ? axisSize - range.start : range.end;
+    if (painted.direction.axis === "x") {
+      return {
+        left: (x ?? 0) + start,
+        top: y ?? 0,
+        right: (x ?? 0) + end,
+        bottom: (y ?? 0) + size.height
+      };
+    }
+    return {
+      left: x ?? 0,
+      top: (y ?? 0) + start,
+      right: (x ?? 0) + size.width,
+      bottom: (y ?? 0) + end
+    };
+  });
+  return unionBounds(bounds);
+}
+
+function bodyAxisSize(
+  body: string,
+  size: { width: number; height: number }
+) {
+  const parsedDirection = linearMaskGradientDirection(splitCssCommaList(body)[0] ?? "");
+  const axis = parsedDirection?.axis ?? "y";
+  return axis === "x" ? size.width : size.height;
+}
+
 function maskRepeatRepeatsAxis(value: string | undefined, axis: "x" | "y") {
   const normalized = value?.trim().toLowerCase();
   if (!normalized) {
@@ -2099,6 +2318,18 @@ function cssMaskVisibleBounds(
     }
     if (maskImageFullySuppressesPaint(layer, modeValue)) {
       return [];
+    }
+    const gradientBounds = cssMaskLinearGradientVisibleBounds(
+      layer,
+      maskLayerValue(positionLayers, index),
+      maskLayerValue(sizeLayers, index),
+      maskLayerValue(repeatLayers, index),
+      current,
+      modeValue,
+      units
+    );
+    if (gradientBounds !== null) {
+      return [gradientBounds];
     }
     const layerBounds = maskLayerVisibleBounds(
       maskLayerValue(positionLayers, index),
