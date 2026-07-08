@@ -2042,6 +2042,25 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats credential fields hidden by data SVG background images as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="background:black">
+          <input name="data_svg_background_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background-color:transparent;background-image:url(data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E);background-size:100% 100%;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "data_svg_background_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "data_svg_background_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats credential fields hidden by CSS grayscale filters as not viewable", () => {
     document.body.innerHTML = `
       <form>

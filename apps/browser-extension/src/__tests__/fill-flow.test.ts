@@ -465,6 +465,22 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys hidden by data SVG background images", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="background:black">
+          <input id="data-svg-background-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background-color:transparent;background-image:url(data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E);background-size:100% 100%;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#data-svg-background-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys hidden by CSS grayscale filters", () => {
     document.body.innerHTML = `
       <form>

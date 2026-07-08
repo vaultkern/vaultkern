@@ -3697,7 +3697,7 @@ function fieldChromePaintBlendsIntoBackground(
   const backgroundImage = cssPropertyValue(style, current, "background-image");
   const hasUnmodeledBackgroundImage =
     !cssPaintListLooksEmpty(backgroundImage) &&
-    cssBackgroundImageSolidColor(backgroundImage) === null;
+    cssBackgroundImageSolidColor(backgroundImage, current) === null;
   const backgroundPaint = nearestOpaqueAncestorBackground(current);
   const ancestorBackground =
     cssFilterPaintColor(
@@ -3844,14 +3844,16 @@ function cssGradientSolidColor(value: string) {
   return rest.every((color) => cssColorChannelsMatch(first, color)) ? first : null;
 }
 
-function cssBackgroundImageSolidColor(value: string) {
+function cssBackgroundImageSolidColor(value: string, current?: HTMLElement) {
   if (cssPaintListLooksEmpty(value)) {
     return null;
   }
 
   let result: CssColorRgba = { r: 0, g: 0, b: 0, a: 0 };
   for (const layer of splitCssCommaList(value).reverse()) {
-    const layerColor = cssGradientSolidColor(layer);
+    const layerColor =
+      cssGradientSolidColor(layer) ??
+      (current === undefined ? null : dataSvgBackgroundImageSolidColor(current, layer));
     if (layerColor === null) {
       return null;
     }
@@ -3868,7 +3870,8 @@ function elementBackgroundPaintColor(
     cssColorRgba(cssPropertyValue(style, current, "background-color")) ??
     ({ r: 0, g: 0, b: 0, a: 0 } satisfies CssColorRgba);
   const backgroundImage = cssBackgroundImageSolidColor(
-    cssPropertyValue(style, current, "background-image")
+    cssPropertyValue(style, current, "background-image"),
+    current
   );
   return backgroundImage === null
     ? backgroundColor
@@ -3996,6 +3999,84 @@ function dataSvgReferencedElement(current: Element, value: string) {
     return null;
   }
   return descendantElementById(parsed.root, parsed.fragmentId);
+}
+
+function svgBackgroundImageShapeColors(
+  shape: Element,
+  seen: Set<Element> = new Set()
+): CssColorRgba[] | null {
+  if (seen.has(shape)) {
+    return null;
+  }
+  seen.add(shape);
+
+  const tagName = shape.tagName.toLowerCase();
+  const style = shape.ownerDocument.defaultView?.getComputedStyle(shape);
+  const inlineStyle = (shape as SVGElement).style;
+  const display =
+    shape.getAttribute("display") ??
+    inlineStyle?.getPropertyValue("display") ??
+    style?.getPropertyValue("display");
+  const visibility =
+    shape.getAttribute("visibility") ??
+    inlineStyle?.getPropertyValue("visibility") ??
+    style?.getPropertyValue("visibility");
+  if (display === "none" || visibility === "hidden" || visibility === "collapse") {
+    return [];
+  }
+
+  const opacity = svgElementOpacityValue(shape, "opacity", style);
+  if (isEffectivelyTransparent(opacity)) {
+    return [];
+  }
+
+  if (tagName === "use") {
+    const href = svgElementHrefValue(shape);
+    const targetId = href?.startsWith("#") ? href.slice(1) : null;
+    const target = targetId ? shape.ownerDocument.getElementById(targetId) : null;
+    return target === null ? null : svgBackgroundImageShapeColors(target, seen);
+  }
+
+  if (tagName === "svg" || tagName === "g" || tagName === "a") {
+    const childColors = Array.from(shape.children).map((child) =>
+      svgBackgroundImageShapeColors(child, seen)
+    );
+    return childColors.some((colors) => colors === null)
+      ? null
+      : childColors.flatMap((colors) => colors ?? []);
+  }
+
+  if (svgClipElementIsNonRendering(tagName)) {
+    return [];
+  }
+
+  const fill = svgPaintValue(shape, style, "fill", "black");
+  if (fill.trim().toLowerCase() === "none" || cssColorLooksTransparent(fill)) {
+    return [];
+  }
+  const fillColor = cssColorRgba(fill);
+  if (fillColor === null) {
+    return null;
+  }
+  const fillOpacity = svgElementOpacityValue(shape, "fill-opacity", style);
+  return [{ ...fillColor, a: clampCssAlphaChannel(fillColor.a * opacity * fillOpacity) }];
+}
+
+function dataSvgBackgroundImageSolidColor(current: Element, value: string) {
+  const urls = cssUrlValues(value);
+  if (urls.length !== 1) {
+    return null;
+  }
+  const parsed = parseDataSvgDocument(current, urls[0]);
+  if (parsed === null || parsed.fragmentId !== null) {
+    return null;
+  }
+  const colors = svgBackgroundImageShapeColors(parsed.root);
+  if (colors === null || colors.length === 0) {
+    return null;
+  }
+  const [first, ...rest] = colors;
+  return rest.every((color) => cssColorChannelsMatch(first, color)) ? first : null;
 }
 
 function svgPaintValue(
