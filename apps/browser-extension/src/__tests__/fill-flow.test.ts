@@ -705,6 +705,9 @@ describe("fillLoginForm", () => {
           <clipPath id="zeroPolygonClip"><polygon points="0,0 0,0 0,0" /></clipPath>
           <clipPath id="zeroPathClip"><path d="M0 0Z" /></clipPath>
           <clipPath id="zeroUseClip"><use href="#zeroRect" /></clipPath>
+          <clipPath id="defsUseZeroClip"><defs><rect id="defsZeroRect" width="0" height="0" /></defs><use href="#defsZeroRect" /></clipPath>
+          <clipPath id="anchorZeroClip"><a><rect width="0" height="0" /></a></clipPath>
+          <clipPath id="metadataZeroClip"><title>decorative title</title><rect width="0" height="0" /></clipPath>
           <clipPath id="emptyGroupClip"><g></g></clipPath>
           <clipPath id="lineClip"><line x1="0" y1="0" x2="200" y2="0" /></clipPath>
           <clipPath id="emptyTextClip"><text></text></clipPath>
@@ -741,6 +744,9 @@ describe("fillLoginForm", () => {
         <input id="url-polygon-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPolygonClip)" />
         <input id="url-path-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroPathClip)" />
         <input id="url-use-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroUseClip)" />
+        <input id="url-defs-use-password" type="password" autocomplete="current-password" style="clip-path:url(#defsUseZeroClip)" />
+        <input id="url-anchor-password" type="password" autocomplete="current-password" style="clip-path:url(#anchorZeroClip)" />
+        <input id="url-metadata-password" type="password" autocomplete="current-password" style="clip-path:url(#metadataZeroClip)" />
         <input id="url-empty-group-password" type="password" autocomplete="current-password" style="clip-path:url(#emptyGroupClip)" />
         <input id="url-line-password" type="password" autocomplete="current-password" style="clip-path:url(#lineClip)" />
         <input id="url-empty-text-password" type="password" autocomplete="current-password" style="clip-path:url(#emptyTextClip)" />
@@ -827,6 +833,9 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#url-polygon-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-path-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-use-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-defs-use-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-anchor-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-metadata-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-empty-group-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-line-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-empty-text-password") as HTMLInputElement).value).toBe("");

@@ -2570,6 +2570,29 @@ function shapeClipSuppressesField(
   return points.length > 0 && pointRegionSuppressesField(points, rect, true);
 }
 
+function svgClipElementIsNonRendering(tagName: string) {
+  return [
+    "defs",
+    "desc",
+    "metadata",
+    "title",
+    "style",
+    "script",
+    "symbol",
+    "marker",
+    "pattern",
+    "lineargradient",
+    "radialgradient",
+    "filter",
+    "mask",
+    "clippath"
+  ].includes(tagName);
+}
+
+function svgClipElementIsContainer(tagName: string) {
+  return tagName === "g" || tagName === "svg" || tagName === "a" || tagName === "switch";
+}
+
 function svgClipShapeSuppressesField(
   current: HTMLElement,
   shape: Element,
@@ -2594,6 +2617,9 @@ function svgClipShapeSuppressesField(
   const rect = current.getBoundingClientRect();
   const tagName = shape.tagName.toLowerCase();
   const matrix = svgElementTransformMatrix(shape, inheritedMatrix, units);
+  if (svgClipElementIsNonRendering(tagName)) {
+    return true;
+  }
   if (tagName === "use") {
     const href =
       shape.getAttribute("href") ??
@@ -2734,7 +2760,7 @@ function svgClipShapeSuppressesField(
     const points = svgPathDataToPoints(pathData);
     return pathRegionSuppressesField(transformSvgPoints(points, matrix), rect);
   }
-  if (tagName === "g" || tagName === "svg") {
+  if (svgClipElementIsContainer(tagName)) {
     const children = Array.from(shape.children);
     return children.length === 0 || children.every((child) =>
       svgClipShapeSuppressesField(current, child, units, seen, matrix, coordinateSpace)
