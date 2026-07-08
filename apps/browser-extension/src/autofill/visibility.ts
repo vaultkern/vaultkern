@@ -252,7 +252,7 @@ function hasClippingOverflow(current: HTMLElement, style: CSSStyleDeclaration | 
     cssPropertyValue(style, current, "overflow-x"),
     cssPropertyValue(style, current, "overflow-y")
   ].join(" ");
-  return /\b(hidden|clip)\b/.test(overflow);
+  return /\b(hidden|clip|auto|scroll|overlay)\b/.test(overflow);
 }
 
 function hasPaintContainment(current: HTMLElement, style: CSSStyleDeclaration | undefined) {

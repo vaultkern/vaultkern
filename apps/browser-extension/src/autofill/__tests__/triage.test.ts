@@ -1286,6 +1286,9 @@ describe("autofill triage", () => {
         <div class="computed-clip-box">
           <input name="computed_overflow_email" type="email" autocomplete="username" />
         </div>
+        <div id="auto-overflow-clip" style="position:relative;width:185px;height:21px;overflow:auto">
+          <input name="auto_overflow_clipped_email" type="email" autocomplete="username" style="position:absolute;left:181px;width:185px;height:21px" />
+        </div>
         <input name="transparent_email" type="email" autocomplete="username" style="opacity:0" />
         <input name="real_user" type="email" autocomplete="username" />
         <input name="real_password" type="password" autocomplete="current-password" />
@@ -1321,6 +1324,14 @@ describe("autofill triage", () => {
         })
       );
     }
+    stubElementRect(
+      document.querySelector("#auto-overflow-clip") as HTMLDivElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector('input[name="auto_overflow_clipped_email"]') as HTMLInputElement,
+      elementRect({ left: 205, top: 40, width: 185, height: 21 })
+    );
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -1406,6 +1417,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "computed_overflow_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "computed_overflow_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "auto_overflow_clipped_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "auto_overflow_clipped_email").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "transparent_email").qualifiedAs).toBe("ignored");

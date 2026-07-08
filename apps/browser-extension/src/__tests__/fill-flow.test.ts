@@ -2666,6 +2666,12 @@ describe("fillLoginForm", () => {
         <div id="ancestor-strip-clip" style="width:185px;height:21px;overflow:hidden">
           <input id="ancestor-strip-clipped-password" type="password" autocomplete="current-password" style="position:relative;left:-181px" />
         </div>
+        <div id="auto-overflow-clip" style="position:relative;width:185px;height:21px;overflow:auto">
+          <input id="auto-overflow-clipped-password" type="password" autocomplete="current-password" style="position:absolute;left:181px;width:185px;height:21px" />
+        </div>
+        <div id="scroll-overflow-clip" style="position:relative;width:185px;height:21px;overflow:scroll">
+          <input id="scroll-overflow-clipped-password" type="password" autocomplete="current-password" style="position:absolute;left:181px;width:185px;height:21px" />
+        </div>
         <div style="width:2px;height:2px;contain:paint">
           <input id="paint-contained-password" type="password" autocomplete="current-password" />
         </div>
@@ -2724,6 +2730,21 @@ describe("fillLoginForm", () => {
       document.querySelector("#ancestor-strip-clipped-password") as HTMLInputElement,
       elementRect({ left: -157, top: 40, width: 185, height: 21 })
     );
+    for (const id of ["auto-overflow-clip", "scroll-overflow-clip"]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLDivElement,
+        elementRect({ left: 24, top: 40, width: 185, height: 21 })
+      );
+    }
+    for (const id of [
+      "auto-overflow-clipped-password",
+      "scroll-overflow-clipped-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 205, top: 40, width: 185, height: 21 })
+      );
+    }
 
     fillLoginForm({ password: "secret" });
 
@@ -2781,6 +2802,12 @@ describe("fillLoginForm", () => {
     ).toBe("");
     expect(
       (document.querySelector("#ancestor-strip-clipped-password") as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (document.querySelector("#auto-overflow-clipped-password") as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (document.querySelector("#scroll-overflow-clipped-password") as HTMLInputElement).value
     ).toBe("");
     expect((document.querySelector("#paint-contained-password") as HTMLInputElement).value).toBe(
       ""
