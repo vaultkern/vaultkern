@@ -2175,6 +2175,9 @@ describe("autofill triage", () => {
         <input name="path_email" type="email" autocomplete="username" style='clip-path:path("M0 0 H185 V21 H0 Z")' />
         <input name="url_path_email" type="email" autocomplete="username" style="clip-path:url(#fullPathClip)" />
         <input name="nested_url_email" type="email" autocomplete="username" style="clip-path:url(#fullNestedClip)" />
+        <div id="wide-overflow-clip" style="width:185px;height:21px;overflow:hidden">
+          <input name="visible_partial_ancestor_clip_password" type="password" autocomplete="current-password" style="position:relative;left:-20px" />
+        </div>
         <input name="password" type="password" autocomplete="current-password" />
       </form>
       <input name="visible_circle_probe" type="text" style="clip-path:circle(closest-side at 50% 50%)" />
@@ -2185,6 +2188,7 @@ describe("autofill triage", () => {
       path_email: 100,
       url_path_email: 120,
       nested_url_email: 140,
+      visible_partial_ancestor_clip_password: 160,
       visible_circle_probe: 160,
       visible_ellipse_probe: 200
     };
@@ -2194,6 +2198,7 @@ describe("autofill triage", () => {
       "path_email",
       "url_path_email",
       "nested_url_email",
+      "visible_partial_ancestor_clip_password",
       "visible_circle_probe",
       "visible_ellipse_probe"
     ]) {
@@ -2207,6 +2212,10 @@ describe("autofill triage", () => {
         })
       );
     }
+    stubElementRect(
+      document.querySelector("#wide-overflow-clip") as HTMLDivElement,
+      elementRect({ left: 24, top: 160, width: 185, height: 21 })
+    );
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -2226,6 +2235,9 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "nested_url_email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "nested_url_email").reasons).not.toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "visible_partial_ancestor_clip_password").reasons).not.toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "visible_circle_probe").reasons).not.toContain(
@@ -2395,6 +2407,9 @@ describe("autofill triage", () => {
         <div style="width:2px;height:2px;overflow:hidden">
           <input name="ancestor_clipped_password" type="password" autocomplete="current-password" />
         </div>
+        <div id="ancestor-strip-clip" style="width:185px;height:21px;overflow:hidden">
+          <input name="ancestor_strip_clipped_password" type="password" autocomplete="current-password" style="position:relative;left:-181px" />
+        </div>
         <div style="width:2px;height:2px;contain:paint">
           <input name="paint_contained_password" type="password" autocomplete="current-password" />
         </div>
@@ -2432,6 +2447,14 @@ describe("autofill triage", () => {
         elementRect({ left: 24, top: 1208, width: 185, height: 21 })
       );
     }
+    stubElementRect(
+      document.querySelector("#ancestor-strip-clip") as HTMLDivElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector('input[name="ancestor_strip_clipped_password"]') as HTMLInputElement,
+      elementRect({ left: -157, top: 40, width: 185, height: 21 })
+    );
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -2589,6 +2612,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "ancestor_clipped_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "ancestor_clipped_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "ancestor_strip_clipped_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "ancestor_strip_clipped_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "paint_contained_password").qualifiedAs).toBe("ignored");

@@ -2545,6 +2545,33 @@ function isFullyClippedByAncestor(element: HTMLElement, ancestor: HTMLElement) {
   );
 }
 
+function clippedAncestorVisibleOverlapSuppressesField(
+  element: HTMLElement,
+  ancestor: HTMLElement
+) {
+  const elementRect = element.getBoundingClientRect();
+  const ancestorRect = ancestor.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(elementRect) || !hasMeaningfulClientRect(ancestorRect)) {
+    return false;
+  }
+
+  const width = Math.max(
+    0,
+    Math.min(elementRect.right, ancestorRect.right) - Math.max(elementRect.left, ancestorRect.left)
+  );
+  const height = Math.max(
+    0,
+    Math.min(elementRect.bottom, ancestorRect.bottom) - Math.max(elementRect.top, ancestorRect.top)
+  );
+  const area = width * height;
+  const elementArea = elementRect.width * elementRect.height;
+  return (
+    width <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    height <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    (elementArea > 0 && area <= elementArea * MIN_CLIPPED_VISIBLE_FRACTION)
+  );
+}
+
 function splitCssTopLevel(value: string, shouldSplit: (char: string) => boolean) {
   const parts: string[] = [];
   let current = "";
@@ -4272,7 +4299,9 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (
       current !== element &&
       (isClippedTinyAncestor(current, width, height, style) ||
-        (clipsDescendantPaint(current, style) && isFullyClippedByAncestor(element, current)))
+        (clipsDescendantPaint(current, style) &&
+          (isFullyClippedByAncestor(element, current) ||
+            clippedAncestorVisibleOverlapSuppressesField(element, current))))
     ) {
       addReason(reasons, "not-viewable:clipped");
     }

@@ -913,6 +913,9 @@ describe("fillLoginForm", () => {
         <div style="width:2px;height:2px;overflow:hidden">
           <input id="ancestor-clipped-password" type="password" autocomplete="current-password" />
         </div>
+        <div id="ancestor-strip-clip" style="width:185px;height:21px;overflow:hidden">
+          <input id="ancestor-strip-clipped-password" type="password" autocomplete="current-password" style="position:relative;left:-181px" />
+        </div>
         <div style="width:2px;height:2px;contain:paint">
           <input id="paint-contained-password" type="password" autocomplete="current-password" />
         </div>
@@ -956,6 +959,14 @@ describe("fillLoginForm", () => {
         elementRect({ left: 24, top: 1208, width: 185, height: 21 })
       );
     }
+    stubElementRect(
+      document.querySelector("#ancestor-strip-clip") as HTMLDivElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-strip-clipped-password") as HTMLInputElement,
+      elementRect({ left: -157, top: 40, width: 185, height: 21 })
+    );
 
     fillLoginForm({ password: "secret" });
 
@@ -1005,6 +1016,9 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#css-evenodd-covered-path-password") as HTMLInputElement).value).toBe("");
     expect(
       (document.querySelector("#ancestor-clipped-password") as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (document.querySelector("#ancestor-strip-clipped-password") as HTMLInputElement).value
     ).toBe("");
     expect((document.querySelector("#paint-contained-password") as HTMLInputElement).value).toBe(
       ""
