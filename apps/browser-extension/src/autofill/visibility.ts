@@ -955,6 +955,57 @@ function svgFilterPrimitiveSuppressesFinalPaint(
   return false;
 }
 
+function svgFilterResultName(value: string | null) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized || null;
+}
+
+function svgFilterMergeSuppressesPaint(
+  primitive: Element,
+  suppressedResults: ReadonlyMap<string, boolean>
+) {
+  const mergeNodes = Array.from(primitive.children).filter(
+    (child) => child.tagName.toLowerCase() === "femergenode"
+  );
+  return (
+    mergeNodes.length > 0 &&
+    mergeNodes.every((node) => {
+      const input = svgFilterInputName(node, "in");
+      return input !== "" && suppressedResults.get(input) === true;
+    })
+  );
+}
+
+function svgFilterGraphSuppressesPaint(
+  filterTarget: HTMLElement,
+  affectedElement: HTMLElement,
+  filter: Element,
+  units: { emPx?: number; remPx?: number }
+) {
+  const suppressedResults = new Map<string, boolean>();
+  let previousOutputSuppressesPaint = false;
+
+  for (const primitive of Array.from(filter.children)) {
+    const tagName = primitive.tagName.toLowerCase();
+    const outputSuppressesPaint =
+      tagName === "femerge"
+        ? svgFilterMergeSuppressesPaint(primitive, suppressedResults)
+        : svgFilterPrimitiveSuppressesFinalPaint(
+            filterTarget,
+            affectedElement,
+            primitive,
+            units
+          );
+    const resultName = svgFilterResultName(primitive.getAttribute("result"));
+    if (resultName !== null) {
+      suppressedResults.set(resultName, outputSuppressesPaint);
+    }
+    previousOutputSuppressesPaint = outputSuppressesPaint;
+  }
+
+  return previousOutputSuppressesPaint;
+}
+
 function svgFilterSuppressesPaint(
   filterTarget: HTMLElement,
   value: string | undefined,
@@ -1025,6 +1076,9 @@ function svgFilterSuppressesPaint(
         units
       )
     ) {
+      return true;
+    }
+    if (svgFilterGraphSuppressesPaint(filterTarget, affectedElement, filter, units)) {
       return true;
     }
   }

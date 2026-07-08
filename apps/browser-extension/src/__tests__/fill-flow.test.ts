@@ -877,6 +877,50 @@ describe("fillLoginForm", () => {
     expect(loginPassword.value).toBe("secret");
   });
 
+  it("does not treat a visible label as enough for a merged filter-offset password decoy", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="mergedOffsetSource">
+            <feOffset dx="-500" dy="0" result="moved" />
+            <feMerge><feMergeNode in="moved" /></feMerge>
+          </filter>
+        </svg>
+        <label id="decoy-label" for="decoy-password" style="position:absolute;left:24px;top:40px;width:185px;height:21px">Password</label>
+        <input id="decoy-password" type="password" autocomplete="current-password" style="filter:url(#mergedOffsetSource)" />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const decoyPassword = document.querySelector("#decoy-password") as HTMLInputElement;
+    const decoyLabel = document.querySelector("#decoy-label") as HTMLLabelElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    stubElementRect(decoyPassword, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(decoyLabel, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return decoyLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(decoyPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("does not treat visible labels as enough for ancestor-clipped password decoys", () => {
     document.body.innerHTML = `
       <form>
