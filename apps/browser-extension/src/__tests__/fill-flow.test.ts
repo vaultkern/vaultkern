@@ -1163,6 +1163,80 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not treat visible labels as enough for radial ancestor mask decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="radial-mask-label" for="radial-mask-password">Password</label>
+        <div id="ancestor-radial-mask" style="width:400px;height:40px;mask-image:radial-gradient(circle at 360px 20px, black 0 40px, transparent 40px 100%)">
+          <input id="radial-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const radialMaskPassword = document.querySelector(
+      "#radial-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const radialMaskLabel = document.querySelector("#radial-mask-label") as HTMLLabelElement;
+    stubElementRect(
+      radialMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      radialMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-radial-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return radialMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(radialMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
+  it("fills password fields when a radial ancestor mask contains the control", () => {
+    document.body.innerHTML = `
+      <form>
+        <div id="ancestor-radial-mask" style="width:400px;height:40px;mask-image:radial-gradient(circle at 116px 20px, black 0 120px, transparent 120px 100%)">
+          <input id="login-password" type="password" autocomplete="current-password" />
+        </div>
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector("#ancestor-radial-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#login-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not treat visible labels as enough for repeating-gradient ancestor mask decoys", () => {
     document.body.innerHTML = `
       <form>

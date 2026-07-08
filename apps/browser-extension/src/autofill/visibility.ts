@@ -2129,6 +2129,163 @@ function cssMaskLinearGradientVisibleBounds(
   return unionBounds(bounds);
 }
 
+function cssMaskRadialGradientPaintedRanges(
+  body: string,
+  axisSize: number,
+  modeValue: string | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const parts = splitCssCommaList(body);
+  const stopParts = cssColorStopColor(parts[0] ?? "") === null ? parts.slice(1) : parts;
+  if (stopParts.length < 2) {
+    return null;
+  }
+
+  const rawPoints: CssMaskGradientPoint[] = [];
+  for (const part of stopParts) {
+    const stopPoints = cssMaskLinearGradientStopPoints(part, axisSize, modeValue, units);
+    if (stopPoints === null) {
+      return null;
+    }
+    rawPoints.push(...stopPoints);
+  }
+  if (rawPoints.length < 2) {
+    return null;
+  }
+
+  const normalizedPoints = normalizeCssMaskGradientStopOffsets(rawPoints, axisSize);
+  if (normalizedPoints === null) {
+    return null;
+  }
+
+  let previousOffset = normalizedPoints[0].offset;
+  const points = normalizedPoints.map((point, index) => {
+    if (index === 0) {
+      return point;
+    }
+    previousOffset = Math.max(previousOffset, point.offset);
+    return { ...point, offset: previousOffset };
+  });
+
+  const ranges: Array<{ start: number; end: number }> = [];
+  const addRange = (start: number, end: number) => {
+    const rangeStart = Math.min(start, end);
+    const rangeEnd = Math.max(start, end);
+    if (rangeEnd > rangeStart) {
+      ranges.push({ start: rangeStart, end: rangeEnd });
+    }
+  };
+
+  const [first] = points;
+  if (first.paints && first.offset > 0) {
+    addRange(0, first.offset);
+  }
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const left = points[index];
+    const right = points[index + 1];
+    if (left.paints || right.paints) {
+      addRange(left.offset, right.offset);
+    }
+  }
+  const last = points[points.length - 1];
+  if (last.paints && last.offset < axisSize) {
+    addRange(last.offset, axisSize);
+  }
+
+  return ranges;
+}
+
+function cssMaskRadialGradientVisibleBounds(
+  layer: string,
+  positionValue: string | undefined,
+  sizeValue: string | undefined,
+  repeatValue: string | undefined,
+  current: HTMLElement,
+  modeValue: string | undefined,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const normalized = layer.trim().toLowerCase();
+  const gradientName = normalized.startsWith("radial-gradient(")
+    ? "radial-gradient"
+    : null;
+  if (gradientName === null) {
+    return null;
+  }
+  const body = cssFunctionBody(normalized, gradientName);
+  if (body === null) {
+    return null;
+  }
+
+  const rect = current.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return null;
+  }
+  const size = maskLayerSize(sizeValue, rect, units);
+  if (size.width <= 0 || size.height <= 0) {
+    return null;
+  }
+  const repeatsX = maskRepeatRepeatsAxis(repeatValue, "x");
+  const repeatsY = maskRepeatRepeatsAxis(repeatValue, "y");
+  if ((repeatsX && size.width < rect.width) || (repeatsY && size.height < rect.height)) {
+    return null;
+  }
+
+  const position = positionValue?.trim() || "0% 0%";
+  const x = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "x"),
+    rect.width,
+    size.width,
+    units
+  );
+  const y = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "y"),
+    rect.height,
+    size.height,
+    units
+  );
+  if (
+    (x === null && Math.abs(rect.width - size.width) > 0.001) ||
+    (y === null && Math.abs(rect.height - size.height) > 0.001)
+  ) {
+    return null;
+  }
+
+  const parts = splitCssCommaList(body);
+  const descriptor = cssColorStopColor(parts[0] ?? "") === null ? parts[0] ?? "" : "";
+  const descriptorTokens = splitCssFunctionArgs(descriptor);
+  const atIndex = descriptorTokens.findIndex((token) => token.toLowerCase() === "at");
+  const center = basicPositionToPx(
+    atIndex < 0 ? [] : descriptorTokens.slice(atIndex + 1),
+    size.width,
+    size.height,
+    units
+  );
+  if (center === null) {
+    return null;
+  }
+
+  const paintedRanges = cssMaskRadialGradientPaintedRanges(
+    body,
+    Math.max(size.width, size.height),
+    modeValue,
+    units
+  );
+  if (paintedRanges === null || paintedRanges.length === 0) {
+    return null;
+  }
+  const radius = Math.max(...paintedRanges.map((range) => range.end));
+  if (radius <= 0) {
+    return null;
+  }
+
+  return {
+    left: (x ?? 0) + center.x - radius,
+    top: (y ?? 0) + center.y - radius,
+    right: (x ?? 0) + center.x + radius,
+    bottom: (y ?? 0) + center.y + radius
+  };
+}
+
 function bodyAxisSize(
   body: string,
   size: { width: number; height: number }
@@ -2451,6 +2608,18 @@ function cssMaskVisibleBounds(
     );
     if (gradientBounds !== null) {
       return [gradientBounds];
+    }
+    const radialGradientBounds = cssMaskRadialGradientVisibleBounds(
+      layer,
+      maskLayerValue(positionLayers, index),
+      maskLayerValue(sizeLayers, index),
+      maskLayerValue(repeatLayers, index),
+      current,
+      modeValue,
+      units
+    );
+    if (radialGradientBounds !== null) {
+      return [radialGradientBounds];
     }
     const layerBounds = maskLayerVisibleBounds(
       maskLayerValue(positionLayers, index),
@@ -5033,23 +5202,32 @@ function basicShapePositionToPx(
   rect: DOMRect,
   units: { emPx?: number; remPx?: number }
 ) {
+  return basicPositionToPx(tokens, rect.width, rect.height, units);
+}
+
+function basicPositionToPx(
+  tokens: string[],
+  width: number,
+  height: number,
+  units: { emPx?: number; remPx?: number }
+) {
   const value = tokens.join(" ");
   const x =
     tokens.length === 0
-      ? rect.width / 2
+      ? width / 2
       : cssPositionComponentToPx(
           maskPositionAxisComponent(value, "x"),
           "x",
-          rect.width,
+          width,
           units
         );
   const y =
     tokens.length === 0
-      ? rect.height / 2
+      ? height / 2
       : cssPositionComponentToPx(
           maskPositionAxisComponent(value, "y"),
           "y",
-          rect.height,
+          height,
           units
         );
   return x === null || y === null ? null : { x, y };
