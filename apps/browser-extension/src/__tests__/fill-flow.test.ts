@@ -392,6 +392,8 @@ describe("fillLoginForm", () => {
         <input id="backface-password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:rotateY(180deg)" />
         <input id="backface-matrix-password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:matrix3d(-1,0,0,0,0,1,0,0,0,0,-1,0,0,0,0,1)" />
         <input id="paintless-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:transparent;-webkit-text-fill-color:transparent;outline:0;box-shadow:none;text-shadow:none" />
+        <input id="font-zero-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;font-size:0;outline:0;box-shadow:none;text-shadow:none" />
+        <input id="text-indent-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;text-indent:-9999px;outline:0;box-shadow:none;text-shadow:none" />
         <input id="translated-password" type="password" autocomplete="current-password" style="translate:-9999px" />
         <input id="longhand-scaled-password" type="password" autocomplete="current-password" style="scale:0" />
         <input id="filter-password" type="password" autocomplete="current-password" style="filter:opacity(0)" />
@@ -501,6 +503,8 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#backface-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#backface-matrix-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#paintless-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#font-zero-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#text-indent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#translated-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-scaled-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#filter-password") as HTMLInputElement).value).toBe("");
