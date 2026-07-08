@@ -2552,6 +2552,13 @@ function isFullyOccludedByPaintedOverlay(element: HTMLElement) {
 
 type ViewportExit = NonNullable<ReturnType<typeof viewportExitForRect>>;
 
+interface RectBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 function inverseOffset(value: number | null) {
   return value === null ? null : -value;
 }
@@ -2609,6 +2616,69 @@ function rectsIntersect(left: DOMRect, right: DOMRect) {
   );
 }
 
+function boundsFromPoints(points: Array<{ x: number; y: number }>): RectBounds | null {
+  if (points.length === 0) {
+    return null;
+  }
+  const xValues = points.map((point) => point.x);
+  const yValues = points.map((point) => point.y);
+  return {
+    left: Math.min(...xValues),
+    top: Math.min(...yValues),
+    right: Math.max(...xValues),
+    bottom: Math.max(...yValues)
+  };
+}
+
+function unionBounds(bounds: RectBounds[]): RectBounds | null {
+  if (bounds.length === 0) {
+    return null;
+  }
+  return {
+    left: Math.min(...bounds.map((bound) => bound.left)),
+    top: Math.min(...bounds.map((bound) => bound.top)),
+    right: Math.max(...bounds.map((bound) => bound.right)),
+    bottom: Math.max(...bounds.map((bound) => bound.bottom))
+  };
+}
+
+function elementRectRelativeToAncestor(element: HTMLElement, ancestor: HTMLElement): RectBounds | null {
+  const elementRect = element.getBoundingClientRect();
+  const ancestorRect = ancestor.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(elementRect) || !hasMeaningfulClientRect(ancestorRect)) {
+    return null;
+  }
+  return {
+    left: elementRect.left - ancestorRect.left,
+    top: elementRect.top - ancestorRect.top,
+    right: elementRect.right - ancestorRect.left,
+    bottom: elementRect.bottom - ancestorRect.top
+  };
+}
+
+function boundsOverlap(
+  left: RectBounds,
+  right: RectBounds
+) {
+  const width = Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left));
+  const height = Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));
+  return { width, height, area: width * height };
+}
+
+function boundsArea(bounds: RectBounds) {
+  return Math.max(0, bounds.right - bounds.left) * Math.max(0, bounds.bottom - bounds.top);
+}
+
+function boundsOverlapSuppressesField(visibleBounds: RectBounds, fieldBounds: RectBounds) {
+  const overlap = boundsOverlap(visibleBounds, fieldBounds);
+  const fieldArea = boundsArea(fieldBounds);
+  return (
+    overlap.width <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    overlap.height <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    (fieldArea > 0 && overlap.area <= fieldArea * MIN_CLIPPED_VISIBLE_FRACTION)
+  );
+}
+
 function isFullyClippedByAncestor(element: HTMLElement, ancestor: HTMLElement) {
   const elementRect = element.getBoundingClientRect();
   const ancestorRect = ancestor.getBoundingClientRect();
@@ -2643,6 +2713,413 @@ function clippedAncestorVisibleOverlapSuppressesField(
     width <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
     height <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
     (elementArea > 0 && area <= elementArea * MIN_CLIPPED_VISIBLE_FRACTION)
+  );
+}
+
+function insetClipVisibleBounds(
+  value: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const inset = expandBoxValues(insetBoxTokens(value));
+  const top = cssLengthToPx(inset.top, rect.height, units);
+  const right = cssLengthToPx(inset.right, rect.width, units);
+  const bottom = cssLengthToPx(inset.bottom, rect.height, units);
+  const left = cssLengthToPx(inset.left, rect.width, units);
+  if (top === null || right === null || bottom === null || left === null) {
+    return null;
+  }
+  return {
+    left,
+    top,
+    right: rect.width - right,
+    bottom: rect.height - bottom
+  };
+}
+
+function legacyClipVisibleBounds(
+  value: string,
+  units: { emPx?: number; remPx?: number },
+  fieldRect: DOMRect
+): RectBounds | null {
+  const match = value.trim().toLowerCase().match(/^rect\((.*)\)$/);
+  if (!match) {
+    return null;
+  }
+  const rect = expandBoxValues(splitCssFunctionArgs(match[1]));
+  const top = cssLengthToPx(rect.top, fieldRect.height, units);
+  const right = cssLengthToPx(rect.right, fieldRect.width, units);
+  const bottom = cssLengthToPx(rect.bottom, fieldRect.height, units);
+  const left = cssLengthToPx(rect.left, fieldRect.width, units);
+  return top === null || right === null || bottom === null || left === null
+    ? null
+    : { left, top, right, bottom };
+}
+
+function circleClipVisibleBounds(
+  value: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const tokens = splitCssFunctionArgs(value);
+  const atIndex = tokens.findIndex((token) => token.toLowerCase() === "at");
+  const radius = atIndex === 0 ? "closest-side" : tokens[0] ?? "closest-side";
+  const center = basicShapePositionToPx(atIndex < 0 ? [] : tokens.slice(atIndex + 1), rect, units);
+  if (center === null) {
+    return null;
+  }
+  const radiusPx = circleRadiusToPx(radius, center, rect, units);
+  return radiusPx === null
+    ? null
+    : {
+        left: center.x - radiusPx,
+        top: center.y - radiusPx,
+        right: center.x + radiusPx,
+        bottom: center.y + radiusPx
+      };
+}
+
+function ellipseClipVisibleBounds(
+  value: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const tokens = splitCssFunctionArgs(value);
+  const atIndex = tokens.findIndex((token) => token.toLowerCase() === "at");
+  const radiusTokens = atIndex < 0 ? tokens : tokens.slice(0, atIndex);
+  const radiusX = radiusTokens[0] ?? "closest-side";
+  const radiusY = radiusTokens[1] ?? radiusX;
+  const center = basicShapePositionToPx(atIndex < 0 ? [] : tokens.slice(atIndex + 1), rect, units);
+  if (center === null) {
+    return null;
+  }
+  const radiusXPx = ellipseRadiusToPx(radiusX, "x", center, rect, units);
+  const radiusYPx = ellipseRadiusToPx(radiusY, "y", center, rect, units);
+  return radiusXPx === null || radiusYPx === null
+    ? null
+    : {
+        left: center.x - radiusXPx,
+        top: center.y - radiusYPx,
+        right: center.x + radiusXPx,
+        bottom: center.y + radiusYPx
+      };
+}
+
+function xywhClipVisibleBounds(
+  value: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const [x, y, width, height] = splitCssFunctionArgs(value);
+  const xPx = x === undefined ? null : cssLengthToPx(x, rect.width, units);
+  const yPx = y === undefined ? null : cssLengthToPx(y, rect.height, units);
+  const widthPx = width === undefined ? null : cssLengthToPx(width, rect.width, units);
+  const heightPx = height === undefined ? null : cssLengthToPx(height, rect.height, units);
+  return xPx === null || yPx === null || widthPx === null || heightPx === null
+    ? null
+    : { left: xPx, top: yPx, right: xPx + widthPx, bottom: yPx + heightPx };
+}
+
+function svgClipShapeVisibleBounds(
+  current: HTMLElement,
+  shape: Element,
+  units: { emPx?: number; remPx?: number },
+  seen: Set<Element> = new Set(),
+  inheritedMatrix: SvgMatrix2d = identitySvgMatrix(),
+  coordinateSpace: SvgClipCoordinateSpace = "userSpaceOnUse"
+): RectBounds | null {
+  if (seen.has(shape)) {
+    return null;
+  }
+  seen.add(shape);
+
+  const shapeStyle = shape.ownerDocument.defaultView?.getComputedStyle(shape);
+  const inlineStyle = (shape as SVGElement).style;
+  const display = shapeStyle?.display || inlineStyle?.display;
+  const visibility = shapeStyle?.visibility || inlineStyle?.visibility;
+  if (display === "none" || visibility === "hidden" || visibility === "collapse") {
+    return null;
+  }
+
+  const rect = current.getBoundingClientRect();
+  const tagName = shape.tagName.toLowerCase();
+  const matrix = svgElementTransformMatrix(shape, inheritedMatrix, units);
+  if (svgClipElementIsNonRendering(tagName)) {
+    return null;
+  }
+  if (
+    svgElementClipPathValues(shape, shapeStyle).some((clipPath) =>
+      svgClipPathFullyClips(current, clipPath, units, seen)
+    )
+  ) {
+    return { left: 0, top: 0, right: 0, bottom: 0 };
+  }
+  if (tagName === "use") {
+    const href =
+      shape.getAttribute("href") ??
+      shape.getAttribute("xlink:href") ??
+      shape.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+    const targetId = href?.startsWith("#") ? href.slice(1) : null;
+    const target = targetId ? current.ownerDocument.getElementById(targetId) : null;
+    const useMatrix = svgMatrixMultiply(
+      matrix,
+      svgUsePositionMatrix(shape, rect, units, coordinateSpace)
+    );
+    return target === null
+      ? { left: 0, top: 0, right: 0, bottom: 0 }
+      : svgClipShapeVisibleBounds(current, target, units, seen, useMatrix, coordinateSpace);
+  }
+  if (tagName === "rect") {
+    const x = svgLengthToPx(shape.getAttribute("x"), rect.width, units, coordinateSpace);
+    const y = svgLengthToPx(shape.getAttribute("y"), rect.height, units, coordinateSpace);
+    const width = svgLengthToPx(
+      shape.getAttribute("width"),
+      rect.width,
+      units,
+      coordinateSpace
+    );
+    const height = svgLengthToPx(
+      shape.getAttribute("height"),
+      rect.height,
+      units,
+      coordinateSpace
+    );
+    return boundsFromPoints(
+      transformSvgPoints(
+        [
+          { x, y },
+          { x: x + width, y },
+          { x: x + width, y: y + height },
+          { x, y: y + height }
+        ],
+        matrix
+      )
+    );
+  }
+  if (tagName === "circle") {
+    const radius = svgLengthToPx(
+      shape.getAttribute("r"),
+      Math.min(rect.width, rect.height),
+      units,
+      coordinateSpace
+    );
+    const cx = svgLengthToPx(shape.getAttribute("cx"), rect.width, units, coordinateSpace);
+    const cy = svgLengthToPx(shape.getAttribute("cy"), rect.height, units, coordinateSpace);
+    return boundsFromPoints(
+      transformSvgPoints(
+        [
+          { x: cx - radius, y: cy - radius },
+          { x: cx + radius, y: cy - radius },
+          { x: cx + radius, y: cy + radius },
+          { x: cx - radius, y: cy + radius }
+        ],
+        matrix
+      )
+    );
+  }
+  if (tagName === "ellipse") {
+    const radiusX = svgLengthToPx(
+      shape.getAttribute("rx"),
+      rect.width,
+      units,
+      coordinateSpace
+    );
+    const radiusY = svgLengthToPx(
+      shape.getAttribute("ry"),
+      rect.height,
+      units,
+      coordinateSpace
+    );
+    const cx = svgLengthToPx(shape.getAttribute("cx"), rect.width, units, coordinateSpace);
+    const cy = svgLengthToPx(shape.getAttribute("cy"), rect.height, units, coordinateSpace);
+    return boundsFromPoints(
+      transformSvgPoints(
+        [
+          { x: cx - radiusX, y: cy - radiusY },
+          { x: cx + radiusX, y: cy - radiusY },
+          { x: cx + radiusX, y: cy + radiusY },
+          { x: cx - radiusX, y: cy + radiusY }
+        ],
+        matrix
+      )
+    );
+  }
+  if (tagName === "line") {
+    return boundsFromPoints(
+      transformSvgPoints(
+        [
+          {
+            x: svgLengthToPx(shape.getAttribute("x1"), rect.width, units, coordinateSpace),
+            y: svgLengthToPx(shape.getAttribute("y1"), rect.height, units, coordinateSpace)
+          },
+          {
+            x: svgLengthToPx(shape.getAttribute("x2"), rect.width, units, coordinateSpace),
+            y: svgLengthToPx(shape.getAttribute("y2"), rect.height, units, coordinateSpace)
+          }
+        ],
+        matrix
+      )
+    );
+  }
+  if (tagName === "polygon" || tagName === "polyline") {
+    return boundsFromPoints(
+      transformSvgPoints(
+        svgPointListToPoints(
+          shape.getAttribute("points") ?? "",
+          rect,
+          units,
+          coordinateSpace
+        ),
+        matrix
+      )
+    );
+  }
+  if (tagName === "path") {
+    return boundsFromPoints(
+      transformSvgPoints(svgPathDataToPoints(shape.getAttribute("d") ?? ""), matrix)
+    );
+  }
+  if (svgClipElementIsContainer(tagName)) {
+    return unionBounds(
+      Array.from(shape.children)
+        .map((child) =>
+          svgClipShapeVisibleBounds(current, child, units, seen, matrix, coordinateSpace)
+        )
+        .filter((bounds): bounds is RectBounds => bounds !== null)
+    );
+  }
+  return null;
+}
+
+function svgClipPathVisibleBounds(
+  current: HTMLElement,
+  value: string,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const [id] = localCssUrlReferenceIds(value);
+  if (!id) {
+    return null;
+  }
+  const clipPath = current.ownerDocument.getElementById(id);
+  if (!clipPath) {
+    return null;
+  }
+  const shapes = Array.from(clipPath.children);
+  if (shapes.length === 0) {
+    return { left: 0, top: 0, right: 0, bottom: 0 };
+  }
+  const rect = current.getBoundingClientRect();
+  const coordinateSpace =
+    clipPath.getAttribute("clipPathUnits")?.trim() === "objectBoundingBox"
+      ? "objectBoundingBox"
+      : "userSpaceOnUse";
+  const baseMatrix =
+    coordinateSpace === "objectBoundingBox"
+      ? { a: rect.width, b: 0, c: 0, d: rect.height, e: 0, f: 0 }
+      : identitySvgMatrix();
+  const clipPathMatrix = svgElementTransformMatrix(clipPath, baseMatrix, units);
+  return unionBounds(
+    shapes
+      .map((shape) =>
+        svgClipShapeVisibleBounds(
+          current,
+          shape,
+          units,
+          new Set([clipPath]),
+          clipPathMatrix,
+          coordinateSpace
+        )
+      )
+      .filter((bounds): bounds is RectBounds => bounds !== null)
+  );
+}
+
+function clipPathVisibleBounds(
+  current: HTMLElement,
+  value: string,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  if (localCssUrlReferenceIds(value).length > 0) {
+    return svgClipPathVisibleBounds(current, value, units);
+  }
+
+  const normalized = value.trim().toLowerCase();
+  const rect = current.getBoundingClientRect();
+  const insetBody = cssFunctionBody(normalized, "inset");
+  if (insetBody !== null) {
+    return insetClipVisibleBounds(insetBody, rect, units);
+  }
+
+  const circleBody = cssFunctionBody(normalized, "circle");
+  if (circleBody !== null) {
+    return circleClipVisibleBounds(circleBody, rect, units);
+  }
+
+  const ellipseBody = cssFunctionBody(normalized, "ellipse");
+  if (ellipseBody !== null) {
+    return ellipseClipVisibleBounds(ellipseBody, rect, units);
+  }
+
+  const rectBody = cssFunctionBody(normalized, "rect");
+  if (rectBody !== null) {
+    return legacyClipVisibleBounds(`rect(${rectBody})`, units, rect);
+  }
+
+  const xywhBody = cssFunctionBody(normalized, "xywh");
+  if (xywhBody !== null) {
+    return xywhClipVisibleBounds(xywhBody, rect, units);
+  }
+
+  const polygonBody = cssFunctionBody(normalized, "polygon");
+  if (polygonBody !== null) {
+    const points = splitCssCommaList(polygonBody).flatMap((point) => {
+      const [x, y] = splitCssFunctionArgs(point);
+      const parsedX = x === undefined ? null : cssCoordinateToPx(x, rect.width, units);
+      const parsedY = y === undefined ? null : cssCoordinateToPx(y, rect.height, units);
+      return parsedX === null || parsedY === null ? [] : [{ x: parsedX, y: parsedY }];
+    });
+    return boundsFromPoints(points);
+  }
+
+  const shapeBody = cssFunctionBody(normalized, "shape");
+  if (shapeBody !== null) {
+    return boundsFromPoints(shapeCommandPoints(shapeBody, rect, units));
+  }
+
+  const pathBody = cssFunctionBody(normalized, "path");
+  if (pathBody !== null) {
+    const pathData =
+      pathBody.match(/(['"])(.*?)\1/)?.[2] ?? pathBody.replace(/^evenodd\s*,/i, "");
+    return boundsFromPoints(svgPathDataToPoints(pathData));
+  }
+
+  return null;
+}
+
+function ancestorClipStyleSuppressesField(
+  element: HTMLElement,
+  current: HTMLElement,
+  style: CSSStyleDeclaration | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  if (current === element) {
+    return false;
+  }
+  const fieldBounds = elementRectRelativeToAncestor(element, current);
+  if (fieldBounds === null) {
+    return false;
+  }
+  const clipPath = cssPropertyValue(style, current, "clip-path");
+  const clip = cssPropertyValue(style, current, "clip");
+  const clipBounds = [
+    isMeaningfulCssValue(clipPath) ? clipPathVisibleBounds(current, clipPath, units) : null,
+    isMeaningfulCssValue(clip)
+      ? legacyClipVisibleBounds(clip, units, current.getBoundingClientRect())
+      : null
+  ];
+  return clipBounds.some(
+    (bounds): bounds is RectBounds =>
+      bounds !== null && boundsOverlapSuppressesField(bounds, fieldBounds)
   );
 }
 
@@ -4319,7 +4796,10 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     ) {
       addReason(reasons, "not-viewable:transparent");
     }
-    if (hasFullyClippingStyle(current, style, cssUnits)) {
+    if (
+      hasFullyClippingStyle(current, style, cssUnits) ||
+      ancestorClipStyleSuppressesField(element, current, style, cssUnits)
+    ) {
       addReason(reasons, "not-viewable:clipped");
     }
     if (

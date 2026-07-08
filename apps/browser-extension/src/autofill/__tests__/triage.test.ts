@@ -2703,6 +2703,94 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields missed by ancestor clip paths as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <clipPath id="rightRectClip"><rect x="320" y="0" width="80" height="40" /></clipPath>
+        </svg>
+        <label id="inset-label" for="ancestor-inset-password">Password</label>
+        <div id="ancestor-inset-clip" style="width:400px;height:40px;clip-path:inset(0 0 0 320px)">
+          <input id="ancestor-inset-password" name="ancestor_inset_password" type="password" autocomplete="current-password" />
+        </div>
+        <label id="polygon-label" for="ancestor-polygon-password">Password</label>
+        <div id="ancestor-polygon-clip" style="width:400px;height:40px;clip-path:polygon(320px 0, 400px 0, 400px 40px, 320px 40px)">
+          <input id="ancestor-polygon-password" name="ancestor_polygon_password" type="password" autocomplete="current-password" />
+        </div>
+        <label id="url-label" for="ancestor-url-password">Password</label>
+        <div id="ancestor-url-clip" style="width:400px;height:40px;clip-path:url(#rightRectClip)">
+          <input id="ancestor-url-password" name="ancestor_url_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const insetPassword = document.querySelector("#ancestor-inset-password") as HTMLInputElement;
+    const polygonPassword = document.querySelector(
+      "#ancestor-polygon-password"
+    ) as HTMLInputElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    const urlPassword = document.querySelector("#ancestor-url-password") as HTMLInputElement;
+    const insetLabel = document.querySelector("#inset-label") as HTMLLabelElement;
+    const polygonLabel = document.querySelector("#polygon-label") as HTMLLabelElement;
+    const urlLabel = document.querySelector("#url-label") as HTMLLabelElement;
+    stubElementRect(insetPassword, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(polygonPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    stubElementRect(urlPassword, elementRect({ left: 24, top: 152, width: 185, height: 21 }));
+    stubElementRect(realPassword, elementRect({ left: 24, top: 208, width: 185, height: 21 }));
+    stubElementRect(insetLabel, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(polygonLabel, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    stubElementRect(urlLabel, elementRect({ left: 24, top: 152, width: 185, height: 21 }));
+    stubElementRect(
+      document.querySelector("#ancestor-inset-clip") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-polygon-clip") as HTMLDivElement,
+      elementRect({ left: 0, top: 88, width: 400, height: 40 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-url-clip") as HTMLDivElement,
+      elementRect({ left: 0, top: 144, width: 400, height: 40 })
+    );
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return insetLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return polygonLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 152 && y <= 173) {
+          return urlLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 208 && y <= 229) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    for (const name of [
+      "ancestor_inset_password",
+      "ancestor_polygon_password",
+      "ancestor_url_password"
+    ]) {
+      expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
+      expect(fieldByName(report, name).reasons).toContain("not-viewable:clipped");
+    }
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("lets current-password fields override mixed sign-in and signup copy", () => {
     document.body.innerHTML = `
       <form id="mixed-auth">
