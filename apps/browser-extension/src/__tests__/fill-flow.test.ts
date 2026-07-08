@@ -493,6 +493,9 @@ describe("fillLoginForm", () => {
         <input id="rotate-y-password" type="password" autocomplete="current-password" style="rotate:y 90deg" />
         <input id="backface-password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:rotateY(180deg)" />
         <input id="backface-matrix-password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:matrix3d(-1,0,0,0,0,1,0,0,0,0,-1,0,0,0,0,1)" />
+        <div style="transform:rotateY(180deg);transform-style:preserve-3d">
+          <input id="ancestor-backface-password" type="password" autocomplete="current-password" style="backface-visibility:hidden" />
+        </div>
         <input id="paintless-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:transparent;-webkit-text-fill-color:transparent;outline:0;box-shadow:none;text-shadow:none" />
         <input id="same-color-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
         <input id="same-color-border-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:1px solid white;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
@@ -829,6 +832,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#rotate-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#backface-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#backface-matrix-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#ancestor-backface-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#paintless-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#same-color-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#same-color-border-password") as HTMLInputElement).value).toBe("");
@@ -869,6 +873,20 @@ describe("fillLoginForm", () => {
     expect(
       (document.querySelector("#ancestor-scaled-password") as HTMLInputElement).value
     ).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("fills backface-hidden fields when preserve-3d is flattened by grouping styles", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="transform:rotateY(180deg);transform-style:preserve-3d;opacity:.999">
+          <input id="login-password" type="password" autocomplete="current-password" style="backface-visibility:hidden" />
+        </div>
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 

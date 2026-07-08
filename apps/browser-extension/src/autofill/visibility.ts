@@ -621,6 +621,98 @@ function backfaceStyleHidesElement(
   );
 }
 
+function backfaceVisibilityIsHidden(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return (
+    cssPropertyValue(style, current, "backface-visibility")
+      .trim()
+      .toLowerCase() === "hidden"
+  );
+}
+
+function transformStylePreserves3d(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return (
+    cssPropertyValue(style, current, "transform-style")
+      .trim()
+      .toLowerCase() === "preserve-3d" &&
+    !transformStyleIsForcedFlat(style, current)
+  );
+}
+
+function overflowForcesFlatTransformStyle(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return splitCssFunctionArgs(normalized).some((token) => token !== "visible");
+}
+
+function transformStyleIsForcedFlat(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  const opacity = cssOpacityValue(cssPropertyValue(style, current, "opacity"));
+  if (opacity !== null && opacity < 1) {
+    return true;
+  }
+  if (isMeaningfulCssValue(cssPropertyValue(style, current, "filter"))) {
+    return true;
+  }
+  if (cssBlendMode(cssPropertyValue(style, current, "mix-blend-mode")) !== "normal") {
+    return true;
+  }
+  if (
+    [
+      cssPropertyValue(style, current, "overflow"),
+      cssPropertyValue(style, current, "overflow-x"),
+      cssPropertyValue(style, current, "overflow-y")
+    ].some(overflowForcesFlatTransformStyle)
+  ) {
+    return true;
+  }
+  return (
+    hasPaintContainment(current, style) ||
+    isMeaningfulCssValue(cssPropertyValue(style, current, "clip")) ||
+    isMeaningfulCssValue(cssPropertyValue(style, current, "clip-path")) ||
+    isMeaningfulCssValue(cssPropertyValue(style, current, "mask-image")) ||
+    isMeaningfulCssValue(cssPropertyValue(style, current, "-webkit-mask-image")) ||
+    isMeaningfulCssValue(cssPropertyValue(style, current, "mask")) ||
+    isMeaningfulCssValue(cssPropertyValue(style, current, "-webkit-mask")) ||
+    cssPropertyValue(style, current, "isolation").trim().toLowerCase() === "isolate"
+  );
+}
+
+function elementOrIntermediateBackfaceIsHidden(element: HTMLElement, ancestor: HTMLElement) {
+  let current: HTMLElement | null = element;
+  while (current && current !== ancestor) {
+    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    if (backfaceVisibilityIsHidden(style, current)) {
+      return true;
+    }
+    current = parentElementOrShadowHost(current);
+  }
+  return false;
+}
+
+function preserve3dAncestorHidesBackface(
+  element: HTMLElement,
+  current: HTMLElement,
+  style: CSSStyleDeclaration | undefined
+) {
+  return (
+    current !== element &&
+    transformStylePreserves3d(style, current) &&
+    elementOrIntermediateBackfaceIsHidden(element, current) &&
+    (rotationTurnsBackfaceAway(cssPropertyValue(style, current, "transform")) ||
+      rotationTurnsBackfaceAway(cssPropertyValue(style, current, "rotate")))
+  );
+}
+
 function filterOpacityValue(value: string | undefined) {
   const normalized = value?.trim().toLowerCase();
   if (!normalized || normalized === "none") {
@@ -6936,7 +7028,8 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       transformStyleFullyCollapses(style, current, cssUnits) ||
       zoomStyleFullyCollapses(style, current) ||
       rotateStyleFullyCollapses(style, current) ||
-      backfaceStyleHidesElement(style, current)
+      backfaceStyleHidesElement(style, current) ||
+      preserve3dAncestorHidesBackface(element, current, style)
     ) {
       addReason(reasons, "not-viewable:zero-size");
     }

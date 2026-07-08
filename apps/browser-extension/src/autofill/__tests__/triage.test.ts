@@ -1731,6 +1731,9 @@ describe("autofill triage", () => {
         <input name="rotate_y_password" type="password" autocomplete="current-password" style="rotate:y 90deg" />
         <input name="backface_password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:rotateY(180deg)" />
         <input name="backface_matrix_password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:matrix3d(-1,0,0,0,0,1,0,0,0,0,-1,0,0,0,0,1)" />
+        <div style="transform:rotateY(180deg);transform-style:preserve-3d">
+          <input name="ancestor_backface_password" type="password" autocomplete="current-password" style="backface-visibility:hidden" />
+        </div>
         <input name="calc_opacity_password" type="password" autocomplete="current-password" style="opacity:calc(0)" />
         <input name="paintless_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:transparent;-webkit-text-fill-color:transparent;outline:0;box-shadow:none;text-shadow:none" />
         <input name="same_color_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
@@ -1869,12 +1872,30 @@ describe("autofill triage", () => {
       "rotate_x_password",
       "rotate_y_password",
       "backface_password",
-      "backface_matrix_password"
+      "backface_matrix_password",
+      "ancestor_backface_password"
     ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:zero-size");
     }
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("keeps flattened preserve-3d backface fields viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="transform:rotateY(180deg);transform-style:preserve-3d;opacity:.999">
+          <input name="login_password" type="password" autocomplete="current-password" style="backface-visibility:hidden" />
+        </div>
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "login_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "login_password").reasons).not.toContain(
+      "not-viewable:zero-size"
+    );
   });
 
   it("treats merged filter-offset credential fields as not viewable", () => {
