@@ -1399,6 +1399,60 @@ describe("fillLoginForm", () => {
     expect(loginPassword.value).toBe("secret");
   });
 
+  it("does not treat visible labels as enough for color-interpolated ancestor mask decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="color-space-mask-label" for="color-space-mask-password">Password</label>
+        <div id="ancestor-color-space-mask" style="width:400px;height:40px;mask-image:linear-gradient(in oklab, transparent 0 24px, black 24px 100%)">
+          <input id="color-space-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const colorSpaceMaskPassword = document.querySelector(
+      "#color-space-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const colorSpaceMaskLabel = document.querySelector(
+      "#color-space-mask-label"
+    ) as HTMLLabelElement;
+    stubElementRect(
+      colorSpaceMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      colorSpaceMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-color-space-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return colorSpaceMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(colorSpaceMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("does not fill near-total clipped password decoys", () => {
     document.body.innerHTML = `
       <style>

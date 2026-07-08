@@ -1855,6 +1855,16 @@ function linearMaskGradientDirection(value: string): LinearMaskGradientDirection
   return null;
 }
 
+function linearGradientDescriptorWithoutColorInterpolation(value: string) {
+  const tokens = splitCssFunctionArgs(value.trim().toLowerCase());
+  const inIndex = tokens.findIndex((token) => token === "in");
+  return inIndex < 0 ? value : tokens.slice(0, inIndex).join(" ");
+}
+
+function linearGradientDescriptorHasColorInterpolation(value: string) {
+  return splitCssFunctionArgs(value.trim().toLowerCase()).includes("in");
+}
+
 function cssMaskLinearGradientStopPoints(
   value: string,
   axisSize: number,
@@ -1939,9 +1949,14 @@ function cssMaskLinearGradientPaintedRanges(
   const parts = splitCssCommaList(body);
   let direction: LinearMaskGradientDirection = { axis: "y", reverse: false };
   let stopParts = parts;
-  const parsedDirection = linearMaskGradientDirection(parts[0] ?? "");
+  const firstPart = parts[0] ?? "";
+  const parsedDirection = linearMaskGradientDirection(
+    linearGradientDescriptorWithoutColorInterpolation(firstPart)
+  );
   if (parsedDirection !== null) {
     direction = parsedDirection;
+    stopParts = parts.slice(1);
+  } else if (linearGradientDescriptorHasColorInterpolation(firstPart)) {
     stopParts = parts.slice(1);
   } else if (cssColorStopColor(parts[0] ?? "") === null) {
     return null;
@@ -2290,7 +2305,9 @@ function bodyAxisSize(
   body: string,
   size: { width: number; height: number }
 ) {
-  const parsedDirection = linearMaskGradientDirection(splitCssCommaList(body)[0] ?? "");
+  const parsedDirection = linearMaskGradientDirection(
+    linearGradientDescriptorWithoutColorInterpolation(splitCssCommaList(body)[0] ?? "")
+  );
   const axis = parsedDirection?.axis ?? "y";
   return axis === "x" ? size.width : size.height;
 }
