@@ -2001,6 +2001,32 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats credential fields hidden by transparent SVG filter images as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="transparentImageFilter">
+            <feImage href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22transparent%22%2F%3E%3C%2Fsvg%3E" x="0" y="0" width="100%" height="100%" />
+          </filter>
+          <filter id="blobImageFilter">
+            <feImage href="blob:null/transparent-filter-image" x="0" y="0" width="100%" height="100%" />
+          </filter>
+        </svg>
+        <input name="filtered_image_password" type="password" autocomplete="current-password" style="filter:url(#transparentImageFilter)" />
+        <input name="blob_filtered_image_password" type="password" autocomplete="current-password" style="filter:url(#blobImageFilter)" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    for (const name of ["filtered_image_password", "blob_filtered_image_password"]) {
+      expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
+      expect(fieldByName(report, name).reasons).toContain("not-viewable:transparent");
+    }
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("keeps flattened preserve-3d backface fields viewable", () => {
     document.body.innerHTML = `
       <form>

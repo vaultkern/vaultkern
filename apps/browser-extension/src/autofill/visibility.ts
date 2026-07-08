@@ -1158,6 +1158,36 @@ function svgMergeOpacityValue(
     : null;
 }
 
+function svgElementHrefValue(element: Element) {
+  return (
+    element.getAttribute("href") ??
+    element.getAttribute("xlink:href") ??
+    element.getAttributeNS("http://www.w3.org/1999/xlink", "href")
+  );
+}
+
+function svgImageOpacityValue(primitive: Element) {
+  const style = primitive.ownerDocument.defaultView?.getComputedStyle(primitive);
+  const opacity = svgElementOpacityValue(primitive, "opacity", style);
+  if (isEffectivelyTransparent(opacity)) {
+    return 0;
+  }
+
+  const href = svgElementHrefValue(primitive);
+  if (!href) {
+    return null;
+  }
+  if (dataSvgImageSuppressesAlphaMask(primitive, href)) {
+    return 0;
+  }
+  return dataSvgUrlParts(href) === null ? null : opacity;
+}
+
+function svgImageHasUninspectablePaintUrl(primitive: Element) {
+  const href = svgElementHrefValue(primitive)?.trim();
+  return href !== undefined && href !== "" && !cssUrlValueIsLocallyInspectable(href);
+}
+
 function svgFilterPrimitiveOpacityValue(
   primitive: Element,
   previousOutputOpacity: number | null,
@@ -1169,6 +1199,9 @@ function svgFilterPrimitiveOpacityValue(
   }
   if (tagName === "femerge") {
     return svgMergeOpacityValue(primitive, previousOutputOpacity, resultOpacities);
+  }
+  if (tagName === "feimage") {
+    return svgImageOpacityValue(primitive);
   }
   if (tagName === "fecomposite" && svgFilterCompositeSuppressesPaint(primitive)) {
     return 0;
@@ -1711,6 +1744,14 @@ function svgFilterGraphSuppressesPaint(
   return previousOutputSuppressesPaint;
 }
 
+function svgFilterHasUninspectableImagePaint(filter: Element) {
+  return Array.from(filter.children).some(
+    (primitive) =>
+      primitive.tagName.toLowerCase() === "feimage" &&
+      svgImageHasUninspectablePaintUrl(primitive)
+  );
+}
+
 function svgFilterSuppressesPaint(
   filterTarget: HTMLElement,
   value: string | undefined,
@@ -1724,6 +1765,12 @@ function svgFilterSuppressesPaint(
     ...dataSvgFilterElements(filterTarget, value)
   ];
   for (const filter of filters) {
+    if (
+      isCredentialLikeField(affectedElement) &&
+      svgFilterHasUninspectableImagePaint(filter)
+    ) {
+      return true;
+    }
     if (isEffectivelyTransparent(svgFilterGraphOpacityValue(filter))) {
       return true;
     }
@@ -3052,7 +3099,7 @@ function descendantElementById(root: Element, id: string): Element | null {
   return null;
 }
 
-function parseDataSvgDocument(current: HTMLElement, value: string) {
+function parseDataSvgDocument(current: Element, value: string) {
   const parts = dataSvgUrlParts(value);
   const DOMParserConstructor = current.ownerDocument.defaultView?.DOMParser;
   if (parts === null || !DOMParserConstructor) {
@@ -3066,7 +3113,7 @@ function parseDataSvgDocument(current: HTMLElement, value: string) {
   return { fragmentId: parts.fragmentId, root };
 }
 
-function dataSvgReferencedElement(current: HTMLElement, value: string) {
+function dataSvgReferencedElement(current: Element, value: string) {
   const parsed = parseDataSvgDocument(current, value);
   if (parsed === null || parsed.fragmentId === null || parsed.fragmentId === "") {
     return null;
@@ -3173,7 +3220,7 @@ function svgAlphaMaskShapeSuppressesPaint(
 }
 
 function dataSvgImageSuppressesAlphaMask(
-  current: HTMLElement,
+  current: Element,
   value: string
 ) {
   const parsed = parseDataSvgDocument(current, value);

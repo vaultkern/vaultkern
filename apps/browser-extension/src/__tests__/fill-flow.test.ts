@@ -465,6 +465,32 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys hidden by transparent SVG filter images", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="transparentImageFilter">
+            <feImage href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22transparent%22%2F%3E%3C%2Fsvg%3E" x="0" y="0" width="100%" height="100%" />
+          </filter>
+          <filter id="blobImageFilter">
+            <feImage href="blob:null/transparent-filter-image" x="0" y="0" width="100%" height="100%" />
+          </filter>
+        </svg>
+        <input id="filtered-image-password" type="password" autocomplete="current-password" style="filter:url(#transparentImageFilter)" />
+        <input id="blob-filtered-image-password" type="password" autocomplete="current-password" style="filter:url(#blobImageFilter)" />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#filtered-image-password") as HTMLInputElement).value).toBe("");
+    expect(
+      (document.querySelector("#blob-filtered-image-password") as HTMLInputElement).value
+    ).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys clipped away by rounded overflow ancestors", () => {
     document.body.innerHTML = `
       <form>
