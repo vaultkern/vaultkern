@@ -1179,6 +1179,87 @@ function svgComponentTransferPaintCollapseColorValue(primitive: Element) {
       };
 }
 
+function svgTransferFunctionValue(func: Element | undefined, input: number) {
+  if (func === undefined) {
+    return clampCssAlphaChannel(input);
+  }
+
+  const type = func.getAttribute("type")?.toLowerCase() ?? "identity";
+  if (type === "identity") {
+    return clampCssAlphaChannel(input);
+  }
+
+  if (type === "table" || type === "discrete") {
+    const tableValues = svgNumberList(func.getAttribute("tableValues"));
+    if (tableValues === null || tableValues.length === 0) {
+      return null;
+    }
+    if (tableValues.length === 1) {
+      return clampCssAlphaChannel(tableValues[0]);
+    }
+
+    const clampedInput = clampCssAlphaChannel(input);
+    if (type === "discrete") {
+      const index = Math.min(
+        tableValues.length - 1,
+        Math.floor(clampedInput * tableValues.length)
+      );
+      return clampCssAlphaChannel(tableValues[index]);
+    }
+
+    const position = clampedInput * (tableValues.length - 1);
+    const leftIndex = Math.floor(position);
+    const rightIndex = Math.min(tableValues.length - 1, leftIndex + 1);
+    const mix = position - leftIndex;
+    return clampCssAlphaChannel(
+      tableValues[leftIndex] * (1 - mix) + tableValues[rightIndex] * mix
+    );
+  }
+
+  if (type === "linear") {
+    const slope = Number(func.getAttribute("slope") ?? "1");
+    const intercept = Number(func.getAttribute("intercept") ?? "0");
+    return Number.isFinite(slope) && Number.isFinite(intercept)
+      ? clampCssAlphaChannel(slope * input + intercept)
+      : null;
+  }
+
+  if (type === "gamma") {
+    const amplitude = Number(func.getAttribute("amplitude") ?? "1");
+    const exponent = Number(func.getAttribute("exponent") ?? "1");
+    const offset = Number(func.getAttribute("offset") ?? "0");
+    return Number.isFinite(amplitude) &&
+      Number.isFinite(exponent) &&
+      Number.isFinite(offset)
+      ? clampCssAlphaChannel(amplitude * input ** exponent + offset)
+      : null;
+  }
+
+  return null;
+}
+
+function svgComponentTransferPaintColorValue(
+  primitive: Element,
+  inputColor: CssColorRgba | null
+) {
+  if (inputColor === null) {
+    return svgComponentTransferPaintCollapseColorValue(primitive);
+  }
+
+  const children = Array.from(primitive.children);
+  const channelFunc = (name: string) =>
+    children.find((child) => child.tagName.toLowerCase() === name);
+  const useLinearRgb = svgColorInterpolationUsesLinearRgb(primitive);
+  const [r, g, b, a] = svgColorMatrixInputChannels(inputColor, useLinearRgb);
+  const red = svgTransferFunctionValue(channelFunc("fefuncr"), r);
+  const green = svgTransferFunctionValue(channelFunc("fefuncg"), g);
+  const blue = svgTransferFunctionValue(channelFunc("fefuncb"), b);
+  const alpha = svgTransferFunctionValue(channelFunc("fefunca"), a);
+  return red === null || green === null || blue === null || alpha === null
+    ? null
+    : svgColorMatrixOutputColor([red, green, blue, alpha], useLinearRgb);
+}
+
 function svgFloodOpacityValue(primitive: Element) {
   const styled = primitive as SVGElement;
   const floodOpacity =
@@ -1745,7 +1826,7 @@ function svgFilterPrimitivePaintCollapseColorValue(
     );
   }
   if (tagName === "fecomponenttransfer") {
-    return svgComponentTransferPaintCollapseColorValue(primitive);
+    return svgComponentTransferPaintColorValue(primitive, previousOutputColor ?? sourceColor);
   }
   if (tagName === "fecolormatrix") {
     return svgColorMatrixPaintColorValue(primitive, previousOutputColor ?? sourceColor);

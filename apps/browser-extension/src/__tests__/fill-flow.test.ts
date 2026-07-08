@@ -613,6 +613,31 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys hidden by SVG component transfer filters", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="svgComponentTransferGray">
+            <feComponentTransfer color-interpolation-filters="sRGB">
+              <feFuncR type="linear" slope="0.498" intercept="0" />
+              <feFuncG type="linear" slope="0" intercept="0.498" />
+              <feFuncB type="linear" slope="0" intercept="0.498" />
+            </feComponentTransfer>
+          </filter>
+        </svg>
+        <div style="background:rgb(127,127,127)">
+          <input id="svg-component-transfer-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:url(#svgComponentTransferGray)" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#svg-component-transfer-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys hidden by SVG blend filters", () => {
     document.body.innerHTML = `
       <form>

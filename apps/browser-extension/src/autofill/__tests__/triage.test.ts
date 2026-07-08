@@ -2173,6 +2173,36 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats credential fields hidden by SVG component transfer filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="svgComponentTransferGray">
+            <feComponentTransfer color-interpolation-filters="sRGB">
+              <feFuncR type="linear" slope="0.498" intercept="0" />
+              <feFuncG type="linear" slope="0" intercept="0.498" />
+              <feFuncB type="linear" slope="0" intercept="0.498" />
+            </feComponentTransfer>
+          </filter>
+        </svg>
+        <div style="background:rgb(127,127,127)">
+          <input name="svg_component_transfer_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:url(#svgComponentTransferGray)" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "svg_component_transfer_password").qualifiedAs).toBe(
+      "ignored"
+    );
+    expect(fieldByName(report, "svg_component_transfer_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats credential fields hidden by SVG blend filters as not viewable", () => {
     document.body.innerHTML = `
       <form>
