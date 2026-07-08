@@ -1628,6 +1628,7 @@ describe("autofill triage", () => {
         <input name="black_luminance_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black, black);mask-mode:luminance" />
         <input name="radial_black_luminance_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(circle, black, black);mask-mode:luminance" />
         <input name="stop_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
+        <input name="composite_exclude_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black),linear-gradient(black,black);mask-composite:exclude" />
         <input name="url_mask_password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input name="group_opacity_mask_password" type="password" autocomplete="current-password" style="mask:url(#transparentGroupMask)" />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
@@ -1755,6 +1756,7 @@ describe("autofill triage", () => {
       "black_luminance_mask_password",
       "radial_black_luminance_mask_password",
       "stop_mask_password",
+      "composite_exclude_mask_password",
       "url_mask_password",
       "group_opacity_mask_password",
       "zero_mask_password",

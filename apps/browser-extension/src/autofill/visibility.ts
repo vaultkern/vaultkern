@@ -1966,6 +1966,52 @@ function maskImageFullySuppressesPaint(value: string | undefined, modeValue: str
   );
 }
 
+function maskImageFullyPaints(value: string, modeValue: string | undefined) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return false;
+  }
+  const gradientMatch = normalized.match(/^([a-z-]*gradient)\(/);
+  if (!gradientMatch) {
+    return false;
+  }
+  const gradientBody = cssFunctionBody(normalized, gradientMatch[1]);
+  if (gradientBody === null) {
+    return false;
+  }
+  const colorStops = gradientColorStops(gradientBody);
+  return (
+    colorStops.length > 0 &&
+    colorStops.every((colorStop) => maskColorStopPaints(colorStop, modeValue))
+  );
+}
+
+function maskCompositeRemovesIdenticalCoverage(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === "exclude" ||
+    normalized === "subtract" ||
+    normalized === "xor" ||
+    normalized === "source-out" ||
+    normalized === "destination-out"
+  );
+}
+
+function maskCompositeSuppressesPaint(
+  imageValue: string | undefined,
+  compositeValue: string | undefined,
+  modeValue: string | undefined
+) {
+  if (!isMeaningfulCssValue(imageValue ?? "") || !isMeaningfulCssValue(compositeValue ?? "")) {
+    return false;
+  }
+  const layers = splitCssCommaList(imageValue ?? "").filter(isMeaningfulCssValue);
+  if (layers.length !== 2 || !layers.every((layer) => maskImageFullyPaints(layer, modeValue))) {
+    return false;
+  }
+  return splitCssCommaList(compositeValue ?? "").some(maskCompositeRemovesIdenticalCoverage);
+}
+
 function maskColorStopPaints(value: string, modeValue: string | undefined) {
   const color = cssColorRgba(value);
   return (
@@ -3741,6 +3787,20 @@ function maskStyleSuppressesPaint(
   if (
     maskImages.some((maskImage) =>
       maskImageFullySuppressesPaint(maskImage, `${maskMode}, ${webkitMaskMode}`)
+    )
+  ) {
+    return true;
+  }
+  if (
+    maskCompositeSuppressesPaint(
+      cssPropertyValue(style, current, "mask-image"),
+      cssPropertyValue(style, current, "mask-composite"),
+      maskMode
+    ) ||
+    maskCompositeSuppressesPaint(
+      cssPropertyValue(style, current, "-webkit-mask-image"),
+      cssPropertyValue(style, current, "-webkit-mask-composite"),
+      webkitMaskMode
     )
   ) {
     return true;
