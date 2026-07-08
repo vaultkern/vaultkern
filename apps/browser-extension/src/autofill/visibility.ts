@@ -848,6 +848,21 @@ function verticalOffsetMovesBeforeViewport(
   );
 }
 
+function verticalTransformMovesAfterViewport(
+  viewportExit: ViewportExit | null,
+  offset: number | null
+) {
+  return (
+    viewportExit !== null &&
+    viewportExit.viewportHeight > 0 &&
+    viewportExit.rect.top >= viewportExit.viewportHeight &&
+    offset !== null &&
+    isPositiveOffset(offset) &&
+    viewportExit.rect.top - offset < viewportExit.viewportHeight &&
+    viewportExit.rect.bottom - offset > 0
+  );
+}
+
 function rectsIntersect(left: DOMRect, right: DOMRect) {
   return (
     left.left < right.right &&
@@ -1483,7 +1498,8 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const hasDirectionalTransformOffset =
       transform !== null &&
       (horizontalOffsetMatchesViewportExit(viewportExit, transform.x) ||
-        verticalOffsetMovesBeforeViewport(viewportExit, transform.y));
+        verticalOffsetMovesBeforeViewport(viewportExit, transform.y) ||
+        verticalTransformMovesAfterViewport(viewportExit, transform.y));
     const hasDirectionalPositionOffset =
       isPositioned &&
       (horizontalOffsetMatchesViewportExit(viewportExit, left) ||

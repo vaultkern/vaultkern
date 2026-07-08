@@ -1505,11 +1505,19 @@ describe("autofill triage", () => {
   it("treats fields whose final rect is after the viewport as not viewable", () => {
     document.body.innerHTML = `
       <form>
+        <input name="translated_y_password" type="password" autocomplete="current-password" style="transform:translateY(900px)" />
+        <input name="longhand_translated_y_password" type="password" autocomplete="current-password" style="translate:0 900px" />
         <input name="relative_password" type="password" autocomplete="current-password" style="position:relative;left:9999px" />
         <input name="margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:9999px" />
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
+    for (const name of ["translated_y_password", "longhand_translated_y_password"]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: 920, width: 185, height: 21 })
+      );
+    }
     for (const name of ["relative_password", "margin_password"]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
@@ -1519,7 +1527,12 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    for (const name of ["relative_password", "margin_password"]) {
+    for (const name of [
+      "translated_y_password",
+      "longhand_translated_y_password",
+      "relative_password",
+      "margin_password"
+    ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:offscreen");
     }
