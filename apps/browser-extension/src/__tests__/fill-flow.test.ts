@@ -460,6 +460,7 @@ describe("fillLoginForm", () => {
         <input id="backface-matrix-password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:matrix3d(-1,0,0,0,0,1,0,0,0,0,-1,0,0,0,0,1)" />
         <input id="paintless-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:transparent;-webkit-text-fill-color:transparent;outline:0;box-shadow:none;text-shadow:none" />
         <input id="same-color-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
+        <input id="same-color-border-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:1px solid white;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
         <input id="font-zero-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;font-size:0;outline:0;box-shadow:none;text-shadow:none" />
         <input id="text-indent-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;text-indent:-9999px;outline:0;box-shadow:none;text-shadow:none" />
         <input id="occluded-password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:88px;width:185px;height:21px" />
@@ -717,6 +718,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#backface-matrix-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#paintless-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#same-color-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#same-color-border-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#font-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#text-indent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#occluded-password") as HTMLInputElement).value).toBe("");

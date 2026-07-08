@@ -1657,6 +1657,7 @@ describe("autofill triage", () => {
         <input name="backface_matrix_password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:matrix3d(-1,0,0,0,0,1,0,0,0,0,-1,0,0,0,0,1)" />
         <input name="paintless_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:transparent;-webkit-text-fill-color:transparent;outline:0;box-shadow:none;text-shadow:none" />
         <input name="same_color_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
+        <input name="same_color_border_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:1px solid white;background:white;color:white;-webkit-text-fill-color:white;outline:0;box-shadow:none;text-shadow:none" />
         <input name="font_zero_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;font-size:0;outline:0;box-shadow:none;text-shadow:none" />
         <input name="text_indent_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;text-indent:-9999px;outline:0;box-shadow:none;text-shadow:none" />
         <input name="real_password" type="password" autocomplete="current-password" />
@@ -1727,6 +1728,7 @@ describe("autofill triage", () => {
       "cumulative_filter_password",
       "paintless_password",
       "same_color_password",
+      "same_color_border_password",
       "font_zero_password",
       "text_indent_password"
     ]) {
