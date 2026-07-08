@@ -1161,7 +1161,13 @@ export function createLoginFillPlan(
       createPasswordChangeActions(fields, passwordChangeScopeKey, payload)
     );
     if (typeof payload.totp === "string") {
-      appendFallbackActions(actions, createTotpActions(report.fields, payload.totp));
+      appendFallbackActions(
+        actions,
+        createTotpActions(
+          report.fields.filter((field) => fieldIsInCredentialScope(field, passwordChangeScopeKey)),
+          payload.totp
+        )
+      );
     }
     return { actions };
   }
@@ -1172,7 +1178,13 @@ export function createLoginFillPlan(
       createRegistrationActions(fields, registrationScopeKey, payload)
     );
     if (typeof payload.totp === "string") {
-      appendFallbackActions(actions, createTotpActions(report.fields, payload.totp));
+      appendFallbackActions(
+        actions,
+        createTotpActions(
+          report.fields.filter((field) => fieldIsInCredentialScope(field, registrationScopeKey)),
+          payload.totp
+        )
+      );
     }
     return { actions };
   }
@@ -1226,7 +1238,7 @@ export function createLoginFillPlan(
 
   if (typeof payload.totp === "string") {
     const totpActionFields =
-      intent.kind === "totp" && shouldUseResolvedScope ? intentAllFields : report.fields;
+      shouldUseResolvedScope && primaryScopeKey !== null ? intentAllFields : report.fields;
     fallbackActions.push(...createTotpActions(totpActionFields, payload.totp));
   }
 

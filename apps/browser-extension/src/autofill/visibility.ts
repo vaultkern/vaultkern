@@ -193,6 +193,7 @@ function isClippedTinyAncestor(
 
 function transformTranslateOffset(
   value: string | undefined,
+  current: HTMLElement,
   units: { emPx?: number; remPx?: number }
 ) {
   const normalized = value?.trim().toLowerCase();
@@ -206,25 +207,27 @@ function transformTranslateOffset(
   const transforms = normalized.matchAll(
     /(matrix3d|matrix|translate3d|translatex|translatey|translate)\(([^)]*)\)/g
   );
+  const rect = current.getBoundingClientRect();
   for (const transform of transforms) {
     const name = transform[1];
-    const args = transform[2].split(/[,\s]+/).filter(Boolean);
-    const values = args.map((arg) => numericCssValue(arg, units));
+    const args = splitCssFunctionArgs(transform[2]);
     found = true;
 
     if (name === "matrix") {
+      const values = args.map((arg) => numericCssValue(arg, units));
       x += values[4] ?? 0;
       y += values[5] ?? 0;
     } else if (name === "matrix3d") {
+      const values = args.map((arg) => numericCssValue(arg, units));
       x += values[12] ?? 0;
       y += values[13] ?? 0;
     } else if (name === "translatex") {
-      x += values[0] ?? 0;
+      x += cssLengthToPx(args[0] ?? "0", rect.width, units) ?? 0;
     } else if (name === "translatey") {
-      y += values[0] ?? 0;
+      y += cssLengthToPx(args[0] ?? "0", rect.height, units) ?? 0;
     } else {
-      x += values[0] ?? 0;
-      y += values[1] ?? 0;
+      x += cssLengthToPx(args[0] ?? "0", rect.width, units) ?? 0;
+      y += cssLengthToPx(args[1] ?? "0", rect.height, units) ?? 0;
     }
   }
 
@@ -233,6 +236,7 @@ function transformTranslateOffset(
 
 function translateLonghandOffset(
   value: string | undefined,
+  current: HTMLElement,
   units: { emPx?: number; remPx?: number }
 ) {
   const normalized = value?.trim().toLowerCase();
@@ -240,12 +244,10 @@ function translateLonghandOffset(
     return null;
   }
 
-  const values = normalized
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => numericCssValue(part, units));
-  const x = values[0];
-  const y = values[1] ?? 0;
+  const rect = current.getBoundingClientRect();
+  const values = splitCssFunctionArgs(normalized);
+  const x = values[0] === undefined ? null : cssLengthToPx(values[0], rect.width, units);
+  const y = values[1] === undefined ? 0 : cssLengthToPx(values[1], rect.height, units);
   if (x === null && y === null) {
     return null;
   }
@@ -257,8 +259,16 @@ function combinedTranslateOffset(
   current: HTMLElement,
   units: { emPx?: number; remPx?: number }
 ) {
-  const transform = transformTranslateOffset(cssPropertyValue(style, current, "transform"), units);
-  const translate = translateLonghandOffset(cssPropertyValue(style, current, "translate"), units);
+  const transform = transformTranslateOffset(
+    cssPropertyValue(style, current, "transform"),
+    current,
+    units
+  );
+  const translate = translateLonghandOffset(
+    cssPropertyValue(style, current, "translate"),
+    current,
+    units
+  );
   if (!transform && !translate) {
     return null;
   }
@@ -360,6 +370,157 @@ function transformStyleFullyCollapses(
   );
 }
 
+function cssAngleDegrees(value: string | undefined) {
+  const match = value?.trim().toLowerCase().match(/^(-?\d+(?:\.\d+)?)(deg|turn|rad|grad)?$/);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number.parseFloat(match[1]);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  const unit = match[2] ?? "deg";
+  if (unit === "turn") {
+    return parsed * 360;
+  }
+  if (unit === "rad") {
+    return (parsed * 180) / Math.PI;
+  }
+  if (unit === "grad") {
+    return parsed * 0.9;
+  }
+  return parsed;
+}
+
+function normalizedDegrees(degrees: number) {
+  return ((degrees % 360) + 360) % 360;
+}
+
+function angleIsQuarterTurn(value: string | undefined) {
+  const degrees = cssAngleDegrees(value);
+  if (degrees === null) {
+    return false;
+  }
+  const normalized = normalizedDegrees(degrees);
+  return (
+    Math.abs(normalized - 90) <= TRANSFORM_COLLAPSE_EPSILON ||
+    Math.abs(normalized - 270) <= TRANSFORM_COLLAPSE_EPSILON
+  );
+}
+
+function angleIsHalfTurn(value: string | undefined) {
+  const degrees = cssAngleDegrees(value);
+  if (degrees === null) {
+    return false;
+  }
+  return Math.abs(normalizedDegrees(degrees) - 180) <= TRANSFORM_COLLAPSE_EPSILON;
+}
+
+function rotateTransformFullyCollapses(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return false;
+  }
+
+  for (const transform of normalized.matchAll(/(rotate3d|rotatex|rotatey)\(([^)]*)\)/g)) {
+    const name = transform[1];
+    const args = splitCssFunctionArgs(transform[2]);
+    if ((name === "rotatex" || name === "rotatey") && angleIsQuarterTurn(args[0])) {
+      return true;
+    }
+    if (name === "rotate3d" && args.length >= 4) {
+      const [x, y, z, angle] = args;
+      const rotatesIntoEdge =
+        (numericCssValue(x) ?? 0) !== 0 || (numericCssValue(y) ?? 0) !== 0;
+      const hasZRotation = (numericCssValue(z) ?? 0) !== 0;
+      if (rotatesIntoEdge && !hasZRotation && angleIsQuarterTurn(angle)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function rotateLonghandFullyCollapses(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return false;
+  }
+  const args = splitCssFunctionArgs(normalized);
+  if (args.length === 2 && (args[0] === "x" || args[0] === "y")) {
+    return angleIsQuarterTurn(args[1]);
+  }
+  if (args.length >= 4) {
+    const [x, y, z, angle] = args;
+    const rotatesIntoEdge =
+      (numericCssValue(x) ?? 0) !== 0 || (numericCssValue(y) ?? 0) !== 0;
+    const hasZRotation = (numericCssValue(z) ?? 0) !== 0;
+    return rotatesIntoEdge && !hasZRotation && angleIsQuarterTurn(angle);
+  }
+  return false;
+}
+
+function rotationTurnsBackfaceAway(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return false;
+  }
+
+  for (const transform of normalized.matchAll(/(rotate3d|rotatex|rotatey)\(([^)]*)\)/g)) {
+    const name = transform[1];
+    const args = splitCssFunctionArgs(transform[2]);
+    if ((name === "rotatex" || name === "rotatey") && angleIsHalfTurn(args[0])) {
+      return true;
+    }
+    if (name === "rotate3d" && args.length >= 4) {
+      const [x, y, z, angle] = args;
+      const flipsPlane =
+        (numericCssValue(x) ?? 0) !== 0 || (numericCssValue(y) ?? 0) !== 0;
+      const hasZRotation = (numericCssValue(z) ?? 0) !== 0;
+      if (flipsPlane && !hasZRotation && angleIsHalfTurn(angle)) {
+        return true;
+      }
+    }
+  }
+
+  const args = splitCssFunctionArgs(normalized);
+  if (args.length === 2 && (args[0] === "x" || args[0] === "y")) {
+    return angleIsHalfTurn(args[1]);
+  }
+  if (args.length >= 4) {
+    const [x, y, z, angle] = args;
+    const flipsPlane = (numericCssValue(x) ?? 0) !== 0 || (numericCssValue(y) ?? 0) !== 0;
+    const hasZRotation = (numericCssValue(z) ?? 0) !== 0;
+    return flipsPlane && !hasZRotation && angleIsHalfTurn(angle);
+  }
+  return false;
+}
+
+function rotateStyleFullyCollapses(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return (
+    rotateTransformFullyCollapses(cssPropertyValue(style, current, "transform")) ||
+    rotateLonghandFullyCollapses(cssPropertyValue(style, current, "rotate"))
+  );
+}
+
+function backfaceStyleHidesElement(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  const backface = cssPropertyValue(style, current, "backface-visibility")
+    .trim()
+    .toLowerCase();
+  return (
+    backface === "hidden" &&
+    (rotationTurnsBackfaceAway(cssPropertyValue(style, current, "transform")) ||
+      rotationTurnsBackfaceAway(cssPropertyValue(style, current, "rotate")))
+  );
+}
+
 function filterOpacityValue(value: string | undefined) {
   const normalized = value?.trim().toLowerCase();
   if (!normalized || normalized === "none") {
@@ -379,6 +540,118 @@ function filterOpacityValue(value: string | undefined) {
   return found ? opacity : null;
 }
 
+function localCssUrlReferenceIds(value: string | undefined) {
+  const references: string[] = [];
+  const normalized = value?.trim();
+  if (!normalized) {
+    return references;
+  }
+  for (const match of normalized.matchAll(/url\(\s*(['"]?)#([^'")]+)\1\s*\)/gi)) {
+    references.push(match[2]);
+  }
+  return references;
+}
+
+function svgFilterSuppressesPaint(current: HTMLElement, value: string | undefined) {
+  for (const id of localCssUrlReferenceIds(value)) {
+    const filter = current.ownerDocument.getElementById(id);
+    if (!filter) {
+      continue;
+    }
+    const alphaFunctions = Array.from(filter.querySelectorAll("*")).filter(
+      (child) => child.tagName.toLowerCase() === "fefunca"
+    );
+    if (
+      alphaFunctions.some((func) => {
+        const type = func.getAttribute("type")?.toLowerCase();
+        const tableValues = (func.getAttribute("tableValues") ?? "")
+          .trim()
+          .split(/\s+/)
+          .map(Number);
+        const slope = Number(func.getAttribute("slope") ?? "1");
+        const intercept = Number(func.getAttribute("intercept") ?? "0");
+        return (
+          (type === "table" &&
+            tableValues.length > 0 &&
+            tableValues.every((value) => Number.isFinite(value) && value <= 0)) ||
+          (type === "linear" && slope <= 0 && intercept <= 0)
+        );
+      })
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function cssColorLooksTransparent(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === "transparent" ||
+    /^rgba?\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(normalized) ||
+    /^rgba?\([^)]*\/\s*0(?:%|\.0+)?\s*\)$/.test(normalized) ||
+    /^#[0-9a-f]{4}$/.test(normalized) && normalized.endsWith("0") ||
+    /^#[0-9a-f]{8}$/.test(normalized) && normalized.endsWith("00")
+  );
+}
+
+function maskImageFullyTransparent(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return false;
+  }
+  const gradientMatch = normalized.match(/^linear-gradient\((.*)\)$/);
+  if (!gradientMatch) {
+    return false;
+  }
+  const colorStops = splitCssCommaList(gradientMatch[1]).filter(
+    (part) => !part.trim().startsWith("to ") && cssAngleDegrees(part.trim()) === null
+  );
+  return colorStops.length > 0 && colorStops.every(cssColorLooksTransparent);
+}
+
+function maskSizeFullyCollapses(
+  value: string | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "auto") {
+    return false;
+  }
+  return splitCssCommaList(normalized).some((layer) => {
+    const [width, height = width] = splitCssFunctionArgs(layer);
+    const widthPx = width === undefined ? null : cssLengthToPx(width, 0, units);
+    const heightPx = height === undefined ? null : cssLengthToPx(height, 0, units);
+    return (
+      (widthPx !== null && widthPx <= 0) ||
+      (heightPx !== null && heightPx <= 0)
+    );
+  });
+}
+
+function maskStyleSuppressesPaint(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  units: { emPx?: number; remPx?: number }
+) {
+  const maskImages = [
+    cssPropertyValue(style, current, "mask-image"),
+    cssPropertyValue(style, current, "-webkit-mask-image"),
+    cssPropertyValue(style, current, "mask"),
+    cssPropertyValue(style, current, "-webkit-mask")
+  ].filter(isMeaningfulCssValue);
+  if (!maskImages.length) {
+    return false;
+  }
+  if (maskImages.some(maskImageFullyTransparent)) {
+    return true;
+  }
+  return (
+    maskSizeFullyCollapses(cssPropertyValue(style, current, "mask-size"), units) ||
+    maskSizeFullyCollapses(cssPropertyValue(style, current, "-webkit-mask-size"), units)
+  );
+}
+
 function isEffectivelyTransparent(value: number | null) {
   return value !== null && value <= MIN_VISIBLE_OPACITY;
 }
@@ -391,8 +664,7 @@ function viewportSize(element: HTMLElement) {
   const view = element.ownerDocument.defaultView;
   const documentElement = element.ownerDocument.documentElement;
   return {
-    width: view?.innerWidth ?? documentElement.clientWidth,
-    height: view?.innerHeight ?? documentElement.clientHeight
+    width: view?.innerWidth ?? documentElement.clientWidth
   };
 }
 
@@ -405,11 +677,8 @@ function viewportExitForRect(element: HTMLElement) {
   return {
     rect,
     viewportWidth: viewport.width,
-    viewportHeight: viewport.height,
     beforeX: rect.right <= 0,
-    afterX: viewport.width > 0 && rect.left >= viewport.width,
-    beforeY: rect.bottom <= 0,
-    afterY: viewport.height > 0 && rect.top >= viewport.height
+    afterX: viewport.width > 0 && rect.left >= viewport.width
   };
 }
 
@@ -431,22 +700,6 @@ function horizontalOffsetMatchesViewportExit(
   }
   if (viewportExit.afterX && isPositiveOffset(offset)) {
     return viewportExit.rect.left - offset < viewportExit.viewportWidth;
-  }
-  return false;
-}
-
-function verticalOffsetMatchesViewportExit(
-  viewportExit: ViewportExit | null,
-  offset: number | null
-) {
-  if (viewportExit === null || offset === null) {
-    return false;
-  }
-  if (viewportExit.beforeY && isNegativeOffset(offset)) {
-    return viewportExit.rect.bottom - offset > 0;
-  }
-  if (viewportExit.afterY && isPositiveOffset(offset)) {
-    return viewportExit.rect.top - offset < viewportExit.viewportHeight;
   }
   return false;
 }
@@ -692,11 +945,73 @@ function insetPairSuppressesField(
   );
 }
 
+function svgLengthToPx(
+  value: string | null,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number }
+) {
+  if (value === null) {
+    return 0;
+  }
+  return cssLengthToPx(value, axisSize, units) ?? numericCssValue(value, units) ?? 0;
+}
+
+function svgClipShapeSuppressesField(
+  current: HTMLElement,
+  shape: Element,
+  units: { emPx?: number; remPx?: number }
+) {
+  const rect = current.getBoundingClientRect();
+  const tagName = shape.tagName.toLowerCase();
+  if (tagName === "rect") {
+    const width = svgLengthToPx(shape.getAttribute("width"), rect.width, units);
+    const height = svgLengthToPx(shape.getAttribute("height"), rect.height, units);
+    return width <= MIN_CREDENTIAL_FIELD_SIZE_PX || height <= MIN_CREDENTIAL_FIELD_SIZE_PX;
+  }
+  if (tagName === "circle") {
+    const radius = svgLengthToPx(shape.getAttribute("r"), Math.min(rect.width, rect.height), units);
+    return radius * 2 <= MIN_CREDENTIAL_FIELD_SIZE_PX;
+  }
+  if (tagName === "ellipse") {
+    const radiusX = svgLengthToPx(shape.getAttribute("rx"), rect.width, units);
+    const radiusY = svgLengthToPx(shape.getAttribute("ry"), rect.height, units);
+    return (
+      radiusX * 2 <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+      radiusY * 2 <= MIN_CREDENTIAL_FIELD_SIZE_PX
+    );
+  }
+  return false;
+}
+
+function svgClipPathFullyClips(
+  current: HTMLElement,
+  value: string,
+  units: { emPx?: number; remPx?: number }
+) {
+  const [id] = localCssUrlReferenceIds(value);
+  if (!id) {
+    return false;
+  }
+  const clipPath = current.ownerDocument.getElementById(id);
+  if (!clipPath) {
+    return false;
+  }
+  const shapes = Array.from(clipPath.children);
+  return (
+    shapes.length === 0 ||
+    shapes.every((shape) => svgClipShapeSuppressesField(current, shape, units))
+  );
+}
+
 function clipPathFullyClips(
   current: HTMLElement,
   value: string,
   units: { emPx?: number; remPx?: number }
 ) {
+  if (localCssUrlReferenceIds(value).length > 0) {
+    return svgClipPathFullyClips(current, value, units);
+  }
+
   const normalized = value.trim().toLowerCase();
   const insetMatch = normalized.match(/^inset\((.*)\)$/);
   if (insetMatch) {
@@ -852,6 +1167,11 @@ function isTinyCredentialField(
   );
 }
 
+function hasCollapsedRenderedAxis(element: HTMLElement) {
+  const rect = element.getBoundingClientRect();
+  return (rect.width <= 0 && rect.height > 0) || (rect.height <= 0 && rect.width > 0);
+}
+
 export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult {
   const reasons: string[] = [];
   const inputType =
@@ -887,7 +1207,8 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const inlineDisplay = current.style.display;
     const inlineVisibility = current.style.visibility;
     const opacity = cssOpacityValue(style?.opacity) ?? cssOpacityValue(current.style.opacity);
-    const filterOpacity = filterOpacityValue(cssPropertyValue(style, current, "filter"));
+    const filter = cssPropertyValue(style, current, "filter");
+    const filterOpacity = filterOpacityValue(filter);
     const contentVisibility = cssPropertyValue(style, current, "content-visibility")
       .trim()
       .toLowerCase();
@@ -898,7 +1219,6 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const right = computedCssValue(style?.right, current.style.right, cssUnits);
     const bottom = computedCssValue(style?.bottom, current.style.bottom, cssUnits);
     const marginLeft = computedCssValue(style?.marginLeft, current.style.marginLeft, cssUnits);
-    const marginTop = computedCssValue(style?.marginTop, current.style.marginTop, cssUnits);
     const width = computedCssValue(style?.width, current.style.width, cssUnits);
     const height = computedCssValue(style?.height, current.style.height, cssUnits);
     const transform = combinedTranslateOffset(style, current, cssUnits);
@@ -906,17 +1226,13 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       position !== undefined && position !== "" && position !== "static";
     const hasDirectionalTransformOffset =
       transform !== null &&
-      (horizontalOffsetMatchesViewportExit(viewportExit, transform.x) ||
-        verticalOffsetMatchesViewportExit(viewportExit, transform.y));
+      horizontalOffsetMatchesViewportExit(viewportExit, transform.x);
     const hasDirectionalPositionOffset =
       isPositioned &&
       (horizontalOffsetMatchesViewportExit(viewportExit, left) ||
-        horizontalOffsetMatchesViewportExit(viewportExit, inverseOffset(right)) ||
-        verticalOffsetMatchesViewportExit(viewportExit, top) ||
-        verticalOffsetMatchesViewportExit(viewportExit, inverseOffset(bottom)));
+        horizontalOffsetMatchesViewportExit(viewportExit, inverseOffset(right)));
     const hasDirectionalMarginOffset =
-      horizontalOffsetMatchesViewportExit(viewportExit, marginLeft) ||
-      verticalOffsetMatchesViewportExit(viewportExit, marginTop);
+      horizontalOffsetMatchesViewportExit(viewportExit, marginLeft);
     const hasHiddenVisibility =
       inlineVisibility === "hidden" ||
       style?.visibility === "hidden" ||
@@ -934,7 +1250,12 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     ) {
       addReason(reasons, "not-viewable:css");
     }
-    if (isEffectivelyTransparent(opacity) || isEffectivelyTransparent(filterOpacity)) {
+    if (
+      isEffectivelyTransparent(opacity) ||
+      isEffectivelyTransparent(filterOpacity) ||
+      svgFilterSuppressesPaint(current, filter) ||
+      maskStyleSuppressesPaint(style, current, cssUnits)
+    ) {
       addReason(reasons, "not-viewable:transparent");
     }
     if (hasFullyClippingStyle(current, style, cssUnits)) {
@@ -962,11 +1283,16 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     ) {
       addReason(reasons, "not-viewable:offscreen");
     }
-    if (transformStyleFullyCollapses(style, current, cssUnits)) {
+    if (
+      transformStyleFullyCollapses(style, current, cssUnits) ||
+      rotateStyleFullyCollapses(style, current) ||
+      backfaceStyleHidesElement(style, current)
+    ) {
       addReason(reasons, "not-viewable:zero-size");
     }
     if (
       (current === element && width === 0 && height === 0) ||
+      (current === element && hasCollapsedRenderedAxis(element)) ||
       (current !== element && isClippedZeroSizeAncestor(current, width, height, style))
     ) {
       addReason(reasons, "not-viewable:zero-size");

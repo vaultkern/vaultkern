@@ -157,6 +157,72 @@ describe("totp autofill detection", () => {
     expect((document.querySelector("#second-code") as HTMLInputElement).value).toBe("123456");
   });
 
+  it("scopes TOTP to the focused login form when credentials are filled too", () => {
+    document.body.innerHTML = `
+      <form id="first" aria-label="Sign in with authenticator">
+        <input id="first-email" type="email" autocomplete="username" />
+        <input id="first-password" type="password" autocomplete="current-password" />
+        <input name="first_otp_1" maxlength="1" inputmode="numeric" />
+        <input name="first_otp_2" maxlength="1" inputmode="numeric" />
+        <input name="first_otp_3" maxlength="1" inputmode="numeric" />
+        <input name="first_otp_4" maxlength="1" inputmode="numeric" />
+        <input name="first_otp_5" maxlength="1" inputmode="numeric" />
+        <input name="first_otp_6" maxlength="1" inputmode="numeric" />
+      </form>
+      <form id="second" aria-label="Sign in with authenticator">
+        <input id="second-email" type="email" autocomplete="username" />
+        <input id="second-password" type="password" autocomplete="current-password" />
+        <input name="second_otp_1" maxlength="1" inputmode="numeric" />
+        <input name="second_otp_2" maxlength="1" inputmode="numeric" />
+        <input name="second_otp_3" maxlength="1" inputmode="numeric" />
+        <input name="second_otp_4" maxlength="1" inputmode="numeric" />
+        <input name="second_otp_5" maxlength="1" inputmode="numeric" />
+        <input name="second_otp_6" maxlength="1" inputmode="numeric" />
+      </form>
+    `;
+
+    (document.querySelector("#second-password") as HTMLInputElement).focus();
+    fillLoginForm({ username: "alice@example.com", password: "secret", totp: "123456" });
+
+    expect((document.querySelector("#first-email") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#first-password") as HTMLInputElement).value).toBe("");
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>('input[name^="first_otp_"]')].map(
+        (field) => field.value
+      )
+    ).toEqual(["", "", "", "", "", ""]);
+    expect((document.querySelector("#second-email") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#second-password") as HTMLInputElement).value).toBe("secret");
+    expect(
+      [...document.querySelectorAll<HTMLInputElement>('input[name^="second_otp_"]')].map(
+        (field) => field.value
+      )
+    ).toEqual(["1", "2", "3", "4", "5", "6"]);
+  });
+
+  it("scopes single-field TOTP to the focused login form when credentials are filled too", () => {
+    document.body.innerHTML = `
+      <form id="first" aria-label="Sign in with authenticator">
+        <input id="first-email" type="email" autocomplete="username" />
+        <input id="first-password" type="password" autocomplete="current-password" />
+        <input id="first-code" name="code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+      <form id="second" aria-label="Sign in with authenticator">
+        <input id="second-email" type="email" autocomplete="username" />
+        <input id="second-password" type="password" autocomplete="current-password" />
+        <input id="second-code" name="code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+
+    (document.querySelector("#second-password") as HTMLInputElement).focus();
+    fillLoginForm({ username: "alice@example.com", password: "secret", totp: "123456" });
+
+    expect((document.querySelector("#first-code") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#second-code") as HTMLInputElement).value).toBe("123456");
+  });
+
   it("splits a TOTP value across one-character fields in document order", () => {
     document.body.innerHTML = `
       <form aria-label="Two-factor verification">
