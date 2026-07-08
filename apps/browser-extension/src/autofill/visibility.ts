@@ -1891,7 +1891,7 @@ function cssMaskLinearGradientPaintedRanges(
     return null;
   }
 
-  const points: Array<{ offset: number; paints: boolean }> = [];
+  let points: Array<{ offset: number; paints: boolean }> = [];
   for (const part of stopParts) {
     const stopPoints = cssMaskLinearGradientStopPoints(part, axisSize, modeValue, units);
     if (stopPoints === null) {
@@ -1902,6 +1902,14 @@ function cssMaskLinearGradientPaintedRanges(
   if (points.length < 2) {
     return null;
   }
+  let previousOffset = points[0].offset;
+  points = points.map((point, index) => {
+    if (index === 0) {
+      return point;
+    }
+    previousOffset = Math.max(previousOffset, point.offset);
+    return { ...point, offset: previousOffset };
+  });
 
   if (repeatsGradient) {
     const first = points[0];

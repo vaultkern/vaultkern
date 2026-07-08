@@ -1215,6 +1215,60 @@ describe("fillLoginForm", () => {
     expect(loginPassword.value).toBe("secret");
   });
 
+  it("does not treat visible labels as enough for hard-stop ancestor mask decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="hard-stop-mask-label" for="hard-stop-mask-password">Password</label>
+        <div id="ancestor-hard-stop-mask" style="width:400px;height:40px;mask-image:linear-gradient(to right, transparent 60%, black 0)">
+          <input id="hard-stop-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const hardStopMaskPassword = document.querySelector(
+      "#hard-stop-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const hardStopMaskLabel = document.querySelector(
+      "#hard-stop-mask-label"
+    ) as HTMLLabelElement;
+    stubElementRect(
+      hardStopMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      hardStopMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-hard-stop-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return hardStopMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(hardStopMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("does not fill near-total clipped password decoys", () => {
     document.body.innerHTML = `
       <style>

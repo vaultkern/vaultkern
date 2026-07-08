@@ -3052,6 +3052,65 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields hidden by hard-stop ancestor masks as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="hard-stop-mask-label" for="hard-stop-mask-password">Password</label>
+        <div id="ancestor-hard-stop-mask" style="width:400px;height:40px;mask-image:linear-gradient(to right, transparent 60%, black 0)">
+          <input id="hard-stop-mask-password" name="hard_stop_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const hardStopMaskPassword = document.querySelector(
+      "#hard-stop-mask-password"
+    ) as HTMLInputElement;
+    const hardStopMaskLabel = document.querySelector(
+      "#hard-stop-mask-label"
+    ) as HTMLLabelElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    stubElementRect(
+      hardStopMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      hardStopMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-hard-stop-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(realPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return hardStopMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(fieldByName(report, "hard_stop_mask_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "hard_stop_mask_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats zero-sized fields and inert container fields as unavailable", () => {
     document.body.innerHTML = `
       <form>
