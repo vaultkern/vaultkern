@@ -1170,6 +1170,7 @@ function cssColorLooksTransparent(value: string) {
         )
       : null;
   return (
+    normalized === "none" ||
     normalized === "transparent" ||
     normalized.startsWith("transparent ") ||
     /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(normalized) ||

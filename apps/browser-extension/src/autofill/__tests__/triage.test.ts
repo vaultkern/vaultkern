@@ -1619,6 +1619,7 @@ describe("autofill triage", () => {
           <mask id="blackMask"><rect width="100%" height="100%" fill="black" /></mask>
           <mask id="transparentGroupMask"><g opacity="0"><rect width="100%" height="100%" fill="white" /></g></mask>
           <mask id="nestedOpacityMask"><g opacity="0.1"><rect opacity="0.1" width="100%" height="100%" fill="white" /></g></mask>
+          <mask id="fillNoneMask"><rect width="100%" height="100%" fill="none" /></mask>
         </svg>
         <input name="transparent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
         <input name="radial_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(transparent, transparent)" />
@@ -1633,6 +1634,7 @@ describe("autofill triage", () => {
         <input name="url_mask_password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input name="group_opacity_mask_password" type="password" autocomplete="current-password" style="mask:url(#transparentGroupMask)" />
         <input name="nested_opacity_mask_password" type="password" autocomplete="current-password" style="mask:url(#nestedOpacityMask)" />
+        <input name="fill_none_mask_password" type="password" autocomplete="current-password" style="mask:url(#fillNoneMask)" />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input name="zero_percent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input name="tiny_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
@@ -1762,6 +1764,7 @@ describe("autofill triage", () => {
       "url_mask_password",
       "group_opacity_mask_password",
       "nested_opacity_mask_password",
+      "fill_none_mask_password",
       "zero_mask_password",
       "zero_percent_mask_password",
       "tiny_mask_password",
