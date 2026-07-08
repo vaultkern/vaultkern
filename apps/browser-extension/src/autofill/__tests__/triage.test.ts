@@ -55,21 +55,34 @@ function fakeCssStyle(values: Record<string, string>) {
   ) as CSSStyleDeclaration;
 }
 
-function stubPseudoElementStyle(
-  element: Element,
-  pseudoElement: "::before" | "::after",
-  values: Record<string, string>
+function stubPseudoElementStyles(
+  styles: Array<{
+    element: Element;
+    pseudoElement: "::before" | "::after";
+    values: Record<string, string>;
+  }>
 ) {
   const originalGetComputedStyle = window.getComputedStyle.bind(window);
   return vi.spyOn(window, "getComputedStyle").mockImplementation((target, pseudoElt) => {
-    if (target === element && pseudoElt === pseudoElement) {
-      return fakeCssStyle(values);
+    const pseudoStyle = styles.find(
+      (style) => target === style.element && pseudoElt === style.pseudoElement
+    );
+    if (pseudoStyle) {
+      return fakeCssStyle(pseudoStyle.values);
     }
     if (pseudoElt) {
       return fakeCssStyle({ content: "none", display: "none" });
     }
     return originalGetComputedStyle(target);
   });
+}
+
+function stubPseudoElementStyle(
+  element: Element,
+  pseudoElement: "::before" | "::after",
+  values: Record<string, string>
+) {
+  return stubPseudoElementStyles([{ element, pseudoElement, values }]);
 }
 
 describe("autofill triage", () => {
@@ -1792,6 +1805,9 @@ describe("autofill triage", () => {
         <div id="pseudo-cover-host" style="position:absolute;left:0;top:420px;width:260px;height:48px">
           <input name="pseudo_covered_password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:8px;width:185px;height:21px;z-index:1" />
         </div>
+        <div id="pseudo-after-cover-host" style="position:absolute;left:0;top:472px;width:260px;height:48px">
+          <input name="pseudo_after_covered_password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:8px;width:185px;height:21px" />
+        </div>
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
@@ -1810,10 +1826,16 @@ describe("autofill triage", () => {
     const pseudoCoveredPassword = document.querySelector(
       'input[name="pseudo_covered_password"]'
     ) as HTMLInputElement;
+    const pseudoAfterCoveredPassword = document.querySelector(
+      'input[name="pseudo_after_covered_password"]'
+    ) as HTMLInputElement;
     const cover = document.querySelector("#cover") as HTMLDivElement;
     const pointerEventsCover = document.querySelector("#pointer-events-cover") as HTMLDivElement;
     const shadowCover = document.querySelector("#shadow-cover") as HTMLDivElement;
     const pseudoCoverHost = document.querySelector("#pseudo-cover-host") as HTMLDivElement;
+    const pseudoAfterCoverHost = document.querySelector(
+      "#pseudo-after-cover-host"
+    ) as HTMLDivElement;
     stubElementRect(coveredPassword, elementRect({ left: 24, top: 88, width: 185, height: 21 }));
     stubElementRect(
       pointerEventsCoveredPassword,
@@ -1827,11 +1849,19 @@ describe("autofill triage", () => {
       pseudoCoveredPassword,
       elementRect({ left: 24, top: 428, width: 185, height: 21 })
     );
+    stubElementRect(
+      pseudoAfterCoveredPassword,
+      elementRect({ left: 24, top: 480, width: 185, height: 21 })
+    );
     stubElementRect(pointerEventsCover, elementRect({ left: 0, top: 164, width: 260, height: 48 }));
     stubElementRect(shadowCover, elementRect({ left: 0, top: 0, width: 1, height: 1 }));
     stubElementRect(pseudoCoverHost, elementRect({ left: 0, top: 420, width: 260, height: 48 }));
+    stubElementRect(
+      pseudoAfterCoverHost,
+      elementRect({ left: 0, top: 472, width: 260, height: 48 })
+    );
     stubElementRect(realPassword, elementRect({ left: 24, top: 140, width: 185, height: 21 }));
-    const pseudoStyle = stubPseudoElementStyle(pseudoCoverHost, "::before", {
+    const pseudoCoverStyle = {
       content: '""',
       display: "block",
       visibility: "visible",
@@ -1841,13 +1871,24 @@ describe("autofill triage", () => {
       top: "0px",
       width: "260px",
       height: "48px",
-      "z-index": "2",
       background: "rgb(255, 255, 255)",
       "background-color": "rgb(255, 255, 255)",
       "background-image": "none",
       "box-shadow": "none",
       filter: "none"
-    });
+    };
+    const pseudoStyle = stubPseudoElementStyles([
+      {
+        element: pseudoCoverHost,
+        pseudoElement: "::before",
+        values: { ...pseudoCoverStyle, "z-index": "2" }
+      },
+      {
+        element: pseudoAfterCoverHost,
+        pseudoElement: "::after",
+        values: { ...pseudoCoverStyle, "z-index": "auto" }
+      }
+    ]);
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
@@ -1863,6 +1904,9 @@ describe("autofill triage", () => {
         }
         if (x >= 24 && x <= 209 && y >= 428 && y <= 449) {
           return pseudoCoveredPassword;
+        }
+        if (x >= 24 && x <= 209 && y >= 480 && y <= 501) {
+          return pseudoAfterCoveredPassword;
         }
         if (x >= 24 && x <= 209 && y >= 140 && y <= 161) {
           return realPassword;
@@ -1892,6 +1936,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "pseudo_covered_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "pseudo_covered_password").reasons).toContain(
+      "not-viewable:occluded"
+    );
+    expect(fieldByName(report, "pseudo_after_covered_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "pseudo_after_covered_password").reasons).toContain(
       "not-viewable:occluded"
     );
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");

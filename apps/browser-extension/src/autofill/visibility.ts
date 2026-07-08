@@ -1542,15 +1542,16 @@ function pseudoContentPaints(style: CSSStyleDeclaration | undefined) {
 
 function pseudoElementMayPaintAboveElement(
   element: HTMLElement,
-  style: CSSStyleDeclaration | undefined
+  style: CSSStyleDeclaration | undefined,
+  pseudoElement: "::before" | "::after"
 ) {
   const pseudoZIndex = numericZIndex(cssStyleValue(style, "z-index"));
-  if (pseudoZIndex === null) {
-    return false;
-  }
   const elementStyle = element.ownerDocument.defaultView?.getComputedStyle(element);
-  const elementZIndex = numericZIndex(elementStyle?.zIndex || element.style.zIndex) ?? 0;
-  return pseudoZIndex > elementZIndex;
+  const elementZIndex = numericZIndex(elementStyle?.zIndex || element.style.zIndex);
+  if (pseudoZIndex === null) {
+    return pseudoElement === "::after" && elementZIndex === null;
+  }
+  return pseudoZIndex > (elementZIndex ?? 0);
 }
 
 function cssStyleLengthToPx(
@@ -1637,7 +1638,7 @@ function pseudoElementCoversPoint(
     visibility !== "collapse" &&
     !isEffectivelyTransparent(opacity) &&
     !isEffectivelyTransparent(filterOpacityValue(filter)) &&
-    pseudoElementMayPaintAboveElement(element, style) &&
+    pseudoElementMayPaintAboveElement(element, style, pseudoElement) &&
     cssStylePaintsVisibleBox(style, cssUnits) &&
     boundsContainPoint(pseudoElementBounds(candidateRect, style, cssUnits), point)
   );
