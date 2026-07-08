@@ -154,6 +154,14 @@ function isLargeOffscreenOffset(value: number | null) {
   return value !== null && Math.abs(value) >= OFFSCREEN_OFFSET_PX;
 }
 
+function isNonZeroOffset(value: number | null) {
+  return value !== null && Math.abs(value) > 0;
+}
+
+function isNegativeOffset(value: number | null) {
+  return value !== null && value < 0;
+}
+
 function isMeaningfulCssValue(value: string) {
   const normalized = value.trim().toLowerCase();
   return normalized !== "" && normalized !== "auto" && normalized !== "none";
@@ -398,11 +406,45 @@ function isFullyClippedByAncestor(element: HTMLElement, ancestor: HTMLElement) {
   );
 }
 
+function isEntirelyBeforeViewport(element: HTMLElement) {
+  const rect = element.getBoundingClientRect();
+  return hasMeaningfulClientRect(rect) && (rect.right <= 0 || rect.bottom <= 0);
+}
+
+function splitCssTopLevel(value: string, shouldSplit: (char: string) => boolean) {
+  const parts: string[] = [];
+  let current = "";
+  let depth = 0;
+
+  for (const char of value.trim()) {
+    if (char === "(") {
+      depth += 1;
+    } else if (char === ")" && depth > 0) {
+      depth -= 1;
+    }
+
+    if (depth === 0 && shouldSplit(char)) {
+      if (current.trim() !== "") {
+        parts.push(current.trim());
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+
+  if (current.trim() !== "") {
+    parts.push(current.trim());
+  }
+  return parts;
+}
+
 function splitCssFunctionArgs(value: string) {
-  return value
-    .trim()
-    .split(/[,\s]+/)
-    .filter(Boolean);
+  return splitCssTopLevel(value, (char) => char === "," || /\s/.test(char));
+}
+
+function splitCssCommaList(value: string) {
+  return splitCssTopLevel(value, (char) => char === ",");
 }
 
 function expandBoxValues(values: string[]) {
@@ -448,6 +490,103 @@ function cssRadiusVisibleSizeIsTiny(value: string, units: { emPx?: number; remPx
   return length !== null && length * 2 <= MIN_CREDENTIAL_FIELD_SIZE_PX;
 }
 
+function cssLengthToPx(
+  value: string,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number }
+): number | null {
+  const normalized = value.trim().toLowerCase();
+  const percent = cssInsetPercent(normalized);
+  if (percent !== null) {
+    return axisSize > 0 ? (axisSize * percent) / 100 : null;
+  }
+
+  const length = numericCssValue(normalized, units);
+  if (length !== null) {
+    return length;
+  }
+
+  const calcMatch = normalized.match(/^calc\((.*)\)$/);
+  if (!calcMatch) {
+    return null;
+  }
+
+  const tokens = calcMatch[1]
+    .replace(/([+-])/g, " $1 ")
+    .split(/\s+/)
+    .filter(Boolean);
+  let total = 0;
+  let sign = 1;
+  for (const token of tokens) {
+    if (token === "+") {
+      sign = 1;
+      continue;
+    }
+    if (token === "-") {
+      sign = -1;
+      continue;
+    }
+    const tokenValue = cssLengthToPx(token, axisSize, units);
+    if (tokenValue === null) {
+      return null;
+    }
+    total += sign * tokenValue;
+    sign = 1;
+  }
+  return total;
+}
+
+function cssAxisIndependentInsetLength(
+  value: string,
+  units: { emPx?: number; remPx?: number }
+) {
+  const percent = cssInsetPercent(value);
+  if (percent !== null && percent === 0) {
+    return 0;
+  }
+  return numericCssValue(value, units);
+}
+
+function cssCalcFullPercentMinusLength(
+  value: string,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value.trim().toLowerCase();
+  const calcMatch = normalized.match(/^calc\((.*)\)$/);
+  if (!calcMatch) {
+    return null;
+  }
+  const tokens = calcMatch[1]
+    .replace(/([+-])/g, " $1 ")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length !== 3 || tokens[0] !== "100%" || tokens[1] !== "-") {
+    return null;
+  }
+  const remainingLength = numericCssValue(tokens[2], units);
+  return remainingLength !== null && remainingLength >= 0 ? remainingLength : null;
+}
+
+function calcInsetPairVisibleLengthWithoutAxis(
+  first: string,
+  second: string,
+  units: { emPx?: number; remPx?: number }
+) {
+  const firstVisibleLength = cssCalcFullPercentMinusLength(first, units);
+  if (firstVisibleLength !== null) {
+    const secondLength = cssAxisIndependentInsetLength(second, units);
+    return secondLength === null ? null : firstVisibleLength - secondLength;
+  }
+
+  const secondVisibleLength = cssCalcFullPercentMinusLength(second, units);
+  if (secondVisibleLength !== null) {
+    const firstLength = cssAxisIndependentInsetLength(first, units);
+    return firstLength === null ? null : secondVisibleLength - firstLength;
+  }
+
+  return null;
+}
+
 function cssCoordinateNumber(value: string, units: { emPx?: number; remPx?: number }) {
   return cssInsetPercent(value) ?? numericCssValue(value, units);
 }
@@ -458,6 +597,17 @@ function insetPairSuppressesField(
   axisSize: number,
   units: { emPx?: number; remPx?: number }
 ) {
+  const firstPx = cssLengthToPx(first, axisSize, units);
+  const secondPx = cssLengthToPx(second, axisSize, units);
+  if (axisSize > 0 && firstPx !== null && secondPx !== null) {
+    return axisSize - (firstPx + secondPx) <= MIN_CREDENTIAL_FIELD_SIZE_PX;
+  }
+
+  const calcVisibleLength = calcInsetPairVisibleLengthWithoutAxis(first, second, units);
+  if (calcVisibleLength !== null) {
+    return calcVisibleLength <= MIN_CREDENTIAL_FIELD_SIZE_PX;
+  }
+
   const firstPercent = cssInsetPercent(first);
   const secondPercent = cssInsetPercent(second);
   if (firstPercent !== null || secondPercent !== null) {
@@ -515,7 +665,7 @@ function clipPathFullyClips(
 
   const polygonMatch = normalized.match(/^polygon\((.*)\)$/);
   if (polygonMatch) {
-    const points = polygonMatch[1].split(",").flatMap((point) => {
+    const points = splitCssCommaList(polygonMatch[1]).flatMap((point) => {
       const [x, y] = splitCssFunctionArgs(point);
       const parsedX = x === undefined ? null : cssCoordinateNumber(x, units);
       const parsedY = y === undefined ? null : cssCoordinateNumber(y, units);
@@ -528,8 +678,14 @@ function clipPathFullyClips(
       const next = points[(index + 1) % points.length];
       return sum + point.x * next.y - next.x * point.y;
     }, 0);
+    const xValues = points.map((point) => point.x);
+    const yValues = points.map((point) => point.y);
+    const width = Math.max(...xValues) - Math.min(...xValues);
+    const height = Math.max(...yValues) - Math.min(...yValues);
     return (
       Math.abs(area) <= Number.EPSILON ||
+      width <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+      height <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
       Math.abs(area) <= 10000 * MIN_CLIPPED_VISIBLE_FRACTION * MIN_CLIPPED_VISIBLE_FRACTION
     );
   }
@@ -663,9 +819,26 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const top = computedCssValue(style?.top, current.style.top, cssUnits);
     const right = computedCssValue(style?.right, current.style.right, cssUnits);
     const bottom = computedCssValue(style?.bottom, current.style.bottom, cssUnits);
+    const marginLeft = computedCssValue(style?.marginLeft, current.style.marginLeft, cssUnits);
+    const marginTop = computedCssValue(style?.marginTop, current.style.marginTop, cssUnits);
+    const marginRight = computedCssValue(style?.marginRight, current.style.marginRight, cssUnits);
+    const marginBottom = computedCssValue(
+      style?.marginBottom,
+      current.style.marginBottom,
+      cssUnits
+    );
     const width = computedCssValue(style?.width, current.style.width, cssUnits);
     const height = computedCssValue(style?.height, current.style.height, cssUnits);
     const transform = combinedTranslateOffset(style, current, cssUnits);
+    const hasTransformOffset =
+      transform !== null && (isNonZeroOffset(transform.x) || isNonZeroOffset(transform.y));
+    const hasPositionOffset =
+      position !== undefined &&
+      position !== "static" &&
+      [left, top, right, bottom].some(isNonZeroOffset);
+    const hasNegativeMargin = [marginLeft, marginTop, marginRight, marginBottom].some(
+      isNegativeOffset
+    );
     const hasHiddenVisibility =
       inlineVisibility === "hidden" ||
       style?.visibility === "hidden" ||
@@ -700,6 +873,13 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (
       transform &&
       (isLargeOffscreenOffset(transform.x) || isLargeOffscreenOffset(transform.y))
+    ) {
+      addReason(reasons, "not-viewable:offscreen");
+    }
+    if (
+      current === element &&
+      isEntirelyBeforeViewport(element) &&
+      (hasTransformOffset || hasPositionOffset || hasNegativeMargin)
     ) {
       addReason(reasons, "not-viewable:offscreen");
     }

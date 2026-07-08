@@ -1105,9 +1105,14 @@ export function createLoginFillPlan(
       : siteRuleUsernameField !== null
         ? credentialScopeKey(siteRuleUsernameField)
         : siteRulePasswordChangeScopeKey;
+  const intentUsesFocusedScope = intent.reasons.some((reason) =>
+    reason.startsWith("focused-")
+  );
   const shouldUseResolvedScope =
     siteRuleAnchorScopeKey !== null ||
     intent.kind === "login" ||
+    ((intent.kind === "usernameFirst" || intent.kind === "passwordStep") &&
+      intentUsesFocusedScope) ||
     intent.kind === "registration" ||
     intent.kind === "passwordChange";
   const primaryScopeKey = siteRuleAnchorScopeKey ?? intentScopeKey;

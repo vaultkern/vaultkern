@@ -1289,6 +1289,55 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "password").reasons).not.toContain("not-viewable:offscreen");
   });
 
+  it("keeps scrolled-past document-flow login fields viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="email" type="email" autocomplete="username" />
+        <input name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector('input[name="email"]') as HTMLInputElement,
+      elementRect({ left: 24, top: -80, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector('input[name="password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: -48, width: 185, height: 21 })
+    );
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "email").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "email").reasons).not.toContain("not-viewable:offscreen");
+    expect(fieldByName(report, "password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "password").reasons).not.toContain("not-viewable:offscreen");
+  });
+
+  it("treats fields whose final rect is before the viewport as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="translated_password" type="password" autocomplete="current-password" style="transform:translateX(-500px)" />
+        <input name="relative_password" type="password" autocomplete="current-password" style="position:relative;left:-9999px" />
+        <input name="margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:-9999px" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const name of ["translated_password", "relative_password", "margin_password"]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: -520, top: 40, width: 185, height: 21 })
+      );
+    }
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    for (const name of ["translated_password", "relative_password", "margin_password"]) {
+      expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
+      expect(fieldByName(report, name).reasons).toContain("not-viewable:offscreen");
+    }
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats tiny credential fields as not viewable", () => {
     document.body.innerHTML = `
       <form>
@@ -1420,7 +1469,9 @@ describe("autofill triage", () => {
     document.body.innerHTML = `
       <form>
         <input name="inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
+        <input name="calc_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% - 4px) 0 0)" />
         <input name="circle_password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
+        <input name="polygon_strip_password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
         <div style="width:2px;height:2px;overflow:hidden">
           <input name="ancestor_clipped_password" type="password" autocomplete="current-password" />
         </div>
@@ -1434,8 +1485,16 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "inset_password").reasons).toContain(
       "not-viewable:clipped"
     );
+    expect(fieldByName(report, "calc_inset_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "calc_inset_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "circle_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "circle_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "polygon_strip_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "polygon_strip_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "ancestor_clipped_password").qualifiedAs).toBe("ignored");

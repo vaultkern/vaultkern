@@ -39,6 +39,32 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+function elementRect(partial: {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}): DOMRect {
+  return {
+    x: partial.left,
+    y: partial.top,
+    left: partial.left,
+    top: partial.top,
+    width: partial.width,
+    height: partial.height,
+    right: partial.left + partial.width,
+    bottom: partial.top + partial.height,
+    toJSON: () => ({})
+  } as DOMRect;
+}
+
+function stubElementRect(element: Element, rect: DOMRect) {
+  Object.defineProperty(element, "getBoundingClientRect", {
+    configurable: true,
+    value: () => rect
+  });
+}
+
 vi.mock("@vaultkern/runtime-web-client", () => ({
   RuntimeClient: vi.fn(() => runtimeClientMocks)
 }));
@@ -173,6 +199,42 @@ describe("fillLoginForm", () => {
     ).toBe("secret");
   });
 
+  it("fills the focused password-only step instead of an earlier password-only form", () => {
+    document.body.innerHTML = `
+      <form id="first">
+        <input id="first-password" type="password" autocomplete="current-password" value="" />
+      </form>
+      <form id="second">
+        <input id="second-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    (document.querySelector("#second-password") as HTMLInputElement).focus();
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#first-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#second-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("fills the focused username-first step instead of an earlier username-only form", () => {
+    document.body.innerHTML = `
+      <form id="first">
+        <input id="first-email" type="email" autocomplete="username" value="" />
+      </form>
+      <form id="second">
+        <input id="second-email" type="email" autocomplete="username" value="" />
+      </form>
+    `;
+
+    (document.querySelector("#second-email") as HTMLInputElement).focus();
+    fillLoginForm({ username: "alice@example.com" });
+
+    expect((document.querySelector("#first-email") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#second-email") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+  });
+
   it("keeps password-only fills on the first login password instead of later settings forms", () => {
     document.body.innerHTML = `
       <form id="login">
@@ -274,6 +336,9 @@ describe("fillLoginForm", () => {
   it("does not fill visually suppressed password decoys", () => {
     document.body.innerHTML = `
       <form>
+        <input id="rect-translated-password" type="password" autocomplete="current-password" style="transform:translateX(-500px)" />
+        <input id="relative-password" type="password" autocomplete="current-password" style="position:relative;left:-9999px" />
+        <input id="margin-password" type="password" autocomplete="current-password" style="display:block;margin-left:-9999px" />
         <input id="translated-password" type="password" autocomplete="current-password" style="translate:-9999px" />
         <input id="longhand-scaled-password" type="password" autocomplete="current-password" style="scale:0" />
         <input id="filter-password" type="password" autocomplete="current-password" style="filter:opacity(0)" />
@@ -284,9 +349,18 @@ describe("fillLoginForm", () => {
         <input id="login-password" type="password" autocomplete="current-password" />
       </form>
     `;
+    for (const id of ["rect-translated-password", "relative-password", "margin-password"]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: -520, top: 40, width: 185, height: 21 })
+      );
+    }
 
     fillLoginForm({ password: "secret" });
 
+    expect((document.querySelector("#rect-translated-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#relative-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#margin-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#translated-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-scaled-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#filter-password") as HTMLInputElement).value).toBe("");
@@ -301,7 +375,9 @@ describe("fillLoginForm", () => {
     document.body.innerHTML = `
       <form>
         <input id="inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
+        <input id="calc-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% - 4px) 0 0)" />
         <input id="circle-password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
+        <input id="polygon-strip-password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
         <div style="width:2px;height:2px;overflow:hidden">
           <input id="ancestor-clipped-password" type="password" autocomplete="current-password" />
         </div>
@@ -312,7 +388,9 @@ describe("fillLoginForm", () => {
     fillLoginForm({ password: "secret" });
 
     expect((document.querySelector("#inset-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#calc-inset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#circle-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#polygon-strip-password") as HTMLInputElement).value).toBe("");
     expect(
       (document.querySelector("#ancestor-clipped-password") as HTMLInputElement).value
     ).toBe("");
