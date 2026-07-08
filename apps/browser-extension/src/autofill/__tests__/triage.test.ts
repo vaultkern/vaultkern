@@ -1657,6 +1657,7 @@ describe("autofill triage", () => {
           <filter id="floodAlphaZero"><feFlood flood-opacity="0" /></filter>
           <filter id="floodTransparent"><feFlood flood-color="transparent" /></filter>
           <filter id="compositeInTransparent"><feFlood flood-opacity="0" result="transparent" /><feComposite in="SourceGraphic" in2="transparent" operator="in" /></filter>
+          <filter id="morphologyErode"><feMorphology operator="erode" radius="9999" /></filter>
           <filter id="sourceOut"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="out" /></filter>
           <filter id="arithmeticZero"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="arithmetic" k1="0" k2="0" k3="0" k4="0" /></filter>
           <filter id="offsetSource"><feOffset dx="-9999" dy="0" /></filter>
@@ -1697,6 +1698,7 @@ describe("autofill triage", () => {
         <input name="svg_filter_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodAlphaZero)" />
         <input name="svg_filter_transparent_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodTransparent)" />
         <input name="svg_filter_composite_in_password" type="password" autocomplete="current-password" style="filter:url(#compositeInTransparent)" />
+        <input name="svg_filter_morphology_password" type="password" autocomplete="current-password" style="filter:url(#morphologyErode)" />
         <input name="svg_filter_composite_out_password" type="password" autocomplete="current-password" style="filter:url(#sourceOut)" />
         <input name="svg_filter_arithmetic_zero_password" type="password" autocomplete="current-password" style="filter:url(#arithmeticZero)" />
         <input name="svg_filter_offset_password" type="password" autocomplete="current-password" style="filter:url(#offsetSource)" />
@@ -1830,6 +1832,7 @@ describe("autofill triage", () => {
       "svg_filter_flood_password",
       "svg_filter_transparent_flood_password",
       "svg_filter_composite_in_password",
+      "svg_filter_morphology_password",
       "svg_filter_composite_out_password",
       "svg_filter_arithmetic_zero_password",
       "svg_filter_offset_password",

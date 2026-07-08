@@ -1107,6 +1107,49 @@ function svgFilterOffsetSuppressesPaint(
   return offsetRectOverlapSuppressesPaint(affectedRect, dx, dy);
 }
 
+function svgFilterMorphologySuppressesPaint(
+  filterTarget: HTMLElement,
+  affectedElement: HTMLElement,
+  primitive: Element,
+  units: { emPx?: number; remPx?: number }
+) {
+  const operator = (primitive.getAttribute("operator") ?? "erode").trim().toLowerCase();
+  if (operator !== "erode") {
+    return false;
+  }
+
+  const [radiusXToken = "0", radiusYToken = radiusXToken] = splitCssFunctionArgs(
+    primitive.getAttribute("radius") ?? "0"
+  );
+  const targetRect = filterTarget.getBoundingClientRect();
+  const affectedRect = affectedElement.getBoundingClientRect();
+  const coordinateSpace = svgFilterPrimitiveUnits(primitive);
+  const radiusX = svgFilterLengthToPx(
+    radiusXToken,
+    targetRect.width,
+    units,
+    coordinateSpace
+  );
+  const radiusY = svgFilterLengthToPx(
+    radiusYToken,
+    targetRect.height,
+    units,
+    coordinateSpace
+  );
+  if (!hasMeaningfulClientRect(affectedRect)) {
+    return isLargeOffscreenOffset(radiusX) || isLargeOffscreenOffset(radiusY);
+  }
+
+  const remainingWidth = Math.max(0, affectedRect.width - radiusX * 2);
+  const remainingHeight = Math.max(0, affectedRect.height - radiusY * 2);
+  return (
+    remainingWidth <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    remainingHeight <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    remainingWidth * remainingHeight <=
+      affectedRect.width * affectedRect.height * MIN_CLIPPED_VISIBLE_FRACTION
+  );
+}
+
 function svgFilterInputName(primitive: Element, attribute: "in" | "in2") {
   return (primitive.getAttribute(attribute) ?? "")
     .trim()
@@ -1145,6 +1188,9 @@ function svgFilterPrimitiveSuppressesFinalPaint(
   }
   if (tagName === "feoffset") {
     return svgFilterOffsetSuppressesPaint(filterTarget, affectedElement, primitive, units);
+  }
+  if (tagName === "femorphology") {
+    return svgFilterMorphologySuppressesPaint(filterTarget, affectedElement, primitive, units);
   }
   if (tagName === "fecomposite") {
     return svgFilterCompositeSuppressesPaint(primitive);
