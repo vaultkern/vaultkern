@@ -444,6 +444,7 @@ describe("fillLoginForm", () => {
         <input id="mask-display-none-password" type="password" autocomplete="current-password" style="mask:url(#displayNoneMask)" />
         <input id="mask-hidden-shape-password" type="password" autocomplete="current-password" style="mask:url(#hiddenShapeMask)" />
         <input id="mask-data-svg-password" type="password" autocomplete="current-password" style='mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22transparent%22%2F%3E%3C%2Fsvg%3E")' />
+        <input id="mask-data-svg-root-opacity-password" type="password" autocomplete="current-password" style='mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%20opacity%3D%220%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E")' />
         <input id="mask-zero-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input id="mask-zero-percent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input id="mask-tiny-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
@@ -470,6 +471,7 @@ describe("fillLoginForm", () => {
           <filter id="offsetSource"><feOffset dx="-9999" dy="0" /></filter>
         </svg>
         <input id="svg-filter-password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
+        <input id="data-svg-filter-password" type="password" autocomplete="current-password" style='filter:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cfilter%20id%3D%22alphaZero%22%3E%3CfeComponentTransfer%3E%3CfeFuncA%20type%3D%22table%22%20tableValues%3D%220%200%22%2F%3E%3C%2FfeComponentTransfer%3E%3C%2Ffilter%3E%3C%2Fsvg%3E#alphaZero")' />
         <input id="svg-filter-discrete-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroDiscrete)" />
         <input id="svg-filter-gamma-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroGamma)" />
         <input id="svg-filter-matrix-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
@@ -830,12 +832,14 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#mask-display-none-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-hidden-shape-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-data-svg-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-data-svg-root-opacity-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-percent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-tiny-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-tiny-percent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-position-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#data-svg-filter-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-discrete-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-gamma-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-matrix-password") as HTMLInputElement).value).toBe("");

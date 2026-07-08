@@ -1453,18 +1453,62 @@ function svgFilterPaintCollapseColor(
   return found ? collapsedColor : null;
 }
 
+function dataSvgFilterElements(filterTarget: HTMLElement, value: string | undefined) {
+  return cssUrlValues(value)
+    .map((url) => dataSvgReferencedElement(filterTarget, url))
+    .filter(
+      (element): element is Element =>
+        element !== null && element.tagName.toLowerCase() === "filter"
+    );
+}
+
+function dataSvgFilterOpacityValue(filterTarget: HTMLElement, value: string | undefined) {
+  let opacity = 1;
+  let found = false;
+  for (const filter of dataSvgFilterElements(filterTarget, value)) {
+    const graphOpacity = svgFilterGraphOpacityValue(filter);
+    if (graphOpacity !== null) {
+      opacity *= graphOpacity;
+      found = true;
+    }
+  }
+
+  return found ? opacity : null;
+}
+
+function dataSvgFilterPaintCollapseColor(
+  filterTarget: HTMLElement,
+  value: string | undefined
+) {
+  let collapsedColor: CssColorRgba | null = null;
+  let found = false;
+
+  for (const filter of dataSvgFilterElements(filterTarget, value)) {
+    const graphColor = svgFilterGraphPaintCollapseColorValue(filter);
+    if (graphColor === null) {
+      return null;
+    }
+    collapsedColor = graphColor;
+    found = true;
+  }
+
+  return found ? collapsedColor : null;
+}
+
 function paintFilterOpacityValue(filterTarget: HTMLElement, value: string | undefined) {
   const cssOpacity = filterOpacityValue(value);
   const svgOpacity = svgFilterOpacityValue(filterTarget, value);
-  return cssOpacity === null && svgOpacity === null
+  const dataSvgOpacity = dataSvgFilterOpacityValue(filterTarget, value);
+  return cssOpacity === null && svgOpacity === null && dataSvgOpacity === null
     ? null
-    : (cssOpacity ?? 1) * (svgOpacity ?? 1);
+    : (cssOpacity ?? 1) * (svgOpacity ?? 1) * (dataSvgOpacity ?? 1);
 }
 
 function paintFilterCollapseColor(filterTarget: HTMLElement, value: string | undefined) {
   return (
     cssFilterPaintCollapseColor(value) ??
-    svgFilterPaintCollapseColor(filterTarget, value)
+    svgFilterPaintCollapseColor(filterTarget, value) ??
+    dataSvgFilterPaintCollapseColor(filterTarget, value)
   );
 }
 
@@ -1673,11 +1717,13 @@ function svgFilterSuppressesPaint(
   units: { emPx?: number; remPx?: number },
   affectedElement: HTMLElement = filterTarget
 ) {
-  for (const id of localCssUrlReferenceIds(value)) {
-    const filter = filterTarget.ownerDocument.getElementById(id);
-    if (!filter) {
-      continue;
-    }
+  const filters = [
+    ...localCssUrlReferenceIds(value)
+      .map((id) => filterTarget.ownerDocument.getElementById(id))
+      .filter((filter): filter is HTMLElement => filter !== null),
+    ...dataSvgFilterElements(filterTarget, value)
+  ];
+  for (const filter of filters) {
     if (isEffectivelyTransparent(svgFilterGraphOpacityValue(filter))) {
       return true;
     }
@@ -2557,7 +2603,15 @@ function cssUrlValues(value: string | undefined) {
   return references;
 }
 
-function dataSvgPayload(value: string) {
+function decodeUrlFragment(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function dataSvgUrlParts(value: string) {
   const trimmed = value.trim();
   if (!trimmed.toLowerCase().startsWith("data:image/svg+xml")) {
     return null;
@@ -2567,14 +2621,58 @@ function dataSvgPayload(value: string) {
     return null;
   }
   const metadata = trimmed.slice(0, commaIndex).toLowerCase();
-  const payload = trimmed.slice(commaIndex + 1);
+  const hashIndex = trimmed.indexOf("#", commaIndex + 1);
+  const payload = trimmed.slice(commaIndex + 1, hashIndex < 0 ? undefined : hashIndex);
   try {
-    return metadata.includes(";base64")
+    const decodedPayload = metadata.includes(";base64")
       ? globalThis.atob(payload)
       : decodeURIComponent(payload);
+    return {
+      fragmentId: hashIndex < 0 ? null : decodeUrlFragment(trimmed.slice(hashIndex + 1)),
+      payload: decodedPayload
+    };
   } catch {
     return null;
   }
+}
+
+function dataSvgPayload(value: string) {
+  return dataSvgUrlParts(value)?.payload ?? null;
+}
+
+function descendantElementById(root: Element, id: string): Element | null {
+  if (root.getAttribute("id") === id) {
+    return root;
+  }
+  for (const child of Array.from(root.children)) {
+    const found = descendantElementById(child, id);
+    if (found !== null) {
+      return found;
+    }
+  }
+  return null;
+}
+
+function parseDataSvgDocument(current: HTMLElement, value: string) {
+  const parts = dataSvgUrlParts(value);
+  const DOMParserConstructor = current.ownerDocument.defaultView?.DOMParser;
+  if (parts === null || !DOMParserConstructor) {
+    return null;
+  }
+  const document = new DOMParserConstructor().parseFromString(parts.payload, "image/svg+xml");
+  const root = document.documentElement;
+  if (root.querySelector("parsererror") || root.tagName.toLowerCase() !== "svg") {
+    return null;
+  }
+  return { fragmentId: parts.fragmentId, root };
+}
+
+function dataSvgReferencedElement(current: HTMLElement, value: string) {
+  const parsed = parseDataSvgDocument(current, value);
+  if (parsed === null || parsed.fragmentId === null || parsed.fragmentId === "") {
+    return null;
+  }
+  return descendantElementById(parsed.root, parsed.fragmentId);
 }
 
 function svgPaintValue(
@@ -2679,24 +2777,11 @@ function dataSvgImageSuppressesAlphaMask(
   current: HTMLElement,
   value: string
 ) {
-  const payload = dataSvgPayload(value);
-  if (payload === null) {
+  const parsed = parseDataSvgDocument(current, value);
+  if (parsed === null) {
     return false;
   }
-  const DOMParserConstructor = current.ownerDocument.defaultView?.DOMParser;
-  if (!DOMParserConstructor) {
-    return false;
-  }
-  const document = new DOMParserConstructor().parseFromString(payload, "image/svg+xml");
-  const root = document.documentElement;
-  if (root.querySelector("parsererror") || root.tagName.toLowerCase() !== "svg") {
-    return false;
-  }
-  const children = Array.from(root.children);
-  return (
-    children.length === 0 ||
-    children.every((child) => svgAlphaMaskShapeSuppressesPaint(child))
-  );
+  return parsed.root.children.length === 0 || svgAlphaMaskShapeSuppressesPaint(parsed.root);
 }
 
 function dataSvgMaskImageFullySuppressesPaint(current: HTMLElement, value: string | undefined) {

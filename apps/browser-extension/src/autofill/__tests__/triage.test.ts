@@ -1694,12 +1694,14 @@ describe("autofill triage", () => {
         <input name="display_none_mask_password" type="password" autocomplete="current-password" style="mask:url(#displayNoneMask)" />
         <input name="hidden_shape_mask_password" type="password" autocomplete="current-password" style="mask:url(#hiddenShapeMask)" />
         <input name="data_svg_mask_password" type="password" autocomplete="current-password" style='mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22transparent%22%2F%3E%3C%2Fsvg%3E")' />
+        <input name="data_svg_root_opacity_mask_password" type="password" autocomplete="current-password" style='mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%20opacity%3D%220%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E")' />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input name="zero_percent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input name="tiny_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
         <input name="tiny_percent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4% 100%;mask-repeat:no-repeat" />
         <input name="positioned_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:-9999px 0" />
         <input name="svg_filter_password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
+        <input name="data_svg_filter_password" type="password" autocomplete="current-password" style='filter:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cfilter%20id%3D%22alphaZero%22%3E%3CfeComponentTransfer%3E%3CfeFuncA%20type%3D%22table%22%20tableValues%3D%220%200%22%2F%3E%3C%2FfeComponentTransfer%3E%3C%2Ffilter%3E%3C%2Fsvg%3E#alphaZero")' />
         <input name="svg_filter_discrete_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroDiscrete)" />
         <input name="svg_filter_gamma_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroGamma)" />
         <input name="svg_filter_matrix_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
@@ -1844,12 +1846,14 @@ describe("autofill triage", () => {
       "display_none_mask_password",
       "hidden_shape_mask_password",
       "data_svg_mask_password",
+      "data_svg_root_opacity_mask_password",
       "zero_mask_password",
       "zero_percent_mask_password",
       "tiny_mask_password",
       "tiny_percent_mask_password",
       "positioned_mask_password",
       "svg_filter_password",
+      "data_svg_filter_password",
       "svg_filter_discrete_password",
       "svg_filter_gamma_password",
       "svg_filter_matrix_password",
