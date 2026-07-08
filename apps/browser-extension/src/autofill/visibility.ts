@@ -609,26 +609,87 @@ function svgFilterFloodSuppressesPaint(primitive: Element) {
   return isEffectivelyTransparent(floodOpacity) || cssColorLooksTransparent(floodColor);
 }
 
-function svgFilterOffsetSuppressesPaint(primitive: Element) {
-  const dx = numericCssValue(primitive.getAttribute("dx") ?? undefined) ?? 0;
-  const dy = numericCssValue(primitive.getAttribute("dy") ?? undefined) ?? 0;
-  return isLargeOffscreenOffset(dx) || isLargeOffscreenOffset(dy);
+function svgFilterPrimitiveUnits(primitive: Element): SvgClipCoordinateSpace {
+  return primitive.closest("filter")?.getAttribute("primitiveUnits")?.trim() ===
+    "objectBoundingBox"
+    ? "objectBoundingBox"
+    : "userSpaceOnUse";
 }
 
-function svgFilterPrimitiveSuppressesFinalPaint(primitive: Element) {
+function svgFilterLengthToPx(
+  value: string | null,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number },
+  coordinateSpace: SvgClipCoordinateSpace
+) {
+  if (coordinateSpace === "objectBoundingBox") {
+    return svgNormalizedLength(value, units) * axisSize;
+  }
+  return cssLengthToPx(value ?? "0", axisSize, units) ?? numericCssValue(value ?? "0", units) ?? 0;
+}
+
+function offsetRectOverlapSuppressesPaint(rect: DOMRect, dx: number, dy: number) {
+  if (!hasMeaningfulClientRect(rect)) {
+    return isLargeOffscreenOffset(dx) || isLargeOffscreenOffset(dy);
+  }
+  const overlapWidth = Math.max(0, rect.width - Math.abs(dx));
+  const overlapHeight = Math.max(0, rect.height - Math.abs(dy));
+  return (
+    overlapWidth <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    overlapHeight <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    overlapWidth * overlapHeight <=
+      rect.width * rect.height * MIN_CLIPPED_VISIBLE_FRACTION
+  );
+}
+
+function svgFilterOffsetSuppressesPaint(
+  filterTarget: HTMLElement,
+  affectedElement: HTMLElement,
+  primitive: Element,
+  units: { emPx?: number; remPx?: number }
+) {
+  const targetRect = filterTarget.getBoundingClientRect();
+  const affectedRect = affectedElement.getBoundingClientRect();
+  const coordinateSpace = svgFilterPrimitiveUnits(primitive);
+  const dx = svgFilterLengthToPx(
+    primitive.getAttribute("dx"),
+    targetRect.width,
+    units,
+    coordinateSpace
+  );
+  const dy = svgFilterLengthToPx(
+    primitive.getAttribute("dy"),
+    targetRect.height,
+    units,
+    coordinateSpace
+  );
+  return offsetRectOverlapSuppressesPaint(affectedRect, dx, dy);
+}
+
+function svgFilterPrimitiveSuppressesFinalPaint(
+  filterTarget: HTMLElement,
+  affectedElement: HTMLElement,
+  primitive: Element,
+  units: { emPx?: number; remPx?: number }
+) {
   const tagName = primitive.tagName.toLowerCase();
   if (tagName === "feflood") {
     return svgFilterFloodSuppressesPaint(primitive);
   }
   if (tagName === "feoffset") {
-    return svgFilterOffsetSuppressesPaint(primitive);
+    return svgFilterOffsetSuppressesPaint(filterTarget, affectedElement, primitive, units);
   }
   return false;
 }
 
-function svgFilterSuppressesPaint(current: HTMLElement, value: string | undefined) {
+function svgFilterSuppressesPaint(
+  filterTarget: HTMLElement,
+  value: string | undefined,
+  units: { emPx?: number; remPx?: number },
+  affectedElement: HTMLElement = filterTarget
+) {
   for (const id of localCssUrlReferenceIds(value)) {
-    const filter = current.ownerDocument.getElementById(id);
+    const filter = filterTarget.ownerDocument.getElementById(id);
     if (!filter) {
       continue;
     }
@@ -682,7 +743,15 @@ function svgFilterSuppressesPaint(current: HTMLElement, value: string | undefine
     }
     const primitives = Array.from(filter.children);
     const finalPrimitive = primitives[primitives.length - 1];
-    if (finalPrimitive && svgFilterPrimitiveSuppressesFinalPaint(finalPrimitive)) {
+    if (
+      finalPrimitive &&
+      svgFilterPrimitiveSuppressesFinalPaint(
+        filterTarget,
+        affectedElement,
+        finalPrimitive,
+        units
+      )
+    ) {
       return true;
     }
   }
@@ -1426,7 +1495,7 @@ function elementPaintsOverlay(
     style?.visibility !== "collapse" &&
     !isEffectivelyTransparent(opacity) &&
     !isEffectivelyTransparent(filterOpacityValue(filter)) &&
-    !svgFilterSuppressesPaint(current, filter) &&
+    !svgFilterSuppressesPaint(current, filter, cssUnits) &&
     !maskStyleSuppressesPaint(style, current, cssUnits) &&
     (!fieldBackgroundPaintIsTransparent(style, current) ||
       !fieldBorderPaintIsTransparent(style, current, cssUnits) ||
@@ -3219,7 +3288,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       isEffectivelyTransparent(cumulativeOpacity) ||
       isEffectivelyTransparent(filterOpacity) ||
       isEffectivelyTransparent(cumulativeFilterOpacity) ||
-      svgFilterSuppressesPaint(current, filter) ||
+      svgFilterSuppressesPaint(current, filter, cssUnits, element) ||
       maskStyleSuppressesPaint(style, current, cssUnits) ||
       (current === element &&
         isCredentialLikeField(element) &&

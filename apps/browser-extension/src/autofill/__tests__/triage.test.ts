@@ -1559,6 +1559,8 @@ describe("autofill triage", () => {
           <filter id="floodAlphaZero"><feFlood flood-opacity="0" /></filter>
           <filter id="floodTransparent"><feFlood flood-color="transparent" /></filter>
           <filter id="offsetSource"><feOffset dx="-9999" dy="0" /></filter>
+          <filter id="nearOffsetSource"><feOffset dx="-500" dy="0" /></filter>
+          <filter id="objectOffsetSource" primitiveUnits="objectBoundingBox"><feOffset dx="-3" dy="0" /></filter>
           <mask id="blackMask"><rect width="100%" height="100%" fill="black" /></mask>
         </svg>
         <input name="transparent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
@@ -1582,6 +1584,11 @@ describe("autofill triage", () => {
         <input name="svg_filter_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodAlphaZero)" />
         <input name="svg_filter_transparent_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodTransparent)" />
         <input name="svg_filter_offset_password" type="password" autocomplete="current-password" style="filter:url(#offsetSource)" />
+        <input name="svg_filter_near_offset_password" type="password" autocomplete="current-password" style="filter:url(#nearOffsetSource)" />
+        <input name="svg_filter_object_offset_password" type="password" autocomplete="current-password" style="filter:url(#objectOffsetSource)" />
+        <div id="ancestor-filter-offset" style="filter:url(#nearOffsetSource)">
+          <input name="ancestor_svg_filter_offset_password" type="password" autocomplete="current-password" />
+        </div>
         <div style="opacity:0.1">
           <div style="opacity:0.1">
             <input name="cumulative_opacity_password" type="password" autocomplete="current-password" />
@@ -1620,6 +1627,20 @@ describe("autofill triage", () => {
         elementRect({ left: 24, top: 40, width: 185, height: 21 })
       );
     }
+    for (const name of [
+      "svg_filter_near_offset_password",
+      "svg_filter_object_offset_password",
+      "ancestor_svg_filter_offset_password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40, width: 185, height: 21 })
+      );
+    }
+    stubElementRect(
+      document.querySelector("#ancestor-filter-offset") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 1000, height: 48 })
+    );
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -1645,6 +1666,9 @@ describe("autofill triage", () => {
       "svg_filter_flood_password",
       "svg_filter_transparent_flood_password",
       "svg_filter_offset_password",
+      "svg_filter_near_offset_password",
+      "svg_filter_object_offset_password",
+      "ancestor_svg_filter_offset_password",
       "cumulative_opacity_password",
       "cumulative_filter_password",
       "paintless_password",
@@ -1671,16 +1695,22 @@ describe("autofill triage", () => {
       <form>
         <svg width="0" height="0" aria-hidden="true">
           <filter id="alphaVisibleGamma"><feComponentTransfer><feFuncA type="gamma" amplitude="1" offset="0" /></feComponentTransfer></filter>
+          <filter id="smallOffset"><feOffset dx="4" dy="0" /></filter>
         </svg>
         <input name="email" type="email" autocomplete="username" />
         <input name="password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:repeat" />
         <input name="positioned_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:100% 0" />
         <input name="gamma_filtered_password" type="password" autocomplete="current-password" style="filter:url(#alphaVisibleGamma)" />
+        <input name="offset_filtered_password" type="password" autocomplete="current-password" style="filter:url(#smallOffset)" />
       </form>
     `;
     stubElementRect(
       document.querySelector('input[name="positioned_password"]') as HTMLInputElement,
       elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector('input[name="offset_filtered_password"]') as HTMLInputElement,
+      elementRect({ left: 24, top: 80, width: 185, height: 21 })
     );
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
@@ -1696,6 +1726,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "gamma_filtered_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "gamma_filtered_password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "offset_filtered_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "offset_filtered_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
   });

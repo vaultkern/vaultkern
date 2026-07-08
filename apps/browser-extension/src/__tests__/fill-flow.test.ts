@@ -615,6 +615,76 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not treat a visible label as enough for a filter-offset password decoy", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="nearOffsetSource"><feOffset dx="-500" dy="0" /></filter>
+        </svg>
+        <label id="decoy-label" for="decoy-password" style="position:absolute;left:24px;top:40px;width:185px;height:21px">Password</label>
+        <input id="decoy-password" type="password" autocomplete="current-password" style="filter:url(#nearOffsetSource)" />
+        <label id="ancestor-decoy-label" for="ancestor-decoy-password" style="position:absolute;left:24px;top:70px;width:185px;height:21px">Password</label>
+        <div id="ancestor-filter-offset" style="filter:url(#nearOffsetSource)">
+          <input id="ancestor-decoy-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const decoyPassword = document.querySelector("#decoy-password") as HTMLInputElement;
+    const decoyLabel = document.querySelector("#decoy-label") as HTMLLabelElement;
+    const ancestorDecoyPassword = document.querySelector(
+      "#ancestor-decoy-password"
+    ) as HTMLInputElement;
+    const ancestorDecoyLabel = document.querySelector(
+      "#ancestor-decoy-label"
+    ) as HTMLLabelElement;
+    const ancestorFilterOffset = document.querySelector(
+      "#ancestor-filter-offset"
+    ) as HTMLDivElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    stubElementRect(decoyPassword, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(decoyLabel, elementRect({ left: 24, top: 40, width: 185, height: 21 }));
+    stubElementRect(
+      ancestorDecoyPassword,
+      elementRect({ left: 24, top: 70, width: 185, height: 21 })
+    );
+    stubElementRect(
+      ancestorDecoyLabel,
+      elementRect({ left: 24, top: 70, width: 185, height: 21 })
+    );
+    stubElementRect(
+      ancestorFilterOffset,
+      elementRect({ left: 0, top: 62, width: 1000, height: 48 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 120, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return decoyLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 70 && y <= 91) {
+          return ancestorDecoyLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 120 && y <= 141) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(decoyPassword.value).toBe("");
+    expect(ancestorDecoyPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("does not fill near-total clipped password decoys", () => {
     document.body.innerHTML = `
       <style>
