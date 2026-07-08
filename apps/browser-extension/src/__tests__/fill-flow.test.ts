@@ -495,6 +495,10 @@ describe("fillLoginForm", () => {
         <input id="circle-password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
         <input id="polygon-strip-password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
         <input id="polygon-percent-password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 10% 0, 10% 30%, 0 30%)" />
+        <input id="css-path-password" type="password" autocomplete="current-password" style='clip-path:path("M0 0Z")' />
+        <input id="css-path-strip-password" type="password" autocomplete="current-password" style='clip-path:path("M0 0 L4 0 L4 100 L0 100 Z")' />
+        <input id="clip-path-rect-password" type="password" autocomplete="current-password" style="clip-path:rect(0 4px 100px 0)" />
+        <input id="clip-path-xywh-password" type="password" autocomplete="current-password" style="clip-path:xywh(0 0 4px 100%)" />
         <input id="legacy-strip-password" type="password" autocomplete="current-password" style="position:absolute;clip:rect(0 4px 100px 0)" />
         <input id="url-zero-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroClip)" />
         <input id="url-strip-password" type="password" autocomplete="current-password" style="clip-path:url(#stripClip)" />
@@ -503,6 +507,12 @@ describe("fillLoginForm", () => {
         <input id="url-use-password" type="password" autocomplete="current-password" style="clip-path:url(#zeroUseClip)" />
         <div style="width:2px;height:2px;overflow:hidden">
           <input id="ancestor-clipped-password" type="password" autocomplete="current-password" />
+        </div>
+        <div style="width:2px;height:2px;contain:paint">
+          <input id="paint-contained-password" type="password" autocomplete="current-password" />
+        </div>
+        <div style="width:2px;height:2px;contain:strict">
+          <input id="strict-contained-password" type="password" autocomplete="current-password" />
         </div>
         <input id="login-password" type="password" autocomplete="current-password" />
       </form>
@@ -519,6 +529,10 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#circle-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#polygon-strip-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#polygon-percent-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#css-path-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#css-path-strip-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#clip-path-rect-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#clip-path-xywh-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#legacy-strip-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-strip-password") as HTMLInputElement).value).toBe("");
@@ -528,6 +542,12 @@ describe("fillLoginForm", () => {
     expect(
       (document.querySelector("#ancestor-clipped-password") as HTMLInputElement).value
     ).toBe("");
+    expect((document.querySelector("#paint-contained-password") as HTMLInputElement).value).toBe(
+      ""
+    );
+    expect((document.querySelector("#strict-contained-password") as HTMLInputElement).value).toBe(
+      ""
+    );
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 

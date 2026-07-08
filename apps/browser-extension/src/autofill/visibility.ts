@@ -147,7 +147,7 @@ function isClippedZeroSizeAncestor(
   if (width !== 0 || height !== 0) {
     return false;
   }
-  return hasClippingOverflow(current, style);
+  return clipsDescendantPaint(current, style);
 }
 
 function isLargeOffscreenOffset(value: number | null) {
@@ -176,13 +176,22 @@ function hasClippingOverflow(current: HTMLElement, style: CSSStyleDeclaration | 
   return /\b(hidden|clip)\b/.test(overflow);
 }
 
+function hasPaintContainment(current: HTMLElement, style: CSSStyleDeclaration | undefined) {
+  const contain = cssPropertyValue(style, current, "contain").toLowerCase();
+  return /\b(paint|content|strict)\b/.test(contain);
+}
+
+function clipsDescendantPaint(current: HTMLElement, style: CSSStyleDeclaration | undefined) {
+  return hasClippingOverflow(current, style) || hasPaintContainment(current, style);
+}
+
 function isClippedTinyAncestor(
   current: HTMLElement,
   width: number | null,
   height: number | null,
   style: CSSStyleDeclaration | undefined
 ) {
-  if (!hasClippingOverflow(current, style)) {
+  if (!clipsDescendantPaint(current, style)) {
     return false;
   }
   return (
@@ -1150,6 +1159,13 @@ function pointRegionSuppressesField(
   );
 }
 
+function pathRegionSuppressesField(points: Array<{ x: number; y: number }>, rect: DOMRect) {
+  if (points.length < 2) {
+    return true;
+  }
+  return pointRegionSuppressesField(points, rect, points.length >= 3);
+}
+
 function svgClipShapeSuppressesField(
   current: HTMLElement,
   shape: Element,
@@ -1195,7 +1211,7 @@ function svgClipShapeSuppressesField(
   }
   if (tagName === "path") {
     const points = svgPathDataToPoints(shape.getAttribute("d") ?? "");
-    return pointRegionSuppressesField(points, rect, true);
+    return pathRegionSuppressesField(points, rect);
   }
   if (shape.children.length > 0 && (tagName === "g" || tagName === "svg")) {
     return Array.from(shape.children).every((child) =>
@@ -1267,6 +1283,23 @@ function clipPathFullyClips(
     );
   }
 
+  const rectMatch = normalized.match(/^rect\((.*)\)$/);
+  if (rectMatch) {
+    return legacyClipFullyClips(normalized, units);
+  }
+
+  const xywhMatch = normalized.match(/^xywh\((.*)\)$/);
+  if (xywhMatch) {
+    const [, , width, height] = splitCssFunctionArgs(xywhMatch[1]);
+    const rect = current.getBoundingClientRect();
+    const widthPx = width === undefined ? null : cssLengthToPx(width, rect.width, units);
+    const heightPx = height === undefined ? null : cssLengthToPx(height, rect.height, units);
+    return (
+      (widthPx !== null && widthPx <= MIN_CREDENTIAL_FIELD_SIZE_PX) ||
+      (heightPx !== null && heightPx <= MIN_CREDENTIAL_FIELD_SIZE_PX)
+    );
+  }
+
   const polygonMatch = normalized.match(/^polygon\((.*)\)$/);
   if (polygonMatch) {
     const rect = current.getBoundingClientRect();
@@ -1277,6 +1310,16 @@ function clipPathFullyClips(
       return parsedX === null || parsedY === null ? [] : [{ x: parsedX, y: parsedY }];
     });
     return pointRegionSuppressesField(points, rect, true);
+  }
+
+  const pathMatch = normalized.match(/^path\((.*)\)$/);
+  if (pathMatch) {
+    const pathData =
+      pathMatch[1].match(/(['"])(.*?)\1/)?.[2] ?? pathMatch[1].replace(/^evenodd\s*,/i, "");
+    return pathRegionSuppressesField(
+      svgPathDataToPoints(pathData),
+      current.getBoundingClientRect()
+    );
   }
 
   return false;
@@ -1522,7 +1565,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (
       current !== element &&
       (isClippedTinyAncestor(current, width, height, style) ||
-        (hasClippingOverflow(current, style) && isFullyClippedByAncestor(element, current)))
+        (clipsDescendantPaint(current, style) && isFullyClippedByAncestor(element, current)))
     ) {
       addReason(reasons, "not-viewable:clipped");
     }
