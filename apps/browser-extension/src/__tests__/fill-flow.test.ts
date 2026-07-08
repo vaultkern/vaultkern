@@ -436,6 +436,8 @@ describe("fillLoginForm", () => {
           <filter id="alphaZeroGamma"><feComponentTransfer><feFuncA type="gamma" amplitude="0" offset="0" /></feComponentTransfer></filter>
           <filter id="alphaZeroMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0 0" /></filter>
           <filter id="floodAlphaZero"><feFlood flood-opacity="0" /></filter>
+          <filter id="sourceOut"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="out" /></filter>
+          <filter id="arithmeticZero"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="arithmetic" k1="0" k2="0" k3="0" k4="0" /></filter>
           <filter id="offsetSource"><feOffset dx="-9999" dy="0" /></filter>
         </svg>
         <input id="svg-filter-password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
@@ -443,6 +445,8 @@ describe("fillLoginForm", () => {
         <input id="svg-filter-gamma-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroGamma)" />
         <input id="svg-filter-matrix-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
         <input id="svg-filter-flood-password" type="password" autocomplete="current-password" style="filter:url(#floodAlphaZero)" />
+        <input id="svg-filter-composite-out-password" type="password" autocomplete="current-password" style="filter:url(#sourceOut)" />
+        <input id="svg-filter-arithmetic-zero-password" type="password" autocomplete="current-password" style="filter:url(#arithmeticZero)" />
         <input id="svg-filter-offset-password" type="password" autocomplete="current-password" style="filter:url(#offsetSource)" />
         <div style="opacity:0.1">
           <div style="opacity:0.1">
@@ -723,6 +727,8 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#svg-filter-gamma-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-matrix-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-flood-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-composite-out-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-arithmetic-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-offset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#cumulative-opacity-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#cumulative-filter-password") as HTMLInputElement).value).toBe("");

@@ -1608,6 +1608,8 @@ describe("autofill triage", () => {
           <filter id="alphaZeroMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0 0" /></filter>
           <filter id="floodAlphaZero"><feFlood flood-opacity="0" /></filter>
           <filter id="floodTransparent"><feFlood flood-color="transparent" /></filter>
+          <filter id="sourceOut"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="out" /></filter>
+          <filter id="arithmeticZero"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="arithmetic" k1="0" k2="0" k3="0" k4="0" /></filter>
           <filter id="offsetSource"><feOffset dx="-9999" dy="0" /></filter>
           <filter id="nearOffsetSource"><feOffset dx="-500" dy="0" /></filter>
           <filter id="objectOffsetSource" primitiveUnits="objectBoundingBox"><feOffset dx="-3" dy="0" /></filter>
@@ -1635,6 +1637,8 @@ describe("autofill triage", () => {
         <input name="svg_filter_matrix_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
         <input name="svg_filter_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodAlphaZero)" />
         <input name="svg_filter_transparent_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodTransparent)" />
+        <input name="svg_filter_composite_out_password" type="password" autocomplete="current-password" style="filter:url(#sourceOut)" />
+        <input name="svg_filter_arithmetic_zero_password" type="password" autocomplete="current-password" style="filter:url(#arithmeticZero)" />
         <input name="svg_filter_offset_password" type="password" autocomplete="current-password" style="filter:url(#offsetSource)" />
         <input name="svg_filter_near_offset_password" type="password" autocomplete="current-password" style="filter:url(#nearOffsetSource)" />
         <input name="svg_filter_object_offset_password" type="password" autocomplete="current-password" style="filter:url(#objectOffsetSource)" />
@@ -1734,6 +1738,8 @@ describe("autofill triage", () => {
       "svg_filter_matrix_password",
       "svg_filter_flood_password",
       "svg_filter_transparent_flood_password",
+      "svg_filter_composite_out_password",
+      "svg_filter_arithmetic_zero_password",
       "svg_filter_offset_password",
       "svg_filter_near_offset_password",
       "svg_filter_object_offset_password",
@@ -1773,6 +1779,8 @@ describe("autofill triage", () => {
         <svg width="0" height="0" aria-hidden="true">
           <filter id="alphaVisibleGamma"><feComponentTransfer><feFuncA type="gamma" amplitude="1" offset="0" /></feComponentTransfer></filter>
           <filter id="smallOffset"><feOffset dx="4" dy="0" /></filter>
+          <filter id="sourceOver"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="over" /></filter>
+          <filter id="arithmeticVisible"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="arithmetic" k1="0" k2="1" k3="0" k4="0" /></filter>
           <mask id="visibleGroupMask"><g opacity="1"><rect width="100%" height="100%" fill="white" /></g></mask>
         </svg>
         <input name="email" type="email" autocomplete="username" />
@@ -1796,6 +1804,8 @@ describe("autofill triage", () => {
         <input name="positioned_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:100% 0" />
         <input name="gamma_filtered_password" type="password" autocomplete="current-password" style="filter:url(#alphaVisibleGamma)" />
         <input name="offset_filtered_password" type="password" autocomplete="current-password" style="filter:url(#smallOffset)" />
+        <input name="composite_over_password" type="password" autocomplete="current-password" style="filter:url(#sourceOver)" />
+        <input name="arithmetic_visible_password" type="password" autocomplete="current-password" style="filter:url(#arithmeticVisible)" />
       </form>
     `;
     stubElementRect(
@@ -1856,6 +1866,14 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "offset_filtered_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "offset_filtered_password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "composite_over_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "composite_over_password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "arithmetic_visible_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "arithmetic_visible_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
   });

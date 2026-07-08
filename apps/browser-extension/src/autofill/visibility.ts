@@ -769,6 +769,32 @@ function svgFilterOffsetSuppressesPaint(
   return offsetRectOverlapSuppressesPaint(affectedRect, dx, dy);
 }
 
+function svgFilterInputName(primitive: Element, attribute: "in" | "in2") {
+  return (primitive.getAttribute(attribute) ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function svgFilterInputIsSourcePaint(value: string) {
+  return value === "sourcegraphic" || value === "sourcealpha";
+}
+
+function svgFilterCompositeSuppressesPaint(primitive: Element) {
+  const operator = (primitive.getAttribute("operator") ?? "over").trim().toLowerCase();
+  if (operator === "out") {
+    const input = svgFilterInputName(primitive, "in");
+    const input2 = svgFilterInputName(primitive, "in2");
+    return svgFilterInputIsSourcePaint(input) && svgFilterInputIsSourcePaint(input2);
+  }
+  if (operator === "arithmetic") {
+    const coefficients = ["k1", "k2", "k3", "k4"].map((attribute) =>
+      Number(primitive.getAttribute(attribute) ?? "0")
+    );
+    return coefficients.every((value) => Number.isFinite(value) && value <= 0);
+  }
+  return false;
+}
+
 function svgFilterPrimitiveSuppressesFinalPaint(
   filterTarget: HTMLElement,
   affectedElement: HTMLElement,
@@ -781,6 +807,9 @@ function svgFilterPrimitiveSuppressesFinalPaint(
   }
   if (tagName === "feoffset") {
     return svgFilterOffsetSuppressesPaint(filterTarget, affectedElement, primitive, units);
+  }
+  if (tagName === "fecomposite") {
+    return svgFilterCompositeSuppressesPaint(primitive);
   }
   return false;
 }
