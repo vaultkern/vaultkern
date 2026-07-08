@@ -596,6 +596,36 @@ function localCssUrlReferenceIds(value: string | undefined) {
   return references;
 }
 
+function svgFilterFloodSuppressesPaint(primitive: Element) {
+  const styled = primitive as SVGElement;
+  const floodOpacity =
+    cssOpacityValue(primitive.getAttribute("flood-opacity") ?? undefined) ??
+    cssOpacityValue(styled.style?.getPropertyValue("flood-opacity")) ??
+    1;
+  const floodColor =
+    primitive.getAttribute("flood-color") ??
+    styled.style?.getPropertyValue("flood-color") ??
+    "black";
+  return isEffectivelyTransparent(floodOpacity) || cssColorLooksTransparent(floodColor);
+}
+
+function svgFilterOffsetSuppressesPaint(primitive: Element) {
+  const dx = numericCssValue(primitive.getAttribute("dx") ?? undefined) ?? 0;
+  const dy = numericCssValue(primitive.getAttribute("dy") ?? undefined) ?? 0;
+  return isLargeOffscreenOffset(dx) || isLargeOffscreenOffset(dy);
+}
+
+function svgFilterPrimitiveSuppressesFinalPaint(primitive: Element) {
+  const tagName = primitive.tagName.toLowerCase();
+  if (tagName === "feflood") {
+    return svgFilterFloodSuppressesPaint(primitive);
+  }
+  if (tagName === "feoffset") {
+    return svgFilterOffsetSuppressesPaint(primitive);
+  }
+  return false;
+}
+
 function svgFilterSuppressesPaint(current: HTMLElement, value: string | undefined) {
   for (const id of localCssUrlReferenceIds(value)) {
     const filter = current.ownerDocument.getElementById(id);
@@ -648,6 +678,11 @@ function svgFilterSuppressesPaint(current: HTMLElement, value: string | undefine
         );
       })
     ) {
+      return true;
+    }
+    const primitives = Array.from(filter.children);
+    const finalPrimitive = primitives[primitives.length - 1];
+    if (finalPrimitive && svgFilterPrimitiveSuppressesFinalPaint(finalPrimitive)) {
       return true;
     }
   }
@@ -796,19 +831,57 @@ function cssColorLooksBlack(value: string | null) {
   return channels.length === 3 && channels.every((channel) => channel === 0);
 }
 
-function maskImageFullyTransparent(value: string | undefined) {
+function cssColorStopColor(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  const functionColor = normalized.match(/^(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\([^)]*\)/);
+  if (functionColor) {
+    return functionColor[0];
+  }
+  const firstToken = splitCssFunctionArgs(normalized)[0];
+  if (
+    firstToken === "transparent" ||
+    firstToken === "black" ||
+    firstToken?.startsWith("#")
+  ) {
+    return firstToken;
+  }
+  return null;
+}
+
+function gradientColorStops(value: string) {
+  return splitCssCommaList(value)
+    .map(cssColorStopColor)
+    .filter((color): color is string => color !== null);
+}
+
+function maskModePaintsByLuminance(value: string | undefined) {
+  return splitCssCommaList(value?.trim().toLowerCase() ?? "").some(
+    (layer) => layer.trim() === "luminance"
+  );
+}
+
+function maskImageFullySuppressesPaint(value: string | undefined, modeValue: string | undefined) {
   const normalized = value?.trim().toLowerCase();
   if (!normalized || normalized === "none") {
     return false;
   }
-  const gradientMatch = normalized.match(/^[a-z-]*gradient\((.*)\)$/);
+  const gradientMatch = normalized.match(/^([a-z-]*gradient)\(/);
   if (!gradientMatch) {
     return false;
   }
-  const colorStops = splitCssCommaList(gradientMatch[1]).filter(
-    (part) => !part.trim().startsWith("to ") && cssAngleDegrees(part.trim()) === null
+  const gradientBody = cssFunctionBody(normalized, gradientMatch[1]);
+  if (gradientBody === null) {
+    return false;
+  }
+  const colorStops = gradientColorStops(gradientBody);
+  return (
+    colorStops.length > 0 &&
+    (colorStops.every(cssColorLooksTransparent) ||
+      (maskModePaintsByLuminance(modeValue) && colorStops.every(cssColorLooksBlack)))
   );
-  return colorStops.length > 0 && colorStops.every(cssColorLooksTransparent);
 }
 
 function maskRepeatRepeatsAxis(value: string | undefined, axis: "x" | "y") {
@@ -833,18 +906,22 @@ function maskRepeatRepeatsAxis(value: string | undefined, axis: "x" | "y") {
 function maskSizeSuppressesPaint(
   value: string | undefined,
   repeatValue: string | undefined,
+  current: HTMLElement,
   units: { emPx?: number; remPx?: number }
 ) {
   const normalized = value?.trim().toLowerCase();
   if (!normalized || normalized === "auto") {
     return false;
   }
+  const rect = current.getBoundingClientRect();
+  const widthAxis = hasMeaningfulClientRect(rect) ? rect.width : 0;
+  const heightAxis = hasMeaningfulClientRect(rect) ? rect.height : 0;
   const repeatLayers = splitCssCommaList(repeatValue?.trim().toLowerCase() ?? "");
   return splitCssCommaList(normalized).some((layer, index) => {
     const repeatLayer = repeatLayers[index] ?? repeatLayers[repeatLayers.length - 1];
     const [width, height = width] = splitCssFunctionArgs(layer);
-    const widthPx = width === undefined ? null : cssLengthToPx(width, 0, units);
-    const heightPx = height === undefined ? null : cssLengthToPx(height, 0, units);
+    const widthPx = width === undefined ? null : cssLengthToPx(width, widthAxis, units);
+    const heightPx = height === undefined ? null : cssLengthToPx(height, heightAxis, units);
     return (
       (widthPx !== null && widthPx <= 0) ||
       (heightPx !== null && heightPx <= 0) ||
@@ -1102,7 +1179,13 @@ function maskStyleSuppressesPaint(
   if (!maskImages.length) {
     return false;
   }
-  if (maskImages.some(maskImageFullyTransparent)) {
+  const maskMode = cssPropertyValue(style, current, "mask-mode");
+  const webkitMaskMode = cssPropertyValue(style, current, "-webkit-mask-mode") || maskMode;
+  if (
+    maskImages.some((maskImage) =>
+      maskImageFullySuppressesPaint(maskImage, `${maskMode}, ${webkitMaskMode}`)
+    )
+  ) {
     return true;
   }
   if (maskImages.some((maskImage) => svgMaskSuppressesPaint(current, maskImage, units))) {
@@ -1112,11 +1195,13 @@ function maskStyleSuppressesPaint(
     maskSizeSuppressesPaint(
       cssPropertyValue(style, current, "mask-size"),
       cssPropertyValue(style, current, "mask-repeat"),
+      current,
       units
     ) ||
     maskSizeSuppressesPaint(
       cssPropertyValue(style, current, "-webkit-mask-size"),
       cssPropertyValue(style, current, "-webkit-mask-repeat"),
+      current,
       units
     ) ||
     maskPositionSuppressesPaint(

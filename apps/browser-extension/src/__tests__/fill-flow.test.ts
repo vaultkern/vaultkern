@@ -364,24 +364,34 @@ describe("fillLoginForm", () => {
         <input id="viewport-margin-password" type="password" autocomplete="current-password" style="display:block;margin-left:-100vw" />
         <input id="mask-transparent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
         <input id="mask-radial-password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(transparent, transparent)" />
+        <input id="mask-radial-shape-password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(circle, transparent, transparent)" />
+        <input id="mask-conic-password" type="password" autocomplete="current-password" style="mask-image:conic-gradient(from 0deg, transparent, transparent)" />
+        <input id="mask-color-space-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(in oklab, transparent, transparent)" />
+        <input id="mask-luminance-black-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black, black);mask-mode:luminance" />
         <input id="mask-stop-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
         <svg width="0" height="0" aria-hidden="true">
           <mask id="blackMask"><rect width="100%" height="100%" fill="black" /></mask>
         </svg>
         <input id="mask-url-password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input id="mask-zero-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
+        <input id="mask-zero-percent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input id="mask-tiny-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
+        <input id="mask-tiny-percent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4% 100%;mask-repeat:no-repeat" />
         <input id="mask-position-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:-9999px 0" />
         <svg width="0" height="0" aria-hidden="true">
           <filter id="alphaZero"><feComponentTransfer><feFuncA type="table" tableValues="0 0" /></feComponentTransfer></filter>
           <filter id="alphaZeroDiscrete"><feComponentTransfer><feFuncA type="discrete" tableValues="0 0" /></feComponentTransfer></filter>
           <filter id="alphaZeroGamma"><feComponentTransfer><feFuncA type="gamma" amplitude="0" offset="0" /></feComponentTransfer></filter>
           <filter id="alphaZeroMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0 0" /></filter>
+          <filter id="floodAlphaZero"><feFlood flood-opacity="0" /></filter>
+          <filter id="offsetSource"><feOffset dx="-9999" dy="0" /></filter>
         </svg>
         <input id="svg-filter-password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
         <input id="svg-filter-discrete-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroDiscrete)" />
         <input id="svg-filter-gamma-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroGamma)" />
         <input id="svg-filter-matrix-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
+        <input id="svg-filter-flood-password" type="password" autocomplete="current-password" style="filter:url(#floodAlphaZero)" />
+        <input id="svg-filter-offset-password" type="password" autocomplete="current-password" style="filter:url(#offsetSource)" />
         <div style="opacity:0.1">
           <div style="opacity:0.1">
             <input id="cumulative-opacity-password" type="password" autocomplete="current-password" />
@@ -484,6 +494,12 @@ describe("fillLoginForm", () => {
       document.querySelector("#mask-position-password") as HTMLInputElement,
       elementRect({ left: 24, top: 40, width: 185, height: 21 })
     );
+    for (const id of ["mask-zero-percent-password", "mask-tiny-percent-password"]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40, width: 185, height: 21 })
+      );
+    }
     stubElementRect(
       document.querySelector("#zoom-zero-password") as HTMLInputElement,
       elementRect({ left: 24, top: 40, width: 0, height: 0 })
@@ -558,15 +574,23 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#viewport-margin-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-transparent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-radial-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-radial-shape-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-conic-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-color-space-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-luminance-black-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-stop-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-url-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-zero-percent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-tiny-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-tiny-percent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-position-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-discrete-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-gamma-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-matrix-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-flood-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-offset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#cumulative-opacity-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#cumulative-filter-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#rotate-x-password") as HTMLInputElement).value).toBe("");

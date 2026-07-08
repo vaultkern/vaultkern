@@ -1542,19 +1542,32 @@ describe("autofill triage", () => {
           <filter id="alphaZeroDiscrete"><feComponentTransfer><feFuncA type="discrete" tableValues="0 0" /></feComponentTransfer></filter>
           <filter id="alphaZeroGamma"><feComponentTransfer><feFuncA type="gamma" amplitude="0" offset="0" /></feComponentTransfer></filter>
           <filter id="alphaZeroMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0 0" /></filter>
+          <filter id="floodAlphaZero"><feFlood flood-opacity="0" /></filter>
+          <filter id="floodTransparent"><feFlood flood-color="transparent" /></filter>
+          <filter id="offsetSource"><feOffset dx="-9999" dy="0" /></filter>
           <mask id="blackMask"><rect width="100%" height="100%" fill="black" /></mask>
         </svg>
         <input name="transparent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
         <input name="radial_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(transparent, transparent)" />
+        <input name="radial_shape_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(circle, transparent, transparent)" />
+        <input name="conic_from_mask_password" type="password" autocomplete="current-password" style="mask-image:conic-gradient(from 0deg, transparent, transparent)" />
+        <input name="linear_color_space_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(in oklab, transparent, transparent)" />
+        <input name="black_luminance_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black, black);mask-mode:luminance" />
+        <input name="radial_black_luminance_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(circle, black, black);mask-mode:luminance" />
         <input name="stop_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
         <input name="url_mask_password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
+        <input name="zero_percent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input name="tiny_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
+        <input name="tiny_percent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4% 100%;mask-repeat:no-repeat" />
         <input name="positioned_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:-9999px 0" />
         <input name="svg_filter_password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
         <input name="svg_filter_discrete_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroDiscrete)" />
         <input name="svg_filter_gamma_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroGamma)" />
         <input name="svg_filter_matrix_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
+        <input name="svg_filter_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodAlphaZero)" />
+        <input name="svg_filter_transparent_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodTransparent)" />
+        <input name="svg_filter_offset_password" type="password" autocomplete="current-password" style="filter:url(#offsetSource)" />
         <div style="opacity:0.1">
           <div style="opacity:0.1">
             <input name="cumulative_opacity_password" type="password" autocomplete="current-password" />
@@ -1587,21 +1600,37 @@ describe("autofill triage", () => {
       document.querySelector('input[name="positioned_mask_password"]') as HTMLInputElement,
       elementRect({ left: 24, top: 40, width: 185, height: 21 })
     );
+    for (const name of ["zero_percent_mask_password", "tiny_percent_mask_password"]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40, width: 185, height: 21 })
+      );
+    }
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     for (const name of [
       "transparent_mask_password",
       "radial_mask_password",
+      "radial_shape_mask_password",
+      "conic_from_mask_password",
+      "linear_color_space_mask_password",
+      "black_luminance_mask_password",
+      "radial_black_luminance_mask_password",
       "stop_mask_password",
       "url_mask_password",
       "zero_mask_password",
+      "zero_percent_mask_password",
       "tiny_mask_password",
+      "tiny_percent_mask_password",
       "positioned_mask_password",
       "svg_filter_password",
       "svg_filter_discrete_password",
       "svg_filter_gamma_password",
       "svg_filter_matrix_password",
+      "svg_filter_flood_password",
+      "svg_filter_transparent_flood_password",
+      "svg_filter_offset_password",
       "cumulative_opacity_password",
       "cumulative_filter_password",
       "paintless_password",
