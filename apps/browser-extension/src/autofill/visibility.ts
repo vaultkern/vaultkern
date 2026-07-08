@@ -5684,7 +5684,8 @@ function svgMaskPaintOpacityValue(
 function svgPaintSuppressesMask(
   shape: Element,
   style: CSSStyleDeclaration | undefined,
-  effectiveOpacity = svgMaskPaintOpacityValue(shape, style)
+  effectiveOpacity = svgMaskPaintOpacityValue(shape, style),
+  paintsByLuminance = true
 ) {
   const fill =
     shape.getAttribute("fill") ??
@@ -5694,8 +5695,24 @@ function svgPaintSuppressesMask(
   return (
     isEffectivelyTransparent(effectiveOpacity) ||
     cssColorLooksTransparent(fill ?? "") ||
-    cssColorLooksBlack(fill)
+    (paintsByLuminance && cssColorLooksBlack(fill))
   );
+}
+
+function svgMaskPaintsByLuminance(
+  mask: Element,
+  style: CSSStyleDeclaration | undefined
+) {
+  const inlineStyle = (mask as SVGElement).style;
+  const maskType = (
+    mask.getAttribute("mask-type") ??
+    inlineStyle?.getPropertyValue("mask-type") ??
+    style?.getPropertyValue("mask-type") ??
+    ""
+  )
+    .trim()
+    .toLowerCase();
+  return maskType !== "alpha";
 }
 
 function svgMaskShapeSuppressesPaint(
@@ -5704,7 +5721,8 @@ function svgMaskShapeSuppressesPaint(
   units: { emPx?: number; remPx?: number },
   seen: Set<Element> = new Set(),
   inheritedMatrix: SvgMatrix2d = identitySvgMatrix(),
-  inheritedOpacity = 1
+  inheritedOpacity = 1,
+  paintsByLuminance = true
 ): boolean {
   if (seen.has(shape)) {
     return true;
@@ -5731,17 +5749,33 @@ function svgMaskShapeSuppressesPaint(
     );
     return (
       target === null ||
-      svgMaskShapeSuppressesPaint(current, target, units, seen, useMatrix, effectiveOpacity)
+      svgMaskShapeSuppressesPaint(
+        current,
+        target,
+        units,
+        seen,
+        useMatrix,
+        effectiveOpacity,
+        paintsByLuminance
+      )
     );
   }
   if (shape.children.length > 0 && (tagName === "g" || tagName === "svg" || tagName === "mask")) {
     return Array.from(shape.children).every((child) =>
-      svgMaskShapeSuppressesPaint(current, child, units, seen, matrix, effectiveOpacity)
+      svgMaskShapeSuppressesPaint(
+        current,
+        child,
+        units,
+        seen,
+        matrix,
+        effectiveOpacity,
+        paintsByLuminance
+      )
     );
   }
   return (
     svgClipShapeSuppressesField(current, shape, units, new Set(), inheritedMatrix) ||
-    svgPaintSuppressesMask(shape, shapeStyle, effectiveOpacity)
+    svgPaintSuppressesMask(shape, shapeStyle, effectiveOpacity, paintsByLuminance)
   );
 }
 
@@ -5751,7 +5785,8 @@ function svgMaskShapeVisibleBounds(
   units: { emPx?: number; remPx?: number },
   seen: Set<Element> = new Set(),
   inheritedMatrix: SvgMatrix2d = identitySvgMatrix(),
-  inheritedOpacity = 1
+  inheritedOpacity = 1,
+  paintsByLuminance = true
 ): RectBounds | null {
   if (seen.has(shape)) {
     return null;
@@ -5778,18 +5813,34 @@ function svgMaskShapeVisibleBounds(
     );
     return target === null
       ? null
-      : svgMaskShapeVisibleBounds(current, target, units, seen, useMatrix, effectiveOpacity);
+      : svgMaskShapeVisibleBounds(
+          current,
+          target,
+          units,
+          seen,
+          useMatrix,
+          effectiveOpacity,
+          paintsByLuminance
+        );
   }
   if (shape.children.length > 0 && (tagName === "g" || tagName === "svg" || tagName === "mask")) {
     return unionBounds(
       Array.from(shape.children)
         .map((child) =>
-          svgMaskShapeVisibleBounds(current, child, units, seen, matrix, effectiveOpacity)
+          svgMaskShapeVisibleBounds(
+            current,
+            child,
+            units,
+            seen,
+            matrix,
+            effectiveOpacity,
+            paintsByLuminance
+          )
         )
         .filter((bounds): bounds is RectBounds => bounds !== null)
     );
   }
-  if (svgPaintSuppressesMask(shape, shapeStyle, effectiveOpacity)) {
+  if (svgPaintSuppressesMask(shape, shapeStyle, effectiveOpacity, paintsByLuminance)) {
     return null;
   }
   return svgClipShapeVisibleBounds(current, shape, units, new Set(), inheritedMatrix);
@@ -5808,6 +5859,7 @@ function svgMaskVisibleBounds(
       }
       const maskStyle = mask.ownerDocument.defaultView?.getComputedStyle(mask);
       const maskOpacity = svgMaskPaintOpacityValue(mask, maskStyle);
+      const paintsByLuminance = svgMaskPaintsByLuminance(mask, maskStyle);
       if (isEffectivelyTransparent(maskOpacity)) {
         return null;
       }
@@ -5820,7 +5872,8 @@ function svgMaskVisibleBounds(
               units,
               new Set(),
               identitySvgMatrix(),
-              maskOpacity
+              maskOpacity,
+              paintsByLuminance
             )
           )
           .filter((shapeBounds): shapeBounds is RectBounds => shapeBounds !== null)
@@ -5842,6 +5895,7 @@ function svgMaskSuppressesPaint(
     }
     const maskStyle = mask.ownerDocument.defaultView?.getComputedStyle(mask);
     const maskOpacity = svgMaskPaintOpacityValue(mask, maskStyle);
+    const paintsByLuminance = svgMaskPaintsByLuminance(mask, maskStyle);
     if (isEffectivelyTransparent(maskOpacity)) {
       return true;
     }
@@ -5855,7 +5909,8 @@ function svgMaskSuppressesPaint(
           units,
           new Set(),
           identitySvgMatrix(),
-          maskOpacity
+          maskOpacity,
+          paintsByLuminance
         )
       )
     );

@@ -1961,6 +1961,27 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("fills password fields through opaque alpha SVG masks", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <mask id="alphaMask" mask-type="alpha">
+            <rect width="200" height="30" fill="black" />
+          </mask>
+        </svg>
+        <input id="login-password" type="password" autocomplete="current-password" style="mask:url(#alphaMask)" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector("#login-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not treat visible labels as enough for radial ancestor mask decoys", () => {
     document.body.innerHTML = `
       <form>
