@@ -455,6 +455,12 @@ describe("fillLoginForm", () => {
           <filter id="alphaZeroMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0 0" /></filter>
           <filter id="alphaTenLinear"><feComponentTransfer><feFuncA type="linear" slope="0.1" intercept="0" /></feComponentTransfer></filter>
           <filter id="floodAlphaZero"><feFlood flood-opacity="0" /></filter>
+          <filter id="floodBlack"><feFlood flood-color="black" /></filter>
+          <filter id="matrixBlack"><feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0" /></filter>
+          <filter id="mergedFloodBlack"><feFlood flood-color="black" result="blackPaint" /><feMerge><feMergeNode in="blackPaint" /></feMerge></filter>
+          <filter id="componentBlack"><feComponentTransfer><feFuncR type="table" tableValues="0 0" /><feFuncG type="table" tableValues="0 0" /><feFuncB type="table" tableValues="0 0" /></feComponentTransfer></filter>
+          <filter id="compositeBlackIn"><feFlood flood-color="black" result="blackPaint" /><feComposite in="blackPaint" in2="SourceAlpha" operator="in" /></filter>
+          <filter id="blendBlack"><feFlood flood-color="black" result="blackPaint" /><feBlend in="blackPaint" in2="SourceGraphic" mode="normal" /></filter>
           <filter id="compositeInTransparent"><feFlood flood-opacity="0" result="transparent" /><feComposite in="SourceGraphic" in2="transparent" operator="in" /></filter>
           <filter id="morphologyErode"><feMorphology operator="erode" radius="9999" /></filter>
           <filter id="sourceOut"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="out" /></filter>
@@ -466,6 +472,14 @@ describe("fillLoginForm", () => {
         <input id="svg-filter-gamma-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroGamma)" />
         <input id="svg-filter-matrix-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
         <input id="svg-filter-flood-password" type="password" autocomplete="current-password" style="filter:url(#floodAlphaZero)" />
+        <div style="background:black">
+          <input id="svg-filter-flood-black-password" type="password" autocomplete="current-password" style="filter:url(#floodBlack)" />
+          <input id="svg-filter-matrix-black-password" type="password" autocomplete="current-password" style="filter:url(#matrixBlack)" />
+          <input id="svg-filter-merged-flood-black-password" type="password" autocomplete="current-password" style="filter:url(#mergedFloodBlack)" />
+          <input id="svg-filter-component-black-password" type="password" autocomplete="current-password" style="filter:url(#componentBlack)" />
+          <input id="svg-filter-composite-black-password" type="password" autocomplete="current-password" style="filter:url(#compositeBlackIn)" />
+          <input id="svg-filter-blend-black-password" type="password" autocomplete="current-password" style="filter:url(#blendBlack)" />
+        </div>
         <input id="svg-filter-composite-in-password" type="password" autocomplete="current-password" style="filter:url(#compositeInTransparent)" />
         <input id="svg-filter-morphology-password" type="password" autocomplete="current-password" style="filter:url(#morphologyErode)" />
         <input id="svg-filter-composite-out-password" type="password" autocomplete="current-password" style="filter:url(#sourceOut)" />
@@ -819,6 +833,12 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#svg-filter-gamma-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-matrix-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-flood-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-flood-black-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-matrix-black-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-merged-flood-black-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-component-black-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-composite-black-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-blend-black-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-composite-in-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-morphology-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-composite-out-password") as HTMLInputElement).value).toBe("");

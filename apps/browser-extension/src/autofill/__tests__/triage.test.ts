@@ -1656,6 +1656,12 @@ describe("autofill triage", () => {
           <filter id="alphaTenMatrix"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 0.1 0" /></filter>
           <filter id="floodAlphaZero"><feFlood flood-opacity="0" /></filter>
           <filter id="floodTransparent"><feFlood flood-color="transparent" /></filter>
+          <filter id="floodBlack"><feFlood flood-color="black" /></filter>
+          <filter id="matrixBlack"><feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0" /></filter>
+          <filter id="mergedFloodBlack"><feFlood flood-color="black" result="blackPaint" /><feMerge><feMergeNode in="blackPaint" /></feMerge></filter>
+          <filter id="componentBlack"><feComponentTransfer><feFuncR type="table" tableValues="0 0" /><feFuncG type="table" tableValues="0 0" /><feFuncB type="table" tableValues="0 0" /></feComponentTransfer></filter>
+          <filter id="compositeBlackIn"><feFlood flood-color="black" result="blackPaint" /><feComposite in="blackPaint" in2="SourceAlpha" operator="in" /></filter>
+          <filter id="blendBlack"><feFlood flood-color="black" result="blackPaint" /><feBlend in="blackPaint" in2="SourceGraphic" mode="normal" /></filter>
           <filter id="compositeInTransparent"><feFlood flood-opacity="0" result="transparent" /><feComposite in="SourceGraphic" in2="transparent" operator="in" /></filter>
           <filter id="morphologyErode"><feMorphology operator="erode" radius="9999" /></filter>
           <filter id="sourceOut"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="out" /></filter>
@@ -1697,6 +1703,14 @@ describe("autofill triage", () => {
         <input name="svg_filter_matrix_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
         <input name="svg_filter_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodAlphaZero)" />
         <input name="svg_filter_transparent_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodTransparent)" />
+        <div style="background:black">
+          <input name="svg_filter_black_flood_password" type="password" autocomplete="current-password" style="filter:url(#floodBlack)" />
+          <input name="svg_filter_black_matrix_password" type="password" autocomplete="current-password" style="filter:url(#matrixBlack)" />
+          <input name="svg_filter_merged_black_flood_password" type="password" autocomplete="current-password" style="filter:url(#mergedFloodBlack)" />
+          <input name="svg_filter_black_component_password" type="password" autocomplete="current-password" style="filter:url(#componentBlack)" />
+          <input name="svg_filter_black_composite_password" type="password" autocomplete="current-password" style="filter:url(#compositeBlackIn)" />
+          <input name="svg_filter_black_blend_password" type="password" autocomplete="current-password" style="filter:url(#blendBlack)" />
+        </div>
         <input name="svg_filter_composite_in_password" type="password" autocomplete="current-password" style="filter:url(#compositeInTransparent)" />
         <input name="svg_filter_morphology_password" type="password" autocomplete="current-password" style="filter:url(#morphologyErode)" />
         <input name="svg_filter_composite_out_password" type="password" autocomplete="current-password" style="filter:url(#sourceOut)" />
@@ -1834,6 +1848,12 @@ describe("autofill triage", () => {
       "svg_filter_matrix_password",
       "svg_filter_flood_password",
       "svg_filter_transparent_flood_password",
+      "svg_filter_black_flood_password",
+      "svg_filter_black_matrix_password",
+      "svg_filter_merged_black_flood_password",
+      "svg_filter_black_component_password",
+      "svg_filter_black_composite_password",
+      "svg_filter_black_blend_password",
       "svg_filter_composite_in_password",
       "svg_filter_morphology_password",
       "svg_filter_composite_out_password",
