@@ -1770,6 +1770,17 @@ function svgFilterBlendAbsorbingPaintColor(
   return null;
 }
 
+function svgFilterBlendPaintColor(
+  mode: string,
+  inputColor: CssColorRgba | null,
+  input2Color: CssColorRgba | null
+) {
+  if (inputColor !== null && input2Color !== null) {
+    return cssColorBlendedOverBackground(inputColor, input2Color, mode);
+  }
+  return svgFilterBlendAbsorbingPaintColor(mode, inputColor, input2Color);
+}
+
 function svgFilterBlendPaintCollapseColorValue(
   primitive: Element,
   previousOutputColor: CssColorRgba | null,
@@ -1793,7 +1804,7 @@ function svgFilterBlendPaintCollapseColorValue(
   );
 
   if (mode !== "normal") {
-    return svgFilterBlendAbsorbingPaintColor(mode, inputColor, input2Color);
+    return svgFilterBlendPaintColor(mode, inputColor, input2Color);
   }
 
   if (inputColor !== null && cssColorIsOpaque(inputColor)) {

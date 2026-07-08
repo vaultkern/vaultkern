@@ -2203,6 +2203,32 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats credential fields hidden by SVG difference blend filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="svgDifferenceBlend" color-interpolation-filters="sRGB">
+            <feFlood flood-color="cyan" result="cyanPaint" />
+            <feComposite in="cyanPaint" in2="SourceAlpha" operator="in" result="maskedCyanPaint" />
+            <feBlend in="SourceGraphic" in2="maskedCyanPaint" mode="difference" />
+          </filter>
+        </svg>
+        <div style="background:white">
+          <input name="svg_difference_blend_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:url(#svgDifferenceBlend)" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "svg_difference_blend_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "svg_difference_blend_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats credential fields hidden by SVG blend filters as not viewable", () => {
     document.body.innerHTML = `
       <form>
