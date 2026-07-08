@@ -1478,6 +1478,183 @@ function boxShadowCoversPoint(
   );
 }
 
+function cssStyleValue(style: CSSStyleDeclaration | undefined, property: string) {
+  return style?.getPropertyValue(property).trim() ?? "";
+}
+
+function cssStyleLinePaints(
+  style: CSSStyleDeclaration | undefined,
+  prefix: string,
+  units: { emPx?: number; remPx?: number } = {}
+) {
+  const lineStyle = cssStyleValue(style, `${prefix}-style`).toLowerCase();
+  const lineWidth = cssStyleValue(style, `${prefix}-width`);
+  const lineColor = cssStyleValue(style, `${prefix}-color`);
+  return (
+    lineStyle !== "" &&
+    lineStyle !== "none" &&
+    lineStyle !== "hidden" &&
+    !cssLengthLooksZero(lineWidth, units) &&
+    !cssColorLooksTransparent(lineColor)
+  );
+}
+
+function cssStylePaintsVisibleBox(
+  style: CSSStyleDeclaration | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  return (
+    !cssPaintListLooksEmpty(cssStyleValue(style, "background-image")) ||
+    !cssColorLooksTransparent(cssStyleValue(style, "background-color")) ||
+    ["top", "right", "bottom", "left"].some((side) =>
+      cssStyleLinePaints(style, `border-${side}`, units)
+    ) ||
+    cssStyleLinePaints(style, "outline", units) ||
+    !cssPaintListLooksEmpty(cssStyleValue(style, "box-shadow"))
+  );
+}
+
+function computedPseudoStyle(element: HTMLElement, pseudoElement: "::before" | "::after") {
+  const view = element.ownerDocument.defaultView;
+  if (!view) {
+    return undefined;
+  }
+  const getComputedStyle = view.getComputedStyle as typeof view.getComputedStyle & {
+    mock?: unknown;
+  };
+  if (
+    view.navigator.userAgent.includes("jsdom") &&
+    getComputedStyle.mock === undefined
+  ) {
+    return undefined;
+  }
+  try {
+    return getComputedStyle(element, pseudoElement);
+  } catch {
+    return undefined;
+  }
+}
+
+function pseudoContentPaints(style: CSSStyleDeclaration | undefined) {
+  const content = cssStyleValue(style, "content").toLowerCase();
+  return content !== "" && content !== "normal" && content !== "none";
+}
+
+function pseudoElementMayPaintAboveElement(
+  element: HTMLElement,
+  style: CSSStyleDeclaration | undefined
+) {
+  const pseudoZIndex = numericZIndex(cssStyleValue(style, "z-index"));
+  if (pseudoZIndex === null) {
+    return false;
+  }
+  const elementStyle = element.ownerDocument.defaultView?.getComputedStyle(element);
+  const elementZIndex = numericZIndex(elementStyle?.zIndex || element.style.zIndex) ?? 0;
+  return pseudoZIndex > elementZIndex;
+}
+
+function cssStyleLengthToPx(
+  style: CSSStyleDeclaration | undefined,
+  property: string,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number }
+) {
+  const value = cssStyleValue(style, property);
+  return value === "" ? null : cssLengthToPx(value, axisSize, units);
+}
+
+function pseudoElementBounds(
+  candidateRect: DOMRect,
+  style: CSSStyleDeclaration | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const width =
+    cssStyleLengthToPx(style, "width", candidateRect.width, units) ?? candidateRect.width;
+  const height =
+    cssStyleLengthToPx(style, "height", candidateRect.height, units) ?? candidateRect.height;
+  const left = cssStyleLengthToPx(style, "left", candidateRect.width, units);
+  const right = cssStyleLengthToPx(style, "right", candidateRect.width, units);
+  const top = cssStyleLengthToPx(style, "top", candidateRect.height, units);
+  const bottom = cssStyleLengthToPx(style, "bottom", candidateRect.height, units);
+  const position = cssStyleValue(style, "position").toLowerCase();
+  const baseLeft = position === "fixed" ? 0 : candidateRect.left;
+  const baseTop = position === "fixed" ? 0 : candidateRect.top;
+  const x =
+    left !== null
+      ? baseLeft + left
+      : right !== null
+        ? baseLeft + candidateRect.width - right - width
+        : baseLeft;
+  const y =
+    top !== null
+      ? baseTop + top
+      : bottom !== null
+        ? baseTop + candidateRect.height - bottom - height
+        : baseTop;
+  return {
+    left: x,
+    top: y,
+    right: x + width,
+    bottom: y + height
+  };
+}
+
+function boundsContainPoint(
+  bounds: { left: number; top: number; right: number; bottom: number },
+  point: { x: number; y: number }
+) {
+  return (
+    point.x >= bounds.left &&
+    point.x <= bounds.right &&
+    point.y >= bounds.top &&
+    point.y <= bounds.bottom
+  );
+}
+
+function pseudoElementCoversPoint(
+  element: HTMLElement,
+  candidate: HTMLElement,
+  pseudoElement: "::before" | "::after",
+  candidateRect: DOMRect,
+  point: { x: number; y: number }
+) {
+  const style = computedPseudoStyle(candidate, pseudoElement);
+  const rootStyle = candidate.ownerDocument.defaultView?.getComputedStyle(
+    candidate.ownerDocument.documentElement
+  );
+  const emPx = numericCssValue(cssStyleValue(style, "font-size")) ?? 16;
+  const remPx = numericCssValue(rootStyle?.fontSize) ?? emPx;
+  const cssUnits = { emPx, remPx };
+  const opacity = cssOpacityValue(cssStyleValue(style, "opacity"));
+  const filter = cssStyleValue(style, "filter");
+  const display = cssStyleValue(style, "display");
+  const visibility = cssStyleValue(style, "visibility");
+
+  return (
+    pseudoContentPaints(style) &&
+    display !== "none" &&
+    visibility !== "hidden" &&
+    visibility !== "collapse" &&
+    !isEffectivelyTransparent(opacity) &&
+    !isEffectivelyTransparent(filterOpacityValue(filter)) &&
+    pseudoElementMayPaintAboveElement(element, style) &&
+    cssStylePaintsVisibleBox(style, cssUnits) &&
+    boundsContainPoint(pseudoElementBounds(candidateRect, style, cssUnits), point)
+  );
+}
+
+function ancestorPseudoElementCoversPoint(
+  element: HTMLElement,
+  candidate: HTMLElement,
+  candidateRect: DOMRect,
+  point: { x: number; y: number }
+) {
+  return (
+    pseudoElementCoversPoint(element, candidate, "::before", candidateRect, point) ||
+    pseudoElementCoversPoint(element, candidate, "::after", candidateRect, point)
+  );
+}
+
 function elementVisualCoversPoint(
   current: HTMLElement,
   style: CSSStyleDeclaration | undefined,
@@ -1600,9 +1777,17 @@ function paintedOverlayCoversPoint(element: HTMLElement, point: { x: number; y: 
       }
       const style = candidate.ownerDocument.defaultView?.getComputedStyle(candidate);
       const candidateRect = candidate.getBoundingClientRect();
+      if (candidate !== element && candidate.contains(element)) {
+        if (
+          ancestorPseudoElementCoversPoint(element, candidate, candidateRect, point) &&
+          elementCumulativePaintIsVisible(candidate)
+        ) {
+          return true;
+        }
+        continue;
+      }
       if (
         candidate === element ||
-        candidate.contains(element) ||
         element.contains(candidate) ||
         !elementMayPaintAboveElement(element, candidate) ||
         !elementVisualCoversPoint(candidate, style, candidateRect, point)

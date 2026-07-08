@@ -65,6 +65,43 @@ function stubElementRect(element: Element, rect: DOMRect) {
   });
 }
 
+function fakeCssStyle(values: Record<string, string>) {
+  const propertyValue = (property: string) => values[property] ?? "";
+  return new Proxy(
+    {
+      getPropertyValue: propertyValue
+    },
+    {
+      get(target, property) {
+        if (property in target) {
+          return target[property as keyof typeof target];
+        }
+        if (typeof property === "string") {
+          return values[property] ?? "";
+        }
+        return undefined;
+      }
+    }
+  ) as CSSStyleDeclaration;
+}
+
+function stubPseudoElementStyle(
+  element: Element,
+  pseudoElement: "::before" | "::after",
+  values: Record<string, string>
+) {
+  const originalGetComputedStyle = window.getComputedStyle.bind(window);
+  return vi.spyOn(window, "getComputedStyle").mockImplementation((target, pseudoElt) => {
+    if (target === element && pseudoElt === pseudoElement) {
+      return fakeCssStyle(values);
+    }
+    if (pseudoElt) {
+      return fakeCssStyle({ content: "none", display: "none" });
+    }
+    return originalGetComputedStyle(target);
+  });
+}
+
 vi.mock("@vaultkern/runtime-web-client", () => ({
   RuntimeClient: vi.fn(() => runtimeClientMocks)
 }));
@@ -415,6 +452,9 @@ describe("fillLoginForm", () => {
         <div id="occluding-cover" style="position:absolute;left:0;top:80px;width:260px;height:48px;background:white"></div>
         <input id="pointer-events-occluded-password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:172px;width:185px;height:21px" />
         <div id="pointer-events-cover" style="position:absolute;left:0;top:164px;width:260px;height:48px;background:white;pointer-events:none"></div>
+        <div id="pseudo-cover-host" style="position:absolute;left:0;top:216px;width:260px;height:48px">
+          <input id="pseudo-occluded-password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:8px;width:185px;height:21px;z-index:1" />
+        </div>
         <input id="translated-password" type="password" autocomplete="current-password" style="translate:-9999px" />
         <input id="longhand-scaled-password" type="password" autocomplete="current-password" style="scale:0" />
         <input id="zoom-zero-password" type="password" autocomplete="current-password" style="zoom:0" />
@@ -513,6 +553,10 @@ describe("fillLoginForm", () => {
       "#pointer-events-occluded-password"
     ) as HTMLInputElement;
     const pointerEventsCover = document.querySelector("#pointer-events-cover") as HTMLDivElement;
+    const pseudoCoverHost = document.querySelector("#pseudo-cover-host") as HTMLDivElement;
+    const pseudoOccludedPassword = document.querySelector(
+      "#pseudo-occluded-password"
+    ) as HTMLInputElement;
     const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
     stubElementRect(
       occludedPassword,
@@ -526,10 +570,32 @@ describe("fillLoginForm", () => {
       pointerEventsCover,
       elementRect({ left: 0, top: 164, width: 260, height: 48 })
     );
+    stubElementRect(pseudoCoverHost, elementRect({ left: 0, top: 216, width: 260, height: 48 }));
+    stubElementRect(
+      pseudoOccludedPassword,
+      elementRect({ left: 24, top: 224, width: 185, height: 21 })
+    );
     stubElementRect(
       loginPassword,
       elementRect({ left: 24, top: 140, width: 185, height: 21 })
     );
+    const pseudoStyle = stubPseudoElementStyle(pseudoCoverHost, "::before", {
+      content: '""',
+      display: "block",
+      visibility: "visible",
+      opacity: "1",
+      position: "absolute",
+      left: "0px",
+      top: "0px",
+      width: "260px",
+      height: "48px",
+      "z-index": "2",
+      background: "rgb(255, 255, 255)",
+      "background-color": "rgb(255, 255, 255)",
+      "background-image": "none",
+      "box-shadow": "none",
+      filter: "none"
+    });
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
       value: (x: number, y: number) => {
@@ -538,6 +604,9 @@ describe("fillLoginForm", () => {
         }
         if (x >= 24 && x <= 209 && y >= 172 && y <= 193) {
           return pointerEventsOccludedPassword;
+        }
+        if (x >= 24 && x <= 209 && y >= 224 && y <= 245) {
+          return pseudoOccludedPassword;
         }
         if (x >= 24 && x <= 209 && y >= 140 && y <= 161) {
           return loginPassword;
@@ -551,6 +620,7 @@ describe("fillLoginForm", () => {
       configurable: true,
       value: originalElementFromPoint
     });
+    pseudoStyle.mockRestore();
 
     expect((document.querySelector("#parent-translated-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#parent-relative-password") as HTMLInputElement).value).toBe("");
@@ -607,6 +677,7 @@ describe("fillLoginForm", () => {
     expect(
       (document.querySelector("#pointer-events-occluded-password") as HTMLInputElement).value
     ).toBe("");
+    expect((document.querySelector("#pseudo-occluded-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#translated-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-scaled-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#zoom-zero-password") as HTMLInputElement).value).toBe("");
