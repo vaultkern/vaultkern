@@ -1518,14 +1518,22 @@ describe("autofill triage", () => {
         <input name="margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:-9999px" />
         <input name="percent_translate_password" type="password" autocomplete="current-password" style="translate:-800%" />
         <input name="calc_translate_password" type="password" autocomplete="current-password" style="translate:calc(-100% - 500px)" />
+        <input name="percent_relative_password" type="password" autocomplete="current-password" style="position:relative;left:-800%" />
+        <input name="calc_relative_password" type="password" autocomplete="current-password" style="position:relative;left:calc(-100% - 500px)" />
+        <input name="percent_margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:-800%" />
+        <input name="calc_margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:calc(-100% - 500px)" />
         <input name="viewport_translate_x_password" type="password" autocomplete="current-password" style="transform:translateX(-100vw)" />
         <input name="motion_path_password" type="password" autocomplete="current-password" style='offset-path:path("M -1000 0");offset-distance:100%' />
         <input name="translated_y_password" type="password" autocomplete="current-password" style="transform:translateY(-500px)" />
         <input name="longhand_translated_y_password" type="password" autocomplete="current-password" style="translate:0 -500px" />
         <input name="viewport_translate_y_password" type="password" autocomplete="current-password" style="translate:0 -100vh" />
         <input name="relative_y_password" type="password" autocomplete="current-password" style="position:relative;top:-500px" />
+        <input name="percent_relative_y_password" type="password" autocomplete="current-password" style="position:relative;top:-800%" />
+        <input name="calc_relative_y_password" type="password" autocomplete="current-password" style="position:relative;top:calc(-100% - 500px)" />
         <input name="viewport_relative_password" type="password" autocomplete="current-password" style="position:relative;left:-100vw" />
         <input name="margin_y_password" type="password" autocomplete="current-password" style="display:block;margin-top:-500px" />
+        <input name="percent_margin_y_password" type="password" autocomplete="current-password" style="display:block;margin-top:-800%" />
+        <input name="calc_margin_y_password" type="password" autocomplete="current-password" style="display:block;margin-top:calc(-100% - 500px)" />
         <input name="viewport_margin_password" type="password" autocomplete="current-password" style="display:block;margin-left:-100vw" />
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
@@ -1541,6 +1549,17 @@ describe("autofill triage", () => {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
         elementRect({ left: -476, top: 40, width: 185, height: 21 })
+      );
+    }
+    for (const name of [
+      "percent_relative_password",
+      "calc_relative_password",
+      "percent_margin_password",
+      "calc_margin_password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: -1476, top: 40, width: 185, height: 21 })
       );
     }
     for (const name of [
@@ -1571,6 +1590,24 @@ describe("autofill triage", () => {
         elementRect({ left: 24, top: -520, width: 185, height: 21 })
       );
     }
+    for (const name of [
+      "percent_relative_y_password",
+      "calc_relative_y_password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: -1180, width: 185, height: 21 })
+      );
+    }
+    for (const name of [
+      "percent_margin_y_password",
+      "calc_margin_y_password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: -1476, width: 185, height: 21 })
+      );
+    }
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
@@ -1582,14 +1619,22 @@ describe("autofill triage", () => {
       "margin_password",
       "percent_translate_password",
       "calc_translate_password",
+      "percent_relative_password",
+      "calc_relative_password",
+      "percent_margin_password",
+      "calc_margin_password",
       "viewport_translate_x_password",
       "motion_path_password",
       "translated_y_password",
       "longhand_translated_y_password",
       "viewport_translate_y_password",
       "relative_y_password",
+      "percent_relative_y_password",
+      "calc_relative_y_password",
       "viewport_relative_password",
       "margin_y_password",
+      "percent_margin_y_password",
+      "calc_margin_y_password",
       "viewport_margin_password"
     ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
@@ -1620,6 +1665,8 @@ describe("autofill triage", () => {
           <mask id="transparentGroupMask"><g opacity="0"><rect width="100%" height="100%" fill="white" /></g></mask>
           <mask id="nestedOpacityMask"><g opacity="0.1"><rect opacity="0.1" width="100%" height="100%" fill="white" /></g></mask>
           <mask id="fillNoneMask"><rect width="100%" height="100%" fill="none" /></mask>
+          <mask id="displayNoneMask"><rect style="display:none" width="100%" height="100%" fill="white" /></mask>
+          <mask id="hiddenShapeMask"><rect style="visibility:hidden" width="100%" height="100%" fill="white" /></mask>
         </svg>
         <input name="transparent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
         <input name="radial_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(transparent, transparent)" />
@@ -1635,6 +1682,8 @@ describe("autofill triage", () => {
         <input name="group_opacity_mask_password" type="password" autocomplete="current-password" style="mask:url(#transparentGroupMask)" />
         <input name="nested_opacity_mask_password" type="password" autocomplete="current-password" style="mask:url(#nestedOpacityMask)" />
         <input name="fill_none_mask_password" type="password" autocomplete="current-password" style="mask:url(#fillNoneMask)" />
+        <input name="display_none_mask_password" type="password" autocomplete="current-password" style="mask:url(#displayNoneMask)" />
+        <input name="hidden_shape_mask_password" type="password" autocomplete="current-password" style="mask:url(#hiddenShapeMask)" />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input name="zero_percent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input name="tiny_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
@@ -1765,6 +1814,8 @@ describe("autofill triage", () => {
       "group_opacity_mask_password",
       "nested_opacity_mask_password",
       "fill_none_mask_password",
+      "display_none_mask_password",
+      "hidden_shape_mask_password",
       "zero_mask_password",
       "zero_percent_mask_password",
       "tiny_mask_password",
@@ -2607,6 +2658,8 @@ describe("autofill triage", () => {
         <input name="inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
         <input name="rounded_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49% round 2px)" />
         <input name="calc_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% - 4px) 0 0)" />
+        <input name="math_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(0 max(0px, calc(100% - 4px)) 0 0)" />
+        <input name="clamp_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(0 clamp(0px, calc(100% - 4px), 100%) 0 0)" />
         <input name="circle_password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
         <input name="polygon_strip_password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
         <input name="polygon_percent_password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 10% 0, 10% 30%, 0 30%)" />
@@ -2659,10 +2712,16 @@ describe("autofill triage", () => {
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
-    stubElementRect(
-      document.querySelector('input[name="polygon_percent_password"]') as HTMLInputElement,
-      elementRect({ left: 24, top: 40, width: 185, height: 21 })
-    );
+    for (const name of [
+      "math_inset_password",
+      "clamp_inset_password",
+      "polygon_percent_password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40, width: 185, height: 21 })
+      );
+    }
     for (const name of [
       "url_evenodd_path_password",
       "css_evenodd_path_password",
@@ -2708,6 +2767,14 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "calc_inset_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "calc_inset_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "math_inset_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "math_inset_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "clamp_inset_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "clamp_inset_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "circle_password").qualifiedAs).toBe("ignored");

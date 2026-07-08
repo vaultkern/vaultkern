@@ -399,6 +399,10 @@ describe("fillLoginForm", () => {
         <input id="positive-margin-password" type="password" autocomplete="current-password" style="display:block;margin-left:9999px" />
         <input id="percent-translate-password" type="password" autocomplete="current-password" style="translate:-800%" />
         <input id="calc-translate-password" type="password" autocomplete="current-password" style="translate:calc(-100% - 500px)" />
+        <input id="percent-relative-password" type="password" autocomplete="current-password" style="position:relative;left:-800%" />
+        <input id="calc-relative-password" type="password" autocomplete="current-password" style="position:relative;left:calc(-100% - 500px)" />
+        <input id="percent-margin-password" type="password" autocomplete="current-password" style="display:block;margin-left:-800%" />
+        <input id="calc-margin-password" type="password" autocomplete="current-password" style="display:block;margin-left:calc(-100% - 500px)" />
         <input id="translated-y-password" type="password" autocomplete="current-password" style="transform:translateY(-500px)" />
         <input id="longhand-translated-y-password" type="password" autocomplete="current-password" style="translate:0 -500px" />
         <input id="viewport-translated-x-password" type="password" autocomplete="current-password" style="transform:translateX(-100vw)" />
@@ -409,8 +413,12 @@ describe("fillLoginForm", () => {
         <input id="fixed-below-password" type="password" autocomplete="current-password" style="position:fixed;top:900px" />
         <input id="fixed-bottom-below-password" type="password" autocomplete="current-password" style="position:fixed;bottom:-900px" />
         <input id="relative-y-password" type="password" autocomplete="current-password" style="position:relative;top:-500px" />
+        <input id="percent-relative-y-password" type="password" autocomplete="current-password" style="position:relative;top:-800%" />
+        <input id="calc-relative-y-password" type="password" autocomplete="current-password" style="position:relative;top:calc(-100% - 500px)" />
         <input id="viewport-relative-password" type="password" autocomplete="current-password" style="position:relative;left:-100vw" />
         <input id="margin-y-password" type="password" autocomplete="current-password" style="display:block;margin-top:-500px" />
+        <input id="percent-margin-y-password" type="password" autocomplete="current-password" style="display:block;margin-top:-800%" />
+        <input id="calc-margin-y-password" type="password" autocomplete="current-password" style="display:block;margin-top:calc(-100% - 500px)" />
         <input id="viewport-margin-password" type="password" autocomplete="current-password" style="display:block;margin-left:-100vw" />
         <input id="mask-transparent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent,transparent)" />
         <input id="mask-radial-password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(transparent, transparent)" />
@@ -426,11 +434,15 @@ describe("fillLoginForm", () => {
           <mask id="transparentGroupMask"><g opacity="0"><rect width="100%" height="100%" fill="white" /></g></mask>
           <mask id="nestedOpacityMask"><g opacity="0.1"><rect opacity="0.1" width="100%" height="100%" fill="white" /></g></mask>
           <mask id="fillNoneMask"><rect width="100%" height="100%" fill="none" /></mask>
+          <mask id="displayNoneMask"><rect style="display:none" width="100%" height="100%" fill="white" /></mask>
+          <mask id="hiddenShapeMask"><rect style="visibility:hidden" width="100%" height="100%" fill="white" /></mask>
         </svg>
         <input id="mask-url-password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input id="mask-group-opacity-password" type="password" autocomplete="current-password" style="mask:url(#transparentGroupMask)" />
         <input id="mask-nested-opacity-password" type="password" autocomplete="current-password" style="mask:url(#nestedOpacityMask)" />
         <input id="mask-fill-none-password" type="password" autocomplete="current-password" style="mask:url(#fillNoneMask)" />
+        <input id="mask-display-none-password" type="password" autocomplete="current-password" style="mask:url(#displayNoneMask)" />
+        <input id="mask-hidden-shape-password" type="password" autocomplete="current-password" style="mask:url(#hiddenShapeMask)" />
         <input id="mask-zero-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input id="mask-zero-percent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input id="mask-tiny-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
@@ -546,6 +558,17 @@ describe("fillLoginForm", () => {
       );
     }
     for (const id of [
+      "percent-relative-password",
+      "calc-relative-password",
+      "percent-margin-password",
+      "calc-margin-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: -1476, top: 40, width: 185, height: 21 })
+      );
+    }
+    for (const id of [
       "parent-relative-password",
       "relative-password",
       "margin-password"
@@ -577,6 +600,24 @@ describe("fillLoginForm", () => {
       stubElementRect(
         document.querySelector(`#${id}`) as HTMLInputElement,
         elementRect({ left: 24, top: -520, width: 185, height: 21 })
+      );
+    }
+    for (const id of [
+      "percent-relative-y-password",
+      "calc-relative-y-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: -1180, width: 185, height: 21 })
+      );
+    }
+    for (const id of [
+      "percent-margin-y-password",
+      "calc-margin-y-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: -1476, width: 185, height: 21 })
       );
     }
     for (const id of [
@@ -725,6 +766,10 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#positive-margin-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#percent-translate-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#calc-translate-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#percent-relative-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#calc-relative-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#percent-margin-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#calc-margin-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#translated-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-translated-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#viewport-translated-x-password") as HTMLInputElement).value).toBe("");
@@ -735,8 +780,12 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#fixed-below-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#fixed-bottom-below-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#relative-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#percent-relative-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#calc-relative-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#viewport-relative-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#margin-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#percent-margin-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#calc-margin-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#viewport-margin-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-transparent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-radial-password") as HTMLInputElement).value).toBe("");
@@ -751,6 +800,8 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#mask-group-opacity-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-nested-opacity-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-fill-none-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-display-none-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-hidden-shape-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-percent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-tiny-password") as HTMLInputElement).value).toBe("");
@@ -2067,6 +2118,8 @@ describe("fillLoginForm", () => {
         <input id="inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
         <input id="rounded-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49% round 2px)" />
         <input id="calc-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% - 4px) 0 0)" />
+        <input id="math-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(0 max(0px, calc(100% - 4px)) 0 0)" />
+        <input id="clamp-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(0 clamp(0px, calc(100% - 4px), 100%) 0 0)" />
         <input id="circle-password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
         <input id="polygon-strip-password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
         <input id="polygon-percent-password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 10% 0, 10% 30%, 0 30%)" />
@@ -2126,10 +2179,16 @@ describe("fillLoginForm", () => {
         <input id="login-password" type="password" autocomplete="current-password" />
       </form>
     `;
-    stubElementRect(
-      document.querySelector("#polygon-percent-password") as HTMLInputElement,
-      elementRect({ left: 24, top: 40, width: 185, height: 21 })
-    );
+    for (const id of [
+      "math-inset-password",
+      "clamp-inset-password",
+      "polygon-percent-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: 24, top: 40, width: 185, height: 21 })
+      );
+    }
     for (const id of [
       "url-offset-rect-password",
       "url-offset-circle-password",
@@ -2175,6 +2234,8 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#inset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#rounded-inset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#calc-inset-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#math-inset-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#clamp-inset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#circle-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#polygon-strip-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#polygon-percent-password") as HTMLInputElement).value).toBe("");

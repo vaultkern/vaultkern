@@ -84,6 +84,31 @@ function computedCssValue(
   return numericCssValue(computed, units) ?? numericCssValue(inline, units);
 }
 
+function computedCssLengthValue(
+  computed: string | undefined,
+  inline: string | undefined,
+  axisSize: number,
+  units: CssNumericUnits = {}
+) {
+  const computedLength =
+    computed === undefined || computed.trim() === ""
+      ? null
+      : cssLengthToPx(computed, axisSize, units);
+  if (computedLength !== null) {
+    return computedLength;
+  }
+
+  const inlineLength =
+    inline === undefined || inline.trim() === ""
+      ? null
+      : cssLengthToPx(inline, axisSize, units);
+  if (inlineLength !== null) {
+    return inlineLength;
+  }
+
+  return computedCssValue(computed, inline, units);
+}
+
 function cssOpacityValue(value: string | undefined) {
   const trimmed = value?.trim().toLowerCase();
   if (!trimmed) {
@@ -5135,6 +5160,38 @@ function cssLengthToPx(
     return length;
   }
 
+  const minBody = cssFunctionBody(normalized, "min");
+  if (minBody !== null) {
+    const values = splitCssCommaList(minBody).map((part) =>
+      cssLengthToPx(part, axisSize, units)
+    );
+    return values.every((value): value is number => value !== null)
+      ? Math.min(...values)
+      : null;
+  }
+
+  const maxBody = cssFunctionBody(normalized, "max");
+  if (maxBody !== null) {
+    const values = splitCssCommaList(maxBody).map((part) =>
+      cssLengthToPx(part, axisSize, units)
+    );
+    return values.every((value): value is number => value !== null)
+      ? Math.max(...values)
+      : null;
+  }
+
+  const clampBody = cssFunctionBody(normalized, "clamp");
+  if (clampBody !== null) {
+    const values = splitCssCommaList(clampBody).map((part) =>
+      cssLengthToPx(part, axisSize, units)
+    );
+    if (values.length !== 3 || !values.every((value): value is number => value !== null)) {
+      return null;
+    }
+    const [minimum, preferred, maximum] = values;
+    return Math.min(Math.max(preferred, minimum), maximum);
+  }
+
   const calcMatch = normalized.match(/^calc\((.*)\)$/);
   if (!calcMatch) {
     return null;
@@ -6652,12 +6709,32 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       .toLowerCase();
     const position = current.style.position || style?.position;
     const cssUnits = { emPx, remPx, viewportWidth: viewport.width, viewportHeight: viewport.height };
-    const left = computedCssValue(style?.left, current.style.left, cssUnits);
-    const top = computedCssValue(style?.top, current.style.top, cssUnits);
-    const right = computedCssValue(style?.right, current.style.right, cssUnits);
-    const bottom = computedCssValue(style?.bottom, current.style.bottom, cssUnits);
-    const marginLeft = computedCssValue(style?.marginLeft, current.style.marginLeft, cssUnits);
-    const marginTop = computedCssValue(style?.marginTop, current.style.marginTop, cssUnits);
+    const left = computedCssLengthValue(style?.left, current.style.left, viewport.width, cssUnits);
+    const top = computedCssLengthValue(style?.top, current.style.top, viewport.height, cssUnits);
+    const right = computedCssLengthValue(
+      style?.right,
+      current.style.right,
+      viewport.width,
+      cssUnits
+    );
+    const bottom = computedCssLengthValue(
+      style?.bottom,
+      current.style.bottom,
+      viewport.height,
+      cssUnits
+    );
+    const marginLeft = computedCssLengthValue(
+      style?.marginLeft,
+      current.style.marginLeft,
+      viewport.width,
+      cssUnits
+    );
+    const marginTop = computedCssLengthValue(
+      style?.marginTop,
+      current.style.marginTop,
+      viewport.width,
+      cssUnits
+    );
     const width = computedCssValue(style?.width, current.style.width, cssUnits);
     const height = computedCssValue(style?.height, current.style.height, cssUnits);
     const transform = combinedTranslateOffset(style, current, cssUnits);
