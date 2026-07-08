@@ -3147,6 +3147,7 @@ describe("autofill triage", () => {
           <clipPath id="textClip"><text x="0" y="10" font-size="10">x</text></clipPath>
           <clipPath id="displayNoneRectClip"><rect style="display:none" width="200" height="30" /></clipPath>
           <clipPath id="hiddenRectClip"><rect style="visibility:hidden" width="200" height="30" /></clipPath>
+          <clipPath id="evenOddPolygonClip"><polygon clip-rule="evenodd" points="0,0 200,0 200,30 0,30 0,0 200,0 200,30 0,30" /></clipPath>
           <clipPath id="evenOddPathClip"><path clip-rule="evenodd" d="M0 0 L200 0 L200 30 L0 30 Z M0 0 L200 0 L200 30 L0 30 Z" /></clipPath>
           <clipPath id="evenOddCoveredPathClip"><path clip-rule="evenodd" d="M-10 -10 L210 -10 L210 40 L-10 40 Z M0 0 L200 0 L200 30 L0 30 Z" /></clipPath>
         </svg>
@@ -3190,6 +3191,7 @@ describe("autofill triage", () => {
         <input name="url_hidden_rect_password" type="password" autocomplete="current-password" style="clip-path:url(#hiddenRectClip)" />
         <input name="data_url_clip_password" type="password" autocomplete="current-password" style='clip-path:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3CclipPath%20id%3D%22z%22%3E%3Crect%20width%3D%220%22%20height%3D%220%22%2F%3E%3C%2FclipPath%3E%3C%2Fsvg%3E#z")' />
         <input name="blob_url_clip_password" type="password" autocomplete="current-password" style='clip-path:url("blob:null/zero-clip#z")' />
+        <input name="url_evenodd_polygon_password" type="password" autocomplete="current-password" style="clip-path:url(#evenOddPolygonClip)" />
         <input name="url_evenodd_path_password" type="password" autocomplete="current-password" style="clip-path:url(#evenOddPathClip)" />
         <input name="css_evenodd_path_password" type="password" autocomplete="current-password" style='clip-path:path(evenodd, "M0 0 L200 0 L200 30 L0 30 Z M0 0 L200 0 L200 30 L0 30 Z")' />
         <input name="url_evenodd_covered_path_password" type="password" autocomplete="current-password" style="clip-path:url(#evenOddCoveredPathClip)" />
@@ -3221,6 +3223,7 @@ describe("autofill triage", () => {
     }
     for (const name of [
       "url_evenodd_path_password",
+      "url_evenodd_polygon_password",
       "css_evenodd_path_password",
       "url_evenodd_covered_path_password",
       "css_evenodd_covered_path_password"
@@ -3412,6 +3415,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "blob_url_clip_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "blob_url_clip_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_evenodd_polygon_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_evenodd_polygon_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "url_evenodd_path_password").qualifiedAs).toBe("ignored");

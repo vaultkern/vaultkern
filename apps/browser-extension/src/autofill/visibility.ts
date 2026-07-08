@@ -7086,17 +7086,23 @@ function svgClipShapeVisibleBounds(
     return { left: 0, top: 0, right: 0, bottom: 0 };
   }
   if (tagName === "polygon" || tagName === "polyline") {
-    return boundsFromPoints(
-      transformSvgPoints(
-        svgPointListToPoints(
-          shape.getAttribute("points") ?? "",
-          rect,
-          units,
-          coordinateSpace
-        ),
-        matrix
-      )
+    const points = transformSvgPoints(
+      svgPointListToPoints(
+        shape.getAttribute("points") ?? "",
+        rect,
+        units,
+        coordinateSpace
+      ),
+      matrix
     );
+    if (
+      tagName === "polygon" &&
+      svgShapeUsesEvenOdd(shape) &&
+      evenOddPolygonPointsSuppressField(points, rect)
+    ) {
+      return { left: 0, top: 0, right: 0, bottom: 0 };
+    }
+    return boundsFromPoints(points);
   }
   if (tagName === "path") {
     return boundsFromPoints(
@@ -8074,7 +8080,17 @@ function evenOddSubpathsSuppressField(
   });
 }
 
-function svgPathUsesEvenOdd(shape: Element) {
+function evenOddPolygonPointsSuppressField(
+  points: Array<{ x: number; y: number }>,
+  rect: DOMRect
+) {
+  return (
+    points.length >= 3 &&
+    fieldLocalSamplePoints(rect).every((sample) => !pointInsidePolygon(sample, points))
+  );
+}
+
+function svgShapeUsesEvenOdd(shape: Element) {
   const style = shape.ownerDocument.defaultView?.getComputedStyle(shape);
   const inlineStyle = (shape as SVGElement).style;
   return [
@@ -8436,15 +8452,23 @@ function svgClipShapeSuppressesField(
       units,
       coordinateSpace
     );
+    const transformedPoints = transformSvgPoints(points, matrix);
+    if (
+      tagName === "polygon" &&
+      svgShapeUsesEvenOdd(shape) &&
+      evenOddPolygonPointsSuppressField(transformedPoints, rect)
+    ) {
+      return true;
+    }
     return pointRegionSuppressesField(
-      transformSvgPoints(points, matrix),
+      transformedPoints,
       rect,
       tagName === "polygon"
     );
   }
   if (tagName === "path") {
     const pathData = shape.getAttribute("d") ?? "";
-    if (svgPathUsesEvenOdd(shape) && evenOddSubpathsSuppressField(pathData, rect, matrix)) {
+    if (svgShapeUsesEvenOdd(shape) && evenOddSubpathsSuppressField(pathData, rect, matrix)) {
       return true;
     }
     const points = svgPathDataToPoints(pathData);
