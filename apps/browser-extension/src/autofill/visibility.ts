@@ -2214,6 +2214,109 @@ function cssMaskLinearGradientPaintedRanges(
   return { direction, ranges };
 }
 
+function intervalOverlapLength(
+  leftStart: number,
+  leftEnd: number,
+  rightStart: number,
+  rightEnd: number
+) {
+  return Math.max(0, Math.min(leftEnd, rightEnd) - Math.max(leftStart, rightStart));
+}
+
+function linearMaskLayerSuppressesField(
+  layer: string,
+  positionValue: string | undefined,
+  sizeValue: string | undefined,
+  repeatValue: string | undefined,
+  current: HTMLElement,
+  fieldBounds: RectBounds,
+  modeValue: string | undefined,
+  units: { emPx?: number; remPx?: number }
+): boolean | null {
+  const normalized = layer.trim().toLowerCase();
+  const gradientName = normalized.startsWith("linear-gradient(")
+    ? "linear-gradient"
+    : normalized.startsWith("repeating-linear-gradient(")
+      ? "repeating-linear-gradient"
+      : null;
+  if (gradientName === null) {
+    return null;
+  }
+  const body = cssFunctionBody(normalized, gradientName);
+  if (body === null) {
+    return null;
+  }
+
+  const rect = current.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return null;
+  }
+  const size = maskLayerSize(sizeValue, rect, units);
+  if (size.width <= 0 || size.height <= 0) {
+    return true;
+  }
+  const repeatsX = maskRepeatRepeatsAxis(repeatValue, "x");
+  const repeatsY = maskRepeatRepeatsAxis(repeatValue, "y");
+  if ((repeatsX && size.width < rect.width) || (repeatsY && size.height < rect.height)) {
+    return null;
+  }
+
+  const position = positionValue?.trim() || "0% 0%";
+  const x = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "x"),
+    rect.width,
+    size.width,
+    units
+  );
+  const y = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "y"),
+    rect.height,
+    size.height,
+    units
+  );
+  if (
+    (x === null && Math.abs(rect.width - size.width) > 0.001) ||
+    (y === null && Math.abs(rect.height - size.height) > 0.001)
+  ) {
+    return null;
+  }
+
+  const axisSize = bodyAxisSize(body, size);
+  const painted = cssMaskLinearGradientPaintedRanges(
+    body,
+    axisSize,
+    modeValue,
+    units,
+    gradientName === "repeating-linear-gradient"
+  );
+  if (painted === null) {
+    return null;
+  }
+  if (painted.ranges.length === 0) {
+    return true;
+  }
+
+  const fieldStart =
+    painted.direction.axis === "x" ? fieldBounds.left - (x ?? 0) : fieldBounds.top - (y ?? 0);
+  const fieldEnd =
+    painted.direction.axis === "x" ? fieldBounds.right - (x ?? 0) : fieldBounds.bottom - (y ?? 0);
+  const fieldLength = Math.max(0, fieldEnd - fieldStart);
+  if (fieldLength <= 0) {
+    return true;
+  }
+
+  const paintedLength = painted.ranges.reduce((total, range) => {
+    const start = painted.direction.reverse ? axisSize - range.end : range.start;
+    const end = painted.direction.reverse ? axisSize - range.start : range.end;
+    return total + intervalOverlapLength(fieldStart, fieldEnd, start, end);
+  }, 0);
+
+  return (
+    paintedLength <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
+    paintedLength <= fieldLength * MIN_CLIPPED_VISIBLE_FRACTION
+  );
+}
+
 function cssMaskLinearGradientVisibleBounds(
   layer: string,
   positionValue: string | undefined,
@@ -3360,6 +3463,16 @@ function sampledMaskStyleSuppressesField(
       const size = maskLayerValue(sizes, index);
       const repeat = maskLayerValue(repeats, index);
       const suppressed =
+        linearMaskLayerSuppressesField(
+          layer,
+          position,
+          size,
+          repeat,
+          current,
+          fieldBounds,
+          source.mode,
+          units
+        ) ??
         radialMaskLayerSuppressesField(
           layer,
           position,

@@ -1690,6 +1690,60 @@ describe("fillLoginForm", () => {
     expect(loginPassword.value).toBe("secret");
   });
 
+  it("does not treat sparse repeating-linear ancestor mask stripes as visible password targets", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="sparse-repeating-mask-label" for="sparse-repeating-mask-password">Password</label>
+        <div id="ancestor-sparse-repeating-mask" style="width:400px;height:40px;mask-image:repeating-linear-gradient(to right, black 0 1px, transparent 1px 40px)">
+          <input id="sparse-repeating-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const sparseRepeatingMaskPassword = document.querySelector(
+      "#sparse-repeating-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const sparseRepeatingMaskLabel = document.querySelector(
+      "#sparse-repeating-mask-label"
+    ) as HTMLLabelElement;
+    stubElementRect(
+      sparseRepeatingMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      sparseRepeatingMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-sparse-repeating-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return sparseRepeatingMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(sparseRepeatingMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("does not treat visible labels as enough for hard-stop ancestor mask decoys", () => {
     document.body.innerHTML = `
       <form>
