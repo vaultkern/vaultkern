@@ -631,10 +631,95 @@ function cssColorLooksTransparent(value: string) {
   return (
     normalized === "transparent" ||
     normalized.startsWith("transparent ") ||
-    /^rgba?\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(normalized) ||
+    /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(normalized) ||
     /^rgba?\([^)]*\/\s*0(?:%|\.0+)?\s*\)$/.test(normalized) ||
     (/^#[0-9a-f]{4}$/.test(normalized) && normalized.endsWith("0")) ||
     (/^#[0-9a-f]{8}$/.test(normalized) && normalized.endsWith("00"))
+  );
+}
+
+function cssPaintListLooksEmpty(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    !normalized ||
+    splitCssCommaList(normalized).every((part) => {
+      const item = part.trim();
+      return item === "" || item === "none";
+    })
+  );
+}
+
+function cssLengthLooksZero(value: string) {
+  const parsed = numericCssValue(value);
+  return parsed !== null && parsed <= 0;
+}
+
+function cssLinePaints(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  prefix: string
+) {
+  const lineStyle = cssPropertyValue(style, current, `${prefix}-style`).toLowerCase();
+  const lineWidth = cssPropertyValue(style, current, `${prefix}-width`);
+  const lineColor = cssPropertyValue(style, current, `${prefix}-color`);
+  return (
+    lineStyle !== "" &&
+    lineStyle !== "none" &&
+    lineStyle !== "hidden" &&
+    !cssLengthLooksZero(lineWidth) &&
+    !cssColorLooksTransparent(lineColor)
+  );
+}
+
+function fieldTextPaintIsTransparent(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  const textFillColor = cssPropertyValue(style, current, "-webkit-text-fill-color");
+  const textColor =
+    isMeaningfulCssValue(textFillColor) && textFillColor.toLowerCase() !== "currentcolor"
+      ? textFillColor
+      : cssPropertyValue(style, current, "color");
+  return cssColorLooksTransparent(textColor);
+}
+
+function fieldBackgroundPaintIsTransparent(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return (
+    cssPaintListLooksEmpty(cssPropertyValue(style, current, "background-image")) &&
+    cssColorLooksTransparent(cssPropertyValue(style, current, "background-color"))
+  );
+}
+
+function fieldBorderPaintIsTransparent(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return ["top", "right", "bottom", "left"].every(
+    (side) => !cssLinePaints(style, current, `border-${side}`)
+  );
+}
+
+function fieldOutlinePaintIsTransparent(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return !cssLinePaints(style, current, "outline");
+}
+
+function fieldChromePaintIsTransparent(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return (
+    fieldTextPaintIsTransparent(style, current) &&
+    fieldBackgroundPaintIsTransparent(style, current) &&
+    fieldBorderPaintIsTransparent(style, current) &&
+    fieldOutlinePaintIsTransparent(style, current) &&
+    cssPaintListLooksEmpty(cssPropertyValue(style, current, "box-shadow")) &&
+    cssPaintListLooksEmpty(cssPropertyValue(style, current, "text-shadow"))
   );
 }
 
@@ -1956,7 +2041,10 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       isEffectivelyTransparent(filterOpacity) ||
       isEffectivelyTransparent(cumulativeFilterOpacity) ||
       svgFilterSuppressesPaint(current, filter) ||
-      maskStyleSuppressesPaint(style, current, cssUnits)
+      maskStyleSuppressesPaint(style, current, cssUnits) ||
+      (current === element &&
+        isCredentialLikeField(element) &&
+        fieldChromePaintIsTransparent(style, current))
     ) {
       addReason(reasons, "not-viewable:transparent");
     }

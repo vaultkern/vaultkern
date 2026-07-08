@@ -1496,6 +1496,7 @@ describe("autofill triage", () => {
         <input name="rotate_y_password" type="password" autocomplete="current-password" style="rotate:y 90deg" />
         <input name="backface_password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:rotateY(180deg)" />
         <input name="backface_matrix_password" type="password" autocomplete="current-password" style="backface-visibility:hidden;transform:matrix3d(-1,0,0,0,0,1,0,0,0,0,-1,0,0,0,0,1)" />
+        <input name="paintless_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:transparent;-webkit-text-fill-color:transparent;outline:0;box-shadow:none;text-shadow:none" />
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
@@ -1527,7 +1528,8 @@ describe("autofill triage", () => {
       "svg_filter_gamma_password",
       "svg_filter_matrix_password",
       "cumulative_opacity_password",
-      "cumulative_filter_password"
+      "cumulative_filter_password",
+      "paintless_password"
     ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:transparent");
