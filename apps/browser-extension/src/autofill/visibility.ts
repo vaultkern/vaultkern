@@ -9,8 +9,9 @@ export interface FieldFillabilityResult {
 }
 
 const OFFSCREEN_OFFSET_PX = 1000;
-const CLIPPED_ANCESTOR_MAX_VISIBLE_SIZE_PX = 1;
 const MIN_CREDENTIAL_FIELD_SIZE_PX = 8;
+const CLIPPED_ANCESTOR_MAX_VISIBLE_SIZE_PX = MIN_CREDENTIAL_FIELD_SIZE_PX;
+const MIN_CLIPPED_VISIBLE_FRACTION = 0.05;
 const MIN_VISIBLE_OPACITY = 0.01;
 const TRANSFORM_COLLAPSE_EPSILON = 0.001;
 
@@ -222,6 +223,43 @@ function transformTranslateOffset(
   return found ? { x, y } : null;
 }
 
+function translateLonghandOffset(
+  value: string | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return null;
+  }
+
+  const values = normalized
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => numericCssValue(part, units));
+  const x = values[0];
+  const y = values[1] ?? 0;
+  if (x === null && y === null) {
+    return null;
+  }
+  return { x: x ?? 0, y: y ?? 0 };
+}
+
+function combinedTranslateOffset(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  units: { emPx?: number; remPx?: number }
+) {
+  const transform = transformTranslateOffset(cssPropertyValue(style, current, "transform"), units);
+  const translate = translateLonghandOffset(cssPropertyValue(style, current, "translate"), units);
+  if (!transform && !translate) {
+    return null;
+  }
+  return {
+    x: (transform?.x ?? 0) + (translate?.x ?? 0),
+    y: (transform?.y ?? 0) + (translate?.y ?? 0)
+  };
+}
+
 function isCollapsedScale(value: number | null) {
   return value !== null && Math.abs(value) <= TRANSFORM_COLLAPSE_EPSILON;
 }
@@ -283,6 +321,35 @@ function transformFullyCollapses(
   }
 
   return false;
+}
+
+function scaleLonghandFullyCollapses(
+  value: string | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return false;
+  }
+
+  const values = normalized
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => numericCssValue(part, units));
+  const scaleX = values[0] ?? null;
+  const scaleY = values[1] ?? scaleX;
+  return isCollapsedScale(scaleX) || isCollapsedScale(scaleY);
+}
+
+function transformStyleFullyCollapses(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  units: { emPx?: number; remPx?: number }
+) {
+  return (
+    transformFullyCollapses(cssPropertyValue(style, current, "transform"), units) ||
+    scaleLonghandFullyCollapses(cssPropertyValue(style, current, "scale"), units)
+  );
 }
 
 function filterOpacityValue(value: string | undefined) {
@@ -372,11 +439,20 @@ function cssLengthOrPercentIsZero(value: string, units: { emPx?: number; remPx?:
   return length !== null && length <= 0;
 }
 
+function cssRadiusVisibleSizeIsTiny(value: string, units: { emPx?: number; remPx?: number }) {
+  const percent = cssInsetPercent(value);
+  if (percent !== null) {
+    return percent * 2 <= MIN_CLIPPED_VISIBLE_FRACTION * 100;
+  }
+  const length = numericCssValue(value, units);
+  return length !== null && length * 2 <= MIN_CREDENTIAL_FIELD_SIZE_PX;
+}
+
 function cssCoordinateNumber(value: string, units: { emPx?: number; remPx?: number }) {
   return cssInsetPercent(value) ?? numericCssValue(value, units);
 }
 
-function insetPairFullyClips(
+function insetPairSuppressesField(
   first: string,
   second: string,
   axisSize: number,
@@ -385,7 +461,8 @@ function insetPairFullyClips(
   const firstPercent = cssInsetPercent(first);
   const secondPercent = cssInsetPercent(second);
   if (firstPercent !== null || secondPercent !== null) {
-    return (firstPercent ?? 0) + (secondPercent ?? 0) >= 100;
+    const visiblePercent = 100 - ((firstPercent ?? 0) + (secondPercent ?? 0));
+    return visiblePercent <= MIN_CLIPPED_VISIBLE_FRACTION * 100;
   }
 
   const firstLength = cssInsetLength(first, units);
@@ -394,7 +471,7 @@ function insetPairFullyClips(
     axisSize > 0 &&
     firstLength !== null &&
     secondLength !== null &&
-    firstLength + secondLength >= axisSize
+    axisSize - (firstLength + secondLength) <= MIN_CREDENTIAL_FIELD_SIZE_PX
   );
 }
 
@@ -409,15 +486,18 @@ function clipPathFullyClips(
     const inset = expandBoxValues(splitCssFunctionArgs(insetMatch[1]));
     const rect = current.getBoundingClientRect();
     return (
-      insetPairFullyClips(inset.left, inset.right, rect.width, units) ||
-      insetPairFullyClips(inset.top, inset.bottom, rect.height, units)
+      insetPairSuppressesField(inset.left, inset.right, rect.width, units) ||
+      insetPairSuppressesField(inset.top, inset.bottom, rect.height, units)
     );
   }
 
   const circleMatch = normalized.match(/^circle\((.*)\)$/);
   if (circleMatch) {
     const [radius] = splitCssFunctionArgs(circleMatch[1]);
-    return radius !== undefined && cssLengthOrPercentIsZero(radius, units);
+    return (
+      radius !== undefined &&
+      (cssLengthOrPercentIsZero(radius, units) || cssRadiusVisibleSizeIsTiny(radius, units))
+    );
   }
 
   const ellipseMatch = normalized.match(/^ellipse\((.*)\)$/);
@@ -427,7 +507,9 @@ function clipPathFullyClips(
       radiusX !== undefined &&
       radiusY !== undefined &&
       (cssLengthOrPercentIsZero(radiusX, units) ||
-        cssLengthOrPercentIsZero(radiusY, units))
+        cssLengthOrPercentIsZero(radiusY, units) ||
+        cssRadiusVisibleSizeIsTiny(radiusX, units) ||
+        cssRadiusVisibleSizeIsTiny(radiusY, units))
     );
   }
 
@@ -446,7 +528,10 @@ function clipPathFullyClips(
       const next = points[(index + 1) % points.length];
       return sum + point.x * next.y - next.x * point.y;
     }, 0);
-    return Math.abs(area) <= Number.EPSILON;
+    return (
+      Math.abs(area) <= Number.EPSILON ||
+      Math.abs(area) <= 10000 * MIN_CLIPPED_VISIBLE_FRACTION * MIN_CLIPPED_VISIBLE_FRACTION
+    );
   }
 
   return false;
@@ -580,10 +665,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const bottom = computedCssValue(style?.bottom, current.style.bottom, cssUnits);
     const width = computedCssValue(style?.width, current.style.width, cssUnits);
     const height = computedCssValue(style?.height, current.style.height, cssUnits);
-    const transform = transformTranslateOffset(
-      cssPropertyValue(style, current, "transform"),
-      cssUnits
-    );
+    const transform = combinedTranslateOffset(style, current, cssUnits);
     const hasHiddenVisibility =
       inlineVisibility === "hidden" ||
       style?.visibility === "hidden" ||
@@ -621,7 +703,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     ) {
       addReason(reasons, "not-viewable:offscreen");
     }
-    if (transformFullyCollapses(cssPropertyValue(style, current, "transform"), cssUnits)) {
+    if (transformStyleFullyCollapses(style, current, cssUnits)) {
       addReason(reasons, "not-viewable:zero-size");
     }
     if (

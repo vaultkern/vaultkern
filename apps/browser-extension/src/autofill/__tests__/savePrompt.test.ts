@@ -138,12 +138,11 @@ describe("autofill save prompt capture", () => {
     });
   });
 
-  it("does not use non-interactive usernames as registration capture defaults", () => {
+  it("does not use pointer-events usernames as registration capture defaults", () => {
     document.body.innerHTML = `
       <form id="signup">
         <h2>Create account</h2>
         <input name="pointer_email" type="email" autocomplete="username" style="pointer-events:none" value="attacker@example.com" />
-        <input name="readonly_email" type="email" autocomplete="username" readonly value="readonly@example.com" />
         <input name="new_password" type="password" autocomplete="new-password" value="new-secret" />
       </form>
     `;
@@ -194,6 +193,28 @@ describe("autofill save prompt capture", () => {
 
     expect(submission).toMatchObject({
       username: "",
+      password: "old-secret",
+      newPassword: "new-secret"
+    });
+  });
+
+  it("captures visible readonly usernames in password-change submissions", () => {
+    document.body.innerHTML = `
+      <form id="change-password">
+        <h2>Change password</h2>
+        <input name="email" type="email" autocomplete="username" readonly value="alice@example.com" />
+        <input name="current_password" type="password" autocomplete="current-password" value="old-secret" />
+        <input name="new_password" type="password" autocomplete="new-password" value="new-secret" />
+      </form>
+    `;
+
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("#change-password") as HTMLFormElement
+    );
+
+    expect(submission).toMatchObject({
+      username: "alice@example.com",
       password: "old-secret",
       newPassword: "new-secret"
     });

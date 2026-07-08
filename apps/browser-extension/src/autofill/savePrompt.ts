@@ -104,7 +104,10 @@ function isCaptureUsernameField(field: AutofillTriageFieldResult) {
     return true;
   }
 
-  if (!field.fillable) {
+  const readonlyOnly =
+    field.fillableReasons.length > 0 &&
+    field.fillableReasons.every((reason) => reason === "not-fillable:readonly");
+  if (!field.fillable && !readonlyOnly) {
     return false;
   }
 

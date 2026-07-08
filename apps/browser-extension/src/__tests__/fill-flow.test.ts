@@ -274,6 +274,8 @@ describe("fillLoginForm", () => {
   it("does not fill visually suppressed password decoys", () => {
     document.body.innerHTML = `
       <form>
+        <input id="translated-password" type="password" autocomplete="current-password" style="translate:-9999px" />
+        <input id="longhand-scaled-password" type="password" autocomplete="current-password" style="scale:0" />
         <input id="filter-password" type="password" autocomplete="current-password" style="filter:opacity(0)" />
         <input id="scaled-password" type="password" autocomplete="current-password" style="transform:scale(0)" />
         <div style="transform:scale(0)">
@@ -285,10 +287,34 @@ describe("fillLoginForm", () => {
 
     fillLoginForm({ password: "secret" });
 
+    expect((document.querySelector("#translated-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#longhand-scaled-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#filter-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#scaled-password") as HTMLInputElement).value).toBe("");
     expect(
       (document.querySelector("#ancestor-scaled-password") as HTMLInputElement).value
+    ).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("does not fill near-total clipped password decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
+        <input id="circle-password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
+        <div style="width:2px;height:2px;overflow:hidden">
+          <input id="ancestor-clipped-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#inset-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#circle-password") as HTMLInputElement).value).toBe("");
+    expect(
+      (document.querySelector("#ancestor-clipped-password") as HTMLInputElement).value
     ).toBe("");
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });

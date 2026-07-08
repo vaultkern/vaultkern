@@ -1367,6 +1367,8 @@ describe("autofill triage", () => {
         <div style="content-visibility:hidden">
           <input name="content_hidden_email" type="email" autocomplete="username" />
         </div>
+        <input name="translated_password" type="password" autocomplete="current-password" style="translate:-9999px" />
+        <input name="longhand_scaled_password" type="password" autocomplete="current-password" style="scale:0" />
         <div style="transform:scale(0)">
           <input name="ancestor_scaled_password" type="password" autocomplete="current-password" />
         </div>
@@ -1394,6 +1396,14 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "content_hidden_email").reasons).toContain(
       "not-viewable:css"
     );
+    expect(fieldByName(report, "translated_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "translated_password").reasons).toContain(
+      "not-viewable:offscreen"
+    );
+    expect(fieldByName(report, "longhand_scaled_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "longhand_scaled_password").reasons).toContain(
+      "not-viewable:zero-size"
+    );
     expect(fieldByName(report, "scaled_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "scaled_password").reasons).toContain(
       "not-viewable:zero-size"
@@ -1403,6 +1413,35 @@ describe("autofill triage", () => {
       "not-viewable:zero-size"
     );
     expect(fieldByName(report, "real_user").qualifiedAs).toBe("username");
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats near-total clipped credential fields as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
+        <input name="circle_password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
+        <div style="width:2px;height:2px;overflow:hidden">
+          <input name="ancestor_clipped_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "inset_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "inset_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "circle_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "circle_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "ancestor_clipped_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "ancestor_clipped_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
