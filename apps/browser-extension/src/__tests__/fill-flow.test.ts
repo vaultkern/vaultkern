@@ -497,6 +497,38 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys hidden by CSS sepia filters", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="background:rgb(100,89,69)">
+          <input id="sepia-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:sepia(1)" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#sepia-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("does not fill password decoys hidden by CSS hue rotation filters", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="background:rgb(0,109,109)">
+          <input id="hue-rotate-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:hue-rotate(180deg)" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#hue-rotate-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys hidden by SVG blend filters", () => {
     document.body.innerHTML = `
       <form>

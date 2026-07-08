@@ -814,6 +814,60 @@ function cssFilterSaturateColor(color: CssColorRgba, amount: number) {
   };
 }
 
+function cssFilterSepiaColor(color: CssColorRgba, amount: number) {
+  const sepia = clampCssAlphaChannel(amount);
+  return {
+    ...color,
+    r: clampCssColorChannel(
+      color.r * (1 - 0.607 * sepia) +
+        color.g * (0.769 * sepia) +
+        color.b * (0.189 * sepia)
+    ),
+    g: clampCssColorChannel(
+      color.r * (0.349 * sepia) +
+        color.g * (1 - 0.314 * sepia) +
+        color.b * (0.168 * sepia)
+    ),
+    b: clampCssColorChannel(
+      color.r * (0.272 * sepia) +
+        color.g * (0.534 * sepia) +
+        color.b * (1 - 0.869 * sepia)
+    )
+  };
+}
+
+function cssFilterHueRotateColor(
+  color: CssColorRgba,
+  angle: string | undefined
+): CssColorRgba | null {
+  const degrees = cssAngleDegrees(angle ?? "0deg");
+  if (degrees === null) {
+    return null;
+  }
+
+  const radians = (degrees * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return {
+    ...color,
+    r: clampCssColorChannel(
+      color.r * (0.213 + cos * 0.787 - sin * 0.213) +
+        color.g * (0.715 - cos * 0.715 - sin * 0.715) +
+        color.b * (0.072 - cos * 0.072 + sin * 0.928)
+    ),
+    g: clampCssColorChannel(
+      color.r * (0.213 - cos * 0.213 + sin * 0.143) +
+        color.g * (0.715 + cos * 0.285 + sin * 0.14) +
+        color.b * (0.072 - cos * 0.072 - sin * 0.283)
+    ),
+    b: clampCssColorChannel(
+      color.r * (0.213 - cos * 0.213 - sin * 0.787) +
+        color.g * (0.715 - cos * 0.715 + sin * 0.715) +
+        color.b * (0.072 + cos * 0.928 + sin * 0.072)
+    )
+  };
+}
+
 function cssFilterPaintColor(value: string | undefined, color: CssColorRgba | null) {
   if (color === null) {
     return null;
@@ -865,6 +919,18 @@ function cssFilterPaintColor(value: string | undefined, color: CssColorRgba | nu
     }
     if (name === "saturate") {
       result = cssFilterSaturateColor(result, amount);
+      continue;
+    }
+    if (name === "sepia") {
+      result = cssFilterSepiaColor(result, amount);
+      continue;
+    }
+    if (name === "hue-rotate") {
+      const hueRotated = cssFilterHueRotateColor(result, match[2]);
+      if (hueRotated === null) {
+        return null;
+      }
+      result = hueRotated;
       continue;
     }
     if (name === "blur") {

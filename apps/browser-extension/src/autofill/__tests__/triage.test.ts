@@ -2039,6 +2039,44 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats credential fields hidden by CSS sepia filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="background:rgb(100,89,69)">
+          <input name="sepia_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:sepia(1)" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "sepia_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "sepia_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats credential fields hidden by CSS hue rotation filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="background:rgb(0,109,109)">
+          <input name="hue_rotate_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:hue-rotate(180deg)" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "hue_rotate_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "hue_rotate_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats credential fields hidden by SVG blend filters as not viewable", () => {
     document.body.innerHTML = `
       <form>
