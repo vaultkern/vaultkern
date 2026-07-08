@@ -1987,6 +1987,25 @@ function svgClipShapeSuppressesField(
       true
     );
   }
+  if (tagName === "line") {
+    return pointRegionSuppressesField(
+      transformSvgPoints(
+        [
+          {
+            x: svgLengthToPx(shape.getAttribute("x1"), rect.width, units),
+            y: svgLengthToPx(shape.getAttribute("y1"), rect.height, units)
+          },
+          {
+            x: svgLengthToPx(shape.getAttribute("x2"), rect.width, units),
+            y: svgLengthToPx(shape.getAttribute("y2"), rect.height, units)
+          }
+        ],
+        matrix
+      ),
+      rect,
+      false
+    );
+  }
   if (tagName === "polygon" || tagName === "polyline") {
     const points = svgPointListToPoints(shape.getAttribute("points") ?? "", rect, units);
     return pointRegionSuppressesField(
