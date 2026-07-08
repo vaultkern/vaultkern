@@ -867,6 +867,55 @@ function svgFilterPrimitiveInputOpacity(
   );
 }
 
+function svgFilterCompositeOpacityValue(
+  primitive: Element,
+  previousOutputOpacity: number | null,
+  resultOpacities: ReadonlyMap<string, number | null>
+) {
+  const inputOpacity = svgFilterPrimitiveInputOpacity(
+    primitive,
+    "in",
+    previousOutputOpacity,
+    resultOpacities
+  );
+  const input2Opacity = svgFilterPrimitiveInputOpacity(
+    primitive,
+    "in2",
+    previousOutputOpacity,
+    resultOpacities
+  );
+  if (inputOpacity === null || input2Opacity === null) {
+    return null;
+  }
+
+  const operator = (primitive.getAttribute("operator") ?? "over").trim().toLowerCase();
+  if (operator === "in") {
+    return clampCssAlphaChannel(inputOpacity * input2Opacity);
+  }
+  if (operator === "out") {
+    return clampCssAlphaChannel(inputOpacity * (1 - input2Opacity));
+  }
+  if (operator === "atop") {
+    return clampCssAlphaChannel(input2Opacity);
+  }
+  if (operator === "xor") {
+    return clampCssAlphaChannel(
+      inputOpacity * (1 - input2Opacity) + input2Opacity * (1 - inputOpacity)
+    );
+  }
+  if (operator === "arithmetic") {
+    const [k1, k2, k3, k4] = ["k1", "k2", "k3", "k4"].map((attribute) =>
+      Number(primitive.getAttribute(attribute) ?? "0")
+    );
+    return [k1, k2, k3, k4].every(Number.isFinite)
+      ? clampCssAlphaChannel(
+          k1 * inputOpacity * input2Opacity + k2 * inputOpacity + k3 * input2Opacity + k4
+        )
+      : null;
+  }
+  return clampCssAlphaChannel(inputOpacity + input2Opacity * (1 - inputOpacity));
+}
+
 function svgComponentTransferAlphaOpacityValue(primitive: Element) {
   const alphaFunc = Array.from(primitive.children).find(
     (child) => child.tagName.toLowerCase() === "fefunca"
@@ -928,6 +977,9 @@ function svgFilterPrimitiveOpacityValue(
   }
   if (tagName === "fecomposite" && svgFilterCompositeSuppressesPaint(primitive)) {
     return 0;
+  }
+  if (tagName === "fecomposite") {
+    return svgFilterCompositeOpacityValue(primitive, previousOutputOpacity, resultOpacities);
   }
 
   const inputOpacity = svgFilterPrimitiveInputOpacity(
