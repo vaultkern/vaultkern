@@ -2027,6 +2027,29 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats credential fields displaced out of paint by SVG filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="displacedSource" x="-1000" y="-1000" width="2000" height="2000" filterUnits="userSpaceOnUse">
+            <feFlood flood-color="white" result="map" />
+            <feDisplacementMap in="SourceGraphic" in2="map" scale="2000" xChannelSelector="R" yChannelSelector="G" />
+          </filter>
+        </svg>
+        <input name="displaced_password" type="password" autocomplete="current-password" style="filter:url(#displacedSource)" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "displaced_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "displaced_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("keeps flattened preserve-3d backface fields viewable", () => {
     document.body.innerHTML = `
       <form>

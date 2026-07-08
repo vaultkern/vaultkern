@@ -491,6 +491,26 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys displaced out of paint by SVG filters", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="displacedSource" x="-1000" y="-1000" width="2000" height="2000" filterUnits="userSpaceOnUse">
+            <feFlood flood-color="white" result="map" />
+            <feDisplacementMap in="SourceGraphic" in2="map" scale="2000" xChannelSelector="R" yChannelSelector="G" />
+          </filter>
+        </svg>
+        <input id="displaced-password" type="password" autocomplete="current-password" style="filter:url(#displacedSource)" />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#displaced-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys clipped away by rounded overflow ancestors", () => {
     document.body.innerHTML = `
       <form>

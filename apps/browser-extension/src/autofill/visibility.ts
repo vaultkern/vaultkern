@@ -1714,6 +1714,79 @@ function svgFilterMergeSuppressesPaint(
   );
 }
 
+function svgColorChannelUnitValue(color: CssColorRgba, selector: string) {
+  const channel = selector.trim().toLowerCase();
+  if (channel === "r") {
+    return color.r / 255;
+  }
+  if (channel === "g") {
+    return color.g / 255;
+  }
+  if (channel === "b") {
+    return color.b / 255;
+  }
+  if (channel === "a") {
+    return color.a;
+  }
+  return null;
+}
+
+function svgDisplacementMapOffset(
+  primitive: Element,
+  previousOutputColor: CssColorRgba | null,
+  resultColors: ReadonlyMap<string, CssColorRgba | null>
+) {
+  const input = svgFilterInputName(primitive, "in");
+  const inputIsSourcePaint =
+    svgFilterInputIsSourcePaint(input) || (input === "" && previousOutputColor === null);
+  if (!inputIsSourcePaint) {
+    return null;
+  }
+
+  const scale = Number(primitive.getAttribute("scale") ?? "0");
+  if (!Number.isFinite(scale)) {
+    return null;
+  }
+
+  const mapColor = svgFilterKnownInputPaintColor(
+    svgFilterInputName(primitive, "in2"),
+    previousOutputColor,
+    resultColors
+  );
+  if (mapColor === null) {
+    return null;
+  }
+
+  const xChannel = svgColorChannelUnitValue(
+    mapColor,
+    primitive.getAttribute("xChannelSelector") ?? "A"
+  );
+  const yChannel = svgColorChannelUnitValue(
+    mapColor,
+    primitive.getAttribute("yChannelSelector") ?? "A"
+  );
+  return xChannel === null || yChannel === null
+    ? null
+    : { dx: scale * (xChannel - 0.5), dy: scale * (yChannel - 0.5) };
+}
+
+function svgFilterDisplacementMapSuppressesPaint(
+  affectedElement: HTMLElement,
+  primitive: Element,
+  previousOutputColor: CssColorRgba | null,
+  resultColors: ReadonlyMap<string, CssColorRgba | null>
+) {
+  const offset = svgDisplacementMapOffset(primitive, previousOutputColor, resultColors);
+  return (
+    offset !== null &&
+    offsetRectOverlapSuppressesPaint(
+      affectedElement.getBoundingClientRect(),
+      offset.dx,
+      offset.dy
+    )
+  );
+}
+
 function svgFilterGraphSuppressesPaint(
   filterTarget: HTMLElement,
   affectedElement: HTMLElement,
@@ -1721,13 +1794,22 @@ function svgFilterGraphSuppressesPaint(
   units: { emPx?: number; remPx?: number }
 ) {
   const suppressedResults = new Map<string, boolean>();
+  const resultColors = new Map<string, CssColorRgba | null>();
   let previousOutputSuppressesPaint = false;
+  let previousOutputColor: CssColorRgba | null = null;
 
   for (const primitive of Array.from(filter.children)) {
     const tagName = primitive.tagName.toLowerCase();
     const outputSuppressesPaint =
       tagName === "femerge"
         ? svgFilterMergeSuppressesPaint(primitive, suppressedResults)
+        : tagName === "fedisplacementmap"
+          ? svgFilterDisplacementMapSuppressesPaint(
+              affectedElement,
+              primitive,
+              previousOutputColor,
+              resultColors
+            )
         : svgFilterPrimitiveSuppressesFinalPaint(
             filterTarget,
             affectedElement,
@@ -1735,8 +1817,14 @@ function svgFilterGraphSuppressesPaint(
             units
           );
     const resultName = svgFilterResultName(primitive.getAttribute("result"));
+    previousOutputColor = svgFilterPrimitivePaintCollapseColorValue(
+      primitive,
+      previousOutputColor,
+      resultColors
+    );
     if (resultName !== null) {
       suppressedResults.set(resultName, outputSuppressesPaint);
+      resultColors.set(resultName, previousOutputColor);
     }
     previousOutputSuppressesPaint = outputSuppressesPaint;
   }
