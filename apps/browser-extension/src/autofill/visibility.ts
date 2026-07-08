@@ -9,6 +9,7 @@ export interface FieldFillabilityResult {
 }
 
 const OFFSCREEN_OFFSET_PX = 1000;
+const CLIPPED_ANCESTOR_MAX_VISIBLE_SIZE_PX = 1;
 
 function addReason(reasons: string[], reason: string) {
   if (!reasons.includes(reason)) {
@@ -54,6 +55,23 @@ function computedCssValue(
   units: { emPx?: number; remPx?: number } = {}
 ) {
   return numericCssValue(computed, units) ?? numericCssValue(inline, units);
+}
+
+function cssPropertyValue(
+  style: CSSStyleDeclaration | undefined,
+  element: HTMLElement,
+  property: string
+) {
+  const inlineStyleText = element.getAttribute("style") ?? "";
+  const inlineMatch = inlineStyleText.match(
+    new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`, "i")
+  );
+  return (
+    style?.getPropertyValue(property).trim() ||
+    element.style.getPropertyValue(property).trim() ||
+    inlineMatch?.[1]?.trim() ||
+    ""
+  );
 }
 
 function parentElementOrShadowHost(element: HTMLElement) {
@@ -108,21 +126,135 @@ function hasExplicitVisibleDescendantOverride(element: HTMLElement, ancestor: HT
 function isClippedZeroSizeAncestor(
   current: HTMLElement,
   width: number | null,
-  height: number | null
+  height: number | null,
+  style: CSSStyleDeclaration | undefined
 ) {
   if (width !== 0 || height !== 0) {
     return false;
   }
-  const overflow = [
-    current.style.overflow,
-    current.style.overflowX,
-    current.style.overflowY
-  ].join(" ");
-  return overflow.includes("hidden") || overflow.includes("clip");
+  return hasClippingOverflow(current, style);
 }
 
 function isLargeOffscreenOffset(value: number | null) {
   return value !== null && Math.abs(value) >= OFFSCREEN_OFFSET_PX;
+}
+
+function isMeaningfulCssValue(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized !== "" && normalized !== "auto" && normalized !== "none";
+}
+
+function hasClippingStyle(current: HTMLElement, style: CSSStyleDeclaration | undefined) {
+  const clipPath = cssPropertyValue(style, current, "clip-path");
+  const clip = cssPropertyValue(style, current, "clip");
+  return isMeaningfulCssValue(clipPath) || isMeaningfulCssValue(clip);
+}
+
+function hasClippingOverflow(current: HTMLElement, style: CSSStyleDeclaration | undefined) {
+  const overflow = [
+    cssPropertyValue(style, current, "overflow"),
+    cssPropertyValue(style, current, "overflow-x"),
+    cssPropertyValue(style, current, "overflow-y")
+  ].join(" ");
+  return /\b(hidden|clip)\b/.test(overflow);
+}
+
+function isClippedTinyAncestor(
+  current: HTMLElement,
+  width: number | null,
+  height: number | null,
+  style: CSSStyleDeclaration | undefined
+) {
+  if (!hasClippingOverflow(current, style)) {
+    return false;
+  }
+  return (
+    (width !== null && width <= CLIPPED_ANCESTOR_MAX_VISIBLE_SIZE_PX) ||
+    (height !== null && height <= CLIPPED_ANCESTOR_MAX_VISIBLE_SIZE_PX)
+  );
+}
+
+function transformTranslateOffset(
+  value: string | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return null;
+  }
+
+  let x = 0;
+  let y = 0;
+  let found = false;
+  const transforms = normalized.matchAll(/(matrix3d|matrix|translate3d|translatex|translatey|translate)\(([^)]*)\)/g);
+  for (const transform of transforms) {
+    const name = transform[1];
+    const args = transform[2].split(/[,\s]+/).filter(Boolean);
+    const values = args.map((arg) => numericCssValue(arg, units));
+    found = true;
+
+    if (name === "matrix") {
+      x += values[4] ?? 0;
+      y += values[5] ?? 0;
+    } else if (name === "matrix3d") {
+      x += values[12] ?? 0;
+      y += values[13] ?? 0;
+    } else if (name === "translatex") {
+      x += values[0] ?? 0;
+    } else if (name === "translatey") {
+      y += values[0] ?? 0;
+    } else {
+      x += values[0] ?? 0;
+      y += values[1] ?? 0;
+    }
+  }
+
+  return found ? { x, y } : null;
+}
+
+function hasMeaningfulClientRect(rect: DOMRect) {
+  return rect.width > 0 && rect.height > 0;
+}
+
+function viewportSize(documentRef: Document) {
+  const view = documentRef.defaultView;
+  return {
+    width: view?.innerWidth ?? documentRef.documentElement.clientWidth,
+    height: view?.innerHeight ?? documentRef.documentElement.clientHeight
+  };
+}
+
+function isOutsideViewport(element: HTMLElement) {
+  const rect = element.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return false;
+  }
+  const viewport = viewportSize(element.ownerDocument);
+  return (
+    rect.right <= 0 ||
+    rect.bottom <= 0 ||
+    rect.left >= viewport.width ||
+    rect.top >= viewport.height
+  );
+}
+
+function rectsIntersect(left: DOMRect, right: DOMRect) {
+  return (
+    left.left < right.right &&
+    left.right > right.left &&
+    left.top < right.bottom &&
+    left.bottom > right.top
+  );
+}
+
+function isFullyClippedByAncestor(element: HTMLElement, ancestor: HTMLElement) {
+  const elementRect = element.getBoundingClientRect();
+  const ancestorRect = ancestor.getBoundingClientRect();
+  return (
+    hasMeaningfulClientRect(elementRect) &&
+    hasMeaningfulClientRect(ancestorRect) &&
+    !rectsIntersect(elementRect, ancestorRect)
+  );
 }
 
 export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult {
@@ -167,6 +299,10 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const bottom = computedCssValue(style?.bottom, current.style.bottom, cssUnits);
     const width = computedCssValue(style?.width, current.style.width, cssUnits);
     const height = computedCssValue(style?.height, current.style.height, cssUnits);
+    const transform = transformTranslateOffset(
+      cssPropertyValue(style, current, "transform"),
+      cssUnits
+    );
     const hasHiddenVisibility =
       inlineVisibility === "hidden" ||
       style?.visibility === "hidden" ||
@@ -186,6 +322,9 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     if (opacity === 0) {
       addReason(reasons, "not-viewable:transparent");
     }
+    if (hasClippingStyle(current, style)) {
+      addReason(reasons, "not-viewable:clipped");
+    }
     if (
       (position === "absolute" || position === "fixed") &&
       (left !== null || top !== null || right !== null || bottom !== null)
@@ -195,10 +334,26 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       }
     }
     if (
+      transform &&
+      (isLargeOffscreenOffset(transform.x) || isLargeOffscreenOffset(transform.y))
+    ) {
+      addReason(reasons, "not-viewable:offscreen");
+    }
+    if (current === element && isOutsideViewport(element)) {
+      addReason(reasons, "not-viewable:offscreen");
+    }
+    if (
       (current === element && width === 0 && height === 0) ||
-      (current !== element && isClippedZeroSizeAncestor(current, width, height))
+      (current !== element && isClippedZeroSizeAncestor(current, width, height, style))
     ) {
       addReason(reasons, "not-viewable:zero-size");
+    }
+    if (
+      current !== element &&
+      (isClippedTinyAncestor(current, width, height, style) ||
+        (hasClippingOverflow(current, style) && isFullyClippedByAncestor(element, current)))
+    ) {
+      addReason(reasons, "not-viewable:clipped");
     }
   }
 

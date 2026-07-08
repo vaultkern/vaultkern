@@ -1166,12 +1166,26 @@ describe("autofill triage", () => {
 
   it("treats offscreen and transparent honeypot fields as not viewable", () => {
     document.body.innerHTML = `
+      <style>
+        .computed-clip-box {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+        }
+      </style>
       <form>
         <input name="offscreen_email" type="email" autocomplete="username" style="position:absolute;left:-9999px" />
         <input name="positive_left_offscreen_email" type="email" autocomplete="username" style="position:absolute;left:9999px" />
         <input name="positive_top_offscreen_email" type="email" autocomplete="username" style="position:absolute;top:9999px" />
         <input name="right_offscreen_email" type="email" autocomplete="username" style="position:absolute;right:-9999px" />
         <input name="bottom_offscreen_email" type="email" autocomplete="username" style="position:absolute;bottom:-9999px" />
+        <input name="transformed_email" type="email" autocomplete="username" style="transform:translateX(-9999px)" />
+        <input name="clip_path_email" type="email" autocomplete="username" style="clip-path:inset(50%)" />
+        <input name="legacy_clip_email" type="email" autocomplete="username" style="position:absolute;clip:rect(0 0 0 0)" />
+        <div class="computed-clip-box">
+          <input name="computed_overflow_email" type="email" autocomplete="username" />
+        </div>
         <input name="transparent_email" type="email" autocomplete="username" style="opacity:0" />
         <input name="real_user" type="email" autocomplete="username" />
         <input name="real_password" type="password" autocomplete="current-password" />
@@ -1197,6 +1211,18 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "bottom_offscreen_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "bottom_offscreen_email").reasons).toContain(
       "not-viewable:offscreen"
+    );
+    expect(fieldByName(report, "transformed_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "transformed_email").reasons).toContain(
+      "not-viewable:offscreen"
+    );
+    expect(fieldByName(report, "clip_path_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "clip_path_email").reasons).toContain("not-viewable:clipped");
+    expect(fieldByName(report, "legacy_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "legacy_clip_email").reasons).toContain("not-viewable:clipped");
+    expect(fieldByName(report, "computed_overflow_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "computed_overflow_email").reasons).toContain(
+      "not-viewable:clipped"
     );
     expect(fieldByName(report, "transparent_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "transparent_email").reasons).toContain("not-viewable:transparent");
