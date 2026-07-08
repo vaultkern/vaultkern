@@ -617,6 +617,7 @@ describe("fillLoginForm", () => {
           <clipPath id="displayNoneRectClip"><rect style="display:none" width="200" height="30" /></clipPath>
           <clipPath id="hiddenRectClip"><rect style="visibility:hidden" width="200" height="30" /></clipPath>
           <clipPath id="evenOddPathClip"><path clip-rule="evenodd" d="M0 0 L200 0 L200 30 L0 30 Z M0 0 L200 0 L200 30 L0 30 Z" /></clipPath>
+          <clipPath id="evenOddCoveredPathClip"><path clip-rule="evenodd" d="M-10 -10 L210 -10 L210 40 L-10 40 Z M0 0 L200 0 L200 30 L0 30 Z" /></clipPath>
         </svg>
         <input id="inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
         <input id="rounded-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49% round 2px)" />
@@ -647,6 +648,8 @@ describe("fillLoginForm", () => {
         <input id="url-hidden-rect-password" type="password" autocomplete="current-password" style="clip-path:url(#hiddenRectClip)" />
         <input id="url-evenodd-path-password" type="password" autocomplete="current-password" style="clip-path:url(#evenOddPathClip)" />
         <input id="css-evenodd-path-password" type="password" autocomplete="current-password" style='clip-path:path(evenodd, "M0 0 L200 0 L200 30 L0 30 Z M0 0 L200 0 L200 30 L0 30 Z")' />
+        <input id="url-evenodd-covered-path-password" type="password" autocomplete="current-password" style="clip-path:url(#evenOddCoveredPathClip)" />
+        <input id="css-evenodd-covered-path-password" type="password" autocomplete="current-password" style='clip-path:path(evenodd, "M-10 -10 L210 -10 L210 40 L-10 40 Z M0 0 L200 0 L200 30 L0 30 Z")' />
         <div style="width:2px;height:2px;overflow:hidden">
           <input id="ancestor-clipped-password" type="password" autocomplete="current-password" />
         </div>
@@ -669,7 +672,11 @@ describe("fillLoginForm", () => {
       "url-translated-rect-password",
       "url-scaled-rect-password",
       "url-class-translated-rect-password",
-      "url-class-scaled-rect-password"
+      "url-class-scaled-rect-password",
+      "url-evenodd-path-password",
+      "css-evenodd-path-password",
+      "url-evenodd-covered-path-password",
+      "css-evenodd-covered-path-password"
     ]) {
       stubElementRect(
         document.querySelector(`#${id}`) as HTMLInputElement,
@@ -708,6 +715,8 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#url-hidden-rect-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-evenodd-path-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#css-evenodd-path-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-evenodd-covered-path-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#css-evenodd-covered-path-password") as HTMLInputElement).value).toBe("");
     expect(
       (document.querySelector("#ancestor-clipped-password") as HTMLInputElement).value
     ).toBe("");

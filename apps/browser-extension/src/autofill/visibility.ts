@@ -1859,50 +1859,81 @@ function svgPathDataToPoints(value: string) {
   return points;
 }
 
-function pathPointKey(point: { x: number; y: number }) {
-  return `${Number(point.x.toFixed(4))},${Number(point.y.toFixed(4))}`;
-}
-
-function canonicalPathPointSequence(points: Array<{ x: number; y: number }>) {
-  const normalized = [...points];
-  if (
-    normalized.length > 1 &&
-    pathPointKey(normalized[0]) === pathPointKey(normalized[normalized.length - 1])
-  ) {
-    normalized.pop();
-  }
-  if (normalized.length === 0) {
-    return "";
-  }
-
-  const keys = normalized.map(pathPointKey);
-  const sequences: string[] = [];
-  for (const source of [keys, [...keys].reverse()]) {
-    for (let index = 0; index < source.length; index += 1) {
-      sequences.push([...source.slice(index), ...source.slice(0, index)].join("|"));
-    }
-  }
-  return sequences.sort()[0];
-}
-
 function svgPathDataToSubpathPoints(value: string) {
   const subpaths = value.match(/[Mm][^Mm]*/g) ?? [value];
   return subpaths.map(svgPathDataToPoints).filter((points) => points.length > 0);
 }
 
-function evenOddDuplicateSubpathsSuppressPath(value: string) {
-  const subpathKeys = svgPathDataToSubpathPoints(value)
-    .map(canonicalPathPointSequence)
-    .filter(Boolean);
-  if (subpathKeys.length < 2) {
+function pointOnSegment(
+  point: { x: number; y: number },
+  start: { x: number; y: number },
+  end: { x: number; y: number }
+) {
+  const cross =
+    (point.y - start.y) * (end.x - start.x) - (point.x - start.x) * (end.y - start.y);
+  if (Math.abs(cross) > 1e-6) {
     return false;
   }
-
-  const counts = new Map<string, number>();
-  for (const key of subpathKeys) {
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+  const dot =
+    (point.x - start.x) * (end.x - start.x) + (point.y - start.y) * (end.y - start.y);
+  if (dot < 0) {
+    return false;
   }
-  return Array.from(counts.values()).every((count) => count % 2 === 0);
+  const squaredLength = (end.x - start.x) ** 2 + (end.y - start.y) ** 2;
+  return dot <= squaredLength + 1e-6;
+}
+
+function pointInsidePolygon(point: { x: number; y: number }, polygon: Array<{ x: number; y: number }>) {
+  let inside = false;
+  for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index++) {
+    const start = polygon[previous];
+    const end = polygon[index];
+    if (pointOnSegment(point, start, end)) {
+      return true;
+    }
+    if (
+      start.y > point.y !== end.y > point.y &&
+      point.x < ((end.x - start.x) * (point.y - start.y)) / (end.y - start.y) + start.x
+    ) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function fieldLocalSamplePoints(rect: DOMRect) {
+  const bounds = fieldLocalBounds(rect);
+  const insetX = Math.min(4, rect.width / 2);
+  const insetY = Math.min(4, rect.height / 2);
+  return [
+    { x: rect.width / 2, y: rect.height / 2 },
+    { x: bounds.left + insetX, y: bounds.top + insetY },
+    { x: bounds.right - insetX, y: bounds.top + insetY },
+    { x: bounds.left + insetX, y: bounds.bottom - insetY },
+    { x: bounds.right - insetX, y: bounds.bottom - insetY }
+  ];
+}
+
+function evenOddSubpathsSuppressField(
+  value: string,
+  rect: DOMRect,
+  matrix: SvgMatrix2d = identitySvgMatrix()
+) {
+  if (!hasMeaningfulClientRect(rect)) {
+    return false;
+  }
+  const polygons = svgPathDataToSubpathPoints(value)
+    .map((points) => transformSvgPoints(points, matrix))
+    .filter((points) => points.length >= 3);
+  if (polygons.length < 2) {
+    return false;
+  }
+  return fieldLocalSamplePoints(rect).every((sample) => {
+    const containingPolygons = polygons.filter((polygon) =>
+      pointInsidePolygon(sample, polygon)
+    ).length;
+    return containingPolygons % 2 === 0;
+  });
 }
 
 function svgPathUsesEvenOdd(shape: Element) {
@@ -2091,7 +2122,7 @@ function svgClipShapeSuppressesField(
   }
   if (tagName === "path") {
     const pathData = shape.getAttribute("d") ?? "";
-    if (svgPathUsesEvenOdd(shape) && evenOddDuplicateSubpathsSuppressPath(pathData)) {
+    if (svgPathUsesEvenOdd(shape) && evenOddSubpathsSuppressField(pathData, rect, matrix)) {
       return true;
     }
     const points = svgPathDataToPoints(pathData);
@@ -2205,7 +2236,10 @@ function clipPathFullyClips(
     const fillRule = pathMatch[1].match(/^\s*(evenodd|nonzero)\s*,/i)?.[1].toLowerCase();
     const pathData =
       pathMatch[1].match(/(['"])(.*?)\1/)?.[2] ?? pathMatch[1].replace(/^evenodd\s*,/i, "");
-    if (fillRule === "evenodd" && evenOddDuplicateSubpathsSuppressPath(pathData)) {
+    if (
+      fillRule === "evenodd" &&
+      evenOddSubpathsSuppressField(pathData, current.getBoundingClientRect())
+    ) {
       return true;
     }
     return pathRegionSuppressesField(
