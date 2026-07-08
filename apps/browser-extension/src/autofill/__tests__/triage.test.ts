@@ -2859,6 +2859,26 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields hidden by evenodd polygon clip paths as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="evenodd-polygon-password" name="evenodd_polygon_password" type="password" autocomplete="current-password" style="clip-path:polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, 100% 0, 100% 100%, 0 100%)" />
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector("#evenodd-polygon-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "evenodd_polygon_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "evenodd_polygon_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats fields missed by ancestor clip paths as not viewable", () => {
     document.body.innerHTML = `
       <form>

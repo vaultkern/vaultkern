@@ -4623,6 +4623,44 @@ function xywhClipVisibleBounds(
     : { left: xPx, top: yPx, right: xPx + widthPx, bottom: yPx + heightPx };
 }
 
+function cssPolygonParts(value: string) {
+  const parts = splitCssCommaList(value);
+  const fillRule = parts[0]?.trim().toLowerCase();
+  return fillRule === "evenodd" || fillRule === "nonzero" ? parts.slice(1) : parts;
+}
+
+function cssPolygonPoints(
+  value: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+) {
+  return cssPolygonParts(value).flatMap((point) => {
+    const [x, y] = splitCssFunctionArgs(point);
+    const parsedX = x === undefined ? null : cssCoordinateToPx(x, rect.width, units);
+    const parsedY = y === undefined ? null : cssCoordinateToPx(y, rect.height, units);
+    return parsedX === null || parsedY === null ? [] : [{ x: parsedX, y: parsedY }];
+  });
+}
+
+function cssPolygonUsesEvenOdd(value: string) {
+  return splitCssCommaList(value)[0]?.trim().toLowerCase() === "evenodd";
+}
+
+function evenOddPolygonSuppressesField(
+  value: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+) {
+  if (!cssPolygonUsesEvenOdd(value)) {
+    return false;
+  }
+  const points = cssPolygonPoints(value, rect, units);
+  return (
+    points.length >= 3 &&
+    fieldLocalSamplePoints(rect).every((sample) => !pointInsidePolygon(sample, points))
+  );
+}
+
 function svgClipShapeVisibleBounds(
   current: HTMLElement,
   shape: Element,
@@ -4875,13 +4913,10 @@ function clipPathVisibleBounds(
 
   const polygonBody = cssFunctionBody(normalized, "polygon");
   if (polygonBody !== null) {
-    const points = splitCssCommaList(polygonBody).flatMap((point) => {
-      const [x, y] = splitCssFunctionArgs(point);
-      const parsedX = x === undefined ? null : cssCoordinateToPx(x, rect.width, units);
-      const parsedY = y === undefined ? null : cssCoordinateToPx(y, rect.height, units);
-      return parsedX === null || parsedY === null ? [] : [{ x: parsedX, y: parsedY }];
-    });
-    return boundsFromPoints(points);
+    if (evenOddPolygonSuppressesField(polygonBody, rect, units)) {
+      return { left: 0, top: 0, right: 0, bottom: 0 };
+    }
+    return boundsFromPoints(cssPolygonPoints(polygonBody, rect, units));
   }
 
   const shapeBody = cssFunctionBody(normalized, "shape");
@@ -6384,13 +6419,10 @@ function clipPathFullyClips(
   const polygonBody = cssFunctionBody(normalized, "polygon");
   if (polygonBody !== null) {
     const rect = current.getBoundingClientRect();
-    const points = splitCssCommaList(polygonBody).flatMap((point) => {
-      const [x, y] = splitCssFunctionArgs(point);
-      const parsedX = x === undefined ? null : cssCoordinateToPx(x, rect.width, units);
-      const parsedY = y === undefined ? null : cssCoordinateToPx(y, rect.height, units);
-      return parsedX === null || parsedY === null ? [] : [{ x: parsedX, y: parsedY }];
-    });
-    return pointRegionSuppressesField(points, rect, true);
+    return (
+      evenOddPolygonSuppressesField(polygonBody, rect, units) ||
+      pointRegionSuppressesField(cssPolygonPoints(polygonBody, rect, units), rect, true)
+    );
   }
 
   const shapeBody = cssFunctionBody(normalized, "shape");
