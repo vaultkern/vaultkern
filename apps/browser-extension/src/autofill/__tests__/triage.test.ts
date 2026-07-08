@@ -3103,6 +3103,71 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields missed by rotated svg mask uses as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <rect id="leftMaskRect" x="0" y="0" width="80" height="40" />
+          <mask id="rotatedUseMask">
+            <use href="#leftMaskRect" transform="rotate(180 200 20)" fill="white" />
+          </mask>
+        </svg>
+        <label id="rotated-mask-label" for="rotated-mask-password">Password</label>
+        <div id="ancestor-rotated-mask" style="width:400px;height:40px;mask:url(#rotatedUseMask)">
+          <input id="rotated-mask-password" name="rotated_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const rotatedMaskPassword = document.querySelector(
+      "#rotated-mask-password"
+    ) as HTMLInputElement;
+    const rotatedMaskLabel = document.querySelector(
+      "#rotated-mask-label"
+    ) as HTMLLabelElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    stubElementRect(
+      rotatedMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      rotatedMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-rotated-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(realPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return rotatedMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(fieldByName(report, "rotated_mask_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "rotated_mask_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats fields hidden by radial ancestor masks as not viewable", () => {
     document.body.innerHTML = `
       <form>

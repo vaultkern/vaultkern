@@ -3075,7 +3075,8 @@ function svgMaskShapeSuppressesPaint(
   current: HTMLElement,
   shape: Element,
   units: { emPx?: number; remPx?: number },
-  seen: Set<Element> = new Set()
+  seen: Set<Element> = new Set(),
+  inheritedMatrix: SvgMatrix2d = identitySvgMatrix()
 ): boolean {
   if (seen.has(shape)) {
     return true;
@@ -3084,6 +3085,7 @@ function svgMaskShapeSuppressesPaint(
 
   const tagName = shape.tagName.toLowerCase();
   const shapeStyle = shape.ownerDocument.defaultView?.getComputedStyle(shape);
+  const matrix = svgElementTransformMatrix(shape, inheritedMatrix, units);
   if (svgMaskOpacitySuppressesPaint(shape, shapeStyle)) {
     return true;
   }
@@ -3094,15 +3096,22 @@ function svgMaskShapeSuppressesPaint(
       shape.getAttributeNS("http://www.w3.org/1999/xlink", "href");
     const targetId = href?.startsWith("#") ? href.slice(1) : null;
     const target = targetId ? current.ownerDocument.getElementById(targetId) : null;
-    return target === null || svgMaskShapeSuppressesPaint(current, target, units, seen);
+    const useMatrix = svgMatrixMultiply(
+      matrix,
+      svgUsePositionMatrix(shape, current.getBoundingClientRect(), units, "userSpaceOnUse")
+    );
+    return (
+      target === null ||
+      svgMaskShapeSuppressesPaint(current, target, units, seen, useMatrix)
+    );
   }
   if (shape.children.length > 0 && (tagName === "g" || tagName === "svg" || tagName === "mask")) {
     return Array.from(shape.children).every((child) =>
-      svgMaskShapeSuppressesPaint(current, child, units, seen)
+      svgMaskShapeSuppressesPaint(current, child, units, seen, matrix)
     );
   }
   return (
-    svgClipShapeSuppressesField(current, shape, units) ||
+    svgClipShapeSuppressesField(current, shape, units, new Set(), inheritedMatrix) ||
     svgPaintSuppressesMask(shape, shapeStyle)
   );
 }
@@ -3111,7 +3120,8 @@ function svgMaskShapeVisibleBounds(
   current: HTMLElement,
   shape: Element,
   units: { emPx?: number; remPx?: number },
-  seen: Set<Element> = new Set()
+  seen: Set<Element> = new Set(),
+  inheritedMatrix: SvgMatrix2d = identitySvgMatrix()
 ): RectBounds | null {
   if (seen.has(shape)) {
     return null;
@@ -3120,6 +3130,7 @@ function svgMaskShapeVisibleBounds(
 
   const tagName = shape.tagName.toLowerCase();
   const shapeStyle = shape.ownerDocument.defaultView?.getComputedStyle(shape);
+  const matrix = svgElementTransformMatrix(shape, inheritedMatrix, units);
   if (svgMaskOpacitySuppressesPaint(shape, shapeStyle)) {
     return null;
   }
@@ -3130,19 +3141,25 @@ function svgMaskShapeVisibleBounds(
       shape.getAttributeNS("http://www.w3.org/1999/xlink", "href");
     const targetId = href?.startsWith("#") ? href.slice(1) : null;
     const target = targetId ? current.ownerDocument.getElementById(targetId) : null;
-    return target === null ? null : svgMaskShapeVisibleBounds(current, target, units, seen);
+    const useMatrix = svgMatrixMultiply(
+      matrix,
+      svgUsePositionMatrix(shape, current.getBoundingClientRect(), units, "userSpaceOnUse")
+    );
+    return target === null
+      ? null
+      : svgMaskShapeVisibleBounds(current, target, units, seen, useMatrix);
   }
   if (shape.children.length > 0 && (tagName === "g" || tagName === "svg" || tagName === "mask")) {
     return unionBounds(
       Array.from(shape.children)
-        .map((child) => svgMaskShapeVisibleBounds(current, child, units, seen))
+        .map((child) => svgMaskShapeVisibleBounds(current, child, units, seen, matrix))
         .filter((bounds): bounds is RectBounds => bounds !== null)
     );
   }
   if (svgPaintSuppressesMask(shape, shapeStyle)) {
     return null;
   }
-  return svgClipShapeVisibleBounds(current, shape, units);
+  return svgClipShapeVisibleBounds(current, shape, units, new Set(), inheritedMatrix);
 }
 
 function svgMaskVisibleBounds(
