@@ -698,6 +698,28 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys hidden by SVG atop composite filters", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="svgAtopComposite">
+            <feFlood flood-color="black" result="blackPaint" />
+            <feComposite in="blackPaint" in2="SourceGraphic" operator="atop" />
+          </filter>
+        </svg>
+        <div style="background:black">
+          <input id="svg-atop-composite-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white;outline:0;box-shadow:none;text-shadow:none;filter:url(#svgAtopComposite)" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#svg-atop-composite-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys hidden by ordered CSS and SVG filter chains", () => {
     document.body.innerHTML = `
       <form>

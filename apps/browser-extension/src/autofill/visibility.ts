@@ -1803,6 +1803,9 @@ function svgFilterCompositePaintCollapseColorValue(
   if (operator === "over" && cssColorIsOpaque(inputColor)) {
     return inputColor;
   }
+  if (operator === "atop" && cssColorIsOpaque(inputColor)) {
+    return inputColor;
+  }
 
   const input2Color = svgFilterPrimitiveInputPaintColor(
     primitive,
