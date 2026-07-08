@@ -1879,6 +1879,12 @@ describe("autofill triage", () => {
           <filter id="smallOffset"><feOffset dx="4" dy="0" /></filter>
           <filter id="sourceOver"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="over" /></filter>
           <filter id="arithmeticVisible"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="arithmetic" k1="0" k2="1" k3="0" k4="0" /></filter>
+          <filter id="unusedAlphaZero">
+            <feComponentTransfer in="SourceGraphic" result="hiddenBranch">
+              <feFuncA type="table" tableValues="0 0" />
+            </feComponentTransfer>
+            <feMerge><feMergeNode in="SourceGraphic" /></feMerge>
+          </filter>
           <mask id="visibleGroupMask"><g opacity="1"><rect width="100%" height="100%" fill="white" /></g></mask>
         </svg>
         <input name="email" type="email" autocomplete="username" />
@@ -1918,6 +1924,7 @@ describe("autofill triage", () => {
         <input name="offset_filtered_password" type="password" autocomplete="current-password" style="filter:url(#smallOffset)" />
         <input name="composite_over_password" type="password" autocomplete="current-password" style="filter:url(#sourceOver)" />
         <input name="arithmetic_visible_password" type="password" autocomplete="current-password" style="filter:url(#arithmeticVisible)" />
+        <input name="unused_alpha_branch_password" type="password" autocomplete="current-password" style="filter:url(#unusedAlphaZero)" />
       </form>
     `;
     stubElementRect(
@@ -2010,6 +2017,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "arithmetic_visible_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "arithmetic_visible_password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "unused_alpha_branch_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "unused_alpha_branch_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
   });

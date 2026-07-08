@@ -812,6 +812,141 @@ function svgColorMatrixAlphaOpacityValue(matrix: Element) {
   return null;
 }
 
+function svgFilterKnownInputOpacity(
+  value: string,
+  previousOutputOpacity: number | null,
+  resultOpacities: ReadonlyMap<string, number | null>
+) {
+  if (value === "") {
+    return previousOutputOpacity;
+  }
+  if (svgFilterInputIsSourcePaint(value)) {
+    return 1;
+  }
+  if (value === "transparentblack") {
+    return 0;
+  }
+  return resultOpacities.has(value) ? resultOpacities.get(value) ?? null : null;
+}
+
+function svgFilterPrimitiveInputOpacity(
+  primitive: Element,
+  attribute: "in" | "in2",
+  previousOutputOpacity: number | null,
+  resultOpacities: ReadonlyMap<string, number | null>
+) {
+  return svgFilterKnownInputOpacity(
+    svgFilterInputName(primitive, attribute),
+    previousOutputOpacity,
+    resultOpacities
+  );
+}
+
+function svgComponentTransferAlphaOpacityValue(primitive: Element) {
+  const alphaFunc = Array.from(primitive.children).find(
+    (child) => child.tagName.toLowerCase() === "fefunca"
+  );
+  return alphaFunc === undefined ? 1 : svgAlphaTransferOpacityValue(alphaFunc);
+}
+
+function svgFloodOpacityValue(primitive: Element) {
+  const styled = primitive as SVGElement;
+  const floodOpacity =
+    cssOpacityValue(primitive.getAttribute("flood-opacity") ?? undefined) ??
+    cssOpacityValue(styled.style?.getPropertyValue("flood-opacity")) ??
+    1;
+  const floodColor =
+    primitive.getAttribute("flood-color") ??
+    styled.style?.getPropertyValue("flood-color") ??
+    "black";
+  const colorAlpha = cssColorLooksTransparent(floodColor)
+    ? 0
+    : cssColorRgba(floodColor)?.a ?? 1;
+  return clampCssAlphaChannel(floodOpacity * colorAlpha);
+}
+
+function svgMergeOpacityValue(
+  primitive: Element,
+  previousOutputOpacity: number | null,
+  resultOpacities: ReadonlyMap<string, number | null>
+) {
+  const mergeNodes = Array.from(primitive.children).filter(
+    (child) => child.tagName.toLowerCase() === "femergenode"
+  );
+  if (mergeNodes.length === 0) {
+    return previousOutputOpacity;
+  }
+
+  const opacities = mergeNodes.map((node) =>
+    svgFilterKnownInputOpacity(
+      svgFilterInputName(node, "in"),
+      previousOutputOpacity,
+      resultOpacities
+    )
+  );
+  return opacities.every((opacity): opacity is number => opacity !== null)
+    ? Math.max(...opacities)
+    : null;
+}
+
+function svgFilterPrimitiveOpacityValue(
+  primitive: Element,
+  previousOutputOpacity: number | null,
+  resultOpacities: ReadonlyMap<string, number | null>
+) {
+  const tagName = primitive.tagName.toLowerCase();
+  if (tagName === "feflood") {
+    return svgFloodOpacityValue(primitive);
+  }
+  if (tagName === "femerge") {
+    return svgMergeOpacityValue(primitive, previousOutputOpacity, resultOpacities);
+  }
+  if (tagName === "fecomposite" && svgFilterCompositeSuppressesPaint(primitive)) {
+    return 0;
+  }
+
+  const inputOpacity = svgFilterPrimitiveInputOpacity(
+    primitive,
+    "in",
+    previousOutputOpacity,
+    resultOpacities
+  );
+  if (inputOpacity === null) {
+    return null;
+  }
+  if (tagName === "fecomponenttransfer") {
+    const alpha = svgComponentTransferAlphaOpacityValue(primitive);
+    return alpha === null ? null : clampCssAlphaChannel(inputOpacity * alpha);
+  }
+  if (tagName === "fecolormatrix") {
+    const alpha = svgColorMatrixAlphaOpacityValue(primitive);
+    return alpha === null ? null : clampCssAlphaChannel(inputOpacity * alpha);
+  }
+  return inputOpacity;
+}
+
+function svgFilterGraphOpacityValue(filter: Element) {
+  const resultOpacities = new Map<string, number | null>();
+  let previousOutputOpacity: number | null = 1;
+  let sawPrimitive = false;
+
+  for (const primitive of Array.from(filter.children)) {
+    sawPrimitive = true;
+    const outputOpacity = svgFilterPrimitiveOpacityValue(
+      primitive,
+      previousOutputOpacity,
+      resultOpacities
+    );
+    const resultName = svgFilterResultName(primitive.getAttribute("result"));
+    if (resultName !== null) {
+      resultOpacities.set(resultName, outputOpacity);
+    }
+    previousOutputOpacity = outputOpacity;
+  }
+
+  return sawPrimitive ? previousOutputOpacity : null;
+}
+
 function svgFilterOpacityValue(filterTarget: HTMLElement, value: string | undefined) {
   let opacity = 1;
   let found = false;
@@ -820,25 +955,10 @@ function svgFilterOpacityValue(filterTarget: HTMLElement, value: string | undefi
     if (!filter) {
       continue;
     }
-
-    for (const func of Array.from(filter.querySelectorAll("*")).filter(
-      (child) => child.tagName.toLowerCase() === "fefunca"
-    )) {
-      const alpha = svgAlphaTransferOpacityValue(func);
-      if (alpha !== null) {
-        opacity *= alpha;
-        found = true;
-      }
-    }
-
-    for (const matrix of Array.from(filter.querySelectorAll("*")).filter(
-      (child) => child.tagName.toLowerCase() === "fecolormatrix"
-    )) {
-      const alpha = svgColorMatrixAlphaOpacityValue(matrix);
-      if (alpha !== null) {
-        opacity *= alpha;
-        found = true;
-      }
+    const graphOpacity = svgFilterGraphOpacityValue(filter);
+    if (graphOpacity !== null) {
+      opacity *= graphOpacity;
+      found = true;
     }
   }
 
@@ -1017,52 +1137,7 @@ function svgFilterSuppressesPaint(
     if (!filter) {
       continue;
     }
-    const alphaFunctions = Array.from(filter.querySelectorAll("*")).filter(
-      (child) => child.tagName.toLowerCase() === "fefunca"
-    );
-    if (
-      alphaFunctions.some((func) => {
-        const type = func.getAttribute("type")?.toLowerCase();
-        const tableValues = (func.getAttribute("tableValues") ?? "")
-          .trim()
-          .split(/\s+/)
-          .map(Number);
-        const slope = Number(func.getAttribute("slope") ?? "1");
-        const intercept = Number(func.getAttribute("intercept") ?? "0");
-        const amplitude = Number(func.getAttribute("amplitude") ?? "1");
-        const offset = Number(func.getAttribute("offset") ?? "0");
-        return (
-          (type === "table" &&
-            tableValues.length > 0 &&
-            tableValues.every((value) => Number.isFinite(value) && value <= 0)) ||
-          (type === "discrete" &&
-            tableValues.length > 0 &&
-            tableValues.every((value) => Number.isFinite(value) && value <= 0)) ||
-          (type === "linear" && slope <= 0 && intercept <= 0) ||
-          (type === "gamma" && amplitude <= 0 && offset <= 0)
-        );
-      })
-    ) {
-      return true;
-    }
-    const colorMatrices = Array.from(filter.querySelectorAll("*")).filter(
-      (child) => child.tagName.toLowerCase() === "fecolormatrix"
-    );
-    if (
-      colorMatrices.some((matrix) => {
-        const type = matrix.getAttribute("type")?.toLowerCase() ?? "matrix";
-        const values = (matrix.getAttribute("values") ?? "")
-          .trim()
-          .split(/[\s,]+/)
-          .filter(Boolean)
-          .map(Number);
-        return (
-          type === "matrix" &&
-          values.length >= 20 &&
-          values.slice(15, 20).every((value) => Number.isFinite(value) && value <= 0)
-        );
-      })
-    ) {
+    if (isEffectivelyTransparent(svgFilterGraphOpacityValue(filter))) {
       return true;
     }
     const primitives = Array.from(filter.children);

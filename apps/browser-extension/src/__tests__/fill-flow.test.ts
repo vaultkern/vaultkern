@@ -877,6 +877,28 @@ describe("fillLoginForm", () => {
     expect(loginPassword.value).toBe("secret");
   });
 
+  it("fills a password field when an svg filter keeps source graphic as the final output", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="unusedAlphaZero">
+            <feComponentTransfer in="SourceGraphic" result="hiddenBranch">
+              <feFuncA type="table" tableValues="0 0" />
+            </feComponentTransfer>
+            <feMerge><feMergeNode in="SourceGraphic" /></feMerge>
+          </filter>
+        </svg>
+        <input id="filtered-password" type="password" autocomplete="current-password" style="filter:url(#unusedAlphaZero)" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#filtered-password") as HTMLInputElement).value).toBe(
+      "secret"
+    );
+  });
+
   it("does not treat a visible label as enough for a merged filter-offset password decoy", () => {
     document.body.innerHTML = `
       <form>
