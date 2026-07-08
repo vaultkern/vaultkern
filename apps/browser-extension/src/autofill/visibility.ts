@@ -89,6 +89,32 @@ function cssOpacityValue(value: string | undefined) {
   if (!trimmed) {
     return null;
   }
+  const calcMatch = trimmed.match(/^calc\((.*)\)$/);
+  if (calcMatch) {
+    const tokens = calcMatch[1]
+      .replace(/([+-])/g, " $1 ")
+      .split(/\s+/)
+      .filter(Boolean);
+    let total = 0;
+    let sign = 1;
+    for (const token of tokens) {
+      if (token === "+") {
+        sign = 1;
+        continue;
+      }
+      if (token === "-") {
+        sign = -1;
+        continue;
+      }
+      const tokenValue = cssOpacityValue(token);
+      if (tokenValue === null) {
+        return null;
+      }
+      total += sign * tokenValue;
+      sign = 1;
+    }
+    return clampCssAlphaChannel(total);
+  }
   if (trimmed.endsWith("%")) {
     const parsed = Number.parseFloat(trimmed.slice(0, -1));
     return Number.isFinite(parsed) ? parsed / 100 : null;
@@ -106,12 +132,17 @@ function cssPropertyValue(
   const inlineMatch = inlineStyleText.match(
     new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`, "i")
   );
-  return (
-    style?.getPropertyValue(property).trim() ||
-    element.style.getPropertyValue(property).trim() ||
-    inlineMatch?.[1]?.trim() ||
-    ""
-  );
+  const computedValue = style?.getPropertyValue(property).trim() ?? "";
+  const styleValue = element.style.getPropertyValue(property).trim();
+  const validStyleValue = (value: string) =>
+    value !== "" && value.trim().toLowerCase() !== "nan";
+  if (validStyleValue(computedValue)) {
+    return computedValue;
+  }
+  if (validStyleValue(styleValue)) {
+    return styleValue;
+  }
+  return inlineMatch?.[1]?.trim() ?? "";
 }
 
 function parentElementOrShadowHost(element: HTMLElement) {
@@ -3330,7 +3361,7 @@ function elementPaintsOverlay(
   const emPx = numericCssValue(style?.fontSize || current.style.fontSize) ?? 16;
   const remPx = numericCssValue(rootStyle?.fontSize) ?? emPx;
   const cssUnits = { emPx, remPx };
-  const opacity = cssOpacityValue(style?.opacity) ?? cssOpacityValue(current.style.opacity);
+  const opacity = cssOpacityValue(cssPropertyValue(style, current, "opacity"));
   const filter = cssPropertyValue(style, current, "filter");
   return (
     style?.display !== "none" &&
@@ -3367,7 +3398,7 @@ function elementCumulativePaintIsVisible(element: HTMLElement) {
     ) {
       return false;
     }
-    opacity *= cssOpacityValue(style?.opacity) ?? cssOpacityValue(current.style.opacity) ?? 1;
+    opacity *= cssOpacityValue(cssPropertyValue(style, current, "opacity")) ?? 1;
     const currentFilterOpacity = paintFilterOpacityValue(
       current,
       cssPropertyValue(style, current, "filter")
@@ -5650,7 +5681,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const viewport = viewportSize(current);
     const inlineDisplay = current.style.display;
     const inlineVisibility = current.style.visibility;
-    const opacity = cssOpacityValue(style?.opacity) ?? cssOpacityValue(current.style.opacity);
+    const opacity = cssOpacityValue(cssPropertyValue(style, current, "opacity"));
     const filter = cssPropertyValue(style, current, "filter");
     const filterOpacity = paintFilterOpacityValue(current, filter);
     const contentVisibility = cssPropertyValue(style, current, "content-visibility")

@@ -518,6 +518,7 @@ describe("fillLoginForm", () => {
         <input id="translated-password" type="password" autocomplete="current-password" style="translate:-9999px" />
         <input id="longhand-scaled-password" type="password" autocomplete="current-password" style="scale:0" />
         <input id="zoom-zero-password" type="password" autocomplete="current-password" style="zoom:0" />
+        <input id="calc-opacity-password" type="password" autocomplete="current-password" style="opacity:calc(0)" />
         <input id="filter-password" type="password" autocomplete="current-password" style="filter:opacity(0)" />
         <input id="scaled-password" type="password" autocomplete="current-password" style="transform:scale(0)" />
         <div style="transform:scale(0)">
@@ -797,6 +798,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#translated-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-scaled-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#zoom-zero-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#calc-opacity-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#filter-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#scaled-password") as HTMLInputElement).value).toBe("");
     expect(
