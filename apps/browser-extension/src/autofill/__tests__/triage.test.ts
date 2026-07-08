@@ -2001,6 +2001,31 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats credential fields hidden by SVG blend filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="multiplyBlack">
+            <feFlood flood-color="black" result="blackPaint" />
+            <feBlend in="SourceGraphic" in2="blackPaint" mode="multiply" />
+          </filter>
+        </svg>
+        <div style="background:black">
+          <input name="multiply_black_password" type="password" autocomplete="current-password" style="filter:url(#multiplyBlack)" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "multiply_black_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "multiply_black_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats credential fields hidden by transparent SVG filter images as not viewable", () => {
     document.body.innerHTML = `
       <form>

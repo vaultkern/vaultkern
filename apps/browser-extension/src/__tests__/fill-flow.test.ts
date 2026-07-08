@@ -465,6 +465,28 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys hidden by SVG blend filters", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="multiplyBlack">
+            <feFlood flood-color="black" result="blackPaint" />
+            <feBlend in="SourceGraphic" in2="blackPaint" mode="multiply" />
+          </filter>
+        </svg>
+        <div style="background:black">
+          <input id="multiply-black-password" type="password" autocomplete="current-password" style="filter:url(#multiplyBlack)" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#multiply-black-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys hidden by transparent SVG filter images", () => {
     document.body.innerHTML = `
       <form>

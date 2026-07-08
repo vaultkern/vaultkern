@@ -1352,32 +1352,65 @@ function svgFilterCompositePaintCollapseColorValue(
   return null;
 }
 
+function cssOpaquePaintMatches(color: CssColorRgba | null, r: number, g: number, b: number) {
+  return (
+    color !== null &&
+    color.a >= 0.99 &&
+    Math.abs(color.r - r) <= 1 &&
+    Math.abs(color.g - g) <= 1 &&
+    Math.abs(color.b - b) <= 1
+  );
+}
+
+function svgFilterBlendAbsorbingPaintColor(
+  mode: string,
+  inputColor: CssColorRgba | null,
+  input2Color: CssColorRgba | null
+) {
+  if (
+    (mode === "multiply" || mode === "darken") &&
+    (cssOpaquePaintMatches(inputColor, 0, 0, 0) ||
+      cssOpaquePaintMatches(input2Color, 0, 0, 0))
+  ) {
+    return { r: 0, g: 0, b: 0, a: 1 } satisfies CssColorRgba;
+  }
+  if (
+    (mode === "screen" || mode === "lighten") &&
+    (cssOpaquePaintMatches(inputColor, 255, 255, 255) ||
+      cssOpaquePaintMatches(input2Color, 255, 255, 255))
+  ) {
+    return { r: 255, g: 255, b: 255, a: 1 } satisfies CssColorRgba;
+  }
+  return null;
+}
+
 function svgFilterBlendPaintCollapseColorValue(
   primitive: Element,
   previousOutputColor: CssColorRgba | null,
   resultColors: ReadonlyMap<string, CssColorRgba | null>
 ) {
   const mode = (primitive.getAttribute("mode") ?? "normal").trim().toLowerCase();
-  if (mode !== "normal") {
-    return null;
-  }
-
   const inputColor = svgFilterPrimitiveInputPaintColor(
     primitive,
     "in",
     previousOutputColor,
     resultColors
   );
-  if (inputColor !== null && cssColorIsOpaque(inputColor)) {
-    return inputColor;
-  }
-
   const input2Color = svgFilterPrimitiveInputPaintColor(
     primitive,
     "in2",
     previousOutputColor,
     resultColors
   );
+
+  if (mode !== "normal") {
+    return svgFilterBlendAbsorbingPaintColor(mode, inputColor, input2Color);
+  }
+
+  if (inputColor !== null && cssColorIsOpaque(inputColor)) {
+    return inputColor;
+  }
+
   return inputColor !== null &&
     input2Color !== null &&
     cssColorChannelsMatch(inputColor, input2Color)
