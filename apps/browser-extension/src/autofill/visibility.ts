@@ -1735,7 +1735,39 @@ function svgFilterCompositePaintCollapseColorValue(
   ) {
     return inputColor;
   }
+  if (operator === "arithmetic") {
+    return svgCompositeArithmeticPaintColor(primitive, inputColor, input2Color);
+  }
   return null;
+}
+
+function svgCompositeArithmeticPaintColor(
+  primitive: Element,
+  inputColor: CssColorRgba | null,
+  input2Color: CssColorRgba | null
+) {
+  if (inputColor === null || input2Color === null) {
+    return null;
+  }
+
+  const [k1, k2, k3, k4] = ["k1", "k2", "k3", "k4"].map((attribute) =>
+    Number(primitive.getAttribute(attribute) ?? "0")
+  );
+  if (![k1, k2, k3, k4].every(Number.isFinite)) {
+    return null;
+  }
+
+  const useLinearRgb = svgColorInterpolationUsesLinearRgb(primitive);
+  const first = svgColorMatrixInputChannels(inputColor, useLinearRgb);
+  const second = svgColorMatrixInputChannels(input2Color, useLinearRgb);
+  const channel = (index: number) =>
+    clampCssAlphaChannel(
+      k1 * first[index] * second[index] + k2 * first[index] + k3 * second[index] + k4
+    );
+  return svgColorMatrixOutputColor(
+    [channel(0), channel(1), channel(2), channel(3)],
+    useLinearRgb
+  );
 }
 
 function cssOpaquePaintMatches(color: CssColorRgba | null, r: number, g: number, b: number) {

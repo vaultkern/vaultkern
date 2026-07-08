@@ -2244,6 +2244,30 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats credential fields hidden by SVG arithmetic composite filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="svgArithmeticComposite" color-interpolation-filters="sRGB">
+            <feComposite in="SourceGraphic" in2="SourceGraphic" operator="arithmetic" k1="0" k2="0" k3="0" k4="1" />
+          </filter>
+        </svg>
+        <div style="background:white">
+          <input name="svg_arithmetic_composite_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:url(#svgArithmeticComposite)" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "svg_arithmetic_composite_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "svg_arithmetic_composite_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats credential fields hidden by SVG blend filters as not viewable", () => {
     document.body.innerHTML = `
       <form>

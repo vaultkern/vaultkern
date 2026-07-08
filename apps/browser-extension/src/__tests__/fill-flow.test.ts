@@ -661,6 +661,27 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys hidden by SVG arithmetic composite filters", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="svgArithmeticComposite" color-interpolation-filters="sRGB">
+            <feComposite in="SourceGraphic" in2="SourceGraphic" operator="arithmetic" k1="0" k2="0" k3="0" k4="1" />
+          </filter>
+        </svg>
+        <div style="background:white">
+          <input id="svg-arithmetic-composite-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:url(#svgArithmeticComposite)" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#svg-arithmetic-composite-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys hidden by SVG blend filters", () => {
     document.body.innerHTML = `
       <form>
