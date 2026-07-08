@@ -1250,6 +1250,62 @@ function pointInsideRect(point: { x: number; y: number }, rect: DOMRect) {
   );
 }
 
+function boxShadowLayerCoversPoint(
+  layer: string,
+  rect: DOMRect,
+  point: { x: number; y: number },
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = layer.trim().toLowerCase();
+  if (!normalized || normalized === "none" || /\binset\b/.test(normalized)) {
+    return false;
+  }
+  const lengths = splitCssFunctionArgs(normalized)
+    .map((token) => numericCssValue(token, units))
+    .filter((value): value is number => value !== null);
+  if (lengths.length < 2) {
+    return false;
+  }
+
+  const [offsetX, offsetY, blur = 0, spread = 0] = lengths;
+  const expansion = Math.max(0, blur) + spread;
+  return (
+    point.x >= rect.left + offsetX - expansion &&
+    point.x <= rect.right + offsetX + expansion &&
+    point.y >= rect.top + offsetY - expansion &&
+    point.y <= rect.bottom + offsetY + expansion
+  );
+}
+
+function boxShadowCoversPoint(
+  current: HTMLElement,
+  style: CSSStyleDeclaration | undefined,
+  rect: DOMRect,
+  point: { x: number; y: number }
+) {
+  const boxShadow = cssPropertyValue(style, current, "box-shadow");
+  if (cssPaintListLooksEmpty(boxShadow)) {
+    return false;
+  }
+  const rootStyle = current.ownerDocument.defaultView?.getComputedStyle(
+    current.ownerDocument.documentElement
+  );
+  const emPx = numericCssValue(style?.fontSize || current.style.fontSize) ?? 16;
+  const remPx = numericCssValue(rootStyle?.fontSize) ?? emPx;
+  return splitCssCommaList(boxShadow).some((layer) =>
+    boxShadowLayerCoversPoint(layer, rect, point, { emPx, remPx })
+  );
+}
+
+function elementVisualCoversPoint(
+  current: HTMLElement,
+  style: CSSStyleDeclaration | undefined,
+  rect: DOMRect,
+  point: { x: number; y: number }
+) {
+  return pointInsideRect(point, rect) || boxShadowCoversPoint(current, style, rect, point);
+}
+
 function numericZIndex(value: string | undefined) {
   const trimmed = value?.trim();
   if (!trimmed || trimmed === "auto") {
@@ -1358,18 +1414,21 @@ function paintedOverlayCoversPoint(element: HTMLElement, point: { x: number; y: 
   }
   for (const root of occlusionScanRoots(element)) {
     for (const candidate of Array.from(root.querySelectorAll("*"))) {
+      if (!(candidate instanceof ownerWindow.HTMLElement)) {
+        continue;
+      }
+      const style = candidate.ownerDocument.defaultView?.getComputedStyle(candidate);
+      const candidateRect = candidate.getBoundingClientRect();
       if (
-        !(candidate instanceof ownerWindow.HTMLElement) ||
         candidate === element ||
         candidate.contains(element) ||
         element.contains(candidate) ||
         !elementMayPaintAboveElement(element, candidate) ||
-        !pointInsideRect(point, candidate.getBoundingClientRect())
+        !elementVisualCoversPoint(candidate, style, candidateRect, point)
       ) {
         continue;
       }
 
-      const style = candidate.ownerDocument.defaultView?.getComputedStyle(candidate);
       if (
         elementPaintsOverlay(candidate, style) &&
         elementCumulativePaintIsVisible(candidate)
@@ -1494,6 +1553,43 @@ function splitCssCommaList(value: string) {
   return splitCssTopLevel(value, (char) => char === ",");
 }
 
+function cssFunctionBody(value: string, functionName: string) {
+  const normalized = value.trim().toLowerCase();
+  const prefix = `${functionName}(`;
+  const functionStart = normalized.indexOf(prefix);
+  if (functionStart < 0) {
+    return null;
+  }
+
+  let depth = 1;
+  let quote: string | null = null;
+  const bodyStart = functionStart + prefix.length;
+  for (let index = bodyStart; index < value.length; index += 1) {
+    const char = value[index];
+    if (quote !== null) {
+      if (char === quote && value[index - 1] !== "\\") {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(bodyStart, index);
+      }
+    }
+  }
+  return null;
+}
+
 function expandBoxValues(values: string[]) {
   const top = values[0] ?? "0";
   const right = values[1] ?? top;
@@ -1517,24 +1613,6 @@ function cssInsetLength(
 ) {
   const percent = cssInsetPercent(value);
   return percent === null ? numericCssValue(value, units) : null;
-}
-
-function cssLengthOrPercentIsZero(value: string, units: { emPx?: number; remPx?: number }) {
-  const percent = cssInsetPercent(value);
-  if (percent !== null) {
-    return percent <= 0;
-  }
-  const length = numericCssValue(value, units);
-  return length !== null && length <= 0;
-}
-
-function cssRadiusVisibleSizeIsTiny(value: string, units: { emPx?: number; remPx?: number }) {
-  const percent = cssInsetPercent(value);
-  if (percent !== null) {
-    return percent * 2 <= MIN_CLIPPED_VISIBLE_FRACTION * 100;
-  }
-  const length = numericCssValue(value, units);
-  return length !== null && length * 2 <= MIN_CREDENTIAL_FIELD_SIZE_PX;
 }
 
 function cssLengthToPx(
@@ -2044,6 +2122,106 @@ function pathRegionSuppressesField(points: Array<{ x: number; y: number }>, rect
   return pointRegionSuppressesField(points, rect, points.length >= 3);
 }
 
+function cssShapeCoordinatePairToPoint(
+  value: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+) {
+  const [x, y] = splitCssFunctionArgs(value);
+  const parsedX = x === undefined ? null : cssCoordinateToPx(x, rect.width, units);
+  const parsedY = y === undefined ? null : cssCoordinateToPx(y, rect.height, units);
+  return parsedX === null || parsedY === null ? null : { x: parsedX, y: parsedY };
+}
+
+function cssShapeLengthToPx(
+  value: string | undefined,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number }
+) {
+  return value === undefined ? null : cssCoordinateToPx(value, axisSize, units);
+}
+
+function shapeCommandPoints(
+  value: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+) {
+  const points: Array<{ x: number; y: number }> = [];
+  let current = { x: 0, y: 0 };
+
+  for (const command of splitCssCommaList(value)) {
+    const normalized = command.trim().toLowerCase();
+    if (normalized === "" || normalized === "close") {
+      continue;
+    }
+
+    const absolutePair = normalized.match(
+      /^(?:from|move\s+to|line\s+to|smooth\s+to|curve\s+to|arc\s+to)\s+(.+?)(?:\s+with\b|$)/
+    );
+    if (absolutePair) {
+      const point = cssShapeCoordinatePairToPoint(absolutePair[1], rect, units);
+      if (point === null) {
+        return [];
+      }
+      current = point;
+      points.push(point);
+      continue;
+    }
+
+    const relativePair = normalized.match(/^(?:move\s+by|line\s+by)\s+(.+)$/);
+    if (relativePair) {
+      const offset = cssShapeCoordinatePairToPoint(relativePair[1], rect, units);
+      if (offset === null) {
+        return [];
+      }
+      current = { x: current.x + offset.x, y: current.y + offset.y };
+      points.push(current);
+      continue;
+    }
+
+    const horizontal = normalized.match(/^hline\s+(to|by)\s+(.+)$/);
+    if (horizontal) {
+      const x = cssShapeLengthToPx(horizontal[2], rect.width, units);
+      if (x === null) {
+        return [];
+      }
+      current = {
+        x: horizontal[1] === "by" ? current.x + x : x,
+        y: current.y
+      };
+      points.push(current);
+      continue;
+    }
+
+    const vertical = normalized.match(/^vline\s+(to|by)\s+(.+)$/);
+    if (vertical) {
+      const y = cssShapeLengthToPx(vertical[2], rect.height, units);
+      if (y === null) {
+        return [];
+      }
+      current = {
+        x: current.x,
+        y: vertical[1] === "by" ? current.y + y : y
+      };
+      points.push(current);
+      continue;
+    }
+
+    return [];
+  }
+
+  return points;
+}
+
+function shapeClipSuppressesField(
+  value: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+) {
+  const points = shapeCommandPoints(value, rect, units);
+  return points.length > 0 && pointRegionSuppressesField(points, rect, true);
+}
+
 function svgClipShapeSuppressesField(
   current: HTMLElement,
   shape: Element,
@@ -2233,14 +2411,100 @@ function cssPositionTokenToPx(
   return cssLengthToPx(normalized, axisSize, units);
 }
 
+function cssPositionComponentToPx(
+  value: string,
+  axis: "x" | "y",
+  axisSize: number,
+  units: { emPx?: number; remPx?: number }
+) {
+  const [origin, offsetToken = "0"] = splitCssFunctionArgs(value.trim().toLowerCase());
+  const start = axis === "x" ? "left" : "top";
+  const end = axis === "x" ? "right" : "bottom";
+  if (origin === start) {
+    return cssLengthToPx(offsetToken, axisSize, units) ?? 0;
+  }
+  if (origin === end) {
+    return axisSize - (cssLengthToPx(offsetToken, axisSize, units) ?? 0);
+  }
+  if (origin === "center") {
+    return axisSize / 2 + (cssLengthToPx(offsetToken, axisSize, units) ?? 0);
+  }
+  return cssPositionTokenToPx(value, axis, axisSize, units);
+}
+
 function basicShapePositionToPx(
   tokens: string[],
   rect: DOMRect,
   units: { emPx?: number; remPx?: number }
 ) {
-  const x = cssPositionTokenToPx(tokens[0], "x", rect.width, units);
-  const y = cssPositionTokenToPx(tokens[1], "y", rect.height, units);
+  const value = tokens.join(" ");
+  const x =
+    tokens.length === 0
+      ? rect.width / 2
+      : cssPositionComponentToPx(
+          maskPositionAxisComponent(value, "x"),
+          "x",
+          rect.width,
+          units
+        );
+  const y =
+    tokens.length === 0
+      ? rect.height / 2
+      : cssPositionComponentToPx(
+          maskPositionAxisComponent(value, "y"),
+          "y",
+          rect.height,
+          units
+        );
   return x === null || y === null ? null : { x, y };
+}
+
+function distanceToBoxSides(point: { x: number; y: number }, rect: DOMRect) {
+  return {
+    left: Math.abs(point.x),
+    right: Math.abs(rect.width - point.x),
+    top: Math.abs(point.y),
+    bottom: Math.abs(rect.height - point.y)
+  };
+}
+
+function circleRadiusToPx(
+  value: string,
+  center: { x: number; y: number },
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value.trim().toLowerCase();
+  const distances = distanceToBoxSides(center, rect);
+  if (normalized === "closest-side") {
+    return Math.min(distances.left, distances.right, distances.top, distances.bottom);
+  }
+  if (normalized === "farthest-side") {
+    return Math.max(distances.left, distances.right, distances.top, distances.bottom);
+  }
+  return cssLengthToPx(normalized, Math.min(rect.width, rect.height), units);
+}
+
+function ellipseRadiusToPx(
+  value: string,
+  axis: "x" | "y",
+  center: { x: number; y: number },
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+) {
+  const normalized = value.trim().toLowerCase();
+  const distances = distanceToBoxSides(center, rect);
+  if (normalized === "closest-side") {
+    return axis === "x"
+      ? Math.min(distances.left, distances.right)
+      : Math.min(distances.top, distances.bottom);
+  }
+  if (normalized === "farthest-side") {
+    return axis === "x"
+      ? Math.max(distances.left, distances.right)
+      : Math.max(distances.top, distances.bottom);
+  }
+  return cssLengthToPx(normalized, axis === "x" ? rect.width : rect.height, units);
 }
 
 function circleClipSuppressesField(
@@ -2250,17 +2514,12 @@ function circleClipSuppressesField(
 ) {
   const tokens = splitCssFunctionArgs(value);
   const atIndex = tokens.findIndex((token) => token.toLowerCase() === "at");
-  const radius = tokens[0];
-  if (
-    radius === undefined ||
-    cssLengthOrPercentIsZero(radius, units) ||
-    cssRadiusVisibleSizeIsTiny(radius, units)
-  ) {
-    return radius !== undefined;
-  }
-
-  const radiusPx = cssLengthToPx(radius, Math.min(rect.width, rect.height), units);
+  const radius = atIndex === 0 ? "closest-side" : tokens[0] ?? "closest-side";
   const center = basicShapePositionToPx(atIndex < 0 ? [] : tokens.slice(atIndex + 1), rect, units);
+  if (center === null) {
+    return false;
+  }
+  const radiusPx = circleRadiusToPx(radius, center, rect, units);
   if (radiusPx === null || center === null) {
     return false;
   }
@@ -2283,22 +2542,15 @@ function ellipseClipSuppressesField(
   const tokens = splitCssFunctionArgs(value);
   const atIndex = tokens.findIndex((token) => token.toLowerCase() === "at");
   const radiusTokens = atIndex < 0 ? tokens : tokens.slice(0, atIndex);
-  const [radiusX, radiusY] = radiusTokens;
-  if (
-    radiusX === undefined ||
-    radiusY === undefined ||
-    cssLengthOrPercentIsZero(radiusX, units) ||
-    cssLengthOrPercentIsZero(radiusY, units) ||
-    cssRadiusVisibleSizeIsTiny(radiusX, units) ||
-    cssRadiusVisibleSizeIsTiny(radiusY, units)
-  ) {
-    return radiusX !== undefined && radiusY !== undefined;
-  }
-
-  const radiusXPx = cssLengthToPx(radiusX, rect.width, units);
-  const radiusYPx = cssLengthToPx(radiusY, rect.height, units);
+  const radiusX = radiusTokens[0] ?? "closest-side";
+  const radiusY = radiusTokens[1] ?? radiusX;
   const center = basicShapePositionToPx(atIndex < 0 ? [] : tokens.slice(atIndex + 1), rect, units);
-  if (radiusXPx === null || radiusYPx === null || center === null) {
+  if (center === null) {
+    return false;
+  }
+  const radiusXPx = ellipseRadiusToPx(radiusX, "x", center, rect, units);
+  const radiusYPx = ellipseRadiusToPx(radiusY, "y", center, rect, units);
+  if (radiusXPx === null || radiusYPx === null) {
     return false;
   }
   return rectBoundsSuppressField(
@@ -2353,37 +2605,37 @@ function clipPathFullyClips(
   }
 
   const normalized = value.trim().toLowerCase();
-  const insetMatch = normalized.match(/^inset\((.*)\)$/);
-  if (insetMatch) {
-    const inset = expandBoxValues(insetBoxTokens(insetMatch[1]));
+  const insetBody = cssFunctionBody(normalized, "inset");
+  if (insetBody !== null) {
+    const inset = expandBoxValues(insetBoxTokens(insetBody));
     const rect = current.getBoundingClientRect();
     return insetBoxSuppressesField(inset, rect, units);
   }
 
-  const circleMatch = normalized.match(/^circle\((.*)\)$/);
-  if (circleMatch) {
-    return circleClipSuppressesField(circleMatch[1], current.getBoundingClientRect(), units);
+  const circleBody = cssFunctionBody(normalized, "circle");
+  if (circleBody !== null) {
+    return circleClipSuppressesField(circleBody, current.getBoundingClientRect(), units);
   }
 
-  const ellipseMatch = normalized.match(/^ellipse\((.*)\)$/);
-  if (ellipseMatch) {
-    return ellipseClipSuppressesField(ellipseMatch[1], current.getBoundingClientRect(), units);
+  const ellipseBody = cssFunctionBody(normalized, "ellipse");
+  if (ellipseBody !== null) {
+    return ellipseClipSuppressesField(ellipseBody, current.getBoundingClientRect(), units);
   }
 
-  const rectMatch = normalized.match(/^rect\((.*)\)$/);
-  if (rectMatch) {
-    return legacyClipFullyClips(normalized, units, current.getBoundingClientRect());
+  const rectBody = cssFunctionBody(normalized, "rect");
+  if (rectBody !== null) {
+    return legacyClipFullyClips(`rect(${rectBody})`, units, current.getBoundingClientRect());
   }
 
-  const xywhMatch = normalized.match(/^xywh\((.*)\)$/);
-  if (xywhMatch) {
-    return xywhClipSuppressesField(xywhMatch[1], current.getBoundingClientRect(), units);
+  const xywhBody = cssFunctionBody(normalized, "xywh");
+  if (xywhBody !== null) {
+    return xywhClipSuppressesField(xywhBody, current.getBoundingClientRect(), units);
   }
 
-  const polygonMatch = normalized.match(/^polygon\((.*)\)$/);
-  if (polygonMatch) {
+  const polygonBody = cssFunctionBody(normalized, "polygon");
+  if (polygonBody !== null) {
     const rect = current.getBoundingClientRect();
-    const points = splitCssCommaList(polygonMatch[1]).flatMap((point) => {
+    const points = splitCssCommaList(polygonBody).flatMap((point) => {
       const [x, y] = splitCssFunctionArgs(point);
       const parsedX = x === undefined ? null : cssCoordinateToPx(x, rect.width, units);
       const parsedY = y === undefined ? null : cssCoordinateToPx(y, rect.height, units);
@@ -2392,11 +2644,16 @@ function clipPathFullyClips(
     return pointRegionSuppressesField(points, rect, true);
   }
 
-  const pathMatch = normalized.match(/^path\((.*)\)$/);
-  if (pathMatch) {
-    const fillRule = pathMatch[1].match(/^\s*(evenodd|nonzero)\s*,/i)?.[1].toLowerCase();
+  const shapeBody = cssFunctionBody(normalized, "shape");
+  if (shapeBody !== null) {
+    return shapeClipSuppressesField(shapeBody, current.getBoundingClientRect(), units);
+  }
+
+  const pathBody = cssFunctionBody(normalized, "path");
+  if (pathBody !== null) {
+    const fillRule = pathBody.match(/^\s*(evenodd|nonzero)\s*,/i)?.[1].toLowerCase();
     const pathData =
-      pathMatch[1].match(/(['"])(.*?)\1/)?.[2] ?? pathMatch[1].replace(/^evenodd\s*,/i, "");
+      pathBody.match(/(['"])(.*?)\1/)?.[2] ?? pathBody.replace(/^evenodd\s*,/i, "");
     if (
       fillRule === "evenodd" &&
       evenOddSubpathsSuppressField(pathData, current.getBoundingClientRect())

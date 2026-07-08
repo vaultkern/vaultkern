@@ -1209,9 +1209,17 @@ describe("autofill triage", () => {
         <input name="bottom_offscreen_email" type="email" autocomplete="username" style="position:absolute;bottom:-9999px" />
         <input name="transformed_email" type="email" autocomplete="username" style="transform:translateX(-9999px)" />
         <input name="clip_path_email" type="email" autocomplete="username" style="clip-path:inset(50%)" />
+        <input name="geometry_box_inset_clip_email" type="email" autocomplete="username" style="clip-path:inset(50%) content-box" />
         <input name="circle_clip_email" type="email" autocomplete="username" style="clip-path:circle(0)" />
+        <input name="circle_keyword_clip_email" type="email" autocomplete="username" style="clip-path:circle(closest-side at -9999px 50%)" />
+        <input name="geometry_box_circle_clip_email" type="email" autocomplete="username" style="clip-path:circle(closest-side at -9999px 50%) content-box" />
         <input name="ellipse_clip_email" type="email" autocomplete="username" style="clip-path:ellipse(0 0)" />
+        <input name="ellipse_keyword_clip_email" type="email" autocomplete="username" style="clip-path:ellipse(closest-side closest-side at -9999px 50%)" />
         <input name="polygon_clip_email" type="email" autocomplete="username" style="clip-path:polygon(0 0, 0 0, 0 0)" />
+        <input name="geometry_box_polygon_clip_email" type="email" autocomplete="username" style="clip-path:polygon(0 0, 0 0, 0 0) content-box" />
+        <input name="shape_zero_clip_email" type="email" autocomplete="username" style="clip-path:shape(from 0 0, line to 0 0, close)" />
+        <input name="shape_strip_clip_email" type="email" autocomplete="username" style="clip-path:shape(from 0 0, line to 4px 0, line to 4px 100%, line to 0 100%, close)" />
+        <input name="shape_offset_clip_email" type="email" autocomplete="username" style="clip-path:shape(from -9999px 0, line to -9900px 0, line to -9900px 100%, line to -9999px 100%, close)" />
         <input name="legacy_clip_email" type="email" autocomplete="username" style="position:absolute;clip:rect(0 0 0 0)" />
         <svg width="0" height="0" aria-hidden="true">
           <clipPath id="offsetRectClip"><rect x="-9999" y="0" width="200" height="30" /></clipPath>
@@ -1232,11 +1240,29 @@ describe("autofill triage", () => {
     for (const name of [
       "offset_url_clip_email",
       "translated_url_clip_email",
-      "class_translated_url_clip_email"
+      "class_translated_url_clip_email",
+      "circle_keyword_clip_email",
+      "ellipse_keyword_clip_email",
+      "geometry_box_inset_clip_email",
+      "geometry_box_circle_clip_email",
+      "geometry_box_polygon_clip_email",
+      "shape_zero_clip_email",
+      "shape_strip_clip_email",
+      "shape_offset_clip_email"
     ]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
-        elementRect({ left: 24, top: 40, width: 185, height: 21 })
+        elementRect({
+          left: 24,
+          top:
+            name.includes("_keyword_") ||
+            name.startsWith("geometry_box_") ||
+            name.startsWith("shape_")
+              ? 920
+              : 40,
+          width: 185,
+          height: 21
+        })
       );
     }
 
@@ -1266,12 +1292,40 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "clip_path_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "clip_path_email").reasons).toContain("not-viewable:clipped");
+    expect(fieldByName(report, "geometry_box_inset_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "geometry_box_inset_clip_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "circle_clip_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "circle_clip_email").reasons).toContain("not-viewable:clipped");
+    expect(fieldByName(report, "circle_keyword_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "circle_keyword_clip_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "geometry_box_circle_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "geometry_box_circle_clip_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "ellipse_clip_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "ellipse_clip_email").reasons).toContain("not-viewable:clipped");
+    expect(fieldByName(report, "ellipse_keyword_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "ellipse_keyword_clip_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "polygon_clip_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "polygon_clip_email").reasons).toContain("not-viewable:clipped");
+    expect(fieldByName(report, "geometry_box_polygon_clip_email").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "geometry_box_polygon_clip_email").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    for (const name of [
+      "shape_zero_clip_email",
+      "shape_strip_clip_email",
+      "shape_offset_clip_email"
+    ]) {
+      expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
+      expect(fieldByName(report, name).reasons).toContain("not-viewable:clipped");
+    }
     expect(fieldByName(report, "legacy_clip_email").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "legacy_clip_email").reasons).toContain("not-viewable:clipped");
     expect(fieldByName(report, "offset_url_clip_email").qualifiedAs).toBe("ignored");
@@ -1610,6 +1664,8 @@ describe("autofill triage", () => {
         <div id="cover" style="position:absolute;left:0;top:80px;width:260px;height:48px;background:white"></div>
         <input name="pointer_events_covered_password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:172px;width:185px;height:21px" />
         <div id="pointer-events-cover" style="position:absolute;left:0;top:164px;width:260px;height:48px;background:white;pointer-events:none"></div>
+        <input name="shadow_covered_password" type="password" autocomplete="current-password" style="position:absolute;left:24px;top:256px;width:185px;height:21px" />
+        <div id="shadow-cover" style="position:absolute;left:0;top:0;width:1px;height:1px;box-shadow:116px 266px 0 120px white;pointer-events:none;z-index:10"></div>
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
     `;
@@ -1622,14 +1678,23 @@ describe("autofill triage", () => {
     const pointerEventsCoveredPassword = document.querySelector(
       'input[name="pointer_events_covered_password"]'
     ) as HTMLInputElement;
+    const shadowCoveredPassword = document.querySelector(
+      'input[name="shadow_covered_password"]'
+    ) as HTMLInputElement;
     const cover = document.querySelector("#cover") as HTMLDivElement;
     const pointerEventsCover = document.querySelector("#pointer-events-cover") as HTMLDivElement;
+    const shadowCover = document.querySelector("#shadow-cover") as HTMLDivElement;
     stubElementRect(coveredPassword, elementRect({ left: 24, top: 88, width: 185, height: 21 }));
     stubElementRect(
       pointerEventsCoveredPassword,
       elementRect({ left: 24, top: 172, width: 185, height: 21 })
     );
+    stubElementRect(
+      shadowCoveredPassword,
+      elementRect({ left: 24, top: 256, width: 185, height: 21 })
+    );
     stubElementRect(pointerEventsCover, elementRect({ left: 0, top: 164, width: 260, height: 48 }));
+    stubElementRect(shadowCover, elementRect({ left: 0, top: 0, width: 1, height: 1 }));
     stubElementRect(realPassword, elementRect({ left: 24, top: 140, width: 185, height: 21 }));
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
@@ -1640,6 +1705,9 @@ describe("autofill triage", () => {
         }
         if (x >= 24 && x <= 209 && y >= 172 && y <= 193) {
           return pointerEventsCoveredPassword;
+        }
+        if (x >= 24 && x <= 209 && y >= 256 && y <= 277) {
+          return shadowCoveredPassword;
         }
         if (x >= 24 && x <= 209 && y >= 140 && y <= 161) {
           return realPassword;
@@ -1660,6 +1728,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "pointer_events_covered_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "pointer_events_covered_password").reasons).toContain(
+      "not-viewable:occluded"
+    );
+    expect(fieldByName(report, "shadow_covered_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "shadow_covered_password").reasons).toContain(
       "not-viewable:occluded"
     );
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
@@ -1779,16 +1851,36 @@ describe("autofill triage", () => {
         <input name="email" type="email" autocomplete="username" style="clip-path:inset(0)" />
         <input name="password" type="password" autocomplete="current-password" />
       </form>
+      <input name="visible_circle_probe" type="text" style="clip-path:circle(closest-side at 50% 50%)" />
+      <input name="visible_ellipse_probe" type="text" style="clip-path:ellipse(closest-side closest-side at 50% 50%)" />
     `;
-    stubElementRect(
-      document.querySelector('input[name="email"]') as HTMLInputElement,
-      elementRect({ left: 24, top: 40, width: 185, height: 21 })
-    );
+    for (const name of ["email", "visible_circle_probe", "visible_ellipse_probe"]) {
+      stubElementRect(
+        document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
+        elementRect({
+          left: 24,
+          top:
+            name === "visible_circle_probe"
+              ? 120
+              : name === "visible_ellipse_probe"
+                ? 160
+                : 40,
+          width: 185,
+          height: 21
+        })
+      );
+    }
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "email").reasons).not.toContain("not-viewable:clipped");
+    expect(fieldByName(report, "visible_circle_probe").reasons).not.toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "visible_ellipse_probe").reasons).not.toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
   });
 
