@@ -1898,6 +1898,7 @@ describe("autofill triage", () => {
           <clipPath id="emptyTextClip"><text></text></clipPath>
           <clipPath id="displayNoneRectClip"><rect style="display:none" width="200" height="30" /></clipPath>
           <clipPath id="hiddenRectClip"><rect style="visibility:hidden" width="200" height="30" /></clipPath>
+          <clipPath id="evenOddPathClip"><path clip-rule="evenodd" d="M0 0 L200 0 L200 30 L0 30 Z M0 0 L200 0 L200 30 L0 30 Z" /></clipPath>
         </svg>
         <input name="inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
         <input name="rounded_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49% round 2px)" />
@@ -1920,6 +1921,8 @@ describe("autofill triage", () => {
         <input name="url_empty_text_password" type="password" autocomplete="current-password" style="clip-path:url(#emptyTextClip)" />
         <input name="url_display_none_password" type="password" autocomplete="current-password" style="clip-path:url(#displayNoneRectClip)" />
         <input name="url_hidden_rect_password" type="password" autocomplete="current-password" style="clip-path:url(#hiddenRectClip)" />
+        <input name="url_evenodd_path_password" type="password" autocomplete="current-password" style="clip-path:url(#evenOddPathClip)" />
+        <input name="css_evenodd_path_password" type="password" autocomplete="current-password" style='clip-path:path(evenodd, "M0 0 L200 0 L200 30 L0 30 Z M0 0 L200 0 L200 30 L0 30 Z")' />
         <div style="width:2px;height:2px;overflow:hidden">
           <input name="ancestor_clipped_password" type="password" autocomplete="current-password" />
         </div>
@@ -2021,6 +2024,14 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "url_hidden_rect_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "url_hidden_rect_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "url_evenodd_path_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "url_evenodd_path_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "css_evenodd_path_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "css_evenodd_path_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "ancestor_clipped_password").qualifiedAs).toBe("ignored");

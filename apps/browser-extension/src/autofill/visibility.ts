@@ -1859,6 +1859,65 @@ function svgPathDataToPoints(value: string) {
   return points;
 }
 
+function pathPointKey(point: { x: number; y: number }) {
+  return `${Number(point.x.toFixed(4))},${Number(point.y.toFixed(4))}`;
+}
+
+function canonicalPathPointSequence(points: Array<{ x: number; y: number }>) {
+  const normalized = [...points];
+  if (
+    normalized.length > 1 &&
+    pathPointKey(normalized[0]) === pathPointKey(normalized[normalized.length - 1])
+  ) {
+    normalized.pop();
+  }
+  if (normalized.length === 0) {
+    return "";
+  }
+
+  const keys = normalized.map(pathPointKey);
+  const sequences: string[] = [];
+  for (const source of [keys, [...keys].reverse()]) {
+    for (let index = 0; index < source.length; index += 1) {
+      sequences.push([...source.slice(index), ...source.slice(0, index)].join("|"));
+    }
+  }
+  return sequences.sort()[0];
+}
+
+function svgPathDataToSubpathPoints(value: string) {
+  const subpaths = value.match(/[Mm][^Mm]*/g) ?? [value];
+  return subpaths.map(svgPathDataToPoints).filter((points) => points.length > 0);
+}
+
+function evenOddDuplicateSubpathsSuppressPath(value: string) {
+  const subpathKeys = svgPathDataToSubpathPoints(value)
+    .map(canonicalPathPointSequence)
+    .filter(Boolean);
+  if (subpathKeys.length < 2) {
+    return false;
+  }
+
+  const counts = new Map<string, number>();
+  for (const key of subpathKeys) {
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return Array.from(counts.values()).every((count) => count % 2 === 0);
+}
+
+function svgPathUsesEvenOdd(shape: Element) {
+  const style = shape.ownerDocument.defaultView?.getComputedStyle(shape);
+  const inlineStyle = (shape as SVGElement).style;
+  return [
+    shape.getAttribute("clip-rule"),
+    inlineStyle?.getPropertyValue("clip-rule"),
+    style?.getPropertyValue("clip-rule"),
+    shape.getAttribute("fill-rule"),
+    inlineStyle?.getPropertyValue("fill-rule"),
+    style?.getPropertyValue("fill-rule")
+  ].some((value) => value?.trim().toLowerCase() === "evenodd");
+}
+
 function polygonArea(points: Array<{ x: number; y: number }>) {
   const doubledArea = points.reduce((sum, point, index) => {
     const next = points[(index + 1) % points.length];
@@ -2031,7 +2090,11 @@ function svgClipShapeSuppressesField(
     );
   }
   if (tagName === "path") {
-    const points = svgPathDataToPoints(shape.getAttribute("d") ?? "");
+    const pathData = shape.getAttribute("d") ?? "";
+    if (svgPathUsesEvenOdd(shape) && evenOddDuplicateSubpathsSuppressPath(pathData)) {
+      return true;
+    }
+    const points = svgPathDataToPoints(pathData);
     return pathRegionSuppressesField(transformSvgPoints(points, matrix), rect);
   }
   if (tagName === "g" || tagName === "svg") {
@@ -2139,8 +2202,12 @@ function clipPathFullyClips(
 
   const pathMatch = normalized.match(/^path\((.*)\)$/);
   if (pathMatch) {
+    const fillRule = pathMatch[1].match(/^\s*(evenodd|nonzero)\s*,/i)?.[1].toLowerCase();
     const pathData =
       pathMatch[1].match(/(['"])(.*?)\1/)?.[2] ?? pathMatch[1].replace(/^evenodd\s*,/i, "");
+    if (fillRule === "evenodd" && evenOddDuplicateSubpathsSuppressPath(pathData)) {
+      return true;
+    }
     return pathRegionSuppressesField(
       svgPathDataToPoints(pathData),
       current.getBoundingClientRect()

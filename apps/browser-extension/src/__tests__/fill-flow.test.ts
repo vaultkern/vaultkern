@@ -616,6 +616,7 @@ describe("fillLoginForm", () => {
           <clipPath id="emptyTextClip"><text></text></clipPath>
           <clipPath id="displayNoneRectClip"><rect style="display:none" width="200" height="30" /></clipPath>
           <clipPath id="hiddenRectClip"><rect style="visibility:hidden" width="200" height="30" /></clipPath>
+          <clipPath id="evenOddPathClip"><path clip-rule="evenodd" d="M0 0 L200 0 L200 30 L0 30 Z M0 0 L200 0 L200 30 L0 30 Z" /></clipPath>
         </svg>
         <input id="inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
         <input id="rounded-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49% round 2px)" />
@@ -644,6 +645,8 @@ describe("fillLoginForm", () => {
         <input id="url-empty-text-password" type="password" autocomplete="current-password" style="clip-path:url(#emptyTextClip)" />
         <input id="url-display-none-password" type="password" autocomplete="current-password" style="clip-path:url(#displayNoneRectClip)" />
         <input id="url-hidden-rect-password" type="password" autocomplete="current-password" style="clip-path:url(#hiddenRectClip)" />
+        <input id="url-evenodd-path-password" type="password" autocomplete="current-password" style="clip-path:url(#evenOddPathClip)" />
+        <input id="css-evenodd-path-password" type="password" autocomplete="current-password" style='clip-path:path(evenodd, "M0 0 L200 0 L200 30 L0 30 Z M0 0 L200 0 L200 30 L0 30 Z")' />
         <div style="width:2px;height:2px;overflow:hidden">
           <input id="ancestor-clipped-password" type="password" autocomplete="current-password" />
         </div>
@@ -703,6 +706,8 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#url-empty-text-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-display-none-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-hidden-rect-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-evenodd-path-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#css-evenodd-path-password") as HTMLInputElement).value).toBe("");
     expect(
       (document.querySelector("#ancestor-clipped-password") as HTMLInputElement).value
     ).toBe("");
