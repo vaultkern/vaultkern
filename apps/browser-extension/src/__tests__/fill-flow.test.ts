@@ -369,6 +369,70 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys hidden by external clip-path URLs", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="data-clip-password" type="password" autocomplete="current-password" style='clip-path:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3CclipPath%20id%3D%22z%22%3E%3Crect%20width%3D%220%22%20height%3D%220%22%2F%3E%3C%2FclipPath%3E%3C%2Fsvg%3E#z")' />
+        <input id="blob-clip-password" type="password" autocomplete="current-password" style='clip-path:url("blob:null/zero-clip#z")' />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#data-clip-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#blob-clip-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("does not fill password decoys clipped away by rounded overflow ancestors", () => {
+    document.body.innerHTML = `
+      <form>
+        <div id="rounded-clip" style="position:relative;width:200px;height:200px;overflow:hidden;border-radius:50%">
+          <input id="rounded-corner-password" type="password" autocomplete="current-password" style="position:absolute;left:0;top:0;width:20px;height:20px" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector("#rounded-clip") as HTMLDivElement,
+      elementRect({ left: 20, top: 20, width: 200, height: 200 })
+    );
+    stubElementRect(
+      document.querySelector("#rounded-corner-password") as HTMLInputElement,
+      elementRect({ left: 20, top: 20, width: 26, height: 24 })
+    );
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#rounded-corner-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("does not fill password decoys clipped away by ancestor mask clip boxes", () => {
+    document.body.innerHTML = `
+      <form>
+        <div id="mask-clip" style="position:relative;width:200px;height:60px;padding-left:220px;mask-image:linear-gradient(black,black);mask-clip:content-box">
+          <input id="mask-clip-password" type="password" autocomplete="current-password" style="position:absolute;left:0;top:0;width:185px;height:21px" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector("#mask-clip") as HTMLDivElement,
+      elementRect({ left: 20, top: 20, width: 420, height: 60 })
+    );
+    stubElementRect(
+      document.querySelector("#mask-clip-password") as HTMLInputElement,
+      elementRect({ left: 20, top: 20, width: 191, height: 25 })
+    );
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#mask-clip-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill tiny password decoys", () => {
     document.body.innerHTML = `
       <form>
@@ -445,6 +509,7 @@ describe("fillLoginForm", () => {
         <input id="mask-hidden-shape-password" type="password" autocomplete="current-password" style="mask:url(#hiddenShapeMask)" />
         <input id="mask-data-svg-password" type="password" autocomplete="current-password" style='mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22transparent%22%2F%3E%3C%2Fsvg%3E")' />
         <input id="mask-data-svg-root-opacity-password" type="password" autocomplete="current-password" style='mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%20opacity%3D%220%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E")' />
+        <input id="mask-blob-url-password" type="password" autocomplete="current-password" style='mask-image:url("blob:null/transparent-mask")' />
         <input id="mask-zero-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input id="mask-zero-percent-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input id="mask-tiny-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
@@ -472,6 +537,7 @@ describe("fillLoginForm", () => {
         </svg>
         <input id="svg-filter-password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
         <input id="data-svg-filter-password" type="password" autocomplete="current-password" style='filter:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cfilter%20id%3D%22alphaZero%22%3E%3CfeComponentTransfer%3E%3CfeFuncA%20type%3D%22table%22%20tableValues%3D%220%200%22%2F%3E%3C%2FfeComponentTransfer%3E%3C%2Ffilter%3E%3C%2Fsvg%3E#alphaZero")' />
+        <input id="filter-blob-url-password" type="password" autocomplete="current-password" style='filter:url("blob:null/alpha-zero#f")' />
         <input id="svg-filter-discrete-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroDiscrete)" />
         <input id="svg-filter-gamma-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroGamma)" />
         <input id="svg-filter-matrix-password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
@@ -833,6 +899,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#mask-hidden-shape-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-data-svg-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-data-svg-root-opacity-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-blob-url-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-zero-percent-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-tiny-password") as HTMLInputElement).value).toBe("");
@@ -840,6 +907,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#mask-position-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#data-svg-filter-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#filter-blob-url-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-discrete-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-gamma-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-matrix-password") as HTMLInputElement).value).toBe("");

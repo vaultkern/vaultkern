@@ -1695,6 +1695,7 @@ describe("autofill triage", () => {
         <input name="hidden_shape_mask_password" type="password" autocomplete="current-password" style="mask:url(#hiddenShapeMask)" />
         <input name="data_svg_mask_password" type="password" autocomplete="current-password" style='mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22transparent%22%2F%3E%3C%2Fsvg%3E")' />
         <input name="data_svg_root_opacity_mask_password" type="password" autocomplete="current-password" style='mask-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%221%22%20height%3D%221%22%20opacity%3D%220%22%3E%3Crect%20width%3D%221%22%20height%3D%221%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E")' />
+        <input name="blob_url_mask_password" type="password" autocomplete="current-password" style='mask-image:url("blob:null/transparent-mask")' />
         <input name="zero_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0 0" />
         <input name="zero_percent_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:0% 100%;mask-repeat:no-repeat" />
         <input name="tiny_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:4px 100%;mask-repeat:no-repeat" />
@@ -1702,6 +1703,7 @@ describe("autofill triage", () => {
         <input name="positioned_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:-9999px 0" />
         <input name="svg_filter_password" type="password" autocomplete="current-password" style="filter:url(#alphaZero)" />
         <input name="data_svg_filter_password" type="password" autocomplete="current-password" style='filter:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cfilter%20id%3D%22alphaZero%22%3E%3CfeComponentTransfer%3E%3CfeFuncA%20type%3D%22table%22%20tableValues%3D%220%200%22%2F%3E%3C%2FfeComponentTransfer%3E%3C%2Ffilter%3E%3C%2Fsvg%3E#alphaZero")' />
+        <input name="blob_url_filter_password" type="password" autocomplete="current-password" style='filter:url("blob:null/alpha-zero#f")' />
         <input name="svg_filter_discrete_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroDiscrete)" />
         <input name="svg_filter_gamma_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroGamma)" />
         <input name="svg_filter_matrix_password" type="password" autocomplete="current-password" style="filter:url(#alphaZeroMatrix)" />
@@ -1847,6 +1849,7 @@ describe("autofill triage", () => {
       "hidden_shape_mask_password",
       "data_svg_mask_password",
       "data_svg_root_opacity_mask_password",
+      "blob_url_mask_password",
       "zero_mask_password",
       "zero_percent_mask_password",
       "tiny_mask_password",
@@ -1854,6 +1857,7 @@ describe("autofill triage", () => {
       "positioned_mask_password",
       "svg_filter_password",
       "data_svg_filter_password",
+      "blob_url_filter_password",
       "svg_filter_discrete_password",
       "svg_filter_gamma_password",
       "svg_filter_matrix_password",
@@ -2753,6 +2757,8 @@ describe("autofill triage", () => {
         <input name="url_text_password" type="password" autocomplete="current-password" style="clip-path:url(#textClip)" />
         <input name="url_display_none_password" type="password" autocomplete="current-password" style="clip-path:url(#displayNoneRectClip)" />
         <input name="url_hidden_rect_password" type="password" autocomplete="current-password" style="clip-path:url(#hiddenRectClip)" />
+        <input name="data_url_clip_password" type="password" autocomplete="current-password" style='clip-path:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3CclipPath%20id%3D%22z%22%3E%3Crect%20width%3D%220%22%20height%3D%220%22%2F%3E%3C%2FclipPath%3E%3C%2Fsvg%3E#z")' />
+        <input name="blob_url_clip_password" type="password" autocomplete="current-password" style='clip-path:url("blob:null/zero-clip#z")' />
         <input name="url_evenodd_path_password" type="password" autocomplete="current-password" style="clip-path:url(#evenOddPathClip)" />
         <input name="css_evenodd_path_password" type="password" autocomplete="current-password" style='clip-path:path(evenodd, "M0 0 L200 0 L200 30 L0 30 Z M0 0 L200 0 L200 30 L0 30 Z")' />
         <input name="url_evenodd_covered_path_password" type="password" autocomplete="current-password" style="clip-path:url(#evenOddCoveredPathClip)" />
@@ -2969,6 +2975,14 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "url_hidden_rect_password").reasons).toContain(
       "not-viewable:clipped"
     );
+    expect(fieldByName(report, "data_url_clip_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "data_url_clip_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "blob_url_clip_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "blob_url_clip_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
     expect(fieldByName(report, "url_evenodd_path_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "url_evenodd_path_password").reasons).toContain(
       "not-viewable:clipped"
@@ -3020,6 +3034,60 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "evenodd_polygon_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "evenodd_polygon_password").reasons).toContain(
       "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats fields hidden by rounded overflow clips as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <div id="rounded-clip" style="position:relative;width:200px;height:200px;overflow:hidden;border-radius:50%">
+          <input name="rounded_corner_password" type="password" autocomplete="current-password" style="position:absolute;left:0;top:0;width:20px;height:20px" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector("#rounded-clip") as HTMLDivElement,
+      elementRect({ left: 20, top: 20, width: 200, height: 200 })
+    );
+    stubElementRect(
+      document.querySelector('input[name="rounded_corner_password"]') as HTMLInputElement,
+      elementRect({ left: 20, top: 20, width: 26, height: 24 })
+    );
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "rounded_corner_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "rounded_corner_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats fields hidden outside ancestor mask clip boxes as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <div id="mask-clip" style="position:relative;width:200px;height:60px;padding-left:220px;mask-image:linear-gradient(black,black);mask-clip:content-box">
+          <input name="mask_clip_password" type="password" autocomplete="current-password" style="position:absolute;left:0;top:0;width:185px;height:21px" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    stubElementRect(
+      document.querySelector("#mask-clip") as HTMLDivElement,
+      elementRect({ left: 20, top: 20, width: 420, height: 60 })
+    );
+    stubElementRect(
+      document.querySelector('input[name="mask_clip_password"]') as HTMLInputElement,
+      elementRect({ left: 20, top: 20, width: 191, height: 25 })
+    );
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "mask_clip_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "mask_clip_password").reasons).toContain(
+      "not-viewable:transparent"
     );
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });

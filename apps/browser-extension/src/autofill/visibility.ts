@@ -2603,6 +2603,18 @@ function cssUrlValues(value: string | undefined) {
   return references;
 }
 
+function cssUrlValueIsLocallyInspectable(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized.startsWith("#") || normalized.startsWith("data:image/svg+xml");
+}
+
+function cssValueHasUninspectableUrl(value: string | undefined) {
+  return cssUrlValues(value).some((url) => {
+    const normalized = url.trim();
+    return normalized !== "" && !cssUrlValueIsLocallyInspectable(normalized);
+  });
+}
+
 function decodeUrlFragment(value: string) {
   try {
     return decodeURIComponent(value);
@@ -4211,12 +4223,88 @@ function maskLayerVisibleBounds(
   };
 }
 
+function boxEdgeLengthToPx(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  property: string,
+  axisSize: number,
+  units: { emPx?: number; remPx?: number }
+) {
+  return cssLengthToPx(cssPropertyValue(style, current, property), axisSize, units) ?? 0;
+}
+
+function maskClipVisibleBounds(
+  current: HTMLElement,
+  value: string | undefined,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
+  const rect = current.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return null;
+  }
+  const clip = splitCssFunctionArgs(value?.trim().toLowerCase() ?? "")[0] ?? "border-box";
+  if (
+    clip === "border-box" ||
+    clip === "margin-box" ||
+    clip === "fill-box" ||
+    clip === "stroke-box" ||
+    clip === "view-box" ||
+    clip === "no-clip"
+  ) {
+    return { left: 0, top: 0, right: rect.width, bottom: rect.height };
+  }
+  if (clip === "text") {
+    return { left: 0, top: 0, right: 0, bottom: 0 };
+  }
+
+  const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+  const borderLeft = boxEdgeLengthToPx(style, current, "border-left-width", rect.width, units);
+  const borderRight = boxEdgeLengthToPx(style, current, "border-right-width", rect.width, units);
+  const borderTop = boxEdgeLengthToPx(style, current, "border-top-width", rect.height, units);
+  const borderBottom = boxEdgeLengthToPx(
+    style,
+    current,
+    "border-bottom-width",
+    rect.height,
+    units
+  );
+  if (clip === "padding-box") {
+    return {
+      left: borderLeft,
+      top: borderTop,
+      right: rect.width - borderRight,
+      bottom: rect.height - borderBottom
+    };
+  }
+  if (clip === "content-box") {
+    const paddingLeft = boxEdgeLengthToPx(style, current, "padding-left", rect.width, units);
+    const paddingRight = boxEdgeLengthToPx(style, current, "padding-right", rect.width, units);
+    const paddingTop = boxEdgeLengthToPx(style, current, "padding-top", rect.height, units);
+    const paddingBottom = boxEdgeLengthToPx(
+      style,
+      current,
+      "padding-bottom",
+      rect.height,
+      units
+    );
+    return {
+      left: borderLeft + paddingLeft,
+      top: borderTop + paddingTop,
+      right: rect.width - borderRight - paddingRight,
+      bottom: rect.height - borderBottom - paddingBottom
+    };
+  }
+
+  return { left: 0, top: 0, right: rect.width, bottom: rect.height };
+}
+
 function cssMaskVisibleBounds(
   current: HTMLElement,
   imageValue: string | undefined,
   positionValue: string | undefined,
   sizeValue: string | undefined,
   repeatValue: string | undefined,
+  clipValue: string | undefined,
   modeValue: string | undefined,
   units: { emPx?: number; remPx?: number }
 ) {
@@ -4230,10 +4318,15 @@ function cssMaskVisibleBounds(
   const positionLayers = splitCssCommaList(positionValue?.trim().toLowerCase() ?? "");
   const sizeLayers = splitCssCommaList(sizeValue?.trim().toLowerCase() ?? "");
   const repeatLayers = splitCssCommaList(repeatValue?.trim().toLowerCase() ?? "");
+  const clipLayers = splitCssCommaList(clipValue?.trim().toLowerCase() ?? "");
   const bounds = imageLayers.flatMap((layer, index) => {
+    const clipBounds = maskClipVisibleBounds(current, maskLayerValue(clipLayers, index), units);
+    const applyClip = (layerBounds: RectBounds) =>
+      clipBounds === null ? layerBounds : intersectBounds(layerBounds, clipBounds);
     const svgBounds = svgMaskVisibleBounds(current, layer, units);
     if (svgBounds !== null) {
-      return [svgBounds];
+      const clipped = applyClip(svgBounds);
+      return clipped === null ? [] : [clipped];
     }
     if (maskImageFullySuppressesPaint(layer, modeValue)) {
       return [];
@@ -4248,7 +4341,8 @@ function cssMaskVisibleBounds(
       units
     );
     if (gradientBounds !== null) {
-      return [gradientBounds];
+      const clipped = applyClip(gradientBounds);
+      return clipped === null ? [] : [clipped];
     }
     const radialGradientBounds = cssMaskRadialGradientVisibleBounds(
       layer,
@@ -4260,7 +4354,8 @@ function cssMaskVisibleBounds(
       units
     );
     if (radialGradientBounds !== null) {
-      return [radialGradientBounds];
+      const clipped = applyClip(radialGradientBounds);
+      return clipped === null ? [] : [clipped];
     }
     const layerBounds = maskLayerVisibleBounds(
       maskLayerValue(positionLayers, index),
@@ -4269,7 +4364,11 @@ function cssMaskVisibleBounds(
       current,
       units
     );
-    return layerBounds === null ? [] : [layerBounds];
+    if (layerBounds === null) {
+      return [];
+    }
+    const clipped = applyClip(layerBounds);
+    return clipped === null ? [] : [clipped];
   });
   return unionBounds(bounds);
 }
@@ -4289,6 +4388,7 @@ function maskStyleVisibleBounds(
         cssPropertyValue(style, current, "mask-position"),
         cssPropertyValue(style, current, "mask-size"),
         cssPropertyValue(style, current, "mask-repeat"),
+        cssPropertyValue(style, current, "mask-clip"),
         maskMode,
         units
       ),
@@ -4298,6 +4398,7 @@ function maskStyleVisibleBounds(
         cssPropertyValue(style, current, "-webkit-mask-position"),
         cssPropertyValue(style, current, "-webkit-mask-size"),
         cssPropertyValue(style, current, "-webkit-mask-repeat"),
+        cssPropertyValue(style, current, "-webkit-mask-clip"),
         webkitMaskMode,
         units
       ),
@@ -4307,6 +4408,7 @@ function maskStyleVisibleBounds(
         cssPropertyValue(style, current, "mask-position"),
         cssPropertyValue(style, current, "mask-size"),
         cssPropertyValue(style, current, "mask-repeat"),
+        cssPropertyValue(style, current, "mask-clip"),
         maskMode,
         units
       ),
@@ -4316,6 +4418,7 @@ function maskStyleVisibleBounds(
         cssPropertyValue(style, current, "-webkit-mask-position"),
         cssPropertyValue(style, current, "-webkit-mask-size"),
         cssPropertyValue(style, current, "-webkit-mask-repeat"),
+        cssPropertyValue(style, current, "-webkit-mask-clip"),
         webkitMaskMode,
         units
       )
@@ -4695,6 +4798,26 @@ function maskStyleSuppressesPaint(
       units
     )
   );
+}
+
+function hasUninspectablePaintUrl(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return [
+    cssPropertyValue(style, current, "filter"),
+    cssPropertyValue(style, current, "mask-image"),
+    cssPropertyValue(style, current, "-webkit-mask-image"),
+    cssPropertyValue(style, current, "mask"),
+    cssPropertyValue(style, current, "-webkit-mask")
+  ].some(cssValueHasUninspectableUrl);
+}
+
+function hasUninspectableClipPathUrl(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  return cssValueHasUninspectableUrl(cssPropertyValue(style, current, "clip-path"));
 }
 
 function isEffectivelyTransparent(value: number | null) {
@@ -5327,6 +5450,16 @@ function boundsOverlap(
   return { width, height, area: width * height };
 }
 
+function intersectBounds(left: RectBounds, right: RectBounds): RectBounds | null {
+  const bounds = {
+    left: Math.max(left.left, right.left),
+    top: Math.max(left.top, right.top),
+    right: Math.min(left.right, right.right),
+    bottom: Math.min(left.bottom, right.bottom)
+  };
+  return bounds.right <= bounds.left || bounds.bottom <= bounds.top ? null : bounds;
+}
+
 function boundsArea(bounds: RectBounds) {
   return Math.max(0, bounds.right - bounds.left) * Math.max(0, bounds.bottom - bounds.top);
 }
@@ -5375,6 +5508,155 @@ function clippedAncestorVisibleOverlapSuppressesField(
     width <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
     height <= MIN_CREDENTIAL_FIELD_SIZE_PX ||
     (elementArea > 0 && area <= elementArea * MIN_CLIPPED_VISIBLE_FRACTION)
+  );
+}
+
+interface CornerRadii {
+  topLeft: { x: number; y: number };
+  topRight: { x: number; y: number };
+  bottomRight: { x: number; y: number };
+  bottomLeft: { x: number; y: number };
+}
+
+function borderCornerRadiusToPx(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  property: string,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+) {
+  const radiusValue =
+    cssPropertyValue(style, current, property) ||
+    borderRadiusShorthandCorner(cssPropertyValue(style, current, "border-radius"), property);
+  const tokens = splitCssFunctionArgs(radiusValue);
+  const x = cssLengthToPx(tokens[0] ?? "0", rect.width, units) ?? 0;
+  const y = cssLengthToPx(tokens[1] ?? tokens[0] ?? "0", rect.height, units) ?? x;
+  return {
+    x: Math.min(Math.max(0, x), rect.width / 2),
+    y: Math.min(Math.max(0, y), rect.height / 2)
+  };
+}
+
+function borderRadiusShorthandCorner(value: string, property: string) {
+  const normalized = value.trim();
+  if (!normalized) {
+    return "";
+  }
+  const [horizontalPart, verticalPart] = splitCssTopLevel(
+    normalized,
+    (char) => char === "/"
+  );
+  const horizontal = expandBoxValues(splitCssFunctionArgs(horizontalPart ?? ""));
+  const vertical =
+    verticalPart === undefined
+      ? horizontal
+      : expandBoxValues(splitCssFunctionArgs(verticalPart));
+  const corner: "top" | "right" | "bottom" | "left" =
+    property === "border-top-left-radius"
+      ? "top"
+      : property === "border-top-right-radius"
+        ? "right"
+        : property === "border-bottom-right-radius"
+          ? "bottom"
+          : "left";
+  return `${horizontal[corner]} ${vertical[corner]}`;
+}
+
+function borderCornerRadii(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  rect: DOMRect,
+  units: { emPx?: number; remPx?: number }
+): CornerRadii {
+  return {
+    topLeft: borderCornerRadiusToPx(style, current, "border-top-left-radius", rect, units),
+    topRight: borderCornerRadiusToPx(style, current, "border-top-right-radius", rect, units),
+    bottomRight: borderCornerRadiusToPx(style, current, "border-bottom-right-radius", rect, units),
+    bottomLeft: borderCornerRadiusToPx(style, current, "border-bottom-left-radius", rect, units)
+  };
+}
+
+function hasRoundedCorner(radii: CornerRadii) {
+  return Object.values(radii).some((radius) => radius.x > 0 && radius.y > 0);
+}
+
+function pointInsideCornerEllipse(
+  point: { x: number; y: number },
+  center: { x: number; y: number },
+  radius: { x: number; y: number }
+) {
+  if (radius.x <= 0 || radius.y <= 0) {
+    return true;
+  }
+  return ((point.x - center.x) / radius.x) ** 2 +
+    ((point.y - center.y) / radius.y) ** 2 <=
+    1;
+}
+
+function pointInsideRoundedRect(
+  point: { x: number; y: number },
+  width: number,
+  height: number,
+  radii: CornerRadii
+) {
+  if (point.x < 0 || point.y < 0 || point.x > width || point.y > height) {
+    return false;
+  }
+  if (point.x < radii.topLeft.x && point.y < radii.topLeft.y) {
+    return pointInsideCornerEllipse(
+      point,
+      { x: radii.topLeft.x, y: radii.topLeft.y },
+      radii.topLeft
+    );
+  }
+  if (point.x > width - radii.topRight.x && point.y < radii.topRight.y) {
+    return pointInsideCornerEllipse(
+      point,
+      { x: width - radii.topRight.x, y: radii.topRight.y },
+      radii.topRight
+    );
+  }
+  if (point.x > width - radii.bottomRight.x && point.y > height - radii.bottomRight.y) {
+    return pointInsideCornerEllipse(
+      point,
+      { x: width - radii.bottomRight.x, y: height - radii.bottomRight.y },
+      radii.bottomRight
+    );
+  }
+  if (point.x < radii.bottomLeft.x && point.y > height - radii.bottomLeft.y) {
+    return pointInsideCornerEllipse(
+      point,
+      { x: radii.bottomLeft.x, y: height - radii.bottomLeft.y },
+      radii.bottomLeft
+    );
+  }
+  return true;
+}
+
+function roundedOverflowClipSuppressesField(
+  element: HTMLElement,
+  ancestor: HTMLElement,
+  style: CSSStyleDeclaration | undefined,
+  units: { emPx?: number; remPx?: number }
+) {
+  if (element === ancestor || !clipsDescendantPaint(ancestor, style)) {
+    return false;
+  }
+  const ancestorRect = ancestor.getBoundingClientRect();
+  const fieldBounds = elementRectRelativeToAncestor(element, ancestor);
+  if (!hasMeaningfulClientRect(ancestorRect) || fieldBounds === null) {
+    return false;
+  }
+  const radii = borderCornerRadii(style, ancestor, ancestorRect, units);
+  if (!hasRoundedCorner(radii)) {
+    return false;
+  }
+  const samples = rectBoundsSamplePoints(fieldBounds);
+  return (
+    samples.length > 0 &&
+    samples.every(
+      (sample) => !pointInsideRoundedRect(sample, ancestorRect.width, ancestorRect.height, radii)
+    )
   );
 }
 
@@ -5705,14 +5987,16 @@ function svgClipPathVisibleBounds(
   value: string,
   units: { emPx?: number; remPx?: number }
 ): RectBounds | null {
-  const [id] = localCssUrlReferenceIds(value);
-  if (!id) {
-    return null;
-  }
-  const clipPath = current.ownerDocument.getElementById(id);
-  if (!clipPath) {
-    return null;
-  }
+  return unionBounds(clipPathReferenceElements(current, value).map((clipPath) =>
+    svgClipPathElementVisibleBounds(current, clipPath, units)
+  ).filter((bounds): bounds is RectBounds => bounds !== null));
+}
+
+function svgClipPathElementVisibleBounds(
+  current: HTMLElement,
+  clipPath: Element,
+  units: { emPx?: number; remPx?: number }
+): RectBounds | null {
   const shapes = Array.from(clipPath.children);
   if (shapes.length === 0) {
     return { left: 0, top: 0, right: 0, bottom: 0 };
@@ -5743,12 +6027,33 @@ function svgClipPathVisibleBounds(
   );
 }
 
+function dataSvgClipPathElements(current: HTMLElement, value: string | undefined) {
+  return cssUrlValues(value)
+    .map((url) => dataSvgReferencedElement(current, url))
+    .filter(
+      (element): element is Element =>
+        element !== null && element.tagName.toLowerCase() === "clippath"
+    );
+}
+
+function clipPathReferenceElements(current: HTMLElement, value: string | undefined) {
+  return [
+    ...localCssUrlReferenceIds(value)
+      .map((id) => current.ownerDocument.getElementById(id))
+      .filter(
+        (clipPath): clipPath is HTMLElement =>
+          clipPath !== null && clipPath.tagName.toLowerCase() === "clippath"
+      ),
+    ...dataSvgClipPathElements(current, value)
+  ];
+}
+
 function clipPathVisibleBounds(
   current: HTMLElement,
   value: string,
   units: { emPx?: number; remPx?: number }
 ): RectBounds | null {
-  if (localCssUrlReferenceIds(value).length > 0) {
+  if (clipPathReferenceElements(current, value).length > 0) {
     return svgClipPathVisibleBounds(current, value, units);
   }
 
@@ -7027,14 +7332,17 @@ function svgClipPathFullyClips(
   units: { emPx?: number; remPx?: number },
   seen: Set<Element> = new Set()
 ) {
-  const [id] = localCssUrlReferenceIds(value);
-  if (!id) {
-    return false;
-  }
-  const clipPath = current.ownerDocument.getElementById(id);
-  if (!clipPath) {
-    return false;
-  }
+  return clipPathReferenceElements(current, value).some((clipPath) =>
+    svgClipPathElementFullyClips(current, clipPath, units, seen)
+  );
+}
+
+function svgClipPathElementFullyClips(
+  current: HTMLElement,
+  clipPath: Element,
+  units: { emPx?: number; remPx?: number },
+  seen: Set<Element> = new Set()
+) {
   if (seen.has(clipPath)) {
     return true;
   }
@@ -7291,7 +7599,7 @@ function clipPathFullyClips(
   value: string,
   units: { emPx?: number; remPx?: number }
 ) {
-  if (localCssUrlReferenceIds(value).length > 0) {
+  if (clipPathReferenceElements(current, value).length > 0) {
     return svgClipPathFullyClips(current, value, units);
   }
 
@@ -7600,6 +7908,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       isEffectivelyTransparent(cumulativeOpacity * cumulativeFilterOpacity) ||
       svgFilterSuppressesPaint(current, filter, cssUnits, element) ||
       maskStyleSuppressesPaint(style, current, cssUnits) ||
+      (isCredentialLikeField(element) && hasUninspectablePaintUrl(style, current)) ||
       ancestorMaskStyleSuppressesField(element, current, style, cssUnits) ||
       (current === element &&
         isCredentialLikeField(element) &&
@@ -7610,7 +7919,8 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     }
     if (
       hasFullyClippingStyle(current, style, cssUnits) ||
-      ancestorClipStyleSuppressesField(element, current, style, cssUnits)
+      ancestorClipStyleSuppressesField(element, current, style, cssUnits) ||
+      (isCredentialLikeField(element) && hasUninspectableClipPathUrl(style, current))
     ) {
       addReason(reasons, "not-viewable:clipped");
     }
@@ -7668,7 +7978,8 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       (isClippedTinyAncestor(current, width, height, style) ||
         (clipsDescendantPaint(current, style) &&
           (isFullyClippedByAncestor(element, current) ||
-            clippedAncestorVisibleOverlapSuppressesField(element, current))))
+            clippedAncestorVisibleOverlapSuppressesField(element, current) ||
+            roundedOverflowClipSuppressesField(element, current, style, cssUnits))))
     ) {
       addReason(reasons, "not-viewable:clipped");
     }
