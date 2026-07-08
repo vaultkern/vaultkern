@@ -4802,6 +4802,9 @@ function svgClipShapeVisibleBounds(
       )
     );
   }
+  if (tagName === "text") {
+    return { left: 0, top: 0, right: 0, bottom: 0 };
+  }
   if (tagName === "polygon" || tagName === "polyline") {
     return boundsFromPoints(
       transformSvgPoints(
@@ -6082,7 +6085,7 @@ function svgClipShapeSuppressesField(
     );
   }
   if (tagName === "text") {
-    return shape.textContent?.trim() === "";
+    return true;
   }
   if (tagName === "polygon" || tagName === "polyline") {
     const points = svgPointListToPoints(

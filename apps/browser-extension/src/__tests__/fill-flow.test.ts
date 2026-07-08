@@ -2051,6 +2051,7 @@ describe("fillLoginForm", () => {
           <clipPath id="emptyGroupClip"><g></g></clipPath>
           <clipPath id="lineClip"><line x1="0" y1="0" x2="200" y2="0" /></clipPath>
           <clipPath id="emptyTextClip"><text></text></clipPath>
+          <clipPath id="textClip"><text x="0" y="10" font-size="10">x</text></clipPath>
           <clipPath id="displayNoneRectClip"><rect style="display:none" width="200" height="30" /></clipPath>
           <clipPath id="hiddenRectClip"><rect style="visibility:hidden" width="200" height="30" /></clipPath>
           <clipPath id="evenOddPathClip"><path clip-rule="evenodd" d="M0 0 L200 0 L200 30 L0 30 Z M0 0 L200 0 L200 30 L0 30 Z" /></clipPath>
@@ -2094,6 +2095,7 @@ describe("fillLoginForm", () => {
         <input id="url-empty-group-password" type="password" autocomplete="current-password" style="clip-path:url(#emptyGroupClip)" />
         <input id="url-line-password" type="password" autocomplete="current-password" style="clip-path:url(#lineClip)" />
         <input id="url-empty-text-password" type="password" autocomplete="current-password" style="clip-path:url(#emptyTextClip)" />
+        <input id="url-text-password" type="password" autocomplete="current-password" style="clip-path:url(#textClip)" />
         <input id="url-display-none-password" type="password" autocomplete="current-password" style="clip-path:url(#displayNoneRectClip)" />
         <input id="url-hidden-rect-password" type="password" autocomplete="current-password" style="clip-path:url(#hiddenRectClip)" />
         <input id="url-evenodd-path-password" type="password" autocomplete="current-password" style="clip-path:url(#evenOddPathClip)" />
@@ -2200,6 +2202,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#url-empty-group-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-line-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-empty-text-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#url-text-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-display-none-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-hidden-rect-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#url-evenodd-path-password") as HTMLInputElement).value).toBe("");
