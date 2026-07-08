@@ -775,6 +775,44 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not fill password decoys reduced to tiny viewport strips by RTL offsets", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="direction:rtl;padding-right:9999px">
+          <input id="rtl-padding-password" type="password" autocomplete="current-password" />
+        </div>
+        <div style="direction:rtl;border-right:9999px solid transparent">
+          <input id="rtl-border-password" type="password" autocomplete="current-password" />
+        </div>
+        <div style="direction:rtl;margin-right:9999px">
+          <input id="rtl-margin-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    for (const id of [
+      "rtl-padding-password",
+      "rtl-border-password",
+      "rtl-margin-password"
+    ]) {
+      stubElementRect(
+        document.querySelector(`#${id}`) as HTMLInputElement,
+        elementRect({ left: -181, top: 40, width: 185, height: 21 })
+      );
+    }
+    stubElementRect(
+      document.querySelector("#login-password") as HTMLInputElement,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+
+    fillLoginForm({ password: "secret" });
+
+    expect((document.querySelector("#rtl-padding-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#rtl-border-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#rtl-margin-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not fill password decoys hidden by SVG blend filters", () => {
     document.body.innerHTML = `
       <form>

@@ -6795,6 +6795,29 @@ function largeVerticalOffsetMovesAfterViewport(
   );
 }
 
+function viewportOverlapIsTiny(viewportExit: ViewportExit | null) {
+  if (viewportExit === null) {
+    return false;
+  }
+  const visibleWidth =
+    Math.min(viewportExit.rect.right, viewportExit.viewportWidth) -
+    Math.max(viewportExit.rect.left, 0);
+  const visibleHeight =
+    Math.min(viewportExit.rect.bottom, viewportExit.viewportHeight) -
+    Math.max(viewportExit.rect.top, 0);
+  return (
+    (visibleWidth > 0 && visibleWidth <= MIN_CREDENTIAL_FIELD_SIZE_PX) ||
+    (visibleHeight > 0 && visibleHeight <= MIN_CREDENTIAL_FIELD_SIZE_PX)
+  );
+}
+
+function largeOffsetLeavesTinyViewportOverlap(
+  viewportExit: ViewportExit | null,
+  ...offsets: Array<number | null>
+) {
+  return viewportOverlapIsTiny(viewportExit) && offsets.some(isLargeOffscreenOffset);
+}
+
 function sumPositiveOffsets(...values: Array<number | null>) {
   let total = 0;
   let found = false;
@@ -9316,6 +9339,18 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       viewport.width,
       cssUnits
     );
+    const marginRight = computedCssLengthValue(
+      style?.marginRight,
+      current.style.marginRight,
+      viewport.width,
+      cssUnits
+    );
+    const marginBottom = computedCssLengthValue(
+      style?.marginBottom,
+      current.style.marginBottom,
+      viewport.width,
+      cssUnits
+    );
     const paddingLeft = computedCssLengthValue(
       style?.paddingLeft,
       current.style.paddingLeft,
@@ -9325,6 +9360,18 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const paddingTop = computedCssLengthValue(
       style?.paddingTop,
       current.style.paddingTop,
+      viewport.width,
+      cssUnits
+    );
+    const paddingRight = computedCssLengthValue(
+      style?.paddingRight,
+      current.style.paddingRight,
+      viewport.width,
+      cssUnits
+    );
+    const paddingBottom = computedCssLengthValue(
+      style?.paddingBottom,
+      current.style.paddingBottom,
       viewport.width,
       cssUnits
     );
@@ -9340,10 +9387,26 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       viewport.height,
       cssUnits
     );
+    const borderRight = computedCssLengthValue(
+      style?.borderRightWidth,
+      current.style.borderRightWidth,
+      viewport.width,
+      cssUnits
+    );
+    const borderBottom = computedCssLengthValue(
+      style?.borderBottomWidth,
+      current.style.borderBottomWidth,
+      viewport.height,
+      cssUnits
+    );
     const ancestorBoxOffsetX =
-      current === element ? null : sumPositiveOffsets(paddingLeft, borderLeft);
+      current === element
+        ? null
+        : sumPositiveOffsets(paddingLeft, borderLeft, paddingRight, borderRight);
     const ancestorBoxOffsetY =
-      current === element ? null : sumPositiveOffsets(paddingTop, borderTop);
+      current === element
+        ? null
+        : sumPositiveOffsets(paddingTop, borderTop, paddingBottom, borderBottom);
     const width = computedCssValue(style?.width, current.style.width, cssUnits);
     const height = computedCssValue(style?.height, current.style.height, cssUnits);
     const transform = combinedTranslateOffset(style, current, cssUnits);
@@ -9380,6 +9443,21 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const hasDirectionalAncestorBoxOffset =
       horizontalOffsetMatchesViewportExit(viewportExit, ancestorBoxOffsetX) ||
       largeVerticalOffsetMovesAfterViewport(viewportExit, ancestorBoxOffsetY);
+    const hasLargeOffsetTinyViewportOverlap = largeOffsetLeavesTinyViewportOverlap(
+      viewportExit,
+      transform?.x ?? null,
+      transform?.y ?? null,
+      left,
+      top,
+      right,
+      bottom,
+      marginLeft,
+      marginTop,
+      marginRight,
+      marginBottom,
+      ancestorBoxOffsetX,
+      ancestorBoxOffsetY
+    );
     const hasMotionPathViewportExit =
       viewportExit !== null &&
       hasMotionPathOffset(style, current) &&
@@ -9448,6 +9526,7 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
         hasDirectionalPositionOffset ||
         hasDirectionalMarginOffset ||
         hasDirectionalAncestorBoxOffset ||
+        hasLargeOffsetTinyViewportOverlap ||
         hasMotionPathViewportExit)
     ) {
       addReason(reasons, "not-viewable:offscreen");
