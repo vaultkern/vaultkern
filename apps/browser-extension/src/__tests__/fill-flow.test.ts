@@ -1432,6 +1432,58 @@ describe("fillLoginForm", () => {
     expect(loginPassword.value).toBe("secret");
   });
 
+  it("does not treat visible labels as enough for conic ancestor mask wedge decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="conic-mask-label" for="conic-mask-password">Password</label>
+        <div id="ancestor-conic-mask" style="width:400px;height:40px;mask-image:conic-gradient(from -10deg at -200px 20px, transparent 0deg 20deg, black 20deg 360deg)">
+          <input id="conic-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const conicMaskPassword = document.querySelector(
+      "#conic-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const conicMaskLabel = document.querySelector("#conic-mask-label") as HTMLLabelElement;
+    stubElementRect(
+      conicMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      conicMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-conic-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return conicMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(conicMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("fills password fields when a radial ancestor mask contains the control", () => {
     document.body.innerHTML = `
       <form>

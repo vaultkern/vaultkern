@@ -2562,6 +2562,272 @@ function radialMaskLayerSuppressesField(
   return true;
 }
 
+function cssAngleToDegrees(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.endsWith("%")) {
+    const percent = Number.parseFloat(normalized.slice(0, -1));
+    return Number.isFinite(percent) ? percent * 3.6 : null;
+  }
+  const match = normalized.match(/^(-?\d+(?:\.\d+)?)(deg|grad|rad|turn)?$/);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number.parseFloat(match[1]);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  const unit = match[2] ?? "deg";
+  if (unit === "turn") {
+    return parsed * 360;
+  }
+  if (unit === "grad") {
+    return parsed * 0.9;
+  }
+  if (unit === "rad") {
+    return (parsed * 180) / Math.PI;
+  }
+  return parsed;
+}
+
+function normalizeDegrees(value: number) {
+  return ((value % 360) + 360) % 360;
+}
+
+function cssMaskConicGradientStopPoints(
+  value: string,
+  modeValue: string | undefined
+): CssMaskGradientPoint[] | null {
+  const normalized = value.trim().toLowerCase();
+  const color = cssColorStopColor(normalized);
+  if (color === null) {
+    return null;
+  }
+
+  const positions = splitCssFunctionArgs(normalized.slice(color.length).trim());
+  const paints = maskColorStopPaints(color, modeValue);
+  if (positions.length === 0) {
+    return [{ offset: null, paints }];
+  }
+
+  const points = positions.slice(0, 2).map((position) => {
+    const offset = cssAngleToDegrees(position);
+    return offset === null ? null : { offset, paints };
+  });
+  return points.every((point): point is { offset: number; paints: boolean } => point !== null)
+    ? points
+    : null;
+}
+
+function cssMaskConicGradientPaintedRanges(
+  body: string,
+  modeValue: string | undefined,
+  repeatsGradient = false
+) {
+  const parts = splitCssCommaList(body);
+  const stopParts = cssColorStopColor(parts[0] ?? "") === null ? parts.slice(1) : parts;
+  if (stopParts.length < 2) {
+    return null;
+  }
+
+  const rawPoints: CssMaskGradientPoint[] = [];
+  for (const part of stopParts) {
+    const stopPoints = cssMaskConicGradientStopPoints(part, modeValue);
+    if (stopPoints === null) {
+      return null;
+    }
+    rawPoints.push(...stopPoints);
+  }
+  if (rawPoints.length < 2) {
+    return null;
+  }
+
+  const normalizedPoints = normalizeCssMaskGradientStopOffsets(rawPoints, 360);
+  if (normalizedPoints === null) {
+    return null;
+  }
+
+  let previousOffset = normalizedPoints[0].offset;
+  const points = normalizedPoints.map((point, index) => {
+    if (index === 0) {
+      return point;
+    }
+    previousOffset = Math.max(previousOffset, point.offset);
+    return { ...point, offset: previousOffset };
+  });
+
+  if (repeatsGradient) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    const period = last.offset - first.offset;
+    if (period <= 0) {
+      return null;
+    }
+
+    const baseRanges: Array<{ start: number; end: number }> = [];
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const left = points[index];
+      const right = points[index + 1];
+      if (left.paints || right.paints) {
+        const start = Math.min(left.offset, right.offset);
+        const end = Math.max(left.offset, right.offset);
+        if (end > start) {
+          baseRanges.push({ start, end });
+        }
+      }
+    }
+
+    const ranges: Array<{ start: number; end: number }> = [];
+    for (const range of baseRanges) {
+      const firstShift = Math.floor((0 - range.end) / period) * period;
+      for (let shift = firstShift; range.start + shift < 360; shift += period) {
+        const start = Math.max(0, range.start + shift);
+        const end = Math.min(360, range.end + shift);
+        if (end > start) {
+          ranges.push({ start, end });
+        }
+      }
+    }
+    return ranges;
+  }
+
+  const ranges: Array<{ start: number; end: number }> = [];
+  const addRange = (start: number, end: number) => {
+    const rangeStart = Math.min(start, end);
+    const rangeEnd = Math.max(start, end);
+    if (rangeEnd > rangeStart) {
+      ranges.push({ start: rangeStart, end: rangeEnd });
+    }
+  };
+
+  const [first] = points;
+  if (first.paints && first.offset > 0) {
+    addRange(0, first.offset);
+  }
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const left = points[index];
+    const right = points[index + 1];
+    if (left.paints || right.paints) {
+      addRange(left.offset, right.offset);
+    }
+  }
+  const last = points[points.length - 1];
+  if (last.paints && last.offset < 360) {
+    addRange(last.offset, 360);
+  }
+
+  return ranges;
+}
+
+function conicMaskLayerSuppressesField(
+  layer: string,
+  positionValue: string | undefined,
+  sizeValue: string | undefined,
+  repeatValue: string | undefined,
+  current: HTMLElement,
+  fieldBounds: RectBounds,
+  modeValue: string | undefined,
+  units: { emPx?: number; remPx?: number }
+): boolean | null {
+  const normalized = layer.trim().toLowerCase();
+  const gradientName = normalized.startsWith("conic-gradient(")
+    ? "conic-gradient"
+    : normalized.startsWith("repeating-conic-gradient(")
+      ? "repeating-conic-gradient"
+      : null;
+  if (gradientName === null) {
+    return null;
+  }
+  const body = cssFunctionBody(normalized, gradientName);
+  if (body === null) {
+    return null;
+  }
+
+  const rect = current.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return null;
+  }
+  const size = maskLayerSize(sizeValue, rect, units);
+  if (size.width <= 0 || size.height <= 0) {
+    return true;
+  }
+  const repeatsX = maskRepeatRepeatsAxis(repeatValue, "x");
+  const repeatsY = maskRepeatRepeatsAxis(repeatValue, "y");
+  if ((repeatsX && size.width < rect.width) || (repeatsY && size.height < rect.height)) {
+    return null;
+  }
+
+  const position = positionValue?.trim() || "0% 0%";
+  const x = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "x"),
+    rect.width,
+    size.width,
+    units
+  );
+  const y = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "y"),
+    rect.height,
+    size.height,
+    units
+  );
+  if (
+    (x === null && Math.abs(rect.width - size.width) > 0.001) ||
+    (y === null && Math.abs(rect.height - size.height) > 0.001)
+  ) {
+    return null;
+  }
+
+  const parts = splitCssCommaList(body);
+  const descriptor = cssColorStopColor(parts[0] ?? "") === null ? parts[0] ?? "" : "";
+  const descriptorTokens = splitCssFunctionArgs(descriptor);
+  const fromIndex = descriptorTokens.findIndex((token) => token.toLowerCase() === "from");
+  const fromAngle =
+    fromIndex < 0 ? 0 : cssAngleToDegrees(descriptorTokens[fromIndex + 1]) ?? 0;
+  const atIndex = descriptorTokens.findIndex((token) => token.toLowerCase() === "at");
+  const center = basicPositionToPx(
+    atIndex < 0 ? [] : descriptorTokens.slice(atIndex + 1),
+    size.width,
+    size.height,
+    units
+  );
+  if (center === null) {
+    return null;
+  }
+
+  const paintedRanges = cssMaskConicGradientPaintedRanges(
+    body,
+    modeValue,
+    gradientName === "repeating-conic-gradient"
+  );
+  if (paintedRanges === null) {
+    return null;
+  }
+  if (paintedRanges.length === 0) {
+    return true;
+  }
+
+  const offsetX = x ?? 0;
+  const offsetY = y ?? 0;
+  for (const sample of rectBoundsSamplePoints(fieldBounds)) {
+    const sampleX = sample.x - offsetX;
+    const sampleY = sample.y - offsetY;
+    if (sampleX < 0 || sampleY < 0 || sampleX > size.width || sampleY > size.height) {
+      continue;
+    }
+    const angle = normalizeDegrees(
+      (Math.atan2(sampleY - center.y, sampleX - center.x) * 180) / Math.PI
+    );
+    const relativeAngle = normalizeDegrees(angle - fromAngle);
+    if (radialPaintedRangesContainDistance(paintedRanges, relativeAngle)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function bodyAxisSize(
   body: string,
   size: { width: number; height: number }
@@ -2960,7 +3226,7 @@ function maskStyleVisibleBounds(
   );
 }
 
-function radialMaskStyleSuppressesField(
+function sampledMaskStyleSuppressesField(
   style: CSSStyleDeclaration | undefined,
   current: HTMLElement,
   fieldBounds: RectBounds,
@@ -2999,7 +3265,7 @@ function radialMaskStyleSuppressesField(
     }
   ];
 
-  let modeledRadialLayer = false;
+  let modeledSampledLayer = false;
   for (const source of sources) {
     if (!isMeaningfulCssValue(source.image)) {
       continue;
@@ -3012,27 +3278,41 @@ function radialMaskStyleSuppressesField(
       if (!isMeaningfulCssValue(layer)) {
         continue;
       }
-      const suppressed = radialMaskLayerSuppressesField(
-        layer,
-        maskLayerValue(positions, index),
-        maskLayerValue(sizes, index),
-        maskLayerValue(repeats, index),
-        current,
-        fieldBounds,
-        source.mode,
-        units
-      );
+      const position = maskLayerValue(positions, index);
+      const size = maskLayerValue(sizes, index);
+      const repeat = maskLayerValue(repeats, index);
+      const suppressed =
+        radialMaskLayerSuppressesField(
+          layer,
+          position,
+          size,
+          repeat,
+          current,
+          fieldBounds,
+          source.mode,
+          units
+        ) ??
+        conicMaskLayerSuppressesField(
+          layer,
+          position,
+          size,
+          repeat,
+          current,
+          fieldBounds,
+          source.mode,
+          units
+        );
       if (suppressed === null) {
         return false;
       }
-      modeledRadialLayer = true;
+      modeledSampledLayer = true;
       if (!suppressed) {
         return false;
       }
     }
   }
 
-  return modeledRadialLayer;
+  return modeledSampledLayer;
 }
 
 function svgElementOpacityValue(
@@ -4356,7 +4636,7 @@ function ancestorMaskStyleSuppressesField(
   if (fieldBounds === null) {
     return false;
   }
-  if (radialMaskStyleSuppressesField(style, current, fieldBounds, units)) {
+  if (sampledMaskStyleSuppressesField(style, current, fieldBounds, units)) {
     return true;
   }
   const maskBounds = maskStyleVisibleBounds(style, current, units);

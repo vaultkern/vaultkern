@@ -3284,6 +3284,63 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats fields hidden by conic ancestor mask wedges as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="conic-mask-label" for="conic-mask-password">Password</label>
+        <div id="ancestor-conic-mask" style="width:400px;height:40px;mask-image:conic-gradient(from -10deg at -200px 20px, transparent 0deg 20deg, black 20deg 360deg)">
+          <input id="conic-mask-password" name="conic_mask_password" type="password" autocomplete="current-password" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const conicMaskPassword = document.querySelector(
+      "#conic-mask-password"
+    ) as HTMLInputElement;
+    const conicMaskLabel = document.querySelector("#conic-mask-label") as HTMLLabelElement;
+    const realPassword = document.querySelector(
+      'input[name="real_password"]'
+    ) as HTMLInputElement;
+    stubElementRect(
+      conicMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      conicMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-conic-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(realPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return conicMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return realPassword;
+        }
+        return document.body;
+      }
+    });
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(fieldByName(report, "conic_mask_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "conic_mask_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats fields hidden by repeating-radial ancestor masks as not viewable", () => {
     document.body.innerHTML = `
       <form>
