@@ -989,6 +989,36 @@ function cssColorsMatch(left: CssColorRgba | null, right: CssColorRgba | null) {
   );
 }
 
+function cssColorChannelsMatch(left: CssColorRgba | null, right: CssColorRgba | null) {
+  if (left === null || right === null) {
+    return false;
+  }
+  return (
+    Math.abs(left.r - right.r) <= 1 &&
+    Math.abs(left.g - right.g) <= 1 &&
+    Math.abs(left.b - right.b) <= 1 &&
+    Math.abs(left.a - right.a) <= 0.01
+  );
+}
+
+function cssColorCompositedOver(
+  color: CssColorRgba,
+  background: CssColorRgba
+): CssColorRgba {
+  const sourceAlpha = clampCssAlphaChannel(color.a);
+  const backgroundAlpha = clampCssAlphaChannel(background.a);
+  const alpha = sourceAlpha + backgroundAlpha * (1 - sourceAlpha);
+  if (alpha <= 0.01) {
+    return { r: 0, g: 0, b: 0, a: 0 };
+  }
+  return {
+    r: (color.r * sourceAlpha + background.r * backgroundAlpha * (1 - sourceAlpha)) / alpha,
+    g: (color.g * sourceAlpha + background.g * backgroundAlpha * (1 - sourceAlpha)) / alpha,
+    b: (color.b * sourceAlpha + background.b * backgroundAlpha * (1 - sourceAlpha)) / alpha,
+    a: alpha
+  };
+}
+
 function cssColorPaintedOverBackground(
   color: CssColorRgba | null,
   background: CssColorRgba
@@ -1282,7 +1312,7 @@ function nearestOpaqueAncestorBackgroundColor(current: HTMLElement) {
   let ancestor = parentElementOrShadowHost(current);
   while (ancestor) {
     const style = ancestor.ownerDocument.defaultView?.getComputedStyle(ancestor);
-    const color = cssColorRgba(cssPropertyValue(style, ancestor, "background-color"));
+    const color = elementBackgroundPaintColor(style, ancestor);
     if (cssColorIsOpaque(color)) {
       return color;
     }
@@ -1303,7 +1333,7 @@ function fieldOwnBackgroundColor(
   style: CSSStyleDeclaration | undefined,
   current: HTMLElement
 ) {
-  return cssColorRgba(cssPropertyValue(style, current, "background-color"));
+  return elementBackgroundPaintColor(style, current);
 }
 
 function fieldEffectiveBackgroundColor(
@@ -1385,6 +1415,10 @@ function fieldChromePaintBlendsIntoBackground(
 ) {
   const filter = cssPropertyValue(style, current, "filter");
   const blendMode = cssPropertyValue(style, current, "mix-blend-mode");
+  const backgroundImage = cssPropertyValue(style, current, "background-image");
+  const hasUnmodeledBackgroundImage =
+    !cssPaintListLooksEmpty(backgroundImage) &&
+    cssBackgroundImageSolidColor(backgroundImage) === null;
   const ancestorBackground = nearestOpaqueAncestorBackgroundColor(current);
   const ownBackground = fieldOwnBackgroundColor(style, current);
   const paintedOwnBackground = cssPaintColorOnBackground(
@@ -1408,9 +1442,9 @@ function fieldChromePaintBlendsIntoBackground(
   }
   return (
     !fieldHasPlaceholderText(current) &&
+    !hasUnmodeledBackgroundImage &&
     !cssColorContrastsWithBackground(textColor, ancestorBackground) &&
     !cssColorContrastsWithBackground(paintedOwnBackground, ancestorBackground) &&
-    cssPaintListLooksEmpty(cssPropertyValue(style, current, "background-image")) &&
     !fieldBorderPaintContrastsWithBackground(
       style,
       current,
@@ -1472,11 +1506,7 @@ function cssColorStopColor(value: string) {
     return functionColor[0];
   }
   const firstToken = splitCssFunctionArgs(normalized)[0];
-  if (
-    firstToken === "transparent" ||
-    firstToken === "black" ||
-    firstToken?.startsWith("#")
-  ) {
+  if (firstToken !== undefined && cssColorRgba(firstToken) !== null) {
     return firstToken;
   }
   return null;
@@ -1486,6 +1516,75 @@ function gradientColorStops(value: string) {
   return splitCssCommaList(value)
     .map(cssColorStopColor)
     .filter((color): color is string => color !== null);
+}
+
+function cssGradientSolidColor(value: string) {
+  const normalized = value.trim().toLowerCase();
+  const gradientName = normalized.match(
+    /^((?:repeating-)?(?:linear|radial|conic)-gradient)\(/
+  )?.[1];
+  if (!gradientName) {
+    return null;
+  }
+  const body = cssFunctionBody(normalized, gradientName);
+  if (body === null) {
+    return null;
+  }
+
+  const colors: CssColorRgba[] = [];
+  let sawColorStop = false;
+  for (const part of splitCssCommaList(body)) {
+    const stopColor = cssColorStopColor(part);
+    if (stopColor === null) {
+      if (sawColorStop) {
+        return null;
+      }
+      continue;
+    }
+    const color = cssColorRgba(stopColor);
+    if (color === null) {
+      return null;
+    }
+    colors.push(color);
+    sawColorStop = true;
+  }
+
+  if (colors.length === 0) {
+    return null;
+  }
+  const [first, ...rest] = colors;
+  return rest.every((color) => cssColorChannelsMatch(first, color)) ? first : null;
+}
+
+function cssBackgroundImageSolidColor(value: string) {
+  if (cssPaintListLooksEmpty(value)) {
+    return null;
+  }
+
+  let result: CssColorRgba = { r: 0, g: 0, b: 0, a: 0 };
+  for (const layer of splitCssCommaList(value).reverse()) {
+    const layerColor = cssGradientSolidColor(layer);
+    if (layerColor === null) {
+      return null;
+    }
+    result = cssColorCompositedOver(layerColor, result);
+  }
+  return result;
+}
+
+function elementBackgroundPaintColor(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement
+) {
+  const backgroundColor =
+    cssColorRgba(cssPropertyValue(style, current, "background-color")) ??
+    ({ r: 0, g: 0, b: 0, a: 0 } satisfies CssColorRgba);
+  const backgroundImage = cssBackgroundImageSolidColor(
+    cssPropertyValue(style, current, "background-image")
+  );
+  return backgroundImage === null
+    ? backgroundColor
+    : cssColorCompositedOver(backgroundImage, backgroundColor);
 }
 
 function maskModePaintsByLuminance(value: string | undefined) {

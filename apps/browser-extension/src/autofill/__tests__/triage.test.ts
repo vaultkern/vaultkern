@@ -1669,6 +1669,9 @@ describe("autofill triage", () => {
         <div style="background:black">
           <input name="blend_multiply_password" type="password" autocomplete="current-password" style="mix-blend-mode:multiply;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
         </div>
+        <div style="background-image:linear-gradient(black, black)">
+          <input name="gradient_backdrop_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
+        </div>
         <input name="font_zero_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;font-size:0;outline:0;box-shadow:none;text-shadow:none" />
         <input name="text_indent_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;border:0;background:transparent;color:black;text-indent:-9999px;outline:0;box-shadow:none;text-shadow:none" />
         <input name="real_password" type="password" autocomplete="current-password" />
@@ -1745,6 +1748,7 @@ describe("autofill triage", () => {
       "filter_inverted_password",
       "blend_screen_password",
       "blend_multiply_password",
+      "gradient_backdrop_password",
       "font_zero_password",
       "text_indent_password"
     ]) {
@@ -1785,6 +1789,9 @@ describe("autofill triage", () => {
           <input name="visible_screen_blend_password" type="password" autocomplete="current-password" style="mix-blend-mode:screen;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white" />
         </div>
         <input name="visible_multiply_blend_password" type="password" autocomplete="current-password" style="mix-blend-mode:multiply;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black" />
+        <div style="background-image:linear-gradient(black, black)">
+          <input name="visible_gradient_backdrop_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white;outline:0;box-shadow:none;text-shadow:none" />
+        </div>
         <input name="group_mask_password" type="password" autocomplete="current-password" style="mask:url(#visibleGroupMask)" />
         <input name="positioned_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:100% 0" />
         <input name="gamma_filtered_password" type="password" autocomplete="current-password" style="filter:url(#alphaVisibleGamma)" />
@@ -1829,6 +1836,10 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "visible_multiply_blend_password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "visible_multiply_blend_password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "visible_gradient_backdrop_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "visible_gradient_backdrop_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
     expect(fieldByName(report, "group_mask_password").qualifiedAs).toBe("password");
