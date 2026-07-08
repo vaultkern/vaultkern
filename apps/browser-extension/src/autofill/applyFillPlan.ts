@@ -8,6 +8,7 @@ function isWritableField(
   const ownerWindow = element.ownerDocument.defaultView;
   if (
     ownerWindow === null ||
+    !element.isConnected ||
     !(
       element instanceof ownerWindow.HTMLInputElement ||
       element instanceof ownerWindow.HTMLSelectElement ||

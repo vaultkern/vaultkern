@@ -693,6 +693,31 @@ describe("fillLoginForm", () => {
     expect(password.value).toBe("");
   });
 
+  it("does not write secrets into fields removed during earlier fill events", () => {
+    document.body.innerHTML = `
+      <form>
+        <input id="login-email" type="email" autocomplete="username" />
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const username = document.querySelector("#login-email") as HTMLInputElement;
+    const password = document.querySelector("#login-password") as HTMLInputElement;
+    let leakedPassword = "";
+
+    password.addEventListener("input", () => {
+      leakedPassword = password.value;
+    });
+    username.addEventListener("input", () => {
+      password.remove();
+    });
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect(username.value).toBe("alice@example.com");
+    expect(password.value).toBe("");
+    expect(leakedPassword).toBe("");
+  });
+
   it("dispatches input change and blur events for updated fields", () => {
     document.body.innerHTML = `
       <form>
