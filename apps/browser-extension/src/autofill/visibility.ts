@@ -1090,14 +1090,17 @@ function svgFloodOpacityValue(primitive: Element) {
 
 function svgFloodPaintColorValue(primitive: Element) {
   const styled = primitive as SVGElement;
+  const style = primitive.ownerDocument.defaultView?.getComputedStyle(primitive);
   const opacity = svgFloodOpacityValue(primitive);
-  const floodColor =
-    primitive.getAttribute("flood-color") ??
-    styled.style?.getPropertyValue("flood-color");
+  const floodColors = [
+    style?.getPropertyValue("flood-color"),
+    primitive.getAttribute("flood-color") ?? undefined,
+    styled.style?.getPropertyValue("flood-color")
+  ].filter((color): color is string => Boolean(color?.trim()));
   const color =
-    floodColor === undefined || floodColor === null || floodColor.trim() === ""
+    floodColors.length === 0
       ? ({ r: 0, g: 0, b: 0, a: 1 } satisfies CssColorRgba)
-      : cssColorRgba(floodColor);
+      : firstCssColorRgba(floodColors);
   if (color === null) {
     return null;
   }
@@ -1726,6 +1729,28 @@ interface CssColorRgba {
   a: number;
 }
 
+const CSS_BASIC_NAMED_COLORS: Record<string, [number, number, number]> = {
+  aqua: [0, 255, 255],
+  blue: [0, 0, 255],
+  cyan: [0, 255, 255],
+  fuchsia: [255, 0, 255],
+  gray: [128, 128, 128],
+  green: [0, 128, 0],
+  grey: [128, 128, 128],
+  lime: [0, 255, 0],
+  magenta: [255, 0, 255],
+  maroon: [128, 0, 0],
+  navy: [0, 0, 128],
+  olive: [128, 128, 0],
+  orange: [255, 165, 0],
+  purple: [128, 0, 128],
+  red: [255, 0, 0],
+  rebeccapurple: [102, 51, 153],
+  silver: [192, 192, 192],
+  teal: [0, 128, 128],
+  yellow: [255, 255, 0]
+};
+
 function clampCssColorChannel(value: number) {
   return Math.min(255, Math.max(0, value));
 }
@@ -1817,7 +1842,22 @@ function cssColorRgba(value: string): CssColorRgba | null {
   if (normalized === "white") {
     return { r: 255, g: 255, b: 255, a: 1 };
   }
-  return cssHexColor(normalized) ?? cssRgbColor(normalized);
+  return cssHexColor(normalized) ?? cssRgbColor(normalized) ?? cssBasicNamedColor(normalized);
+}
+
+function cssBasicNamedColor(value: string): CssColorRgba | null {
+  const color = CSS_BASIC_NAMED_COLORS[value];
+  return color === undefined ? null : { r: color[0], g: color[1], b: color[2], a: 1 };
+}
+
+function firstCssColorRgba(values: string[]) {
+  for (const value of values) {
+    const color = cssColorRgba(value);
+    if (color !== null) {
+      return color;
+    }
+  }
+  return null;
 }
 
 function cssColorIsOpaque(color: CssColorRgba | null): color is CssColorRgba {

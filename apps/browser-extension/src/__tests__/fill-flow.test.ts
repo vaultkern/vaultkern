@@ -461,6 +461,7 @@ describe("fillLoginForm", () => {
           <filter id="componentBlack"><feComponentTransfer><feFuncR type="table" tableValues="0 0" /><feFuncG type="table" tableValues="0 0" /><feFuncB type="table" tableValues="0 0" /></feComponentTransfer></filter>
           <filter id="compositeBlackIn"><feFlood flood-color="black" result="blackPaint" /><feComposite in="blackPaint" in2="SourceAlpha" operator="in" /></filter>
           <filter id="blendBlack"><feFlood flood-color="black" result="blackPaint" /><feBlend in="blackPaint" in2="SourceGraphic" mode="normal" /></filter>
+          <filter id="floodNamedBlue"><feFlood flood-color="blue" /></filter>
           <filter id="compositeInTransparent"><feFlood flood-opacity="0" result="transparent" /><feComposite in="SourceGraphic" in2="transparent" operator="in" /></filter>
           <filter id="morphologyErode"><feMorphology operator="erode" radius="9999" /></filter>
           <filter id="sourceOut"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="out" /></filter>
@@ -479,6 +480,9 @@ describe("fillLoginForm", () => {
           <input id="svg-filter-component-black-password" type="password" autocomplete="current-password" style="filter:url(#componentBlack)" />
           <input id="svg-filter-composite-black-password" type="password" autocomplete="current-password" style="filter:url(#compositeBlackIn)" />
           <input id="svg-filter-blend-black-password" type="password" autocomplete="current-password" style="filter:url(#blendBlack)" />
+        </div>
+        <div style="background:rgb(0,0,255)">
+          <input id="svg-filter-named-blue-password" type="password" autocomplete="current-password" style="filter:url(#floodNamedBlue)" />
         </div>
         <input id="svg-filter-composite-in-password" type="password" autocomplete="current-password" style="filter:url(#compositeInTransparent)" />
         <input id="svg-filter-morphology-password" type="password" autocomplete="current-password" style="filter:url(#morphologyErode)" />
@@ -839,6 +843,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#svg-filter-component-black-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-composite-black-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-blend-black-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#svg-filter-named-blue-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-composite-in-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-morphology-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#svg-filter-composite-out-password") as HTMLInputElement).value).toBe("");

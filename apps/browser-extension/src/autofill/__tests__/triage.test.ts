@@ -1662,6 +1662,7 @@ describe("autofill triage", () => {
           <filter id="componentBlack"><feComponentTransfer><feFuncR type="table" tableValues="0 0" /><feFuncG type="table" tableValues="0 0" /><feFuncB type="table" tableValues="0 0" /></feComponentTransfer></filter>
           <filter id="compositeBlackIn"><feFlood flood-color="black" result="blackPaint" /><feComposite in="blackPaint" in2="SourceAlpha" operator="in" /></filter>
           <filter id="blendBlack"><feFlood flood-color="black" result="blackPaint" /><feBlend in="blackPaint" in2="SourceGraphic" mode="normal" /></filter>
+          <filter id="floodNamedBlue"><feFlood flood-color="blue" /></filter>
           <filter id="compositeInTransparent"><feFlood flood-opacity="0" result="transparent" /><feComposite in="SourceGraphic" in2="transparent" operator="in" /></filter>
           <filter id="morphologyErode"><feMorphology operator="erode" radius="9999" /></filter>
           <filter id="sourceOut"><feComposite in="SourceGraphic" in2="SourceAlpha" operator="out" /></filter>
@@ -1710,6 +1711,9 @@ describe("autofill triage", () => {
           <input name="svg_filter_black_component_password" type="password" autocomplete="current-password" style="filter:url(#componentBlack)" />
           <input name="svg_filter_black_composite_password" type="password" autocomplete="current-password" style="filter:url(#compositeBlackIn)" />
           <input name="svg_filter_black_blend_password" type="password" autocomplete="current-password" style="filter:url(#blendBlack)" />
+        </div>
+        <div style="background:rgb(0,0,255)">
+          <input name="svg_filter_named_blue_password" type="password" autocomplete="current-password" style="filter:url(#floodNamedBlue)" />
         </div>
         <input name="svg_filter_composite_in_password" type="password" autocomplete="current-password" style="filter:url(#compositeInTransparent)" />
         <input name="svg_filter_morphology_password" type="password" autocomplete="current-password" style="filter:url(#morphologyErode)" />
@@ -1854,6 +1858,7 @@ describe("autofill triage", () => {
       "svg_filter_black_component_password",
       "svg_filter_black_composite_password",
       "svg_filter_black_blend_password",
+      "svg_filter_named_blue_password",
       "svg_filter_composite_in_password",
       "svg_filter_morphology_password",
       "svg_filter_composite_out_password",
