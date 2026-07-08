@@ -1241,6 +1241,196 @@ function svgColorMatrixPaintCollapseColorValue(matrix: Element) {
       };
 }
 
+function svgColorInterpolationUsesLinearRgb(element: Element) {
+  for (let current: Element | null = element; current; current = current.parentElement) {
+    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    const inlineStyle = (current as SVGElement).style;
+    const value = (
+      current.getAttribute("color-interpolation-filters") ??
+      inlineStyle?.getPropertyValue("color-interpolation-filters") ??
+      style?.getPropertyValue("color-interpolation-filters") ??
+      ""
+    )
+      .trim()
+      .toLowerCase();
+    if (value === "srgb") {
+      return false;
+    }
+    if (value === "linearrgb") {
+      return true;
+    }
+  }
+  return true;
+}
+
+function cssSrgbChannelToLinear(value: number) {
+  const encoded = clampCssColorChannel(value) / 255;
+  return encoded <= 0.04045
+    ? encoded / 12.92
+    : ((encoded + 0.055) / 1.055) ** 2.4;
+}
+
+function svgColorMatrixInputChannels(color: CssColorRgba, useLinearRgb: boolean) {
+  return useLinearRgb
+    ? [
+        cssSrgbChannelToLinear(color.r),
+        cssSrgbChannelToLinear(color.g),
+        cssSrgbChannelToLinear(color.b),
+        clampCssAlphaChannel(color.a)
+      ]
+    : [
+        clampCssColorChannel(color.r) / 255,
+        clampCssColorChannel(color.g) / 255,
+        clampCssColorChannel(color.b) / 255,
+        clampCssAlphaChannel(color.a)
+      ];
+}
+
+function svgColorMatrixOutputColor(
+  channels: [number, number, number, number],
+  useLinearRgb: boolean
+) {
+  const [r, g, b, a] = channels;
+  return useLinearRgb
+    ? cssLinearSrgbToColor(r, g, b, clampCssAlphaChannel(a))
+    : {
+        r: clampCssColorChannel(r * 255),
+        g: clampCssColorChannel(g * 255),
+        b: clampCssColorChannel(b * 255),
+        a: clampCssAlphaChannel(a)
+      };
+}
+
+function svgColorMatrixApply(
+  color: CssColorRgba,
+  matrix: number[],
+  useLinearRgb: boolean
+) {
+  const [r, g, b, a] = svgColorMatrixInputChannels(color, useLinearRgb);
+  const channel = (offset: number) =>
+    matrix[offset] * r +
+    matrix[offset + 1] * g +
+    matrix[offset + 2] * b +
+    matrix[offset + 3] * a +
+    matrix[offset + 4];
+  return svgColorMatrixOutputColor(
+    [channel(0), channel(5), channel(10), channel(15)],
+    useLinearRgb
+  );
+}
+
+function svgSaturateMatrix(amount: number) {
+  return [
+    0.213 + 0.787 * amount,
+    0.715 - 0.715 * amount,
+    0.072 - 0.072 * amount,
+    0,
+    0,
+    0.213 - 0.213 * amount,
+    0.715 + 0.285 * amount,
+    0.072 - 0.072 * amount,
+    0,
+    0,
+    0.213 - 0.213 * amount,
+    0.715 - 0.715 * amount,
+    0.072 + 0.928 * amount,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0
+  ];
+}
+
+function svgHueRotateMatrix(degrees: number) {
+  const radians = (degrees * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return [
+    0.213 + cos * 0.787 - sin * 0.213,
+    0.715 - cos * 0.715 - sin * 0.715,
+    0.072 - cos * 0.072 + sin * 0.928,
+    0,
+    0,
+    0.213 - cos * 0.213 + sin * 0.143,
+    0.715 + cos * 0.285 + sin * 0.14,
+    0.072 - cos * 0.072 - sin * 0.283,
+    0,
+    0,
+    0.213 - cos * 0.213 - sin * 0.787,
+    0.715 - cos * 0.715 + sin * 0.715,
+    0.072 + cos * 0.928 + sin * 0.072,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0
+  ];
+}
+
+function svgLuminanceToAlphaMatrix() {
+  return [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0.2125,
+    0.7154,
+    0.0721,
+    0,
+    0
+  ];
+}
+
+function svgColorMatrixPaintColorValue(
+  matrix: Element,
+  inputColor: CssColorRgba | null
+) {
+  if (inputColor === null) {
+    return svgColorMatrixPaintCollapseColorValue(matrix);
+  }
+
+  const type = matrix.getAttribute("type")?.toLowerCase() ?? "matrix";
+  const useLinearRgb = svgColorInterpolationUsesLinearRgb(matrix);
+  if (type === "matrix") {
+    const values = svgNumberList(matrix.getAttribute("values"));
+    return values === null || values.length < 20
+      ? null
+      : svgColorMatrixApply(inputColor, values.slice(0, 20), useLinearRgb);
+  }
+  if (type === "saturate") {
+    const amount = Number(matrix.getAttribute("values") ?? "1");
+    return Number.isFinite(amount)
+      ? svgColorMatrixApply(inputColor, svgSaturateMatrix(amount), useLinearRgb)
+      : null;
+  }
+  if (type === "huerotate") {
+    const degrees = Number(matrix.getAttribute("values") ?? "0");
+    return Number.isFinite(degrees)
+      ? svgColorMatrixApply(inputColor, svgHueRotateMatrix(degrees), useLinearRgb)
+      : null;
+  }
+  if (type === "luminancetoalpha") {
+    return svgColorMatrixApply(inputColor, svgLuminanceToAlphaMatrix(), useLinearRgb);
+  }
+  return null;
+}
+
 function svgMergeOpacityValue(
   primitive: Element,
   previousOutputOpacity: number | null,
@@ -1362,13 +1552,14 @@ function svgFilterGraphOpacityValue(filter: Element) {
 function svgFilterKnownInputPaintColor(
   value: string,
   previousOutputColor: CssColorRgba | null,
-  resultColors: ReadonlyMap<string, CssColorRgba | null>
+  resultColors: ReadonlyMap<string, CssColorRgba | null>,
+  sourceColor: CssColorRgba | null = null
 ) {
   if (value === "") {
-    return previousOutputColor;
+    return previousOutputColor ?? sourceColor;
   }
   if (svgFilterInputIsSourcePaint(value)) {
-    return null;
+    return sourceColor;
   }
   if (value === "transparentblack") {
     return { r: 0, g: 0, b: 0, a: 0 };
@@ -1380,19 +1571,22 @@ function svgFilterPrimitiveInputPaintColor(
   primitive: Element,
   attribute: "in" | "in2",
   previousOutputColor: CssColorRgba | null,
-  resultColors: ReadonlyMap<string, CssColorRgba | null>
+  resultColors: ReadonlyMap<string, CssColorRgba | null>,
+  sourceColor: CssColorRgba | null = null
 ) {
   return svgFilterKnownInputPaintColor(
     svgFilterInputName(primitive, attribute),
     previousOutputColor,
-    resultColors
+    resultColors,
+    sourceColor
   );
 }
 
 function svgMergePaintCollapseColorValue(
   primitive: Element,
   previousOutputColor: CssColorRgba | null,
-  resultColors: ReadonlyMap<string, CssColorRgba | null>
+  resultColors: ReadonlyMap<string, CssColorRgba | null>,
+  sourceColor: CssColorRgba | null = null
 ) {
   const mergeNodes = Array.from(primitive.children).filter(
     (child) => child.tagName.toLowerCase() === "femergenode"
@@ -1405,7 +1599,8 @@ function svgMergePaintCollapseColorValue(
     svgFilterKnownInputPaintColor(
       svgFilterInputName(node, "in"),
       previousOutputColor,
-      resultColors
+      resultColors,
+      sourceColor
     )
   );
   return colors.every(
@@ -1419,13 +1614,15 @@ function svgMergePaintCollapseColorValue(
 function svgFilterCompositePaintCollapseColorValue(
   primitive: Element,
   previousOutputColor: CssColorRgba | null,
-  resultColors: ReadonlyMap<string, CssColorRgba | null>
+  resultColors: ReadonlyMap<string, CssColorRgba | null>,
+  sourceColor: CssColorRgba | null = null
 ) {
   const inputColor = svgFilterPrimitiveInputPaintColor(
     primitive,
     "in",
     previousOutputColor,
-    resultColors
+    resultColors,
+    sourceColor
   );
   if (inputColor === null) {
     return null;
@@ -1444,7 +1641,8 @@ function svgFilterCompositePaintCollapseColorValue(
     primitive,
     "in2",
     previousOutputColor,
-    resultColors
+    resultColors,
+    sourceColor
   );
   if (operator === "in" && input2Color !== null && !isEffectivelyTransparent(input2Color.a)) {
     return inputColor;
@@ -1494,20 +1692,23 @@ function svgFilterBlendAbsorbingPaintColor(
 function svgFilterBlendPaintCollapseColorValue(
   primitive: Element,
   previousOutputColor: CssColorRgba | null,
-  resultColors: ReadonlyMap<string, CssColorRgba | null>
+  resultColors: ReadonlyMap<string, CssColorRgba | null>,
+  sourceColor: CssColorRgba | null = null
 ) {
   const mode = (primitive.getAttribute("mode") ?? "normal").trim().toLowerCase();
   const inputColor = svgFilterPrimitiveInputPaintColor(
     primitive,
     "in",
     previousOutputColor,
-    resultColors
+    resultColors,
+    sourceColor
   );
   const input2Color = svgFilterPrimitiveInputPaintColor(
     primitive,
     "in2",
     previousOutputColor,
-    resultColors
+    resultColors,
+    sourceColor
   );
 
   if (mode !== "normal") {
@@ -1528,43 +1729,59 @@ function svgFilterBlendPaintCollapseColorValue(
 function svgFilterPrimitivePaintCollapseColorValue(
   primitive: Element,
   previousOutputColor: CssColorRgba | null,
-  resultColors: ReadonlyMap<string, CssColorRgba | null>
+  resultColors: ReadonlyMap<string, CssColorRgba | null>,
+  sourceColor: CssColorRgba | null = null
 ) {
   const tagName = primitive.tagName.toLowerCase();
   if (tagName === "feflood") {
     return svgFloodPaintColorValue(primitive);
   }
   if (tagName === "femerge") {
-    return svgMergePaintCollapseColorValue(primitive, previousOutputColor, resultColors);
+    return svgMergePaintCollapseColorValue(
+      primitive,
+      previousOutputColor,
+      resultColors,
+      sourceColor
+    );
   }
   if (tagName === "fecomponenttransfer") {
     return svgComponentTransferPaintCollapseColorValue(primitive);
   }
   if (tagName === "fecolormatrix") {
-    return svgColorMatrixPaintCollapseColorValue(primitive);
+    return svgColorMatrixPaintColorValue(primitive, previousOutputColor ?? sourceColor);
   }
   if (tagName === "fecomposite") {
     return svgFilterCompositePaintCollapseColorValue(
       primitive,
       previousOutputColor,
-      resultColors
+      resultColors,
+      sourceColor
     );
   }
   if (tagName === "feblend") {
-    return svgFilterBlendPaintCollapseColorValue(primitive, previousOutputColor, resultColors);
+    return svgFilterBlendPaintCollapseColorValue(
+      primitive,
+      previousOutputColor,
+      resultColors,
+      sourceColor
+    );
   }
   if (tagName === "feoffset" || tagName === "fegaussianblur" || tagName === "femorphology") {
     return svgFilterPrimitiveInputPaintColor(
       primitive,
       "in",
       previousOutputColor,
-      resultColors
+      resultColors,
+      sourceColor
     );
   }
   return null;
 }
 
-function svgFilterGraphPaintCollapseColorValue(filter: Element) {
+function svgFilterGraphPaintCollapseColorValue(
+  filter: Element,
+  sourceColor: CssColorRgba | null = null
+) {
   const resultColors = new Map<string, CssColorRgba | null>();
   let previousOutputColor: CssColorRgba | null = null;
   let sawPrimitive = false;
@@ -1574,7 +1791,8 @@ function svgFilterGraphPaintCollapseColorValue(filter: Element) {
     previousOutputColor = svgFilterPrimitivePaintCollapseColorValue(
       primitive,
       previousOutputColor,
-      resultColors
+      resultColors,
+      sourceColor
     );
     const resultName = svgFilterResultName(primitive.getAttribute("result"));
     if (resultName !== null) {
@@ -1626,6 +1844,33 @@ function svgFilterPaintCollapseColor(
   return found ? collapsedColor : null;
 }
 
+function svgFilterPaintColor(
+  filterTarget: HTMLElement,
+  value: string | undefined,
+  color: CssColorRgba | null
+) {
+  if (color === null) {
+    return null;
+  }
+
+  let filteredColor: CssColorRgba | null = color;
+  let found = false;
+
+  for (const id of localCssUrlReferenceIds(value)) {
+    const filter = filterTarget.ownerDocument.getElementById(id);
+    if (!filter) {
+      continue;
+    }
+    filteredColor = svgFilterGraphPaintCollapseColorValue(filter, filteredColor);
+    if (filteredColor === null) {
+      return null;
+    }
+    found = true;
+  }
+
+  return found ? filteredColor : null;
+}
+
 function dataSvgFilterElements(filterTarget: HTMLElement, value: string | undefined) {
   return cssUrlValues(value)
     .map((url) => dataSvgReferencedElement(filterTarget, url))
@@ -1668,6 +1913,29 @@ function dataSvgFilterPaintCollapseColor(
   return found ? collapsedColor : null;
 }
 
+function dataSvgFilterPaintColor(
+  filterTarget: HTMLElement,
+  value: string | undefined,
+  color: CssColorRgba | null
+) {
+  if (color === null) {
+    return null;
+  }
+
+  let filteredColor: CssColorRgba | null = color;
+  let found = false;
+
+  for (const filter of dataSvgFilterElements(filterTarget, value)) {
+    filteredColor = svgFilterGraphPaintCollapseColorValue(filter, filteredColor);
+    if (filteredColor === null) {
+      return null;
+    }
+    found = true;
+  }
+
+  return found ? filteredColor : null;
+}
+
 function paintFilterOpacityValue(filterTarget: HTMLElement, value: string | undefined) {
   const cssOpacity = filterOpacityValue(value);
   const svgOpacity = svgFilterOpacityValue(filterTarget, value);
@@ -1682,6 +1950,21 @@ function paintFilterCollapseColor(filterTarget: HTMLElement, value: string | und
     cssFilterPaintCollapseColor(value) ??
     svgFilterPaintCollapseColor(filterTarget, value) ??
     dataSvgFilterPaintCollapseColor(filterTarget, value)
+  );
+}
+
+function paintFilterColor(
+  filterTarget: HTMLElement,
+  value: string | undefined,
+  color: CssColorRgba | null
+) {
+  const cssColor = cssFilterPaintColor(value, color);
+  if (cssColor !== null) {
+    return cssColor;
+  }
+  return (
+    svgFilterPaintColor(filterTarget, value, color) ??
+    dataSvgFilterPaintColor(filterTarget, value, color)
   );
 }
 
@@ -2772,9 +3055,13 @@ function cssPaintColorOnBackground(
   filter: string | undefined,
   blendMode: string | undefined,
   color: CssColorRgba | null,
-  background: CssColorRgba
+  background: CssColorRgba,
+  filterTarget?: HTMLElement
 ) {
-  const filteredColor = cssFilterPaintColor(filter, color);
+  const filteredColor =
+    filterTarget === undefined
+      ? cssFilterPaintColor(filter, color)
+      : paintFilterColor(filterTarget, filter, color);
   return cssColorBlendedOverBackground(filteredColor ?? color, background, blendMode);
 }
 
@@ -2835,7 +3122,8 @@ function cssLinePaintsWithContrast(
   background: CssColorRgba,
   units: { emPx?: number; remPx?: number } = {},
   filter = "",
-  blendMode = ""
+  blendMode = "",
+  filterTarget?: HTMLElement
 ) {
   const lineStyle = cssPropertyValue(style, current, `${prefix}-style`).toLowerCase();
   const lineWidth = cssPropertyValue(style, current, `${prefix}-width`);
@@ -2846,7 +3134,13 @@ function cssLinePaintsWithContrast(
     lineStyle !== "hidden" &&
     !cssLengthLooksZero(lineWidth, units) &&
     cssColorContrastsWithBackground(
-      cssPaintColorOnBackground(filter, blendMode, cssColorRgba(lineColor), background),
+      cssPaintColorOnBackground(
+        filter,
+        blendMode,
+        cssColorRgba(lineColor),
+        background,
+        filterTarget
+      ),
       background
     )
   );
@@ -2933,7 +3227,8 @@ function fieldBorderPaintContrastsWithBackground(
       background,
       units,
       filter,
-      blendMode
+      blendMode,
+      current
     )
   );
 }
@@ -2953,7 +3248,8 @@ function fieldOutlinePaintContrastsWithBackground(
     background,
     units,
     filter,
-    blendMode
+    blendMode,
+    current
   );
 }
 
@@ -3081,7 +3377,8 @@ function cssShadowLayerPaintsWithContrast(
   background: CssColorRgba,
   fallbackColor: CssColorRgba | null,
   filter = "",
-  blendMode = ""
+  blendMode = "",
+  filterTarget?: HTMLElement
 ) {
   const colorToken = splitCssFunctionArgs(value.toLowerCase()).find((token) => {
     const normalized = token.trim();
@@ -3092,7 +3389,7 @@ function cssShadowLayerPaintsWithContrast(
       ? fallbackColor
       : cssColorRgba(colorToken);
   return cssColorContrastsWithBackground(
-    cssPaintColorOnBackground(filter, blendMode, color, background),
+    cssPaintColorOnBackground(filter, blendMode, color, background, filterTarget),
     background
   );
 }
@@ -3102,13 +3399,21 @@ function cssShadowPaintsWithContrast(
   background: CssColorRgba,
   fallbackColor: CssColorRgba | null,
   filter = "",
-  blendMode = ""
+  blendMode = "",
+  filterTarget?: HTMLElement
 ) {
   if (cssPaintListLooksEmpty(value)) {
     return false;
   }
   return splitCssCommaList(value).some((layer) =>
-    cssShadowLayerPaintsWithContrast(layer, background, fallbackColor, filter, blendMode)
+    cssShadowLayerPaintsWithContrast(
+      layer,
+      background,
+      fallbackColor,
+      filter,
+      blendMode,
+      filterTarget
+    )
   );
 }
 
@@ -3134,13 +3439,15 @@ function fieldChromePaintBlendsIntoBackground(
     filter,
     blendMode,
     ownBackground,
-    ancestorBackground
+    ancestorBackground,
+    current
   );
   const textColor = cssPaintColorOnBackground(
     filter,
     blendMode,
     cssColorRgba(fieldTextPaintColor(style, current)),
-    ancestorBackground
+    ancestorBackground,
+    current
   );
   const collapsedFilterColor = paintFilterCollapseColor(current, filter);
   if (collapsedFilterColor !== null) {
@@ -3175,14 +3482,16 @@ function fieldChromePaintBlendsIntoBackground(
       ancestorBackground,
       textColor,
       filter,
-      blendMode
+      blendMode,
+      current
     ) &&
     !cssShadowPaintsWithContrast(
       cssPropertyValue(style, current, "text-shadow"),
       ancestorBackground,
       textColor,
       filter,
-      blendMode
+      blendMode,
+      current
     )
   );
 }

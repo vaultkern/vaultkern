@@ -2077,6 +2077,102 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
   });
 
+  it("treats credential fields hidden by SVG saturation filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="svgSaturateZero">
+            <feColorMatrix type="saturate" values="0" />
+          </filter>
+        </svg>
+        <div style="background:rgb(127,127,127)">
+          <input name="svg_saturate_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:url(#svgSaturateZero)" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "svg_saturate_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "svg_saturate_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats credential fields hidden by SVG hue rotation filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="svgHueRotateHalfTurn">
+            <feColorMatrix type="hueRotate" values="180" />
+          </filter>
+        </svg>
+        <div style="background:rgb(0,175,175)">
+          <input name="svg_hue_rotate_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:url(#svgHueRotateHalfTurn)" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "svg_hue_rotate_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "svg_hue_rotate_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats credential fields hidden by SVG matrix filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="svgMatrixGray" color-interpolation-filters="sRGB">
+            <feColorMatrix type="matrix" values="0.498 0 0 0 0 0.498 0 0 0 0 0.498 0 0 0 0 0 0 0 1 0" />
+          </filter>
+        </svg>
+        <div style="background:rgb(127,127,127)">
+          <input name="svg_matrix_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:url(#svgMatrixGray)" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "svg_matrix_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "svg_matrix_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats credential fields hidden by SVG luminance-to-alpha filters as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <svg width="0" height="0" aria-hidden="true">
+          <filter id="svgLuminanceToAlpha">
+            <feColorMatrix type="luminanceToAlpha" />
+          </filter>
+        </svg>
+        <div style="background:black">
+          <input name="svg_luminance_alpha_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;filter:url(#svgLuminanceToAlpha)" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+    expect(fieldByName(report, "svg_luminance_alpha_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "svg_luminance_alpha_password").reasons).toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
   it("treats credential fields hidden by SVG blend filters as not viewable", () => {
     document.body.innerHTML = `
       <form>
