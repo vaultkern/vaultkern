@@ -1160,8 +1160,17 @@ function viewportExitForRect(element: HTMLElement) {
     viewportHeight: viewport.height,
     beforeX: rect.right <= 0,
     afterX: viewport.width > 0 && rect.left >= viewport.width,
-    beforeY: rect.bottom <= 0
+    beforeY: rect.bottom <= 0,
+    afterY: viewport.height > 0 && rect.top >= viewport.height
   };
+}
+
+function hasMotionPathOffset(style: CSSStyleDeclaration | undefined, current: HTMLElement) {
+  return [
+    cssPropertyValue(style, current, "offset-path"),
+    cssPropertyValue(style, current, "motion-path"),
+    cssPropertyValue(style, current, "offset")
+  ].some((value) => isMeaningfulCssValue(value) && !value.trim().toLowerCase().startsWith("none"));
 }
 
 function hitTargetBelongsToElement(element: HTMLElement, target: Element) {
@@ -2281,6 +2290,13 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
     const hasDirectionalMarginOffset =
       horizontalOffsetMatchesViewportExit(viewportExit, marginLeft) ||
       verticalOffsetMovesBeforeViewport(viewportExit, marginTop);
+    const hasMotionPathViewportExit =
+      viewportExit !== null &&
+      hasMotionPathOffset(style, current) &&
+      (viewportExit.beforeX ||
+        viewportExit.afterX ||
+        viewportExit.beforeY ||
+        viewportExit.afterY);
     const hasHiddenVisibility =
       inlineVisibility === "hidden" ||
       style?.visibility === "hidden" ||
@@ -2332,7 +2348,8 @@ export function getFieldVisibility(element: HTMLElement): FieldVisibilityResult 
       viewportExit !== null &&
       (hasDirectionalTransformOffset ||
         hasDirectionalPositionOffset ||
-        hasDirectionalMarginOffset)
+        hasDirectionalMarginOffset ||
+        hasMotionPathViewportExit)
     ) {
       addReason(reasons, "not-viewable:offscreen");
     }

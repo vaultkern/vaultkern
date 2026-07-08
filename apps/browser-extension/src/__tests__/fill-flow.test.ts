@@ -353,6 +353,7 @@ describe("fillLoginForm", () => {
         <input id="longhand-translated-y-password" type="password" autocomplete="current-password" style="translate:0 -500px" />
         <input id="viewport-translated-x-password" type="password" autocomplete="current-password" style="transform:translateX(-100vw)" />
         <input id="viewport-translated-y-password" type="password" autocomplete="current-password" style="translate:0 -100vh" />
+        <input id="motion-path-password" type="password" autocomplete="current-password" style='offset-path:path("M -1000 0");offset-distance:100%' />
         <input id="translated-y-after-password" type="password" autocomplete="current-password" style="transform:translateY(900px)" />
         <input id="longhand-translated-y-after-password" type="password" autocomplete="current-password" style="translate:0 900px" />
         <input id="fixed-below-password" type="password" autocomplete="current-password" style="position:fixed;top:900px" />
@@ -417,7 +418,8 @@ describe("fillLoginForm", () => {
       "rect-translated-password",
       "percent-translate-password",
       "calc-translate-password",
-      "viewport-translated-x-password"
+      "viewport-translated-x-password",
+      "motion-path-password"
     ]) {
       stubElementRect(
         document.querySelector(`#${id}`) as HTMLInputElement,
@@ -540,6 +542,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#longhand-translated-y-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#viewport-translated-x-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#viewport-translated-y-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#motion-path-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#translated-y-after-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#longhand-translated-y-after-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#fixed-below-password") as HTMLInputElement).value).toBe("");

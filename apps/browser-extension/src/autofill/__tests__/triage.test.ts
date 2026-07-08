@@ -1401,6 +1401,7 @@ describe("autofill triage", () => {
         <input name="percent_translate_password" type="password" autocomplete="current-password" style="translate:-800%" />
         <input name="calc_translate_password" type="password" autocomplete="current-password" style="translate:calc(-100% - 500px)" />
         <input name="viewport_translate_x_password" type="password" autocomplete="current-password" style="transform:translateX(-100vw)" />
+        <input name="motion_path_password" type="password" autocomplete="current-password" style='offset-path:path("M -1000 0");offset-distance:100%' />
         <input name="translated_y_password" type="password" autocomplete="current-password" style="transform:translateY(-500px)" />
         <input name="longhand_translated_y_password" type="password" autocomplete="current-password" style="translate:0 -500px" />
         <input name="viewport_translate_y_password" type="password" autocomplete="current-password" style="translate:0 -100vh" />
@@ -1416,7 +1417,8 @@ describe("autofill triage", () => {
       "translated_password",
       "percent_translate_password",
       "calc_translate_password",
-      "viewport_translate_x_password"
+      "viewport_translate_x_password",
+      "motion_path_password"
     ]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
@@ -1463,6 +1465,7 @@ describe("autofill triage", () => {
       "percent_translate_password",
       "calc_translate_password",
       "viewport_translate_x_password",
+      "motion_path_password",
       "translated_y_password",
       "longhand_translated_y_password",
       "viewport_translate_y_password",
