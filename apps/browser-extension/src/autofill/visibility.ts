@@ -586,6 +586,8 @@ function svgFilterSuppressesPaint(current: HTMLElement, value: string | undefine
           .map(Number);
         const slope = Number(func.getAttribute("slope") ?? "1");
         const intercept = Number(func.getAttribute("intercept") ?? "0");
+        const amplitude = Number(func.getAttribute("amplitude") ?? "1");
+        const offset = Number(func.getAttribute("offset") ?? "0");
         return (
           (type === "table" &&
             tableValues.length > 0 &&
@@ -593,7 +595,8 @@ function svgFilterSuppressesPaint(current: HTMLElement, value: string | undefine
           (type === "discrete" &&
             tableValues.length > 0 &&
             tableValues.every((value) => Number.isFinite(value) && value <= 0)) ||
-          (type === "linear" && slope <= 0 && intercept <= 0)
+          (type === "linear" && slope <= 0 && intercept <= 0) ||
+          (type === "gamma" && amplitude <= 0 && offset <= 0)
         );
       })
     ) {
