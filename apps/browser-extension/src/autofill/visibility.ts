@@ -2375,6 +2375,139 @@ function cssMaskRadialGradientVisibleBounds(
   };
 }
 
+function rectBoundsSamplePoints(bounds: RectBounds) {
+  const width = bounds.right - bounds.left;
+  const height = bounds.bottom - bounds.top;
+  if (width <= 0 || height <= 0) {
+    return [];
+  }
+  const insetX = Math.min(4, width / 2);
+  const insetY = Math.min(4, height / 2);
+  return [
+    { x: bounds.left + width / 2, y: bounds.top + height / 2 },
+    { x: bounds.left + insetX, y: bounds.top + insetY },
+    { x: bounds.right - insetX, y: bounds.top + insetY },
+    { x: bounds.left + insetX, y: bounds.bottom - insetY },
+    { x: bounds.right - insetX, y: bounds.bottom - insetY }
+  ];
+}
+
+function radialPaintedRangesContainDistance(
+  ranges: Array<{ start: number; end: number }>,
+  distance: number
+) {
+  return ranges.some(
+    (range) => distance >= range.start - 1e-6 && distance <= range.end + 1e-6
+  );
+}
+
+function radialMaskLayerSuppressesField(
+  layer: string,
+  positionValue: string | undefined,
+  sizeValue: string | undefined,
+  repeatValue: string | undefined,
+  current: HTMLElement,
+  fieldBounds: RectBounds,
+  modeValue: string | undefined,
+  units: { emPx?: number; remPx?: number }
+): boolean | null {
+  const normalized = layer.trim().toLowerCase();
+  const gradientName = normalized.startsWith("radial-gradient(")
+    ? "radial-gradient"
+    : normalized.startsWith("repeating-radial-gradient(")
+      ? "repeating-radial-gradient"
+      : null;
+  if (gradientName === null) {
+    return null;
+  }
+  const body = cssFunctionBody(normalized, gradientName);
+  if (body === null) {
+    return null;
+  }
+
+  const rect = current.getBoundingClientRect();
+  if (!hasMeaningfulClientRect(rect)) {
+    return null;
+  }
+  const size = maskLayerSize(sizeValue, rect, units);
+  if (size.width <= 0 || size.height <= 0) {
+    return true;
+  }
+  const repeatsX = maskRepeatRepeatsAxis(repeatValue, "x");
+  const repeatsY = maskRepeatRepeatsAxis(repeatValue, "y");
+  if ((repeatsX && size.width < rect.width) || (repeatsY && size.height < rect.height)) {
+    return null;
+  }
+
+  const position = positionValue?.trim() || "0% 0%";
+  const x = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "x"),
+    rect.width,
+    size.width,
+    units
+  );
+  const y = maskPositionOffsetToPx(
+    maskPositionAxisComponent(position, "y"),
+    rect.height,
+    size.height,
+    units
+  );
+  if (
+    (x === null && Math.abs(rect.width - size.width) > 0.001) ||
+    (y === null && Math.abs(rect.height - size.height) > 0.001)
+  ) {
+    return null;
+  }
+
+  const parts = splitCssCommaList(body);
+  const descriptor = cssColorStopColor(parts[0] ?? "") === null ? parts[0] ?? "" : "";
+  const descriptorTokens = splitCssFunctionArgs(descriptor);
+  const atIndex = descriptorTokens.findIndex((token) => token.toLowerCase() === "at");
+  const center = basicPositionToPx(
+    atIndex < 0 ? [] : descriptorTokens.slice(atIndex + 1),
+    size.width,
+    size.height,
+    units
+  );
+  if (center === null) {
+    return null;
+  }
+
+  const paintedRanges = cssMaskRadialGradientPaintedRanges(
+    body,
+    Math.max(size.width, size.height),
+    modeValue,
+    units,
+    gradientName === "repeating-radial-gradient"
+  );
+  if (paintedRanges === null) {
+    return null;
+  }
+  if (paintedRanges.length === 0) {
+    return true;
+  }
+
+  const offsetX = x ?? 0;
+  const offsetY = y ?? 0;
+  for (const sample of rectBoundsSamplePoints(fieldBounds)) {
+    const sampleX = sample.x - offsetX;
+    const sampleY = sample.y - offsetY;
+    if (sampleX < 0 || sampleY < 0 || sampleX > size.width || sampleY > size.height) {
+      continue;
+    }
+    if (
+      radialPaintedRangesContainDistance(
+        paintedRanges,
+        Math.hypot(sampleX - center.x, sampleY - center.y)
+      )
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function bodyAxisSize(
   body: string,
   size: { width: number; height: number }
@@ -2771,6 +2904,81 @@ function maskStyleVisibleBounds(
       )
     ].filter((bounds): bounds is RectBounds => bounds !== null)
   );
+}
+
+function radialMaskStyleSuppressesField(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  fieldBounds: RectBounds,
+  units: { emPx?: number; remPx?: number }
+) {
+  const maskMode = cssPropertyValue(style, current, "mask-mode");
+  const webkitMaskMode = cssPropertyValue(style, current, "-webkit-mask-mode") || maskMode;
+  const sources = [
+    {
+      image: cssPropertyValue(style, current, "mask-image"),
+      position: cssPropertyValue(style, current, "mask-position"),
+      size: cssPropertyValue(style, current, "mask-size"),
+      repeat: cssPropertyValue(style, current, "mask-repeat"),
+      mode: maskMode
+    },
+    {
+      image: cssPropertyValue(style, current, "-webkit-mask-image"),
+      position: cssPropertyValue(style, current, "-webkit-mask-position"),
+      size: cssPropertyValue(style, current, "-webkit-mask-size"),
+      repeat: cssPropertyValue(style, current, "-webkit-mask-repeat"),
+      mode: webkitMaskMode
+    },
+    {
+      image: cssPropertyValue(style, current, "mask"),
+      position: cssPropertyValue(style, current, "mask-position"),
+      size: cssPropertyValue(style, current, "mask-size"),
+      repeat: cssPropertyValue(style, current, "mask-repeat"),
+      mode: maskMode
+    },
+    {
+      image: cssPropertyValue(style, current, "-webkit-mask"),
+      position: cssPropertyValue(style, current, "-webkit-mask-position"),
+      size: cssPropertyValue(style, current, "-webkit-mask-size"),
+      repeat: cssPropertyValue(style, current, "-webkit-mask-repeat"),
+      mode: webkitMaskMode
+    }
+  ];
+
+  let modeledRadialLayer = false;
+  for (const source of sources) {
+    if (!isMeaningfulCssValue(source.image)) {
+      continue;
+    }
+    const layers = splitCssCommaList(source.image);
+    const positions = splitCssCommaList(source.position?.trim().toLowerCase() ?? "");
+    const sizes = splitCssCommaList(source.size?.trim().toLowerCase() ?? "");
+    const repeats = splitCssCommaList(source.repeat?.trim().toLowerCase() ?? "");
+    for (const [index, layer] of layers.entries()) {
+      if (!isMeaningfulCssValue(layer)) {
+        continue;
+      }
+      const suppressed = radialMaskLayerSuppressesField(
+        layer,
+        maskLayerValue(positions, index),
+        maskLayerValue(sizes, index),
+        maskLayerValue(repeats, index),
+        current,
+        fieldBounds,
+        source.mode,
+        units
+      );
+      if (suppressed === null) {
+        return false;
+      }
+      modeledRadialLayer = true;
+      if (!suppressed) {
+        return false;
+      }
+    }
+  }
+
+  return modeledRadialLayer;
 }
 
 function svgElementOpacityValue(
@@ -4076,6 +4284,9 @@ function ancestorMaskStyleSuppressesField(
   const fieldBounds = elementRectRelativeToAncestor(element, current);
   if (fieldBounds === null) {
     return false;
+  }
+  if (radialMaskStyleSuppressesField(style, current, fieldBounds, units)) {
+    return true;
   }
   const maskBounds = maskStyleVisibleBounds(style, current, units);
   return maskBounds !== null && boundsOverlapSuppressesField(maskBounds, fieldBounds);

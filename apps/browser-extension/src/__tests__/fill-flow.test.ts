@@ -1217,6 +1217,60 @@ describe("fillLoginForm", () => {
     expect(loginPassword.value).toBe("secret");
   });
 
+  it("does not treat visible labels as enough for radial ancestor mask hole decoys", () => {
+    document.body.innerHTML = `
+      <form>
+        <label id="radial-hole-mask-label" for="radial-hole-mask-password">Password</label>
+        <div id="ancestor-radial-hole-mask" style="width:400px;height:40px;mask-image:radial-gradient(circle at 116px 20px, transparent 0 100px, black 100px 120px, transparent 120px 100%)">
+          <input id="radial-hole-mask-password" type="password" autocomplete="current-password" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const radialHoleMaskPassword = document.querySelector(
+      "#radial-hole-mask-password"
+    ) as HTMLInputElement;
+    const loginPassword = document.querySelector("#login-password") as HTMLInputElement;
+    const radialHoleMaskLabel = document.querySelector(
+      "#radial-hole-mask-label"
+    ) as HTMLLabelElement;
+    stubElementRect(
+      radialHoleMaskPassword,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      radialHoleMaskLabel,
+      elementRect({ left: 24, top: 40, width: 185, height: 21 })
+    );
+    stubElementRect(
+      document.querySelector("#ancestor-radial-hole-mask") as HTMLDivElement,
+      elementRect({ left: 0, top: 32, width: 400, height: 40 })
+    );
+    stubElementRect(loginPassword, elementRect({ left: 24, top: 96, width: 185, height: 21 }));
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: (x: number, y: number) => {
+        if (x >= 24 && x <= 209 && y >= 40 && y <= 61) {
+          return radialHoleMaskLabel;
+        }
+        if (x >= 24 && x <= 209 && y >= 96 && y <= 117) {
+          return loginPassword;
+        }
+        return document.body;
+      }
+    });
+
+    fillLoginForm({ password: "secret" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: originalElementFromPoint
+    });
+
+    expect(radialHoleMaskPassword.value).toBe("");
+    expect(loginPassword.value).toBe("secret");
+  });
+
   it("fills password fields when a radial ancestor mask contains the control", () => {
     document.body.innerHTML = `
       <form>
