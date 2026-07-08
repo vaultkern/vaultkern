@@ -1104,6 +1104,12 @@ function insetPairSuppressesField(
   );
 }
 
+function insetBoxTokens(value: string) {
+  const tokens = splitCssFunctionArgs(value);
+  const roundIndex = tokens.findIndex((token) => token.toLowerCase() === "round");
+  return roundIndex < 0 ? tokens : tokens.slice(0, roundIndex);
+}
+
 function svgLengthToPx(
   value: string | null,
   axisSize: number,
@@ -1268,7 +1274,7 @@ function clipPathFullyClips(
   const normalized = value.trim().toLowerCase();
   const insetMatch = normalized.match(/^inset\((.*)\)$/);
   if (insetMatch) {
-    const inset = expandBoxValues(splitCssFunctionArgs(insetMatch[1]));
+    const inset = expandBoxValues(insetBoxTokens(insetMatch[1]));
     const rect = current.getBoundingClientRect();
     return (
       insetPairSuppressesField(inset.left, inset.right, rect.width, units) ||

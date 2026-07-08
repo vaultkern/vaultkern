@@ -1678,6 +1678,7 @@ describe("autofill triage", () => {
           <clipPath id="zeroUseClip"><use href="#zeroRect" /></clipPath>
         </svg>
         <input name="inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
+        <input name="rounded_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(49% round 2px)" />
         <input name="calc_inset_password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% - 4px) 0 0)" />
         <input name="circle_password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
         <input name="polygon_strip_password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
@@ -1713,6 +1714,10 @@ describe("autofill triage", () => {
 
     expect(fieldByName(report, "inset_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "inset_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "rounded_inset_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "rounded_inset_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "calc_inset_password").qualifiedAs).toBe("ignored");

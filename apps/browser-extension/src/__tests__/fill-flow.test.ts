@@ -501,6 +501,7 @@ describe("fillLoginForm", () => {
           <clipPath id="zeroUseClip"><use href="#zeroRect" /></clipPath>
         </svg>
         <input id="inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49%)" />
+        <input id="rounded-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(49% round 2px)" />
         <input id="calc-inset-password" type="password" autocomplete="current-password" style="clip-path:inset(0 calc(100% - 4px) 0 0)" />
         <input id="circle-password" type="password" autocomplete="current-password" style="clip-path:circle(1px)" />
         <input id="polygon-strip-password" type="password" autocomplete="current-password" style="clip-path:polygon(0 0, 4px 0, 4px 100%, 0 100%)" />
@@ -535,6 +536,7 @@ describe("fillLoginForm", () => {
     fillLoginForm({ password: "secret" });
 
     expect((document.querySelector("#inset-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#rounded-inset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#calc-inset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#circle-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#polygon-strip-password") as HTMLInputElement).value).toBe("");
