@@ -629,6 +629,64 @@ function cssFilterPaintCollapseColor(value: string | undefined): CssColorRgba | 
   return collapsedColor;
 }
 
+function cssFilterAmount(value: string | undefined, defaultValue = 1) {
+  return cssOpacityValue(value) ?? defaultValue;
+}
+
+function cssFilterPaintColor(value: string | undefined, color: CssColorRgba | null) {
+  if (color === null) {
+    return null;
+  }
+
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "none") {
+    return color;
+  }
+
+  let result = { ...color };
+  for (const match of normalized.matchAll(/([a-z-]+)\(([^)]*)\)/g)) {
+    const name = match[1];
+    const amount = cssFilterAmount(match[2]);
+    if (name === "opacity") {
+      result = { ...result, a: clampCssAlphaChannel(result.a * amount) };
+      continue;
+    }
+    if (name === "brightness") {
+      result = {
+        ...result,
+        r: clampCssColorChannel(result.r * amount),
+        g: clampCssColorChannel(result.g * amount),
+        b: clampCssColorChannel(result.b * amount)
+      };
+      continue;
+    }
+    if (name === "contrast") {
+      result = {
+        ...result,
+        r: clampCssColorChannel((result.r - 128) * amount + 128),
+        g: clampCssColorChannel((result.g - 128) * amount + 128),
+        b: clampCssColorChannel((result.b - 128) * amount + 128)
+      };
+      continue;
+    }
+    if (name === "invert") {
+      result = {
+        ...result,
+        r: clampCssColorChannel(result.r * (1 - amount) + (255 - result.r) * amount),
+        g: clampCssColorChannel(result.g * (1 - amount) + (255 - result.g) * amount),
+        b: clampCssColorChannel(result.b * (1 - amount) + (255 - result.b) * amount)
+      };
+      continue;
+    }
+    if (name === "blur") {
+      continue;
+    }
+    return null;
+  }
+
+  return result;
+}
+
 function localCssUrlReferenceIds(value: string | undefined) {
   const references: string[] = [];
   const normalized = value?.trim();
@@ -1002,7 +1060,8 @@ function cssLinePaintsWithContrast(
   current: HTMLElement,
   prefix: string,
   background: CssColorRgba,
-  units: { emPx?: number; remPx?: number } = {}
+  units: { emPx?: number; remPx?: number } = {},
+  filter = ""
 ) {
   const lineStyle = cssPropertyValue(style, current, `${prefix}-style`).toLowerCase();
   const lineWidth = cssPropertyValue(style, current, `${prefix}-width`);
@@ -1012,7 +1071,10 @@ function cssLinePaintsWithContrast(
     lineStyle !== "none" &&
     lineStyle !== "hidden" &&
     !cssLengthLooksZero(lineWidth, units) &&
-    cssColorContrastsWithBackground(cssColorRgba(lineColor), background)
+    cssColorContrastsWithBackground(
+      cssFilterPaintColor(filter, cssColorRgba(lineColor)) ?? cssColorRgba(lineColor),
+      background
+    )
   );
 }
 
@@ -1085,10 +1147,11 @@ function fieldBorderPaintContrastsWithBackground(
   style: CSSStyleDeclaration | undefined,
   current: HTMLElement,
   background: CssColorRgba,
-  units: { emPx?: number; remPx?: number }
+  units: { emPx?: number; remPx?: number },
+  filter = ""
 ) {
   return ["top", "right", "bottom", "left"].some((side) =>
-    cssLinePaintsWithContrast(style, current, `border-${side}`, background, units)
+    cssLinePaintsWithContrast(style, current, `border-${side}`, background, units, filter)
   );
 }
 
@@ -1096,9 +1159,10 @@ function fieldOutlinePaintContrastsWithBackground(
   style: CSSStyleDeclaration | undefined,
   current: HTMLElement,
   background: CssColorRgba,
-  units: { emPx?: number; remPx?: number }
+  units: { emPx?: number; remPx?: number },
+  filter = ""
 ) {
-  return cssLinePaintsWithContrast(style, current, "outline", background, units);
+  return cssLinePaintsWithContrast(style, current, "outline", background, units, filter);
 }
 
 function fieldChromePaintIsTransparent(
@@ -1183,7 +1247,8 @@ function fieldTextPaintBlendsWithBackground(
 function cssShadowLayerPaintsWithContrast(
   value: string,
   background: CssColorRgba,
-  fallbackColor: CssColorRgba | null
+  fallbackColor: CssColorRgba | null,
+  filter = ""
 ) {
   const colorToken = splitCssFunctionArgs(value.toLowerCase()).find((token) => {
     const normalized = token.trim();
@@ -1193,19 +1258,23 @@ function cssShadowLayerPaintsWithContrast(
     colorToken === undefined || colorToken === "currentcolor"
       ? fallbackColor
       : cssColorRgba(colorToken);
-  return cssColorContrastsWithBackground(color, background);
+  return cssColorContrastsWithBackground(
+    cssFilterPaintColor(filter, color) ?? color,
+    background
+  );
 }
 
 function cssShadowPaintsWithContrast(
   value: string,
   background: CssColorRgba,
-  fallbackColor: CssColorRgba | null
+  fallbackColor: CssColorRgba | null,
+  filter = ""
 ) {
   if (cssPaintListLooksEmpty(value)) {
     return false;
   }
   return splitCssCommaList(value).some((layer) =>
-    cssShadowLayerPaintsWithContrast(layer, background, fallbackColor)
+    cssShadowLayerPaintsWithContrast(layer, background, fallbackColor, filter)
   );
 }
 
@@ -1214,32 +1283,43 @@ function fieldChromePaintBlendsIntoBackground(
   current: HTMLElement,
   units: { emPx?: number; remPx?: number }
 ) {
-  const background = fieldEffectiveBackgroundColor(style, current);
-  const textColor = cssColorRgba(fieldTextPaintColor(style, current));
-  const collapsedFilterColor = cssFilterPaintCollapseColor(
-    cssPropertyValue(style, current, "filter")
+  const filter = cssPropertyValue(style, current, "filter");
+  const ancestorBackground = nearestOpaqueAncestorBackgroundColor(current);
+  const ownBackground = fieldOwnBackgroundColor(style, current);
+  const filteredOwnBackground =
+    cssFilterPaintColor(filter, ownBackground) ?? ownBackground;
+  const background =
+    cssColorPaintedOverBackground(filteredOwnBackground, ancestorBackground) ??
+    ancestorBackground;
+  const textColor = cssFilterPaintColor(
+    filter,
+    cssColorRgba(fieldTextPaintColor(style, current))
   );
+  const collapsedFilterColor = cssFilterPaintCollapseColor(filter);
   if (collapsedFilterColor !== null) {
     return !cssColorContrastsWithBackground(
       collapsedFilterColor,
-      nearestOpaqueAncestorBackgroundColor(current)
+      ancestorBackground
     );
   }
   return (
     !fieldHasPlaceholderText(current) &&
-    fieldTextPaintBlendsWithBackground(style, current) &&
-    fieldBackgroundPaintBlendsWithAncestor(style, current) &&
-    !fieldBorderPaintContrastsWithBackground(style, current, background, units) &&
-    !fieldOutlinePaintContrastsWithBackground(style, current, background, units) &&
+    !cssColorContrastsWithBackground(textColor, background) &&
+    !cssColorContrastsWithBackground(filteredOwnBackground, ancestorBackground) &&
+    cssPaintListLooksEmpty(cssPropertyValue(style, current, "background-image")) &&
+    !fieldBorderPaintContrastsWithBackground(style, current, ancestorBackground, units, filter) &&
+    !fieldOutlinePaintContrastsWithBackground(style, current, ancestorBackground, units, filter) &&
     !cssShadowPaintsWithContrast(
       cssPropertyValue(style, current, "box-shadow"),
-      background,
-      textColor
+      ancestorBackground,
+      textColor,
+      filter
     ) &&
     !cssShadowPaintsWithContrast(
       cssPropertyValue(style, current, "text-shadow"),
       background,
-      textColor
+      textColor,
+      filter
     )
   );
 }
