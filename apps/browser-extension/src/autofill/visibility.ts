@@ -4060,16 +4060,39 @@ function svgBackgroundImageShapeColors(
     return [];
   }
 
+  const colors: CssColorRgba[] = [];
   const fill = svgPaintValue(shape, style, "fill", "black");
-  if (fill.trim().toLowerCase() === "none" || cssColorLooksTransparent(fill)) {
-    return [];
+  if (fill.trim().toLowerCase() !== "none" && !cssColorLooksTransparent(fill)) {
+    const fillColor = cssColorRgba(fill);
+    if (fillColor === null) {
+      return null;
+    }
+    const fillOpacity = svgElementOpacityValue(shape, "fill-opacity", style);
+    colors.push({
+      ...fillColor,
+      a: clampCssAlphaChannel(fillColor.a * opacity * fillOpacity)
+    });
   }
-  const fillColor = cssColorRgba(fill);
-  if (fillColor === null) {
-    return null;
+
+  const stroke = svgPaintValue(shape, style, "stroke", "none");
+  const strokeWidth = svgPaintValue(shape, style, "stroke-width", "1");
+  if (
+    stroke.trim().toLowerCase() !== "none" &&
+    !cssColorLooksTransparent(stroke) &&
+    !cssLengthLooksZero(strokeWidth)
+  ) {
+    const strokeColor = cssColorRgba(stroke);
+    if (strokeColor === null) {
+      return null;
+    }
+    const strokeOpacity = svgElementOpacityValue(shape, "stroke-opacity", style);
+    colors.push({
+      ...strokeColor,
+      a: clampCssAlphaChannel(strokeColor.a * opacity * strokeOpacity)
+    });
   }
-  const fillOpacity = svgElementOpacityValue(shape, "fill-opacity", style);
-  return [{ ...fillColor, a: clampCssAlphaChannel(fillColor.a * opacity * fillOpacity) }];
+
+  return colors;
 }
 
 function dataSvgBackgroundImageSolidColor(current: Element, value: string) {
