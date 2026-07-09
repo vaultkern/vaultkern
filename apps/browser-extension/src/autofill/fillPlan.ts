@@ -238,11 +238,14 @@ function createSiteRuleActions(
 
   if (typeof payload.totp === "string") {
     const totpFields = fields.filter((field) => field.siteRuleTypes.includes("totp"));
-    for (const action of createSplitSiteRuleTotpActions(fields, payload.totp)) {
-      usedFields.add(action.fieldOpid);
-      actions.push(action);
+    const ambiguousTotpScopes = siteRuleScopesForFieldType(fields, "totp").size > 1;
+    if (!ambiguousTotpScopes) {
+      for (const action of createSplitSiteRuleTotpActions(fields, payload.totp)) {
+        usedFields.add(action.fieldOpid);
+        actions.push(action);
+      }
     }
-    if (totpFields.length > 1) {
+    if (ambiguousTotpScopes || totpFields.length > 1) {
       skippedFieldTypes.add("totp");
     }
   }

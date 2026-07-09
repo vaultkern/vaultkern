@@ -918,7 +918,7 @@ describe("autofill site rules", () => {
     ).toEqual(["1", "2", "3", "4", "5", "6"]);
   });
 
-  it("splits one TOTP site-rule group before comparing all matched fields", () => {
+  it("does not split ambiguous multi-scope TOTP site-rule groups", () => {
     document.body.innerHTML = `
       <form id="primary-otp">
         <input class="otp" name="primary_1" maxlength="1" inputmode="numeric" />
@@ -958,7 +958,7 @@ describe("autofill site rules", () => {
       Array.from(document.querySelectorAll<HTMLInputElement>("#primary-otp .otp")).map(
         (field) => field.value
       )
-    ).toEqual(["1", "2", "3", "4", "5", "6"]);
+    ).toEqual(["", "", "", "", "", ""]);
     expect(
       Array.from(document.querySelectorAll<HTMLInputElement>("#backup-otp .otp")).map(
         (field) => field.value
