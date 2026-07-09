@@ -898,6 +898,74 @@ function scopeHasNewsletterExclusion(fields: AutofillTriageFieldResult[], scopeK
   });
 }
 
+function newPasswordScopeKeys(fields: AutofillTriageFieldResult[]) {
+  return new Set(
+    fields
+      .filter((field) => field.qualifiedAs === "newPassword" && credentialScopeKey(field) !== null)
+      .map(credentialScopeKey)
+      .filter((scopeKey): scopeKey is string => scopeKey !== null)
+  );
+}
+
+function unfocusedRegistrationScopeKeys(
+  fields: AutofillTriageFieldResult[],
+  options: { allowSingleNewPassword?: boolean } = {}
+) {
+  const newPasswordFields = fields.filter(
+    (field) => field.qualifiedAs === "newPassword" && credentialScopeKey(field) !== null
+  );
+  if (!newPasswordFields.length) {
+    return [];
+  }
+
+  const loginPasswordFields = fields.filter((field) => field.qualifiedAs === "password");
+  if (loginPasswordFields.length) {
+    return [];
+  }
+
+  const scopeKeys: string[] = [];
+  for (const scopeKey of newPasswordScopeKeys(fields)) {
+    if (scopeHasCurrentPassword(fields, scopeKey)) {
+      continue;
+    }
+    const formFields = fieldsInCredentialScope(fields, scopeKey);
+    const newPasswordCount = formFields.filter(
+      (field) => field.qualifiedAs === "newPassword"
+    ).length;
+    if (
+      formHasResetPasswordContext(formFields) ||
+      !formHasRegistrationContext(formFields) ||
+      (newPasswordCount < 2 && options.allowSingleNewPassword !== true)
+    ) {
+      continue;
+    }
+    scopeKeys.push(scopeKey);
+  }
+  return scopeKeys;
+}
+
+function ambiguousNewPasswordFallbackSpansMultipleScopes(
+  fields: AutofillTriageFieldResult[],
+  payload: LoginFillPayload
+) {
+  const scopeKeys = new Set<string>();
+  if (typeof payload.password === "string" && typeof payload.newPassword === "string") {
+    for (const scopeKey of newPasswordScopeKeys(fields)) {
+      if (scopeQualifiesForPasswordChange(fields, scopeKey)) {
+        scopeKeys.add(scopeKey);
+      }
+    }
+  }
+  if (typeof payload.password === "string" || typeof payload.newPassword === "string") {
+    for (const scopeKey of unfocusedRegistrationScopeKeys(fields, {
+      allowSingleNewPassword: typeof payload.newPassword === "string"
+    })) {
+      scopeKeys.add(scopeKey);
+    }
+  }
+  return scopeKeys.size > 1;
+}
+
 function pickRegistrationScopeKey(
   fields: AutofillTriageFieldResult[],
   allFields: AutofillTriageFieldResult[],
@@ -934,30 +1002,8 @@ function pickRegistrationScopeKey(
     }
   }
 
-  const loginPasswordFields = fields.filter((field) => field.qualifiedAs === "password");
-  if (!loginPasswordFields.length) {
-    const scopeKeys = new Set(
-      newPasswordFields
-        .map(credentialScopeKey)
-        .filter((scopeKey): scopeKey is string => scopeKey !== null)
-    );
-    for (const scopeKey of scopeKeys) {
-      if (scopeHasCurrentPassword(fields, scopeKey)) {
-        continue;
-      }
-      const formFields = fieldsInCredentialScope(fields, scopeKey);
-      const newPasswordCount = formFields.filter(
-        (field) => field.qualifiedAs === "newPassword"
-      ).length;
-      if (
-        formHasResetPasswordContext(formFields) ||
-        !formHasRegistrationContext(formFields) ||
-        (newPasswordCount < 2 && options.allowSingleNewPassword !== true)
-      ) {
-        continue;
-      }
-      return scopeKey;
-    }
+  for (const scopeKey of unfocusedRegistrationScopeKeys(fields, options)) {
+    return scopeKey;
   }
 
   return null;
@@ -1242,6 +1288,8 @@ export function createLoginFillPlan(
     fillableSiteRuleFieldSpansMultipleScopes(report.fields, ["password", "currentPassword"]);
   const ambiguousUsernameSiteRule =
     viewableSiteRuleFieldSpansMultipleScopes(report.fields, "username");
+  const ambiguousNewPasswordSiteRule =
+    fillableSiteRuleFieldSpansMultipleScopes(report.fields, ["newPassword"]);
   const ambiguousTotpSiteRule =
     viewableSiteRuleFieldSpansMultipleScopes(report.fields, "totp");
   const siteRuleUsernameField = fieldForAction(
@@ -1279,7 +1327,11 @@ export function createLoginFillPlan(
     intent.kind === "passwordChange";
   const primaryScopeKey = siteRuleAnchorScopeKey ?? intentScopeKey;
   if (
-    (ambiguousPasswordSiteRule || ambiguousUsernameSiteRule || ambiguousTotpSiteRule) &&
+    (ambiguousPasswordSiteRule ||
+      ambiguousUsernameSiteRule ||
+      (ambiguousNewPasswordSiteRule &&
+        ambiguousNewPasswordFallbackSpansMultipleScopes(fields, payload)) ||
+      ambiguousTotpSiteRule) &&
     siteRuleAnchorScopeKey === null &&
     !intentUsesFocusedScope
   ) {
