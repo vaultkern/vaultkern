@@ -2995,6 +2995,8 @@ describe("fillLoginForm", () => {
         <input id="ellipse-offset-password" type="password" autocomplete="current-password" style="clip-path:ellipse(50% 50% at -9999px 50%)" />
         <input id="css-path-password" type="password" autocomplete="current-password" style='clip-path:path("M0 0Z")' />
         <input id="css-path-strip-password" type="password" autocomplete="current-password" style='clip-path:path("M0 0 L4 0 L4 100 L0 100 Z")' />
+        <input id="css-path-subpath-strips-password" type="password" autocomplete="current-password" style='clip-path:path("M0 0 H185 V4 H0 Z M0 17 H185 V21 H0 Z")' />
+        <input id="css-path-corner-boxes-password" type="password" autocomplete="current-password" style='clip-path:path("M0 0 H4 V4 H0 Z M181 0 H185 V4 H181 Z M0 17 H4 V21 H0 Z M181 17 H185 V21 H181 Z")' />
         <input id="clip-path-rect-password" type="password" autocomplete="current-password" style="clip-path:rect(0 4px 100px 0)" />
         <input id="clip-path-xywh-password" type="password" autocomplete="current-password" style="clip-path:xywh(0 0 4px 100%)" />
         <input id="clip-path-offset-xywh-password" type="password" autocomplete="current-password" style="clip-path:xywh(-9999px 0 200px 30px)" />
@@ -3058,7 +3060,9 @@ describe("fillLoginForm", () => {
     for (const id of [
       "math-inset-password",
       "clamp-inset-password",
-      "polygon-percent-password"
+      "polygon-percent-password",
+      "css-path-subpath-strips-password",
+      "css-path-corner-boxes-password"
     ]) {
       stubElementRect(
         document.querySelector(`#${id}`) as HTMLInputElement,
@@ -3136,6 +3140,8 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#ellipse-offset-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#css-path-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#css-path-strip-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#css-path-subpath-strips-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#css-path-corner-boxes-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#clip-path-rect-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#clip-path-xywh-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#clip-path-offset-xywh-password") as HTMLInputElement).value).toBe("");

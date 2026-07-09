@@ -8752,6 +8752,23 @@ function pathRegionSuppressesField(points: Array<{ x: number; y: number }>, rect
   return pointRegionSuppressesField(points, rect, points.length >= 3);
 }
 
+function pathSubpathsSuppressField(
+  value: string,
+  rect: DOMRect,
+  matrix: SvgMatrix2d = identitySvgMatrix()
+) {
+  const subpaths = svgPathDataToSubpathPoints(value)
+    .map((points) => transformSvgPoints(points, matrix))
+    .filter((points) => points.length > 0);
+  if (subpaths.length === 0) {
+    return pathRegionSuppressesField(
+      transformSvgPoints(svgPathDataToPoints(value), matrix),
+      rect
+    );
+  }
+  return subpaths.every((points) => pathRegionSuppressesField(points, rect));
+}
+
 function cssShapeCoordinatePairToPoint(
   value: string,
   rect: DOMRect,
@@ -9070,8 +9087,7 @@ function svgClipShapeSuppressesField(
     if (svgShapeUsesEvenOdd(shape) && evenOddSubpathsSuppressField(pathData, rect, matrix)) {
       return true;
     }
-    const points = svgPathDataToPoints(pathData);
-    return pathRegionSuppressesField(transformSvgPoints(points, matrix), rect);
+    return pathSubpathsSuppressField(pathData, rect, matrix);
   }
   if (svgClipElementIsContainer(tagName)) {
     const children = Array.from(shape.children);
@@ -9412,10 +9428,7 @@ function clipPathFullyClips(
     ) {
       return true;
     }
-    return pathRegionSuppressesField(
-      svgPathDataToPoints(pathData),
-      current.getBoundingClientRect()
-    );
+    return pathSubpathsSuppressField(pathData, current.getBoundingClientRect());
   }
 
   return false;

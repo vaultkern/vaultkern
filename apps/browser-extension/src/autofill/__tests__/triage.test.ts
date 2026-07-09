@@ -3478,6 +3478,8 @@ describe("autofill triage", () => {
         <input name="ellipse_offset_password" type="password" autocomplete="current-password" style="clip-path:ellipse(50% 50% at -9999px 50%)" />
         <input name="css_path_password" type="password" autocomplete="current-password" style='clip-path:path("M0 0Z")' />
         <input name="css_path_strip_password" type="password" autocomplete="current-password" style='clip-path:path("M0 0 L4 0 L4 100 L0 100 Z")' />
+        <input name="css_path_subpath_strips_password" type="password" autocomplete="current-password" style='clip-path:path("M0 0 H185 V4 H0 Z M0 17 H185 V21 H0 Z")' />
+        <input name="css_path_corner_boxes_password" type="password" autocomplete="current-password" style='clip-path:path("M0 0 H4 V4 H0 Z M181 0 H185 V4 H181 Z M0 17 H4 V21 H0 Z M181 17 H185 V21 H181 Z")' />
         <input name="clip_path_rect_password" type="password" autocomplete="current-password" style="clip-path:rect(0 4px 100px 0)" />
         <input name="clip_path_xywh_password" type="password" autocomplete="current-password" style="clip-path:xywh(0 0 4px 100%)" />
         <input name="clip_path_offset_xywh_password" type="password" autocomplete="current-password" style="clip-path:xywh(-9999px 0 200px 30px)" />
@@ -3530,7 +3532,9 @@ describe("autofill triage", () => {
     for (const name of [
       "math_inset_password",
       "clamp_inset_password",
-      "polygon_percent_password"
+      "polygon_percent_password",
+      "css_path_subpath_strips_password",
+      "css_path_corner_boxes_password"
     ]) {
       stubElementRect(
         document.querySelector(`input[name="${name}"]`) as HTMLInputElement,
@@ -3620,6 +3624,14 @@ describe("autofill triage", () => {
     );
     expect(fieldByName(report, "css_path_strip_password").qualifiedAs).toBe("ignored");
     expect(fieldByName(report, "css_path_strip_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "css_path_subpath_strips_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "css_path_subpath_strips_password").reasons).toContain(
+      "not-viewable:clipped"
+    );
+    expect(fieldByName(report, "css_path_corner_boxes_password").qualifiedAs).toBe("ignored");
+    expect(fieldByName(report, "css_path_corner_boxes_password").reasons).toContain(
       "not-viewable:clipped"
     );
     expect(fieldByName(report, "clip_path_rect_password").qualifiedAs).toBe("ignored");
