@@ -305,6 +305,29 @@ function confirmedNewPasswordValue(
   return submittedNewPasswordValues.every((value) => value === password) ? password : null;
 }
 
+function pickOrdinaryLoginPasswordField(fields: AutofillTriageFieldResult[]) {
+  const siteRulePasswordFields = fields.filter(
+    (field) =>
+      field.qualifiedAs === "password" &&
+      (hasSiteRuleType(field, "password") || hasSiteRuleType(field, "currentPassword"))
+  );
+  if (siteRulePasswordFields.length > 0) {
+    return siteRulePasswordFields.length === 1 ? siteRulePasswordFields[0] : null;
+  }
+
+  const autocompletePasswordFields = fields.filter(
+    (field) =>
+      field.qualifiedAs === "password" &&
+      field.reasons.includes("autocomplete:current-password")
+  );
+  if (autocompletePasswordFields.length > 0) {
+    return autocompletePasswordFields.length === 1 ? autocompletePasswordFields[0] : null;
+  }
+
+  const passwordFields = fields.filter((field) => field.qualifiedAs === "password");
+  return passwordFields.length === 1 ? passwordFields[0] : null;
+}
+
 export function collectAutofillSubmission(
   documentRef: Document = document,
   submittedForm?: HTMLFormElement,
@@ -394,19 +417,7 @@ export function collectAutofillSubmission(
     }
   }
 
-  const passwordField =
-    fields.find(
-      (field) =>
-        field.qualifiedAs === "password" &&
-        (hasSiteRuleType(field, "password") || hasSiteRuleType(field, "currentPassword"))
-    ) ??
-    fields.find(
-      (field) =>
-        field.qualifiedAs === "password" &&
-        field.reasons.includes("autocomplete:current-password")
-    ) ??
-    fields.find((field) => field.qualifiedAs === "password") ??
-    null;
+  const passwordField = pickOrdinaryLoginPasswordField(fields);
   const password = fieldValue(elements, passwordField, { trim: false });
   const username = fieldValue(elements, pickUsernameField(fieldsForUsername, passwordField, elements));
 

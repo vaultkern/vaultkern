@@ -96,6 +96,23 @@ describe("autofill save prompt capture", () => {
     });
   });
 
+  it("does not capture ordinary login submissions with ambiguous current-password fields", () => {
+    document.body.innerHTML = `
+      <form id="login">
+        <input name="email" type="email" autocomplete="username" value="alice@example.com" />
+        <input name="decoy_password" type="password" autocomplete="current-password" value="attacker-secret" />
+        <input name="password" type="password" autocomplete="current-password" value="secret-123" />
+      </form>
+    `;
+
+    const submission = collectAutofillSubmission(
+      document,
+      document.querySelector("#login") as HTMLFormElement
+    );
+
+    expect(submission).toBeNull();
+  });
+
   it("does not use hidden usernames as registration capture defaults", () => {
     document.body.innerHTML = `
       <form id="signup">
