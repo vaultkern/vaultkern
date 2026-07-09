@@ -524,6 +524,44 @@ describe("autofill site rules", () => {
     expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("scopes credential fallback selection to a rule-selected TOTP field", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form">
+        <input id="decoy-user" name="email" type="email" autocomplete="username" />
+        <input id="decoy-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="target-form">
+        <input id="target-user" name="account" type="email" autocomplete="username" />
+        <input id="target-password" name="secret" type="password" autocomplete="current-password" />
+        <input id="target-totp" name="code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "totp-only-rule",
+          host: window.location.hostname,
+          fields: {
+            totp: ["#target-totp"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret",
+      totp: "123456"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("alice");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
+    expect((document.querySelector("#target-totp") as HTMLInputElement).value).toBe("123456");
+  });
+
   it("scopes change-password fallback fills to the rule-selected form", () => {
     document.body.innerHTML = `
       <form id="decoy-form">

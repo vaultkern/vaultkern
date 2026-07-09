@@ -1157,6 +1157,10 @@ export function createLoginFillPlan(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "username")
   ) ?? firstViewableSiteRuleField(report.fields, "username");
+  const siteRuleTotpField = fieldForAction(
+    report.fields,
+    siteRuleActions.find((action) => action.fieldType === "totp")
+  ) ?? firstViewableSiteRuleField(report.fields, "totp");
   const siteRulePasswordChangeScopeKey = siteRulePasswordChangeField
     ? credentialScopeKey(siteRulePasswordChangeField)
     : null;
@@ -1165,7 +1169,8 @@ export function createLoginFillPlan(
       ? credentialScopeKey(siteRulePasswordField)
       : siteRuleUsernameField !== null
         ? credentialScopeKey(siteRuleUsernameField)
-        : siteRulePasswordChangeScopeKey;
+        : siteRulePasswordChangeScopeKey ??
+          (siteRuleTotpField ? credentialScopeKey(siteRuleTotpField) : null);
   const intentUsesFocusedScope = intent.reasons.some((reason) =>
     reason.startsWith("focused-")
   );
