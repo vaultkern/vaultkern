@@ -173,11 +173,48 @@ describe("autofill site rules", () => {
       username: "alice",
       password: "secret"
     });
+    expect(plan.actions).toEqual([]);
     applyFillPlan(plan, document);
 
     expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
-    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("alice");
-    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("does not fall back to the first login when a password rule matches multiple login scopes", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form" aria-label="Sign in">
+        <input id="decoy-user" name="email" type="email" autocomplete="username" />
+        <input class="rule-password" id="decoy-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="target-form" aria-label="Sign in">
+        <input id="target-user" name="email" type="email" autocomplete="username" />
+        <input class="rule-password" id="target-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "ambiguous-password-rule",
+          host: window.location.hostname,
+          fields: {
+            password: [".rule-password"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret"
+    });
+    expect(plan.actions).toEqual([]);
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("");
   });
 
   it("does not anchor password fills to ambiguous username site-rule matches", () => {

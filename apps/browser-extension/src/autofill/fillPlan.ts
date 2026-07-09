@@ -202,6 +202,19 @@ function siteRuleScopesForFieldType(
   );
 }
 
+function siteRuleScopesForAnyFieldType(
+  fields: AutofillTriageFieldResult[],
+  fieldTypes: AutofillFieldQualification[]
+) {
+  return new Set(
+    fields
+      .filter((field) =>
+        field.siteRuleTypes.some((fieldType) => fieldTypes.includes(fieldType))
+      )
+      .map(credentialScopeBucket)
+  );
+}
+
 function viewableSiteRuleFieldSpansMultipleScopes(
   reportFields: AutofillTriageFieldResult[],
   fieldType: AutofillFieldQualification
@@ -210,6 +223,13 @@ function viewableSiteRuleFieldSpansMultipleScopes(
     viewableSiteRuleFields(reportFields, fieldType),
     fieldType
   ).size > 1;
+}
+
+function fillableSiteRuleFieldSpansMultipleScopes(
+  reportFields: AutofillTriageFieldResult[],
+  fieldTypes: AutofillFieldQualification[]
+) {
+  return siteRuleScopesForAnyFieldType(siteRuleFields(reportFields), fieldTypes).size > 1;
 }
 
 function createSiteRuleActions(
@@ -1218,6 +1238,8 @@ export function createLoginFillPlan(
       (action) => action.fieldType === "currentPassword" || action.fieldType === "newPassword"
     )
   );
+  const ambiguousPasswordSiteRule =
+    fillableSiteRuleFieldSpansMultipleScopes(report.fields, ["password", "currentPassword"]);
   const ambiguousUsernameSiteRule =
     viewableSiteRuleFieldSpansMultipleScopes(report.fields, "username");
   const ambiguousTotpSiteRule =
@@ -1257,7 +1279,7 @@ export function createLoginFillPlan(
     intent.kind === "passwordChange";
   const primaryScopeKey = siteRuleAnchorScopeKey ?? intentScopeKey;
   if (
-    (ambiguousUsernameSiteRule || ambiguousTotpSiteRule) &&
+    (ambiguousPasswordSiteRule || ambiguousUsernameSiteRule || ambiguousTotpSiteRule) &&
     siteRuleAnchorScopeKey === null &&
     !intentUsesFocusedScope
   ) {
