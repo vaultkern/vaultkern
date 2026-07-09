@@ -145,6 +145,9 @@ function scopeNewPasswordFieldCount(scope: AutofillCredentialScope) {
 }
 
 function scopeQualifiesForLogin(scope: AutofillCredentialScope) {
+  if (scopeHasNewPassword(scope) && !scopeHasAnyKeyword(scope, LOGIN_KEYWORDS)) {
+    return false;
+  }
   return (
     hasRole(scope, "username") &&
     scopeHasPassword(scope) &&
