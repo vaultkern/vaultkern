@@ -323,6 +323,26 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#second-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("prefers a complete login scope over an earlier password-only scope", () => {
+    document.body.innerHTML = `
+      <form id="decoy">
+        <input id="decoy-password" type="password" autocomplete="current-password" value="" />
+      </form>
+      <form id="login">
+        <input id="login-email" type="email" autocomplete="username" value="" />
+        <input id="login-password" type="password" autocomplete="current-password" value="" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-email") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("keeps password-only fills on the first login password instead of later settings forms", () => {
     document.body.innerHTML = `
       <form id="login">

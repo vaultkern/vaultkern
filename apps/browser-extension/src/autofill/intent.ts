@@ -25,6 +25,15 @@ const RESET_KEYWORDS = [
   "recoverpassword"
 ];
 
+const LOGIN_KEYWORDS = [
+  "login",
+  "signin",
+  "signon",
+  "logon",
+  "authenticate",
+  "authentication"
+];
+
 const CHANGE_PASSWORD_KEYWORDS = [
   "changepassword",
   "updatepassword",
@@ -137,6 +146,14 @@ function scopeNewPasswordFieldCount(scope: AutofillCredentialScope) {
 
 function scopeQualifiesForLogin(scope: AutofillCredentialScope) {
   return hasRole(scope, "username") && scopeHasPassword(scope);
+}
+
+function scopeQualifiesForAnyLoginStep(scope: AutofillCredentialScope) {
+  return (
+    scopeQualifiesForLogin(scope) ||
+    scopeQualifiesForUsernameFirst(scope) ||
+    scopeQualifiesForPasswordStep(scope)
+  );
 }
 
 function scopeQualifiesForPasswordStep(scope: AutofillCredentialScope) {
@@ -282,19 +299,25 @@ export function resolveAutofillIntent(
   }
 
   if (hasUsername && hasPassword) {
-    for (const scope of scopes) {
-      if (scope.kind === "site-rule") {
-        continue;
-      }
-      if (scopeQualifiesForLogin(scope)) {
-        return plan("login", scope, "scope-has-username-and-password");
-      }
-      if (scopeQualifiesForUsernameFirst(scope)) {
-        return plan("usernameFirst", scope, "scope-has-username");
-      }
-      if (scopeQualifiesForPasswordStep(scope)) {
-        return plan("passwordStep", scope, "scope-has-password");
-      }
+    const firstLoginStepScope = firstMatchingScope(scopes, scopeQualifiesForAnyLoginStep);
+    if (firstLoginStepScope && scopeQualifiesForLogin(firstLoginStepScope)) {
+      return plan("login", firstLoginStepScope, "scope-has-username-and-password");
+    }
+
+    const explicitLoginScope = firstMatchingScope(
+      scopes,
+      (scope) => scopeQualifiesForLogin(scope) && scopeHasAnyKeyword(scope, LOGIN_KEYWORDS)
+    );
+    if (explicitLoginScope) {
+      return plan("login", explicitLoginScope, "scope-has-explicit-login-context");
+    }
+
+    if (firstLoginStepScope && scopeQualifiesForUsernameFirst(firstLoginStepScope)) {
+      return plan("usernameFirst", firstLoginStepScope, "scope-has-username");
+    }
+
+    if (firstLoginStepScope && scopeQualifiesForPasswordStep(firstLoginStepScope)) {
+      return plan("passwordStep", firstLoginStepScope, "scope-has-password");
     }
 
     const registrationScope = firstMatchingScope(scopes, (scope) =>
