@@ -562,6 +562,40 @@ describe("autofill site rules", () => {
     expect((document.querySelector("#target-totp") as HTMLInputElement).value).toBe("123456");
   });
 
+  it("does not anchor credential fallback to a non-fillable TOTP site-rule match", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form">
+        <input id="decoy-password" name="password" type="password" autocomplete="current-password" />
+        <input id="stale-totp" name="code" inputmode="numeric" autocomplete="one-time-code" disabled />
+      </form>
+      <form id="signin-form" aria-label="Sign in">
+        <input id="target-user" name="account" type="email" autocomplete="username" />
+        <input id="target-password" name="secret" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "stale-totp-rule",
+          host: window.location.hostname,
+          fields: {
+            totp: ["#stale-totp"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("alice");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("scopes change-password fallback fills to the rule-selected form", () => {
     document.body.innerHTML = `
       <form id="decoy-form">

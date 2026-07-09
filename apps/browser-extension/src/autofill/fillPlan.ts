@@ -121,6 +121,16 @@ function firstViewableSiteRuleField(
   return viewableSiteRuleFields(reportFields, fieldType)[0] ?? null;
 }
 
+function firstFillableSiteRuleField(
+  reportFields: AutofillTriageFieldResult[],
+  fieldType: AutofillFieldQualification
+) {
+  return (
+    siteRuleFields(reportFields).find((field) => field.siteRuleTypes.includes(fieldType)) ??
+    null
+  );
+}
+
 function actionForSiteRuleField(
   field: AutofillTriageFieldResult,
   payload: LoginFillPayload,
@@ -1160,7 +1170,7 @@ export function createLoginFillPlan(
   const siteRuleTotpField = fieldForAction(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "totp")
-  ) ?? firstViewableSiteRuleField(report.fields, "totp");
+  ) ?? firstFillableSiteRuleField(report.fields, "totp");
   const siteRulePasswordChangeScopeKey = siteRulePasswordChangeField
     ? credentialScopeKey(siteRulePasswordChangeField)
     : null;
