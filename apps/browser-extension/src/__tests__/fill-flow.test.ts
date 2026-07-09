@@ -4444,14 +4444,15 @@ describe("PopupShell fill flow", () => {
     });
   });
 
-  it("does not send a selected entry after the active tab navigates before delivery", async () => {
+  it("does not send a selected entry after the active tab navigates away from its candidates", async () => {
+    let activeUrl = "https://example.com/login";
     const query = vi.fn(async () => [
       {
         id: 7,
-        url: "https://example.com/login"
+        url: activeUrl
       }
     ]);
-    const get = vi.fn(async () => ({ id: 7, url: "https://evil.test/login" }));
+    const get = vi.fn(async () => ({ id: 7, url: activeUrl }));
     const sendMessage = vi.fn(async () => undefined);
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -4467,14 +4468,18 @@ describe("PopupShell fill flow", () => {
       activeVaultId: "vault-1"
     });
     runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice",
-        url: "https://example.com/login"
-      }
-    ]);
+    runtimeClientMocks.findFillCandidates.mockImplementation(async (_vaultId, url) =>
+      url === "https://example.com/login"
+        ? [
+            {
+              id: "entry-1",
+              title: "Example Account",
+              username: "alice",
+              url: "https://example.com/login"
+            }
+          ]
+        : []
+    );
     runtimeClientMocks.getEntryDetail.mockResolvedValue({
       type: "entry_detail",
       id: "entry-1",
@@ -4489,19 +4494,30 @@ describe("PopupShell fill flow", () => {
 
     render(createElement(PopupShell));
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Fill Example Account" })
+    const fillButton = await screen.findByRole("button", {
+      name: "Fill Example Account"
+    });
+    await waitFor(() =>
+      expect(runtimeClientMocks.findFillCandidates).toHaveBeenCalledWith(
+        "vault-1",
+        "https://example.com/login"
+      )
     );
+    const detailRequestsBeforeFill = runtimeClientMocks.getEntryDetail.mock.calls.length;
+    activeUrl = "https://evil.test/login";
+
+    fireEvent.click(fillButton);
 
     await waitFor(() => {
-      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith(
+      expect(runtimeClientMocks.findFillCandidates).toHaveBeenCalledWith(
         "vault-1",
-        "entry-1"
+        "https://evil.test/login"
       );
     });
-    await waitFor(() => {
-      expect(get).toHaveBeenCalledWith(7);
-    });
+    expect(get).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledTimes(
+      detailRequestsBeforeFill
+    );
     expect(sendMessage).not.toHaveBeenCalled();
   });
 

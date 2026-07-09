@@ -45,6 +45,10 @@ async function currentFillTargetUrl(tabId: number) {
   return normalizedHttpFillTargetUrl(tab?.url);
 }
 
+function candidateListIncludesEntry(candidates: Array<{ id?: unknown }>, entryId: string) {
+  return candidates.some((candidate) => candidate.id === entryId);
+}
+
 export async function requestFillCandidates(vaultId: string, siteUrl?: string) {
   if (siteUrl) {
     return client.findFillCandidates(vaultId, siteUrl);
@@ -68,6 +72,11 @@ export async function fillSelectedEntry(vaultId: string, entryId: string) {
   }
   const targetUrl = normalizedHttpFillTargetUrl(tab.url);
   if (!targetUrl) {
+    return;
+  }
+
+  const currentCandidates = await client.findFillCandidates(vaultId, targetUrl);
+  if (!candidateListIncludesEntry(currentCandidates, entryId)) {
     return;
   }
 

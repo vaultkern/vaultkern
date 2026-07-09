@@ -519,6 +519,16 @@ describe("background bridge", () => {
     });
 
     await vi.waitFor(() => {
+      expect(postedCommandCount(port, "get_session_state")).toBe(2);
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+
+    await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: {
@@ -539,7 +549,7 @@ describe("background bridge", () => {
     });
 
     await vi.waitFor(() => {
-      expect(postedCommandCount(port, "get_session_state")).toBe(2);
+      expect(postedCommandCount(port, "get_session_state")).toBe(3);
     });
     port.emitMessage({
       type: "session_state",
@@ -656,28 +666,12 @@ describe("background bridge", () => {
     });
 
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 1,
-        command: {
-          type: "get_entry_detail",
-          vault_id: "vault-1",
-          entry_id: "entry-1"
-        }
-      }));
+      expect(get).toHaveBeenCalledWith(7);
     });
-    port.emitMessage({
-      type: "entry_detail",
-      id: "entry-1",
-      title: "Example",
-      username: "alice",
-      password: "secret",
-      url: "https://example.com/login",
-      notes: ""
-    });
-
-    await flushMicrotasks();
 
     expect(get).toHaveBeenCalledWith(7);
+    expect(getWindow).not.toHaveBeenCalled();
+    expect(postedCommandCount(port, "get_entry_detail")).toBe(0);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -777,38 +771,11 @@ describe("background bridge", () => {
     });
 
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 1,
-        command: {
-          type: "get_entry_detail",
-          vault_id: "vault-1",
-          entry_id: "entry-1"
-        }
-      }));
+      expect(getWindow).toHaveBeenCalledWith(1);
     });
-    port.emitMessage({
-      type: "entry_detail",
-      id: "entry-1",
-      title: "Example",
-      username: "alice",
-      password: "secret",
-      url: "https://example.com/login",
-      notes: ""
-    });
-
-    await vi.waitFor(() => {
-      expect(postedCommandCount(port, "get_session_state")).toBe(2);
-    });
-    port.emitMessage({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-    await flushMicrotasks();
 
     expect(get).toHaveBeenCalledWith(7);
-    expect(getWindow).toHaveBeenCalledWith(1);
+    expect(postedCommandCount(port, "get_entry_detail")).toBe(0);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -908,26 +875,6 @@ describe("background bridge", () => {
     });
 
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 1,
-        command: {
-          type: "get_entry_detail",
-          vault_id: "vault-1",
-          entry_id: "entry-1"
-        }
-      }));
-    });
-    port.emitMessage({
-      type: "entry_detail",
-      id: "entry-1",
-      title: "Example",
-      username: "alice",
-      password: "secret",
-      url: "https://example.com/login",
-      notes: ""
-    });
-
-    await vi.waitFor(() => {
       expect(postedCommandCount(port, "get_session_state")).toBe(2);
     });
     port.emitMessage({
@@ -939,6 +886,8 @@ describe("background bridge", () => {
     await flushMicrotasks();
 
     expect(get).toHaveBeenCalledWith(7);
+    expect(getWindow).toHaveBeenCalledWith(1);
+    expect(postedCommandCount(port, "get_entry_detail")).toBe(0);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -1038,26 +987,6 @@ describe("background bridge", () => {
     });
 
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 1,
-        command: {
-          type: "get_entry_detail",
-          vault_id: "vault-1",
-          entry_id: "entry-1"
-        }
-      }));
-    });
-    port.emitMessage({
-      type: "entry_detail",
-      id: "entry-1",
-      title: "Example",
-      username: "alice",
-      password: "secret",
-      url: "https://example.com/login",
-      notes: ""
-    });
-
-    await vi.waitFor(() => {
       expect(postedCommandCount(port, "get_session_state")).toBe(2);
     });
     port.emitMessage({
@@ -1069,6 +998,8 @@ describe("background bridge", () => {
     await flushMicrotasks();
 
     expect(get).toHaveBeenCalledWith(7);
+    expect(getWindow).toHaveBeenCalledWith(1);
+    expect(postedCommandCount(port, "get_entry_detail")).toBe(0);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -1156,6 +1087,7 @@ describe("background bridge", () => {
         }
       }));
     });
+    autofillOnPageLoadEnabled = false;
     port.emitMessage({
       type: "fill_candidates",
       entries: [
@@ -1169,28 +1101,13 @@ describe("background bridge", () => {
     });
 
     await vi.waitFor(() => {
-      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 1,
-        command: {
-          type: "get_entry_detail",
-          vault_id: "vault-1",
-          entry_id: "entry-1"
-        }
-      }));
-    });
-    autofillOnPageLoadEnabled = false;
-    port.emitMessage({
-      type: "entry_detail",
-      id: "entry-1",
-      title: "Example",
-      username: "alice",
-      password: "secret",
-      url: "https://example.com/login",
-      notes: ""
+      expect(getWindow).toHaveBeenCalledWith(1);
     });
     await flushMicrotasks();
 
     expect(get).toHaveBeenCalledWith(7);
+    expect(postedCommandCount(port, "get_session_state")).toBe(1);
+    expect(postedCommandCount(port, "get_entry_detail")).toBe(0);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 

@@ -153,14 +153,6 @@ function pageLoadEntryCredentials(response: unknown) {
   return { username, password };
 }
 
-async function currentPageLoadAutofillUrl(tabId: number) {
-  if (!chromeApi?.tabs?.get) {
-    return null;
-  }
-  const tab = await chromeApi.tabs.get(tabId);
-  return pageLoadAutofillUrl(tab?.url);
-}
-
 async function pageLoadAutofillTabCanReceive(tabId: number, expectedUrl: string) {
   if (!chromeApi?.tabs?.get || !chromeApi?.windows?.get) {
     return false;
@@ -506,6 +498,14 @@ async function maybeSendPageLoadAutofill(tabId: number, tabUrl: string | undefin
       return;
     }
 
+    if (!(await pageLoadAutofillTabCanReceive(tabId, url))) {
+      return;
+    }
+
+    if (!(await pageLoadAutofillStillAuthorized(vaultId))) {
+      return;
+    }
+
     const credentials = pageLoadEntryCredentials(
       await sendRuntimeCommand({
         type: "get_entry_detail",
@@ -514,11 +514,6 @@ async function maybeSendPageLoadAutofill(tabId: number, tabUrl: string | undefin
       })
     );
     if (!credentials) {
-      return;
-    }
-
-    const currentUrl = await currentPageLoadAutofillUrl(tabId);
-    if (currentUrl !== url) {
       return;
     }
 
