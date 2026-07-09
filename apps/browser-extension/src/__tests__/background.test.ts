@@ -11,7 +11,8 @@ type StorageChangeListener = (
 ) => void;
 type TabUpdatedListener = (
   tabId: number,
-  changeInfo: { status?: string; url?: string }
+  changeInfo: { status?: string; url?: string },
+  tab?: { id?: number; url?: string }
 ) => void;
 type AlarmListener = (alarm: { name: string }) => void;
 
@@ -399,6 +400,121 @@ describe("background bridge", () => {
         tabId: 7
       }).response()
     ).resolves.toEqual({ pending: null });
+  });
+
+  it("sends an explicit page-load fill message when automatic autofill is enabled and one candidate matches", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+    const sendMessage = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                autofillOnPageLoadEnabled: true,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: false
+              }
+            });
+          },
+          set() {}
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener(listener: TabUpdatedListener) {
+            tabUpdatedListeners.push(listener);
+          }
+        },
+        onRemoved: {
+          addListener() {}
+        },
+        sendMessage
+      }
+    };
+
+    await import("../background");
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { status: "complete" }, { id: 7, url: "https://example.com/login" });
+    }
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: { type: "get_session_state" }
+      }));
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: {
+          type: "find_fill_candidates",
+          vault_id: "vault-1",
+          url: "https://example.com/login"
+        }
+      }));
+    });
+    port.emitMessage({
+      type: "fill_candidates",
+      entries: [
+        {
+          id: "entry-1",
+          title: "Example",
+          username: "alice",
+          url: "https://example.com/login"
+        }
+      ]
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: {
+          type: "get_entry_detail",
+          vault_id: "vault-1",
+          entry_id: "entry-1"
+        }
+      }));
+    });
+    port.emitMessage({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com/login",
+      notes: ""
+    });
+
+    await vi.waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith(7, {
+        type: "fill_entry_detail",
+        trigger: "pageLoad",
+        allowAutomaticSecretFill: true,
+        username: "alice",
+        password: "secret"
+      });
+    });
   });
 
   it("keeps fresh tab-scoped pending autofill submissions after submit redirects", async () => {

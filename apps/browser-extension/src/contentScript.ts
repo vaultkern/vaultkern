@@ -1,17 +1,25 @@
 import { applyFillPlan } from "./autofill/applyFillPlan";
 import { collectAutofillPageSnapshot } from "./autofill/collectPageFields";
 import { createLoginFillPlan } from "./autofill/fillPlan";
+import type { AutofillTrigger, CreateLoginFillPlanOptions } from "./autofill/fillPlan";
 import { collectAutofillSubmission } from "./autofill/savePrompt";
 
-export function fillLoginForm(payload: {
-  username?: string;
-  password?: string;
-  newPassword?: string;
-  totp?: string;
-}) {
+export function fillLoginForm(
+  payload: {
+    username?: string;
+    password?: string;
+    newPassword?: string;
+    totp?: string;
+  },
+  options: CreateLoginFillPlanOptions = {}
+) {
   const snapshot = collectAutofillPageSnapshot(document);
-  const fillPlan = createLoginFillPlan(snapshot, payload);
+  const fillPlan = createLoginFillPlan(snapshot, payload, options);
   applyFillPlan(fillPlan, document);
+}
+
+function triggerFromFillMessage(trigger: unknown): AutofillTrigger {
+  return trigger === "pageLoad" || trigger === "unlockContinuation" ? trigger : "manual";
 }
 
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
@@ -29,6 +37,8 @@ if (chromeApi?.runtime?.onMessage) {
         password?: string;
         newPassword?: string;
         totp?: string;
+        trigger?: unknown;
+        allowAutomaticSecretFill?: unknown;
       },
       _sender: unknown,
       _sendResponse: (response?: unknown) => void
@@ -46,12 +56,18 @@ if (chromeApi?.runtime?.onMessage) {
         return false;
       }
 
-      fillLoginForm({
-        username: hasUsername ? message.username : undefined,
-        password: hasPassword ? message.password : undefined,
-        newPassword: hasNewPassword ? message.newPassword : undefined,
-        totp: hasTotp ? message.totp : undefined
-      });
+      fillLoginForm(
+        {
+          username: hasUsername ? message.username : undefined,
+          password: hasPassword ? message.password : undefined,
+          newPassword: hasNewPassword ? message.newPassword : undefined,
+          totp: hasTotp ? message.totp : undefined
+        },
+        {
+          trigger: triggerFromFillMessage(message.trigger),
+          allowAutomaticSecretFill: message.allowAutomaticSecretFill === true
+        }
+      );
 
       return false;
     }

@@ -215,6 +215,71 @@ describe("fillLoginForm", () => {
     ).toBe("secret");
   });
 
+  it("does not write credentials for a page-load fill without explicit automatic permission", () => {
+    document.body.innerHTML = `
+      <form>
+        <input type="text" name="username" />
+        <input type="password" name="password" />
+      </form>
+    `;
+
+    fillLoginForm(
+      { username: "alice", password: "secret" },
+      { trigger: "pageLoad" }
+    );
+
+    expect(
+      (document.querySelector('input[name="username"]') as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (document.querySelector('input[name="password"]') as HTMLInputElement).value
+    ).toBe("");
+  });
+
+  it("writes credentials for an explicitly allowed page-load fill of one ordinary login scope", () => {
+    document.body.innerHTML = `
+      <form>
+        <input type="email" name="username" autocomplete="username" />
+        <input type="password" name="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm(
+      { username: "alice", password: "secret" },
+      { trigger: "pageLoad", allowAutomaticSecretFill: true }
+    );
+
+    expect(
+      (document.querySelector('input[name="username"]') as HTMLInputElement).value
+    ).toBe("alice");
+    expect(
+      (document.querySelector('input[name="password"]') as HTMLInputElement).value
+    ).toBe("secret");
+  });
+
+  it("does not write credentials for an automatic page-load fill when multiple credential scopes exist", () => {
+    document.body.innerHTML = `
+      <form id="first">
+        <input id="first-username" type="email" autocomplete="username" />
+        <input id="first-password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="second">
+        <input id="second-username" type="email" autocomplete="username" />
+        <input id="second-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm(
+      { username: "alice", password: "secret" },
+      { trigger: "pageLoad", allowAutomaticSecretFill: true }
+    );
+
+    expect((document.querySelector("#first-username") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#first-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#second-username") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#second-password") as HTMLInputElement).value).toBe("");
+  });
+
   it("fills only the visible username field when no password field is present", () => {
     document.body.innerHTML = `
       <form>
@@ -4366,6 +4431,7 @@ describe("PopupShell fill flow", () => {
       );
       expect(sendMessage).toHaveBeenCalledWith(7, {
         type: "fill_entry_detail",
+        trigger: "manual",
         username: "alice",
         password: "secret-123",
         totp: "123456"
@@ -7095,6 +7161,81 @@ describe("content script fill message", () => {
       <form>
         <input type="email" name="username" />
         <input type="password" name="password" />
+      </form>
+    `;
+
+    vi.resetModules();
+    await import("../contentScript");
+
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(
+      (document.querySelector('input[name="username"]') as HTMLInputElement).value
+    ).toBe("bob");
+    expect(
+      (document.querySelector('input[name="password"]') as HTMLInputElement).value
+    ).toBe("root-secret");
+  });
+
+  it("does not treat a page-load entry-detail message as manual fill intent", async () => {
+    const addListener = vi.fn((listener: (message: unknown) => void) => {
+      listener({
+        type: "fill_entry_detail",
+        trigger: "pageLoad",
+        username: "bob",
+        password: "root-secret"
+      });
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        }
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input type="email" name="username" />
+        <input type="password" name="password" />
+      </form>
+    `;
+
+    vi.resetModules();
+    await import("../contentScript");
+
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(
+      (document.querySelector('input[name="username"]') as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (document.querySelector('input[name="password"]') as HTMLInputElement).value
+    ).toBe("");
+  });
+
+  it("honors an explicitly allowed page-load entry-detail message for one ordinary login scope", async () => {
+    const addListener = vi.fn((listener: (message: unknown) => void) => {
+      listener({
+        type: "fill_entry_detail",
+        trigger: "pageLoad",
+        allowAutomaticSecretFill: true,
+        username: "bob",
+        password: "root-secret"
+      });
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        }
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input type="email" name="username" autocomplete="username" />
+        <input type="password" name="password" autocomplete="current-password" />
       </form>
     `;
 

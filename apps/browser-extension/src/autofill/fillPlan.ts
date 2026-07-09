@@ -1,7 +1,8 @@
 import { resolveAutofillIntent } from "./intent";
-import { credentialScopeKey, fieldScopeMatches } from "./scope";
+import { credentialScopeKey, fieldScopeMatches, resolveCredentialScopes } from "./scope";
 import { triageAutofillPage } from "./triage";
 import type {
+  AutofillCredentialScope,
   AutofillPageSnapshot,
   AutofillTriageFieldResult,
   AutofillFieldQualification
@@ -12,6 +13,13 @@ export interface LoginFillPayload {
   password?: string;
   newPassword?: string;
   totp?: string;
+}
+
+export type AutofillTrigger = "manual" | "unlockContinuation" | "pageLoad";
+
+export interface CreateLoginFillPlanOptions {
+  trigger?: AutofillTrigger;
+  allowAutomaticSecretFill?: boolean;
 }
 
 export interface AutofillFillAction {
@@ -629,6 +637,76 @@ function fieldIsInCredentialScope(
     return field.formOpid === undefined && field.containerOpid === undefined;
   }
   return credentialScopeKey(field) === scopeKey;
+}
+
+function fieldHasQualification(
+  field: AutofillTriageFieldResult,
+  qualification: AutofillFieldQualification
+) {
+  return field.qualifiedAs === qualification || field.siteRuleTypes.includes(qualification);
+}
+
+function fieldHasLoginPasswordQualification(field: AutofillTriageFieldResult) {
+  return (
+    fieldHasQualification(field, "password") ||
+    fieldHasQualification(field, "currentPassword")
+  );
+}
+
+function fieldHasAnyCredentialQualification(field: AutofillTriageFieldResult) {
+  return (
+    fieldHasQualification(field, "username") ||
+    fieldHasLoginPasswordQualification(field) ||
+    fieldHasQualification(field, "newPassword") ||
+    fieldHasQualification(field, "totp")
+  );
+}
+
+function scopeHasCredentialFields(scope: AutofillCredentialScope) {
+  return scope.fields.some(fieldHasAnyCredentialQualification);
+}
+
+function scopeIsOrdinaryPageLoadLogin(scope: AutofillCredentialScope) {
+  const usernameFields = scope.fields.filter((field) => fieldHasQualification(field, "username"));
+  const passwordFields = scope.fields.filter(fieldHasLoginPasswordQualification);
+  const hasNewPassword = scope.fields.some((field) => fieldHasQualification(field, "newPassword"));
+  const hasTotp = scope.fields.some((field) => fieldHasQualification(field, "totp"));
+
+  return (
+    usernameFields.length === 1 &&
+    passwordFields.length === 1 &&
+    !hasNewPassword &&
+    !hasTotp
+  );
+}
+
+function strictPageLoadScopeKey(
+  reportFields: AutofillTriageFieldResult[],
+  payload: LoginFillPayload,
+  options: CreateLoginFillPlanOptions
+) {
+  if (options.trigger !== "pageLoad") {
+    return undefined;
+  }
+  if (
+    options.allowAutomaticSecretFill !== true ||
+    typeof payload.username !== "string" ||
+    typeof payload.password !== "string" ||
+    typeof payload.newPassword === "string" ||
+    typeof payload.totp === "string"
+  ) {
+    return null;
+  }
+
+  const credentialScopes = resolveCredentialScopes(reportFields).filter(
+    (scope) => scope.kind !== "site-rule" && scopeHasCredentialFields(scope)
+  );
+  if (credentialScopes.length !== 1) {
+    return null;
+  }
+
+  const [scope] = credentialScopes;
+  return scopeIsOrdinaryPageLoadLogin(scope) ? scope.key : null;
 }
 
 const CHANGE_PASSWORD_KEYWORDS = [
@@ -1258,9 +1336,14 @@ function createTotpActions(
 
 export function createLoginFillPlan(
   snapshot: AutofillPageSnapshot,
-  payload: LoginFillPayload
+  payload: LoginFillPayload,
+  options: CreateLoginFillPlanOptions = {}
 ): AutofillFillPlan {
   const report = triageAutofillPage(snapshot);
+  const pageLoadScopeKey = strictPageLoadScopeKey(report.fields, payload, options);
+  if (pageLoadScopeKey === null) {
+    return { actions: [] };
+  }
   if (snapshot.siteRule?.disabled) {
     return { actions: [] };
   }

@@ -340,6 +340,8 @@ it("opens extension settings while locked and saves local extension preferences"
   fireEvent.change(screen.getByLabelText("Clear Clipboard Seconds"), {
     target: { value: "12" }
   });
+  expect(screen.getByLabelText("Page-load autofill")).not.toBeChecked();
+  fireEvent.click(screen.getByLabelText("Page-load autofill"));
   fireEvent.click(screen.getByLabelText("VaultKern passkey provider"));
   fireEvent.click(screen.getByLabelText("Quick Unlock"));
   fireEvent.click(screen.getByRole("button", { name: "中文" }));
@@ -351,6 +353,7 @@ it("opens extension settings while locked and saves local extension preferences"
       language: "zh-CN",
       idleLockMinutes: 7,
       clearClipboardSeconds: 12,
+      autofillOnPageLoadEnabled: true,
       passkeyProviderEnabled: true,
       quickUnlockEnabled: true
     });
@@ -388,6 +391,7 @@ it("does not save quick unlock as enabled when the host does not support it", as
       language: "en",
       idleLockMinutes: 10,
       clearClipboardSeconds: 30,
+      autofillOnPageLoadEnabled: false,
       passkeyProviderEnabled: false,
       quickUnlockEnabled: false
     });

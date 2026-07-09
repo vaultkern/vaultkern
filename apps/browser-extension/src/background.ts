@@ -81,6 +81,78 @@ function hostFromUrl(url: string | undefined) {
   }
 }
 
+function pageLoadAutofillUrl(url: string | undefined) {
+  if (typeof url !== "string" || url.trim() === "") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function activeVaultIdFromSessionState(response: unknown) {
+  if (
+    typeof response !== "object" ||
+    response === null ||
+    (response as { type?: unknown }).type !== "session_state" ||
+    (response as { unlocked?: unknown }).unlocked !== true ||
+    typeof (response as { activeVaultId?: unknown }).activeVaultId !== "string"
+  ) {
+    return null;
+  }
+
+  return (response as { activeVaultId: string }).activeVaultId;
+}
+
+function singleFillCandidateId(response: unknown) {
+  if (
+    typeof response !== "object" ||
+    response === null ||
+    (response as { type?: unknown }).type !== "fill_candidates" ||
+    !Array.isArray((response as { entries?: unknown }).entries)
+  ) {
+    return null;
+  }
+
+  const entries = (response as { entries: unknown[] }).entries;
+  if (entries.length !== 1) {
+    return null;
+  }
+
+  const [entry] = entries;
+  return typeof entry === "object" &&
+    entry !== null &&
+    typeof (entry as { id?: unknown }).id === "string"
+    ? (entry as { id: string }).id
+    : null;
+}
+
+function pageLoadEntryCredentials(response: unknown) {
+  if (
+    typeof response !== "object" ||
+    response === null ||
+    (response as { type?: unknown }).type !== "entry_detail"
+  ) {
+    return null;
+  }
+
+  const username = (response as { username?: unknown }).username;
+  const password = (response as { password?: unknown }).password;
+  if (
+    typeof username !== "string" ||
+    username.trim() === "" ||
+    typeof password !== "string" ||
+    password === ""
+  ) {
+    return null;
+  }
+
+  return { username, password };
+}
+
 function pendingAutofillSubmissionIsExpired(
   submission: PendingAutofillSubmission,
   now = Date.now()
@@ -367,6 +439,59 @@ const nativeBridge =
       )
     : null;
 
+async function maybeSendPageLoadAutofill(tabId: number, tabUrl: string | undefined) {
+  const url = pageLoadAutofillUrl(tabUrl);
+  if (!url || !nativeBridge || !chromeApi?.tabs?.sendMessage) {
+    return;
+  }
+
+  try {
+    const settings = await extensionSettingsStore.load();
+    if (!settings.autofillOnPageLoadEnabled) {
+      return;
+    }
+
+    const vaultId = activeVaultIdFromSessionState(
+      await sendRuntimeCommand({ type: "get_session_state" })
+    );
+    if (!vaultId) {
+      return;
+    }
+
+    const entryId = singleFillCandidateId(
+      await sendRuntimeCommand({
+        type: "find_fill_candidates",
+        vault_id: vaultId,
+        url
+      })
+    );
+    if (!entryId) {
+      return;
+    }
+
+    const credentials = pageLoadEntryCredentials(
+      await sendRuntimeCommand({
+        type: "get_entry_detail",
+        vault_id: vaultId,
+        entry_id: entryId
+      })
+    );
+    if (!credentials) {
+      return;
+    }
+
+    await chromeApi.tabs.sendMessage(tabId, {
+      type: "fill_entry_detail",
+      trigger: "pageLoad",
+      allowAutomaticSecretFill: true,
+      username: credentials.username,
+      password: credentials.password
+    });
+  } catch {
+    // Page-load autofill is opportunistic; popup/manual fill remains the reliable path.
+  }
+}
+
 if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener(
     (
@@ -404,10 +529,20 @@ if (chromeApi?.runtime?.onMessage) {
 }
 
 chromeApi?.tabs?.onUpdated?.addListener?.(
-  (tabId: number, changeInfo: { url?: string }) => {
+  (
+    tabId: number,
+    changeInfo: { status?: string; url?: string },
+    tab?: { url?: string }
+  ) => {
     if (typeof changeInfo.url === "string" && changeInfo.url.trim() !== "") {
       trackPendingAutofillTabUrl(tabId, changeInfo.url);
       clearInvalidPendingAutofillSubmissionForTab(tabId, changeInfo.url);
+    }
+    if (changeInfo.status === "complete") {
+      void maybeSendPageLoadAutofill(
+        tabId,
+        tab?.url ?? changeInfo.url ?? pendingAutofillTabUrls.get(tabId)
+      );
     }
   }
 );

@@ -49,11 +49,13 @@ export async function fillSelectedEntry(vaultId: string, entryId: string) {
   const detail = await client.getEntryDetail(vaultId, entryId);
   const fillMessage: {
     type: "fill_entry_detail";
+    trigger: "manual";
     username?: string;
     password?: string;
     totp?: string;
   } = {
     type: "fill_entry_detail",
+    trigger: "manual",
     username: detail.username,
     password: detail.password
   };
