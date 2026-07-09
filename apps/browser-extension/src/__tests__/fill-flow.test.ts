@@ -364,6 +364,25 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#settings-new-password") as HTMLInputElement).value).toBe("");
   });
 
+  it("keeps password-only fills off earlier settings forms when a login password follows", () => {
+    document.body.innerHTML = `
+      <form id="settings">
+        <input id="settings-current-password" type="password" autocomplete="current-password" value="" />
+        <input id="settings-new-password" type="password" autocomplete="new-password" value="" />
+      </form>
+      <form id="login">
+        <input id="login-password" type="password" value="" />
+      </form>
+    `;
+    fillLoginForm({ password: "secret" });
+
+    expect(
+      (document.querySelector("#settings-current-password") as HTMLInputElement).value
+    ).toBe("");
+    expect((document.querySelector("#settings-new-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("keeps password-only fills off setup forms that also ask for a new password", () => {
     document.body.innerHTML = `
       <form id="setup">

@@ -332,6 +332,13 @@ function isUnsafeLoginPasswordField(
   );
 }
 
+function isPasswordChangeCurrentPasswordField(
+  passwordField: AutofillTriageFieldResult,
+  fields: AutofillTriageFieldResult[]
+) {
+  return fieldHasSiblingNewPassword(passwordField, fields) && isCurrentPasswordField(passwordField);
+}
+
 function pickLoginPasswordField(fields: AutofillTriageFieldResult[]) {
   const passwordField = pickPasswordField(fields);
   if (!passwordField) {
@@ -346,10 +353,15 @@ function pickLoginPasswordField(fields: AutofillTriageFieldResult[]) {
 }
 
 function pickFirstSafeLoginPasswordField(fields: AutofillTriageFieldResult[]) {
+  const safePasswordFields = fields.filter(
+    (field) => field.qualifiedAs === "password" && !isUnsafeLoginPasswordField(field, fields)
+  );
   return (
-    fields.find(
-      (field) => field.qualifiedAs === "password" && !isUnsafeLoginPasswordField(field, fields)
-    ) ?? null
+    safePasswordFields.find(
+      (field) => !isPasswordChangeCurrentPasswordField(field, fields)
+    ) ??
+    safePasswordFields[0] ??
+    null
   );
 }
 
