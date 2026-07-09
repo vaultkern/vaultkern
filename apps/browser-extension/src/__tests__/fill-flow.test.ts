@@ -7214,11 +7214,13 @@ describe("content script fill message", () => {
   });
 
   it("honors an explicitly allowed page-load entry-detail message for one ordinary login scope", async () => {
+    const targetUrl = window.location.href;
     const addListener = vi.fn((listener: (message: unknown) => void) => {
       listener({
         type: "fill_entry_detail",
         trigger: "pageLoad",
         allowAutomaticSecretFill: true,
+        targetUrl,
         username: "bob",
         password: "root-secret"
       });
@@ -7249,6 +7251,46 @@ describe("content script fill message", () => {
     expect(
       (document.querySelector('input[name="password"]') as HTMLInputElement).value
     ).toBe("root-secret");
+  });
+
+  it("does not honor a page-load entry-detail message for a different page URL", async () => {
+    window.history.replaceState(null, "", "/login");
+    const addListener = vi.fn((listener: (message: unknown) => void) => {
+      listener({
+        type: "fill_entry_detail",
+        trigger: "pageLoad",
+        allowAutomaticSecretFill: true,
+        targetUrl: "https://evil.test/login",
+        username: "bob",
+        password: "root-secret"
+      });
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        }
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input type="email" name="username" autocomplete="username" />
+        <input type="password" name="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    vi.resetModules();
+    await import("../contentScript");
+
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(
+      (document.querySelector('input[name="username"]') as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (document.querySelector('input[name="password"]') as HTMLInputElement).value
+    ).toBe("");
   });
 
   it("fills a TOTP field when the content script receives entry detail", async () => {

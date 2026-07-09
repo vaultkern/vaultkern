@@ -22,6 +22,24 @@ function triggerFromFillMessage(trigger: unknown): AutofillTrigger {
   return trigger === "pageLoad" || trigger === "unlockContinuation" ? trigger : "manual";
 }
 
+function normalizedHttpPageUrl(value: unknown) {
+  if (typeof value !== "string" || value.trim() === "") {
+    return null;
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function pageLoadTargetMatchesCurrentPage(targetUrl: unknown) {
+  const expectedUrl = normalizedHttpPageUrl(targetUrl);
+  const currentUrl = normalizedHttpPageUrl(window.location.href);
+  return expectedUrl !== null && expectedUrl === currentUrl;
+}
+
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
 const autofillSubmissionListenerRoots = new WeakSet<EventTarget>();
 const openShadowRootDiscoveryRoots = new WeakSet<Document | ShadowRoot>();
@@ -39,6 +57,7 @@ if (chromeApi?.runtime?.onMessage) {
         totp?: string;
         trigger?: unknown;
         allowAutomaticSecretFill?: unknown;
+        targetUrl?: unknown;
       },
       _sender: unknown,
       _sendResponse: (response?: unknown) => void
@@ -56,6 +75,11 @@ if (chromeApi?.runtime?.onMessage) {
         return false;
       }
 
+      const trigger = triggerFromFillMessage(message.trigger);
+      if (trigger === "pageLoad" && !pageLoadTargetMatchesCurrentPage(message.targetUrl)) {
+        return false;
+      }
+
       fillLoginForm(
         {
           username: hasUsername ? message.username : undefined,
@@ -64,7 +88,7 @@ if (chromeApi?.runtime?.onMessage) {
           totp: hasTotp ? message.totp : undefined
         },
         {
-          trigger: triggerFromFillMessage(message.trigger),
+          trigger,
           allowAutomaticSecretFill: message.allowAutomaticSecretFill === true
         }
       );

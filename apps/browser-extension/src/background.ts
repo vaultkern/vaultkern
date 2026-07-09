@@ -153,6 +153,14 @@ function pageLoadEntryCredentials(response: unknown) {
   return { username, password };
 }
 
+async function currentPageLoadAutofillUrl(tabId: number) {
+  if (!chromeApi?.tabs?.get) {
+    return null;
+  }
+  const tab = await chromeApi.tabs.get(tabId);
+  return pageLoadAutofillUrl(tab?.url);
+}
+
 function pendingAutofillSubmissionIsExpired(
   submission: PendingAutofillSubmission,
   now = Date.now()
@@ -480,10 +488,16 @@ async function maybeSendPageLoadAutofill(tabId: number, tabUrl: string | undefin
       return;
     }
 
+    const currentUrl = await currentPageLoadAutofillUrl(tabId);
+    if (currentUrl !== url) {
+      return;
+    }
+
     await chromeApi.tabs.sendMessage(tabId, {
       type: "fill_entry_detail",
       trigger: "pageLoad",
       allowAutomaticSecretFill: true,
+      targetUrl: url,
       username: credentials.username,
       password: credentials.password
     });
