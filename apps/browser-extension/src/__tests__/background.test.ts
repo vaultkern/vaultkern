@@ -141,6 +141,27 @@ function createPort() {
   };
 }
 
+function postedCommandCount(
+  port: ReturnType<typeof createPort>,
+  commandType: string
+) {
+  return port.postMessage.mock.calls.filter(([message]) => {
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      !("command" in message)
+    ) {
+      return false;
+    }
+    const command = (message as { command?: unknown }).command;
+    return (
+      typeof command === "object" &&
+      command !== null &&
+      (command as { type?: unknown }).type === commandType
+    );
+  }).length;
+}
+
 async function completePasskeyLedgerReconciliation(
   port: ReturnType<typeof createPort>
 ) {
@@ -509,6 +530,16 @@ describe("background bridge", () => {
     });
 
     await vi.waitFor(() => {
+      expect(postedCommandCount(port, "get_session_state")).toBe(2);
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+
+    await vi.waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith(7, {
         type: "fill_entry_detail",
         trigger: "pageLoad",
@@ -626,6 +657,361 @@ describe("background bridge", () => {
       notes: ""
     });
 
+    await flushMicrotasks();
+
+    expect(get).toHaveBeenCalledWith(7);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not send a page-load fill after the vault locks before delivery", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
+    const sendMessage = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                autofillOnPageLoadEnabled: true,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: false
+              }
+            });
+          },
+          set() {}
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener(listener: TabUpdatedListener) {
+            tabUpdatedListeners.push(listener);
+          }
+        },
+        onRemoved: {
+          addListener() {}
+        },
+        get,
+        sendMessage
+      }
+    };
+
+    await import("../background");
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { status: "complete" }, { id: 7, url: "https://example.com/login" });
+    }
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: { type: "get_session_state" }
+      }));
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: {
+          type: "find_fill_candidates",
+          vault_id: "vault-1",
+          url: "https://example.com/login"
+        }
+      }));
+    });
+    port.emitMessage({
+      type: "fill_candidates",
+      entries: [
+        {
+          id: "entry-1",
+          title: "Example",
+          username: "alice",
+          url: "https://example.com/login"
+        }
+      ]
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: {
+          type: "get_entry_detail",
+          vault_id: "vault-1",
+          entry_id: "entry-1"
+        }
+      }));
+    });
+    port.emitMessage({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com/login",
+      notes: ""
+    });
+
+    await vi.waitFor(() => {
+      expect(postedCommandCount(port, "get_session_state")).toBe(2);
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: false,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+    await flushMicrotasks();
+
+    expect(get).toHaveBeenCalledWith(7);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not send a page-load fill after the active vault changes before delivery", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
+    const sendMessage = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                autofillOnPageLoadEnabled: true,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: false
+              }
+            });
+          },
+          set() {}
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener(listener: TabUpdatedListener) {
+            tabUpdatedListeners.push(listener);
+          }
+        },
+        onRemoved: {
+          addListener() {}
+        },
+        get,
+        sendMessage
+      }
+    };
+
+    await import("../background");
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { status: "complete" }, { id: 7, url: "https://example.com/login" });
+    }
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: { type: "get_session_state" }
+      }));
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: {
+          type: "find_fill_candidates",
+          vault_id: "vault-1",
+          url: "https://example.com/login"
+        }
+      }));
+    });
+    port.emitMessage({
+      type: "fill_candidates",
+      entries: [
+        {
+          id: "entry-1",
+          title: "Example",
+          username: "alice",
+          url: "https://example.com/login"
+        }
+      ]
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: {
+          type: "get_entry_detail",
+          vault_id: "vault-1",
+          entry_id: "entry-1"
+        }
+      }));
+    });
+    port.emitMessage({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com/login",
+      notes: ""
+    });
+
+    await vi.waitFor(() => {
+      expect(postedCommandCount(port, "get_session_state")).toBe(2);
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-2",
+      currentVaultRefId: "vault-ref-2"
+    });
+    await flushMicrotasks();
+
+    expect(get).toHaveBeenCalledWith(7);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not send a page-load fill after automatic autofill is disabled before delivery", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
+    const sendMessage = vi.fn(async () => undefined);
+    let autofillOnPageLoadEnabled = true;
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                autofillOnPageLoadEnabled,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: false
+              }
+            });
+          },
+          set() {}
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener(listener: TabUpdatedListener) {
+            tabUpdatedListeners.push(listener);
+          }
+        },
+        onRemoved: {
+          addListener() {}
+        },
+        get,
+        sendMessage
+      }
+    };
+
+    await import("../background");
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { status: "complete" }, { id: 7, url: "https://example.com/login" });
+    }
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: { type: "get_session_state" }
+      }));
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: {
+          type: "find_fill_candidates",
+          vault_id: "vault-1",
+          url: "https://example.com/login"
+        }
+      }));
+    });
+    port.emitMessage({
+      type: "fill_candidates",
+      entries: [
+        {
+          id: "entry-1",
+          title: "Example",
+          username: "alice",
+          url: "https://example.com/login"
+        }
+      ]
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: {
+          type: "get_entry_detail",
+          vault_id: "vault-1",
+          entry_id: "entry-1"
+        }
+      }));
+    });
+    autofillOnPageLoadEnabled = false;
+    port.emitMessage({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com/login",
+      notes: ""
+    });
     await flushMicrotasks();
 
     expect(get).toHaveBeenCalledWith(7);

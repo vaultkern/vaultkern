@@ -161,6 +161,18 @@ async function currentPageLoadAutofillUrl(tabId: number) {
   return pageLoadAutofillUrl(tab?.url);
 }
 
+async function pageLoadAutofillStillAuthorized(vaultId: string) {
+  const settings = await extensionSettingsStore.load();
+  if (!settings.autofillOnPageLoadEnabled) {
+    return false;
+  }
+
+  const currentVaultId = activeVaultIdFromSessionState(
+    await sendRuntimeCommand({ type: "get_session_state" })
+  );
+  return currentVaultId === vaultId;
+}
+
 function pendingAutofillSubmissionIsExpired(
   submission: PendingAutofillSubmission,
   now = Date.now()
@@ -490,6 +502,10 @@ async function maybeSendPageLoadAutofill(tabId: number, tabUrl: string | undefin
 
     const currentUrl = await currentPageLoadAutofillUrl(tabId);
     if (currentUrl !== url) {
+      return;
+    }
+
+    if (!(await pageLoadAutofillStillAuthorized(vaultId))) {
       return;
     }
 
