@@ -1192,6 +1192,7 @@ describe("fillLoginForm", () => {
         <input id="mask-luminance-black-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black, black);mask-mode:luminance" />
         <input id="mask-stop-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
         <input id="mask-composite-exclude-password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black),linear-gradient(black,black);mask-composite:exclude" />
+        <input id="mask-composite-source-in-password" type="password" autocomplete="current-password" style="-webkit-mask-image:linear-gradient(black,black),linear-gradient(transparent,transparent);-webkit-mask-composite:source-in" />
         <svg width="0" height="0" aria-hidden="true">
           <mask id="blackMask"><rect width="100%" height="100%" fill="black" /></mask>
           <mask id="transparentGroupMask"><g opacity="0"><rect width="100%" height="100%" fill="white" /></g></mask>
@@ -1590,6 +1591,7 @@ describe("fillLoginForm", () => {
     expect((document.querySelector("#mask-luminance-black-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-stop-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-composite-exclude-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#mask-composite-source-in-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-url-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-group-opacity-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#mask-nested-opacity-password") as HTMLInputElement).value).toBe("");

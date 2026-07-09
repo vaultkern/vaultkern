@@ -1727,6 +1727,7 @@ describe("autofill triage", () => {
         <input name="radial_black_luminance_mask_password" type="password" autocomplete="current-password" style="mask-image:radial-gradient(circle, black, black);mask-mode:luminance" />
         <input name="stop_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(transparent 0 100%)" />
         <input name="composite_exclude_mask_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black),linear-gradient(black,black);mask-composite:exclude" />
+        <input name="composite_source_in_mask_password" type="password" autocomplete="current-password" style="-webkit-mask-image:linear-gradient(black,black),linear-gradient(transparent,transparent);-webkit-mask-composite:source-in" />
         <input name="url_mask_password" type="password" autocomplete="current-password" style="mask:url(#blackMask)" />
         <input name="group_opacity_mask_password" type="password" autocomplete="current-password" style="mask:url(#transparentGroupMask)" />
         <input name="nested_opacity_mask_password" type="password" autocomplete="current-password" style="mask:url(#nestedOpacityMask)" />
@@ -1881,6 +1882,7 @@ describe("autofill triage", () => {
       "radial_black_luminance_mask_password",
       "stop_mask_password",
       "composite_exclude_mask_password",
+      "composite_source_in_mask_password",
       "url_mask_password",
       "group_opacity_mask_password",
       "nested_opacity_mask_password",
@@ -2679,6 +2681,7 @@ describe("autofill triage", () => {
           <input name="visible_gradient_backdrop_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;background:white;color:white;-webkit-text-fill-color:white;border:1px solid white;outline:0;box-shadow:none;text-shadow:none" />
         </div>
         <input name="group_mask_password" type="password" autocomplete="current-password" style="mask:url(#visibleGroupMask)" />
+        <input name="source_over_mask_password" type="password" autocomplete="current-password" style="-webkit-mask-image:linear-gradient(transparent,transparent),linear-gradient(black,black);-webkit-mask-composite:source-over" />
         <input name="positioned_password" type="password" autocomplete="current-password" style="mask-image:linear-gradient(black,black);mask-size:100% 100%;mask-repeat:no-repeat;mask-position:100% 0" />
         <input name="gamma_filtered_password" type="password" autocomplete="current-password" style="filter:url(#alphaVisibleGamma)" />
         <input name="offset_filtered_password" type="password" autocomplete="current-password" style="filter:url(#smallOffset)" />
@@ -2701,6 +2704,10 @@ describe("autofill triage", () => {
     expect(fieldByName(report, "email").qualifiedAs).toBe("username");
     expect(fieldByName(report, "password").qualifiedAs).toBe("password");
     expect(fieldByName(report, "password").reasons).not.toContain(
+      "not-viewable:transparent"
+    );
+    expect(fieldByName(report, "source_over_mask_password").qualifiedAs).toBe("password");
+    expect(fieldByName(report, "source_over_mask_password").reasons).not.toContain(
       "not-viewable:transparent"
     );
     expect(fieldByName(report, "contrast_password").qualifiedAs).toBe("password");

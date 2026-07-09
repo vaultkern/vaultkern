@@ -3969,6 +3969,16 @@ function maskImageFullySuppressesPaint(value: string | undefined, modeValue: str
   );
 }
 
+function maskImageValueFullySuppressesPaint(
+  value: string | undefined,
+  modeValue: string | undefined
+) {
+  const layers = splitCssCommaList(value?.trim() ?? "").filter(isMeaningfulCssValue);
+  return layers.length > 0 && layers.every((layer) =>
+    maskImageFullySuppressesPaint(layer, modeValue)
+  );
+}
+
 function cssUrlValues(value: string | undefined) {
   const references: string[] = [];
   const normalized = value?.trim();
@@ -4403,6 +4413,20 @@ function maskCompositeRemovesIdenticalCoverage(value: string) {
   );
 }
 
+function maskCompositeIntersectsCoverage(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === "intersect" ||
+    normalized === "source-in" ||
+    normalized === "destination-in"
+  );
+}
+
+function maskCompositeCopiesSource(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "copy" || normalized === "source-copy";
+}
+
 function maskCompositeSuppressesPaint(
   imageValue: string | undefined,
   compositeValue: string | undefined,
@@ -4412,10 +4436,26 @@ function maskCompositeSuppressesPaint(
     return false;
   }
   const layers = splitCssCommaList(imageValue ?? "").filter(isMeaningfulCssValue);
-  if (layers.length !== 2 || !layers.every((layer) => maskImageFullyPaints(layer, modeValue))) {
+  if (layers.length !== 2) {
     return false;
   }
-  return splitCssCommaList(compositeValue ?? "").some(maskCompositeRemovesIdenticalCoverage);
+  const composites = splitCssCommaList(compositeValue ?? "");
+  const layerSuppresses = layers.map((layer) =>
+    maskImageFullySuppressesPaint(layer, modeValue)
+  );
+  if (
+    composites.some(maskCompositeIntersectsCoverage) &&
+    layerSuppresses.some(Boolean)
+  ) {
+    return true;
+  }
+  if (composites.some(maskCompositeCopiesSource) && layerSuppresses[0]) {
+    return true;
+  }
+  return (
+    layers.every((layer) => maskImageFullyPaints(layer, modeValue)) &&
+    composites.some(maskCompositeRemovesIdenticalCoverage)
+  );
 }
 
 function maskColorStopPaints(value: string, modeValue: string | undefined) {
@@ -6394,7 +6434,7 @@ function maskStyleSuppressesPaint(
   ].filter((source) => isMeaningfulCssValue(source.image));
   if (
     maskImages.some((maskImage) =>
-      maskImageFullySuppressesPaint(maskImage, `${maskMode}, ${webkitMaskMode}`)
+      maskImageValueFullySuppressesPaint(maskImage, `${maskMode}, ${webkitMaskMode}`)
     ) ||
     maskSources.some((source) =>
       dataSvgMaskImageFullySuppressesPaint(current, source.image, source.mode)
