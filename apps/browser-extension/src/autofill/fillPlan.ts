@@ -1291,7 +1291,7 @@ export function createLoginFillPlan(
     reason.startsWith("focused-")
   );
   const siteRuleActions =
-    ambiguousCredentialSiteRule && intentUsesFocusedScope && intentScopeKey !== null
+    intentUsesFocusedScope && intentScopeKey !== null
       ? rawSiteRuleActions.filter((action) => {
           const field = fieldForAction(report.fields, action);
           return field !== null && fieldIsInCredentialScope(field, intentScopeKey);
@@ -1317,7 +1317,6 @@ export function createLoginFillPlan(
     ? null
     : firstViewableSiteRuleField(report.fields, "username"));
   const siteRuleUsernameField =
-    ambiguousCredentialSiteRule &&
     intentUsesFocusedScope &&
     intentScopeKey !== null &&
     siteRuleUsernameFieldCandidate !== null &&
@@ -1331,7 +1330,6 @@ export function createLoginFillPlan(
     ? null
     : firstFillableSiteRuleField(report.fields, "totp"));
   const siteRuleTotpField =
-    ambiguousCredentialSiteRule &&
     intentUsesFocusedScope &&
     intentScopeKey !== null &&
     siteRuleTotpFieldCandidate !== null &&

@@ -254,6 +254,42 @@ describe("autofill site rules", () => {
     expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not let a stale partial username rule override the focused login scope", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form" aria-label="Sign in">
+        <input id="rule-user" name="email" type="email" autocomplete="username" />
+        <input id="decoy-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="target-form" aria-label="Sign in">
+        <input id="target-user" name="email" type="email" autocomplete="username" />
+        <input id="target-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    (document.querySelector("#target-password") as HTMLInputElement).focus();
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "stale-username-rule",
+          host: window.location.hostname,
+          fields: {
+            username: ["#rule-user"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#rule-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("alice");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("does not anchor password fills to ambiguous username site-rule matches", () => {
     document.body.innerHTML = `
       <form id="decoy-form">
