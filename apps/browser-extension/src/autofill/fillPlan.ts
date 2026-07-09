@@ -187,6 +187,10 @@ function createSplitSiteRuleTotpActions(
   }));
 }
 
+function credentialScopeBucket(field: AutofillTriageFieldResult) {
+  return credentialScopeKey(field) ?? "root-run:0";
+}
+
 function createSiteRuleActions(
   reportFields: AutofillTriageFieldResult[],
   payload: LoginFillPayload
@@ -203,6 +207,14 @@ function createSiteRuleActions(
   if (currentPasswordRuleFields.length > 1) {
     skippedFieldTypes.add("password");
     skippedFieldTypes.add("currentPassword");
+  }
+  const newPasswordRuleScopes = new Set(
+    fields
+      .filter((field) => field.siteRuleTypes.includes("newPassword"))
+      .map(credentialScopeBucket)
+  );
+  if (newPasswordRuleScopes.size > 1) {
+    skippedFieldTypes.add("newPassword");
   }
 
   if (typeof payload.totp === "string") {

@@ -248,6 +248,46 @@ describe("autofill site rules", () => {
     );
   });
 
+  it("does not fill new-password site-rule matches across multiple scopes", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form">
+        <input id="decoy-new-password" class="rule-new-password" name="new_password" type="password" autocomplete="new-password" />
+      </form>
+      <form id="target-form">
+        <h2>Create account</h2>
+        <input id="target-user" name="email" type="email" autocomplete="username" />
+        <input id="target-new-password" class="rule-new-password" name="new_password" type="password" autocomplete="new-password" />
+        <input id="target-confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "ambiguous-new-password-rule",
+          host: window.location.hostname,
+          fields: {
+            newPassword: [".rule-new-password"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      newPassword: "new-secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-new-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("alice");
+    expect((document.querySelector("#target-new-password") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+    expect((document.querySelector("#target-confirm-password") as HTMLInputElement).value).toBe(
+      "new-secret"
+    );
+  });
+
   it("uses a current-password site rule role to fill heuristic new password fields", () => {
     document.body.innerHTML = `
       <form>
