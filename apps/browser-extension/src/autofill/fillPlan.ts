@@ -1269,8 +1269,34 @@ export function createLoginFillPlan(
     intent.scopeKey !== undefined && !intent.scopeKey.startsWith("site-rule:")
       ? intent.scopeKey
       : null;
-  const siteRuleActions = createSiteRuleActions(report.fields, payload);
+  const rawSiteRuleActions = createSiteRuleActions(report.fields, payload);
   const fields = candidateFields(report.fields);
+  const ambiguousPasswordSiteRule =
+    fillableSiteRuleFieldSpansMultipleScopes(report.fields, ["password", "currentPassword"]);
+  const ambiguousUsernameSiteRule =
+    viewableSiteRuleFieldSpansMultipleScopes(report.fields, "username");
+  const ambiguousNewPasswordSiteRule =
+    fillableSiteRuleFieldSpansMultipleScopes(report.fields, ["newPassword"]);
+  const ambiguousTotpSiteRule =
+    viewableSiteRuleFieldSpansMultipleScopes(report.fields, "totp");
+  const ambiguousNewPasswordFallback =
+    ambiguousNewPasswordSiteRule &&
+    ambiguousNewPasswordFallbackSpansMultipleScopes(fields, payload);
+  const ambiguousCredentialSiteRule =
+    ambiguousPasswordSiteRule ||
+    ambiguousUsernameSiteRule ||
+    ambiguousNewPasswordFallback ||
+    ambiguousTotpSiteRule;
+  const intentUsesFocusedScope = intent.reasons.some((reason) =>
+    reason.startsWith("focused-")
+  );
+  const siteRuleActions =
+    ambiguousCredentialSiteRule && intentUsesFocusedScope && intentScopeKey !== null
+      ? rawSiteRuleActions.filter((action) => {
+          const field = fieldForAction(report.fields, action);
+          return field !== null && fieldIsInCredentialScope(field, intentScopeKey);
+        })
+      : rawSiteRuleActions;
   const actions: AutofillFillAction[] = [...siteRuleActions];
   const siteRulePasswordField = fieldForAction(
     report.fields,
@@ -1284,26 +1310,34 @@ export function createLoginFillPlan(
       (action) => action.fieldType === "currentPassword" || action.fieldType === "newPassword"
     )
   );
-  const ambiguousPasswordSiteRule =
-    fillableSiteRuleFieldSpansMultipleScopes(report.fields, ["password", "currentPassword"]);
-  const ambiguousUsernameSiteRule =
-    viewableSiteRuleFieldSpansMultipleScopes(report.fields, "username");
-  const ambiguousNewPasswordSiteRule =
-    fillableSiteRuleFieldSpansMultipleScopes(report.fields, ["newPassword"]);
-  const ambiguousTotpSiteRule =
-    viewableSiteRuleFieldSpansMultipleScopes(report.fields, "totp");
-  const siteRuleUsernameField = fieldForAction(
+  const siteRuleUsernameFieldCandidate = fieldForAction(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "username")
   ) ?? (ambiguousUsernameSiteRule
     ? null
     : firstViewableSiteRuleField(report.fields, "username"));
-  const siteRuleTotpField = fieldForAction(
+  const siteRuleUsernameField =
+    ambiguousCredentialSiteRule &&
+    intentUsesFocusedScope &&
+    intentScopeKey !== null &&
+    siteRuleUsernameFieldCandidate !== null &&
+    !fieldIsInCredentialScope(siteRuleUsernameFieldCandidate, intentScopeKey)
+      ? null
+      : siteRuleUsernameFieldCandidate;
+  const siteRuleTotpFieldCandidate = fieldForAction(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "totp")
   ) ?? (ambiguousTotpSiteRule
     ? null
     : firstFillableSiteRuleField(report.fields, "totp"));
+  const siteRuleTotpField =
+    ambiguousCredentialSiteRule &&
+    intentUsesFocusedScope &&
+    intentScopeKey !== null &&
+    siteRuleTotpFieldCandidate !== null &&
+    !fieldIsInCredentialScope(siteRuleTotpFieldCandidate, intentScopeKey)
+      ? null
+      : siteRuleTotpFieldCandidate;
   const siteRulePasswordChangeScopeKey = siteRulePasswordChangeField
     ? credentialScopeKey(siteRulePasswordChangeField)
     : null;
@@ -1312,11 +1346,8 @@ export function createLoginFillPlan(
       ? credentialScopeKey(siteRulePasswordField)
       : siteRuleUsernameField !== null
         ? credentialScopeKey(siteRuleUsernameField)
-        : siteRulePasswordChangeScopeKey ??
+      : siteRulePasswordChangeScopeKey ??
           (siteRuleTotpField ? credentialScopeKey(siteRuleTotpField) : null);
-  const intentUsesFocusedScope = intent.reasons.some((reason) =>
-    reason.startsWith("focused-")
-  );
   const shouldUseResolvedScope =
     siteRuleAnchorScopeKey !== null ||
     intent.kind === "login" ||
@@ -1327,11 +1358,7 @@ export function createLoginFillPlan(
     intent.kind === "passwordChange";
   const primaryScopeKey = siteRuleAnchorScopeKey ?? intentScopeKey;
   if (
-    (ambiguousPasswordSiteRule ||
-      ambiguousUsernameSiteRule ||
-      (ambiguousNewPasswordSiteRule &&
-        ambiguousNewPasswordFallbackSpansMultipleScopes(fields, payload)) ||
-      ambiguousTotpSiteRule) &&
+    ambiguousCredentialSiteRule &&
     siteRuleAnchorScopeKey === null &&
     !intentUsesFocusedScope
   ) {
