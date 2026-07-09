@@ -1217,6 +1217,8 @@ export function createLoginFillPlan(
   );
   const ambiguousUsernameSiteRule =
     viewableSiteRuleFieldSpansMultipleScopes(report.fields, "username");
+  const ambiguousTotpSiteRule =
+    viewableSiteRuleFieldSpansMultipleScopes(report.fields, "totp");
   const siteRuleUsernameField = fieldForAction(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "username")
@@ -1226,7 +1228,9 @@ export function createLoginFillPlan(
   const siteRuleTotpField = fieldForAction(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "totp")
-  ) ?? firstFillableSiteRuleField(report.fields, "totp");
+  ) ?? (ambiguousTotpSiteRule
+    ? null
+    : firstFillableSiteRuleField(report.fields, "totp"));
   const siteRulePasswordChangeScopeKey = siteRulePasswordChangeField
     ? credentialScopeKey(siteRulePasswordChangeField)
     : null;
@@ -1250,7 +1254,7 @@ export function createLoginFillPlan(
     intent.kind === "passwordChange";
   const primaryScopeKey = siteRuleAnchorScopeKey ?? intentScopeKey;
   if (
-    ambiguousUsernameSiteRule &&
+    (ambiguousUsernameSiteRule || ambiguousTotpSiteRule) &&
     siteRuleAnchorScopeKey === null &&
     !intentUsesFocusedScope
   ) {

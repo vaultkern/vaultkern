@@ -705,6 +705,47 @@ describe("autofill site rules", () => {
     expect((document.querySelector("#target-totp") as HTMLInputElement).value).toBe("123456");
   });
 
+  it("does not anchor credential fills to ambiguous TOTP site-rule matches", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form">
+        <input id="decoy-user" name="email" type="email" autocomplete="username" />
+        <input id="decoy-password" name="password" type="password" autocomplete="current-password" />
+        <input id="decoy-totp" class="rule-totp" name="code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+      <form id="target-form" aria-label="Sign in with authenticator">
+        <input id="target-user" name="account" type="email" autocomplete="username" />
+        <input id="target-password" name="secret" type="password" autocomplete="current-password" />
+        <input id="target-totp" class="rule-totp" name="code" inputmode="numeric" autocomplete="one-time-code" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "ambiguous-totp-rule",
+          host: window.location.hostname,
+          fields: {
+            totp: [".rule-totp"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret",
+      totp: "123456"
+    });
+    expect(plan.actions).toEqual([]);
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#decoy-totp") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-totp") as HTMLInputElement).value).toBe("");
+  });
+
   it("does not anchor credential fallback to a non-fillable TOTP site-rule match", () => {
     document.body.innerHTML = `
       <form id="decoy-form">
