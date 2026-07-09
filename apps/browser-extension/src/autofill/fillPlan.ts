@@ -110,7 +110,7 @@ function viewableSiteRuleFields(
   fieldType: AutofillFieldQualification
 ) {
   return reportFields
-    .filter((field) => field.viewable && field.siteRuleTypes.includes(fieldType))
+    .filter((field) => field.viewable && !field.disabled && field.siteRuleTypes.includes(fieldType))
     .sort(byDocumentOrder);
 }
 

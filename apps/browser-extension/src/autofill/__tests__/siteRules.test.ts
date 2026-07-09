@@ -493,6 +493,40 @@ describe("autofill site rules", () => {
     expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not anchor fallback fills to a disabled username site-rule match", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form">
+        <input id="disabled-user" name="account" type="email" autocomplete="username" disabled />
+        <input id="decoy-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="target-form" aria-label="Sign in">
+        <input id="target-user" name="account" type="email" autocomplete="username" />
+        <input id="target-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "stale-disabled-username-rule",
+          host: window.location.hostname,
+          fields: {
+            username: ["#disabled-user"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret"
+    });
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("alice");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("scopes form-less fallback fields to a partial rule container", () => {
     document.body.innerHTML = `
       <input id="decoy-user" name="email" type="email" autocomplete="username" />
