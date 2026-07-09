@@ -148,6 +148,10 @@ function cssOpacityValue(value: string | undefined) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function cssValueContainsEmptyUrl(value: string) {
+  return /url\(\s*(?:(['"])\1)?\s*\)/i.test(value);
+}
+
 function cssPropertyValue(
   style: CSSStyleDeclaration | undefined,
   element: HTMLElement,
@@ -159,15 +163,23 @@ function cssPropertyValue(
   );
   const computedValue = style?.getPropertyValue(property).trim() ?? "";
   const styleValue = element.style.getPropertyValue(property).trim();
+  const inlineValue = inlineMatch?.[1]?.trim() ?? "";
   const validStyleValue = (value: string) =>
     value !== "" && value.trim().toLowerCase() !== "nan";
+  const computedHasSanitizedUrl = cssValueContainsEmptyUrl(computedValue);
+  if (computedHasSanitizedUrl && validStyleValue(styleValue) && styleValue !== computedValue) {
+    return styleValue;
+  }
+  if (computedHasSanitizedUrl && validStyleValue(inlineValue) && inlineValue !== computedValue) {
+    return inlineValue;
+  }
   if (validStyleValue(computedValue)) {
     return computedValue;
   }
   if (validStyleValue(styleValue)) {
     return styleValue;
   }
-  return inlineMatch?.[1]?.trim() ?? "";
+  return inlineValue;
 }
 
 function parentElementOrShadowHost(element: HTMLElement) {
@@ -3929,13 +3941,16 @@ function cssUrlValues(value: string | undefined) {
 
 function cssUrlValueIsLocallyInspectable(value: string) {
   const normalized = value.trim().toLowerCase();
-  return normalized.startsWith("#") || normalized.startsWith("data:image/svg+xml");
+  return (
+    normalized !== "" &&
+    (normalized.startsWith("#") || normalized.startsWith("data:image/svg+xml"))
+  );
 }
 
 function cssValueHasUninspectableUrl(value: string | undefined) {
   return cssUrlValues(value).some((url) => {
     const normalized = url.trim();
-    return normalized !== "" && !cssUrlValueIsLocallyInspectable(normalized);
+    return !cssUrlValueIsLocallyInspectable(normalized);
   });
 }
 
@@ -4202,10 +4217,12 @@ function svgStrokePaintsAlpha(
   if (stroke.trim().toLowerCase() === "none" || cssColorLooksTransparent(stroke)) {
     return false;
   }
+  const strokeColor = svgPaintSolidColor(shape, stroke);
+  const strokeAlpha = strokeColor?.a ?? 1;
   const strokeOpacity = svgElementOpacityValue(shape, "stroke-opacity", style);
   const strokeWidth = svgPaintValue(shape, style, "stroke-width", "1");
   return (
-    !isEffectivelyTransparent(effectiveOpacity * strokeOpacity) &&
+    !isEffectivelyTransparent(effectiveOpacity * strokeOpacity * strokeAlpha) &&
     !cssLengthLooksZero(strokeWidth)
   );
 }
@@ -4216,10 +4233,12 @@ function svgAlphaPaintSuppressesMask(
   effectiveOpacity: number
 ) {
   const fill = svgPaintValue(shape, style, "fill", "black");
+  const fillColor = svgPaintSolidColor(shape, fill);
+  const fillAlpha = fillColor?.a ?? 1;
   const fillPaints =
     fill.trim().toLowerCase() !== "none" &&
     !cssColorLooksTransparent(fill) &&
-    !isEffectivelyTransparent(effectiveOpacity);
+    !isEffectivelyTransparent(effectiveOpacity * fillAlpha);
   return !fillPaints && !svgStrokePaintsAlpha(shape, style, effectiveOpacity);
 }
 

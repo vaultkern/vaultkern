@@ -295,7 +295,6 @@ describe("fillLoginForm", () => {
         <input id="settings-new-password" type="password" autocomplete="new-password" value="" />
       </form>
     `;
-
     fillLoginForm({ password: "secret" });
 
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe(
@@ -488,15 +487,40 @@ describe("fillLoginForm", () => {
       <form>
         <input id="data-svg-mask-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;mask-image:url(data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E);mask-mode:luminance;-webkit-mask-image:url(data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E);-webkit-mask-mode:luminance" />
         <input id="data-svg-stroke-mask-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;mask-image:url(data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221%22%2F%3E%3C%2Fsvg%3E);mask-mode:luminance;-webkit-mask-image:url(data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221%22%2F%3E%3C%2Fsvg%3E);-webkit-mask-mode:luminance" />
+        <input id="data-svg-transparent-gradient-mask-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:red;color:red;-webkit-text-fill-color:red;border:1px solid red;outline:0;box-shadow:none;text-shadow:none;mask-image:url(&quot;data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22black%22%20stop-opacity%3D%220%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22black%22%20stop-opacity%3D%220%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22url(%2523g)%22%2F%3E%3C%2Fsvg%3E&quot;);-webkit-mask-image:url(&quot;data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22black%22%20stop-opacity%3D%220%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22black%22%20stop-opacity%3D%220%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22url(%2523g)%22%2F%3E%3C%2Fsvg%3E&quot;)" />
         <input id="login-password" type="password" autocomplete="current-password" />
       </form>
     `;
 
-    fillLoginForm({ password: "secret" });
+    const transparentGradientMask = document.querySelector(
+      "#data-svg-transparent-gradient-mask-password"
+    ) as HTMLInputElement;
+    const originalGetComputedStyle = window.getComputedStyle.bind(window);
+    const getComputedStyleSpy = vi
+      .spyOn(window, "getComputedStyle")
+      .mockImplementation((target, pseudoElement) => {
+        if (pseudoElement) {
+          return fakeCssStyle({ content: "none", display: "none" });
+        }
+        if (target === transparentGradientMask) {
+          return fakeCssStyle({
+            "mask-image": 'url("")',
+            "-webkit-mask-image": 'url("")'
+          });
+        }
+        return originalGetComputedStyle(target);
+      });
 
-    expect((document.querySelector("#data-svg-mask-password") as HTMLInputElement).value).toBe("");
-    expect((document.querySelector("#data-svg-stroke-mask-password") as HTMLInputElement).value).toBe("");
-    expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+    try {
+      fillLoginForm({ password: "secret" });
+
+      expect((document.querySelector("#data-svg-mask-password") as HTMLInputElement).value).toBe("");
+      expect((document.querySelector("#data-svg-stroke-mask-password") as HTMLInputElement).value).toBe("");
+      expect((document.querySelector("#data-svg-transparent-gradient-mask-password") as HTMLInputElement).value).toBe("");
+      expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+    } finally {
+      getComputedStyleSpy.mockRestore();
+    }
   });
 
   it("does not fill password decoys hidden by CSS grayscale filters", () => {
