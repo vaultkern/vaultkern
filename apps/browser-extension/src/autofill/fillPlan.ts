@@ -38,6 +38,67 @@ function candidateFields(reportFields: AutofillTriageFieldResult[]) {
     .sort(byDocumentOrder);
 }
 
+function isLoginPasswordRole(field: AutofillTriageFieldResult) {
+  return field.qualifiedAs === "password" || field.qualifiedAs === "currentPassword";
+}
+
+function focusedLoginSegmentFields(fields: AutofillTriageFieldResult[]) {
+  const sortedFields = [...fields].sort(byDocumentOrder);
+  const focusedIndex = sortedFields.findIndex(
+    (field) => field.focused && (field.qualifiedAs === "username" || isLoginPasswordRole(field))
+  );
+  if (focusedIndex < 0) {
+    return fields;
+  }
+
+  let start = focusedIndex;
+  let end = focusedIndex;
+  const focusedField = sortedFields[focusedIndex];
+  if (isLoginPasswordRole(focusedField)) {
+    for (let index = focusedIndex - 1; index >= 0; index -= 1) {
+      const field = sortedFields[index];
+      if (field.qualifiedAs === "username") {
+        start = index;
+        break;
+      }
+      if (isLoginPasswordRole(field)) {
+        break;
+      }
+    }
+    for (let index = focusedIndex + 1; index < sortedFields.length; index += 1) {
+      const field = sortedFields[index];
+      if (field.qualifiedAs === "totp") {
+        end = index;
+        continue;
+      }
+      break;
+    }
+  } else {
+    let sawPassword = false;
+    for (let index = focusedIndex + 1; index < sortedFields.length; index += 1) {
+      const field = sortedFields[index];
+      if (field.qualifiedAs === "username") {
+        break;
+      }
+      if (isLoginPasswordRole(field)) {
+        end = index;
+        sawPassword = true;
+        continue;
+      }
+      if (field.qualifiedAs === "totp" && sawPassword) {
+        end = index;
+        continue;
+      }
+      break;
+    }
+  }
+
+  const segmentFields = sortedFields.slice(start, end + 1);
+  const hasUsername = segmentFields.some((field) => field.qualifiedAs === "username");
+  const hasPassword = segmentFields.some(isLoginPasswordRole);
+  return hasUsername && hasPassword ? segmentFields : fields;
+}
+
 function siteRuleFields(reportFields: AutofillTriageFieldResult[]) {
   return reportFields
     .filter((field) => field.viewable && field.fillable && field.siteRuleTypes.length > 0)
@@ -1117,14 +1178,22 @@ export function createLoginFillPlan(
     intent.kind === "registration" ||
     intent.kind === "passwordChange";
   const primaryScopeKey = siteRuleAnchorScopeKey ?? intentScopeKey;
-  const intentFields =
+  const resolvedIntentFields =
     shouldUseResolvedScope && primaryScopeKey !== null
       ? fields.filter((field) => fieldIsInCredentialScope(field, primaryScopeKey))
       : fields;
-  const intentAllFields =
+  const intentFields =
+    intent.kind === "login" && intentUsesFocusedScope
+      ? focusedLoginSegmentFields(resolvedIntentFields)
+      : resolvedIntentFields;
+  const resolvedIntentAllFields =
     shouldUseResolvedScope && primaryScopeKey !== null
       ? report.fields.filter((field) => fieldIsInCredentialScope(field, primaryScopeKey))
       : report.fields;
+  const intentAllFields =
+    intent.kind === "login" && intentUsesFocusedScope
+      ? focusedLoginSegmentFields(resolvedIntentAllFields)
+      : resolvedIntentAllFields;
   const passwordChangeFields =
     siteRulePasswordChangeScopeKey !== null
       ? fields.filter((field) =>

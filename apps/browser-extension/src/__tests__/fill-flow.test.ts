@@ -285,6 +285,44 @@ describe("fillLoginForm", () => {
     );
   });
 
+  it("fills the focused login pair inside a repeated root-level field run", () => {
+    document.body.innerHTML = `
+      <input id="first-email" type="email" autocomplete="username" value="" />
+      <input id="first-password" type="password" autocomplete="current-password" value="" />
+      <input id="second-email" type="email" autocomplete="username" value="" />
+      <input id="second-password" type="password" autocomplete="current-password" value="" />
+    `;
+
+    (document.querySelector("#second-password") as HTMLInputElement).focus();
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector("#first-email") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#first-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#second-email") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#second-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("fills the focused username login pair inside a repeated root-level field run", () => {
+    document.body.innerHTML = `
+      <input id="first-email" type="email" autocomplete="username" value="" />
+      <input id="first-password" type="password" autocomplete="current-password" value="" />
+      <input id="second-email" type="email" autocomplete="username" value="" />
+      <input id="second-password" type="password" autocomplete="current-password" value="" />
+    `;
+
+    (document.querySelector("#second-email") as HTMLInputElement).focus();
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector("#first-email") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#first-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#second-email") as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector("#second-password") as HTMLInputElement).value).toBe("secret");
+  });
+
   it("keeps password-only fills on the first login password instead of later settings forms", () => {
     document.body.innerHTML = `
       <form id="login">
