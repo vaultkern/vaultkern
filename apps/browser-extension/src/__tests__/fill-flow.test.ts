@@ -4377,11 +4377,13 @@ describe("PopupShell fill flow", () => {
         url: "https://example.com/login"
       }
     ]);
+    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
     const sendMessage = vi.fn(async () => undefined);
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       tabs: {
         query,
+        get,
         sendMessage
       }
     };
@@ -4432,6 +4434,7 @@ describe("PopupShell fill flow", () => {
       expect(sendMessage).toHaveBeenCalledWith(7, {
         type: "fill_entry_detail",
         trigger: "manual",
+        targetUrl: "https://example.com/login",
         username: "alice",
         password: "secret-123",
         totp: "123456"
@@ -4439,6 +4442,67 @@ describe("PopupShell fill flow", () => {
       const message = sendMessage.mock.calls[0]?.[1] as { newPassword?: string };
       expect(message.newPassword).toBeUndefined();
     });
+  });
+
+  it("does not send a selected entry after the active tab navigates before delivery", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const get = vi.fn(async () => ({ id: 7, url: "https://evil.test/login" }));
+    const sendMessage = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query,
+        get,
+        sendMessage
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example Account",
+        username: "alice",
+        url: "https://example.com/login"
+      }
+    ]);
+    runtimeClientMocks.getEntryDetail.mockResolvedValue({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example Account",
+      username: "alice",
+      password: "secret-123",
+      url: "https://example.com/login",
+      notes: ""
+    });
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Fill Example Account" })
+    );
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith(
+        "vault-1",
+        "entry-1"
+      );
+    });
+    await waitFor(() => {
+      expect(get).toHaveBeenCalledWith(7);
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("saves a pending login submission as a new entry after user confirmation", async () => {
@@ -6961,6 +7025,7 @@ describe("PopupShell fill flow", () => {
         url: "https://example.com/login"
       }
     ]);
+    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
     const sendMessage = vi.fn(async () => {
       throw new Error("tab unavailable");
     });
@@ -6968,6 +7033,7 @@ describe("PopupShell fill flow", () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       tabs: {
         query,
+        get,
         sendMessage
       }
     };
@@ -7141,9 +7207,11 @@ describe("content script fill message", () => {
   }
 
   it("fills the page when the content script receives entry detail", async () => {
+    const targetUrl = window.location.href;
     const addListener = vi.fn((listener: (message: unknown) => void) => {
       listener({
         type: "fill_entry_detail",
+        targetUrl,
         username: "bob",
         password: "root-secret"
       });
@@ -7174,6 +7242,45 @@ describe("content script fill message", () => {
     expect(
       (document.querySelector('input[name="password"]') as HTMLInputElement).value
     ).toBe("root-secret");
+  });
+
+  it("does not fill a manual entry-detail message for a different page URL", async () => {
+    window.history.replaceState(null, "", "/login");
+    const addListener = vi.fn((listener: (message: unknown) => void) => {
+      listener({
+        type: "fill_entry_detail",
+        trigger: "manual",
+        targetUrl: "https://evil.test/login",
+        username: "bob",
+        password: "root-secret"
+      });
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        }
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input type="email" name="username" />
+        <input type="password" name="password" />
+      </form>
+    `;
+
+    vi.resetModules();
+    await import("../contentScript");
+
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(
+      (document.querySelector('input[name="username"]') as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (document.querySelector('input[name="password"]') as HTMLInputElement).value
+    ).toBe("");
   });
 
   it("does not treat a page-load entry-detail message as manual fill intent", async () => {
@@ -7293,10 +7400,56 @@ describe("content script fill message", () => {
     ).toBe("");
   });
 
-  it("fills a TOTP field when the content script receives entry detail", async () => {
+  it("does not honor a page-load entry-detail message while the document is hidden", async () => {
+    const targetUrl = window.location.href;
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden"
+    });
     const addListener = vi.fn((listener: (message: unknown) => void) => {
       listener({
         type: "fill_entry_detail",
+        trigger: "pageLoad",
+        allowAutomaticSecretFill: true,
+        targetUrl,
+        username: "bob",
+        password: "root-secret"
+      });
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        }
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input type="email" name="username" autocomplete="username" />
+        <input type="password" name="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    vi.resetModules();
+    await import("../contentScript");
+
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(
+      (document.querySelector('input[name="username"]') as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (document.querySelector('input[name="password"]') as HTMLInputElement).value
+    ).toBe("");
+  });
+
+  it("fills a TOTP field when the content script receives entry detail", async () => {
+    const targetUrl = window.location.href;
+    const addListener = vi.fn((listener: (message: unknown) => void) => {
+      listener({
+        type: "fill_entry_detail",
+        targetUrl,
         totp: "246810"
       });
     });
@@ -7323,9 +7476,11 @@ describe("content script fill message", () => {
   });
 
   it("fills available fields from a partial fill message", async () => {
+    const targetUrl = window.location.href;
     const addListener = vi.fn((listener: (message: unknown) => void) => {
       listener({
         type: "fill_entry_detail",
+        targetUrl,
         username: "bob"
       });
     });
@@ -7357,9 +7512,11 @@ describe("content script fill message", () => {
   });
 
   it("fills only the visible username field for a username-first login step", async () => {
+    const targetUrl = window.location.href;
     const addListener = vi.fn((listener: (message: unknown) => void) => {
       listener({
         type: "fill_entry_detail",
+        targetUrl,
         username: "alice",
         password: "secret"
       });
@@ -7387,9 +7544,11 @@ describe("content script fill message", () => {
   });
 
   it("fills only the password field when the message omits username", async () => {
+    const targetUrl = window.location.href;
     const addListener = vi.fn((listener: (message: unknown) => void) => {
       listener({
         type: "fill_entry_detail",
+        targetUrl,
         password: "root-secret"
       });
     });

@@ -161,6 +161,23 @@ async function currentPageLoadAutofillUrl(tabId: number) {
   return pageLoadAutofillUrl(tab?.url);
 }
 
+async function pageLoadAutofillTabCanReceive(tabId: number, expectedUrl: string) {
+  if (!chromeApi?.tabs?.get || !chromeApi?.windows?.get) {
+    return false;
+  }
+
+  const tab = await chromeApi.tabs.get(tabId);
+  if (pageLoadAutofillUrl(tab?.url) !== expectedUrl || tab?.active !== true) {
+    return false;
+  }
+  if (typeof tab.windowId !== "number") {
+    return false;
+  }
+
+  const tabWindow = await chromeApi.windows.get(tab.windowId);
+  return tabWindow?.focused === true;
+}
+
 async function pageLoadAutofillStillAuthorized(vaultId: string) {
   const settings = await extensionSettingsStore.load();
   if (!settings.autofillOnPageLoadEnabled) {
@@ -506,6 +523,10 @@ async function maybeSendPageLoadAutofill(tabId: number, tabUrl: string | undefin
     }
 
     if (!(await pageLoadAutofillStillAuthorized(vaultId))) {
+      return;
+    }
+
+    if (!(await pageLoadAutofillTabCanReceive(tabId, url))) {
       return;
     }
 

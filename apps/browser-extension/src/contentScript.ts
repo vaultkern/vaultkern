@@ -34,10 +34,14 @@ function normalizedHttpPageUrl(value: unknown) {
   }
 }
 
-function pageLoadTargetMatchesCurrentPage(targetUrl: unknown) {
+function fillTargetMatchesCurrentPage(targetUrl: unknown) {
   const expectedUrl = normalizedHttpPageUrl(targetUrl);
   const currentUrl = normalizedHttpPageUrl(window.location.href);
   return expectedUrl !== null && expectedUrl === currentUrl;
+}
+
+function pageLoadDocumentIsVisible() {
+  return document.visibilityState === "visible";
 }
 
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
@@ -76,7 +80,10 @@ if (chromeApi?.runtime?.onMessage) {
       }
 
       const trigger = triggerFromFillMessage(message.trigger);
-      if (trigger === "pageLoad" && !pageLoadTargetMatchesCurrentPage(message.targetUrl)) {
+      if (!fillTargetMatchesCurrentPage(message.targetUrl)) {
+        return false;
+      }
+      if (trigger === "pageLoad" && !pageLoadDocumentIsVisible()) {
         return false;
       }
 

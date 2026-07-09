@@ -24,6 +24,27 @@ async function activeTabId() {
   }
 }
 
+function normalizedHttpFillTargetUrl(value: unknown) {
+  if (typeof value !== "string" || value.trim() === "") {
+    return null;
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+async function currentFillTargetUrl(tabId: number) {
+  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+  if (typeof chromeApi?.tabs?.get !== "function") {
+    return null;
+  }
+  const tab = await chromeApi.tabs.get(tabId);
+  return normalizedHttpFillTargetUrl(tab?.url);
+}
+
 export async function requestFillCandidates(vaultId: string, siteUrl?: string) {
   if (siteUrl) {
     return client.findFillCandidates(vaultId, siteUrl);
@@ -45,17 +66,26 @@ export async function fillSelectedEntry(vaultId: string, entryId: string) {
   if (typeof tab?.id !== "number") {
     return;
   }
+  const targetUrl = normalizedHttpFillTargetUrl(tab.url);
+  if (!targetUrl) {
+    return;
+  }
 
   const detail = await client.getEntryDetail(vaultId, entryId);
+  if ((await currentFillTargetUrl(tab.id)) !== targetUrl) {
+    return;
+  }
   const fillMessage: {
     type: "fill_entry_detail";
     trigger: "manual";
+    targetUrl: string;
     username?: string;
     password?: string;
     totp?: string;
   } = {
     type: "fill_entry_detail",
     trigger: "manual",
+    targetUrl,
     username: detail.username,
     password: detail.password
   };

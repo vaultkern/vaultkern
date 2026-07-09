@@ -427,7 +427,13 @@ describe("background bridge", () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     const tabUpdatedListeners: TabUpdatedListener[] = [];
-    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
+    const get = vi.fn(async () => ({
+      id: 7,
+      url: "https://example.com/login",
+      active: true,
+      windowId: 1
+    }));
+    const getWindow = vi.fn(async () => ({ focused: true }));
     const sendMessage = vi.fn(async () => undefined);
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -466,6 +472,9 @@ describe("background bridge", () => {
         },
         get,
         sendMessage
+      },
+      windows: {
+        get: getWindow
       }
     };
 
@@ -555,7 +564,13 @@ describe("background bridge", () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     const tabUpdatedListeners: TabUpdatedListener[] = [];
-    const get = vi.fn(async () => ({ id: 7, url: "https://evil.test/login" }));
+    const get = vi.fn(async () => ({
+      id: 7,
+      url: "https://evil.test/login",
+      active: true,
+      windowId: 1
+    }));
+    const getWindow = vi.fn(async () => ({ focused: true }));
     const sendMessage = vi.fn(async () => undefined);
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -594,6 +609,9 @@ describe("background bridge", () => {
         },
         get,
         sendMessage
+      },
+      windows: {
+        get: getWindow
       }
     };
 
@@ -663,11 +681,17 @@ describe("background bridge", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("does not send a page-load fill after the vault locks before delivery", async () => {
+  it("does not send a page-load fill into an unfocused browser window", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     const tabUpdatedListeners: TabUpdatedListener[] = [];
-    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
+    const get = vi.fn(async () => ({
+      id: 7,
+      url: "https://example.com/login",
+      active: true,
+      windowId: 1
+    }));
+    const getWindow = vi.fn(async () => ({ focused: false }));
     const sendMessage = vi.fn(async () => undefined);
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -706,6 +730,140 @@ describe("background bridge", () => {
         },
         get,
         sendMessage
+      },
+      windows: {
+        get: getWindow
+      }
+    };
+
+    await import("../background");
+    for (const listener of tabUpdatedListeners) {
+      listener(7, { status: "complete" }, { id: 7, url: "https://example.com/login" });
+    }
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: { type: "get_session_state" }
+      }));
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: {
+          type: "find_fill_candidates",
+          vault_id: "vault-1",
+          url: "https://example.com/login"
+        }
+      }));
+    });
+    port.emitMessage({
+      type: "fill_candidates",
+      entries: [
+        {
+          id: "entry-1",
+          title: "Example",
+          username: "alice",
+          url: "https://example.com/login"
+        }
+      ]
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        version: 1,
+        command: {
+          type: "get_entry_detail",
+          vault_id: "vault-1",
+          entry_id: "entry-1"
+        }
+      }));
+    });
+    port.emitMessage({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com/login",
+      notes: ""
+    });
+
+    await vi.waitFor(() => {
+      expect(postedCommandCount(port, "get_session_state")).toBe(2);
+    });
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+    await flushMicrotasks();
+
+    expect(get).toHaveBeenCalledWith(7);
+    expect(getWindow).toHaveBeenCalledWith(1);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not send a page-load fill after the vault locks before delivery", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const tabUpdatedListeners: TabUpdatedListener[] = [];
+    const get = vi.fn(async () => ({
+      id: 7,
+      url: "https://example.com/login",
+      active: true,
+      windowId: 1
+    }));
+    const getWindow = vi.fn(async () => ({ focused: true }));
+    const sendMessage = vi.fn(async () => undefined);
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        onMessage: {
+          addListener() {}
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                autofillOnPageLoadEnabled: true,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: false
+              }
+            });
+          },
+          set() {}
+        }
+      },
+      tabs: {
+        onUpdated: {
+          addListener(listener: TabUpdatedListener) {
+            tabUpdatedListeners.push(listener);
+          }
+        },
+        onRemoved: {
+          addListener() {}
+        },
+        get,
+        sendMessage
+      },
+      windows: {
+        get: getWindow
       }
     };
 
@@ -788,7 +946,13 @@ describe("background bridge", () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     const tabUpdatedListeners: TabUpdatedListener[] = [];
-    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
+    const get = vi.fn(async () => ({
+      id: 7,
+      url: "https://example.com/login",
+      active: true,
+      windowId: 1
+    }));
+    const getWindow = vi.fn(async () => ({ focused: true }));
     const sendMessage = vi.fn(async () => undefined);
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -827,6 +991,9 @@ describe("background bridge", () => {
         },
         get,
         sendMessage
+      },
+      windows: {
+        get: getWindow
       }
     };
 
@@ -909,7 +1076,13 @@ describe("background bridge", () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     const tabUpdatedListeners: TabUpdatedListener[] = [];
-    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
+    const get = vi.fn(async () => ({
+      id: 7,
+      url: "https://example.com/login",
+      active: true,
+      windowId: 1
+    }));
+    const getWindow = vi.fn(async () => ({ focused: true }));
     const sendMessage = vi.fn(async () => undefined);
     let autofillOnPageLoadEnabled = true;
 
@@ -949,6 +1122,9 @@ describe("background bridge", () => {
         },
         get,
         sendMessage
+      },
+      windows: {
+        get: getWindow
       }
     };
 
