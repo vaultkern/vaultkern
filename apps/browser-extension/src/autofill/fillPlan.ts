@@ -195,6 +195,15 @@ function createSiteRuleActions(
   const usedFields = new Set<string>();
   const skippedFieldTypes = new Set<AutofillFieldQualification>();
   const actions: AutofillFillAction[] = [];
+  const currentPasswordRuleFields = fields.filter((field) =>
+    field.siteRuleTypes.some(
+      (fieldType) => fieldType === "password" || fieldType === "currentPassword"
+    )
+  );
+  if (currentPasswordRuleFields.length > 1) {
+    skippedFieldTypes.add("password");
+    skippedFieldTypes.add("currentPassword");
+  }
 
   if (typeof payload.totp === "string") {
     const totpFields = fields.filter((field) => field.siteRuleTypes.includes("totp"));
