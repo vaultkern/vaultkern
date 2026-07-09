@@ -299,17 +299,17 @@ export function resolveAutofillIntent(
   }
 
   if (hasUsername && hasPassword) {
-    const firstLoginStepScope = firstMatchingScope(scopes, scopeQualifiesForAnyLoginStep);
-    if (firstLoginStepScope && scopeQualifiesForLogin(firstLoginStepScope)) {
-      return plan("login", firstLoginStepScope, "scope-has-username-and-password");
-    }
-
     const explicitLoginScope = firstMatchingScope(
       scopes,
       (scope) => scopeQualifiesForLogin(scope) && scopeHasAnyKeyword(scope, LOGIN_KEYWORDS)
     );
     if (explicitLoginScope) {
       return plan("login", explicitLoginScope, "scope-has-explicit-login-context");
+    }
+
+    const firstLoginStepScope = firstMatchingScope(scopes, scopeQualifiesForAnyLoginStep);
+    if (firstLoginStepScope && scopeQualifiesForLogin(firstLoginStepScope)) {
+      return plan("login", firstLoginStepScope, "scope-has-username-and-password");
     }
 
     if (firstLoginStepScope && scopeQualifiesForUsernameFirst(firstLoginStepScope)) {

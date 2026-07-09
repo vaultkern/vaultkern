@@ -422,6 +422,34 @@ describe("login detection fill flow", () => {
     );
   });
 
+  it("prefers an explicit login scope over an earlier generic complete scope", () => {
+    document.body.innerHTML = `
+      <form id="generic">
+        <input name="generic_email" type="email" autocomplete="username" />
+        <input name="generic_password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="signin" aria-label="Sign in">
+        <input name="signin_email" type="email" autocomplete="username" />
+        <input name="signin_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="generic_email"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+    expect(
+      (document.querySelector('input[name="generic_password"]') as HTMLInputElement).value
+    ).toBe("");
+    expect((document.querySelector('input[name="signin_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect(
+      (document.querySelector('input[name="signin_password"]') as HTMLInputElement).value
+    ).toBe("secret");
+  });
+
   it("does not fill username-first signup forms", () => {
     document.body.innerHTML = `
       <main>
