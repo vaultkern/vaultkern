@@ -450,6 +450,38 @@ describe("login detection fill flow", () => {
     ).toBe("secret");
   });
 
+  it("does not treat a password-change form as the login scope", () => {
+    document.body.innerHTML = `
+      <form id="settings">
+        <input name="settings_email" type="email" autocomplete="username" />
+        <input name="settings_current_password" type="password" autocomplete="current-password" />
+        <input name="settings_new_password" type="password" autocomplete="new-password" />
+      </form>
+      <form id="account">
+        <input name="account_email" type="email" autocomplete="username" />
+        <input name="account_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    fillLoginForm({ username: "alice@example.com", password: "secret" });
+
+    expect((document.querySelector('input[name="settings_email"]') as HTMLInputElement).value).toBe(
+      ""
+    );
+    expect(
+      (document.querySelector('input[name="settings_current_password"]') as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (document.querySelector('input[name="settings_new_password"]') as HTMLInputElement).value
+    ).toBe("");
+    expect((document.querySelector('input[name="account_email"]') as HTMLInputElement).value).toBe(
+      "alice@example.com"
+    );
+    expect((document.querySelector('input[name="account_password"]') as HTMLInputElement).value).toBe(
+      "secret"
+    );
+  });
+
   it("does not fill username-first signup forms", () => {
     document.body.innerHTML = `
       <main>
