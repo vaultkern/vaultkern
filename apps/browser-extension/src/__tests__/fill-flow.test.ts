@@ -470,6 +470,7 @@ describe("fillLoginForm", () => {
         <div style="background:black">
           <input id="data-svg-background-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background-color:transparent;background-image:url(data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E);background-size:100% 100%;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
           <input id="data-svg-gradient-background-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background-color:transparent;background-image:url(&quot;data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22black%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22black%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22url(%2523g)%22%2F%3E%3C%2Fsvg%3E&quot;);background-size:100% 100%;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
+          <input id="data-png-background-password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background-color:transparent;background-image:url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=);background-size:100% 100%;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
         </div>
         <input id="login-password" type="password" autocomplete="current-password" />
       </form>
@@ -479,7 +480,48 @@ describe("fillLoginForm", () => {
 
     expect((document.querySelector("#data-svg-background-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#data-svg-gradient-background-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#data-png-background-password") as HTMLInputElement).value).toBe("");
     expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+  });
+
+  it("does not fill password decoys whose placeholder paint blends into the page", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="background:black">
+          <input id="placeholder-password" type="password" autocomplete="current-password" placeholder="Password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
+        </div>
+        <input id="login-password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    const placeholderPassword = document.querySelector(
+      "#placeholder-password"
+    ) as HTMLInputElement;
+    const originalGetComputedStyle = window.getComputedStyle.bind(window);
+    const getComputedStyleSpy = vi
+      .spyOn(window, "getComputedStyle")
+      .mockImplementation((target, pseudoElement) => {
+        if (target === placeholderPassword && pseudoElement === "::placeholder") {
+          return fakeCssStyle({
+            color: "black",
+            opacity: "1",
+            "-webkit-text-fill-color": "black"
+          });
+        }
+        if (pseudoElement) {
+          return fakeCssStyle({ content: "none", display: "none" });
+        }
+        return originalGetComputedStyle(target);
+      });
+
+    try {
+      fillLoginForm({ password: "secret" });
+
+      expect((document.querySelector("#placeholder-password") as HTMLInputElement).value).toBe("");
+      expect((document.querySelector("#login-password") as HTMLInputElement).value).toBe("secret");
+    } finally {
+      getComputedStyleSpy.mockRestore();
+    }
   });
 
   it("does not fill password decoys hidden by luminance data SVG masks", () => {

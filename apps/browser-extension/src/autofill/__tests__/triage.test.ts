@@ -2047,6 +2047,7 @@ describe("autofill triage", () => {
         <div style="background:black">
           <input name="data_svg_background_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background-color:transparent;background-image:url(data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22black%22%2F%3E%3C%2Fsvg%3E);background-size:100% 100%;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
           <input name="data_svg_gradient_background_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background-color:transparent;background-image:url(&quot;data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2210%22%20height%3D%2210%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22black%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22black%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2210%22%20height%3D%2210%22%20fill%3D%22url(%2523g)%22%2F%3E%3C%2Fsvg%3E&quot;);background-size:100% 100%;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
+          <input name="data_png_background_password" type="password" autocomplete="current-password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background-color:transparent;background-image:url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=);background-size:100% 100%;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
         </div>
         <input name="real_password" type="password" autocomplete="current-password" />
       </form>
@@ -2054,11 +2055,57 @@ describe("autofill triage", () => {
 
     const report = triageAutofillPage(collectAutofillPageSnapshot(document));
 
-    for (const name of ["data_svg_background_password", "data_svg_gradient_background_password"]) {
+    for (const name of [
+      "data_svg_background_password",
+      "data_svg_gradient_background_password",
+      "data_png_background_password"
+    ]) {
       expect(fieldByName(report, name).qualifiedAs).toBe("ignored");
       expect(fieldByName(report, name).reasons).toContain("not-viewable:transparent");
     }
     expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+  });
+
+  it("treats credential fields with hidden placeholder paint as not viewable", () => {
+    document.body.innerHTML = `
+      <form>
+        <div style="background:black">
+          <input name="placeholder_password" type="password" autocomplete="current-password" placeholder="Password" style="appearance:none;-webkit-appearance:none;width:185px;height:21px;background:black;color:black;-webkit-text-fill-color:black;border:1px solid black;outline:0;box-shadow:none;text-shadow:none" />
+        </div>
+        <input name="real_password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const placeholderPassword = document.querySelector(
+      'input[name="placeholder_password"]'
+    ) as HTMLInputElement;
+    const originalGetComputedStyle = window.getComputedStyle.bind(window);
+    const getComputedStyleSpy = vi
+      .spyOn(window, "getComputedStyle")
+      .mockImplementation((target, pseudoElement) => {
+        if (target === placeholderPassword && pseudoElement === "::placeholder") {
+          return fakeCssStyle({
+            color: "black",
+            opacity: "1",
+            "-webkit-text-fill-color": "black"
+          });
+        }
+        if (pseudoElement) {
+          return fakeCssStyle({ content: "none", display: "none" });
+        }
+        return originalGetComputedStyle(target);
+      });
+
+    try {
+      const report = triageAutofillPage(collectAutofillPageSnapshot(document));
+
+      expect(fieldByName(report, "placeholder_password").qualifiedAs).toBe("ignored");
+      expect(fieldByName(report, "placeholder_password").reasons).toContain(
+        "not-viewable:transparent"
+      );
+      expect(fieldByName(report, "real_password").qualifiedAs).toBe("password");
+    } finally {
+      getComputedStyleSpy.mockRestore();
+    }
   });
 
   it("treats credential fields hidden by luminance data SVG masks as not viewable", () => {

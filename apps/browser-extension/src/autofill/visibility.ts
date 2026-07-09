@@ -3611,6 +3611,47 @@ function fieldHasPlaceholderText(current: HTMLElement) {
   return (current.getAttribute("placeholder") ?? "").trim() !== "";
 }
 
+function fieldPlaceholderPaintContrastsWithBackground(
+  style: CSSStyleDeclaration | undefined,
+  current: HTMLElement,
+  background: CssColorRgba,
+  filter = "",
+  blendMode = ""
+) {
+  if (!fieldHasPlaceholderText(current)) {
+    return false;
+  }
+
+  const placeholderStyle = computedPseudoStyle(current, "::placeholder");
+  if (placeholderStyle === undefined) {
+    return true;
+  }
+
+  const display = cssStyleValue(placeholderStyle, "display");
+  const visibility = cssStyleValue(placeholderStyle, "visibility");
+  const opacity = cssOpacityValue(cssStyleValue(placeholderStyle, "opacity")) ?? 1;
+  if (
+    display === "none" ||
+    visibility === "hidden" ||
+    visibility === "collapse" ||
+    isEffectivelyTransparent(opacity)
+  ) {
+    return false;
+  }
+
+  const textFillColor = cssStyleValue(placeholderStyle, "-webkit-text-fill-color");
+  const colorValue =
+    isMeaningfulCssValue(textFillColor) && textFillColor.toLowerCase() !== "currentcolor"
+      ? textFillColor
+      : cssStyleValue(placeholderStyle, "color") || fieldTextPaintColor(style, current);
+  const color = cssColorRgba(colorValue);
+  const effectiveColor = color === null ? null : { ...color, a: color.a * opacity };
+  return cssColorContrastsWithBackground(
+    cssPaintColorOnBackground(filter, blendMode, effectiveColor, background, current),
+    background
+  );
+}
+
 function fieldOwnBackgroundColor(
   style: CSSStyleDeclaration | undefined,
   current: HTMLElement
@@ -3706,10 +3747,6 @@ function fieldChromePaintBlendsIntoBackground(
 ) {
   const filter = cssFilterChainForPaintSource(current);
   const blendMode = cssBlendModeForPaintSource(current);
-  const backgroundImage = cssPropertyValue(style, current, "background-image");
-  const hasUnmodeledBackgroundImage =
-    !cssPaintListLooksEmpty(backgroundImage) &&
-    cssBackgroundImageSolidColor(backgroundImage, current) === null;
   const backgroundPaint = nearestOpaqueAncestorBackground(current);
   const ancestorBackground =
     cssFilterPaintColor(
@@ -3739,8 +3776,13 @@ function fieldChromePaintBlendsIntoBackground(
     );
   }
   return (
-    !fieldHasPlaceholderText(current) &&
-    !hasUnmodeledBackgroundImage &&
+    !fieldPlaceholderPaintContrastsWithBackground(
+      style,
+      current,
+      ancestorBackground,
+      filter,
+      blendMode
+    ) &&
     !cssColorContrastsWithBackground(textColor, ancestorBackground) &&
     !cssColorContrastsWithBackground(paintedOwnBackground, ancestorBackground) &&
     !fieldBorderPaintContrastsWithBackground(
@@ -6628,7 +6670,10 @@ function cssStylePaintsVisibleBox(
   );
 }
 
-function computedPseudoStyle(element: HTMLElement, pseudoElement: "::before" | "::after") {
+function computedPseudoStyle(
+  element: HTMLElement,
+  pseudoElement: "::before" | "::after" | "::placeholder"
+) {
   const view = element.ownerDocument.defaultView;
   if (!view) {
     return undefined;
