@@ -4011,6 +4011,68 @@ function dataSvgReferencedElement(current: Element, value: string) {
   return descendantElementById(parsed.root, parsed.fragmentId);
 }
 
+function svgLocalPaintReferenceId(value: string) {
+  const match = value.trim().match(/^url\(\s*(['"]?)(#|%23)([^'")]+)\1\s*\)$/i);
+  return match ? decodeUrlFragment(match[3]) : null;
+}
+
+function svgStopColor(stop: Element) {
+  const style = stop.ownerDocument.defaultView?.getComputedStyle(stop);
+  const inlineStyle = (stop as SVGElement).style;
+  const colorValue =
+    stop.getAttribute("stop-color") ??
+    inlineStyle?.getPropertyValue("stop-color") ??
+    style?.getPropertyValue("stop-color") ??
+    "black";
+  const color = cssColorRgba(colorValue);
+  if (color === null) {
+    return null;
+  }
+
+  const opacity =
+    cssOpacityValue(stop.getAttribute("stop-opacity") ?? undefined) ??
+    cssOpacityValue(inlineStyle?.getPropertyValue("stop-opacity")) ??
+    cssOpacityValue(style?.getPropertyValue("stop-opacity")) ??
+    1;
+  return {
+    ...color,
+    a: clampCssAlphaChannel(color.a * opacity)
+  };
+}
+
+function svgGradientSolidColor(gradient: Element) {
+  const stopColors = Array.from(gradient.children)
+    .filter((child) => child.tagName.toLowerCase() === "stop")
+    .map(svgStopColor);
+  if (stopColors.length === 0 || stopColors.some((color) => color === null)) {
+    return null;
+  }
+  const colors = stopColors as CssColorRgba[];
+  const [first, ...rest] = colors;
+  return rest.every((color) => cssColorChannelsMatch(first, color)) ? first : null;
+}
+
+function svgPaintServerSolidColor(shape: Element, value: string) {
+  const targetId = svgLocalPaintReferenceId(value);
+  if (targetId === null) {
+    return null;
+  }
+
+  const target = shape.ownerDocument.getElementById(targetId);
+  if (target === null) {
+    return null;
+  }
+  const tagName = target.tagName.toLowerCase();
+  if (tagName === "lineargradient" || tagName === "radialgradient") {
+    return svgGradientSolidColor(target);
+  }
+  return null;
+}
+
+function svgPaintSolidColor(shape: Element, value: string) {
+  return cssColorRgba(value) ?? svgPaintServerSolidColor(shape, value);
+}
+
 function svgBackgroundImageShapeColors(
   shape: Element,
   seen: Set<Element> = new Set()
@@ -4063,7 +4125,7 @@ function svgBackgroundImageShapeColors(
   const colors: CssColorRgba[] = [];
   const fill = svgPaintValue(shape, style, "fill", "black");
   if (fill.trim().toLowerCase() !== "none" && !cssColorLooksTransparent(fill)) {
-    const fillColor = cssColorRgba(fill);
+    const fillColor = svgPaintSolidColor(shape, fill);
     if (fillColor === null) {
       return null;
     }
@@ -4081,7 +4143,7 @@ function svgBackgroundImageShapeColors(
     !cssColorLooksTransparent(stroke) &&
     !cssLengthLooksZero(strokeWidth)
   ) {
-    const strokeColor = cssColorRgba(stroke);
+    const strokeColor = svgPaintSolidColor(shape, stroke);
     if (strokeColor === null) {
       return null;
     }
