@@ -191,6 +191,27 @@ function credentialScopeBucket(field: AutofillTriageFieldResult) {
   return credentialScopeKey(field) ?? "root-run:0";
 }
 
+function siteRuleScopesForFieldType(
+  fields: AutofillTriageFieldResult[],
+  fieldType: AutofillFieldQualification
+) {
+  return new Set(
+    fields
+      .filter((field) => field.siteRuleTypes.includes(fieldType))
+      .map(credentialScopeBucket)
+  );
+}
+
+function viewableSiteRuleFieldSpansMultipleScopes(
+  reportFields: AutofillTriageFieldResult[],
+  fieldType: AutofillFieldQualification
+) {
+  return siteRuleScopesForFieldType(
+    viewableSiteRuleFields(reportFields, fieldType),
+    fieldType
+  ).size > 1;
+}
+
 function createSiteRuleActions(
   reportFields: AutofillTriageFieldResult[],
   payload: LoginFillPayload
@@ -208,12 +229,10 @@ function createSiteRuleActions(
     skippedFieldTypes.add("password");
     skippedFieldTypes.add("currentPassword");
   }
-  const newPasswordRuleScopes = new Set(
-    fields
-      .filter((field) => field.siteRuleTypes.includes("newPassword"))
-      .map(credentialScopeBucket)
-  );
-  if (newPasswordRuleScopes.size > 1) {
+  if (siteRuleScopesForFieldType(fields, "username").size > 1) {
+    skippedFieldTypes.add("username");
+  }
+  if (siteRuleScopesForFieldType(fields, "newPassword").size > 1) {
     skippedFieldTypes.add("newPassword");
   }
 
@@ -1196,10 +1215,14 @@ export function createLoginFillPlan(
       (action) => action.fieldType === "currentPassword" || action.fieldType === "newPassword"
     )
   );
+  const ambiguousUsernameSiteRule =
+    viewableSiteRuleFieldSpansMultipleScopes(report.fields, "username");
   const siteRuleUsernameField = fieldForAction(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "username")
-  ) ?? firstViewableSiteRuleField(report.fields, "username");
+  ) ?? (ambiguousUsernameSiteRule
+    ? null
+    : firstViewableSiteRuleField(report.fields, "username"));
   const siteRuleTotpField = fieldForAction(
     report.fields,
     siteRuleActions.find((action) => action.fieldType === "totp")
@@ -1226,6 +1249,13 @@ export function createLoginFillPlan(
     intent.kind === "registration" ||
     intent.kind === "passwordChange";
   const primaryScopeKey = siteRuleAnchorScopeKey ?? intentScopeKey;
+  if (
+    ambiguousUsernameSiteRule &&
+    siteRuleAnchorScopeKey === null &&
+    !intentUsesFocusedScope
+  ) {
+    return { actions };
+  }
   const resolvedIntentFields =
     shouldUseResolvedScope && primaryScopeKey !== null
       ? fields.filter((field) => fieldIsInCredentialScope(field, primaryScopeKey))

@@ -180,6 +180,42 @@ describe("autofill site rules", () => {
     expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("secret");
   });
 
+  it("does not anchor password fills to ambiguous username site-rule matches", () => {
+    document.body.innerHTML = `
+      <form id="decoy-form">
+        <input class="rule-user" id="decoy-user" name="email" type="email" autocomplete="username" />
+        <input id="decoy-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+      <form id="target-form" aria-label="Sign in">
+        <input class="rule-user" id="target-user" name="email" type="email" autocomplete="username" />
+        <input id="target-password" name="password" type="password" autocomplete="current-password" />
+      </form>
+    `;
+    const snapshot = collectAutofillPageSnapshot(document, {
+      siteRules: [
+        {
+          id: "ambiguous-username-rule",
+          host: window.location.hostname,
+          fields: {
+            username: [".rule-user"]
+          }
+        }
+      ]
+    });
+
+    const plan = createLoginFillPlan(snapshot, {
+      username: "alice",
+      password: "secret"
+    });
+    expect(plan.actions).toEqual([]);
+    applyFillPlan(plan, document);
+
+    expect((document.querySelector("#decoy-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#decoy-password") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-user") as HTMLInputElement).value).toBe("");
+    expect((document.querySelector("#target-password") as HTMLInputElement).value).toBe("");
+  });
+
   it("uses heuristic selection for payload fields not covered by matching rules", () => {
     document.body.innerHTML = `
       <form>
