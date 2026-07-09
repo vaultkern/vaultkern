@@ -36,13 +36,33 @@ function normalizedHttpFillTargetUrl(value: unknown) {
   }
 }
 
-async function currentFillTargetUrl(tabId: number) {
+async function fillTargetCanReceiveSecrets(tabId: number, targetUrl: string) {
   const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
-  if (typeof chromeApi?.tabs?.get !== "function") {
-    return null;
+  if (
+    typeof chromeApi?.tabs?.get !== "function" ||
+    typeof chromeApi?.windows?.get !== "function"
+  ) {
+    return false;
   }
-  const tab = await chromeApi.tabs.get(tabId);
-  return normalizedHttpFillTargetUrl(tab?.url);
+
+  try {
+    const tab = (await chromeApi.tabs.get(tabId)) as
+      | { active?: boolean; url?: string; windowId?: number }
+      | undefined;
+    if (tab?.active !== true || normalizedHttpFillTargetUrl(tab.url) !== targetUrl) {
+      return false;
+    }
+    if (typeof tab.windowId !== "number") {
+      return false;
+    }
+
+    const tabWindow = (await chromeApi.windows.get(tab.windowId)) as
+      | { focused?: boolean }
+      | undefined;
+    return tabWindow?.focused === true;
+  } catch {
+    return false;
+  }
 }
 
 function candidateListIncludesEntry(candidates: Array<{ id?: unknown }>, entryId: string) {
@@ -80,8 +100,11 @@ export async function fillSelectedEntry(vaultId: string, entryId: string) {
     return;
   }
 
+  if (!(await fillTargetCanReceiveSecrets(tab.id, targetUrl))) {
+    return;
+  }
   const detail = await client.getEntryDetail(vaultId, entryId);
-  if ((await currentFillTargetUrl(tab.id)) !== targetUrl) {
+  if (!(await fillTargetCanReceiveSecrets(tab.id, targetUrl))) {
     return;
   }
   const fillMessage: {

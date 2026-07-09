@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { readFileSync } from "node:fs";
 import { createElement } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fillLoginForm } from "../contentScript";
@@ -131,6 +131,10 @@ afterEach(() => {
 beforeEach(() => {
   document.body.innerHTML = "";
   window.history.replaceState(null, "", "/");
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "visible"
+  });
   delete (globalThis as typeof globalThis & { chrome?: unknown }).chrome;
   delete (globalThis as typeof globalThis & {
     __vaultkernWebAuthnContentScriptInstalled?: boolean;
@@ -3652,7 +3656,7 @@ describe("PopupShell fill flow", () => {
     });
   });
 
-  it("renders popup site candidates search and selected record details together", async () => {
+  it("renders popup site candidates search and selected record summary without preloading secrets", async () => {
     const query = vi.fn(async () => [
       {
         id: 7,
@@ -3711,8 +3715,10 @@ describe("PopupShell fill flow", () => {
     expect(await screen.findByText("Suggested for this site")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Search records")).toBeInTheDocument();
     expect(screen.getByText("Selected record")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Copy username alice@example.com" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Open Manager" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Fallback Account" })).not.toBeInTheDocument();
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
     expect((container.firstElementChild as HTMLElement).style.width).toBe("460px");
     expect((container.firstElementChild as HTMLElement).style.maxHeight).toBe("600px");
     expect((container.firstElementChild as HTMLElement).style.overflowY).toBe("auto");
@@ -3724,7 +3730,7 @@ describe("PopupShell fill flow", () => {
     expect(await screen.findByRole("button", { name: "Fallback Account" })).toBeInTheDocument();
   });
 
-  it("copies username password and totp when the field itself is clicked", async () => {
+  it("loads entry secrets only when a secret field action is clicked", async () => {
     const query = vi.fn(async () => [
       {
         id: 7,
@@ -3784,19 +3790,25 @@ describe("PopupShell fill flow", () => {
         name: "Copy username alice@example.com"
       })
     );
+    expect(writeText).toHaveBeenCalledWith("alice@example.com");
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
+
     fireEvent.click(
       screen.getByRole("button", {
         name: "Copy password"
       })
     );
+    await waitFor(() => {
+      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
+      expect(writeText).toHaveBeenCalledWith("secret-123");
+    });
+
     fireEvent.click(
-      screen.getByRole("button", {
+      await screen.findByRole("button", {
         name: "Copy TOTP 123456"
       })
     );
 
-    expect(writeText).toHaveBeenCalledWith("alice@example.com");
-    expect(writeText).toHaveBeenCalledWith("secret-123");
     expect(writeText).toHaveBeenCalledWith("123456");
   });
 
@@ -3852,11 +3864,193 @@ describe("PopupShell fill flow", () => {
 
     expect(await screen.findByText("••••••••••")).toBeInTheDocument();
     expect(screen.queryByText("secret-123")).not.toBeInTheDocument();
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Show password" }));
 
+    await waitFor(() => {
+      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
+    });
     expect(await screen.findByText("secret-123")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Hide password" })).toBeInTheDocument();
+  });
+
+  it("does not reveal stale secrets when selection changes while detail is loading", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const detailRequest = createDeferred<{
+      type: "entry_detail";
+      id: string;
+      title: string;
+      username: string;
+      password: string;
+      url: string;
+      notes: string;
+      totp: string;
+    }>();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example Account",
+        username: "alice@example.com",
+        url: "https://example.com/login"
+      },
+      {
+        id: "entry-2",
+        title: "Fallback Account",
+        username: "backup@example.com",
+        url: "https://example.com"
+      }
+    ]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example Account",
+        username: "alice@example.com",
+        url: "https://example.com/login"
+      }
+    ]);
+    runtimeClientMocks.getEntryDetail.mockReturnValue(detailRequest.promise);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Show password" }));
+    await waitFor(() => {
+      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("Search records"), {
+      target: { value: "Fallback" }
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Fallback Account" }));
+    expect(
+      await screen.findByRole("button", {
+        name: "Copy username backup@example.com"
+      })
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      detailRequest.resolve({
+        type: "entry_detail",
+        id: "entry-1",
+        title: "Example Account",
+        username: "alice@example.com",
+        password: "secret-123",
+        url: "https://example.com/login",
+        notes: "",
+        totp: "123456"
+      });
+      await detailRequest.promise;
+    });
+
+    expect(screen.queryByText("secret-123")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy TOTP 123456" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show password" })).toBeInTheDocument();
+  });
+
+  it("does not copy stale secrets when selection changes while detail is loading", async () => {
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const detailRequest = createDeferred<{
+      type: "entry_detail";
+      id: string;
+      title: string;
+      username: string;
+      password: string;
+      url: string;
+      notes: string;
+    }>();
+
+    Object.assign(navigator, {
+      clipboard: { writeText }
+    });
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query,
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example Account",
+        username: "alice@example.com",
+        url: "https://example.com/login"
+      },
+      {
+        id: "entry-2",
+        title: "Fallback Account",
+        username: "backup@example.com",
+        url: "https://example.com"
+      }
+    ]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example Account",
+        username: "alice@example.com",
+        url: "https://example.com/login"
+      }
+    ]);
+    runtimeClientMocks.getEntryDetail.mockReturnValue(detailRequest.promise);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Copy password" }));
+    await waitFor(() => {
+      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("Search records"), {
+      target: { value: "Fallback" }
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Fallback Account" }));
+
+    await act(async () => {
+      detailRequest.resolve({
+        type: "entry_detail",
+        id: "entry-1",
+        title: "Example Account",
+        username: "alice@example.com",
+        password: "secret-123",
+        url: "https://example.com/login",
+        notes: ""
+      });
+      await detailRequest.promise;
+    });
+
+    expect(writeText).not.toHaveBeenCalledWith("secret-123");
+    expect(screen.queryByText("secret-123")).not.toBeInTheDocument();
   });
 
   it("enables quick unlock during the first popup password unlock when the extension preference is on", async () => {
@@ -4377,7 +4571,13 @@ describe("PopupShell fill flow", () => {
         url: "https://example.com/login"
       }
     ]);
-    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
+    const get = vi.fn(async () => ({
+      id: 7,
+      url: "https://example.com/login",
+      active: true,
+      windowId: 1
+    }));
+    const getWindow = vi.fn(async () => ({ focused: true }));
     const sendMessage = vi.fn(async () => undefined);
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -4385,6 +4585,9 @@ describe("PopupShell fill flow", () => {
         query,
         get,
         sendMessage
+      },
+      windows: {
+        get: getWindow
       }
     };
 
@@ -4518,6 +4721,93 @@ describe("PopupShell fill flow", () => {
     expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledTimes(
       detailRequestsBeforeFill
     );
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not send a selected entry after the target tab loses focus during secret retrieval", async () => {
+    let targetActive = true;
+    let windowFocused = true;
+    const query = vi.fn(async () => [
+      {
+        id: 7,
+        url: "https://example.com/login"
+      }
+    ]);
+    const get = vi.fn(async () => ({
+      id: 7,
+      url: "https://example.com/login",
+      active: targetActive,
+      windowId: 1
+    }));
+    const getWindow = vi.fn(async () => ({ focused: windowFocused }));
+    const sendMessage = vi.fn(async () => undefined);
+    const detailRequest = createDeferred<{
+      type: "entry_detail";
+      id: string;
+      title: string;
+      username: string;
+      password: string;
+      url: string;
+      notes: string;
+    }>();
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query,
+        get,
+        sendMessage
+      },
+      windows: {
+        get: getWindow
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example Account",
+        username: "alice",
+        url: "https://example.com/login"
+      }
+    ]);
+    runtimeClientMocks.getEntryDetail.mockReturnValue(detailRequest.promise);
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Fill Example Account"
+      })
+    );
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith(
+        "vault-1",
+        "entry-1"
+      );
+    });
+    targetActive = false;
+    windowFocused = false;
+    detailRequest.resolve({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example Account",
+      username: "alice",
+      password: "secret-123",
+      url: "https://example.com/login",
+      notes: ""
+    });
+
+    await waitFor(() => {
+      expect(getWindow).toHaveBeenCalledWith(1);
+    });
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -4748,9 +5038,11 @@ describe("PopupShell fill flow", () => {
     const updateButton = await screen.findByRole("button", {
       name: "Update Password"
     });
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
     fireEvent.click(updateButton);
 
     await waitFor(() => {
+      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
       expect(runtimeClientMocks.updateEntryFields).toHaveBeenCalledWith("vault-1", "entry-1", {
         title: "Example",
         username: "alice",
@@ -5144,7 +5436,14 @@ describe("PopupShell fill flow", () => {
 
     render(createElement(PopupShell));
 
+    const updateButton = await screen.findByRole("button", {
+      name: "Update Password"
+    });
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
+    fireEvent.click(updateButton);
+
     await waitFor(() => {
+      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
       expect(runtimeSendMessage).toHaveBeenCalledWith(expect.objectContaining({
         type: "vaultkern_autofill_pending_clear"
       }));
@@ -5230,10 +5529,11 @@ describe("PopupShell fill flow", () => {
       }));
     });
     expect(screen.queryByRole("button", { name: "Update Password" })).not.toBeInTheDocument();
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
     expect(runtimeClientMocks.updateEntryFields).not.toHaveBeenCalled();
   });
 
-  it("does not offer a changed-password update when the current password does not match", async () => {
+  it("does not update a changed password when the current password does not match", async () => {
     const query = vi.fn(async () => [
       {
         id: 7,
@@ -5298,7 +5598,14 @@ describe("PopupShell fill flow", () => {
 
     render(createElement(PopupShell));
 
+    const updateButton = await screen.findByRole("button", {
+      name: "Update Password"
+    });
+    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
+    fireEvent.click(updateButton);
+
     await waitFor(() => {
+      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
       expect(runtimeSendMessage).toHaveBeenCalledWith(expect.objectContaining({
         type: "vaultkern_autofill_pending_clear"
       }));
@@ -7041,7 +7348,13 @@ describe("PopupShell fill flow", () => {
         url: "https://example.com/login"
       }
     ]);
-    const get = vi.fn(async () => ({ id: 7, url: "https://example.com/login" }));
+    const get = vi.fn(async () => ({
+      id: 7,
+      url: "https://example.com/login",
+      active: true,
+      windowId: 1
+    }));
+    const getWindow = vi.fn(async () => ({ focused: true }));
     const sendMessage = vi.fn(async () => {
       throw new Error("tab unavailable");
     });
@@ -7051,6 +7364,9 @@ describe("PopupShell fill flow", () => {
         query,
         get,
         sendMessage
+      },
+      windows: {
+        get: getWindow
       }
     };
 
@@ -7427,6 +7743,49 @@ describe("content script fill message", () => {
         type: "fill_entry_detail",
         trigger: "pageLoad",
         allowAutomaticSecretFill: true,
+        targetUrl,
+        username: "bob",
+        password: "root-secret"
+      });
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        onMessage: {
+          addListener
+        }
+      }
+    };
+
+    document.body.innerHTML = `
+      <form>
+        <input type="email" name="username" autocomplete="username" />
+        <input type="password" name="password" autocomplete="current-password" />
+      </form>
+    `;
+
+    vi.resetModules();
+    await import("../contentScript");
+
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(
+      (document.querySelector('input[name="username"]') as HTMLInputElement).value
+    ).toBe("");
+    expect(
+      (document.querySelector('input[name="password"]') as HTMLInputElement).value
+    ).toBe("");
+  });
+
+  it("does not honor a manual entry-detail message while the document is hidden", async () => {
+    const targetUrl = window.location.href;
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden"
+    });
+    const addListener = vi.fn((listener: (message: unknown) => void) => {
+      listener({
+        type: "fill_entry_detail",
+        trigger: "manual",
         targetUrl,
         username: "bob",
         password: "root-secret"

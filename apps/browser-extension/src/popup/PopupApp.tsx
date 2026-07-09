@@ -89,7 +89,6 @@ type AutofillSavePrompt =
       mode: "update";
       submission: PendingAutofillSubmission;
       entry: EntrySummary;
-      detail: EntryDetail;
     };
 
 function limitRecentVaults(vaults: VaultReference[], limit: number) {
@@ -226,8 +225,6 @@ export function PopupApp({
   const [entriesError, setEntriesError] = useState<string | null>(null);
   const [searchValue, setSearchValue] = useState("");
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
-  const [selectedDetail, setSelectedDetail] = useState<EntryDetail | null>(null);
-  const [detailError, setDetailError] = useState<string | null>(null);
   const [pendingAutofillSubmission, setPendingAutofillSubmission] =
     useState<PendingAutofillSubmission | null>(null);
   const [autofillSavePrompt, setAutofillSavePrompt] =
@@ -614,8 +611,6 @@ export function PopupApp({
       setEntries([]);
       setCandidates([]);
       setSelectedEntryId(null);
-      setSelectedDetail(null);
-      setDetailError(null);
       return;
     }
 
@@ -623,8 +618,6 @@ export function PopupApp({
       setEntries([]);
       setCandidates([]);
       setSelectedEntryId(null);
-      setSelectedDetail(null);
-      setDetailError(null);
       return;
     }
 
@@ -736,8 +729,6 @@ export function PopupApp({
         }
 
         const hasSubmittedUsername = pendingAutofillSubmission.username.trim() !== "";
-        const pendingCredentialPassword = pendingPassword(pendingAutofillSubmission);
-
         if (!pendingCandidates.length) {
           setAutofillSavePrompt({
             mode: "save",
@@ -763,66 +754,23 @@ export function PopupApp({
               return;
             }
 
-            const detail = await client.getEntryDetail(
-              activeVaultId,
-              matchingEntries[0].id
-            );
-            if (cancelled) {
-              return;
-            }
-            if (
-              typeof pendingAutofillSubmission.newPassword === "string" &&
-              detail.password !== pendingAutofillSubmission.password
-            ) {
-              void clearAutofillPrompt();
-              return;
-            }
-            if (detail.password === pendingCredentialPassword) {
-              void clearAutofillPrompt();
-              return;
-            }
             setAutofillSavePrompt({
               mode: "update",
               submission: pendingAutofillSubmission,
-              entry: matchingEntries[0],
-              detail
+              entry: matchingEntries[0]
             });
             return;
           }
 
-          const candidateDetails = await Promise.all(
-            pendingCandidates.map(async (entry) => ({
-              entry,
-              detail: await client.getEntryDetail(activeVaultId, entry.id)
-            }))
-          );
-          if (cancelled) {
-            return;
-          }
-
-          const matchingDetails =
-            typeof pendingAutofillSubmission.newPassword === "string"
-              ? candidateDetails.filter(
-                  ({ detail }) => detail.password === pendingAutofillSubmission.password
-                )
-              : pendingCandidates.length === 1
-                ? candidateDetails
-                : [];
-          if (matchingDetails.length !== 1) {
+          if (pendingCandidates.length !== 1) {
             void clearAutofillPrompt();
             return;
           }
 
-          const [{ entry, detail }] = matchingDetails;
-          if (detail.password === pendingCredentialPassword) {
-            void clearAutofillPrompt();
-            return;
-          }
           setAutofillSavePrompt({
             mode: "update",
             submission: pendingAutofillSubmission,
-            entry,
-            detail
+            entry: pendingCandidates[0]
           });
         } catch {
           if (!cancelled) {
@@ -841,51 +789,6 @@ export function PopupApp({
       cancelled = true;
     };
   }, [client, findCandidates, pendingAutofillSubmission, session?.activeVaultId]);
-
-  useEffect(() => {
-    if (webAuthnCeremonyPrompt) {
-      setSelectedDetail(null);
-      setDetailError(null);
-      return;
-    }
-
-    if (!session?.activeVaultId || !selectedEntryId) {
-      setSelectedDetail(null);
-      setDetailError(null);
-      return;
-    }
-
-    let cancelled = false;
-
-    Promise.resolve(client.getEntryDetail(session.activeVaultId, selectedEntryId))
-      .then((detail) => {
-        if (!cancelled) {
-          setSelectedDetail(detail ?? null);
-          setDetailError(null);
-        }
-      })
-      .catch((loadError) => {
-        if (!cancelled) {
-          setSelectedDetail(null);
-          setDetailError(
-            popupErrorMessage(
-              loadError,
-              translate(extensionSettings.language, "Failed to load record detail")
-            )
-          );
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    client,
-    extensionSettings.language,
-    selectedEntryId,
-    session?.activeVaultId,
-    webAuthnCeremonyPrompt
-  ]);
 
   async function handleUnlock() {
     if (submitting) {
@@ -1136,6 +1039,13 @@ export function PopupApp({
     setCandidates(nextCandidates);
   }
 
+  async function loadSelectedEntryDetail() {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      return null;
+    }
+    return client.getEntryDetail(session.activeVaultId, selectedEntryId);
+  }
+
   async function handleSavePendingLogin() {
     if (!session?.activeVaultId || !autofillSavePrompt || savingAutofillPrompt) {
       return;
@@ -1165,19 +1075,36 @@ export function PopupApp({
           );
         }
       } else {
+        const detail = await client.getEntryDetail(
+          session.activeVaultId,
+          autofillSavePrompt.entry.id
+        );
+        const nextPassword = pendingPassword(autofillSavePrompt.submission);
+        if (
+          typeof autofillSavePrompt.submission.newPassword === "string" &&
+          detail.password !== autofillSavePrompt.submission.password
+        ) {
+          await clearAutofillPrompt();
+          return;
+        }
+        if (detail.password === nextPassword) {
+          await clearAutofillPrompt();
+          return;
+        }
         await client.updateEntryFields(
           session.activeVaultId,
           autofillSavePrompt.entry.id,
           {
-            title: autofillSavePrompt.detail.title,
-            username: autofillSavePrompt.detail.username,
-            password: pendingPassword(autofillSavePrompt.submission),
-            url:
-              autofillSavePrompt.detail.url ||
-              savedUrlForPendingSubmission(autofillSavePrompt.submission),
-            notes: autofillSavePrompt.detail.notes,
-            totpUri: autofillSavePrompt.detail.totpUri ?? null,
-            customFields: autofillSavePrompt.detail.customFields ?? []
+            title: detail.title,
+            username:
+              autofillSavePrompt.submission.username.trim() === ""
+                ? detail.username
+                : autofillSavePrompt.submission.username,
+            password: nextPassword,
+            url: detail.url || savedUrlForPendingSubmission(autofillSavePrompt.submission),
+            notes: detail.notes,
+            totpUri: detail.totpUri ?? null,
+            customFields: detail.customFields ?? []
           }
         );
       }
@@ -1201,7 +1128,6 @@ export function PopupApp({
       const nextSession = await client.lockSession();
       setSession(nextSession);
       setEntriesError(null);
-      setDetailError(null);
       setUnlockError(null);
       setUnlockErrorCause(null);
       setPassword("");
@@ -1232,6 +1158,11 @@ export function PopupApp({
         )
       )
     : [];
+  const selectedEntry = selectedEntryId
+    ? candidates.find((entry) => entry.id === selectedEntryId) ??
+      entries.find((entry) => entry.id === selectedEntryId) ??
+      null
+    : null;
 
   if (!session) {
     if (sessionError) {
@@ -1589,9 +1520,9 @@ export function PopupApp({
         selectedEntryId={selectedEntryId}
         onSelectEntry={setSelectedEntryId}
       />
-      {detailError ? <div role="alert">{detailError}</div> : null}
       <PopupRecordCard
-        detail={selectedDetail}
+        entry={selectedEntry}
+        loadDetail={loadSelectedEntryDetail}
         clearClipboardSeconds={extensionSettings.clearClipboardSeconds}
         onFill={() =>
           selectedEntryId

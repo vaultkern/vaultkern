@@ -83,7 +83,7 @@ if (chromeApi?.runtime?.onMessage) {
       if (!fillTargetMatchesCurrentPage(message.targetUrl)) {
         return false;
       }
-      if (trigger === "pageLoad" && !pageLoadDocumentIsVisible()) {
+      if (!pageLoadDocumentIsVisible()) {
         return false;
       }
 

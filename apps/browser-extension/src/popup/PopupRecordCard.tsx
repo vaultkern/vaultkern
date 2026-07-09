@@ -1,29 +1,81 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import type { EntryDetail } from "@vaultkern/runtime-web-client";
+import type { EntryDetail, EntrySummary } from "@vaultkern/runtime-web-client";
 import { useText } from "@vaultkern/shared-web-ui";
 
 import { copyFieldValue } from "./copyField";
 import { popupTheme } from "./theme";
 
 export function PopupRecordCard({
-  detail,
+  entry,
+  loadDetail,
   onFill,
   clearClipboardSeconds = 0
 }: {
-  detail: EntryDetail | null;
+  entry: EntrySummary | null;
+  loadDetail: () => Promise<EntryDetail | null>;
   onFill: () => void;
   clearClipboardSeconds?: number;
 }) {
   const text = useText();
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  const [showPassword, setShowPassword] = useState(false);
+  const [showPasswordEntryId, setShowPasswordEntryId] = useState<string | null>(null);
+  const [detailState, setDetailState] = useState<{
+    entryId: string;
+    detail: EntryDetail;
+  } | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const entryId = entry?.id ?? null;
+  const selectionVersionRef = useRef(0);
+  const previousEntryIdRef = useRef(entryId);
+  if (previousEntryIdRef.current !== entryId) {
+    previousEntryIdRef.current = entryId;
+    selectionVersionRef.current += 1;
+  }
+  const detail = detailState?.entryId === entryId ? detailState.detail : null;
+  const showPassword = showPasswordEntryId === entryId;
   const totp =
     typeof detail?.totp === "string" && detail.totp !== "" ? detail.totp : null;
 
   useEffect(() => {
-    setShowPassword(false);
-  }, [detail?.id]);
+    setShowPasswordEntryId(null);
+    setDetailState(null);
+    setDetailError(null);
+  }, [entryId]);
+
+  async function ensureDetail() {
+    if (!entryId) {
+      return null;
+    }
+    if (detail) {
+      return detail;
+    }
+    const requestedEntryId = entryId;
+    const requestedSelectionVersion = selectionVersionRef.current;
+    try {
+      const loadedDetail = await loadDetail();
+      if (
+        loadedDetail &&
+        previousEntryIdRef.current === requestedEntryId &&
+        selectionVersionRef.current === requestedSelectionVersion
+      ) {
+        setDetailState({ entryId: requestedEntryId, detail: loadedDetail });
+        setDetailError(null);
+        return loadedDetail;
+      }
+      return null;
+    } catch (error) {
+      if (
+        previousEntryIdRef.current === requestedEntryId &&
+        selectionVersionRef.current === requestedSelectionVersion
+      ) {
+        setDetailError(
+          error instanceof Error ? error.message : text("Failed to load record detail")
+        );
+      }
+      return null;
+    }
+  }
 
   async function handleCopy(kind: string, value: string) {
     await copyFieldValue(value, clearClipboardSeconds);
@@ -56,7 +108,7 @@ export function PopupRecordCard({
           background: popupTheme.colors.surface
         }}
       >
-        {detail ? (
+        {entry ? (
           <>
             <strong
               style={{
@@ -67,13 +119,13 @@ export function PopupRecordCard({
                 whiteSpace: "nowrap"
               }}
             >
-              {detail.title}
+              {entry.title}
             </strong>
             <FieldButton
-              label={`Copy username ${detail.username}`}
+              label={`Copy username ${entry.username}`}
               copied={copiedField === "username"}
-              value={detail.username}
-              onClick={() => handleCopy("username", detail.username)}
+              value={entry.username}
+              onClick={() => handleCopy("username", entry.username)}
             />
             <div
               style={{
@@ -90,13 +142,35 @@ export function PopupRecordCard({
                     : "Copy password"
                 }
                 copied={copiedField === "password"}
-                value={showPassword ? detail.password : "••••••••••"}
-                onClick={() => handleCopy("password", detail.password)}
+                value={showPassword && detail ? detail.password : "••••••••••"}
+                onClick={async () => {
+                  const loadedDetail = await ensureDetail();
+                  if (loadedDetail) {
+                    await handleCopy("password", loadedDetail.password);
+                  }
+                }}
               />
               <button
                 type="button"
                 aria-label={showPassword ? text("Hide password") : text("Show password")}
-                onClick={() => setShowPassword((value) => !value)}
+                onClick={() => {
+                  if (showPassword) {
+                    setShowPasswordEntryId(null);
+                    return;
+                  }
+                  const requestedEntryId = entryId;
+                  const requestedSelectionVersion = selectionVersionRef.current;
+                  void ensureDetail().then((loadedDetail) => {
+                    if (
+                      loadedDetail &&
+                      requestedEntryId &&
+                      previousEntryIdRef.current === requestedEntryId &&
+                      selectionVersionRef.current === requestedSelectionVersion
+                    ) {
+                      setShowPasswordEntryId(requestedEntryId);
+                    }
+                  });
+                }}
                 style={toggleActionStyle}
               >
                 {showPassword ? text("Hide password") : text("Show password")}
@@ -110,6 +184,11 @@ export function PopupRecordCard({
                 onClick={() => handleCopy("totp", totp)}
               />
             ) : null}
+            {detailError ? (
+              <div role="alert" style={{ color: popupTheme.colors.accentStrong }}>
+                {detailError}
+              </div>
+            ) : null}
             <div
               style={{
                 color: popupTheme.colors.textMuted,
@@ -119,7 +198,7 @@ export function PopupRecordCard({
                 whiteSpace: "nowrap"
               }}
             >
-              {detail.url}
+              {entry.url}
             </div>
             <div
               style={{
