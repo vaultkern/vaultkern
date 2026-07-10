@@ -8,7 +8,8 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 const HOST_NAME: &str = "com.vaultkern.runtime";
-const EXTENSION_ID: &str = "test-extension-id";
+const EXTENSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const OTHER_EXTENSION_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const DEVELOPER_ID_HASH: &str = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
 const DEVELOPER_ID_NAME: &str = "Developer ID Application: VaultKern Test (TEAMID1234)";
 const APPLE_DEVELOPMENT_NAME: &str = "Apple Development: VaultKern Test (TEAMID1234)";
@@ -94,8 +95,12 @@ fn run_package(
 }
 
 fn run_install(home: &Path, app: &Path) -> Output {
+    run_install_for_extension(home, app, EXTENSION_ID)
+}
+
+fn run_install_for_extension(home: &Path, app: &Path, extension_id: &str) -> Output {
     script_command("install_native_host_macos.sh")
-        .arg(EXTENSION_ID)
+        .arg(extension_id)
         .arg(app)
         .env("HOME", home)
         .output()
@@ -317,7 +322,7 @@ fn packages_signed_app_and_installs_chrome_native_host() {
     );
     assert_eq!(
         manifest["allowed_origins"],
-        serde_json::json!(["chrome-extension://test-extension-id/"])
+        serde_json::json!([format!("chrome-extension://{EXTENSION_ID}/")])
     );
 }
 
@@ -409,6 +414,181 @@ fn package_rejects_prebuilt_with_wrong_deployment_minimum() {
         String::from_utf8(output.stderr)
             .unwrap()
             .contains("minimum macOS version must be exactly 13.0")
+    );
+}
+
+#[test]
+fn package_copy_sign_or_publish_failure_preserves_existing_artifact() {
+    for failing_tool in ["install", "codesign", "rmdir"] {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let output_root = temp.path().join("packages");
+        let prebuilt = valid_prebuilt(&temp);
+        std::fs::create_dir(&home).unwrap();
+        assert_success(
+            run_package(&output_root, &home, &prebuilt, &[]),
+            "package initial macOS app",
+        );
+
+        let app = output_root.join(host_target()).join("VaultKern Native.app");
+        let marker = app.join("Contents/Resources/known-good");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"known-good").unwrap();
+        assert_success(
+            Command::new("/usr/bin/codesign")
+                .args(["--force", "--sign", "-"])
+                .arg(&app)
+                .output()
+                .unwrap(),
+            "re-sign known-good app",
+        );
+
+        let fake_bin = temp.path().join("failing-package-bin");
+        std::fs::create_dir(&fake_bin).unwrap();
+        write_executable(&fake_bin.join(failing_tool), "#!/bin/sh\nexit 23\n");
+        let failed_package = script_command("package_macos.sh")
+            .arg(host_target())
+            .args(["--output-root", output_root.to_str().unwrap()])
+            .arg("--prebuilt-binary")
+            .arg(&prebuilt)
+            .env("HOME", &home)
+            .env("PATH", path_with_first(&fake_bin))
+            .output()
+            .unwrap();
+
+        assert!(
+            !failed_package.status.success(),
+            "{failing_tool} failure unexpectedly packaged an app"
+        );
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            b"known-good",
+            "{failing_tool} failure replaced the known-good artifact"
+        );
+        assert_success(
+            Command::new("/usr/bin/codesign")
+                .args(["--verify", "--strict"])
+                .arg(&app)
+                .output()
+                .unwrap(),
+            &format!("verify artifact after {failing_tool} failure"),
+        );
+    }
+}
+
+#[test]
+fn installer_rejects_invalid_or_changed_extension_id_without_replacing_state() {
+    let temp = TempDir::new().unwrap();
+    let output_root = temp.path().join("packages");
+    let home = temp.path().join("home");
+    let prebuilt = valid_prebuilt(&temp);
+    std::fs::create_dir(&home).unwrap();
+    assert_success(
+        run_package(&output_root, &home, &prebuilt, &[]),
+        "package macOS app",
+    );
+    let app = output_root.join(host_target()).join("VaultKern Native.app");
+
+    for invalid_extension_id in [
+        "test-extension-id".to_owned(),
+        "A".repeat(32),
+        "q".repeat(32),
+        "é".repeat(32),
+    ] {
+        let invalid = script_command("install_native_host_macos.sh")
+            .arg(&invalid_extension_id)
+            .arg(&app)
+            .env("HOME", &home)
+            .env("LC_ALL", "en_US.UTF-8")
+            .output()
+            .unwrap();
+        assert!(
+            !invalid.status.success(),
+            "accepted invalid extension ID {invalid_extension_id:?}"
+        );
+        assert!(
+            String::from_utf8(invalid.stderr)
+                .unwrap()
+                .contains("32 lowercase characters in the range a-p")
+        );
+    }
+
+    assert_success(run_install(&home, &app), "install initial app");
+    let installed_app = home
+        .join("Library/Application Support/VaultKern")
+        .join("VaultKern Native.app");
+    let installed_manifest = home
+        .join("Library/Application Support/Google/Chrome/NativeMessagingHosts")
+        .join(format!("{HOST_NAME}.json"));
+    let original_manifest = std::fs::read(&installed_manifest).unwrap();
+
+    let expected_origin = format!("chrome-extension://{EXTENSION_ID}/");
+    let mut origin_dictionary = serde_json::Map::new();
+    origin_dictionary.insert(expected_origin, Value::String("not-a-string-origin".into()));
+    let type_confusion_manifest = serde_json::to_vec(&serde_json::json!({
+        "name": HOST_NAME,
+        "description": "type confusion fixture",
+        "path": "/stale/vaultkern-runtime",
+        "type": "stdio",
+        "allowed_origins": [Value::Object(origin_dictionary)],
+    }))
+    .unwrap();
+    std::fs::write(&installed_manifest, &type_confusion_manifest).unwrap();
+
+    let rejected_type_confusion = run_install(&home, &app);
+    assert!(
+        !rejected_type_confusion.status.success(),
+        "accepted a non-string extension origin"
+    );
+    assert!(
+        String::from_utf8(rejected_type_confusion.stderr)
+            .unwrap()
+            .contains("cannot read the existing native-host extension origin")
+    );
+    assert_eq!(
+        std::fs::read(&installed_manifest).unwrap(),
+        type_confusion_manifest
+    );
+    std::fs::write(&installed_manifest, &original_manifest).unwrap();
+
+    let incoming_app = temp.path().join("Incoming Extension Drift.app");
+    assert_success(
+        Command::new("ditto")
+            .arg(&app)
+            .arg(&incoming_app)
+            .output()
+            .unwrap(),
+        "copy incoming extension-drift app",
+    );
+    let incoming_marker = incoming_app.join("Contents/Resources/incoming-marker");
+    std::fs::create_dir_all(incoming_marker.parent().unwrap()).unwrap();
+    std::fs::write(&incoming_marker, b"extension-drift").unwrap();
+    assert_success(
+        Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&incoming_app)
+            .output()
+            .unwrap(),
+        "re-sign incoming extension-drift app",
+    );
+
+    let rejected = run_install_for_extension(&home, &incoming_app, OTHER_EXTENSION_ID);
+
+    assert!(!rejected.status.success(), "accepted extension ID drift");
+    assert!(
+        String::from_utf8(rejected.stderr)
+            .unwrap()
+            .contains("extension origin drift")
+    );
+    assert_eq!(
+        std::fs::read(&installed_manifest).unwrap(),
+        original_manifest
+    );
+    assert!(
+        !installed_app
+            .join("Contents/Resources/incoming-marker")
+            .exists(),
+        "extension ID drift replaced the installed app"
     );
 }
 
@@ -576,8 +756,15 @@ fn first_install_manifest_failure_removes_new_app_and_preserves_stale_manifest()
         .join("Library/Application Support/Google/Chrome/NativeMessagingHosts")
         .join(format!("{HOST_NAME}.json"));
     std::fs::create_dir_all(installed_manifest.parent().unwrap()).unwrap();
-    let stale_manifest = b"stale manifest bytes";
-    std::fs::write(&installed_manifest, stale_manifest).unwrap();
+    let stale_manifest = serde_json::to_vec(&serde_json::json!({
+        "name": HOST_NAME,
+        "description": "stale manifest",
+        "path": "/stale/vaultkern-runtime",
+        "type": "stdio",
+        "allowed_origins": [format!("chrome-extension://{EXTENSION_ID}/")],
+    }))
+    .unwrap();
+    std::fs::write(&installed_manifest, &stale_manifest).unwrap();
 
     let failed_install = run_install(&home, &failing_app);
 

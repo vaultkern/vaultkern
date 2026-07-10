@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
 
 signature_team_identifier() {
   local app_bundle="$1"
@@ -68,6 +69,26 @@ validate_upgrade_signature_continuity() {
   fi
 }
 
+validate_existing_manifest_extension() {
+  local manifest="$1"
+  local expected_origin="$2"
+  local origin_count
+  local existing_origin
+
+  if ! origin_count="$(plutil -extract allowed_origins raw -expect array -o - "${manifest}" 2>/dev/null)"; then
+    echo "error: cannot validate the existing native-host manifest; remove it explicitly before resetting the extension binding: ${manifest}" >&2
+    return 1
+  fi
+  if ! existing_origin="$(plutil -extract allowed_origins.0 raw -expect string -o - "${manifest}" 2>/dev/null)"; then
+    echo "error: cannot read the existing native-host extension origin: ${manifest}" >&2
+    return 1
+  fi
+  if [[ "${origin_count}" != "1" || "${existing_origin}" != "${expected_origin}" ]]; then
+    echo "error: refusing native host upgrade due to extension origin drift: existing=${existing_origin}, incoming=${expected_origin}" >&2
+    return 1
+  fi
+}
+
 if [[ $# -ne 2 || -z "$1" ]]; then
   echo "usage: install_native_host_macos.sh <extension-id> <VaultKern Native.app>" >&2
   exit 1
@@ -75,6 +96,11 @@ fi
 
 extension_id="$1"
 source_bundle="$2"
+
+if [[ ${#extension_id} -ne 32 || "${extension_id}" == *[!a-p]* ]]; then
+  echo "error: Chrome extension ID must contain exactly 32 lowercase characters in the range a-p" >&2
+  exit 1
+fi
 
 if [[ ! -d "${source_bundle}" ]]; then
   echo "error: app bundle not found: ${source_bundle}" >&2
@@ -85,10 +111,15 @@ source_parent="$(cd "$(dirname "${source_bundle}")" && pwd -P)"
 source_bundle="${source_parent}/$(basename "${source_bundle}")"
 app_destination="${VAULTKERN_MACOS_APP_DESTINATION:-${HOME}/Library/Application Support/VaultKern/VaultKern Native.app}"
 manifest_destination="${VAULTKERN_CHROME_NATIVE_HOST_MANIFEST:-${HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.vaultkern.runtime.json}"
+expected_extension_origin="chrome-extension://${extension_id}/"
 
 if [[ "${app_destination}" != /* || "${manifest_destination}" != /* ]]; then
   echo "error: macOS installation destinations must be absolute paths" >&2
   exit 1
+fi
+
+if [[ -e "${manifest_destination}" || -L "${manifest_destination}" ]]; then
+  validate_existing_manifest_extension "${manifest_destination}" "${expected_extension_origin}"
 fi
 
 codesign --verify --strict "${source_bundle}"
@@ -163,7 +194,7 @@ tmp_manifest="$(mktemp "${manifest_dir}/.com.vaultkern.runtime.json.XXXXXX")"
 
 "${installed_executable}" --print-native-host-manifest \
   "${installed_executable}" \
-  "chrome-extension://${extension_id}/" > "${tmp_manifest}"
+  "${expected_extension_origin}" > "${tmp_manifest}"
 mv -f -- "${tmp_manifest}" "${manifest_destination}"
 tmp_manifest=""
 installation_committed=1

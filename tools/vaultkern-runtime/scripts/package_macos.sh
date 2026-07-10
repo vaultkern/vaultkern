@@ -298,23 +298,76 @@ if [[ ! -f "${runtime_binary}" ]]; then
 fi
 validate_runtime_binary "${runtime_binary}" "${target}"
 
-app_bundle="${output_root}/${target}/VaultKern Native.app"
-contents_dir="${app_bundle}/Contents"
+target_output_dir="${output_root}/${target}"
+app_bundle="${target_output_dir}/VaultKern Native.app"
+mkdir -p "${target_output_dir}"
+staging_root="$(mktemp -d "${target_output_dir}/.VaultKern Native.staging.XXXXXX")"
+staged_app_bundle="${staging_root}/VaultKern Native.app"
+contents_dir="${staged_app_bundle}/Contents"
 executable_dir="${contents_dir}/MacOS"
+backup_bundle=""
+backup_contains_previous=0
+destination_replaced=0
+publication_committed=0
 
-rm -rf -- "${app_bundle}"
+cleanup_package() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [[ "${publication_committed}" -ne 1 && "${destination_replaced}" -eq 1 ]]; then
+    rm -rf -- "${app_bundle}" || true
+  fi
+  if [[ "${backup_contains_previous}" -eq 1 && -n "${backup_bundle}" && -e "${backup_bundle}" ]]; then
+    if [[ "${publication_committed}" -ne 1 ]]; then
+      rm -rf -- "${app_bundle}" || true
+      if ! mv -- "${backup_bundle}" "${app_bundle}"; then
+        echo "error: failed to restore previous packaged app: ${backup_bundle}" >&2
+      fi
+    else
+      rm -rf -- "${backup_bundle}" || true
+    fi
+  elif [[ -n "${backup_bundle}" && -e "${backup_bundle}" ]]; then
+    rm -rf -- "${backup_bundle}" || true
+  fi
+  if [[ -n "${staging_root}" ]]; then
+    rm -rf -- "${staging_root}" || true
+  fi
+  exit "${status}"
+}
+trap cleanup_package EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 mkdir -p "${executable_dir}"
 install -m 0644 "${runtime_dir}/macos/Info.plist" "${contents_dir}/Info.plist"
 install -m 0755 "${runtime_binary}" "${executable_dir}/vaultkern-runtime"
 
 if [[ -z "${signing_identity}" || "${signing_identity}" == "-" ]]; then
-  codesign --force --sign - "${app_bundle}"
+  codesign --force --sign - "${staged_app_bundle}"
 else
-  codesign --force --options runtime --timestamp --sign "${resolved_signing_identity}" "${app_bundle}"
-  if ! validate_release_signature "${app_bundle}" "${expected_team_identifier}"; then
-    rm -rf -- "${app_bundle}"
-    exit 1
-  fi
+  codesign --force --options runtime --timestamp --sign "${resolved_signing_identity}" "${staged_app_bundle}"
 fi
+codesign --verify --strict "${staged_app_bundle}"
+if [[ -n "${signing_identity}" && "${signing_identity}" != "-" ]]; then
+  validate_release_signature "${staged_app_bundle}" "${expected_team_identifier}"
+fi
+
+if [[ -e "${app_bundle}" || -L "${app_bundle}" ]]; then
+  backup_bundle="$(mktemp -d "${target_output_dir}/.VaultKern Native.backup.XXXXXX")"
+  rmdir "${backup_bundle}"
+  backup_contains_previous=1
+  mv -- "${app_bundle}" "${backup_bundle}"
+fi
+destination_replaced=1
+mv -- "${staged_app_bundle}" "${app_bundle}"
+publication_committed=1
+if [[ -n "${backup_bundle}" ]]; then
+  rm -rf -- "${backup_bundle}" || true
+  backup_bundle=""
+  backup_contains_previous=0
+fi
+rm -rf -- "${staging_root}"
+staging_root=""
+trap - EXIT HUP INT TERM
 
 echo "${app_bundle}"
