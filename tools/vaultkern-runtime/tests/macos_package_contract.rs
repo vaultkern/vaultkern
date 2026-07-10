@@ -10,9 +10,11 @@ use tempfile::TempDir;
 const HOST_NAME: &str = "com.vaultkern.runtime";
 const EXTENSION_ID: &str = "test-extension-id";
 const DEVELOPER_ID_HASH: &str = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
-const DEVELOPER_ID_NAME: &str = "Developer ID Application: VaultKern Test (TEAMID)";
-const APPLE_DEVELOPMENT_NAME: &str = "Apple Development: VaultKern Test (TEAMID)";
+const DEVELOPER_ID_NAME: &str = "Developer ID Application: VaultKern Test (TEAMID1234)";
+const APPLE_DEVELOPMENT_NAME: &str = "Apple Development: VaultKern Test (TEAMID1234)";
 const SELF_SIGNED_NAME: &str = "VaultKern Self Signed";
+const SPOOFED_DEVELOPER_ID_HASH: &str = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
+const SPOOFED_DEVELOPER_ID_NAME: &str = "Developer ID Application: VaultKern Spoof (SPOOFTEAM1)";
 
 fn script(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -71,24 +73,70 @@ fn write_executable(path: &Path, contents: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn fake_signing_tools(temp: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
+fn fake_signing_tools(temp: &TempDir) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let fake_bin = temp.path().join("fake-signing-bin");
     std::fs::create_dir(&fake_bin).unwrap();
     let security_log = temp.path().join("security.log");
     let codesign_log = temp.path().join("codesign.log");
+    let codesign_display_log = temp.path().join("codesign-display.log");
 
     write_executable(
         &fake_bin.join("security"),
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$VAULTKERN_TEST_SECURITY_LOG\"\ncat <<'EOF'\n  1) {DEVELOPER_ID_HASH} \"{DEVELOPER_ID_NAME}\"\n  2) 2222222222222222222222222222222222222222 \"{APPLE_DEVELOPMENT_NAME}\"\n  3) 3333333333333333333333333333333333333333 \"{SELF_SIGNED_NAME}\"\n     3 valid identities found\nEOF\n"
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$VAULTKERN_TEST_SECURITY_LOG\"\ncat <<'EOF'\n  1) {DEVELOPER_ID_HASH} \"{DEVELOPER_ID_NAME}\"\n  2) 2222222222222222222222222222222222222222 \"{APPLE_DEVELOPMENT_NAME}\"\n  3) 3333333333333333333333333333333333333333 \"{SELF_SIGNED_NAME}\"\n  4) {SPOOFED_DEVELOPER_ID_HASH} \"{SPOOFED_DEVELOPER_ID_NAME}\"\n     4 valid identities found\nEOF\n"
         ),
     );
     write_executable(
         &fake_bin.join("codesign"),
-        "#!/bin/sh\n: > \"$VAULTKERN_TEST_CODESIGN_LOG\"\nfor argument in \"$@\"; do\n  printf '%s\\n' \"$argument\" >> \"$VAULTKERN_TEST_CODESIGN_LOG\"\n  bundle=\"$argument\"\ndone\nexec /usr/bin/codesign --force --sign - \"$bundle\"\n",
+        r#"#!/bin/sh
+if [ "$1" = "--display" ]; then
+  printf 'call' >> "$VAULTKERN_TEST_CODESIGN_DISPLAY_LOG"
+  for argument in "$@"; do
+    printf '\t%s' "$argument" >> "$VAULTKERN_TEST_CODESIGN_DISPLAY_LOG"
+  done
+  printf '\n' >> "$VAULTKERN_TEST_CODESIGN_DISPLAY_LOG"
+  if [ "$2" = "--verbose=4" ]; then
+    if [ "${VAULTKERN_TEST_SIGNATURE_MODE:-valid}" = "spoofed" ]; then
+      cat >&2 <<'EOF'
+Executable=/tmp/VaultKern Native.app/Contents/MacOS/vaultkern-runtime
+Identifier=com.vaultkern.runtime
+CodeDirectory v=20500 size=512 flags=0x10000(runtime) hashes=8+2 location=embedded
+Authority=Developer ID Application: VaultKern Spoof (SPOOFTEAM1)
+Authority=VaultKern Self Signed
+Timestamp=Jul 11, 2026 at 12:00:00
+TeamIdentifier=SPOOFTEAM1
+EOF
+    else
+      cat >&2 <<'EOF'
+Executable=/tmp/VaultKern Native.app/Contents/MacOS/vaultkern-runtime
+Identifier=com.vaultkern.runtime
+CodeDirectory v=20500 size=512 flags=0x10000(runtime) hashes=8+2 location=embedded
+Authority=Developer ID Application: VaultKern Test (TEAMID1234)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=Jul 11, 2026 at 12:00:00
+TeamIdentifier=TEAMID1234
+EOF
+    fi
+    exit 0
+  fi
+  if [ "$2" = "--requirements" ]; then
+    echo 'designated => identifier "com.vaultkern.runtime" and anchor apple generic' >&2
+    exit 0
+  fi
+  exit 64
+fi
+
+: > "$VAULTKERN_TEST_CODESIGN_LOG"
+for argument in "$@"; do
+  printf '%s\n' "$argument" >> "$VAULTKERN_TEST_CODESIGN_LOG"
+  bundle="$argument"
+done
+exec /usr/bin/codesign --force --sign - "$bundle"
+"#,
     );
 
-    (fake_bin, security_log, codesign_log)
+    (fake_bin, security_log, codesign_log, codesign_display_log)
 }
 
 fn assert_success(output: Output, action: &str) {
@@ -288,7 +336,7 @@ fn release_signing_resolves_developer_id_name_and_sha1_hash() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("home");
     std::fs::create_dir(&home).unwrap();
-    let (fake_bin, security_log, codesign_log) = fake_signing_tools(&temp);
+    let (fake_bin, security_log, codesign_log, codesign_display_log) = fake_signing_tools(&temp);
 
     for (case, requested_identity) in [
         ("name", DEVELOPER_ID_NAME.to_owned()),
@@ -305,6 +353,8 @@ fn release_signing_resolves_developer_id_name_and_sha1_hash() {
             .env("VAULTKERN_CODESIGN_IDENTITY", requested_identity)
             .env("VAULTKERN_TEST_SECURITY_LOG", &security_log)
             .env("VAULTKERN_TEST_CODESIGN_LOG", &codesign_log)
+            .env("VAULTKERN_TEST_CODESIGN_DISPLAY_LOG", &codesign_display_log)
+            .env("VAULTKERN_TEST_SIGNATURE_MODE", "valid")
             .output()
             .unwrap();
         assert_success(output, &format!("release sign by {case}"));
@@ -321,6 +371,9 @@ fn release_signing_resolves_developer_id_name_and_sha1_hash() {
         }
         assert!(codesign_args.lines().any(|line| line == DEVELOPER_ID_HASH));
         assert!(!codesign_args.lines().any(|line| line == "--deep"));
+        let display_calls = std::fs::read_to_string(&codesign_display_log).unwrap();
+        assert!(display_calls.contains("call\t--display\t--verbose=4"));
+        assert!(display_calls.contains("call\t--display\t--requirements\t-"));
     }
 }
 
@@ -329,7 +382,7 @@ fn release_signing_rejects_non_developer_id_identities() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("home");
     std::fs::create_dir(&home).unwrap();
-    let (fake_bin, security_log, codesign_log) = fake_signing_tools(&temp);
+    let (fake_bin, security_log, codesign_log, codesign_display_log) = fake_signing_tools(&temp);
 
     for (case, requested_identity) in [
         ("apple-development", APPLE_DEVELOPMENT_NAME),
@@ -347,6 +400,7 @@ fn release_signing_rejects_non_developer_id_identities() {
             .env("VAULTKERN_CODESIGN_IDENTITY", requested_identity)
             .env("VAULTKERN_TEST_SECURITY_LOG", &security_log)
             .env("VAULTKERN_TEST_CODESIGN_LOG", &codesign_log)
+            .env("VAULTKERN_TEST_CODESIGN_DISPLAY_LOG", &codesign_display_log)
             .output()
             .unwrap();
 
@@ -358,6 +412,41 @@ fn release_signing_rejects_non_developer_id_identities() {
         );
         assert!(!codesign_log.exists(), "{case} identity reached codesign");
     }
+}
+
+#[test]
+fn release_signing_rejects_spoofed_developer_id_after_signing() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let (fake_bin, security_log, codesign_log, codesign_display_log) = fake_signing_tools(&temp);
+    let output_root = temp.path().join("packages-spoofed");
+
+    let output = script_command("package_macos.sh")
+        .arg(host_target())
+        .args(["--output-root", output_root.to_str().unwrap()])
+        .args(["--prebuilt-binary", env!("CARGO_BIN_EXE_vaultkern-runtime")])
+        .arg("--release-signing")
+        .env("HOME", &home)
+        .env("PATH", path_with_first(&fake_bin))
+        .env("VAULTKERN_CODESIGN_IDENTITY", SPOOFED_DEVELOPER_ID_NAME)
+        .env("VAULTKERN_TEST_SECURITY_LOG", &security_log)
+        .env("VAULTKERN_TEST_CODESIGN_LOG", &codesign_log)
+        .env("VAULTKERN_TEST_CODESIGN_DISPLAY_LOG", &codesign_display_log)
+        .env("VAULTKERN_TEST_SIGNATURE_MODE", "spoofed")
+        .output()
+        .unwrap();
+
+    assert!(
+        codesign_log.is_file(),
+        "spoofed identity did not reach signing"
+    );
+    assert!(!output.status.success(), "accepted spoofed Developer ID");
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("Developer ID Certification Authority")
+    );
 }
 
 #[test]
