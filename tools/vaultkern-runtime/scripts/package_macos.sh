@@ -5,6 +5,40 @@ usage() {
   echo "usage: package_macos.sh <aarch64-apple-darwin|x86_64-apple-darwin> [--output-root <path>] [--prebuilt-binary <path>] [--release-signing]" >&2
 }
 
+resolve_release_signing_identity() {
+  local requested_identity="$1"
+  local requested_hash
+  local available_identities
+  local identity_hash
+  local identity_name
+  local line
+
+  if ! available_identities="$(security find-identity -v -p codesigning 2>&1)"; then
+    echo "error: failed to query signing identities with security find-identity" >&2
+    echo "${available_identities}" >&2
+    return 1
+  fi
+
+  requested_hash="$(printf '%s' "${requested_identity}" | tr '[:lower:]' '[:upper:]')"
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ^[[:space:]]*[0-9]+\)[[:space:]]+([[:xdigit:]]{40})[[:space:]]+\"(.*)\"$ ]]; then
+      identity_hash="${BASH_REMATCH[1]}"
+      identity_name="${BASH_REMATCH[2]}"
+      if [[ "${requested_hash}" == "${identity_hash}" || "${requested_identity}" == "${identity_name}" ]]; then
+        if [[ "${identity_name}" != "Developer ID Application: "* ]]; then
+          echo "error: release signing requires a Developer ID Application identity; matched ${identity_name}" >&2
+          return 1
+        fi
+        printf '%s\n' "${identity_hash}"
+        return 0
+      fi
+    fi
+  done <<< "${available_identities}"
+
+  echo "error: VAULTKERN_CODESIGN_IDENTITY was not found by security find-identity; release signing requires a Developer ID Application identity" >&2
+  return 1
+}
+
 if [[ $# -lt 1 ]]; then
   usage
   exit 1
@@ -60,9 +94,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 signing_identity="${VAULTKERN_CODESIGN_IDENTITY:-}"
+resolved_signing_identity="${signing_identity}"
 if [[ "${release_signing}" -eq 1 && ( -z "${signing_identity}" || "${signing_identity}" == "-" ) ]]; then
-  echo "error: release signing requires a non-ad-hoc VAULTKERN_CODESIGN_IDENTITY" >&2
+  echo "error: release signing requires a Developer ID Application VAULTKERN_CODESIGN_IDENTITY" >&2
   exit 1
+fi
+if [[ "${release_signing}" -eq 1 ]]; then
+  if ! resolved_signing_identity="$(resolve_release_signing_identity "${signing_identity}")"; then
+    exit 1
+  fi
 fi
 
 if [[ -z "${prebuilt_binary}" ]]; then
@@ -96,7 +136,7 @@ install -m 0755 "${runtime_binary}" "${executable_dir}/vaultkern-runtime"
 if [[ -z "${signing_identity}" || "${signing_identity}" == "-" ]]; then
   codesign --force --sign - "${app_bundle}"
 else
-  codesign --force --options runtime --timestamp --sign "${signing_identity}" "${app_bundle}"
+  codesign --force --options runtime --timestamp --sign "${resolved_signing_identity}" "${app_bundle}"
 fi
 
 echo "${app_bundle}"

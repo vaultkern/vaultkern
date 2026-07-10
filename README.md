@@ -66,12 +66,14 @@ tools/vaultkern-runtime/scripts/package_macos.sh aarch64-apple-darwin
 tools/vaultkern-runtime/scripts/package_macos.sh x86_64-apple-darwin
 ```
 
-Development bundles are signed ad hoc when no identity is supplied. Release packaging requires a stable, non-ad-hoc signing identity:
+Development bundles are signed ad hoc when no identity is supplied. Release packaging accepts only a valid `Developer ID Application` identity present in the login keychain. Set `VAULTKERN_CODESIGN_IDENTITY` to either its exact identity name or its 40-character SHA-1 hash from `security find-identity -v -p codesigning`:
 
 ```sh
 VAULTKERN_CODESIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
   tools/vaultkern-runtime/scripts/package_macos.sh aarch64-apple-darwin --release-signing
 ```
+
+Release mode resolves the requested identity before building and rejects ad-hoc, `Apple Development`, and self-signed identities.
 
 Install the signed bundle for the current user with the Chrome extension ID shown on `chrome://extensions`:
 
