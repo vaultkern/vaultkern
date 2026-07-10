@@ -1,4 +1,5 @@
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 
 use super::macos_local_authentication::{
     MacLocalAuthentication, MacLocalAuthenticationApi, is_missing_item_error,
@@ -7,26 +8,54 @@ use super::quick_unlock::QuickUnlockProvider;
 
 pub(crate) struct MacOsQuickUnlockProvider {
     local_authentication: Box<dyn MacLocalAuthenticationApi>,
+    identifier_scope: String,
 }
 
 impl MacOsQuickUnlockProvider {
     pub(crate) fn new_default() -> Self {
-        Self::new(Box::new(MacLocalAuthentication))
+        Self::new(Box::new(MacLocalAuthentication), None)
     }
 
-    fn new(local_authentication: Box<dyn MacLocalAuthenticationApi>) -> Self {
+    pub(crate) fn new_for_extension_id(extension_id: &str) -> Self {
+        Self::new(Box::new(MacLocalAuthentication), Some(extension_id))
+    }
+
+    fn new(
+        local_authentication: Box<dyn MacLocalAuthenticationApi>,
+        extension_id: Option<&str>,
+    ) -> Self {
         Self {
             local_authentication,
+            identifier_scope: identifier_scope(extension_id),
         }
     }
 
-    fn remove_missing_ok(&self, identifier: &str) -> Result<()> {
+    fn backend_identifier(&self, key: &str) -> String {
+        format!(
+            "com.vaultkern.quick-unlock.v1:{}:{key}",
+            self.identifier_scope
+        )
+    }
+
+    fn remove_if_present(&self, identifier: &str) -> Result<bool> {
         match self.local_authentication.remove(identifier) {
-            Ok(()) => Ok(()),
-            Err(error) if is_missing_item_error(&error) => Ok(()),
+            Ok(()) => Ok(true),
+            Err(error) if is_missing_item_error(&error) => Ok(false),
             Err(error) => Err(error),
         }
     }
+}
+
+fn identifier_scope(extension_id: Option<&str>) -> String {
+    let Some(extension_id) = extension_id else {
+        return "default".into();
+    };
+    let digest = Sha256::digest(extension_id.as_bytes());
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("extension-{digest}")
 }
 
 impl QuickUnlockProvider for MacOsQuickUnlockProvider {
@@ -35,22 +64,28 @@ impl QuickUnlockProvider for MacOsQuickUnlockProvider {
     }
 
     fn contains(&self, key: &str) -> Result<bool> {
-        self.local_authentication.contains(key)
+        self.local_authentication
+            .contains(&self.backend_identifier(key))
     }
 
     fn enable(&self, key: &str, value: &[u8], reason: &str) -> Result<()> {
+        let identifier = self.backend_identifier(key);
         self.local_authentication.authorize(reason)?;
-        self.remove_missing_ok(key)?;
-        self.local_authentication.save(key, value)
+        self.remove_if_present(&identifier)?;
+        self.local_authentication.save(&identifier, value)
     }
 
     fn unlock(&self, key: &str, reason: &str) -> Result<Option<Vec<u8>>> {
-        self.local_authentication.authorize_and_load(key, reason)
+        self.local_authentication
+            .authorize_and_load(&self.backend_identifier(key), reason)
     }
 
     fn refresh(&self, key: &str, value: &[u8]) -> Result<()> {
-        self.remove_missing_ok(key)?;
-        self.local_authentication.save(key, value)
+        let identifier = self.backend_identifier(key);
+        if self.remove_if_present(&identifier)? {
+            self.local_authentication.save(&identifier, value)?;
+        }
+        Ok(())
     }
 
     fn verify_user(&self, reason: &str) -> Result<()> {
@@ -58,7 +93,8 @@ impl QuickUnlockProvider for MacOsQuickUnlockProvider {
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        self.remove_missing_ok(key)
+        self.remove_if_present(&self.backend_identifier(key))
+            .map(|_| ())
     }
 }
 
@@ -142,10 +178,18 @@ mod tests {
             touch_id_available,
             ..FakeState::default()
         }));
-        let provider = MacOsQuickUnlockProvider::new(Box::new(FakeMacLocalAuthenticationApi {
-            state: state.clone(),
-        }));
+        let provider = provider_with_state(state.clone(), None);
         (provider, state)
+    }
+
+    fn provider_with_state(
+        state: Rc<RefCell<FakeState>>,
+        extension_id: Option<&str>,
+    ) -> MacOsQuickUnlockProvider {
+        MacOsQuickUnlockProvider::new(
+            Box::new(FakeMacLocalAuthenticationApi { state }),
+            extension_id,
+        )
     }
 
     #[test]
@@ -168,6 +212,7 @@ mod tests {
     #[test]
     fn enable_authorizes_then_removes_then_saves() {
         let (provider, state) = provider(true);
+        let identifier = provider.backend_identifier("vault");
 
         provider
             .enable("vault", b"secret", "Enable quick unlock")
@@ -177,20 +222,21 @@ mod tests {
             state.borrow().operations,
             [
                 "authorize:Enable quick unlock",
-                "remove:vault",
-                "save:vault"
+                &format!("remove:{identifier}"),
+                &format!("save:{identifier}")
             ]
         );
-        assert_eq!(state.borrow().records.get("vault").unwrap(), b"secret");
+        assert_eq!(state.borrow().records.get(&identifier).unwrap(), b"secret");
     }
 
     #[test]
     fn unlock_is_one_authorize_and_load_operation() {
         let (provider, state) = provider(true);
+        let identifier = provider.backend_identifier("vault");
         state
             .borrow_mut()
             .records
-            .insert("vault".into(), b"secret".to_vec());
+            .insert(identifier.clone(), b"secret".to_vec());
 
         assert_eq!(
             provider.unlock("vault", "Unlock this vault").unwrap(),
@@ -198,34 +244,53 @@ mod tests {
         );
         assert_eq!(
             state.borrow().operations,
-            ["authorize_and_load:vault:Unlock this vault"]
+            [format!("authorize_and_load:{identifier}:Unlock this vault")]
         );
     }
 
     #[test]
     fn contains_never_authorizes_or_loads() {
         let (provider, state) = provider(true);
+        let identifier = provider.backend_identifier("vault");
         state
             .borrow_mut()
             .records
-            .insert("vault".into(), b"secret".to_vec());
+            .insert(identifier.clone(), b"secret".to_vec());
 
         assert!(provider.contains("vault").unwrap());
-        assert_eq!(state.borrow().operations, ["contains:vault"]);
+        assert_eq!(
+            state.borrow().operations,
+            [format!("contains:{identifier}")]
+        );
     }
 
     #[test]
     fn refresh_removes_then_saves_without_authorizing() {
         let (provider, state) = provider(true);
+        let identifier = provider.backend_identifier("vault");
         state
             .borrow_mut()
             .records
-            .insert("vault".into(), b"old".to_vec());
+            .insert(identifier.clone(), b"old".to_vec());
 
         provider.refresh("vault", b"new").unwrap();
 
-        assert_eq!(state.borrow().operations, ["remove:vault", "save:vault"]);
-        assert_eq!(state.borrow().records.get("vault").unwrap(), b"new");
+        assert_eq!(
+            state.borrow().operations,
+            [format!("remove:{identifier}"), format!("save:{identifier}")]
+        );
+        assert_eq!(state.borrow().records.get(&identifier).unwrap(), b"new");
+    }
+
+    #[test]
+    fn refresh_of_missing_record_does_not_create_quick_unlock() {
+        let (provider, state) = provider(true);
+
+        provider.refresh("vault", b"new").unwrap();
+
+        assert!(state.borrow().records.is_empty());
+        assert_eq!(state.borrow().operations.len(), 1);
+        assert!(state.borrow().operations[0].starts_with("remove:"));
     }
 
     #[test]
@@ -243,9 +308,10 @@ mod tests {
     #[test]
     fn cancelled_enable_retains_existing_record() {
         let (provider, state) = provider(true);
+        let identifier = provider.backend_identifier("vault");
         {
             let mut state = state.borrow_mut();
-            state.records.insert("vault".into(), b"old".to_vec());
+            state.records.insert(identifier.clone(), b"old".to_vec());
             state.cancel_next_authorization = true;
         }
 
@@ -256,26 +322,34 @@ mod tests {
         );
 
         assert_eq!(state.borrow().operations, ["authorize:Enable quick unlock"]);
-        assert_eq!(state.borrow().records.get("vault").unwrap(), b"old");
+        assert_eq!(state.borrow().records.get(&identifier).unwrap(), b"old");
     }
 
     #[test]
     fn delete_is_idempotent_when_record_is_missing() {
         let (provider, state) = provider(true);
+        let identifier = provider.backend_identifier("vault");
 
         provider.delete("vault").unwrap();
         provider.delete("vault").unwrap();
 
-        assert_eq!(state.borrow().operations, ["remove:vault", "remove:vault"]);
+        assert_eq!(
+            state.borrow().operations,
+            [
+                format!("remove:{identifier}"),
+                format!("remove:{identifier}")
+            ]
+        );
     }
 
     #[test]
     fn explicit_reenable_replaces_existing_record() {
         let (provider, state) = provider(true);
+        let identifier = provider.backend_identifier("vault");
         state
             .borrow_mut()
             .records
-            .insert("vault".into(), b"old".to_vec());
+            .insert(identifier.clone(), b"old".to_vec());
 
         provider
             .enable("vault", b"new", "Enable quick unlock")
@@ -285,10 +359,40 @@ mod tests {
             state.borrow().operations,
             [
                 "authorize:Enable quick unlock",
-                "remove:vault",
-                "save:vault"
+                &format!("remove:{identifier}"),
+                &format!("save:{identifier}")
             ]
         );
-        assert_eq!(state.borrow().records.get("vault").unwrap(), b"new");
+        assert_eq!(state.borrow().records.get(&identifier).unwrap(), b"new");
+    }
+
+    #[test]
+    fn extension_scopes_do_not_share_backend_identifiers() {
+        let state = Rc::new(RefCell::new(FakeState {
+            touch_id_available: true,
+            ..FakeState::default()
+        }));
+        let first = provider_with_state(state.clone(), Some("extension-a"));
+        let second = provider_with_state(state.clone(), Some("extension-b"));
+
+        first.enable("vault", b"secret", "Enable").unwrap();
+        state.borrow_mut().operations.clear();
+
+        assert!(!second.contains("vault").unwrap());
+    }
+
+    #[test]
+    fn default_scope_is_stable_across_provider_instances() {
+        let state = Rc::new(RefCell::new(FakeState {
+            touch_id_available: true,
+            ..FakeState::default()
+        }));
+        let first = provider_with_state(state.clone(), None);
+        let second = provider_with_state(state.clone(), None);
+
+        first.enable("vault", b"secret", "Enable").unwrap();
+        state.borrow_mut().operations.clear();
+
+        assert!(second.contains("vault").unwrap());
     }
 }

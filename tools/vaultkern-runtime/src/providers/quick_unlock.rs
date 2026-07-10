@@ -229,8 +229,12 @@ pub(crate) fn default_quick_unlock_provider_for_extension_id(
 ) -> Box<dyn QuickUnlockProvider> {
     #[cfg(target_os = "macos")]
     {
-        let _ = extension_id;
-        Box::new(MacOsQuickUnlockProvider::new_default())
+        match extension_id {
+            Some(extension_id) => {
+                Box::new(MacOsQuickUnlockProvider::new_for_extension_id(extension_id))
+            }
+            None => Box::new(MacOsQuickUnlockProvider::new_default()),
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
