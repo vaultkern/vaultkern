@@ -1,11 +1,17 @@
 use anyhow::Result;
 
-use super::biometric::BiometricProvider;
-#[cfg(windows)]
-use super::biometric::WindowsHelloBiometricProvider;
-use super::secure_storage::SecureStorageProvider;
-#[cfg(windows)]
-use super::secure_storage::{WindowsHelloSecureStorageProvider, quick_unlock_storage_dir};
+#[cfg(test)]
+use std::cell::RefCell;
+#[cfg(test)]
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::rc::Rc;
+
+use super::biometric::{BiometricProvider, default_biometric_provider};
+use super::secure_storage::{
+    SecureStorageProvider, default_secure_storage_provider,
+    default_secure_storage_provider_for_extension_id,
+};
 
 pub trait QuickUnlockProvider {
     fn is_supported(&self) -> bool;
@@ -15,6 +21,104 @@ pub trait QuickUnlockProvider {
     fn refresh(&self, key: &str, value: &[u8]) -> Result<()>;
     fn verify_user(&self, reason: &str) -> Result<()>;
     fn delete(&self, key: &str) -> Result<()>;
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct MemoryQuickUnlockFailures {
+    pub(crate) contains: bool,
+    pub(crate) refresh: bool,
+    pub(crate) delete: bool,
+}
+
+#[cfg(test)]
+pub(crate) struct MemoryQuickUnlockProvider {
+    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    operations: Rc<RefCell<Vec<String>>>,
+    failures: MemoryQuickUnlockFailures,
+    verify_user_callback: Option<Box<dyn Fn()>>,
+}
+
+#[cfg(test)]
+impl MemoryQuickUnlockProvider {
+    pub(crate) fn new(operations: Rc<RefCell<Vec<String>>>) -> Self {
+        Self {
+            values: RefCell::new(BTreeMap::new()),
+            operations,
+            failures: MemoryQuickUnlockFailures::default(),
+            verify_user_callback: None,
+        }
+    }
+
+    pub(crate) fn with_failures(mut self, failures: MemoryQuickUnlockFailures) -> Self {
+        self.failures = failures;
+        self
+    }
+
+    pub(crate) fn with_verify_user_callback(mut self, callback: impl Fn() + 'static) -> Self {
+        self.verify_user_callback = Some(Box::new(callback));
+        self
+    }
+
+    fn record(&self, operation: impl Into<String>) {
+        self.operations.borrow_mut().push(operation.into());
+    }
+}
+
+#[cfg(test)]
+impl QuickUnlockProvider for MemoryQuickUnlockProvider {
+    fn is_supported(&self) -> bool {
+        true
+    }
+
+    fn contains(&self, key: &str) -> Result<bool> {
+        self.record("contains");
+        if self.failures.contains {
+            anyhow::bail!("injected quick unlock contains failure");
+        }
+        Ok(self.values.borrow().contains_key(key))
+    }
+
+    fn enable(&self, key: &str, value: &[u8], reason: &str) -> Result<()> {
+        self.record(format!("enable:{reason}"));
+        self.values
+            .borrow_mut()
+            .insert(key.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn unlock(&self, key: &str, reason: &str) -> Result<Option<Vec<u8>>> {
+        self.record(format!("unlock:{reason}"));
+        Ok(self.values.borrow().get(key).cloned())
+    }
+
+    fn refresh(&self, key: &str, value: &[u8]) -> Result<()> {
+        self.record("refresh");
+        if self.failures.refresh {
+            anyhow::bail!("injected quick unlock refresh failure");
+        }
+        if let Some(stored) = self.values.borrow_mut().get_mut(key) {
+            *stored = value.to_owned();
+        }
+        Ok(())
+    }
+
+    fn verify_user(&self, reason: &str) -> Result<()> {
+        self.record(format!("verify_user:{reason}"));
+        if let Some(callback) = &self.verify_user_callback {
+            callback();
+        }
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        self.record("delete");
+        if self.failures.delete {
+            anyhow::bail!("injected quick unlock delete failure");
+        }
+        self.values.borrow_mut().remove(key);
+        Ok(())
+    }
 }
 
 pub(crate) struct ComposedQuickUnlockProvider {
@@ -51,7 +155,13 @@ impl QuickUnlockProvider for ComposedQuickUnlockProvider {
     }
 
     fn refresh(&self, key: &str, value: &[u8]) -> Result<()> {
-        self.storage.store(key, value)
+        if !self.biometric.supports_quick_unlock() {
+            anyhow::bail!("biometric quick unlock is not implemented on this host");
+        }
+        if self.storage.contains(key)? {
+            self.storage.store(key, value)?;
+        }
+        Ok(())
     }
 
     fn verify_user(&self, reason: &str) -> Result<()> {
@@ -95,29 +205,20 @@ impl QuickUnlockProvider for UnsupportedQuickUnlockProvider {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn default_quick_unlock_provider() -> Box<dyn QuickUnlockProvider> {
-    default_quick_unlock_provider_for_extension_id(None)
+    Box::new(ComposedQuickUnlockProvider::new(
+        default_biometric_provider(),
+        default_secure_storage_provider(),
+    ))
 }
 
-#[allow(dead_code)]
 pub(crate) fn default_quick_unlock_provider_for_extension_id(
     extension_id: Option<&str>,
 ) -> Box<dyn QuickUnlockProvider> {
-    #[cfg(windows)]
-    {
-        Box::new(ComposedQuickUnlockProvider::new(
-            Box::new(WindowsHelloBiometricProvider),
-            Box::new(WindowsHelloSecureStorageProvider::new(
-                quick_unlock_storage_dir(extension_id),
-            )),
-        ))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = extension_id;
-        Box::new(UnsupportedQuickUnlockProvider)
-    }
+    Box::new(ComposedQuickUnlockProvider::new(
+        default_biometric_provider(),
+        default_secure_storage_provider_for_extension_id(extension_id),
+    ))
 }
 
 #[cfg(test)]
@@ -234,10 +335,27 @@ mod tests {
     #[test]
     fn composed_refresh_stores_without_authorizing() {
         let events = Rc::new(RefCell::new(Vec::new()));
+        let provider = composed_test_provider(events.clone(), Some(b"old".to_vec()));
+
+        provider.refresh("vault", b"new").unwrap();
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["contains:vault", "store:vault"]
+        );
+    }
+
+    #[test]
+    fn composed_refresh_does_not_create_a_missing_record() {
+        let events = Rc::new(RefCell::new(Vec::new()));
         let provider = composed_test_provider(events.clone(), None);
 
         provider.refresh("vault", b"new").unwrap();
-        assert_eq!(events.borrow().as_slice(), ["store:vault"]);
+
+        assert_eq!(provider.unlock("vault", "Unlock").unwrap(), None);
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["contains:vault", "authorize:Unlock", "load:vault"]
+        );
     }
 
     #[test]

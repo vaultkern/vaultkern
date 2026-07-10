@@ -43,18 +43,17 @@ use crate::passkey::{
     PasskeyAssertionRequest, PasskeyRegistrationRequest, create_assertion,
     create_registration_with_credential_id, generate_passkey_credential_id,
 };
-use crate::providers::biometric::{
-    BiometricProvider, TestBiometricProvider, UnsupportedBiometricProvider,
-    default_biometric_provider,
-};
+use crate::providers::biometric::TestBiometricProvider;
 use crate::providers::local_file::{LocalFileVaultSourceProvider, VaultSourceFingerprint};
 use crate::providers::onedrive::{OneDriveMemoryAccessCounts, OneDriveVaultSourceProvider};
+use crate::providers::quick_unlock::{
+    ComposedQuickUnlockProvider, QuickUnlockProvider, UnsupportedQuickUnlockProvider,
+    default_quick_unlock_provider, default_quick_unlock_provider_for_extension_id,
+};
 use crate::providers::remote_cache::{RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry};
 use crate::providers::secure_storage::{
     FailingContainsSecureStorageProvider, FailingDeleteSecureStorageProvider,
-    FailingStoreSecureStorageProvider, MemorySecureStorageProvider, SecureStorageProvider,
-    UnsupportedSecureStorageProvider, default_secure_storage_provider,
-    default_secure_storage_provider_for_extension_id,
+    FailingStoreSecureStorageProvider, MemorySecureStorageProvider,
 };
 use crate::session::SessionState;
 use crate::state_paths::extension_id_from_browser_origin;
@@ -189,8 +188,7 @@ pub struct Runtime {
     local_files: LocalFileVaultSourceProvider,
     one_drive: OneDriveVaultSourceProvider,
     remote_cache: RemoteVaultCache,
-    biometric: Box<dyn BiometricProvider>,
-    secure_storage: Box<dyn SecureStorageProvider>,
+    quick_unlock: Box<dyn QuickUnlockProvider>,
     loaded: BTreeMap<String, LoadedVault>,
     passkey_ceremonies: BTreeMap<String, PasskeyCeremonyLedgerEntry>,
     recent_unlock_user_verification: Option<PasskeyUserVerificationProof>,
@@ -205,7 +203,7 @@ impl Runtime {
             VaultReferenceStore::new_default(),
             OneDriveVaultSourceProvider::new_from_env(),
             RemoteVaultCache::new_default(),
-            default_secure_storage_provider(),
+            default_quick_unlock_provider(),
         )
     }
 
@@ -215,7 +213,7 @@ impl Runtime {
                 VaultReferenceStore::new_for_extension_id(extension_id),
                 OneDriveVaultSourceProvider::new_from_env_for_extension_id(extension_id),
                 RemoteVaultCache::new_for_extension_id(extension_id),
-                default_secure_storage_provider_for_extension_id(Some(extension_id)),
+                default_quick_unlock_provider_for_extension_id(Some(extension_id)),
             );
         }
 
@@ -226,7 +224,7 @@ impl Runtime {
         references: VaultReferenceStore,
         one_drive: OneDriveVaultSourceProvider,
         remote_cache: RemoteVaultCache,
-        secure_storage: Box<dyn SecureStorageProvider>,
+        quick_unlock: Box<dyn QuickUnlockProvider>,
     ) -> Self {
         let mut session = SessionState::default();
         if let Some(vault_ref_id) = references.current_vault_ref_id() {
@@ -240,8 +238,7 @@ impl Runtime {
             local_files: LocalFileVaultSourceProvider,
             one_drive,
             remote_cache,
-            biometric: default_biometric_provider(),
-            secure_storage,
+            quick_unlock,
             loaded: BTreeMap::new(),
             passkey_ceremonies: BTreeMap::new(),
             recent_unlock_user_verification: None,
@@ -262,8 +259,7 @@ impl Runtime {
                 "vaultkern-runtime-test-remote-cache-{}",
                 uuid::Uuid::new_v4()
             ))),
-            biometric: Box::new(UnsupportedBiometricProvider),
-            secure_storage: Box::new(UnsupportedSecureStorageProvider),
+            quick_unlock: Box::new(UnsupportedQuickUnlockProvider),
             loaded: BTreeMap::new(),
             passkey_ceremonies: BTreeMap::new(),
             recent_unlock_user_verification: None,
@@ -303,31 +299,39 @@ impl Runtime {
 
     pub fn for_tests_with_quick_unlock() -> Self {
         let mut runtime = Self::for_tests();
-        runtime.biometric = Box::new(TestBiometricProvider);
-        runtime.secure_storage = Box::new(MemorySecureStorageProvider::new());
+        runtime.quick_unlock = Box::new(ComposedQuickUnlockProvider::new(
+            Box::new(TestBiometricProvider),
+            Box::new(MemorySecureStorageProvider::new()),
+        ));
         runtime
     }
 
     pub fn for_tests_with_quick_unlock_failing_store_after(stores_before_failure: usize) -> Self {
         let mut runtime = Self::for_tests();
-        runtime.biometric = Box::new(TestBiometricProvider);
-        runtime.secure_storage = Box::new(FailingStoreSecureStorageProvider::new(
-            stores_before_failure,
+        runtime.quick_unlock = Box::new(ComposedQuickUnlockProvider::new(
+            Box::new(TestBiometricProvider),
+            Box::new(FailingStoreSecureStorageProvider::new(
+                stores_before_failure,
+            )),
         ));
         runtime
     }
 
     pub fn for_tests_with_quick_unlock_failing_contains() -> Self {
         let mut runtime = Self::for_tests();
-        runtime.biometric = Box::new(TestBiometricProvider);
-        runtime.secure_storage = Box::new(FailingContainsSecureStorageProvider::new());
+        runtime.quick_unlock = Box::new(ComposedQuickUnlockProvider::new(
+            Box::new(TestBiometricProvider),
+            Box::new(FailingContainsSecureStorageProvider::new()),
+        ));
         runtime
     }
 
     pub fn for_tests_with_quick_unlock_failing_delete() -> Self {
         let mut runtime = Self::for_tests();
-        runtime.biometric = Box::new(TestBiometricProvider);
-        runtime.secure_storage = Box::new(FailingDeleteSecureStorageProvider::new());
+        runtime.quick_unlock = Box::new(ComposedQuickUnlockProvider::new(
+            Box::new(TestBiometricProvider),
+            Box::new(FailingDeleteSecureStorageProvider::new()),
+        ));
         runtime
     }
 
@@ -712,16 +716,11 @@ impl Runtime {
 
     pub fn list_recent_vaults(&self) -> Result<VaultReferenceListDto> {
         let mut list = self.references.list_recent_vaults();
-        if self.biometric.supports_quick_unlock() {
+        if self.quick_unlock.is_supported() {
             for vault in &mut list.vaults {
                 let storage_key = quick_unlock_storage_key(&vault.vault_ref_id);
-                vault.supports_quick_unlock = match self.secure_storage.contains(&storage_key) {
-                    Ok(contains) => contains,
-                    Err(_) => {
-                        let _ = self.secure_storage.delete(&storage_key);
-                        false
-                    }
-                };
+                vault.supports_quick_unlock =
+                    self.quick_unlock.contains(&storage_key).unwrap_or(false);
             }
         }
         Ok(list)
@@ -738,7 +737,7 @@ impl Runtime {
         let source = self.references.source_for(vault_ref_id).ok();
         let deleted_current = self.references.delete(vault_ref_id)?;
         let _ = self
-            .secure_storage
+            .quick_unlock
             .delete(&quick_unlock_storage_key(vault_ref_id));
         if let Some(cache_key) = source.as_ref().and_then(remote_cache_key_for_stored_source) {
             self.remote_cache.delete(&cache_key)?;
@@ -830,7 +829,7 @@ impl Runtime {
     }
 
     pub fn enable_quick_unlock_for_current_vault(&mut self) -> Result<()> {
-        if !self.biometric.supports_quick_unlock() {
+        if !self.quick_unlock.is_supported() {
             anyhow::bail!("biometric quick unlock is not implemented on this host");
         }
         let current_vault_ref_id = self
@@ -855,16 +854,17 @@ impl Runtime {
             anyhow::bail!("current vault has no reusable unlock credentials");
         }
 
-        self.biometric
-            .authorize("Enable quick unlock for this vault")?;
         let bytes = serde_json::to_vec(&credentials)
             .context("failed to encode quick unlock credentials")?;
-        self.secure_storage
-            .store(&quick_unlock_storage_key(&current_vault_ref_id), &bytes)
+        self.quick_unlock.enable(
+            &quick_unlock_storage_key(&current_vault_ref_id),
+            &bytes,
+            "Enable quick unlock for this vault",
+        )
     }
 
     pub fn unlock_current_vault_with_quick_unlock(&mut self) -> Result<()> {
-        if !self.biometric.supports_quick_unlock() {
+        if !self.quick_unlock.is_supported() {
             anyhow::bail!("biometric quick unlock is not implemented on this host");
         }
         let current_vault_ref_id = self
@@ -872,10 +872,12 @@ impl Runtime {
             .current_vault_ref_id()
             .context("no current vault selected")?
             .to_owned();
-        self.biometric.authorize("Unlock this vault")?;
         let bytes = self
-            .secure_storage
-            .load(&quick_unlock_storage_key(&current_vault_ref_id))?
+            .quick_unlock
+            .unlock(
+                &quick_unlock_storage_key(&current_vault_ref_id),
+                "Unlock this vault",
+            )?
             .context("quick unlock is not enabled for the current vault")?;
         let credentials: VaultCredentials =
             serde_json::from_slice(&bytes).context("failed to decode quick unlock credentials")?;
@@ -896,7 +898,7 @@ impl Runtime {
             }
             Err(error) => {
                 if is_unlock_credentials_error(&error) {
-                    self.secure_storage.delete(&storage_key)?;
+                    self.quick_unlock.delete(&storage_key)?;
                 }
                 Err(error)
             }
@@ -909,12 +911,12 @@ impl Runtime {
             .current_vault_ref_id()
             .context("no current vault selected")?
             .to_owned();
-        self.secure_storage
+        self.quick_unlock
             .delete(&quick_unlock_storage_key(&current_vault_ref_id))
     }
 
     pub fn session_state(&self) -> vaultkern_runtime_protocol::SessionStateDto {
-        let mut dto = self.session.to_dto(self.biometric.supports_quick_unlock());
+        let mut dto = self.session.to_dto(self.quick_unlock.is_supported());
         dto.source_status = self.current_source_status();
         dto
     }
@@ -944,10 +946,10 @@ impl Runtime {
             methods.push(PasskeyUserVerificationMethodDto::MasterPassword);
         }
 
-        if self.biometric.supports_quick_unlock() {
+        if self.quick_unlock.is_supported() {
             if let Some(vault_ref_id) = self.session.current_vault_ref_id() {
                 let storage_key = quick_unlock_storage_key(vault_ref_id);
-                if self.secure_storage.contains(&storage_key).unwrap_or(false) {
+                if self.quick_unlock.contains(&storage_key).unwrap_or(false) {
                     methods.push(PasskeyUserVerificationMethodDto::QuickUnlock);
                 }
             }
@@ -1085,7 +1087,7 @@ impl Runtime {
     }
 
     fn verify_passkey_user_with_quick_unlock(&self, vault_id: &str) -> Result<()> {
-        if !self.biometric.supports_quick_unlock() {
+        if !self.quick_unlock.is_supported() {
             anyhow::bail!("passkey quick unlock verification is unavailable");
         }
         let current_vault_ref_id = self
@@ -1100,10 +1102,10 @@ impl Runtime {
             anyhow::bail!("vault is locked: {vault_id}");
         }
         let storage_key = quick_unlock_storage_key(current_vault_ref_id);
-        if !self.secure_storage.contains(&storage_key).unwrap_or(false) {
+        if !self.quick_unlock.contains(&storage_key).unwrap_or(false) {
             anyhow::bail!("quick unlock is not enabled for the current vault");
         }
-        self.biometric.authorize("Verify user for passkey")?;
+        self.quick_unlock.verify_user("Verify user for passkey")?;
         Ok(())
     }
 
@@ -3802,7 +3804,7 @@ impl Runtime {
             return Ok(());
         }
 
-        if !self.biometric.supports_quick_unlock() {
+        if !self.quick_unlock.is_supported() {
             self.clear_quick_unlock_refresh_pending(vault_id)?;
             return Ok(());
         }
@@ -3811,19 +3813,6 @@ impl Runtime {
             return Ok(());
         };
         let storage_key = quick_unlock_storage_key(&vault_ref_id);
-        let contains_quick_unlock = match self.secure_storage.contains(&storage_key) {
-            Ok(contains) => contains,
-            Err(_) => {
-                let _ = self.secure_storage.delete(&storage_key);
-                self.clear_quick_unlock_refresh_pending(vault_id)?;
-                return Ok(());
-            }
-        };
-        if !contains_quick_unlock {
-            self.clear_quick_unlock_refresh_pending(vault_id)?;
-            return Ok(());
-        }
-
         let loaded = self
             .loaded
             .get(vault_id)
@@ -3834,15 +3823,15 @@ impl Runtime {
         };
 
         if credentials.password.is_none() && credentials.key_file_path.is_none() {
-            let _ = self.secure_storage.delete(&storage_key);
+            let _ = self.quick_unlock.delete(&storage_key);
             self.clear_quick_unlock_refresh_pending(vault_id)?;
             return Ok(());
         }
 
         let bytes = serde_json::to_vec(&credentials)
             .context("failed to encode quick unlock credentials")?;
-        if self.secure_storage.store(&storage_key, &bytes).is_err() {
-            let _ = self.secure_storage.delete(&storage_key);
+        if self.quick_unlock.refresh(&storage_key, &bytes).is_err() {
+            let _ = self.quick_unlock.delete(&storage_key);
         }
         self.clear_quick_unlock_refresh_pending(vault_id)?;
         Ok(())
@@ -5356,81 +5345,9 @@ struct RankedFillCandidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::quick_unlock::{MemoryQuickUnlockFailures, MemoryQuickUnlockProvider};
     use std::cell::RefCell;
-    use std::collections::BTreeMap;
     use vaultkern_runtime_protocol::DatabaseCredentialsUpdateDto;
-
-    struct LoadRejectingSecureStorageProvider {
-        values: RefCell<BTreeMap<String, Vec<u8>>>,
-    }
-
-    impl LoadRejectingSecureStorageProvider {
-        fn new() -> Self {
-            Self {
-                values: RefCell::new(BTreeMap::new()),
-            }
-        }
-    }
-
-    impl SecureStorageProvider for LoadRejectingSecureStorageProvider {
-        fn store(&self, key: &str, value: &[u8]) -> Result<()> {
-            self.values
-                .borrow_mut()
-                .insert(key.to_owned(), value.to_owned());
-            Ok(())
-        }
-
-        fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
-            anyhow::bail!("quick unlock secret should not be decrypted while listing vaults")
-        }
-
-        fn contains(&self, key: &str) -> Result<bool> {
-            Ok(self.values.borrow().contains_key(key))
-        }
-
-        fn delete(&self, key: &str) -> Result<()> {
-            self.values.borrow_mut().remove(key);
-            Ok(())
-        }
-    }
-
-    struct PresenceLoadingSecureStorageProvider {
-        values: RefCell<BTreeMap<String, Vec<u8>>>,
-    }
-
-    impl PresenceLoadingSecureStorageProvider {
-        fn new() -> Self {
-            Self {
-                values: RefCell::new(BTreeMap::new()),
-            }
-        }
-    }
-
-    impl SecureStorageProvider for PresenceLoadingSecureStorageProvider {
-        fn store(&self, key: &str, value: &[u8]) -> Result<()> {
-            self.values
-                .borrow_mut()
-                .insert(key.to_owned(), value.to_owned());
-            Ok(())
-        }
-
-        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            Ok(self.values.borrow().get(key).cloned())
-        }
-
-        fn contains(&self, key: &str) -> Result<bool> {
-            Ok(self.values.borrow().contains_key(key))
-        }
-
-        fn load_requires_user_presence(&self) -> bool {
-            true
-        }
-
-        fn delete(&self, key: &str) -> Result<()> {
-            self.values.borrow_mut().remove(key);
-            Ok(())
-        }
-    }
 
     #[test]
     fn history_snapshot_restore_preserves_duplicate_entry_histories_by_position() {
@@ -5454,38 +5371,6 @@ mod tests {
 
         assert_eq!(group.entries[0].history[0].title, "First old");
         assert_eq!(group.entries[1].history[0].title, "Second old");
-    }
-
-    #[derive(Default)]
-    struct CountingBiometricProvider {
-        authorizations: std::rc::Rc<RefCell<Vec<String>>>,
-    }
-
-    impl BiometricProvider for CountingBiometricProvider {
-        fn supports_quick_unlock(&self) -> bool {
-            true
-        }
-
-        fn authorize(&self, reason: &str) -> Result<()> {
-            self.authorizations.borrow_mut().push(reason.to_owned());
-            Ok(())
-        }
-    }
-
-    struct RecordingBiometricProvider {
-        authorized_at_epoch_ms: std::rc::Rc<RefCell<Option<u64>>>,
-    }
-
-    impl BiometricProvider for RecordingBiometricProvider {
-        fn supports_quick_unlock(&self) -> bool {
-            true
-        }
-
-        fn authorize(&self, _reason: &str) -> Result<()> {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            *self.authorized_at_epoch_ms.borrow_mut() = Some(current_unix_time_ms());
-            Ok(())
-        }
     }
 
     fn open_unlocked_demo_vault(runtime: &mut Runtime) -> (tempfile::TempDir, VaultHandleDto) {
@@ -5870,10 +5755,15 @@ mod tests {
     #[test]
     fn passkey_quick_unlock_user_verification_records_completion_time() {
         let authorized_at_epoch_ms = std::rc::Rc::new(RefCell::new(None));
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let callback_timestamp = authorized_at_epoch_ms.clone();
         let mut runtime = Runtime::for_tests_with_quick_unlock();
-        runtime.biometric = Box::new(RecordingBiometricProvider {
-            authorized_at_epoch_ms: authorized_at_epoch_ms.clone(),
-        });
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations).with_verify_user_callback(move || {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                *callback_timestamp.borrow_mut() = Some(current_unix_time_ms());
+            }),
+        );
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         runtime.enable_quick_unlock_for_current_vault().unwrap();
         *authorized_at_epoch_ms.borrow_mut() = None;
@@ -5948,13 +5838,15 @@ mod tests {
         let path = dir.path().join("personal.kdbx");
         std::fs::write(&path, bytes).unwrap();
 
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests_with_quick_unlock();
-        runtime.secure_storage = Box::new(LoadRejectingSecureStorageProvider::new());
+        runtime.quick_unlock = Box::new(MemoryQuickUnlockProvider::new(operations.clone()));
         let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
         runtime
             .unlock_vault(&opened.vault_id, Some("demo-password"), None)
             .unwrap();
         runtime.enable_quick_unlock_for_current_vault().unwrap();
+        operations.borrow_mut().clear();
 
         let response = runtime
             .handle(RuntimeCommand::GetPasskeyUserVerificationCapability)
@@ -5972,6 +5864,7 @@ mod tests {
                 }
             )
         );
+        assert_eq!(operations.borrow().as_slice(), ["contains"]);
     }
 
     #[test]
@@ -5988,19 +5881,22 @@ mod tests {
         let path = dir.path().join("personal.kdbx");
         std::fs::write(&path, bytes).unwrap();
 
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests_with_quick_unlock();
-        runtime.secure_storage = Box::new(LoadRejectingSecureStorageProvider::new());
+        runtime.quick_unlock = Box::new(MemoryQuickUnlockProvider::new(operations.clone()));
         let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
         runtime
             .unlock_vault(&opened.vault_id, Some("demo-password"), None)
             .unwrap();
         runtime.enable_quick_unlock_for_current_vault().unwrap();
         runtime.lock_session();
+        operations.borrow_mut().clear();
 
         let listed = runtime.list_recent_vaults().unwrap();
 
         assert_eq!(listed.vaults.len(), 1);
         assert!(listed.vaults[0].supports_quick_unlock);
+        assert_eq!(operations.borrow().as_slice(), ["contains"]);
     }
 
     #[test]
@@ -6017,18 +5913,29 @@ mod tests {
         let path = dir.path().join("personal.kdbx");
         std::fs::write(&path, bytes).unwrap();
 
-        let mut runtime = Runtime::for_tests_with_quick_unlock_failing_contains();
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone()).with_failures(
+                MemoryQuickUnlockFailures {
+                    contains: true,
+                    ..MemoryQuickUnlockFailures::default()
+                },
+            ),
+        );
         let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
         runtime
             .unlock_vault(&opened.vault_id, Some("demo-password"), None)
             .unwrap();
         runtime.enable_quick_unlock_for_current_vault().unwrap();
         runtime.lock_session();
+        operations.borrow_mut().clear();
 
         let listed = runtime.list_recent_vaults().unwrap();
 
         assert_eq!(listed.vaults.len(), 1);
         assert!(!listed.vaults[0].supports_quick_unlock);
+        assert_eq!(operations.borrow().as_slice(), ["contains"]);
     }
 
     #[test]
@@ -6045,8 +5952,9 @@ mod tests {
         let path = dir.path().join("personal.kdbx");
         std::fs::write(&path, bytes).unwrap();
 
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests_with_quick_unlock();
-        runtime.secure_storage = Box::new(LoadRejectingSecureStorageProvider::new());
+        runtime.quick_unlock = Box::new(MemoryQuickUnlockProvider::new(operations.clone()));
         let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
         runtime
             .unlock_vault(&opened.vault_id, Some("old-password"), None)
@@ -6064,12 +5972,14 @@ mod tests {
                 },
             )
             .unwrap();
+        operations.borrow_mut().clear();
 
         runtime.save_vault(&opened.vault_id).unwrap();
+        assert_eq!(operations.borrow().as_slice(), ["refresh"]);
     }
 
     #[test]
-    fn quick_unlock_requires_biometric_authorization_even_when_secret_load_is_protected() {
+    fn quick_unlock_uses_atomic_enable_and_unlock_operations() {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
@@ -6082,12 +5992,9 @@ mod tests {
         let path = dir.path().join("personal.kdbx");
         std::fs::write(&path, bytes).unwrap();
 
-        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
-        runtime.biometric = Box::new(CountingBiometricProvider {
-            authorizations: authorizations.clone(),
-        });
-        runtime.secure_storage = Box::new(PresenceLoadingSecureStorageProvider::new());
+        runtime.quick_unlock = Box::new(MemoryQuickUnlockProvider::new(operations.clone()));
 
         let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
         runtime
@@ -6099,10 +6006,10 @@ mod tests {
         runtime.unlock_current_vault_with_quick_unlock().unwrap();
 
         assert_eq!(
-            authorizations.borrow().as_slice(),
+            operations.borrow().as_slice(),
             [
-                "Enable quick unlock for this vault".to_owned(),
-                "Unlock this vault".to_owned(),
+                "enable:Enable quick unlock for this vault",
+                "unlock:Unlock this vault",
             ]
         );
     }
@@ -6121,12 +6028,9 @@ mod tests {
         let path = dir.path().join("personal.kdbx");
         std::fs::write(&path, bytes).unwrap();
 
-        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests_at(100);
-        runtime.biometric = Box::new(CountingBiometricProvider {
-            authorizations: authorizations.clone(),
-        });
-        runtime.secure_storage = Box::new(MemorySecureStorageProvider::new());
+        runtime.quick_unlock = Box::new(MemoryQuickUnlockProvider::new(operations.clone()));
 
         let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
         runtime
@@ -6189,10 +6093,10 @@ mod tests {
         };
         assert!(verified.verified);
         assert_eq!(
-            authorizations.borrow().as_slice(),
+            operations.borrow().as_slice(),
             [
-                "Enable quick unlock for this vault".to_owned(),
-                "Unlock this vault".to_owned(),
+                "enable:Enable quick unlock for this vault",
+                "unlock:Unlock this vault",
             ]
         );
     }
