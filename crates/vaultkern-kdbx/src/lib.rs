@@ -1572,13 +1572,14 @@ fn custom_data_block_to_xml(
             .push(XMLNode::Element(text_element("Key", &custom_item.key)));
         item.children
             .push(XMLNode::Element(text_element("Value", &custom_item.value)));
-        if include_item_times && version == KdbxVersion::V4_1 {
-            if let Some(last_modified) = custom_item.last_modified {
-                item.children.push(XMLNode::Element(text_element(
-                    "LastModificationTime",
-                    &datetime_text(version, last_modified),
-                )));
-            }
+        if include_item_times
+            && version == KdbxVersion::V4_1
+            && let Some(last_modified) = custom_item.last_modified
+        {
+            item.children.push(XMLNode::Element(text_element(
+                "LastModificationTime",
+                &datetime_text(version, last_modified),
+            )));
         }
         element.children.push(XMLNode::Element(item));
     }
@@ -1900,14 +1901,14 @@ fn parse_kdbx3_xml(
         .map_err(|error| KdbxError::Xml(error.to_string()))?;
     let meta = child(&root, "Meta")?;
 
-    if let Some(header_hash) = child_text(&meta, "HeaderHash") {
-        if !header_hash.is_empty() {
-            let expected = STANDARD
-                .decode(header_hash.as_bytes())
-                .map_err(|_| KdbxError::InvalidValue)?;
-            if expected.as_slice() != sha256_bytes(header_bytes).as_slice() {
-                return Err(KdbxError::HeaderHashMismatch);
-            }
+    if let Some(header_hash) = child_text(&meta, "HeaderHash")
+        && !header_hash.is_empty()
+    {
+        let expected = STANDARD
+            .decode(header_hash.as_bytes())
+            .map_err(|_| KdbxError::InvalidValue)?;
+        if expected.as_slice() != sha256_bytes(header_bytes).as_slice() {
+            return Err(KdbxError::HeaderHashMismatch);
         }
     }
 
@@ -2779,14 +2780,12 @@ fn parse_entry(
                 }
                 "History" => {
                     for history_child in &child.children {
-                        if let XMLNode::Element(history_entry) = history_child {
-                            if history_entry.name == "Entry" {
-                                entry.history.push(parse_entry(
-                                    history_entry,
-                                    binaries,
-                                    protected,
-                                )?);
-                            }
+                        if let XMLNode::Element(history_entry) = history_child
+                            && history_entry.name == "Entry"
+                        {
+                            entry
+                                .history
+                                .push(parse_entry(history_entry, binaries, protected)?);
                         }
                     }
                     let occurrence = counts.entry(child.name.clone()).or_insert(0);
@@ -2871,7 +2870,7 @@ fn parse_entry(
             (key, field)
         })
         .filter(|(key, _)| {
-            !is_totp_attribute_key(key) && !(has_complete_passkey && is_passkey_attribute_key(key))
+            !(is_totp_attribute_key(key) || (has_complete_passkey && is_passkey_attribute_key(key)))
         })
         .collect();
 
@@ -2963,13 +2962,15 @@ fn parse_group_times(element: &Element) -> Result<GroupTimes> {
 }
 
 fn parse_auto_type(element: &Element) -> AutoTypeConfig {
-    let mut auto_type = AutoTypeConfig::default();
-    auto_type.enabled = child_text(element, "Enabled")
-        .as_deref()
-        .and_then(parse_nullable_bool);
-    auto_type.obfuscation =
-        child_text(element, "DataTransferObfuscation").and_then(|value| value.parse::<i32>().ok());
-    auto_type.default_sequence = child_text(element, "DefaultSequence");
+    let mut auto_type = AutoTypeConfig {
+        enabled: child_text(element, "Enabled")
+            .as_deref()
+            .and_then(parse_nullable_bool),
+        obfuscation: child_text(element, "DataTransferObfuscation")
+            .and_then(|value| value.parse::<i32>().ok()),
+        default_sequence: child_text(element, "DefaultSequence"),
+        ..AutoTypeConfig::default()
+    };
 
     for child in &element.children {
         let XMLNode::Element(child) = child else {
@@ -3519,11 +3520,11 @@ fn parse_datetime_value(text: &str) -> Option<u64> {
         return Some(value);
     }
 
-    if let Ok(bytes) = STANDARD.decode(text.as_bytes()) {
-        if bytes.len() == 8 {
-            let raw = i64::from_le_bytes(bytes.try_into().ok()?);
-            return (raw - KDBX4_TIME_OFFSET).try_into().ok();
-        }
+    if let Ok(bytes) = STANDARD.decode(text.as_bytes())
+        && bytes.len() == 8
+    {
+        let raw = i64::from_le_bytes(bytes.try_into().ok()?);
+        return (raw - KDBX4_TIME_OFFSET).try_into().ok();
     }
 
     let parsed = DateTime::parse_from_rfc3339(text).ok()?;
@@ -3607,10 +3608,10 @@ fn group_requires_41(group: &Group) -> bool {
 }
 
 fn build_totp(fields: &BTreeMap<String, CustomField>) -> Option<TotpSpec> {
-    if let Some(field) = fields.get("otp") {
-        if let Ok(spec) = TotpSpec::parse_otpauth(&field.value) {
-            return Some(spec);
-        }
+    if let Some(field) = fields.get("otp")
+        && let Ok(spec) = TotpSpec::parse_otpauth(&field.value)
+    {
+        return Some(spec);
     }
 
     let secret = fields.get("TimeOtp-Secret-Base32")?.value.clone();

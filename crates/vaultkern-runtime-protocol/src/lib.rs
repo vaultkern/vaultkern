@@ -430,7 +430,7 @@ pub struct DatabaseSettingsDto {
     pub has_password: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseSettingsUpdateDto {
     #[serde(default)]
@@ -447,20 +447,6 @@ pub struct DatabaseSettingsUpdateDto {
     pub credentials: Option<DatabaseCredentialsUpdateDto>,
     #[serde(default)]
     pub autosave_delay_seconds: Option<u32>,
-}
-
-impl Default for DatabaseSettingsUpdateDto {
-    fn default() -> Self {
-        Self {
-            metadata: None,
-            public_metadata: None,
-            history: None,
-            recycle_bin: None,
-            encryption: None,
-            credentials: None,
-            autosave_delay_seconds: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

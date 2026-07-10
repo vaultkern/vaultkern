@@ -2,10 +2,10 @@ use std::env;
 use std::path::PathBuf;
 
 pub(crate) fn runtime_state_dir() -> PathBuf {
-    if cfg!(windows) {
-        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
-            return PathBuf::from(local_app_data).join("vaultkern-runtime");
-        }
+    if cfg!(windows)
+        && let Ok(local_app_data) = env::var("LOCALAPPDATA")
+    {
+        return PathBuf::from(local_app_data).join("vaultkern-runtime");
     }
 
     if let Ok(state_home) = env::var("XDG_STATE_HOME") {

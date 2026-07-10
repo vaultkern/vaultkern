@@ -729,14 +729,14 @@ impl OneDriveVaultSourceProvider {
     }
 
     fn access_token(&self) -> Result<String> {
-        if let Some(state) = self.token_state.borrow().as_ref() {
-            if let Some(access_token) = state.access_token.clone() {
-                let token_is_fresh = state.access_expires_at.is_some_and(|expires_at| {
-                    expires_at > Instant::now() + ACCESS_TOKEN_EXPIRY_SKEW
-                });
-                if token_is_fresh {
-                    return Ok(access_token);
-                }
+        if let Some(state) = self.token_state.borrow().as_ref()
+            && let Some(access_token) = state.access_token.clone()
+        {
+            let token_is_fresh = state
+                .access_expires_at
+                .is_some_and(|expires_at| expires_at > Instant::now() + ACCESS_TOKEN_EXPIRY_SKEW);
+            if token_is_fresh {
+                return Ok(access_token);
             }
         }
         self.refresh_access_token()

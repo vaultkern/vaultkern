@@ -4822,7 +4822,7 @@ fn register_get_subframe_ceremony_at_s4(
             user_verification: PasskeyUserVerificationRequirementDto::Preferred,
             challenge_base64url: challenge_base64url.into(),
             request_id,
-            tab_id: request_id as i64,
+            tab_id: request_id,
             frame_id: 1,
             frame_kind: PasskeyFrameKindDto::Subframe,
             registered_at_epoch_ms: 1_000,
@@ -4948,6 +4948,7 @@ fn register_ceremony_at_s4_with_discoverable(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_ceremony_at_s4_with_user_verification(
     runtime: &mut Runtime,
     token: &str,
@@ -5018,6 +5019,7 @@ fn register_ceremony_at_s3_with_discoverable(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_ceremony_at_s3_with_discoverable_and_user_verification(
     runtime: &mut Runtime,
     token: &str,
@@ -5042,7 +5044,7 @@ fn register_ceremony_at_s3_with_discoverable_and_user_verification(
             user_verification,
             challenge_base64url: challenge_base64url.into(),
             request_id,
-            tab_id: request_id as i64,
+            tab_id: request_id,
             frame_id: 0,
             frame_kind: PasskeyFrameKindDto::Top,
             registered_at_epoch_ms: 1_000,

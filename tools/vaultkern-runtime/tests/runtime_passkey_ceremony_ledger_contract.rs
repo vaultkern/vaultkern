@@ -3267,6 +3267,7 @@ fn register_command_with(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_command_with_frame(
     token: &str,
     ceremony: PasskeyCeremonyKindDto,
@@ -3476,6 +3477,7 @@ fn register_and_advance_to_s4_with_top_origin(
         .unwrap();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_and_advance_to_s4_with_frame(
     runtime: &mut Runtime,
     token: &str,
@@ -3506,6 +3508,7 @@ fn register_and_advance_to_s4_with_frame(
         .unwrap();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_and_advance_to_s3_with_frame(
     runtime: &mut Runtime,
     token: &str,

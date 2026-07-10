@@ -452,7 +452,7 @@ fn attestation_object(auth_data: &[u8]) -> Vec<u8> {
     cbor_text(&mut object, "attStmt");
     cbor_map_len(&mut object, 0);
     cbor_text(&mut object, "authData");
-    cbor_bytes(&mut object, &auth_data);
+    cbor_bytes(&mut object, auth_data);
     object
 }
 
