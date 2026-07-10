@@ -16,7 +16,7 @@ export function RecentVaultUnlockScreen({
     keyFilePath: "Key File Path",
     unlock: "Unlock Vault",
     unlocking: "Unlocking...",
-    unlockWithWindowsHello: "Unlock with Windows Hello",
+    unlockWithQuickUnlock: "Unlock with Quick Unlock",
     manageVaults: "Manage vaults",
     extensionSettings: "Extension Settings",
     noRecentVaults: "No recent vaults",
@@ -45,7 +45,7 @@ export function RecentVaultUnlockScreen({
     keyFilePath: string;
     unlock: string;
     unlocking: string;
-    unlockWithWindowsHello: string;
+    unlockWithQuickUnlock: string;
     manageVaults: string;
     extensionSettings: string;
     noRecentVaults: string;
@@ -190,7 +190,7 @@ export function RecentVaultUnlockScreen({
                 opacity: busy ? 0.72 : 1
               }}
             >
-              {labels.unlockWithWindowsHello}
+              {labels.unlockWithQuickUnlock}
             </button>
           ) : null}
           <button

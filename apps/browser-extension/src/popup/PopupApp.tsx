@@ -1021,7 +1021,7 @@ export function PopupApp({
               disabled={submitting}
               style={primaryActionStyle}
             >
-              {text("Unlock with Windows Hello")}
+              {text("Unlock with Quick Unlock")}
             </button>
           ) : null}
           <button
@@ -1110,8 +1110,8 @@ export function PopupApp({
               style={primaryActionStyle}
             >
               {extensionSettings.language === "zh-CN"
-                ? "使用 Windows Hello 验证"
-                : "Verify with Windows Hello"}
+                ? "使用快速解锁验证"
+                : "Verify with Quick Unlock"}
             </button>
           ) : null}
           {unlockError ? <div role="alert">{unlockError}</div> : null}

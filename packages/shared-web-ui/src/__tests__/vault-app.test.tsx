@@ -256,62 +256,76 @@ it("renders recent vaults and unlocks the current selection without a path field
   expect(passwordInput).toHaveAttribute("type", "text");
 });
 
-it("unlocks the current recent vault with Windows Hello when quick unlock is enabled", async () => {
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: async () => ({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    }),
-    listRecentVaults: vi.fn(async () => [
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: true,
-        isCurrent: true
-      }
-    ]),
-    unlockCurrentVaultWithQuickUnlock: vi.fn(async () => ({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    })),
-    listGroups: vi.fn(async () => ({
-      type: "group_tree" as const,
-      root: {
-        id: "group-root",
-        title: "Demo Vault",
-        entryCount: 0,
-        childCount: 0,
-        children: []
-      }
-    })),
-    listEntries: vi.fn(async () => []),
-    getEntryDetail: vi.fn()
-  } satisfies RuntimeClientLike;
+it.each([
+  {
+    language: "en" as const,
+    quickUnlockLabel: "Unlock with Quick Unlock",
+    emptyEntriesLabel: "No entries available."
+  },
+  {
+    language: "zh-CN" as const,
+    quickUnlockLabel: "使用快速解锁",
+    emptyEntriesLabel: "没有可用条目。"
+  }
+])(
+  "unlocks the current recent vault with Quick Unlock in $language",
+  async ({ language, quickUnlockLabel, emptyEntriesLabel }) => {
+    const client = {
+      ...createVaultSelectionMethods(),
+      getSessionState: async () => ({
+        unlocked: false,
+        activeVaultId: null,
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      }),
+      listRecentVaults: vi.fn(async () => [
+        {
+          vaultRefId: "vault-ref-1",
+          displayName: "Personal",
+          sourceKind: "local",
+          sourceSummary: "personal.kdbx",
+          lastUsedAt: 1776500000,
+          availability: "ready",
+          supportsQuickUnlock: true,
+          isCurrent: true
+        }
+      ]),
+      unlockCurrentVaultWithQuickUnlock: vi.fn(async () => ({
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      })),
+      listGroups: vi.fn(async () => ({
+        type: "group_tree" as const,
+        root: {
+          id: "group-root",
+          title: "Demo Vault",
+          entryCount: 0,
+          childCount: 0,
+          children: []
+        }
+      })),
+      listEntries: vi.fn(async () => []),
+      getEntryDetail: vi.fn()
+    } satisfies RuntimeClientLike;
 
-  render(
-    <App
-      client={client}
-      extensionSettingsStore={createSettingsStore({ quickUnlockEnabled: true })}
-    />
-  );
+    render(
+      <App
+        client={client}
+        extensionSettingsStore={createSettingsStore({ quickUnlockEnabled: true, language })}
+      />
+    );
 
-  expect(await screen.findByText("Personal")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Unlock with Windows Hello" }));
+    expect(await screen.findByText("Personal")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: quickUnlockLabel }));
 
-  await waitFor(() => {
-    expect(client.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
-  });
-  expect(await screen.findByText("No entries available.")).toBeInTheDocument();
-});
+    await waitFor(() => {
+      expect(client.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
+    });
+    expect(await screen.findByText(emptyEntriesLabel)).toBeInTheDocument();
+  }
+);
 
 it("opens extension settings while locked and saves local extension preferences", async () => {
   const settingsStore = createSettingsStore();

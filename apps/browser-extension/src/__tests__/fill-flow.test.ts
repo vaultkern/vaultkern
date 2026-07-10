@@ -1441,7 +1441,7 @@ describe("PopupShell fill flow", () => {
     ).toBeInTheDocument();
   });
 
-  it("unlocks the locked popup with Windows Hello when quick unlock is enabled", async () => {
+  it("unlocks the locked popup with Quick Unlock when quick unlock is enabled", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       tabs: {
         query: vi.fn(async () => []),
@@ -1481,7 +1481,7 @@ describe("PopupShell fill flow", () => {
     render(createElement(PopupShell));
 
     expect(await screen.findByText("Personal")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Unlock with Windows Hello" }));
+    fireEvent.click(screen.getByRole("button", { name: "Unlock with Quick Unlock" }));
 
     await waitFor(() => {
       expect(runtimeClientMocks.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
@@ -1611,7 +1611,7 @@ describe("PopupShell fill flow", () => {
     render(createElement(PopupShell));
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "Unlock with Windows Hello" })
+      await screen.findByRole("button", { name: "Unlock with Quick Unlock" })
     );
 
     await waitFor(() => {
@@ -1936,66 +1936,93 @@ describe("PopupShell fill flow", () => {
     });
   });
 
-  it("auto verifies the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
-    window.history.replaceState(
-      null,
-      "",
-      "/popup.html?webauthn=verify&requestId=46&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-46"
-    );
-    const sendMessage = vi.fn(async () => ({ ok: true }));
-    const closeWindow = vi.fn();
-    Object.defineProperty(window, "close", {
-      configurable: true,
-      value: closeWindow
-    });
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        sendMessage
-      },
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Work",
-        sourceKind: "local",
-        sourceSummary: "work.kdbx",
-        lastUsedAt: 1776500010,
-        availability: "ready",
-        supportsQuickUnlock: true,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByText("Verify passkey request")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_user_verification_complete",
-        requestId: 46,
-        origin: "https://example.com",
-        relyingParty: "example.com",
-        nonce: "nonce-46",
-        method: "quick_unlock"
+  it.each([
+    { language: "en" as const, quickUnlockLabel: "Verify with Quick Unlock" },
+    { language: "zh-CN" as const, quickUnlockLabel: "使用快速解锁验证" }
+  ])(
+    "auto verifies the WebAuthn prompt with Quick Unlock in $language",
+    async ({ language, quickUnlockLabel }) => {
+      window.history.replaceState(
+        null,
+        "",
+        "/popup.html?webauthn=verify&requestId=46&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-46"
+      );
+      const verification = createDeferred<{ ok: boolean }>();
+      const sendMessage = vi.fn(() => verification.promise);
+      const closeWindow = vi.fn();
+      Object.defineProperty(window, "close", {
+        configurable: true,
+        value: closeWindow
       });
-      expect(closeWindow).toHaveBeenCalledTimes(1);
-    });
-  });
+      (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+        runtime: {
+          sendMessage
+        },
+        storage: {
+          local: {
+            get: vi.fn((_key, callback) =>
+              callback({
+                vaultkernExtensionSettings: {
+                  recentVaultLimit: 10,
+                  language,
+                  idleLockMinutes: 0,
+                  clearClipboardSeconds: 30,
+                  passkeyProviderEnabled: true,
+                  quickUnlockEnabled: true
+                }
+              })
+            ),
+            set: vi.fn((_values, callback) => callback?.())
+          }
+        },
+        tabs: {
+          query: vi.fn(async () => []),
+          sendMessage: vi.fn(async () => undefined)
+        }
+      };
+
+      runtimeClientMocks.getSessionState.mockResolvedValue({
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      });
+      runtimeClientMocks.listRecentVaults.mockResolvedValue([
+        {
+          vaultRefId: "vault-ref-1",
+          displayName: "Work",
+          sourceKind: "local",
+          sourceSummary: "work.kdbx",
+          lastUsedAt: 1776500010,
+          availability: "ready",
+          supportsQuickUnlock: true,
+          isCurrent: true
+        }
+      ]);
+      runtimeClientMocks.listEntries.mockResolvedValue([]);
+      runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+      const { PopupShell } = await import("../popupShell");
+
+      render(createElement(PopupShell));
+
+      expect(
+        await screen.findByRole("button", { name: quickUnlockLabel })
+      ).toBeInTheDocument();
+      verification.resolve({ ok: true });
+      await waitFor(() => {
+        expect(sendMessage).toHaveBeenCalledWith({
+          type: "vaultkern_user_verification_complete",
+          requestId: 46,
+          origin: "https://example.com",
+          relyingParty: "example.com",
+          nonce: "nonce-46",
+          method: "quick_unlock"
+        });
+        expect(closeWindow).toHaveBeenCalledTimes(1);
+      });
+    }
+  );
 
   it("sends the selected passkey credential when approving a discoverable WebAuthn request", async () => {
     const credentialOptions = [
@@ -2195,7 +2222,7 @@ describe("PopupShell fill flow", () => {
     });
   });
 
-  it("auto unlocks the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
+  it("auto unlocks the WebAuthn prompt with Quick Unlock when quick unlock is enabled", async () => {
     window.history.replaceState(
       null,
       "",
