@@ -21,6 +21,7 @@ The project is currently focused on a Rust kernel for KDBX parsing, vault modeli
 
 - Rust toolchain with Rust 2024 edition support.
 - Node.js and npm for the TypeScript workspaces.
+- macOS 13 or later for the macOS native host bundle.
 - For Windows browser native messaging builds, a Windows Rust target such as `x86_64-pc-windows-gnu` may be needed.
 
 ## Build and Test
@@ -55,6 +56,32 @@ cargo run -p vkdbx -- roundtrip-demo /tmp/demo.kdbx
 The browser extension talks to `tools/vaultkern-runtime` through the browser native messaging API. The runtime exposes vault operations over a small JSON protocol defined in `crates/vaultkern-runtime-protocol`.
 
 Native messaging manifests are platform-specific and should be generated or installed for the local browser profile. Do not commit local native-host manifests, browser profile paths, or deployment scripts containing machine-specific paths.
+
+### macOS Native Host
+
+Build a separate app bundle for each supported architecture. The packaging script sets the deployment target to macOS 13.0 and writes the bundle under `target/vaultkern-runtime-macos/<target>/VaultKern Native.app`:
+
+```sh
+tools/vaultkern-runtime/scripts/package_macos.sh aarch64-apple-darwin
+tools/vaultkern-runtime/scripts/package_macos.sh x86_64-apple-darwin
+```
+
+Development bundles are signed ad hoc when no identity is supplied. Release packaging requires a stable, non-ad-hoc signing identity:
+
+```sh
+VAULTKERN_CODESIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
+  tools/vaultkern-runtime/scripts/package_macos.sh aarch64-apple-darwin --release-signing
+```
+
+Install the signed bundle for the current user with the Chrome extension ID shown on `chrome://extensions`:
+
+```sh
+tools/vaultkern-runtime/scripts/install_native_host_macos.sh \
+  <extension-id> \
+  "target/vaultkern-runtime-macos/aarch64-apple-darwin/VaultKern Native.app"
+```
+
+The installer copies the app to `~/Library/Application Support/VaultKern/VaultKern Native.app` and atomically writes `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.vaultkern.runtime.json`. Reload the extension after installing the host. The bundle identifier remains `com.vaultkern.runtime` across architecture-specific builds and signed upgrades.
 
 ## OneDrive Support
 

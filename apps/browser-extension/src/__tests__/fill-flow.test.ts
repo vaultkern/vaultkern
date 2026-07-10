@@ -2973,6 +2973,16 @@ describe("PopupShell fill flow", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
+        /tools\/vaultkern-runtime\/scripts\/install_native_host_macos\.sh/
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /~\/Library\/Application Support\/Google\/Chrome\/NativeMessagingHosts\/com\.vaultkern\.runtime\.json/
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
         /HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com\.vaultkern\.runtime/
       )
     ).toBeInTheDocument();

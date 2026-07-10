@@ -7,6 +7,14 @@ function installCommand() {
   return `tools/vaultkern-runtime/scripts/install_native_host.sh ${extensionId()} /absolute/path/to/vaultkern-runtime`;
 }
 
+function macosInstallCommand() {
+  return `tools/vaultkern-runtime/scripts/install_native_host_macos.sh ${extensionId()} "/absolute/path/to/VaultKern Native.app"`;
+}
+
+function macosManifestPath() {
+  return `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.vaultkern.runtime.json`;
+}
+
 function edgeRegistryPath() {
   return `HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.vaultkern.runtime`;
 }
@@ -53,6 +61,13 @@ export function renderNativeHostHelp(error: unknown) {
           </li>
           <li>
             The Windows runtime should exist at <code>{windowsRuntimePath()}</code>.
+          </li>
+          <li>
+            On macOS 13 or later, run <code>{macosInstallCommand()}</code>.
+          </li>
+          <li>
+            Confirm the macOS Chrome manifest exists at{" "}
+            <code>{macosManifestPath()}</code>.
           </li>
           <li>
             For Linux Chromium, run <code>{installCommand()}</code>.
