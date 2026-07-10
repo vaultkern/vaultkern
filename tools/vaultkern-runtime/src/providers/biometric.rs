@@ -50,6 +50,7 @@ impl BiometricProvider for WindowsHelloBiometricProvider {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn default_biometric_provider() -> Box<dyn BiometricProvider> {
     #[cfg(windows)]
     {

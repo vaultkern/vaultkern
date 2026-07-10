@@ -91,10 +91,12 @@ impl SecureStorageProvider for UnsupportedSecureStorageProvider {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn default_secure_storage_provider() -> Box<dyn SecureStorageProvider> {
     default_secure_storage_provider_for_extension_id(None)
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn default_secure_storage_provider_for_extension_id(
     extension_id: Option<&str>,
 ) -> Box<dyn SecureStorageProvider> {
