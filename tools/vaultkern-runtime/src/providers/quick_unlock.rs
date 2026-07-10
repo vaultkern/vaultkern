@@ -7,10 +7,15 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::rc::Rc;
 
-use super::biometric::{BiometricProvider, default_biometric_provider};
+use super::biometric::BiometricProvider;
+#[cfg(not(target_os = "macos"))]
+use super::biometric::default_biometric_provider;
+#[cfg(target_os = "macos")]
+use super::macos_quick_unlock::MacOsQuickUnlockProvider;
+use super::secure_storage::SecureStorageProvider;
+#[cfg(not(target_os = "macos"))]
 use super::secure_storage::{
-    SecureStorageProvider, default_secure_storage_provider,
-    default_secure_storage_provider_for_extension_id,
+    default_secure_storage_provider, default_secure_storage_provider_for_extension_id,
 };
 
 pub trait QuickUnlockProvider {
@@ -206,19 +211,34 @@ impl QuickUnlockProvider for UnsupportedQuickUnlockProvider {
 }
 
 pub(crate) fn default_quick_unlock_provider() -> Box<dyn QuickUnlockProvider> {
-    Box::new(ComposedQuickUnlockProvider::new(
-        default_biometric_provider(),
-        default_secure_storage_provider(),
-    ))
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(MacOsQuickUnlockProvider::new_default())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Box::new(ComposedQuickUnlockProvider::new(
+            default_biometric_provider(),
+            default_secure_storage_provider(),
+        ))
+    }
 }
 
 pub(crate) fn default_quick_unlock_provider_for_extension_id(
     extension_id: Option<&str>,
 ) -> Box<dyn QuickUnlockProvider> {
-    Box::new(ComposedQuickUnlockProvider::new(
-        default_biometric_provider(),
-        default_secure_storage_provider_for_extension_id(extension_id),
-    ))
+    #[cfg(target_os = "macos")]
+    {
+        let _ = extension_id;
+        Box::new(MacOsQuickUnlockProvider::new_default())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Box::new(ComposedQuickUnlockProvider::new(
+            default_biometric_provider(),
+            default_secure_storage_provider_for_extension_id(extension_id),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -228,10 +248,9 @@ mod tests {
 
     use anyhow::Result;
 
-    use super::{
-        ComposedQuickUnlockProvider, QuickUnlockProvider, default_quick_unlock_provider,
-        default_quick_unlock_provider_for_extension_id,
-    };
+    use super::{ComposedQuickUnlockProvider, QuickUnlockProvider};
+    #[cfg(not(any(windows, target_os = "macos")))]
+    use super::{default_quick_unlock_provider, default_quick_unlock_provider_for_extension_id};
     use crate::providers::biometric::BiometricProvider;
     use crate::providers::secure_storage::SecureStorageProvider;
 
@@ -384,7 +403,7 @@ mod tests {
         assert!(provider.is_supported());
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn default_provider_is_unsupported_off_windows() {
         let provider = default_quick_unlock_provider();
@@ -398,7 +417,7 @@ mod tests {
         provider.delete("vault").unwrap();
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn extension_scoped_provider_is_unsupported_off_windows() {
         let provider = default_quick_unlock_provider_for_extension_id(Some("extension-id"));

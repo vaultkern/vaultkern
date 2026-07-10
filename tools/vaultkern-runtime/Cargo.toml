@@ -26,6 +26,17 @@ uuid.workspace = true
 windows = { version = "0.62", features = ["Security_Credentials_UI"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std", "NSArray", "NSData", "NSError", "NSString",
+] }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = [
+    "std", "block2", "LABiometryType", "LAContext", "LAError", "LAPersistedRight",
+    "LARequirement", "LARight", "LARightStore", "LASecret",
+] }
+
 [dev-dependencies]
 mockito = "1.5"
 p256.workspace = true

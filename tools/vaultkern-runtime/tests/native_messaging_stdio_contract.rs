@@ -3,9 +3,11 @@ use std::process::{Command, Stdio};
 
 use serde_json::json;
 use vaultkern_core::{CompositeKey, KeepassCore, SaveProfile, Vault};
+use vaultkern_runtime::Runtime;
 
 #[test]
 fn runtime_binary_serves_native_messaging_session_state_frame() {
+    let expected_biometric_support = Runtime::new().session_state().supports_biometric_unlock;
     let state_dir = tempfile::tempdir().expect("state tempdir");
     let mut child = spawn_isolated_runtime_native_host(&state_dir);
 
@@ -38,7 +40,7 @@ fn runtime_binary_serves_native_messaging_session_state_frame() {
         response
             .get("supportsBiometricUnlock")
             .and_then(|value| value.as_bool()),
-        Some(false)
+        Some(expected_biometric_support)
     );
 }
 
