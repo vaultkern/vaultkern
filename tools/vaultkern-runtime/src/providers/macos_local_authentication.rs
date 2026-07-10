@@ -411,9 +411,9 @@ impl MacLocalAuthenticationApi for MacLocalAuthentication {
 
 #[cfg(test)]
 mod tests {
-    use objc2_local_authentication::LABiometryType;
+    use objc2_local_authentication::{LABiometryType, LAError};
 
-    use super::{NSErrorSnapshot, touch_id_policy_is_available};
+    use super::{MacLocalAuthenticationError, NSErrorSnapshot, touch_id_policy_is_available};
 
     #[test]
     fn macos_quick_unlock_touch_id_policy_rejects_other_biometry_types() {
@@ -453,5 +453,34 @@ mod tests {
         };
 
         assert!(!snapshot.is_missing_item());
+    }
+
+    #[test]
+    fn macos_quick_unlock_preserves_distinct_non_missing_authentication_errors() {
+        for (name, code) in [
+            ("authentication failed", LAError::AuthenticationFailed.0),
+            ("user cancel", LAError::UserCancel.0),
+            ("user fallback", LAError::UserFallback.0),
+            ("system cancel", LAError::SystemCancel.0),
+            ("biometry unavailable", LAError::BiometryNotAvailable.0),
+            ("biometry not enrolled", LAError::BiometryNotEnrolled.0),
+            ("biometry lockout", LAError::BiometryLockout.0),
+            ("companion unavailable", LAError::CompanionNotAvailable.0),
+        ] {
+            let snapshot = NSErrorSnapshot {
+                domain: "com.apple.LocalAuthentication".into(),
+                code,
+                description: name.into(),
+                underlying: Vec::new(),
+            };
+
+            let MacLocalAuthenticationError::Apple(snapshot) =
+                MacLocalAuthenticationError::from_snapshot(snapshot)
+            else {
+                panic!("{name} was incorrectly classified as a missing item");
+            };
+            assert_eq!(snapshot.code, code);
+            assert_eq!(snapshot.description, name);
+        }
     }
 }

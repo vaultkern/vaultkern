@@ -160,9 +160,6 @@ impl QuickUnlockProvider for ComposedQuickUnlockProvider {
     }
 
     fn refresh(&self, key: &str, value: &[u8]) -> Result<()> {
-        if !self.biometric.supports_quick_unlock() {
-            anyhow::bail!("biometric quick unlock is not implemented on this host");
-        }
         if self.storage.contains(key)? {
             self.storage.store(key, value)?;
         }
@@ -264,6 +261,7 @@ mod tests {
 
     impl BiometricProvider for RecordingBiometricProvider {
         fn supports_quick_unlock(&self) -> bool {
+            self.events.borrow_mut().push("support".into());
             true
         }
 
@@ -356,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn composed_refresh_stores_without_authorizing() {
+    fn composed_refresh_checks_presence_and_stores_without_support_probe_or_authorization() {
         let events = Rc::new(RefCell::new(Vec::new()));
         let provider = composed_test_provider(events.clone(), Some(b"old".to_vec()));
 

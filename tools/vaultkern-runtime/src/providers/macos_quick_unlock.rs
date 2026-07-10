@@ -116,6 +116,9 @@ mod tests {
     struct FakeState {
         touch_id_available: bool,
         cancel_next_authorization: bool,
+        authorize_and_load_error: Option<&'static str>,
+        remove_error: Option<&'static str>,
+        save_error: Option<&'static str>,
         operations: Vec<String>,
         records: BTreeMap<String, Vec<u8>>,
     }
@@ -150,6 +153,9 @@ mod tests {
         fn save(&self, identifier: &str, secret: &[u8]) -> Result<()> {
             let mut state = self.state.borrow_mut();
             state.operations.push(format!("save:{identifier}"));
+            if let Some(error) = state.save_error {
+                anyhow::bail!(error);
+            }
             state.records.insert(identifier.into(), secret.into());
             Ok(())
         }
@@ -159,12 +165,18 @@ mod tests {
             state
                 .operations
                 .push(format!("authorize_and_load:{identifier}:{reason}"));
+            if let Some(error) = state.authorize_and_load_error {
+                anyhow::bail!(error);
+            }
             Ok(state.records.get(identifier).cloned())
         }
 
         fn remove(&self, identifier: &str) -> Result<()> {
             let mut state = self.state.borrow_mut();
             state.operations.push(format!("remove:{identifier}"));
+            if let Some(error) = state.remove_error {
+                anyhow::bail!(error);
+            }
             if state.records.remove(identifier).is_some() {
                 Ok(())
             } else {
@@ -323,6 +335,78 @@ mod tests {
 
         assert_eq!(state.borrow().operations, ["authorize:Enable quick unlock"]);
         assert_eq!(state.borrow().records.get(&identifier).unwrap(), b"old");
+    }
+
+    #[test]
+    fn failed_unlock_authorization_retains_existing_record() {
+        for failure in [
+            "user cancelled",
+            "system cancelled",
+            "authentication failed",
+            "biometry locked out",
+            "Touch ID unavailable",
+            "Touch ID not enrolled",
+        ] {
+            let (provider, state) = provider(true);
+            let identifier = provider.backend_identifier("vault");
+            {
+                let mut state = state.borrow_mut();
+                state.records.insert(identifier.clone(), b"old".to_vec());
+                state.authorize_and_load_error = Some(failure);
+            }
+
+            let error = provider
+                .unlock("vault", "Unlock this vault")
+                .expect_err("authorization failure must not release the secret");
+
+            assert!(format!("{error:#}").contains(failure));
+            assert_eq!(state.borrow().records.get(&identifier).unwrap(), b"old");
+            assert_eq!(
+                state.borrow().operations,
+                [format!("authorize_and_load:{identifier}:Unlock this vault")]
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_remove_failure_retains_existing_record_without_saving() {
+        let (provider, state) = provider(true);
+        let identifier = provider.backend_identifier("vault");
+        {
+            let mut state = state.borrow_mut();
+            state.records.insert(identifier.clone(), b"old".to_vec());
+            state.remove_error = Some("remove failed");
+        }
+
+        let error = provider
+            .refresh("vault", b"new")
+            .expect_err("remove failure must abort refresh");
+
+        assert!(format!("{error:#}").contains("remove failed"));
+        assert_eq!(state.borrow().records.get(&identifier).unwrap(), b"old");
+        assert_eq!(state.borrow().operations, [format!("remove:{identifier}")]);
+    }
+
+    #[test]
+    fn refresh_save_failure_leaves_quick_unlock_disabled() {
+        let (provider, state) = provider(true);
+        let identifier = provider.backend_identifier("vault");
+        {
+            let mut state = state.borrow_mut();
+            state.records.insert(identifier.clone(), b"old".to_vec());
+            state.save_error = Some("save failed");
+        }
+
+        let error = provider
+            .refresh("vault", b"new")
+            .expect_err("save failure must be reported");
+
+        assert!(format!("{error:#}").contains("save failed"));
+        assert!(!state.borrow().records.contains_key(&identifier));
+        assert_eq!(
+            state.borrow().operations,
+            [format!("remove:{identifier}"), format!("save:{identifier}")]
+        );
     }
 
     #[test]

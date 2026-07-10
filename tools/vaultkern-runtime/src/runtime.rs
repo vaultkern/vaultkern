@@ -197,6 +197,12 @@ pub struct Runtime {
     fixed_unix_time_ms: Option<u64>,
 }
 
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Runtime {
     pub fn new() -> Self {
         Self::new_with_state(
@@ -425,19 +431,19 @@ impl Runtime {
     fn load_local_vault_snapshot(&mut self, path: &str) -> Result<VaultHandleDto> {
         let snapshot = self
             .local_files
-            .read_snapshot(&path)
+            .read_snapshot(path)
             .with_context(|| format!("failed to read vault: {path}"))?;
         let bytes = snapshot.bytes;
         let baseline_fingerprint = snapshot.fingerprint;
         let vault_id = path.to_owned();
-        let name = Path::new(&path)
+        let name = Path::new(path)
             .file_stem()
             .and_then(|value| value.to_str())
-            .unwrap_or(&path)
+            .unwrap_or(path)
             .to_owned();
         let reference = self
             .references
-            .upsert_local_path(&path, self.current_unix_time() as i64)?;
+            .upsert_local_path(path, self.current_unix_time() as i64)?;
         self.session
             .set_current_vault(reference.vault_ref_id.clone());
 
@@ -882,6 +888,14 @@ impl Runtime {
         let storage_key = quick_unlock_storage_key(&current_vault_ref_id);
         let credentials: VaultCredentials = match serde_json::from_slice(&bytes)
             .context("failed to decode quick unlock credentials")
+            .and_then(|credentials: VaultCredentials| {
+                if credentials.password.is_none() && credentials.key_file_path.is_none() {
+                    anyhow::bail!(
+                        "invalid serialized quick unlock credentials: no reusable unlock credentials"
+                    );
+                }
+                Ok(credentials)
+            })
         {
             Ok(credentials) => credentials,
             Err(error) => {
@@ -953,13 +967,14 @@ impl Runtime {
             methods.push(PasskeyUserVerificationMethodDto::MasterPassword);
         }
 
-        if self.quick_unlock.is_supported() {
-            if let Some(vault_ref_id) = self.session.current_vault_ref_id() {
-                let storage_key = quick_unlock_storage_key(vault_ref_id);
-                if self.quick_unlock.contains(&storage_key).unwrap_or(false) {
-                    methods.push(PasskeyUserVerificationMethodDto::QuickUnlock);
-                }
-            }
+        if self.quick_unlock.is_supported()
+            && let Some(vault_ref_id) = self.session.current_vault_ref_id()
+            && self
+                .quick_unlock
+                .contains(&quick_unlock_storage_key(vault_ref_id))
+                .unwrap_or(false)
+        {
+            methods.push(PasskeyUserVerificationMethodDto::QuickUnlock);
         }
 
         PasskeyUserVerificationCapabilityDto {
@@ -1379,6 +1394,7 @@ impl Runtime {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_entry(
         &mut self,
         vault_id: &str,
@@ -1425,6 +1441,7 @@ impl Runtime {
         self.get_entry_detail(vault_id, &entry_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_entry_fields(
         &mut self,
         vault_id: &str,
@@ -1576,6 +1593,7 @@ impl Runtime {
         self.get_entry_detail(vault_id, entry_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_passkey_assertion(
         &mut self,
         ceremony_token: &str,
@@ -1633,6 +1651,7 @@ impl Runtime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn validate_passkey_ceremony_for_s4(
         &self,
         ceremony_token: &str,
@@ -1664,10 +1683,10 @@ impl Runtime {
         if entry.identity.relying_party != relying_party {
             anyhow::bail!("passkey ceremony relying party mismatch");
         }
-        if let Some(discoverable) = discoverable {
-            if entry.identity.discoverable != discoverable {
-                anyhow::bail!("passkey ceremony discoverable mismatch");
-            }
+        if let Some(discoverable) = discoverable
+            && entry.identity.discoverable != discoverable
+        {
+            anyhow::bail!("passkey ceremony discoverable mismatch");
         }
         validate_passkey_ceremony_not_expired(entry, now_epoch_ms)?;
         validate_passkey_ceremony_vault_binding(entry, vault_id)?;
@@ -1883,10 +1902,9 @@ impl Runtime {
         }
         if let (Some(top_origin), Some(last_ancestor)) =
             (&identity.top_origin, identity.ancestor_origins.last())
+            && !passkey_ceremony_origins_are_same_origin(top_origin, last_ancestor)
         {
-            if !passkey_ceremony_origins_are_same_origin(top_origin, last_ancestor) {
-                anyhow::bail!("passkey ceremony top origin must match the last ancestor");
-            }
+            anyhow::bail!("passkey ceremony top origin must match the last ancestor");
         }
         if identity.frame_kind == PasskeyFrameKindDto::Subframe
             && (identity.top_origin.is_none() || identity.ancestor_origins.is_empty())
@@ -2189,6 +2207,7 @@ impl Runtime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_passkey_registration(
         &mut self,
         ceremony_token: &str,
@@ -3536,10 +3555,10 @@ impl Runtime {
                     .loaded
                     .get_mut(vault_id)
                     .with_context(|| format!("vault not opened: {vault_id}"))?;
-                if let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key.as_ref()) {
-                    if snapshot.fingerprint != baseline_fingerprint {
-                        self.core.load_and_merge_kdbx(vault, &snapshot.bytes, key)?;
-                    }
+                if let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key.as_ref())
+                    && snapshot.fingerprint != baseline_fingerprint
+                {
+                    self.core.load_and_merge_kdbx(vault, &snapshot.bytes, key)?;
                 }
                 loaded.name = display_name;
                 loaded.bytes = snapshot.bytes;
@@ -3720,14 +3739,14 @@ impl Runtime {
             }
             VaultSource::OneDriveItem { drive_id, item_id } => {
                 let state = self.one_drive.remote_state(drive_id, item_id)?;
-                if let Some(baseline) = baseline {
-                    if state.matches_fingerprint(baseline) {
-                        return Ok(LoadedSourceSnapshot {
-                            bytes: None,
-                            fingerprint: baseline.clone(),
-                            one_drive_etag: state.e_tag,
-                        });
-                    }
+                if let Some(baseline) = baseline
+                    && state.matches_fingerprint(baseline)
+                {
+                    return Ok(LoadedSourceSnapshot {
+                        bytes: None,
+                        fingerprint: baseline.clone(),
+                        one_drive_etag: state.e_tag,
+                    });
                 }
                 let snapshot = self
                     .one_drive
@@ -3790,10 +3809,10 @@ impl Runtime {
     }
 
     fn vault_ref_id_for_loaded_vault(&self, vault_id: &str) -> Option<String> {
-        if self.session.active_vault_id() == Some(vault_id) {
-            if let Some(vault_ref_id) = self.session.current_vault_ref_id() {
-                return Some(vault_ref_id.to_owned());
-            }
+        if self.session.active_vault_id() == Some(vault_id)
+            && let Some(vault_ref_id) = self.session.current_vault_ref_id()
+        {
+            return Some(vault_ref_id.to_owned());
         }
 
         self.references.find_ref_id_by_path(vault_id)
@@ -4955,16 +4974,16 @@ fn is_legal_passkey_ceremony_transition(
         );
     }
 
-    match (expected_phase, next_phase) {
-        (CompletionAndMutation, ClosedDelivered) => true,
-        (PreAuthorization, ClosedAborted | ClosedFailed)
-        | (UserAuthorization, ClosedAborted | ClosedFailed)
-        | (NetworkValidation, ClosedAborted | ClosedFailed)
-        | (CredentialResolution, ClosedAborted | ClosedFailed)
-        | (UserSelection, ClosedAborted | ClosedFailed)
-        | (CompletionAndMutation, ClosedAborted | ClosedFailed) => true,
-        _ => false,
-    }
+    matches!(
+        (expected_phase, next_phase),
+        (CompletionAndMutation, ClosedDelivered)
+            | (PreAuthorization, ClosedAborted | ClosedFailed)
+            | (UserAuthorization, ClosedAborted | ClosedFailed)
+            | (NetworkValidation, ClosedAborted | ClosedFailed)
+            | (CredentialResolution, ClosedAborted | ClosedFailed)
+            | (UserSelection, ClosedAborted | ClosedFailed)
+            | (CompletionAndMutation, ClosedAborted | ClosedFailed)
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -6057,6 +6076,94 @@ mod tests {
 
         assert!(
             format_error_chain(&error).contains("failed to decode quick unlock credentials"),
+            "{error:?}"
+        );
+        assert!(!runtime.session_state().unlocked);
+        assert_eq!(
+            operations.borrow().as_slice(),
+            ["unlock:Unlock this vault", "delete"]
+        );
+    }
+
+    #[test]
+    fn empty_quick_unlock_credentials_are_deleted_before_kdbx_unlock() {
+        for invalid_credentials in [
+            b"{}".as_slice(),
+            br#"{"password":null,"key_file_path":null}"#.as_slice(),
+        ] {
+            let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let mut runtime = Runtime::for_tests();
+            runtime.quick_unlock = Box::new(MemoryQuickUnlockProvider::new(operations.clone()));
+            let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+            let storage_key = quick_unlock_storage_key(
+                runtime
+                    .session
+                    .current_vault_ref_id()
+                    .expect("current vault reference"),
+            );
+            runtime
+                .quick_unlock
+                .enable(&storage_key, invalid_credentials, "Seed test data")
+                .unwrap();
+            runtime.loaded.get_mut(&opened.vault_id).unwrap().bytes = b"not a kdbx".to_vec();
+            runtime.lock_session();
+            operations.borrow_mut().clear();
+
+            let error = runtime
+                .unlock_current_vault_with_quick_unlock()
+                .unwrap_err();
+            let error_chain = format_error_chain(&error);
+
+            assert!(
+                error_chain.contains("invalid serialized quick unlock credentials"),
+                "{error:?}"
+            );
+            assert!(!error_chain.contains("failed to unlock vault"), "{error:?}");
+            assert!(!runtime.session_state().unlocked);
+            assert_eq!(
+                operations.borrow().as_slice(),
+                ["unlock:Unlock this vault", "delete"]
+            );
+            assert!(!runtime.quick_unlock.contains(&storage_key).unwrap());
+        }
+    }
+
+    #[test]
+    fn empty_quick_unlock_credentials_preserve_validation_error_when_delete_fails() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone()).with_failures(
+                MemoryQuickUnlockFailures {
+                    delete: true,
+                    ..MemoryQuickUnlockFailures::default()
+                },
+            ),
+        );
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        let storage_key = quick_unlock_storage_key(
+            runtime
+                .session
+                .current_vault_ref_id()
+                .expect("current vault reference"),
+        );
+        runtime
+            .quick_unlock
+            .enable(
+                &storage_key,
+                br#"{"password":null,"key_file_path":null}"#,
+                "Seed test data",
+            )
+            .unwrap();
+        runtime.lock_session();
+        operations.borrow_mut().clear();
+
+        let error = runtime
+            .unlock_current_vault_with_quick_unlock()
+            .unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("invalid serialized quick unlock credentials"),
             "{error:?}"
         );
         assert!(!runtime.session_state().unlocked);
