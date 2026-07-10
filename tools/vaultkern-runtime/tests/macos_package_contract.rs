@@ -51,6 +51,7 @@ fn script_command(name: &str) -> Command {
     command
         .arg(script(name))
         .env_remove("VAULTKERN_CODESIGN_IDENTITY")
+        .env_remove("VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID")
         .env_remove("VAULTKERN_MACOS_APP_DESTINATION")
         .env_remove("VAULTKERN_CHROME_NATIVE_HOST_MANIFEST");
     command
