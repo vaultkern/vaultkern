@@ -879,9 +879,16 @@ impl Runtime {
                 "Unlock this vault",
             )?
             .context("quick unlock is not enabled for the current vault")?;
-        let credentials: VaultCredentials =
-            serde_json::from_slice(&bytes).context("failed to decode quick unlock credentials")?;
         let storage_key = quick_unlock_storage_key(&current_vault_ref_id);
+        let credentials: VaultCredentials = match serde_json::from_slice(&bytes)
+            .context("failed to decode quick unlock credentials")
+        {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                let _ = self.quick_unlock.delete(&storage_key);
+                return Err(error);
+            }
+        };
         match self.unlock_current_vault(
             credentials.password.as_deref(),
             credentials.key_file_path.as_deref(),
@@ -6011,6 +6018,51 @@ mod tests {
                 "enable:Enable quick unlock for this vault",
                 "unlock:Unlock this vault",
             ]
+        );
+    }
+
+    #[test]
+    fn corrupt_quick_unlock_credentials_are_deleted_without_unlocking_or_masking_decode_error() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone()).with_failures(
+                MemoryQuickUnlockFailures {
+                    delete: true,
+                    ..MemoryQuickUnlockFailures::default()
+                },
+            ),
+        );
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        let storage_key = quick_unlock_storage_key(
+            runtime
+                .session
+                .current_vault_ref_id()
+                .expect("current vault reference"),
+        );
+        runtime
+            .quick_unlock
+            .enable(
+                &storage_key,
+                b"legacy plaintext credential",
+                "Seed test data",
+            )
+            .unwrap();
+        runtime.lock_session();
+        operations.borrow_mut().clear();
+
+        let error = runtime
+            .unlock_current_vault_with_quick_unlock()
+            .unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("failed to decode quick unlock credentials"),
+            "{error:?}"
+        );
+        assert!(!runtime.session_state().unlocked);
+        assert_eq!(
+            operations.borrow().as_slice(),
+            ["unlock:Unlock this vault", "delete"]
         );
     }
 

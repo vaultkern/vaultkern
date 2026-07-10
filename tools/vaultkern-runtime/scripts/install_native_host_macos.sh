@@ -1,6 +1,73 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+signature_team_identifier() {
+  local app_bundle="$1"
+  local details
+  local line
+
+  if ! details="$(codesign --display --verbose=4 "${app_bundle}" 2>&1)"; then
+    echo "error: failed to inspect app signature TeamIdentifier: ${app_bundle}" >&2
+    echo "${details}" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    if [[ "${line}" == TeamIdentifier=* ]]; then
+      printf '%s\n' "${line#TeamIdentifier=}"
+      return 0
+    fi
+  done <<< "${details}"
+  echo "error: app signature has no TeamIdentifier field: ${app_bundle}" >&2
+  return 1
+}
+
+signature_designated_requirement() {
+  local app_bundle="$1"
+  local details
+  local line
+
+  if ! details="$(codesign --display --requirements - "${app_bundle}" 2>&1)"; then
+    echo "error: failed to inspect app designated requirement: ${app_bundle}" >&2
+    echo "${details}" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    if [[ "${line}" == *"designated => "* ]]; then
+      printf '%s\n' "${line#*designated => }"
+      return 0
+    fi
+  done <<< "${details}"
+  echo "error: app signature has no designated requirement: ${app_bundle}" >&2
+  return 1
+}
+
+validate_upgrade_signature_continuity() {
+  local existing_bundle="$1"
+  local incoming_bundle="$2"
+  local existing_team
+  local incoming_team
+  local existing_requirement
+  local incoming_requirement
+
+  existing_team="$(signature_team_identifier "${existing_bundle}")"
+  incoming_team="$(signature_team_identifier "${incoming_bundle}")"
+
+  if [[ -n "${existing_team}" && "${existing_team}" != "not set" ]]; then
+    if [[ "${incoming_team}" != "${existing_team}" ]]; then
+      echo "error: refusing native host upgrade due to TeamIdentifier drift: existing=${existing_team}, incoming=${incoming_team}" >&2
+      return 1
+    fi
+    existing_requirement="$(signature_designated_requirement "${existing_bundle}")"
+    incoming_requirement="$(signature_designated_requirement "${incoming_bundle}")"
+    if [[ "${incoming_requirement}" != "${existing_requirement}" ]]; then
+      echo "error: refusing native host upgrade due to designated requirement drift" >&2
+      return 1
+    fi
+  elif [[ "${incoming_team}" == "not set" ]]; then
+    echo "warning: ad-hoc-to-ad-hoc development upgrade; persisted Quick Unlock continuity is not guaranteed" >&2
+  fi
+}
+
 if [[ $# -ne 2 || -z "$1" ]]; then
   echo "usage: install_native_host_macos.sh <extension-id> <VaultKern Native.app>" >&2
   exit 1
@@ -41,6 +108,7 @@ staging_bundle="$(mktemp -d "${destination_parent}/.VaultKern Native.staging.XXX
 backup_bundle=""
 tmp_manifest=""
 installation_committed=0
+destination_replaced=0
 
 cleanup() {
   status=$?
@@ -51,14 +119,17 @@ cleanup() {
   if [[ -n "${staging_bundle}" ]]; then
     rm -rf -- "${staging_bundle}" || true
   fi
+  if [[ "${installation_committed}" -ne 1 && "${destination_replaced}" -eq 1 ]]; then
+    rm -rf -- "${app_destination}" || true
+  fi
   if [[ -n "${backup_bundle}" && -e "${backup_bundle}" ]]; then
-    if [[ "${installation_committed}" -eq 1 ]]; then
-      rm -rf -- "${backup_bundle}" || true
-    else
+    if [[ "${installation_committed}" -ne 1 ]]; then
       rm -rf -- "${app_destination}" || true
       if ! mv -- "${backup_bundle}" "${app_destination}"; then
         echo "error: failed to restore previous app bundle: ${backup_bundle}" >&2
       fi
+    else
+      rm -rf -- "${backup_bundle}" || true
     fi
   fi
   exit "${status}"
@@ -69,12 +140,18 @@ ditto "${source_bundle}" "${staging_bundle}"
 codesign --verify --strict "${staging_bundle}"
 
 if [[ -e "${app_destination}" || -L "${app_destination}" ]]; then
+  codesign --verify --strict "${app_destination}"
+  validate_upgrade_signature_continuity "${app_destination}" "${staging_bundle}"
+fi
+
+if [[ -e "${app_destination}" || -L "${app_destination}" ]]; then
   backup_bundle="$(mktemp -d "${destination_parent}/.VaultKern Native.backup.XXXXXX")"
   rmdir "${backup_bundle}"
   mv -- "${app_destination}" "${backup_bundle}"
 fi
 mv -- "${staging_bundle}" "${app_destination}"
 staging_bundle=""
+destination_replaced=1
 
 installed_executable="${app_destination}/Contents/MacOS/vaultkern-runtime"
 if [[ ! -x "${installed_executable}" ]]; then

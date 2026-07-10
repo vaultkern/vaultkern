@@ -5,6 +5,59 @@ usage() {
   echo "usage: package_macos.sh <aarch64-apple-darwin|x86_64-apple-darwin> [--output-root <path>] [--prebuilt-binary <path>] [--release-signing]" >&2
 }
 
+validate_runtime_binary() {
+  local runtime_binary="$1"
+  local target="$2"
+  local expected_architecture
+  local architecture_info
+  local architectures
+  local build_versions
+  local field
+  local value
+  local platforms=""
+  local minimum_versions=""
+
+  case "${target}" in
+    aarch64-apple-darwin) expected_architecture="arm64" ;;
+    x86_64-apple-darwin) expected_architecture="x86_64" ;;
+    *)
+      echo "error: cannot validate binary for unsupported target: ${target}" >&2
+      return 1
+      ;;
+  esac
+
+  if ! architecture_info="$(lipo -info "${runtime_binary}" 2>/dev/null)"; then
+    echo "error: runtime binary is not a thin Mach-O: ${runtime_binary}" >&2
+    return 1
+  fi
+  architectures="$(lipo -archs "${runtime_binary}" 2>/dev/null)"
+  if [[ "${architecture_info}" != "Non-fat file: "*" is architecture: ${expected_architecture}" || "${architectures}" != "${expected_architecture}" ]]; then
+    echo "error: expected thin ${expected_architecture} Mach-O for ${target}, found architectures: ${architectures}" >&2
+    return 1
+  fi
+
+  if ! build_versions="$(vtool -show-build "${runtime_binary}" 2>&1)"; then
+    echo "error: failed to inspect runtime Mach-O build version" >&2
+    echo "${build_versions}" >&2
+    return 1
+  fi
+  while read -r field value _; do
+    case "${field}" in
+      platform) platforms="${platforms}${platforms:+ }${value}" ;;
+      minos) minimum_versions="${minimum_versions}${minimum_versions:+ }${value}" ;;
+    esac
+  done <<< "${build_versions}"
+
+  if [[ "${platforms}" != "MACOS" ]]; then
+    echo "error: expected macOS platform in runtime Mach-O, found: ${platforms:-none}" >&2
+    return 1
+  fi
+  if [[ "${minimum_versions}" != "13.0" ]]; then
+    echo "error: runtime binary minimum macOS version must be exactly 13.0, found: ${minimum_versions:-none}" >&2
+    return 1
+  fi
+}
+
 resolve_release_signing_identity() {
   local requested_identity="$1"
   local requested_hash
@@ -202,6 +255,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 signing_identity="${VAULTKERN_CODESIGN_IDENTITY:-}"
+expected_team_identifier="${VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID:-}"
 resolved_signing_identity="${signing_identity}"
 resolved_team_identifier=""
 if [[ "${release_signing}" -eq 1 && ( -z "${signing_identity}" || "${signing_identity}" == "-" ) ]]; then
@@ -209,11 +263,19 @@ if [[ "${release_signing}" -eq 1 && ( -z "${signing_identity}" || "${signing_ide
   exit 1
 fi
 if [[ "${release_signing}" -eq 1 ]]; then
+  if [[ -z "${expected_team_identifier}" ]]; then
+    echo "error: release signing requires an independent VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID" >&2
+    exit 1
+  fi
   if ! resolved_signing_record="$(resolve_release_signing_identity "${signing_identity}")"; then
     exit 1
   fi
   resolved_signing_identity="${resolved_signing_record%%$'\t'*}"
   resolved_team_identifier="${resolved_signing_record#*$'\t'}"
+  if [[ "${resolved_team_identifier}" != "${expected_team_identifier}" ]]; then
+    echo "error: selected Developer ID TeamIdentifier ${resolved_team_identifier} does not match VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID ${expected_team_identifier}" >&2
+    exit 1
+  fi
 fi
 
 if [[ -z "${prebuilt_binary}" ]]; then
@@ -234,6 +296,7 @@ if [[ ! -f "${runtime_binary}" ]]; then
   echo "error: vaultkern-runtime binary not found: ${runtime_binary}" >&2
   exit 1
 fi
+validate_runtime_binary "${runtime_binary}" "${target}"
 
 app_bundle="${output_root}/${target}/VaultKern Native.app"
 contents_dir="${app_bundle}/Contents"
@@ -248,7 +311,7 @@ if [[ -z "${signing_identity}" || "${signing_identity}" == "-" ]]; then
   codesign --force --sign - "${app_bundle}"
 else
   codesign --force --options runtime --timestamp --sign "${resolved_signing_identity}" "${app_bundle}"
-  if ! validate_release_signature "${app_bundle}" "${resolved_team_identifier}"; then
+  if ! validate_release_signature "${app_bundle}" "${expected_team_identifier}"; then
     rm -rf -- "${app_bundle}"
     exit 1
   fi

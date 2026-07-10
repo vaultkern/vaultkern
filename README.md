@@ -70,10 +70,11 @@ Development bundles are signed ad hoc when no identity is supplied. Release pack
 
 ```sh
 VAULTKERN_CODESIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
+  VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID="TEAMID" \
   tools/vaultkern-runtime/scripts/package_macos.sh aarch64-apple-darwin --release-signing
 ```
 
-Release mode resolves the requested identity before building and rejects ad-hoc, `Apple Development`, and self-signed identities.
+Release mode resolves the requested identity before building and rejects ad-hoc, `Apple Development`, and self-signed identities. `VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID` is an independent pinned value: packaging fails if either the selected certificate or the completed signature has a different Team ID.
 
 Install the signed bundle for the current user with the Chrome extension ID shown on `chrome://extensions`:
 
@@ -83,7 +84,7 @@ tools/vaultkern-runtime/scripts/install_native_host_macos.sh \
   "target/vaultkern-runtime-macos/aarch64-apple-darwin/VaultKern Native.app"
 ```
 
-The installer copies the app to `~/Library/Application Support/VaultKern/VaultKern Native.app` and atomically writes `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.vaultkern.runtime.json`. Reload the extension after installing the host. The bundle identifier remains `com.vaultkern.runtime` across architecture-specific builds and signed upgrades.
+The installer copies the app to `~/Library/Application Support/VaultKern/VaultKern Native.app` and atomically writes `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.vaultkern.runtime.json`. Reload the extension after installing the host. On upgrades from a Developer ID-signed installation, the installer requires the incoming bundle to preserve both its Team ID and designated requirement so persisted Quick Unlock rights retain the same code-signing identity. Ad-hoc-to-ad-hoc development upgrades remain allowed but emit a warning because persisted-right continuity is not guaranteed. The bundle identifier remains `com.vaultkern.runtime` across architecture-specific builds and signed upgrades.
 
 ## OneDrive Support
 
