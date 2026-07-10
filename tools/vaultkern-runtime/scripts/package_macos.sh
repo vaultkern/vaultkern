@@ -60,6 +60,8 @@ validate_release_signature() {
   local has_team_identifier=0
   local timestamp
   local designated_requirement=""
+  local explicit_requirement
+  local verification_output
 
   if [[ -z "${expected_team_identifier}" || "${expected_team_identifier}" == "not set" ]]; then
     echo "error: release signature has no selected TeamIdentifier" >&2
@@ -134,6 +136,13 @@ validate_release_signature() {
   fi
   if [[ "${designated_requirement}" != *"anchor apple generic"* ]]; then
     echo "error: designated requirement is missing anchor apple generic" >&2
+    return 1
+  fi
+
+  explicit_requirement="identifier \"com.vaultkern.runtime\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"${expected_team_identifier}\""
+  if ! verification_output="$(codesign --verify --strict "-R=${explicit_requirement}" "${app_bundle}" 2>&1)"; then
+    echo "error: explicit Developer ID requirement verification failed" >&2
+    echo "${verification_output}" >&2
     return 1
   fi
 }

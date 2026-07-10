@@ -73,12 +73,13 @@ fn write_executable(path: &Path, contents: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn fake_signing_tools(temp: &TempDir) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+fn fake_signing_tools(temp: &TempDir) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
     let fake_bin = temp.path().join("fake-signing-bin");
     std::fs::create_dir(&fake_bin).unwrap();
     let security_log = temp.path().join("security.log");
     let codesign_log = temp.path().join("codesign.log");
     let codesign_display_log = temp.path().join("codesign-display.log");
+    let codesign_verify_log = temp.path().join("codesign-verify.log");
 
     write_executable(
         &fake_bin.join("security"),
@@ -89,6 +90,18 @@ fn fake_signing_tools(temp: &TempDir) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     write_executable(
         &fake_bin.join("codesign"),
         r#"#!/bin/sh
+if [ "$1" = "--verify" ]; then
+  : > "$VAULTKERN_TEST_CODESIGN_VERIFY_LOG"
+  for argument in "$@"; do
+    printf '%s\n' "$argument" >> "$VAULTKERN_TEST_CODESIGN_VERIFY_LOG"
+  done
+  if [ "${VAULTKERN_TEST_SIGNATURE_MODE:-valid}" = "spoofed" ]; then
+    echo 'explicit Developer ID requirement failed' >&2
+    exit 3
+  fi
+  exit 0
+fi
+
 if [ "$1" = "--display" ]; then
   printf 'call' >> "$VAULTKERN_TEST_CODESIGN_DISPLAY_LOG"
   for argument in "$@"; do
@@ -102,7 +115,8 @@ Executable=/tmp/VaultKern Native.app/Contents/MacOS/vaultkern-runtime
 Identifier=com.vaultkern.runtime
 CodeDirectory v=20500 size=512 flags=0x10000(runtime) hashes=8+2 location=embedded
 Authority=Developer ID Application: VaultKern Spoof (SPOOFTEAM1)
-Authority=VaultKern Self Signed
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
 Timestamp=Jul 11, 2026 at 12:00:00
 TeamIdentifier=SPOOFTEAM1
 EOF
@@ -136,7 +150,13 @@ exec /usr/bin/codesign --force --sign - "$bundle"
 "#,
     );
 
-    (fake_bin, security_log, codesign_log, codesign_display_log)
+    (
+        fake_bin,
+        security_log,
+        codesign_log,
+        codesign_display_log,
+        codesign_verify_log,
+    )
 }
 
 fn assert_success(output: Output, action: &str) {
@@ -336,7 +356,8 @@ fn release_signing_resolves_developer_id_name_and_sha1_hash() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("home");
     std::fs::create_dir(&home).unwrap();
-    let (fake_bin, security_log, codesign_log, codesign_display_log) = fake_signing_tools(&temp);
+    let (fake_bin, security_log, codesign_log, codesign_display_log, codesign_verify_log) =
+        fake_signing_tools(&temp);
 
     for (case, requested_identity) in [
         ("name", DEVELOPER_ID_NAME.to_owned()),
@@ -354,6 +375,7 @@ fn release_signing_resolves_developer_id_name_and_sha1_hash() {
             .env("VAULTKERN_TEST_SECURITY_LOG", &security_log)
             .env("VAULTKERN_TEST_CODESIGN_LOG", &codesign_log)
             .env("VAULTKERN_TEST_CODESIGN_DISPLAY_LOG", &codesign_display_log)
+            .env("VAULTKERN_TEST_CODESIGN_VERIFY_LOG", &codesign_verify_log)
             .env("VAULTKERN_TEST_SIGNATURE_MODE", "valid")
             .output()
             .unwrap();
@@ -374,6 +396,22 @@ fn release_signing_resolves_developer_id_name_and_sha1_hash() {
         let display_calls = std::fs::read_to_string(&codesign_display_log).unwrap();
         assert!(display_calls.contains("call\t--display\t--verbose=4"));
         assert!(display_calls.contains("call\t--display\t--requirements\t-"));
+        let verify_args = std::fs::read_to_string(&codesign_verify_log).unwrap();
+        assert!(verify_args.lines().any(|line| line == "--verify"));
+        assert!(verify_args.lines().any(|line| line == "--strict"));
+        let explicit_requirement = verify_args
+            .lines()
+            .find(|line| line.starts_with("-R="))
+            .expect("codesign verify must receive an explicit requirement");
+        for required in [
+            "identifier \"com.vaultkern.runtime\"",
+            "anchor apple generic",
+            "certificate 1[field.1.2.840.113635.100.6.2.6] exists",
+            "certificate leaf[field.1.2.840.113635.100.6.1.13] exists",
+            "certificate leaf[subject.OU] = \"TEAMID1234\"",
+        ] {
+            assert!(explicit_requirement.contains(required));
+        }
     }
 }
 
@@ -382,7 +420,7 @@ fn release_signing_rejects_non_developer_id_identities() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("home");
     std::fs::create_dir(&home).unwrap();
-    let (fake_bin, security_log, codesign_log, codesign_display_log) = fake_signing_tools(&temp);
+    let (fake_bin, security_log, codesign_log, codesign_display_log, _) = fake_signing_tools(&temp);
 
     for (case, requested_identity) in [
         ("apple-development", APPLE_DEVELOPMENT_NAME),
@@ -419,7 +457,8 @@ fn release_signing_rejects_spoofed_developer_id_after_signing() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("home");
     std::fs::create_dir(&home).unwrap();
-    let (fake_bin, security_log, codesign_log, codesign_display_log) = fake_signing_tools(&temp);
+    let (fake_bin, security_log, codesign_log, codesign_display_log, codesign_verify_log) =
+        fake_signing_tools(&temp);
     let output_root = temp.path().join("packages-spoofed");
 
     let output = script_command("package_macos.sh")
@@ -433,6 +472,7 @@ fn release_signing_rejects_spoofed_developer_id_after_signing() {
         .env("VAULTKERN_TEST_SECURITY_LOG", &security_log)
         .env("VAULTKERN_TEST_CODESIGN_LOG", &codesign_log)
         .env("VAULTKERN_TEST_CODESIGN_DISPLAY_LOG", &codesign_display_log)
+        .env("VAULTKERN_TEST_CODESIGN_VERIFY_LOG", &codesign_verify_log)
         .env("VAULTKERN_TEST_SIGNATURE_MODE", "spoofed")
         .output()
         .unwrap();
@@ -445,7 +485,7 @@ fn release_signing_rejects_spoofed_developer_id_after_signing() {
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("Developer ID Certification Authority")
+            .contains("explicit Developer ID requirement")
     );
 }
 
