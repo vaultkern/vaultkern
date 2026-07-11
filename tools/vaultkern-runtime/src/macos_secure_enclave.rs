@@ -49,8 +49,24 @@ unsafe extern "C" {
         salt_length: usize,
         shared_info: *const u8,
         shared_info_length: usize,
+        localized_reason: *const u8,
+        localized_reason_length: usize,
         private_key_out: *mut *mut c_void,
         private_key_length_out: *mut usize,
+        peer_public_key_out: *mut *mut c_void,
+        peer_public_key_length_out: *mut usize,
+        kek_out: *mut *mut c_void,
+        kek_length_out: *mut usize,
+        error_out: *mut *mut c_void,
+        error_length_out: *mut usize,
+    ) -> i32;
+    fn vaultkern_macos_secure_enclave_derive_for_refresh(
+        private_key: *const u8,
+        private_key_length: usize,
+        salt: *const u8,
+        salt_length: usize,
+        shared_info: *const u8,
+        shared_info_length: usize,
         peer_public_key_out: *mut *mut c_void,
         peer_public_key_length_out: *mut usize,
         kek_out: *mut *mut c_void,
@@ -118,6 +134,14 @@ impl BridgeError {
 
     pub(super) fn diagnostic(&self) -> &str {
         &self.diagnostic
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(kind: BridgeErrorKind, diagnostic: impl Into<String>) -> Self {
+        Self {
+            kind,
+            diagnostic: diagnostic.into(),
+        }
     }
 }
 
@@ -212,6 +236,10 @@ impl RawOutput {
 pub(super) struct SensitiveBytes(Vec<u8>);
 
 impl SensitiveBytes {
+    pub(super) fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
     pub(super) fn expose(&self) -> &[u8] {
         &self.0
     }
@@ -248,6 +276,11 @@ impl Secret32 {
     pub(super) fn expose(&self) -> &[u8; 32] {
         &self.0
     }
+
+    #[cfg(test)]
+    pub(super) fn for_test(value: [u8; 32]) -> Self {
+        Self(value)
+    }
 }
 
 impl fmt::Debug for Secret32 {
@@ -280,6 +313,39 @@ impl CreatedKeyMaterial {
 
     pub(super) fn kek(&self) -> &Secret32 {
         &self.kek
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(private_key: Vec<u8>, peer_public_key: Vec<u8>, kek: [u8; 32]) -> Self {
+        Self {
+            private_key: SensitiveBytes::new(private_key),
+            peer_public_key,
+            kek: Secret32::for_test(kek),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct WrappingKeyMaterial {
+    peer_public_key: Vec<u8>,
+    kek: Secret32,
+}
+
+impl WrappingKeyMaterial {
+    pub(super) fn peer_public_key(&self) -> &[u8] {
+        &self.peer_public_key
+    }
+
+    pub(super) fn kek(&self) -> &Secret32 {
+        &self.kek
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(peer_public_key: Vec<u8>, kek: [u8; 32]) -> Self {
+        Self {
+            peer_public_key,
+            kek: Secret32::for_test(kek),
+        }
     }
 }
 
@@ -412,7 +478,9 @@ pub(super) fn delete_quick_unlock_record(record_id: &str) -> Result<(), BridgeEr
 pub(super) fn create_key_material(
     salt: &[u8],
     shared_info: &[u8],
+    localized_reason: &str,
 ) -> Result<CreatedKeyMaterial, BridgeError> {
+    let reason = localized_reason.as_bytes();
     let mut private_key = RawOutput::default();
     let mut peer_public_key = RawOutput::default();
     let mut kek = RawOutput::default();
@@ -426,6 +494,8 @@ pub(super) fn create_key_material(
             salt.len(),
             ffi_pointer(shared_info),
             shared_info.len(),
+            ffi_pointer(reason),
+            reason.len(),
             &mut private_key.pointer,
             &mut private_key.length,
             &mut peer_public_key.pointer,
@@ -457,6 +527,52 @@ pub(super) fn create_key_material(
         private_key,
         peer_public_key,
         kek,
+    })
+}
+
+pub(super) fn derive_key_material_for_refresh(
+    private_key: &[u8],
+    salt: &[u8],
+    shared_info: &[u8],
+) -> Result<WrappingKeyMaterial, BridgeError> {
+    let mut peer_public_key = RawOutput::default();
+    let mut kek = RawOutput::default();
+    let mut diagnostic = RawOutput::default();
+
+    // SAFETY: Every input remains alive for this synchronous call and all
+    // output slots point to initialized stack storage.
+    let status = unsafe {
+        vaultkern_macos_secure_enclave_derive_for_refresh(
+            ffi_pointer(private_key),
+            private_key.len(),
+            ffi_pointer(salt),
+            salt.len(),
+            ffi_pointer(shared_info),
+            shared_info.len(),
+            &mut peer_public_key.pointer,
+            &mut peer_public_key.length,
+            &mut kek.pointer,
+            &mut kek.length,
+            &mut diagnostic.pointer,
+            &mut diagnostic.length,
+        )
+    };
+
+    // SAFETY: Swift leaves each output null or transfers it to the matching
+    // zeroizing free function.
+    let peer_public_key = unsafe { peer_public_key.into_foreign() };
+    let kek = unsafe { kek.into_foreign() };
+    let diagnostic = unsafe { diagnostic.into_foreign() };
+    if status != STATUS_OK {
+        return Err(BridgeError::from_status(
+            status,
+            diagnostic.diagnostic_or_fallback(status),
+        ));
+    }
+
+    Ok(WrappingKeyMaterial {
+        peer_public_key: peer_public_key.to_vec("peer public key")?,
+        kek: kek.to_secret32("KEK")?,
     })
 }
 

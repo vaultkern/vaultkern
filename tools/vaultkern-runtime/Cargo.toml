@@ -8,7 +8,7 @@ version.workspace = true
 external-fixtures = []
 
 [dependencies]
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 anyhow = "1.0"
 base64.workspace = true
 p256.workspace = true
@@ -27,6 +27,7 @@ windows = { version = "0.62", features = ["Security_Credentials_UI"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+aes = { version = "0.8", features = ["zeroize"] }
 block2 = "0.6.2"
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
@@ -36,6 +37,7 @@ objc2-local-authentication = { version = "0.3.2", default-features = false, feat
     "std", "block2", "LABiometryType", "LAContext", "LAError", "LAPersistedRight",
     "LARequirement", "LARight", "LARightStore", "LASecret",
 ] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize.workspace = true
 
 [dev-dependencies]

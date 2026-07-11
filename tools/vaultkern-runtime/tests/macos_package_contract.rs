@@ -131,7 +131,7 @@ fn macos_bridge_source_contract_uses_secure_enclave_key_agreement() {
         ".privateKeyUsage",
         ".biometryCurrentSet",
         "kSecAttrAccessibleWhenUnlockedThisDeviceOnly",
-        "P256.KeyAgreement.PrivateKey()",
+        "P256.KeyAgreement.PrivateKey(compactRepresentable: false)",
         "hkdfDerivedSymmetricKey",
         "SHA256.self",
         "outputByteCount: 32",
@@ -144,6 +144,54 @@ fn macos_bridge_source_contract_uses_secure_enclave_key_agreement() {
             "Swift bridge is missing {required}"
         );
     }
+}
+
+#[test]
+fn macos_bridge_refreshes_wrapping_material_from_only_the_secure_enclave_public_key() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let refresh_start = swift
+        .find("@_cdecl(\"vaultkern_macos_secure_enclave_derive_for_refresh\")")
+        .expect("the public-side refresh C ABI must exist");
+    let restore_start = swift[refresh_start..]
+        .find("@_cdecl(\"vaultkern_macos_secure_enclave_restore_and_derive\")")
+        .map(|offset| refresh_start + offset)
+        .expect("the private-side restore C ABI must follow refresh");
+    let refresh = &swift[refresh_start..restore_start];
+
+    for required in [
+        "context.interactionNotAllowed = true",
+        "authenticationContext: context",
+        "P256.KeyAgreement.PrivateKey(compactRepresentable: false)",
+        "peerPrivateKey.sharedSecretFromKeyAgreement(with: secureEnclaveKey.publicKey)",
+        "peerPrivateKey.publicKey.rawRepresentation",
+    ] {
+        assert!(refresh.contains(required), "refresh is missing {required}");
+    }
+    assert!(
+        !refresh.contains("secureEnclaveKey.sharedSecretFromKeyAgreement"),
+        "refresh must never perform a Secure Enclave private-key operation"
+    );
+}
+
+#[test]
+fn macos_secure_enclave_creation_uses_the_requested_touch_id_reason() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let create_start = swift
+        .find("@_cdecl(\"vaultkern_macos_secure_enclave_create\")")
+        .expect("the create C ABI must exist");
+    let refresh_start = swift[create_start..]
+        .find("@_cdecl(\"vaultkern_macos_secure_enclave_derive_for_refresh\")")
+        .map(|offset| create_start + offset)
+        .expect("the refresh C ABI must follow create");
+    let create = &swift[create_start..refresh_start];
+
+    assert!(create.contains("let reason = try copiedString("));
+    assert!(create.contains("context.localizedReason = reason"));
+    assert!(create.contains("authenticationContext: context"));
 }
 
 #[test]
@@ -235,10 +283,14 @@ fn macos_bridge_wipes_private_key_data_copies_on_every_exit() {
     let restore_start = swift
         .find("@_cdecl(\"vaultkern_macos_secure_enclave_restore_and_derive\")")
         .expect("restore C ABI must exist");
+    let refresh_start = swift
+        .find("@_cdecl(\"vaultkern_macos_secure_enclave_derive_for_refresh\")")
+        .expect("refresh C ABI must exist");
     let free_start = swift
         .find("@_cdecl(\"vaultkern_macos_buffer_free\")")
         .expect("buffer free C ABI must follow restore");
-    let create = &swift[create_start..restore_start];
+    let create = &swift[create_start..refresh_start];
+    let refresh = &swift[refresh_start..restore_start];
     let restore = &swift[restore_start..free_start];
 
     let create_copy = create
@@ -258,6 +310,17 @@ fn macos_bridge_wipes_private_key_data_copies_on_every_exit() {
         !create.contains("publish(\n            secureEnclaveKey.dataRepresentation,"),
         "create must not publish an unwipeable temporary Data value"
     );
+
+    let refresh_copy = refresh
+        .find("var privateKeyData = try copiedData(")
+        .expect("refresh must hold mutable private-key input Data");
+    let refresh_defer = refresh
+        .find("defer { wipeData(&privateKeyData) }")
+        .expect("refresh must defer wiping its private-key input");
+    let refresh_salt = refresh
+        .find("let salt = try copiedData(")
+        .expect("refresh salt parsing must follow private-key input");
+    assert!(refresh_copy < refresh_defer && refresh_defer < refresh_salt);
 
     let restore_copy = restore
         .find("var privateKeyData = try copiedData(")
@@ -338,10 +401,8 @@ fn macos_quick_unlock_contains_never_requests_or_publishes_secret_data() {
         .expect("the record load C ABI must follow contains");
     let contains = &swift[contains_start..load_start];
 
-    assert!(
-        contains.contains("SecItemCopyMatching(query as CFDictionary, nil)"),
-        "contains must ask only whether a matching record exists"
-    );
+    assert!(contains.contains("copyQuickUnlockRecordItem("));
+    assert!(contains.contains("validateQuickUnlockRecordAccess(existingItem)"));
     assert!(
         !contains.contains("kSecReturnData"),
         "contains must never request the opaque record bytes"
@@ -350,6 +411,107 @@ fn macos_quick_unlock_contains_never_requests_or_publishes_secret_data() {
         !contains.contains("publish("),
         "contains must never return an allocated secret buffer"
     );
+}
+
+#[test]
+fn macos_quick_unlock_acl_inspection_globally_suppresses_ui_under_a_lock() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let keychain_start = swift
+        .find("// MARK: - Executable-bound Quick Unlock Keychain")
+        .expect("the legacy login Keychain implementation must exist");
+    let keychain_end = swift[keychain_start..]
+        .find("// MARK: - Secure Enclave C ABI")
+        .map(|offset| keychain_start + offset)
+        .expect("the Secure Enclave bridge must follow the Keychain implementation");
+    let keychain = &swift[keychain_start..keychain_end];
+
+    for required in [
+        "private let securityInteractionLock = NSRecursiveLock()",
+        "SecKeychainGetUserInteractionAllowed(",
+        "SecKeychainSetUserInteractionAllowed(false)",
+        "let bodyResult: Result<T, Error>",
+        "let restoreStatus = SecKeychainSetUserInteractionAllowed(wasAllowed.boolValue)",
+        "securityInteractionLock.lock()",
+        "securityInteractionLock.unlock()",
+    ] {
+        assert!(
+            keychain.contains(required),
+            "Keychain guard is missing {required}"
+        );
+    }
+    assert!(
+        keychain
+            .matches("withKeychainUserInteractionDisabled {")
+            .count()
+            >= 4,
+        "every exported record operation must share the serialized global UI guard"
+    );
+}
+
+#[test]
+fn macos_secure_enclave_operations_share_the_global_keychain_interaction_lock() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    for (exported, next_exported) in [
+        (
+            "vaultkern_macos_secure_enclave_create",
+            "vaultkern_macos_secure_enclave_derive_for_refresh",
+        ),
+        (
+            "vaultkern_macos_secure_enclave_derive_for_refresh",
+            "vaultkern_macos_secure_enclave_restore_and_derive",
+        ),
+        (
+            "vaultkern_macos_secure_enclave_restore_and_derive",
+            "vaultkern_macos_buffer_free",
+        ),
+    ] {
+        let start = swift
+            .find(&format!("@_cdecl(\"{exported}\")"))
+            .unwrap_or_else(|| panic!("{exported} must exist"));
+        let end = swift[start..]
+            .find(&format!("@_cdecl(\"{next_exported}\")"))
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("{next_exported} must follow {exported}"));
+        let body = &swift[start..end];
+        assert!(
+            body.contains("securityInteractionLock.lock()"),
+            "{exported}"
+        );
+        assert!(
+            body.contains("securityInteractionLock.unlock()"),
+            "{exported}"
+        );
+    }
+}
+
+#[test]
+fn macos_quick_unlock_acl_validation_covers_delete_controllers() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let validation_start = swift
+        .find("private func validateQuickUnlockRecordAccess(")
+        .expect("the ACL validator must exist");
+    let store_start = swift[validation_start..]
+        .find("private func storeQuickUnlockRecord(")
+        .map(|offset| validation_start + offset)
+        .expect("store helper must follow ACL validation");
+    let validation = &swift[validation_start..store_start];
+
+    for required in [
+        "kSecACLAuthorizationDelete",
+        "kSecACLAuthorizationKeychainItemDelete",
+        "validateMutatingApplicationList(",
+    ] {
+        assert!(
+            validation.contains(required),
+            "ACL validation is missing {required}"
+        );
+    }
 }
 
 #[test]
@@ -517,8 +679,8 @@ fn macos_quick_unlock_keychain_operations_fail_instead_of_showing_keychain_ui() 
             .unwrap_or_else(|| panic!("{exported} C ABI must exist"));
         let body = &keychain[exported_start..];
         assert!(
-            body.contains("quickUnlockRecordQuery(recordID: recordID, keychain: keychain)"),
-            "{exported} must use the UI-suppressing, Keychain-scoped query"
+            body.contains("copyQuickUnlockRecordItem("),
+            "{exported} must use the UI-suppressing, Keychain-scoped item lookup"
         );
     }
 }
@@ -719,6 +881,37 @@ fn macos_rust_bridge_exposes_zeroizing_quick_unlock_record_storage() {
         load.contains("SensitiveBytes(record.to_vec(\"Quick Unlock record\")?)"),
         "loaded opaque bytes must immediately enter a zeroizing Rust owner"
     );
+}
+
+#[test]
+fn macos_envelope_moves_the_decoded_secure_enclave_blob_into_zeroizing_storage_first() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let provider = std::fs::read_to_string(runtime.join("src/providers/macos_quick_unlock.rs"))
+        .expect("the macOS Quick Unlock provider source must exist");
+    let decode_start = provider
+        .find("fn decode_envelope(")
+        .expect("the envelope decoder must exist");
+    let decoder = &provider[decode_start..];
+    let private_decode = decoder
+        .find("let private_key = decode_base64(")
+        .expect("the Secure Enclave representation must be decoded");
+    let private_owner = decoder
+        .find("let private_key = SensitiveBytes::new(private_key)")
+        .expect("the decoded representation must enter a zeroizing owner");
+    let peer_decode = decoder
+        .find("let peer_public_key = decode_base64(")
+        .expect("peer parsing must follow the private representation");
+    assert!(private_decode < private_owner && private_owner < peer_decode);
+}
+
+#[test]
+fn macos_runtime_zeroizes_serialized_and_decrypted_quick_unlock_credentials() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(runtime.join("src/runtime.rs"))
+        .expect("the runtime source must exist");
+
+    assert!(source.contains("use zeroize::Zeroizing;"));
+    assert!(source.matches("let bytes = Zeroizing::new(bytes);").count() >= 3);
 }
 
 #[test]

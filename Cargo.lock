@@ -36,6 +36,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures",
+ "zeroize",
 ]
 
 [[package]]
@@ -50,6 +51,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -3245,6 +3247,7 @@ dependencies = [
 name = "vaultkern-runtime"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "anyhow",
  "base64",
@@ -3255,6 +3258,7 @@ dependencies = [
  "objc2-local-authentication",
  "p256",
  "psl",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sha2",

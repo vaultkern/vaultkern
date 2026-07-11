@@ -209,6 +209,7 @@ private func derivedKEK(
 
 private let quickUnlockService = "com.vaultkern.runtime.quick-unlock"
 private let quickUnlockLabel = "VaultKern Quick Unlock"
+private let securityInteractionLock = NSRecursiveLock()
 
 private func securityError(_ status: OSStatus, operation: String) -> NSError {
     let detail = SecCopyErrorMessageString(status, nil) as String?
@@ -220,10 +221,73 @@ private func securityError(_ status: OSStatus, operation: String) -> NSError {
     )
 }
 
+private func combinedSecurityError(primary: Error, secondary: Error) -> NSError {
+    let primaryError = primary as NSError
+    let secondaryError = secondary as NSError
+    return NSError(
+        domain: "com.vaultkern.runtime.security-bridge",
+        code: 1,
+        userInfo: [
+            NSLocalizedDescriptionKey:
+                "\(diagnostic(for: primary)) | \(diagnostic(for: secondary))",
+            NSUnderlyingErrorKey: primaryError,
+            NSMultipleUnderlyingErrorsKey: [primaryError, secondaryError],
+        ]
+    )
+}
+
 private func checkSecurityStatus(_ status: OSStatus, operation: String) throws {
     guard status == errSecSuccess else {
         throw securityError(status, operation: operation)
     }
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func withKeychainUserInteractionDisabled<T>(_ body: () throws -> T) throws -> T {
+    securityInteractionLock.lock()
+    defer { securityInteractionLock.unlock() }
+
+    var wasAllowed = DarwinBoolean(false)
+    try checkSecurityStatus(
+        SecKeychainGetUserInteractionAllowed(&wasAllowed),
+        operation: "read Keychain user-interaction state"
+    )
+    let disableStatus = SecKeychainSetUserInteractionAllowed(false)
+    if disableStatus != errSecSuccess {
+        let disableError = securityError(
+            disableStatus,
+            operation: "disable Keychain user interaction"
+        )
+        let restoreStatus = SecKeychainSetUserInteractionAllowed(wasAllowed.boolValue)
+        if restoreStatus != errSecSuccess {
+            let restoreError = securityError(
+                restoreStatus,
+                operation: "restore Keychain user-interaction state after disable failure"
+            )
+            throw combinedSecurityError(primary: disableError, secondary: restoreError)
+        }
+        throw disableError
+    }
+
+    let bodyResult: Result<T, Error>
+    do {
+        bodyResult = .success(try body())
+    } catch {
+        bodyResult = .failure(error)
+    }
+
+    let restoreStatus = SecKeychainSetUserInteractionAllowed(wasAllowed.boolValue)
+    if restoreStatus != errSecSuccess {
+        let restoreError = securityError(
+            restoreStatus,
+            operation: "restore Keychain user-interaction state"
+        )
+        if case let .failure(primaryError) = bodyResult {
+            throw combinedSecurityError(primary: primaryError, secondary: restoreError)
+        }
+        throw restoreError
+    }
+    return try bodyResult.get()
 }
 
 @available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
@@ -476,6 +540,12 @@ private func validateQuickUnlockRecordAccess(_ item: SecKeychainItem) throws {
         ) || containsAuthorization(
             kSecACLAuthorizationKeychainItemModify,
             in: authorizations
+        ) || containsAuthorization(
+            kSecACLAuthorizationDelete,
+            in: authorizations
+        ) || containsAuthorization(
+            kSecACLAuthorizationKeychainItemDelete,
+            in: authorizations
         )
         guard readsSecret || mutatesAccess else { continue }
 
@@ -568,13 +638,15 @@ public func vaultkernMacosQuickUnlockRecordStore(
         guard !recordData.isEmpty else {
             throw BridgeInputError(message: "record must not be empty")
         }
-        let keychain = try defaultLoginKeychain()
-        try storeQuickUnlockRecord(
-            recordID: recordID,
-            recordData: recordData,
-            keychain: keychain
-        )
-        return statusOK
+        return try withKeychainUserInteractionDisabled {
+            let keychain = try defaultLoginKeychain()
+            try storeQuickUnlockRecord(
+                recordID: recordID,
+                recordData: recordData,
+                keychain: keychain
+            )
+            return statusOK
+        }
     } catch {
         return publishError(
             error,
@@ -596,17 +668,17 @@ public func vaultkernMacosQuickUnlockRecordContains(
     do {
         _ = try resetOutput(errorOut, errorLengthOut)
         let recordID = try quickUnlockRecordID(recordIDPointer, length: recordIDLength)
-        let keychain = try defaultLoginKeychain()
-        var query = quickUnlockRecordQuery(recordID: recordID, keychain: keychain)
-        query[kSecMatchLimit] = kSecMatchLimitOne
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        if status == errSecSuccess {
+        return try withKeychainUserInteractionDisabled {
+            let keychain = try defaultLoginKeychain()
+            guard let existingItem = try copyQuickUnlockRecordItem(
+                recordID: recordID,
+                keychain: keychain
+            ) else {
+                return statusMissingItem
+            }
+            try validateQuickUnlockRecordAccess(existingItem)
             return statusOK
         }
-        if status == errSecItemNotFound {
-            return statusMissingItem
-        }
-        throw securityError(status, operation: "check for the Quick Unlock record")
     } catch {
         return publishError(
             error,
@@ -631,31 +703,35 @@ public func vaultkernMacosQuickUnlockRecordLoad(
         let recordOutput = try resetOutput(recordOut, recordLengthOut)
         _ = try resetOutput(errorOut, errorLengthOut)
         let recordID = try quickUnlockRecordID(recordIDPointer, length: recordIDLength)
-        let keychain = try defaultLoginKeychain()
-        guard let existingItem = try copyQuickUnlockRecordItem(
-            recordID: recordID,
-            keychain: keychain
-        ) else {
-            throw securityError(errSecItemNotFound, operation: "load the Quick Unlock record")
+        return try withKeychainUserInteractionDisabled {
+            let keychain = try defaultLoginKeychain()
+            guard let existingItem = try copyQuickUnlockRecordItem(
+                recordID: recordID,
+                keychain: keychain
+            ) else {
+                throw securityError(errSecItemNotFound, operation: "load the Quick Unlock record")
+            }
+            try validateQuickUnlockRecordAccess(existingItem)
+            let fetchQuery: [CFString: Any] = [
+                kSecMatchItemList: [existingItem],
+                kSecMatchLimit: kSecMatchLimitOne,
+                kSecReturnData: true,
+                kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
+            ]
+            var result: CFTypeRef?
+            try checkSecurityStatus(
+                SecItemCopyMatching(fetchQuery as CFDictionary, &result),
+                operation: "load the Quick Unlock record"
+            )
+            guard var recordData = result as? Data else {
+                throw BridgeInputError(
+                    message: "Keychain returned a non-data Quick Unlock record"
+                )
+            }
+            defer { wipeData(&recordData) }
+            publish(recordData, pointerOut: recordOutput.0, lengthOut: recordOutput.1)
+            return statusOK
         }
-        try validateQuickUnlockRecordAccess(existingItem)
-        let fetchQuery: [CFString: Any] = [
-            kSecMatchItemList: [existingItem],
-            kSecMatchLimit: kSecMatchLimitOne,
-            kSecReturnData: true,
-            kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
-        ]
-        var result: CFTypeRef?
-        try checkSecurityStatus(
-            SecItemCopyMatching(fetchQuery as CFDictionary, &result),
-            operation: "load the Quick Unlock record"
-        )
-        guard var recordData = result as? Data else {
-            throw BridgeInputError(message: "Keychain returned a non-data Quick Unlock record")
-        }
-        defer { wipeData(&recordData) }
-        publish(recordData, pointerOut: recordOutput.0, lengthOut: recordOutput.1)
-        return statusOK
     } catch {
         return publishError(
             error,
@@ -677,16 +753,25 @@ public func vaultkernMacosQuickUnlockRecordDelete(
     do {
         _ = try resetOutput(errorOut, errorLengthOut)
         let recordID = try quickUnlockRecordID(recordIDPointer, length: recordIDLength)
-        let keychain = try defaultLoginKeychain()
-        let query = quickUnlockRecordQuery(recordID: recordID, keychain: keychain)
-        let status = SecItemDelete(query as CFDictionary)
-        if status == errSecSuccess {
+        return try withKeychainUserInteractionDisabled {
+            let keychain = try defaultLoginKeychain()
+            guard let existingItem = try copyQuickUnlockRecordItem(
+                recordID: recordID,
+                keychain: keychain
+            ) else {
+                return statusMissingItem
+            }
+            try validateQuickUnlockRecordAccess(existingItem)
+            let deleteQuery: [CFString: Any] = [
+                kSecMatchItemList: [existingItem],
+                kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
+            ]
+            try checkSecurityStatus(
+                SecItemDelete(deleteQuery as CFDictionary),
+                operation: "delete the Quick Unlock record"
+            )
             return statusOK
         }
-        if status == errSecItemNotFound {
-            return statusMissingItem
-        }
-        throw securityError(status, operation: "delete the Quick Unlock record")
     } catch {
         return publishError(
             error,
@@ -710,6 +795,8 @@ public func vaultkernMacosSecureEnclaveCreate(
     _ saltLength: Int,
     _ sharedInfoPointer: UnsafePointer<UInt8>?,
     _ sharedInfoLength: Int,
+    _ localizedReasonPointer: UnsafePointer<UInt8>?,
+    _ localizedReasonLength: Int,
     _ privateKeyOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
     _ privateKeyLengthOut: UnsafeMutablePointer<Int>?,
     _ peerPublicKeyOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
@@ -719,6 +806,8 @@ public func vaultkernMacosSecureEnclaveCreate(
     _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
     _ errorLengthOut: UnsafeMutablePointer<Int>?
 ) -> Int32 {
+    securityInteractionLock.lock()
+    defer { securityInteractionLock.unlock() }
     do {
         let privateKeyOutput = try resetOutput(privateKeyOut, privateKeyLengthOut)
         let peerPublicKeyOutput = try resetOutput(peerPublicKeyOut, peerPublicKeyLengthOut)
@@ -730,13 +819,24 @@ public func vaultkernMacosSecureEnclaveCreate(
             length: sharedInfoLength,
             label: "shared info"
         )
+        let reason = try copiedString(
+            localizedReasonPointer,
+            length: localizedReasonLength,
+            label: "localized reason"
+        )
+        guard !reason.isEmpty else {
+            throw BridgeInputError(message: "localized reason must not be empty")
+        }
 
+        let context = LAContext()
+        context.localizedReason = reason
+        defer { context.invalidate() }
         let secureEnclaveKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(
             compactRepresentable: false,
             accessControl: accessControl(),
-            authenticationContext: nil
+            authenticationContext: context
         )
-        let peerPrivateKey = P256.KeyAgreement.PrivateKey()
+        let peerPrivateKey = P256.KeyAgreement.PrivateKey(compactRepresentable: false)
         let kek = try derivedKEK(
             privateKey: secureEnclaveKey,
             peerPublicKey: peerPrivateKey.publicKey,
@@ -771,6 +871,74 @@ public func vaultkernMacosSecureEnclaveCreate(
     }
 }
 
+@_cdecl("vaultkern_macos_secure_enclave_derive_for_refresh")
+public func vaultkernMacosSecureEnclaveDeriveForRefresh(
+    _ privateKeyPointer: UnsafePointer<UInt8>?,
+    _ privateKeyLength: Int,
+    _ saltPointer: UnsafePointer<UInt8>?,
+    _ saltLength: Int,
+    _ sharedInfoPointer: UnsafePointer<UInt8>?,
+    _ sharedInfoLength: Int,
+    _ peerPublicKeyOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+    _ peerPublicKeyLengthOut: UnsafeMutablePointer<Int>?,
+    _ kekOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+    _ kekLengthOut: UnsafeMutablePointer<Int>?,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+    _ errorLengthOut: UnsafeMutablePointer<Int>?
+) -> Int32 {
+    securityInteractionLock.lock()
+    defer { securityInteractionLock.unlock() }
+    do {
+        let peerPublicKeyOutput = try resetOutput(peerPublicKeyOut, peerPublicKeyLengthOut)
+        let kekOutput = try resetOutput(kekOut, kekLengthOut)
+        _ = try resetOutput(errorOut, errorLengthOut)
+        var privateKeyData = try copiedData(
+            privateKeyPointer,
+            length: privateKeyLength,
+            label: "private key representation"
+        )
+        defer { wipeData(&privateKeyData) }
+        let salt = try copiedData(saltPointer, length: saltLength, label: "salt")
+        let sharedInfo = try copiedData(
+            sharedInfoPointer,
+            length: sharedInfoLength,
+            label: "shared info"
+        )
+
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        defer { context.invalidate() }
+        let secureEnclaveKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(
+            dataRepresentation: privateKeyData,
+            authenticationContext: context
+        )
+        let peerPrivateKey = P256.KeyAgreement.PrivateKey(compactRepresentable: false)
+        let sharedSecret = try peerPrivateKey.sharedSecretFromKeyAgreement(with: secureEnclaveKey.publicKey)
+        let kek = sharedSecret.hkdfDerivedSymmetricKey(
+            using: SHA256.self,
+            salt: salt,
+            sharedInfo: sharedInfo,
+            outputByteCount: 32
+        )
+        publish(
+            peerPrivateKey.publicKey.rawRepresentation,
+            pointerOut: peerPublicKeyOutput.0,
+            lengthOut: peerPublicKeyOutput.1
+        )
+        kek.withUnsafeBytes { bytes in
+            publish(bytes, pointerOut: kekOutput.0, lengthOut: kekOutput.1)
+        }
+        return statusOK
+    } catch {
+        return publishError(
+            error,
+            invalidationEligible: true,
+            errorOut: errorOut,
+            errorLengthOut: errorLengthOut
+        )
+    }
+}
+
 @_cdecl("vaultkern_macos_secure_enclave_restore_and_derive")
 public func vaultkernMacosSecureEnclaveRestoreAndDerive(
     _ privateKeyPointer: UnsafePointer<UInt8>?,
@@ -788,6 +956,8 @@ public func vaultkernMacosSecureEnclaveRestoreAndDerive(
     _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
     _ errorLengthOut: UnsafeMutablePointer<Int>?
 ) -> Int32 {
+    securityInteractionLock.lock()
+    defer { securityInteractionLock.unlock() }
     do {
         let kekOutput = try resetOutput(kekOut, kekLengthOut)
         _ = try resetOutput(errorOut, errorLengthOut)
@@ -819,6 +989,7 @@ public func vaultkernMacosSecureEnclaveRestoreAndDerive(
 
         let context = LAContext()
         context.localizedReason = reason
+        defer { context.invalidate() }
         let secureEnclaveKey = try SecureEnclave.P256.KeyAgreement.PrivateKey(
             dataRepresentation: privateKeyData,
             authenticationContext: context

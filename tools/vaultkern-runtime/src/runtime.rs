@@ -36,6 +36,8 @@ use vaultkern_runtime_protocol::{
     SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
     VaultSourceStatusDto,
 };
+#[cfg(target_os = "macos")]
+use zeroize::Zeroizing;
 
 use crate::command_loop::format_error_chain;
 use crate::match_fill::{FillMatchScore, score_entry_match};
@@ -862,9 +864,11 @@ impl Runtime {
 
         let bytes = serde_json::to_vec(&credentials)
             .context("failed to encode quick unlock credentials")?;
+        #[cfg(target_os = "macos")]
+        let bytes = Zeroizing::new(bytes);
         self.quick_unlock.enable(
             &quick_unlock_storage_key(&current_vault_ref_id),
-            &bytes,
+            bytes.as_slice(),
             "Enable quick unlock for this vault",
         )
     }
@@ -885,8 +889,10 @@ impl Runtime {
                 "Unlock this vault",
             )?
             .context("quick unlock is not enabled for the current vault")?;
+        #[cfg(target_os = "macos")]
+        let bytes = Zeroizing::new(bytes);
         let storage_key = quick_unlock_storage_key(&current_vault_ref_id);
-        let credentials: VaultCredentials = match serde_json::from_slice(&bytes)
+        let credentials: VaultCredentials = match serde_json::from_slice(bytes.as_slice())
             .context("failed to decode quick unlock credentials")
             .and_then(|credentials: VaultCredentials| {
                 if credentials.password.is_none() && credentials.key_file_path.is_none() {
@@ -3856,7 +3862,13 @@ impl Runtime {
 
         let bytes = serde_json::to_vec(&credentials)
             .context("failed to encode quick unlock credentials")?;
-        if self.quick_unlock.refresh(&storage_key, &bytes).is_err() {
+        #[cfg(target_os = "macos")]
+        let bytes = Zeroizing::new(bytes);
+        if self
+            .quick_unlock
+            .refresh(&storage_key, bytes.as_slice())
+            .is_err()
+        {
             let _ = self.quick_unlock.delete(&storage_key);
         }
         self.clear_quick_unlock_refresh_pending(vault_id)?;
