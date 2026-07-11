@@ -684,22 +684,6 @@ mod tests {
                 .push(format!("authorize:{reason}"));
             Ok(())
         }
-
-        fn contains(&self, _identifier: &str) -> Result<bool> {
-            unreachable!("the envelope provider must not use LARightStore")
-        }
-
-        fn save(&self, _identifier: &str, _secret: &[u8]) -> Result<()> {
-            unreachable!("the envelope provider must not use LARightStore")
-        }
-
-        fn authorize_and_load(&self, _identifier: &str, _reason: &str) -> Result<Option<Vec<u8>>> {
-            unreachable!("the envelope provider must not use LARightStore")
-        }
-
-        fn remove(&self, _identifier: &str) -> Result<()> {
-            unreachable!("the envelope provider must not use LARightStore")
-        }
     }
 
     struct FakeSecureEnclave {

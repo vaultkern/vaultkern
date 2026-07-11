@@ -160,10 +160,16 @@ impl QuickUnlockProvider for ComposedQuickUnlockProvider {
     }
 
     fn refresh(&self, key: &str, value: &[u8]) -> Result<()> {
-        if self.storage.contains(key)? {
-            self.storage.store(key, value)?;
+        let refresh = (|| {
+            if self.storage.contains(key)? {
+                self.storage.store(key, value)?;
+            }
+            Ok(())
+        })();
+        if refresh.is_err() {
+            let _ = self.storage.delete(key);
         }
-        Ok(())
+        refresh
     }
 
     fn verify_user(&self, reason: &str) -> Result<()> {
@@ -276,6 +282,44 @@ mod tests {
         value: RefCell<Option<Vec<u8>>>,
     }
 
+    struct FailingRefreshSecureStorageProvider {
+        events: Rc<RefCell<Vec<String>>>,
+        fail_contains: bool,
+        fail_store: bool,
+        fail_delete: bool,
+    }
+
+    impl SecureStorageProvider for FailingRefreshSecureStorageProvider {
+        fn store(&self, key: &str, _value: &[u8]) -> Result<()> {
+            self.events.borrow_mut().push(format!("store:{key}"));
+            if self.fail_store {
+                anyhow::bail!("injected refresh store failure");
+            }
+            Ok(())
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.events.borrow_mut().push(format!("load:{key}"));
+            Ok(None)
+        }
+
+        fn contains(&self, key: &str) -> Result<bool> {
+            self.events.borrow_mut().push(format!("contains:{key}"));
+            if self.fail_contains {
+                anyhow::bail!("injected refresh contains failure");
+            }
+            Ok(true)
+        }
+
+        fn delete(&self, key: &str) -> Result<()> {
+            self.events.borrow_mut().push(format!("delete:{key}"));
+            if self.fail_delete {
+                anyhow::bail!("injected refresh cleanup failure");
+            }
+            Ok(())
+        }
+    }
+
     impl SecureStorageProvider for RecordingSecureStorageProvider {
         fn store(&self, key: &str, value: &[u8]) -> Result<()> {
             self.events.borrow_mut().push(format!("store:{key}"));
@@ -311,6 +355,25 @@ mod tests {
             Box::new(RecordingSecureStorageProvider {
                 events,
                 value: RefCell::new(value),
+            }),
+        )
+    }
+
+    fn composed_failing_refresh_provider(
+        events: Rc<RefCell<Vec<String>>>,
+        fail_contains: bool,
+        fail_store: bool,
+        fail_delete: bool,
+    ) -> ComposedQuickUnlockProvider {
+        ComposedQuickUnlockProvider::new(
+            Box::new(RecordingBiometricProvider {
+                events: events.clone(),
+            }),
+            Box::new(FailingRefreshSecureStorageProvider {
+                events,
+                fail_contains,
+                fail_store,
+                fail_delete,
             }),
         )
     }
@@ -376,6 +439,50 @@ mod tests {
         assert_eq!(
             events.borrow().as_slice(),
             ["contains:vault", "authorize:Unlock", "load:vault"]
+        );
+    }
+
+    #[test]
+    fn composed_refresh_deletes_a_stale_record_after_store_failure() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let provider = composed_failing_refresh_provider(events.clone(), false, true, false);
+
+        let error = provider.refresh("vault", b"new").unwrap_err();
+
+        assert!(format!("{error:#}").contains("injected refresh store failure"));
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["contains:vault", "store:vault", "delete:vault"]
+        );
+    }
+
+    #[test]
+    fn composed_refresh_deletes_a_possibly_stale_record_after_contains_failure() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let provider = composed_failing_refresh_provider(events.clone(), true, false, false);
+
+        let error = provider.refresh("vault", b"new").unwrap_err();
+
+        assert!(format!("{error:#}").contains("injected refresh contains failure"));
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["contains:vault", "delete:vault"]
+        );
+    }
+
+    #[test]
+    fn composed_refresh_cleanup_failure_does_not_mask_the_primary_error() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let provider = composed_failing_refresh_provider(events.clone(), false, true, true);
+
+        let error = provider.refresh("vault", b"new").unwrap_err();
+        let error = format!("{error:#}");
+
+        assert!(error.contains("injected refresh store failure"));
+        assert!(!error.contains("injected refresh cleanup failure"));
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["contains:vault", "store:vault", "delete:vault"]
         );
     }
 

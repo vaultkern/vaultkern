@@ -4,6 +4,27 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::command_loop::format_error_chain;
+use crate::match_fill::{FillMatchScore, score_entry_match};
+use crate::passkey::{
+    PasskeyAssertionRequest, PasskeyRegistrationRequest, create_assertion,
+    create_registration_with_credential_id, generate_passkey_credential_id,
+};
+use crate::providers::biometric::TestBiometricProvider;
+use crate::providers::local_file::{LocalFileVaultSourceProvider, VaultSourceFingerprint};
+use crate::providers::onedrive::{OneDriveMemoryAccessCounts, OneDriveVaultSourceProvider};
+use crate::providers::quick_unlock::{
+    ComposedQuickUnlockProvider, QuickUnlockProvider, UnsupportedQuickUnlockProvider,
+    default_quick_unlock_provider, default_quick_unlock_provider_for_extension_id,
+};
+use crate::providers::remote_cache::{RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry};
+use crate::providers::secure_storage::{
+    FailingContainsSecureStorageProvider, FailingDeleteSecureStorageProvider,
+    FailingStoreSecureStorageProvider, MemorySecureStorageProvider,
+};
+use crate::session::SessionState;
+use crate::state_paths::extension_id_from_browser_origin;
+use crate::vault_reference_store::{StoredVaultSource, VaultReferenceStore};
 use anyhow::{Context, Result};
 use base64::{
     Engine as _,
@@ -36,30 +57,7 @@ use vaultkern_runtime_protocol::{
     SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
     VaultSourceStatusDto,
 };
-#[cfg(target_os = "macos")]
-use zeroize::Zeroizing;
-
-use crate::command_loop::format_error_chain;
-use crate::match_fill::{FillMatchScore, score_entry_match};
-use crate::passkey::{
-    PasskeyAssertionRequest, PasskeyRegistrationRequest, create_assertion,
-    create_registration_with_credential_id, generate_passkey_credential_id,
-};
-use crate::providers::biometric::TestBiometricProvider;
-use crate::providers::local_file::{LocalFileVaultSourceProvider, VaultSourceFingerprint};
-use crate::providers::onedrive::{OneDriveMemoryAccessCounts, OneDriveVaultSourceProvider};
-use crate::providers::quick_unlock::{
-    ComposedQuickUnlockProvider, QuickUnlockProvider, UnsupportedQuickUnlockProvider,
-    default_quick_unlock_provider, default_quick_unlock_provider_for_extension_id,
-};
-use crate::providers::remote_cache::{RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry};
-use crate::providers::secure_storage::{
-    FailingContainsSecureStorageProvider, FailingDeleteSecureStorageProvider,
-    FailingStoreSecureStorageProvider, MemorySecureStorageProvider,
-};
-use crate::session::SessionState;
-use crate::state_paths::extension_id_from_browser_origin;
-use crate::vault_reference_store::{StoredVaultSource, VaultReferenceStore};
+use zeroize::{Zeroize, Zeroizing};
 
 struct LoadedVault {
     source: VaultSource,
@@ -78,9 +76,26 @@ struct LoadedVault {
 
 impl LoadedVault {
     fn clear_unlock_secrets(&mut self) {
-        self.password = None;
-        self.key_file_path = None;
+        self.password.zeroize();
+        self.key_file_path.zeroize();
         self.vault = None;
+    }
+
+    fn replace_unlock_credentials(
+        &mut self,
+        password: Option<String>,
+        key_file_path: Option<String>,
+    ) {
+        self.clear_unlock_secrets();
+        self.password = password;
+        self.key_file_path = key_file_path;
+    }
+}
+
+impl Drop for LoadedVault {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        self.key_file_path.zeroize();
     }
 }
 
@@ -160,7 +175,45 @@ impl VaultSource {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct SerializedCredentialString(String);
+
+impl SerializedCredentialString {
+    fn take(&mut self) -> String {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for SerializedCredentialString {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if !self.0.is_empty() {
+            SERIALIZED_CREDENTIAL_STRING_DROPS.with(|drops| drops.set(drops.get() + 1));
+        }
+        self.0.zeroize();
+    }
+}
+
+#[derive(Deserialize)]
+struct SerializedVaultCredentials {
+    password: Option<SerializedCredentialString>,
+    key_file_path: Option<SerializedCredentialString>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static SERIALIZED_CREDENTIAL_STRING_DROPS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+fn observed_serialized_credential_string_drops() -> usize {
+    SERIALIZED_CREDENTIAL_STRING_DROPS.with(std::cell::Cell::get)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 struct VaultCredentials {
     password: Option<String>,
     key_file_path: Option<String>,
@@ -168,11 +221,11 @@ struct VaultCredentials {
 
 impl VaultCredentials {
     fn from_parts(password: Option<&str>, key_file_path: Option<&str>) -> Result<Self> {
-        let password = password.map(ToOwned::to_owned);
         let key_file_path = key_file_path
             .map(normalize_local_path)
             .transpose()
             .context("invalid key file path")?;
+        let password = password.map(ToOwned::to_owned);
         if password.is_none() && key_file_path.is_none() {
             anyhow::bail!("no unlock credentials provided");
         }
@@ -180,6 +233,38 @@ impl VaultCredentials {
             password,
             key_file_path,
         })
+    }
+}
+
+impl<'de> Deserialize<'de> for VaultCredentials {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut serialized = SerializedVaultCredentials::deserialize(deserializer)?;
+        Ok(Self {
+            password: serialized
+                .password
+                .as_mut()
+                .map(SerializedCredentialString::take),
+            key_file_path: serialized
+                .key_file_path
+                .as_mut()
+                .map(SerializedCredentialString::take),
+        })
+    }
+}
+
+impl Zeroize for VaultCredentials {
+    fn zeroize(&mut self) {
+        self.password.zeroize();
+        self.key_file_path.zeroize();
+    }
+}
+
+impl Drop for VaultCredentials {
+    fn drop(&mut self) {
+        self.zeroize();
     }
 }
 
@@ -728,7 +813,12 @@ impl Runtime {
             for vault in &mut list.vaults {
                 let storage_key = quick_unlock_storage_key(&vault.vault_ref_id);
                 vault.supports_quick_unlock =
-                    self.quick_unlock.contains(&storage_key).unwrap_or(false);
+                    self.quick_unlock.contains(&storage_key).with_context(|| {
+                        format!(
+                            "failed to inspect Quick Unlock state for vault {}",
+                            vault.vault_ref_id
+                        )
+                    })?;
             }
         }
         Ok(list)
@@ -766,7 +856,7 @@ impl Runtime {
         password: Option<&str>,
         key_file_path: Option<&str>,
     ) -> Result<()> {
-        let credentials = VaultCredentials::from_parts(password, key_file_path)?;
+        let mut credentials = VaultCredentials::from_parts(password, key_file_path)?;
         let current_vault_ref_id = self
             .references
             .find_ref_id_by_path(vault_id)
@@ -783,8 +873,10 @@ impl Runtime {
             .load_database(&loaded.bytes, &key)
             .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
         loaded.name = database.vault.name.clone();
-        loaded.password = credentials.password;
-        loaded.key_file_path = credentials.key_file_path;
+        loaded.replace_unlock_credentials(
+            credentials.password.take(),
+            credentials.key_file_path.take(),
+        );
         loaded.vault = Some(database.vault);
         self.session
             .unlock(vault_id.to_owned(), current_vault_ref_id);
@@ -862,10 +954,10 @@ impl Runtime {
             anyhow::bail!("current vault has no reusable unlock credentials");
         }
 
-        let bytes = serde_json::to_vec(&credentials)
-            .context("failed to encode quick unlock credentials")?;
-        #[cfg(target_os = "macos")]
-        let bytes = Zeroizing::new(bytes);
+        let bytes = Zeroizing::new(
+            serde_json::to_vec(&credentials)
+                .context("failed to encode quick unlock credentials")?,
+        );
         self.quick_unlock.enable(
             &quick_unlock_storage_key(&current_vault_ref_id),
             bytes.as_slice(),
@@ -889,7 +981,6 @@ impl Runtime {
                 "Unlock this vault",
             )?
             .context("quick unlock is not enabled for the current vault")?;
-        #[cfg(target_os = "macos")]
         let bytes = Zeroizing::new(bytes);
         let storage_key = quick_unlock_storage_key(&current_vault_ref_id);
         let credentials: VaultCredentials = match serde_json::from_slice(bytes.as_slice())
@@ -925,7 +1016,7 @@ impl Runtime {
             }
             Err(error) => {
                 if is_unlock_credentials_error(&error) {
-                    self.quick_unlock.delete(&storage_key)?;
+                    let _ = self.quick_unlock.delete(&storage_key);
                 }
                 Err(error)
             }
@@ -948,25 +1039,27 @@ impl Runtime {
         dto
     }
 
-    pub fn passkey_user_verification_capability(&self) -> PasskeyUserVerificationCapabilityDto {
+    pub fn passkey_user_verification_capability(
+        &self,
+    ) -> Result<PasskeyUserVerificationCapabilityDto> {
         let mut methods = Vec::new();
         let Some(active_vault_id) = self.session.active_vault_id() else {
-            return PasskeyUserVerificationCapabilityDto {
+            return Ok(PasskeyUserVerificationCapabilityDto {
                 available: false,
                 methods,
-            };
+            });
         };
         let Some(loaded) = self.loaded.get(active_vault_id) else {
-            return PasskeyUserVerificationCapabilityDto {
+            return Ok(PasskeyUserVerificationCapabilityDto {
                 available: false,
                 methods,
-            };
+            });
         };
         if loaded.vault.is_none() {
-            return PasskeyUserVerificationCapabilityDto {
+            return Ok(PasskeyUserVerificationCapabilityDto {
                 available: false,
                 methods,
-            };
+            });
         }
 
         if loaded.password.is_some() {
@@ -975,18 +1068,21 @@ impl Runtime {
 
         if self.quick_unlock.is_supported()
             && let Some(vault_ref_id) = self.session.current_vault_ref_id()
-            && self
-                .quick_unlock
-                .contains(&quick_unlock_storage_key(vault_ref_id))
-                .unwrap_or(false)
         {
-            methods.push(PasskeyUserVerificationMethodDto::QuickUnlock);
+            let storage_key = quick_unlock_storage_key(vault_ref_id);
+            if self
+                .quick_unlock
+                .contains(&storage_key)
+                .context("failed to inspect Quick Unlock state for passkey verification")?
+            {
+                methods.push(PasskeyUserVerificationMethodDto::QuickUnlock);
+            }
         }
 
-        PasskeyUserVerificationCapabilityDto {
+        Ok(PasskeyUserVerificationCapabilityDto {
             available: !methods.is_empty(),
             methods,
-        }
+        })
     }
 
     pub fn verify_passkey_user(
@@ -1130,7 +1226,11 @@ impl Runtime {
             anyhow::bail!("vault is locked: {vault_id}");
         }
         let storage_key = quick_unlock_storage_key(current_vault_ref_id);
-        if !self.quick_unlock.contains(&storage_key).unwrap_or(false) {
+        if !self
+            .quick_unlock
+            .contains(&storage_key)
+            .context("failed to inspect Quick Unlock state for passkey verification")?
+        {
             anyhow::bail!("quick unlock is not enabled for the current vault");
         }
         self.quick_unlock.verify_user("Verify user for passkey")?;
@@ -1274,8 +1374,9 @@ impl Runtime {
 
             if let Some(credentials) = update.credentials {
                 if credentials.remove_password {
-                    loaded.password = None;
+                    loaded.password.zeroize();
                 } else if let Some(password) = credentials.new_password {
+                    loaded.password.zeroize();
                     loaded.password = Some(password);
                 }
                 loaded.quick_unlock_refresh_pending = true;
@@ -2925,11 +3026,9 @@ impl Runtime {
             RuntimeCommand::ClearEntryPasskey { vault_id, entry_id } => self
                 .clear_entry_passkey(&vault_id, &entry_id)
                 .map(RuntimeResponse::EntryDetail),
-            RuntimeCommand::GetPasskeyUserVerificationCapability => {
-                Ok(RuntimeResponse::PasskeyUserVerificationCapability(
-                    self.passkey_user_verification_capability(),
-                ))
-            }
+            RuntimeCommand::GetPasskeyUserVerificationCapability => self
+                .passkey_user_verification_capability()
+                .map(RuntimeResponse::PasskeyUserVerificationCapability),
             RuntimeCommand::VerifyPasskeyUser {
                 ceremony_token,
                 expected_phase,
@@ -3860,17 +3959,11 @@ impl Runtime {
             return Ok(());
         }
 
-        let bytes = serde_json::to_vec(&credentials)
-            .context("failed to encode quick unlock credentials")?;
-        #[cfg(target_os = "macos")]
-        let bytes = Zeroizing::new(bytes);
-        if self
-            .quick_unlock
-            .refresh(&storage_key, bytes.as_slice())
-            .is_err()
-        {
-            let _ = self.quick_unlock.delete(&storage_key);
-        }
+        let bytes = Zeroizing::new(
+            serde_json::to_vec(&credentials)
+                .context("failed to encode quick unlock credentials")?,
+        );
+        let _ = self.quick_unlock.refresh(&storage_key, bytes.as_slice());
         self.clear_quick_unlock_refresh_pending(vault_id)?;
         Ok(())
     }
@@ -4834,8 +4927,10 @@ fn composite_key_from_credentials(credentials: &VaultCredentials) -> Result<Comp
         key.add_password(password.clone());
     }
     if let Some(key_file_path) = credentials.key_file_path.as_ref() {
-        let bytes = fs::read(key_file_path)
-            .with_context(|| format!("failed to read key file: {key_file_path}"))?;
+        let bytes = Zeroizing::new(
+            fs::read(key_file_path)
+                .with_context(|| format!("failed to read key file: {key_file_path}"))?,
+        );
         key.add_key_file_content(&bytes)
             .with_context(|| format!("failed to parse key file: {key_file_path}"))?;
     }
@@ -5386,6 +5481,33 @@ mod tests {
     use crate::providers::quick_unlock::{MemoryQuickUnlockFailures, MemoryQuickUnlockProvider};
     use std::cell::RefCell;
     use vaultkern_runtime_protocol::DatabaseCredentialsUpdateDto;
+    use zeroize::Zeroize;
+
+    #[test]
+    fn quick_unlock_credentials_zeroize_all_owned_fields() {
+        let mut credentials = VaultCredentials {
+            password: Some("secret-password".into()),
+            key_file_path: Some("/secret/key-file".into()),
+        };
+
+        credentials.zeroize();
+
+        assert!(credentials.password.is_none());
+        assert!(credentials.key_file_path.is_none());
+    }
+
+    #[test]
+    fn partially_deserialized_quick_unlock_credentials_zeroize_completed_fields() {
+        let zeroized_before = observed_serialized_credential_string_drops();
+
+        let error = serde_json::from_str::<VaultCredentials>(
+            r#"{"password":"partially-decoded-secret","key_file_path":7}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("string"));
+        assert!(observed_serialized_credential_string_drops() > zeroized_before);
+    }
 
     #[test]
     fn history_snapshot_restore_preserves_duplicate_entry_histories_by_position() {
@@ -5938,7 +6060,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_recent_vaults_treats_quick_unlock_probe_failures_as_disabled() {
+    fn listing_recent_vaults_propagates_quick_unlock_probe_failures() {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
@@ -5969,10 +6091,52 @@ mod tests {
         runtime.lock_session();
         operations.borrow_mut().clear();
 
-        let listed = runtime.list_recent_vaults().unwrap();
+        let error = runtime.list_recent_vaults().unwrap_err();
 
-        assert_eq!(listed.vaults.len(), 1);
-        assert!(!listed.vaults[0].supports_quick_unlock);
+        assert!(
+            format_error_chain(&error).contains("injected quick unlock contains failure"),
+            "{error:?}"
+        );
+        assert_eq!(operations.borrow().as_slice(), ["contains"]);
+    }
+
+    #[test]
+    fn passkey_capability_propagates_quick_unlock_probe_failures() {
+        let mut runtime = Runtime::for_tests_with_quick_unlock_failing_contains();
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+
+        let error = runtime
+            .handle(RuntimeCommand::GetPasskeyUserVerificationCapability)
+            .unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("injected secure storage contains failure"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn passkey_quick_unlock_verification_propagates_probe_failures() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone()).with_failures(
+                MemoryQuickUnlockFailures {
+                    contains: true,
+                    ..MemoryQuickUnlockFailures::default()
+                },
+            ),
+        );
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+
+        let error = runtime
+            .verify_passkey_user_with_quick_unlock(&opened.vault_id)
+            .unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("injected quick unlock contains failure"),
+            "{error:?}"
+        );
         assert_eq!(operations.borrow().as_slice(), ["contains"]);
     }
 
@@ -6013,6 +6177,39 @@ mod tests {
         operations.borrow_mut().clear();
 
         runtime.save_vault(&opened.vault_id).unwrap();
+        assert_eq!(operations.borrow().as_slice(), ["refresh"]);
+    }
+
+    #[test]
+    fn runtime_does_not_delete_a_quick_unlock_record_after_provider_refresh_failure() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone()).with_failures(
+                MemoryQuickUnlockFailures {
+                    refresh: true,
+                    ..MemoryQuickUnlockFailures::default()
+                },
+            ),
+        );
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    credentials: Some(DatabaseCredentialsUpdateDto {
+                        new_password: Some("new-password".into()),
+                        remove_password: false,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+        operations.borrow_mut().clear();
+
+        runtime.save_vault(&opened.vault_id).unwrap();
+
         assert_eq!(operations.borrow().as_slice(), ["refresh"]);
     }
 
@@ -6179,6 +6376,50 @@ mod tests {
             "{error:?}"
         );
         assert!(!runtime.session_state().unlocked);
+        assert_eq!(
+            operations.borrow().as_slice(),
+            ["unlock:Unlock this vault", "delete"]
+        );
+    }
+
+    #[test]
+    fn stale_quick_unlock_credentials_preserve_kdbx_error_when_delete_fails() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone()).with_failures(
+                MemoryQuickUnlockFailures {
+                    delete: true,
+                    ..MemoryQuickUnlockFailures::default()
+                },
+            ),
+        );
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+
+        let mut replacement_key = CompositeKey::default();
+        replacement_key.add_password("replacement-password");
+        runtime.loaded.get_mut(&opened.vault_id).unwrap().bytes = runtime
+            .core
+            .save_kdbx(
+                &Vault::empty("replacement"),
+                &replacement_key,
+                SaveProfile::recommended(),
+            )
+            .unwrap();
+        runtime.lock_session();
+        operations.borrow_mut().clear();
+
+        let error = runtime
+            .unlock_current_vault_with_quick_unlock()
+            .unwrap_err();
+        let error_chain = format_error_chain(&error);
+
+        assert!(error_chain.contains("failed to unlock vault"), "{error:?}");
+        assert!(
+            !error_chain.contains("injected quick unlock delete failure"),
+            "{error:?}"
+        );
         assert_eq!(
             operations.borrow().as_slice(),
             ["unlock:Unlock this vault", "delete"]

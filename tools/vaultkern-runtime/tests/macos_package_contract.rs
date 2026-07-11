@@ -147,6 +147,49 @@ fn macos_bridge_source_contract_uses_secure_enclave_key_agreement() {
 }
 
 #[test]
+fn macos_local_authentication_is_transient_and_has_no_persisted_right_store() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source =
+        std::fs::read_to_string(runtime.join("src/providers/macos_local_authentication.rs"))
+            .expect("the macOS LocalAuthentication implementation must exist");
+    let manifest = std::fs::read_to_string(runtime.join("Cargo.toml"))
+        .expect("the runtime Cargo manifest must exist");
+
+    for required in [
+        "evaluatePolicy_localizedReason_reply",
+        "DeviceOwnerAuthenticationWithBiometrics",
+        "NSRunLoop::currentRunLoop()",
+    ] {
+        assert!(
+            source.contains(required),
+            "LocalAuthentication is missing {required}"
+        );
+    }
+
+    assert!(
+        !source.contains("#![allow(dead_code)]"),
+        "LocalAuthentication must not suppress dead-code diagnostics"
+    );
+
+    for forbidden in [
+        "LARight",
+        "LARightStore",
+        "LAPersistedRight",
+        "LASecret",
+        "LAAuthenticationRequirement",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "LocalAuthentication still contains persisted API {forbidden}"
+        );
+        assert!(
+            !manifest.contains(&format!("\"{forbidden}\"")),
+            "the runtime still enables persisted API feature {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn macos_bridge_refreshes_wrapping_material_from_only_the_secure_enclave_public_key() {
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
     let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
@@ -909,9 +952,18 @@ fn macos_runtime_zeroizes_serialized_and_decrypted_quick_unlock_credentials() {
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = std::fs::read_to_string(runtime.join("src/runtime.rs"))
         .expect("the runtime source must exist");
+    let manifest = std::fs::read_to_string(runtime.join("Cargo.toml"))
+        .expect("the runtime Cargo manifest must exist");
 
-    assert!(source.contains("use zeroize::Zeroizing;"));
-    assert!(source.matches("let bytes = Zeroizing::new(bytes);").count() >= 3);
+    assert!(source.contains("use zeroize::{Zeroize, Zeroizing};"));
+    assert!(source.matches("Zeroizing::new(").count() >= 4);
+    let common_dependencies = manifest.find("[dependencies]").unwrap();
+    let zeroize_dependency = manifest.find("zeroize.workspace = true").unwrap();
+    let macos_dependencies = manifest
+        .find("[target.'cfg(target_os = \"macos\")'.dependencies]")
+        .unwrap();
+    assert!(common_dependencies < zeroize_dependency);
+    assert!(zeroize_dependency < macos_dependencies);
 }
 
 #[test]
@@ -1618,7 +1670,7 @@ fn first_install_manifest_failure_removes_new_app_and_preserves_stale_manifest()
 }
 
 #[test]
-fn adhoc_upgrade_warns_that_persisted_right_continuity_is_not_guaranteed() {
+fn adhoc_upgrade_warns_that_persisted_quick_unlock_continuity_is_not_guaranteed() {
     let temp = TempDir::new().unwrap();
     let output_root = temp.path().join("packages");
     let home = temp.path().join("home");
