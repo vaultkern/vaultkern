@@ -1321,14 +1321,9 @@ impl Runtime {
                 Ok(())
             }
             Err(error) => {
-                let key_file_unavailable = is_key_file_credential_error(&error);
-                let stale_credentials = is_unlock_credentials_error(&error);
-                if key_file_unavailable || stale_credentials {
+                if should_suppress_quick_unlock_after_vault_error(&error) {
                     self.quick_unlock_suppressed_records
                         .insert(storage_key.clone());
-                    if stale_credentials {
-                        let _ = self.quick_unlock.delete(&storage_key);
-                    }
                 }
                 Err(error)
             }
@@ -5589,7 +5584,6 @@ impl Runtime {
                 if self.quick_unlock.refresh(storage_key, credentials).is_err() {
                     self.quick_unlock_suppressed_records
                         .insert(storage_key.to_owned());
-                    let _ = self.quick_unlock.delete(storage_key);
                 } else {
                     self.quick_unlock_suppressed_records.remove(storage_key);
                 }
@@ -5663,9 +5657,6 @@ impl Runtime {
         {
             self.quick_unlock_suppressed_records
                 .insert(storage_key.clone());
-            if self.quick_unlock.delete(&storage_key).is_ok() {
-                self.clear_quick_unlock_refresh_pending(vault_id)?;
-            }
             return Ok(());
         }
         self.quick_unlock_suppressed_records.remove(&storage_key);
@@ -7279,7 +7270,7 @@ fn quick_unlock_storage_key(vault_ref_id: &str) -> String {
     key
 }
 
-fn is_unlock_credentials_error(error: &anyhow::Error) -> bool {
+fn should_suppress_quick_unlock_after_vault_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<KdbxError>(),
@@ -7301,12 +7292,6 @@ fn is_unlock_credentials_error(error: &anyhow::Error) -> bool {
             ))
         )
     })
-}
-
-fn is_key_file_credential_error(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.is::<KeyFileCredentialError>())
 }
 
 fn query_error_response(error: anyhow::Error) -> RuntimeResponse {
@@ -12291,7 +12276,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_deletes_a_stale_quick_unlock_record_after_provider_refresh_failure() {
+    fn runtime_suppresses_but_preserves_quick_unlock_after_provider_refresh_failure() {
         let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
         runtime.quick_unlock = Box::new(
@@ -12320,11 +12305,55 @@ mod tests {
 
         runtime.save_vault(&opened.vault_id).unwrap();
 
-        assert_eq!(operations.borrow().as_slice(), ["refresh", "delete"]);
+        assert_eq!(operations.borrow().as_slice(), ["refresh"]);
+        let storage_key = quick_unlock_storage_key(
+            runtime
+                .session
+                .current_vault_ref_id()
+                .expect("current reference"),
+        );
+        assert!(runtime.quick_unlock.contains(&storage_key).unwrap());
+        operations.borrow_mut().clear();
+        assert!(!runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
+        assert!(operations.borrow().is_empty());
     }
 
     #[test]
-    fn failed_refresh_and_delete_keep_quick_unlock_pending_but_unavailable() {
+    fn manual_unlock_refresh_failure_preserves_the_existing_record() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof()
+                .with_failures(MemoryQuickUnlockFailures {
+                    refresh: true,
+                    ..MemoryQuickUnlockFailures::default()
+                }),
+        );
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+        operations.borrow_mut().clear();
+
+        runtime
+            .unlock_current_vault_with_password("demo-password")
+            .unwrap();
+
+        assert_eq!(operations.borrow().as_slice(), ["contains", "refresh"]);
+        let storage_key = quick_unlock_storage_key(
+            runtime
+                .session
+                .current_vault_ref_id()
+                .expect("current reference"),
+        );
+        assert!(runtime.quick_unlock.contains(&storage_key).unwrap());
+        operations.borrow_mut().clear();
+        assert!(!runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
+        assert!(operations.borrow().is_empty());
+    }
+
+    #[test]
+    fn failed_refresh_preserves_the_record_and_cleanup_authorization() {
         let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
         runtime.quick_unlock = Box::new(
@@ -12354,7 +12383,7 @@ mod tests {
 
         runtime.save_vault(&opened.vault_id).unwrap();
 
-        assert_eq!(operations.borrow().as_slice(), ["refresh", "delete"]);
+        assert_eq!(operations.borrow().as_slice(), ["refresh"]);
         assert!(
             runtime
                 .loaded
@@ -12748,7 +12777,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_quick_unlock_key_file_suppresses_but_preserves_the_record() {
+    fn missing_quick_unlock_key_file_preserves_a_direct_retry() {
         let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
         runtime.quick_unlock = Box::new(
@@ -12758,6 +12787,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (vault_path, key_file_path) =
             write_key_file_vault(dir.path(), "missing-key-file", Some("password"));
+        let key_file_bytes = std::fs::read(&key_file_path).unwrap();
         let opened = runtime
             .open_local_vault(vault_path.to_str().unwrap())
             .unwrap();
@@ -12789,19 +12819,15 @@ mod tests {
         operations.borrow_mut().clear();
         assert!(runtime.quick_unlock.contains(&storage_key).unwrap());
         assert_eq!(operations.borrow().as_slice(), ["contains"]);
+        assert!(runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
+        std::fs::write(&key_file_path, key_file_bytes).unwrap();
         operations.borrow_mut().clear();
-        let retry_error = runtime
-            .unlock_current_vault_with_quick_unlock()
-            .unwrap_err();
-        assert!(
-            format_error_chain(&retry_error).contains("must be re-enabled"),
-            "{retry_error:?}"
-        );
-        assert!(operations.borrow().is_empty());
+        runtime.unlock_current_vault_with_quick_unlock().unwrap();
+        assert_eq!(operations.borrow().as_slice(), ["unlock:Unlock this vault"]);
     }
 
     #[test]
-    fn restored_key_file_manual_unlock_recovers_a_suppressed_composed_record() {
+    fn restored_key_file_retries_a_preserved_composed_record() {
         let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
         runtime.quick_unlock = Box::new(MemoryQuickUnlockProvider::new(operations.clone()));
@@ -12831,29 +12857,18 @@ mod tests {
 
         std::fs::write(&key_file_path, key_file_bytes).unwrap();
         operations.borrow_mut().clear();
-        runtime
-            .unlock_vault(
-                &opened.vault_id,
-                None,
-                Some(key_file_path.to_str().unwrap()),
-            )
-            .unwrap();
-        runtime.lock_session();
         runtime.unlock_current_vault_with_quick_unlock().unwrap();
 
-        assert_eq!(
-            operations.borrow().as_slice(),
-            ["contains", "refresh", "unlock:Unlock this vault"]
-        );
+        assert_eq!(operations.borrow().as_slice(), ["unlock:Unlock this vault"]);
     }
 
     #[test]
-    fn legacy_kdbx_decryption_failure_is_a_stale_quick_unlock_credential_error() {
+    fn legacy_kdbx_decryption_failure_suppresses_quick_unlock() {
         let error = anyhow::Error::new(CoreError::Kdbx(KdbxError::Crypto(
             CryptoError::DecryptionFailed,
         )));
 
-        assert!(is_unlock_credentials_error(&error));
+        assert!(should_suppress_quick_unlock_after_vault_error(&error));
     }
 
     #[test]
@@ -13178,7 +13193,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_quick_unlock_credentials_preserve_kdbx_error_when_delete_fails() {
+    fn stale_quick_unlock_credentials_are_suppressed_without_deleting_the_record() {
         let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
         runtime.quick_unlock = Box::new(
@@ -13215,10 +13230,52 @@ mod tests {
             !error_chain.contains("injected quick unlock delete failure"),
             "{error:?}"
         );
-        assert_eq!(
-            operations.borrow().as_slice(),
-            ["unlock:Unlock this vault", "delete"]
+        assert_eq!(operations.borrow().as_slice(), ["unlock:Unlock this vault"]);
+        let storage_key = quick_unlock_storage_key(
+            runtime
+                .session
+                .current_vault_ref_id()
+                .expect("current reference"),
         );
+        assert!(runtime.quick_unlock.contains(&storage_key).unwrap());
+        operations.borrow_mut().clear();
+        assert!(!runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
+        assert!(operations.borrow().is_empty());
+    }
+
+    #[test]
+    fn corrupt_kdbx_header_suppresses_without_deleting_valid_quick_unlock_credentials() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        let loaded = runtime.loaded.get_mut(&opened.vault_id).unwrap();
+        let (_, header_len) = vaultkern_core::KdbxHeader::decode_with_consumed(&loaded.bytes)
+            .expect("decode KDBX4 header");
+        loaded.bytes[header_len] ^= 0x01;
+        runtime.lock_session();
+        operations.borrow_mut().clear();
+
+        let error = runtime
+            .unlock_current_vault_with_quick_unlock()
+            .unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("header hash mismatch"),
+            "{error:?}"
+        );
+        assert_eq!(operations.borrow().as_slice(), ["unlock:Unlock this vault"]);
+        let storage_key = quick_unlock_storage_key(
+            runtime
+                .session
+                .current_vault_ref_id()
+                .expect("current reference"),
+        );
+        assert!(runtime.quick_unlock.contains(&storage_key).unwrap());
         operations.borrow_mut().clear();
         assert!(!runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
         assert!(operations.borrow().is_empty());

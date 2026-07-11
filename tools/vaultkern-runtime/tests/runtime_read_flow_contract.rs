@@ -484,7 +484,7 @@ fn runtime_save_succeeds_when_quick_unlock_refresh_contains_fails() {
 }
 
 #[test]
-fn runtime_deletes_quick_unlock_credentials_when_stored_password_is_stale() {
+fn runtime_suppresses_quick_unlock_when_stored_password_is_stale() {
     let core = KeepassCore::new();
     let mut old_key = CompositeKey::default();
     old_key.add_password("old-password");
