@@ -190,6 +190,14 @@ fn macos_local_authentication_is_transient_and_has_no_persisted_right_store() {
 }
 
 #[test]
+fn macos_native_host_is_an_agent_app_without_a_dock_icon() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let plist = runtime.join("macos/Info.plist");
+
+    assert_eq!(plist_value(&plist, "LSUIElement"), "true");
+}
+
+#[test]
 fn macos_bridge_refreshes_wrapping_material_from_only_the_secure_enclave_public_key() {
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
     let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
@@ -1183,6 +1191,7 @@ fn packages_signed_app_and_installs_chrome_native_host() {
     );
     assert_eq!(plist_value(&plist, "CFBundlePackageType"), "APPL");
     assert_eq!(plist_value(&plist, "LSMinimumSystemVersion"), "13.0");
+    assert_eq!(plist_value(&plist, "LSUIElement"), "true");
 
     let verify = Command::new("codesign")
         .args(["--verify", "--strict"])
