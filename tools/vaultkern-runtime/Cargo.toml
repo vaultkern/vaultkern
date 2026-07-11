@@ -30,7 +30,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 block2 = "0.6.2"
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
-    "std", "NSArray", "NSData", "NSError", "NSString",
+    "std", "NSArray", "NSData", "NSDate", "NSError", "NSRunLoop", "NSString", "block2",
 ] }
 objc2-local-authentication = { version = "0.3.2", default-features = false, features = [
     "std", "block2", "LABiometryType", "LAContext", "LAError", "LAPersistedRight",

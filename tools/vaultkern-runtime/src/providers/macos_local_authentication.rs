@@ -1,13 +1,14 @@
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use block2::RcBlock;
 use objc2::AnyThread;
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_foundation::{NSData, NSError, NSString};
+use objc2_foundation::{NSData, NSDate, NSError, NSRunLoop, NSString};
 use objc2_local_authentication::{
     LAAuthenticationRequirement, LABiometryType, LAContext, LAPersistedRight, LAPolicy, LARight,
     LARightStore, LASecret,
@@ -164,9 +165,31 @@ fn wait_for_callback<T>(
     receiver: Receiver<CallbackResult<T>>,
     operation: &'static str,
 ) -> CallbackResult<T> {
-    match receiver.recv() {
-        Ok(result) => result,
-        Err(_) => Err(MacLocalAuthenticationError::CallbackDisconnected(operation)),
+    wait_for_callback_with_pump(receiver, operation, || {
+        autoreleasepool(|_| {
+            // Native messaging runs on the main thread, so blocking here would
+            // prevent Cocoa from delivering the LocalAuthentication callback.
+            let deadline = NSDate::dateWithTimeIntervalSinceNow(0.05);
+            NSRunLoop::currentRunLoop().runUntilDate(&deadline);
+        });
+        // A run loop with no registered sources can return immediately.
+        std::thread::sleep(Duration::from_millis(1));
+    })
+}
+
+fn wait_for_callback_with_pump<T>(
+    receiver: Receiver<CallbackResult<T>>,
+    operation: &'static str,
+    mut pump: impl FnMut(),
+) -> CallbackResult<T> {
+    loop {
+        match receiver.try_recv() {
+            Ok(result) => return result,
+            Err(TryRecvError::Empty) => pump(),
+            Err(TryRecvError::Disconnected) => {
+                return Err(MacLocalAuthenticationError::CallbackDisconnected(operation));
+            }
+        }
     }
 }
 
@@ -411,9 +434,72 @@ impl MacLocalAuthenticationApi for MacLocalAuthentication {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::sync_channel;
+    use std::thread;
+    use std::time::Duration;
+
+    use block2::RcBlock;
+    use objc2_foundation::NSRunLoop;
     use objc2_local_authentication::{LABiometryType, LAError};
 
-    use super::{MacLocalAuthenticationError, NSErrorSnapshot, touch_id_policy_is_available};
+    use super::{
+        Completion, MacLocalAuthenticationError, NSErrorSnapshot, touch_id_policy_is_available,
+        wait_for_callback, wait_for_callback_with_pump,
+    };
+
+    #[test]
+    fn macos_quick_unlock_callback_wait_pumps_until_completion() {
+        let (sender, receiver) = sync_channel(1);
+        let pump_calls = Cell::new(0);
+
+        let result = wait_for_callback_with_pump(receiver, "authorization", || {
+            pump_calls.set(pump_calls.get() + 1);
+            sender
+                .send(Ok(()))
+                .expect("callback result should be received");
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(pump_calls.get(), 1);
+    }
+
+    #[test]
+    fn macos_quick_unlock_callback_wait_services_current_run_loop() {
+        let (completion, receiver) = Completion::channel();
+        let (cancel_watchdog, watchdog_cancelled) = sync_channel(1);
+        let did_run = Arc::new(AtomicBool::new(false));
+        let callback_completion = Arc::clone(&completion);
+        let callback_did_run = Arc::clone(&did_run);
+        let callback = RcBlock::new(move || {
+            callback_did_run.store(true, Ordering::SeqCst);
+            callback_completion.finish(Ok(()));
+        });
+
+        // SAFETY: The block captures only Send + Sync Arc-backed state.
+        unsafe { NSRunLoop::currentRunLoop().performBlock(&callback) };
+
+        let watchdog_completion = Arc::clone(&completion);
+        let watchdog = thread::spawn(move || {
+            if watchdog_cancelled
+                .recv_timeout(Duration::from_millis(500))
+                .is_err()
+            {
+                watchdog_completion.finish(Err(MacLocalAuthenticationError::InvalidCallback(
+                    "run loop test timeout",
+                )));
+            }
+        });
+
+        let result = wait_for_callback(receiver, "run loop test");
+        let _ = cancel_watchdog.send(());
+        watchdog.join().expect("watchdog should exit cleanly");
+
+        assert!(result.is_ok());
+        assert!(did_run.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn macos_quick_unlock_touch_id_policy_rejects_other_biometry_types() {
