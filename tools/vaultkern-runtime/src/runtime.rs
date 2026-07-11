@@ -1575,50 +1575,6 @@ impl Runtime {
         self.get_entry_detail(vault_id, &entry_id)
     }
 
-    pub fn create_entry_if_matching_entry_ids(
-        &mut self,
-        vault_id: &str,
-        parent_group_id: &str,
-        fields: EntryFieldsDto,
-        mut expected_matching_entry_ids: Vec<String>,
-    ) -> Result<Option<EntryDetailDto>> {
-        if self.session.active_vault_id() != Some(vault_id) {
-            return Ok(None);
-        }
-        let parent_is_in_matching_scope = {
-            let vault = self.loaded_vault(vault_id)?;
-            group_tree_contains_non_recycled_id(
-                &vault.root,
-                parent_group_id,
-                vault.recycle_bin_group,
-                vault.recycle_bin_enabled.unwrap_or(true),
-                false,
-            )
-        };
-        if !fields.custom_fields.is_empty()
-            || parse_totp_uri(fields.totp_uri.clone()).is_err()
-            || !parent_is_in_matching_scope
-        {
-            return Ok(None);
-        }
-        let actual_matching_entry_ids = self.exact_matching_entry_ids(vault_id, &fields)?;
-        expected_matching_entry_ids.sort();
-        if actual_matching_entry_ids != expected_matching_entry_ids {
-            return Ok(None);
-        }
-        self.create_entry(
-            vault_id,
-            parent_group_id,
-            fields.title,
-            fields.username,
-            fields.password,
-            fields.url,
-            fields.notes,
-            fields.totp_uri,
-        )
-        .map(Some)
-    }
-
     fn exact_matching_entry_ids(
         &self,
         vault_id: &str,
@@ -3115,25 +3071,6 @@ impl Runtime {
                     totp_uri,
                 )
                 .map(RuntimeResponse::EntryDetail),
-            RuntimeCommand::CreateEntryIfMatchingEntryIds {
-                vault_id,
-                parent_group_id,
-                fields,
-                expected_matching_entry_ids,
-            } => Ok(
-                match self.create_entry_if_matching_entry_ids(
-                    &vault_id,
-                    &parent_group_id,
-                    fields,
-                    expected_matching_entry_ids,
-                )? {
-                    Some(detail) => RuntimeResponse::EntryDetail(detail),
-                    None => RuntimeResponse::Error(ErrorDto {
-                        code: "conflict".into(),
-                        message: "matching entry baseline changed".into(),
-                    }),
-                },
-            ),
             RuntimeCommand::UpdateEntryFields {
                 vault_id,
                 entry_id,
@@ -8228,92 +8165,6 @@ mod tests {
     }
 
     #[test]
-    fn conditional_create_requires_the_exact_matching_id_baseline() {
-        let mut runtime = Runtime::for_tests();
-        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        let existing = create_demo_entry(&mut runtime, &opened.vault_id);
-        let root_group_id = runtime.list_groups(&opened.vault_id).unwrap().root.id;
-        let fields = entry_fields(&existing);
-
-        let missing_parent = runtime
-            .handle(RuntimeCommand::CreateEntryIfMatchingEntryIds {
-                vault_id: opened.vault_id.clone(),
-                parent_group_id: "missing-group".into(),
-                fields: fields.clone(),
-                expected_matching_entry_ids: vec![existing.id.clone()],
-            })
-            .unwrap();
-        let RuntimeResponse::Error(error) = missing_parent else {
-            panic!("expected missing-parent conflict, got {missing_parent:?}");
-        };
-        assert_eq!(error.code, "conflict");
-        assert_eq!(runtime.list_entries(&opened.vault_id).unwrap().len(), 1);
-
-        let first = runtime
-            .handle(RuntimeCommand::CreateEntryIfMatchingEntryIds {
-                vault_id: opened.vault_id.clone(),
-                parent_group_id: root_group_id.clone(),
-                fields: fields.clone(),
-                expected_matching_entry_ids: vec![existing.id.clone()],
-            })
-            .unwrap();
-        let RuntimeResponse::EntryDetail(created) = first else {
-            panic!("expected created entry, got {first:?}");
-        };
-        assert_ne!(created.id, existing.id);
-
-        let second = runtime
-            .handle(RuntimeCommand::CreateEntryIfMatchingEntryIds {
-                vault_id: opened.vault_id.clone(),
-                parent_group_id: root_group_id,
-                fields,
-                expected_matching_entry_ids: vec![existing.id],
-            })
-            .unwrap();
-        let RuntimeResponse::Error(error) = second else {
-            panic!("expected conflict response, got {second:?}");
-        };
-        assert_eq!(error.code, "conflict");
-        assert_eq!(runtime.list_entries(&opened.vault_id).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn conditional_create_uses_the_same_candidate_scope_as_baseline_lookup() {
-        let mut runtime = Runtime::for_tests();
-        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        let recycled = create_demo_entry(&mut runtime, &opened.vault_id);
-        let fields = entry_fields(&recycled);
-        {
-            let core = &runtime.core;
-            let loaded = runtime.loaded.get_mut(&opened.vault_id).unwrap();
-            core.soft_delete_entry_to_recycle_bin(loaded.vault.as_mut().unwrap(), &recycled.id)
-                .unwrap();
-        }
-        let root_group_id = runtime.list_groups(&opened.vault_id).unwrap().root.id;
-        let baseline = runtime
-            .handle(RuntimeCommand::FindExactMatchingEntryIds {
-                vault_id: opened.vault_id.clone(),
-                fields: fields.clone(),
-            })
-            .unwrap();
-        let RuntimeResponse::EntryIdList(baseline) = baseline else {
-            panic!("expected exact baseline, got {baseline:?}");
-        };
-        assert!(baseline.entry_ids.is_empty());
-
-        let response = runtime
-            .handle(RuntimeCommand::CreateEntryIfMatchingEntryIds {
-                vault_id: opened.vault_id.clone(),
-                parent_group_id: root_group_id,
-                fields,
-                expected_matching_entry_ids: baseline.entry_ids,
-            })
-            .unwrap();
-
-        assert!(matches!(response, RuntimeResponse::EntryDetail(_)));
-    }
-
-    #[test]
     fn pending_create_reconstruction_matches_semantic_totp_fallbacks() {
         let mut previous = Vault::empty("Autofill");
         let mut existing = Entry::new("Example");
@@ -8344,48 +8195,11 @@ mod tests {
     }
 
     #[test]
-    fn conditional_create_rejects_a_recycle_bin_parent_without_creating() {
-        let mut runtime = Runtime::for_tests();
-        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        let recycled = create_demo_entry(&mut runtime, &opened.vault_id);
-        let fields = entry_fields(&recycled);
-        {
-            let core = &runtime.core;
-            let loaded = runtime.loaded.get_mut(&opened.vault_id).unwrap();
-            core.soft_delete_entry_to_recycle_bin(loaded.vault.as_mut().unwrap(), &recycled.id)
-                .unwrap();
-        }
-        let recycle_bin_group = runtime
-            .loaded_vault(&opened.vault_id)
-            .unwrap()
-            .recycle_bin_group
-            .expect("recycle bin after deletion")
-            .to_string();
-
-        for _ in 0..2 {
-            let response = runtime
-                .handle(RuntimeCommand::CreateEntryIfMatchingEntryIds {
-                    vault_id: opened.vault_id.clone(),
-                    parent_group_id: recycle_bin_group.clone(),
-                    fields: fields.clone(),
-                    expected_matching_entry_ids: vec![],
-                })
-                .unwrap();
-            let RuntimeResponse::Error(error) = response else {
-                panic!("expected recycle-parent conflict, got {response:?}");
-            };
-            assert_eq!(error.code, "conflict");
-        }
-        assert_eq!(runtime.list_entries(&opened.vault_id).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn atomic_autofill_mutations_require_the_command_time_active_vault() {
+    fn conditional_update_requires_the_command_time_active_vault() {
         let mut runtime = Runtime::for_tests();
         let (_first_dir, first) = open_unlocked_demo_vault(&mut runtime);
         let entry = create_demo_entry(&mut runtime, &first.vault_id);
         let fields = entry_fields(&entry);
-        let first_root = runtime.list_groups(&first.vault_id).unwrap().root.id;
         let (_second_dir, second) = open_unlocked_demo_vault(&mut runtime);
         assert_eq!(
             runtime.session.active_vault_id(),
@@ -8403,21 +8217,10 @@ mod tests {
                 },
             })
             .unwrap();
-        let create = runtime
-            .handle(RuntimeCommand::CreateEntryIfMatchingEntryIds {
-                vault_id: first.vault_id.clone(),
-                parent_group_id: first_root,
-                fields,
-                expected_matching_entry_ids: vec![entry.id.clone()],
-            })
-            .unwrap();
-
-        for response in [update, create] {
-            let RuntimeResponse::Error(error) = response else {
-                panic!("expected active-vault conflict, got {response:?}");
-            };
-            assert_eq!(error.code, "conflict");
-        }
+        let RuntimeResponse::Error(error) = update else {
+            panic!("expected active-vault conflict, got {update:?}");
+        };
+        assert_eq!(error.code, "conflict");
         assert_eq!(
             runtime
                 .get_entry_detail(&first.vault_id, &entry.id)

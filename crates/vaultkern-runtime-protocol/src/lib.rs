@@ -102,12 +102,6 @@ pub enum RuntimeCommand {
         notes: String,
         totp_uri: Option<String>,
     },
-    CreateEntryIfMatchingEntryIds {
-        vault_id: String,
-        parent_group_id: String,
-        fields: EntryFieldsDto,
-        expected_matching_entry_ids: Vec<String>,
-    },
     UpdateEntryFields {
         vault_id: String,
         entry_id: String,

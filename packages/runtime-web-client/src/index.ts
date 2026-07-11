@@ -594,21 +594,6 @@ export class RuntimeClient {
     });
   }
 
-  async createEntryIfMatchingEntryIds(
-    vaultId: string,
-    parentGroupId: string,
-    fields: EntryDraft,
-    expectedMatchingEntryIds: string[]
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
-      type: "create_entry_if_matching_entry_ids",
-      vault_id: vaultId,
-      parent_group_id: parentGroupId,
-      fields: entryFieldsCommand(fields),
-      expected_matching_entry_ids: expectedMatchingEntryIds
-    });
-  }
-
   async updateEntryFields(
     vaultId: string,
     entryId: string,

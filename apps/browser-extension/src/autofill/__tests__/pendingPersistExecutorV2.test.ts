@@ -77,7 +77,6 @@ describe("pending autofill atomic persist executor", () => {
       persistAutofillMutation: vi.fn(async () => durable(ENTRY_ID)),
       getEntryDetail: vi.fn(),
       compareAndUpdateEntryFields: vi.fn(),
-      createEntryIfMatchingEntryIds: vi.fn(),
       saveVault: vi.fn()
     };
 
@@ -94,7 +93,6 @@ describe("pending autofill atomic persist executor", () => {
     });
     expect(client.getEntryDetail).not.toHaveBeenCalled();
     expect(client.compareAndUpdateEntryFields).not.toHaveBeenCalled();
-    expect(client.createEntryIfMatchingEntryIds).not.toHaveBeenCalled();
     expect(client.saveVault).not.toHaveBeenCalled();
   });
 

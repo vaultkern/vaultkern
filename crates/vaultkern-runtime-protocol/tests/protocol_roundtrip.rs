@@ -34,6 +34,30 @@ fn protocol_envelope_serializes_open_local_vault_command() {
 }
 
 #[test]
+fn protocol_rejects_the_superseded_conditional_create_command() {
+    let json = r#"{
+        "version": 1,
+        "command": {
+            "type": "create_entry_if_matching_entry_ids",
+            "vault_id": "vault-1",
+            "parent_group_id": "group-root",
+            "fields": {
+                "title": "Example",
+                "username": "alice",
+                "password": "secret",
+                "url": "https://example.com",
+                "notes": "",
+                "totpUri": null,
+                "customFields": [{"key":"Tenant","value":"prod","protected":true}]
+            },
+            "expected_matching_entry_ids": []
+        }
+    }"#;
+
+    assert!(serde_json::from_str::<ProtocolEnvelope>(json).is_err());
+}
+
+#[test]
 fn protocol_roundtrips_database_settings_commands_and_response() {
     let get = ProtocolEnvelope::new(RuntimeCommand::GetDatabaseSettings {
         vault_id: "vault-1".into(),
@@ -762,12 +786,6 @@ fn protocol_roundtrips_entry_mutation_commands() {
         expected_fields: expected_fields.clone(),
         desired_fields: desired_fields.clone(),
     });
-    let create_if_baseline = ProtocolEnvelope::new(RuntimeCommand::CreateEntryIfMatchingEntryIds {
-        vault_id: "vault-1".into(),
-        parent_group_id: "group-root".into(),
-        fields: desired_fields,
-        expected_matching_entry_ids: vec!["entry-existing".into()],
-    });
     let clear_totp = ProtocolEnvelope::new(RuntimeCommand::ClearEntryTotp {
         vault_id: "vault-1".into(),
         entry_id: "entry-1".into(),
@@ -777,14 +795,7 @@ fn protocol_roundtrips_entry_mutation_commands() {
         entry_id: "entry-1".into(),
     });
 
-    for envelope in [
-        create,
-        update,
-        compare_and_update,
-        create_if_baseline,
-        clear_totp,
-        delete,
-    ] {
+    for envelope in [create, update, compare_and_update, clear_totp, delete] {
         let json = serde_json::to_string(&envelope).unwrap();
         let decoded: ProtocolEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, envelope);

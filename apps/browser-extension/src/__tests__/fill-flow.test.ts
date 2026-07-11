@@ -38,7 +38,6 @@ const runtimeClientMocks = vi.hoisted(() => ({
   findFillCandidates: vi.fn(),
   findExactMatchingEntryIds: vi.fn(),
   createEntry: vi.fn(),
-  createEntryIfMatchingEntryIds: vi.fn(),
   updateEntryFields: vi.fn(),
   compareAndUpdateEntryFields: vi.fn(),
   saveVault: vi.fn()
@@ -182,7 +181,6 @@ beforeEach(() => {
   runtimeClientMocks.findFillCandidates.mockReset();
   runtimeClientMocks.findExactMatchingEntryIds.mockReset();
   runtimeClientMocks.createEntry.mockReset();
-  runtimeClientMocks.createEntryIfMatchingEntryIds.mockReset();
   runtimeClientMocks.updateEntryFields.mockReset();
   runtimeClientMocks.compareAndUpdateEntryFields.mockReset();
   runtimeClientMocks.saveVault.mockReset();
@@ -212,13 +210,6 @@ beforeEach(() => {
     };
   });
   runtimeClientMocks.findExactMatchingEntryIds.mockResolvedValue([]);
-  runtimeClientMocks.createEntryIfMatchingEntryIds.mockImplementation(
-    async (_vaultId, _parentGroupId, fields) => ({
-      type: "entry_detail",
-      id: "entry-created",
-      ...fields
-    })
-  );
   runtimeClientMocks.updateEntryFields.mockImplementation(
     async (_vaultId, entryId, fields) => ({
       type: "entry_detail",

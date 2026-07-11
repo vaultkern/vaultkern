@@ -5,6 +5,12 @@ import {
 } from "../index";
 
 describe("RuntimeClient", () => {
+  it("does not expose the superseded conditional create command", () => {
+    const client = new RuntimeClient({ send: vi.fn() });
+
+    expect("createEntryIfMatchingEntryIds" in client).toBe(false);
+  });
+
   it("requests session state through the configured transport", async () => {
     const transport = {
       send: vi.fn().mockResolvedValue({
@@ -660,12 +666,11 @@ describe("RuntimeClient", () => {
     });
   });
 
-  it("sends atomic autofill update and create preconditions", async () => {
+  it("sends the atomic autofill update precondition and matching lookup", async () => {
     const transport = {
       send: vi
         .fn()
         .mockResolvedValueOnce({ type: "entry_detail", id: "entry-1" })
-        .mockResolvedValueOnce({ type: "entry_detail", id: "entry-created" })
         .mockResolvedValueOnce({
           type: "entry_id_list",
           entryIds: ["entry-existing"]
@@ -688,12 +693,6 @@ describe("RuntimeClient", () => {
       "entry-1",
       expectedFields,
       desiredFields
-    );
-    await client.createEntryIfMatchingEntryIds(
-      "vault-1",
-      "group-root",
-      desiredFields,
-      ["entry-existing"]
     );
     await expect(
       client.findExactMatchingEntryIds("vault-1", desiredFields)
@@ -726,24 +725,6 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
-      command: {
-        type: "create_entry_if_matching_entry_ids",
-        vault_id: "vault-1",
-        parent_group_id: "group-root",
-        fields: {
-          title: "Example",
-          username: "alice",
-          password: "new-secret",
-          url: "https://example.com/login",
-          notes: "",
-          totpUri: null,
-          customFields: []
-        },
-        expected_matching_entry_ids: ["entry-existing"]
-      }
-    });
-    expect(transport.send).toHaveBeenNthCalledWith(3, {
       version: 1,
       command: {
         type: "find_exact_matching_entry_ids",
