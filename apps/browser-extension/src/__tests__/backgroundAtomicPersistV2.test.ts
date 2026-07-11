@@ -337,6 +337,28 @@ describe("background atomic pending autofill V2", () => {
     expect(session.items).toEqual({});
   });
 
+  it("accepts a same-document submission after a canonical same-origin URL change", async () => {
+    const { listeners, session } = await setup();
+
+    await expect(
+      send(
+        listeners,
+        {
+          type: "vaultkern_autofill_submission",
+          url: "https://example.com/login",
+          username: "alice",
+          password: "secret",
+          submittedAt: Date.now()
+        },
+        trustedContentSender({
+          url: "https://example.com/welcome",
+          tab: { id: 7, url: "https://example.com/welcome" }
+        })
+      ).response()
+    ).resolves.toEqual({ ok: true });
+    expect(session.items["vaultkernPendingAutofillTransaction:7"]).toBeDefined();
+  });
+
   it("accepts a document-bound top-frame submission during a navigation race", async () => {
     const { listeners, session } = await setup();
 

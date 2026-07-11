@@ -501,6 +501,26 @@ function sameCanonicalHttpUrl(left: unknown, right: unknown) {
   );
 }
 
+function isBrowserSerializedHttpUrl(value: unknown) {
+  if (typeof value !== "string" || parseCanonicalHttpUrl(value) === null) {
+    return false;
+  }
+  try {
+    return new URL(value).href === value;
+  } catch {
+    return false;
+  }
+}
+
+function senderUrlMatchesSubmission(senderUrl: unknown, submissionUrl: string) {
+  return (
+    senderUrl === submissionUrl ||
+    (isBrowserSerializedHttpUrl(senderUrl) &&
+      isBrowserSerializedHttpUrl(submissionUrl) &&
+      sameExactHttpOrigin(senderUrl, submissionUrl))
+  );
+}
+
 function senderIsExtensionContentScript(
   sender: unknown,
   submissionUrl: string
@@ -518,21 +538,24 @@ function senderIsExtensionContentScript(
   if (
     candidate.id !== chromeApi?.runtime?.id ||
     candidate.frameId !== 0 ||
-    tabIdFromSender(sender) === undefined ||
-    candidate.url !== submissionUrl
+    tabIdFromSender(sender) === undefined
   ) {
     return false;
   }
-  if (
-    sameCanonicalHttpUrl(candidate.tab?.url, candidate.url) ||
-    sameExactHttpOrigin(candidate.tab?.url, candidate.url)
-  ) {
-    return true;
-  }
-  return (
+  const documentBound =
     typeof candidate.documentId === "string" &&
     candidate.documentId.length >= 16 &&
-    candidate.documentId.length <= 128
+    candidate.documentId.length <= 128;
+  const senderProof =
+    sameCanonicalHttpUrl(candidate.tab?.url, candidate.url) ||
+    sameExactHttpOrigin(candidate.tab?.url, candidate.url) ||
+    documentBound;
+  if (candidate.url === submissionUrl) {
+    return senderProof;
+  }
+  return (
+    sameCanonicalHttpUrl(candidate.tab?.url, candidate.url) &&
+    senderUrlMatchesSubmission(candidate.url, submissionUrl)
   );
 }
 
