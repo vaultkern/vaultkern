@@ -12,7 +12,7 @@ const EXTENSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OTHER_EXTENSION_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const DEVELOPER_ID_HASH: &str = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
 const DEVELOPER_ID_NAME: &str = "Developer ID Application: VaultKern Test (TEAMID1234)";
-const APPLE_DEVELOPMENT_NAME: &str = "Apple Development: VaultKern Test (TEAMID1234)";
+const APPLE_DEVELOPMENT_NAME: &str = "Apple Development: VaultKern Test (CERTUSER01)";
 const SELF_SIGNED_NAME: &str = "VaultKern Self Signed";
 const SPOOFED_DEVELOPER_ID_HASH: &str = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
 const SPOOFED_DEVELOPER_ID_NAME: &str = "Developer ID Application: VaultKern Spoof (SPOOFTEAM1)";
@@ -1062,14 +1062,16 @@ fn macos_runtime_zeroizes_serialized_and_decrypted_quick_unlock_credentials() {
 }
 
 #[test]
-fn macos_bridge_build_contract_uses_command_line_tools_and_macos_13_static_archive() {
+fn macos_bridge_build_contract_resolves_the_selected_xcode_toolchain_with_xcrun() {
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
     let build = std::fs::read_to_string(runtime.join("build.rs"))
         .expect("vaultkern-runtime build script must exist");
 
     for required in [
-        "/Library/Developer/CommandLineTools/usr/bin/swiftc",
-        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "Command::new(\"/usr/bin/xcrun\")",
+        "--find",
+        "swiftc",
+        "--show-sdk-path",
         "CARGO_CFG_TARGET_OS",
         "macos",
         "CARGO_CFG_TARGET_ARCH",
@@ -1084,6 +1086,8 @@ fn macos_bridge_build_contract_uses_command_line_tools_and_macos_13_static_archi
             "build script is missing {required}"
         );
     }
+    assert!(!build.contains("/Library/Developer/CommandLineTools"));
+    assert!(!build.contains(".env(\"DEVELOPER_DIR\""));
 }
 
 #[test]
@@ -1154,6 +1158,17 @@ Authority=Developer ID Certification Authority
 Authority=Apple Root CA
 Timestamp=Jul 11, 2026 at 12:00:00
 TeamIdentifier=SPOOFTEAM1
+EOF
+    elif [ "${VAULTKERN_TEST_SIGNATURE_MODE:-valid}" = "apple-development" ]; then
+      cat >&2 <<'EOF'
+Executable=/tmp/VaultKern Native.app/Contents/MacOS/vaultkern-runtime
+Identifier=com.vaultkern.runtime
+CodeDirectory v=20500 size=512 flags=0x10000(runtime) hashes=8+2 location=embedded
+Authority=Apple Development: VaultKern Test (CERTUSER01)
+Authority=Apple Worldwide Developer Relations Certification Authority
+Authority=Apple Root CA
+Signed Time=Jul 11, 2026 at 12:00:00
+TeamIdentifier=TEAMID1234
 EOF
     else
       cat >&2 <<'EOF'
@@ -1766,7 +1781,7 @@ fn first_install_manifest_failure_removes_new_app_and_preserves_stale_manifest()
 }
 
 #[test]
-fn adhoc_upgrade_warns_that_persisted_quick_unlock_continuity_is_not_guaranteed() {
+fn adhoc_upgrade_is_rejected_before_it_can_strand_quick_unlock_records() {
     let temp = TempDir::new().unwrap();
     let output_root = temp.path().join("packages");
     let home = temp.path().join("home");
@@ -1778,14 +1793,22 @@ fn adhoc_upgrade_warns_that_persisted_quick_unlock_continuity_is_not_guaranteed(
     );
     let app = output_root.join(host_target()).join("VaultKern Native.app");
     assert_success(run_install(&home, &app), "install initial ad-hoc app");
+    let installed_executable = home
+        .join("Library/Application Support/VaultKern/VaultKern Native.app")
+        .join("Contents/MacOS/vaultkern-runtime");
+    let original_executable = std::fs::read(&installed_executable).unwrap();
 
     let upgrade = run_install(&home, &app);
 
-    assert_success(upgrade.clone(), "upgrade ad-hoc app");
+    assert!(!upgrade.status.success());
     assert!(
         String::from_utf8(upgrade.stderr)
             .unwrap()
-            .contains("persisted Quick Unlock continuity is not guaranteed")
+            .contains("refusing ad-hoc native host upgrade")
+    );
+    assert_eq!(
+        std::fs::read(installed_executable).unwrap(),
+        original_executable
     );
 }
 
@@ -1960,6 +1983,57 @@ fn release_signing_resolves_developer_id_name_and_sha1_hash() {
             assert!(explicit_requirement.contains(required));
         }
     }
+}
+
+#[test]
+fn development_signing_accepts_an_apple_development_identity_without_a_timestamp() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let output_root = temp.path().join("packages-development");
+    let prebuilt = valid_prebuilt(&temp);
+    std::fs::create_dir(&home).unwrap();
+    let (fake_bin, security_log, codesign_log, codesign_display_log, codesign_verify_log) =
+        fake_signing_tools(&temp);
+
+    let output = script_command("package_macos.sh")
+        .arg(host_target())
+        .args(["--output-root", output_root.to_str().unwrap()])
+        .arg("--prebuilt-binary")
+        .arg(&prebuilt)
+        .arg("--development-signing")
+        .env("HOME", &home)
+        .env("PATH", path_with_first(&fake_bin))
+        .env("VAULTKERN_CODESIGN_IDENTITY", APPLE_DEVELOPMENT_NAME)
+        .env("VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID", "TEAMID1234")
+        .env("VAULTKERN_TEST_SECURITY_LOG", &security_log)
+        .env("VAULTKERN_TEST_CODESIGN_LOG", &codesign_log)
+        .env("VAULTKERN_TEST_CODESIGN_DISPLAY_LOG", &codesign_display_log)
+        .env("VAULTKERN_TEST_CODESIGN_VERIFY_LOG", &codesign_verify_log)
+        .env("VAULTKERN_TEST_SIGNATURE_MODE", "apple-development")
+        .output()
+        .unwrap();
+
+    assert_success(output, "sign with Apple Development");
+    let codesign_args = std::fs::read_to_string(codesign_log).unwrap();
+    assert!(codesign_args.lines().any(|line| line == "--options"));
+    assert!(codesign_args.lines().any(|line| line == "runtime"));
+    assert!(codesign_args.lines().any(|line| line == "--sign"));
+    assert!(
+        codesign_args
+            .lines()
+            .any(|line| line == "2222222222222222222222222222222222222222")
+    );
+    assert!(!codesign_args.lines().any(|line| line == "--timestamp"));
+
+    let display_calls = std::fs::read_to_string(codesign_display_log).unwrap();
+    assert!(display_calls.contains("call\t--display\t--verbose=4"));
+    let verify_args = std::fs::read_to_string(codesign_verify_log).unwrap();
+    assert!(verify_args.lines().any(|line| line == "--strict"));
+    assert!(verify_args.lines().any(|line| {
+        line.starts_with("-R=")
+            && line.contains("anchor apple generic")
+            && line.contains("certificate leaf[subject.OU] = \"TEAMID1234\"")
+    }));
 }
 
 #[test]

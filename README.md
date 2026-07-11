@@ -22,6 +22,7 @@ The project is currently focused on a Rust kernel for KDBX parsing, vault modeli
 - Rust toolchain with Rust 2024 edition support.
 - Node.js and npm for the TypeScript workspaces.
 - macOS 13 or later for the macOS native host bundle.
+- Xcode Command Line Tools or Xcode selected through `xcode-select` for the macOS Swift bridge.
 - For Windows browser native messaging builds, a Windows Rust target such as `x86_64-pc-windows-gnu` may be needed.
 
 ## Build and Test
@@ -66,7 +67,15 @@ tools/vaultkern-runtime/scripts/package_macos.sh aarch64-apple-darwin
 tools/vaultkern-runtime/scripts/package_macos.sh x86_64-apple-darwin
 ```
 
-Development bundles are signed ad hoc when no identity is supplied. Release packaging accepts only a valid `Developer ID Application` identity present in the login keychain. Set `VAULTKERN_CODESIGN_IDENTITY` to either its exact identity name or its 40-character SHA-1 hash from `security find-identity -v -p codesigning`:
+Development bundles are signed ad hoc when no identity is supplied. Ad-hoc signing is suitable for one-off testing, but its executable identity changes when the binary changes and therefore cannot preserve the Keychain ACL used by Quick Unlock. For repeatable local Quick Unlock testing, use an `Apple Development` identity and its Team ID:
+
+```sh
+VAULTKERN_CODESIGN_IDENTITY="Apple Development: Example (TEAMID)" \
+  VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID="TEAMID" \
+  tools/vaultkern-runtime/scripts/package_macos.sh aarch64-apple-darwin --development-signing
+```
+
+Release packaging accepts only a valid `Developer ID Application` identity present in the login keychain. Set `VAULTKERN_CODESIGN_IDENTITY` to either its exact identity name or its 40-character SHA-1 hash from `security find-identity -v -p codesigning`:
 
 ```sh
 VAULTKERN_CODESIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
@@ -74,7 +83,7 @@ VAULTKERN_CODESIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
   tools/vaultkern-runtime/scripts/package_macos.sh aarch64-apple-darwin --release-signing
 ```
 
-Release mode resolves the requested identity before building and rejects ad-hoc, `Apple Development`, and self-signed identities. `VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID` is an independent pinned value: packaging fails if either the selected certificate or the completed signature has a different Team ID.
+Development mode accepts only `Apple Development`; release mode accepts only `Developer ID Application` and rejects ad-hoc, `Apple Development`, and self-signed identities. Both modes resolve the requested identity before building. `VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID` is an independent pinned value: packaging fails if either the selected certificate or the completed signature has a different Team ID.
 
 Install the signed bundle for the current user with the Chrome extension ID shown on `chrome://extensions`:
 
@@ -84,7 +93,7 @@ tools/vaultkern-runtime/scripts/install_native_host_macos.sh \
   "target/vaultkern-runtime-macos/aarch64-apple-darwin/VaultKern Native.app"
 ```
 
-The installer copies the app to `~/Library/Application Support/VaultKern/VaultKern Native.app` and atomically writes `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.vaultkern.runtime.json`. Reload the extension after installing the host. It validates Chrome's 32-character extension ID format and refuses to overwrite an existing manifest with a different extension origin; remove the manifest explicitly before intentionally rebinding the host. On upgrades from a Developer ID-signed installation, the installer requires the incoming bundle to preserve both its Team ID and designated requirement so persisted Quick Unlock rights retain the same code-signing identity. Ad-hoc-to-ad-hoc development upgrades remain allowed but emit a warning because persisted-right continuity is not guaranteed. The bundle identifier remains `com.vaultkern.runtime` across architecture-specific builds and signed upgrades.
+The installer copies the app to `~/Library/Application Support/VaultKern/VaultKern Native.app` and atomically writes `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.vaultkern.runtime.json`. Reload the extension after installing the host. It validates Chrome's 32-character extension ID format and refuses to overwrite an existing manifest with a different extension origin; remove the manifest explicitly before intentionally rebinding the host. The macOS host also verifies that browser-origin invocations were launched by a valid Google-signed Chrome process instead of trusting the origin command-line argument alone. On upgrades from a signed installation, the installer requires the incoming bundle to preserve both its Team ID and designated requirement so persisted Quick Unlock rights retain the same code-signing identity. Ad-hoc installations are one-off only: the installer rejects upgrading them because a changed executable identity would strand their Quick Unlock Keychain records. Use `--development-signing` for iterative local development. The bundle identifier remains `com.vaultkern.runtime` across architecture-specific builds and signed upgrades.
 
 ## OneDrive Support
 

@@ -64,8 +64,9 @@ validate_upgrade_signature_continuity() {
       echo "error: refusing native host upgrade due to designated requirement drift" >&2
       return 1
     fi
-  elif [[ "${incoming_team}" == "not set" ]]; then
-    echo "warning: ad-hoc-to-ad-hoc development upgrade; persisted Quick Unlock continuity is not guaranteed" >&2
+  else
+    echo "error: refusing ad-hoc native host upgrade because its executable identity cannot preserve Quick Unlock Keychain ACLs; use --development-signing or remove the existing installation and Quick Unlock records explicitly" >&2
+    return 1
   fi
 }
 

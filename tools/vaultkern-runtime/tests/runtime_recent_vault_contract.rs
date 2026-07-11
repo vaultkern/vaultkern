@@ -216,3 +216,21 @@ fn deleting_recent_vault_reference_ignores_quick_unlock_delete_failures() {
     assert_eq!(listed.vaults.len(), 0);
     assert_eq!(runtime.session_state().current_vault_ref_id, None);
 }
+
+#[test]
+fn listing_recent_vaults_degrades_a_quick_unlock_probe_failure_per_vault() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("probe-failure.kdbx");
+    std::fs::write(&path, b"vault bytes are not read while listing").unwrap();
+
+    let mut runtime = Runtime::for_tests_with_quick_unlock_failing_contains();
+    let vault_ref = runtime
+        .add_local_vault_reference(path.to_str().unwrap())
+        .unwrap();
+
+    let listed = runtime.list_recent_vaults().unwrap();
+
+    assert_eq!(listed.vaults.len(), 1);
+    assert_eq!(listed.vaults[0].vault_ref_id, vault_ref.vault_ref_id);
+    assert!(!listed.vaults[0].supports_quick_unlock);
+}

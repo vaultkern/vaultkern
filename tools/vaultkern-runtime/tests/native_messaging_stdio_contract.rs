@@ -201,6 +201,7 @@ fn runtime_binary_serves_browser_v0_native_messaging_loop() {
     assert!(store.contains("native-bridge.kdbx"));
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn browser_origin_native_hosts_do_not_share_recent_vaults() {
     let core = KeepassCore::new();
@@ -291,6 +292,23 @@ fn browser_origin_native_hosts_do_not_share_recent_vaults() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_runtime_rejects_a_forged_browser_origin_from_a_non_browser_parent() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vaultkern-runtime"))
+        .arg("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/")
+        .output()
+        .expect("run runtime with a forged browser origin");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stdout).unwrap().is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("trusted Chrome process")
+    );
+}
+
 fn spawn_isolated_runtime_native_host(state_dir: &tempfile::TempDir) -> std::process::Child {
     let home_dir = state_dir.path().join("home");
     spawn_isolated_runtime_native_host_at(state_dir.path(), &home_dir)
@@ -310,6 +328,7 @@ fn spawn_isolated_runtime_native_host_at(
         .expect("spawn runtime native host")
 }
 
+#[cfg(not(target_os = "macos"))]
 fn spawn_isolated_runtime_native_host_for_origin(
     state_dir: &std::path::Path,
     home_dir: &std::path::Path,

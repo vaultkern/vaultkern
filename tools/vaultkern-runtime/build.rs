@@ -2,10 +2,6 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const COMMAND_LINE_TOOLS: &str = "/Library/Developer/CommandLineTools";
-const SWIFTC: &str = "/Library/Developer/CommandLineTools/usr/bin/swiftc";
-const MACOS_SDK: &str = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk";
-
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
@@ -16,8 +12,16 @@ fn main() {
 
     let source = Path::new("macos/SecureEnclaveBridge.swift");
     println!("cargo:rerun-if-changed={}", source.display());
-    require_path(Path::new(SWIFTC), "Command Line Tools swiftc");
-    require_path(Path::new(MACOS_SDK), "Command Line Tools macOS SDK");
+    let swiftc = xcrun(&["--find", "swiftc"], "Swift compiler");
+    let macos_sdk = xcrun(&["--sdk", "macosx", "--show-sdk-path"], "macOS SDK");
+    require_path(&swiftc, "selected Swift compiler");
+    require_path(&macos_sdk, "selected macOS SDK");
+    let swift_toolchain_usr = swiftc
+        .parent()
+        .and_then(Path::parent)
+        .expect("selected Swift compiler is not under a toolchain usr/bin directory");
+    let toolchain_swift_libraries = swift_toolchain_usr.join("lib/swift/macosx");
+    let sdk_swift_libraries = macos_sdk.join("usr/lib/swift");
 
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH")
         .expect("Cargo did not provide CARGO_CFG_TARGET_ARCH to build.rs");
@@ -32,13 +36,10 @@ fn main() {
     std::fs::create_dir_all(&module_cache).expect("failed to create Swift module cache");
     let archive = out_dir.join("libvaultkern_macos_bridge.a");
 
-    let output = Command::new(SWIFTC)
-        .env("DEVELOPER_DIR", COMMAND_LINE_TOOLS)
+    let output = Command::new(&swiftc)
+        .args(["-target", swift_target, "-sdk"])
+        .arg(&macos_sdk)
         .args([
-            "-target",
-            swift_target,
-            "-sdk",
-            MACOS_SDK,
             "-parse-as-library",
             "-module-name",
             "VaultKernMacOSBridge",
@@ -56,7 +57,7 @@ fn main() {
         .arg("-o")
         .arg(&archive)
         .output()
-        .expect("failed to invoke Command Line Tools swiftc");
+        .expect("failed to invoke selected swiftc");
     if !output.status.success() {
         panic!(
             "Swift bridge compilation failed ({}):\n{}",
@@ -67,13 +68,41 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static:+bundle=vaultkern_macos_bridge");
-    println!("cargo:rustc-link-search=native={MACOS_SDK}/usr/lib/swift");
-    println!("cargo:rustc-link-search=native={COMMAND_LINE_TOOLS}/usr/lib/swift/macosx");
-    println!("cargo:rustc-link-search=framework={MACOS_SDK}/System/Library/Frameworks");
+    println!(
+        "cargo:rustc-link-search=native={}",
+        sdk_swift_libraries.display()
+    );
+    println!(
+        "cargo:rustc-link-search=native={}",
+        toolchain_swift_libraries.display()
+    );
+    println!(
+        "cargo:rustc-link-search=framework={}",
+        macos_sdk.join("System/Library/Frameworks").display()
+    );
     for framework in ["Foundation", "CryptoKit", "LocalAuthentication", "Security"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-link-arg=-mmacosx-version-min=13.0");
+}
+
+fn xcrun(arguments: &[&str], label: &str) -> PathBuf {
+    let output = Command::new("/usr/bin/xcrun")
+        .args(arguments)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to invoke xcrun for {label}: {error}"));
+    if !output.status.success() {
+        panic!(
+            "xcrun failed to resolve {label} ({}):\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let path = String::from_utf8(output.stdout)
+        .unwrap_or_else(|error| panic!("xcrun returned a non-UTF-8 path for {label}: {error}"));
+    let path = path.trim();
+    assert!(!path.is_empty(), "xcrun returned an empty path for {label}");
+    PathBuf::from(path)
 }
 
 fn require_path(path: &Path, label: &str) {

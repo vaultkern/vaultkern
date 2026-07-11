@@ -1,4 +1,6 @@
-use vaultkern_runtime::{Runtime, render_manifest, run_stdio_loop};
+use vaultkern_runtime::{
+    Runtime, render_manifest, run_stdio_loop, verify_native_messaging_browser_caller,
+};
 
 const USAGE: &str = "usage: vaultkern-runtime [--help] [--print-native-host-manifest <binary-path> <extension-origin>]";
 
@@ -18,6 +20,12 @@ enum Invocation {
 fn main() {
     match classify_invocation(std::env::args().skip(1)) {
         Invocation::RunStdio { browser_origin } => {
+            if browser_origin.is_some()
+                && let Err(error) = verify_native_messaging_browser_caller()
+            {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
             let runtime = browser_origin
                 .as_deref()
                 .map(Runtime::new_for_browser_origin)

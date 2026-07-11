@@ -972,12 +972,7 @@ impl Runtime {
             for vault in &mut list.vaults {
                 let storage_key = quick_unlock_storage_key(&vault.vault_ref_id);
                 vault.supports_quick_unlock =
-                    self.quick_unlock.contains(&storage_key).with_context(|| {
-                        format!(
-                            "failed to inspect Quick Unlock state for vault {}",
-                            vault.vault_ref_id
-                        )
-                    })?;
+                    self.quick_unlock.contains(&storage_key).unwrap_or(false);
             }
         }
         Ok(list)
@@ -11886,7 +11881,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_recent_vaults_propagates_quick_unlock_probe_failures() {
+    fn listing_recent_vaults_degrades_quick_unlock_probe_failures() {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
@@ -11917,12 +11912,10 @@ mod tests {
         runtime.lock_session();
         operations.borrow_mut().clear();
 
-        let error = runtime.list_recent_vaults().unwrap_err();
+        let listed = runtime.list_recent_vaults().unwrap();
 
-        assert!(
-            format_error_chain(&error).contains("injected quick unlock contains failure"),
-            "{error:?}"
-        );
+        assert_eq!(listed.vaults.len(), 1);
+        assert!(!listed.vaults[0].supports_quick_unlock);
         assert_eq!(operations.borrow().as_slice(), ["contains"]);
     }
 

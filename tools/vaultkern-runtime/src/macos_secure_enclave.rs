@@ -15,6 +15,7 @@ const STATUS_PLATFORM_FAILURE: i32 = 5;
 type BufferFree = unsafe extern "C" fn(*mut c_void, usize);
 
 unsafe extern "C" {
+    fn vaultkern_macos_native_messaging_caller_is_trusted() -> i32;
     fn vaultkern_macos_quick_unlock_keychain_is_available() -> i32;
     fn vaultkern_macos_quick_unlock_record_store(
         record_id: *const u8,
@@ -92,6 +93,11 @@ unsafe extern "C" {
         error_length_out: *mut usize,
     ) -> i32;
     fn vaultkern_macos_buffer_free(pointer: *mut c_void, length: usize);
+}
+
+pub(crate) fn native_messaging_caller_is_trusted() -> bool {
+    // SAFETY: This C ABI function accepts no pointers and returns 0 or 1.
+    unsafe { vaultkern_macos_native_messaging_caller_is_trusted() == 1 }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

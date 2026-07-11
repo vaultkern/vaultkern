@@ -174,6 +174,77 @@ private func publishError(
     return classify(error, invalidationEligible: invalidationEligible)
 }
 
+// MARK: - Native Messaging Caller Verification
+
+private let chromeSigningTeamIdentifier = "EQHXZ8M8AV"
+private let chromeBundleIdentifier = "com.google.Chrome"
+
+private func isAllowedChromeIdentifier(_ identifier: String) -> Bool {
+    identifier == chromeBundleIdentifier
+        || identifier.hasPrefix("\(chromeBundleIdentifier).")
+}
+
+@_cdecl("vaultkern_macos_native_messaging_caller_is_trusted")
+public func vaultkernMacosNativeMessagingCallerIsTrusted() -> Int32 {
+    let parentPID = getppid()
+    guard parentPID > 1 else { return 0 }
+
+    var parentCode: SecCode?
+    let guestAttributes = [kSecGuestAttributePid: NSNumber(value: parentPID)] as CFDictionary
+    guard SecCodeCopyGuestWithAttributes(
+        nil,
+        guestAttributes,
+        SecCSFlags(rawValue: 0),
+        &parentCode
+    ) == errSecSuccess, let parentCode else {
+        return 0
+    }
+
+    let requirementText =
+        "anchor apple generic and certificate leaf[subject.OU] = \"\(chromeSigningTeamIdentifier)\""
+    var requirement: SecRequirement?
+    guard SecRequirementCreateWithString(
+        requirementText as CFString,
+        SecCSFlags(rawValue: 0),
+        &requirement
+    ) == errSecSuccess, let requirement else {
+        return 0
+    }
+    guard SecCodeCheckValidity(
+        parentCode,
+        SecCSFlags(rawValue: kSecCSStrictValidate),
+        requirement
+    ) == errSecSuccess else {
+        return 0
+    }
+
+    var parentStaticCode: SecStaticCode?
+    guard SecCodeCopyStaticCode(
+        parentCode,
+        SecCSFlags(rawValue: 0),
+        &parentStaticCode
+    ) == errSecSuccess, let parentStaticCode else {
+        return 0
+    }
+
+    var signingInformation: CFDictionary?
+    guard SecCodeCopySigningInformation(
+        parentStaticCode,
+        SecCSFlags(rawValue: kSecCSSigningInformation),
+        &signingInformation
+    ) == errSecSuccess,
+        let signingInformation = signingInformation as? [CFString: Any],
+        let identifier = signingInformation[kSecCodeInfoIdentifier] as? String,
+        let teamIdentifier = signingInformation[kSecCodeInfoTeamIdentifier] as? String
+    else {
+        return 0
+    }
+
+    return teamIdentifier == chromeSigningTeamIdentifier && isAllowedChromeIdentifier(identifier)
+        ? 1
+        : 0
+}
+
 private func accessControl() throws -> SecAccessControl {
     var error: Unmanaged<CFError>?
     guard let value = SecAccessControlCreateWithFlags(

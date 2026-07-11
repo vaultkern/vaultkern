@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: package_macos.sh <aarch64-apple-darwin|x86_64-apple-darwin> [--output-root <path>] [--prebuilt-binary <path>] [--release-signing]" >&2
+  echo "usage: package_macos.sh <aarch64-apple-darwin|x86_64-apple-darwin> [--output-root <path>] [--prebuilt-binary <path>] [--development-signing|--release-signing]" >&2
 }
 
 validate_runtime_binary() {
@@ -58,8 +58,10 @@ validate_runtime_binary() {
   fi
 }
 
-resolve_release_signing_identity() {
+resolve_signing_identity() {
   local requested_identity="$1"
+  local required_name_prefix="$2"
+  local signing_mode="$3"
   local requested_hash
   local available_identities
   local identity_hash
@@ -79,12 +81,16 @@ resolve_release_signing_identity() {
       identity_hash="${BASH_REMATCH[1]}"
       identity_name="${BASH_REMATCH[2]}"
       if [[ "${requested_hash}" == "${identity_hash}" || "${requested_identity}" == "${identity_name}" ]]; then
-        if [[ "${identity_name}" != "Developer ID Application: "* ]]; then
-          echo "error: release signing requires a Developer ID Application identity; matched ${identity_name}" >&2
+        if [[ "${identity_name}" != "${required_name_prefix}"* ]]; then
+          echo "error: ${signing_mode} signing requires a ${required_name_prefix%: } identity; matched ${identity_name}" >&2
           return 1
         fi
+        if [[ "${signing_mode}" == "development" ]]; then
+          printf '%s\t\n' "${identity_hash}"
+          return 0
+        fi
         if [[ ! "${identity_name}" =~ \(([[:alnum:]]+)\)$ ]]; then
-          echo "error: Developer ID Application identity does not contain a Team ID: ${identity_name}" >&2
+          echo "error: ${required_name_prefix%: } identity does not contain a Team ID: ${identity_name}" >&2
           return 1
         fi
         team_identifier="${BASH_REMATCH[1]}"
@@ -94,8 +100,60 @@ resolve_release_signing_identity() {
     fi
   done <<< "${available_identities}"
 
-  echo "error: VAULTKERN_CODESIGN_IDENTITY was not found by security find-identity; release signing requires a Developer ID Application identity" >&2
+  echo "error: VAULTKERN_CODESIGN_IDENTITY was not found by security find-identity; ${signing_mode} signing requires a ${required_name_prefix%: } identity" >&2
   return 1
+}
+
+validate_development_signature() {
+  local app_bundle="$1"
+  local expected_team_identifier="$2"
+  local signature_details
+  local line
+  local has_apple_development_authority=0
+  local has_wwdr_authority=0
+  local has_apple_root=0
+  local has_hardened_runtime=0
+  local has_identifier=0
+  local has_team_identifier=0
+  local explicit_requirement
+  local verification_output
+
+  if [[ -z "${expected_team_identifier}" || "${expected_team_identifier}" == "not set" ]]; then
+    echo "error: development signature has no selected TeamIdentifier" >&2
+    return 1
+  fi
+  if ! signature_details="$(codesign --display --verbose=4 "${app_bundle}" 2>&1)"; then
+    echo "error: failed to inspect development signature" >&2
+    echo "${signature_details}" >&2
+    return 1
+  fi
+
+  while IFS= read -r line; do
+    case "${line}" in
+      "Authority=Apple Development:"*) has_apple_development_authority=1 ;;
+      "Authority=Apple Worldwide Developer Relations Certification Authority") has_wwdr_authority=1 ;;
+      "Authority=Apple Root CA") has_apple_root=1 ;;
+      "Identifier=com.vaultkern.runtime") has_identifier=1 ;;
+      "TeamIdentifier=${expected_team_identifier}") has_team_identifier=1 ;;
+      CodeDirectory*"flags="*"(runtime)"*) has_hardened_runtime=1 ;;
+    esac
+  done <<< "${signature_details}"
+
+  if [[ "${has_apple_development_authority}" -ne 1 || "${has_wwdr_authority}" -ne 1 || "${has_apple_root}" -ne 1 ]]; then
+    echo "error: development signature is not anchored by an Apple Development certificate chain" >&2
+    return 1
+  fi
+  if [[ "${has_identifier}" -ne 1 || "${has_team_identifier}" -ne 1 || "${has_hardened_runtime}" -ne 1 ]]; then
+    echo "error: development signature is missing the required identifier, TeamIdentifier, or hardened-runtime flag" >&2
+    return 1
+  fi
+
+  explicit_requirement="identifier \"com.vaultkern.runtime\" and anchor apple generic and certificate leaf[subject.OU] = \"${expected_team_identifier}\""
+  if ! verification_output="$(codesign --verify --strict "-R=${explicit_requirement}" "${app_bundle}" 2>&1)"; then
+    echo "error: explicit Apple Development requirement verification failed" >&2
+    echo "${verification_output}" >&2
+    return 1
+  fi
 }
 
 validate_release_signature() {
@@ -223,6 +281,7 @@ repo_root="$(cd "${runtime_dir}/../.." && pwd)"
 output_root="${repo_root}/target/vaultkern-runtime-macos"
 prebuilt_binary=""
 release_signing=0
+development_signing=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -246,6 +305,10 @@ while [[ $# -gt 0 ]]; do
       release_signing=1
       shift
       ;;
+    --development-signing)
+      development_signing=1
+      shift
+      ;;
     *)
       echo "error: unknown argument: $1" >&2
       usage
@@ -258,21 +321,36 @@ signing_identity="${VAULTKERN_CODESIGN_IDENTITY:-}"
 expected_team_identifier="${VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID:-}"
 resolved_signing_identity="${signing_identity}"
 resolved_team_identifier=""
-if [[ "${release_signing}" -eq 1 && ( -z "${signing_identity}" || "${signing_identity}" == "-" ) ]]; then
-  echo "error: release signing requires a Developer ID Application VAULTKERN_CODESIGN_IDENTITY" >&2
+if [[ "${release_signing}" -eq 1 && "${development_signing}" -eq 1 ]]; then
+  echo "error: --development-signing and --release-signing are mutually exclusive" >&2
   exit 1
 fi
-if [[ "${release_signing}" -eq 1 ]]; then
+if [[ "${release_signing}" -eq 0 && "${development_signing}" -eq 0 && -n "${signing_identity}" && "${signing_identity}" != "-" ]]; then
+  echo "error: VAULTKERN_CODESIGN_IDENTITY requires --development-signing or --release-signing" >&2
+  exit 1
+fi
+if [[ ( "${release_signing}" -eq 1 || "${development_signing}" -eq 1 ) && ( -z "${signing_identity}" || "${signing_identity}" == "-" ) ]]; then
+  echo "error: selected signing mode requires VAULTKERN_CODESIGN_IDENTITY" >&2
+  exit 1
+fi
+if [[ "${release_signing}" -eq 1 || "${development_signing}" -eq 1 ]]; then
   if [[ -z "${expected_team_identifier}" ]]; then
-    echo "error: release signing requires an independent VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID" >&2
+    echo "error: selected signing mode requires an independent VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID" >&2
     exit 1
   fi
-  if ! resolved_signing_record="$(resolve_release_signing_identity "${signing_identity}")"; then
+  if [[ "${release_signing}" -eq 1 ]]; then
+    required_name_prefix="Developer ID Application: "
+    signing_mode_label="release"
+  else
+    required_name_prefix="Apple Development: "
+    signing_mode_label="development"
+  fi
+  if ! resolved_signing_record="$(resolve_signing_identity "${signing_identity}" "${required_name_prefix}" "${signing_mode_label}")"; then
     exit 1
   fi
   resolved_signing_identity="${resolved_signing_record%%$'\t'*}"
   resolved_team_identifier="${resolved_signing_record#*$'\t'}"
-  if [[ "${resolved_team_identifier}" != "${expected_team_identifier}" ]]; then
+  if [[ "${release_signing}" -eq 1 && "${resolved_team_identifier}" != "${expected_team_identifier}" ]]; then
     echo "error: selected Developer ID TeamIdentifier ${resolved_team_identifier} does not match VAULTKERN_EXPECTED_DEVELOPER_TEAM_ID ${expected_team_identifier}" >&2
     exit 1
   fi
@@ -342,13 +420,17 @@ mkdir -p "${executable_dir}"
 install -m 0644 "${runtime_dir}/macos/Info.plist" "${contents_dir}/Info.plist"
 install -m 0755 "${runtime_binary}" "${executable_dir}/vaultkern-runtime"
 
-if [[ -z "${signing_identity}" || "${signing_identity}" == "-" ]]; then
-  codesign --force --sign - "${staged_app_bundle}"
-else
+if [[ "${development_signing}" -eq 1 ]]; then
+  codesign --force --options runtime --sign "${resolved_signing_identity}" "${staged_app_bundle}"
+elif [[ "${release_signing}" -eq 1 ]]; then
   codesign --force --options runtime --timestamp --sign "${resolved_signing_identity}" "${staged_app_bundle}"
+else
+  codesign --force --sign - "${staged_app_bundle}"
 fi
 codesign --verify --strict "${staged_app_bundle}"
-if [[ -n "${signing_identity}" && "${signing_identity}" != "-" ]]; then
+if [[ "${development_signing}" -eq 1 ]]; then
+  validate_development_signature "${staged_app_bundle}" "${expected_team_identifier}"
+elif [[ "${release_signing}" -eq 1 ]]; then
   validate_release_signature "${staged_app_bundle}" "${expected_team_identifier}"
 fi
 
