@@ -181,7 +181,6 @@ private let chromeBundleIdentifier = "com.google.Chrome"
 
 private func isAllowedChromeIdentifier(_ identifier: String) -> Bool {
     identifier == chromeBundleIdentifier
-        || identifier.hasPrefix("\(chromeBundleIdentifier).")
 }
 
 @_cdecl("vaultkern_macos_native_messaging_caller_is_trusted")
@@ -363,13 +362,15 @@ private func withKeychainUserInteractionDisabled<T>(_ body: () throws -> T) thro
 
 @available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
 private func defaultLoginKeychain() throws -> SecKeychain {
+    let loginKeychainURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Keychains/login.keychain-db", isDirectory: false)
     var keychain: SecKeychain?
     try checkSecurityStatus(
-        SecKeychainCopyDefault(&keychain),
-        operation: "open the default login Keychain"
+        SecKeychainOpen(loginKeychainURL.path, &keychain),
+        operation: "open the login Keychain"
     )
     guard let keychain else {
-        throw BridgeInputError(message: "SecKeychainCopyDefault returned no Keychain")
+        throw BridgeInputError(message: "SecKeychainOpen returned no login Keychain")
     }
     return keychain
 }

@@ -7,12 +7,9 @@ use vaultkern_runtime::Runtime;
 
 #[test]
 fn runtime_binary_serves_native_messaging_session_state_frame() {
-    // The macOS child has an isolated HOME and therefore no default login Keychain.
-    let expected_biometric_support = if cfg!(target_os = "macos") {
-        false
-    } else {
-        Runtime::new().session_state().supports_biometric_unlock
-    };
+    // The macOS bridge resolves the account's login Keychain independently of
+    // an inherited HOME override, so parent and child report the same support.
+    let expected_biometric_support = Runtime::new().session_state().supports_biometric_unlock;
     let state_dir = tempfile::tempdir().expect("state tempdir");
     let mut child = spawn_isolated_runtime_native_host(&state_dir);
 

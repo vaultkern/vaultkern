@@ -19,6 +19,10 @@ use super::secure_storage::{
 };
 
 pub trait QuickUnlockProvider {
+    fn requires_same_process_credential_proof(&self) -> bool {
+        false
+    }
+
     fn is_supported(&self) -> bool;
     fn contains(&self, key: &str) -> Result<bool>;
     fn enable(&self, key: &str, value: &[u8], reason: &str) -> Result<()>;
@@ -42,6 +46,7 @@ pub(crate) struct MemoryQuickUnlockProvider {
     operations: Rc<RefCell<Vec<String>>>,
     failures: MemoryQuickUnlockFailures,
     verify_user_callback: Option<Box<dyn Fn()>>,
+    requires_process_proof: bool,
 }
 
 #[cfg(test)]
@@ -52,6 +57,7 @@ impl MemoryQuickUnlockProvider {
             operations,
             failures: MemoryQuickUnlockFailures::default(),
             verify_user_callback: None,
+            requires_process_proof: false,
         }
     }
 
@@ -65,6 +71,11 @@ impl MemoryQuickUnlockProvider {
         self
     }
 
+    pub(crate) fn requiring_same_process_credential_proof(mut self) -> Self {
+        self.requires_process_proof = true;
+        self
+    }
+
     fn record(&self, operation: impl Into<String>) {
         self.operations.borrow_mut().push(operation.into());
     }
@@ -72,6 +83,10 @@ impl MemoryQuickUnlockProvider {
 
 #[cfg(test)]
 impl QuickUnlockProvider for MemoryQuickUnlockProvider {
+    fn requires_same_process_credential_proof(&self) -> bool {
+        self.requires_process_proof
+    }
+
     fn is_supported(&self) -> bool {
         true
     }

@@ -553,6 +553,10 @@ fn decode_envelope(bytes: &[u8]) -> std::result::Result<DecodedEnvelopeV1, Envel
 }
 
 impl QuickUnlockProvider for MacOsQuickUnlockProvider {
+    fn requires_same_process_credential_proof(&self) -> bool {
+        true
+    }
+
     fn is_supported(&self) -> bool {
         self.local_authentication.is_touch_id_available()
             && self.secure_enclave.is_available()

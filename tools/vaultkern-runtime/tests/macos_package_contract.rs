@@ -403,7 +403,9 @@ fn macos_quick_unlock_records_use_only_the_executable_bound_login_keychain() {
     let keychain = &swift[keychain_start..keychain_end];
 
     for required in [
-        "SecKeychainCopyDefault",
+        "FileManager.default.homeDirectoryForCurrentUser",
+        "Library/Keychains/login.keychain-db",
+        "SecKeychainOpen(",
         "SecTrustedApplicationCreateFromPath(nil",
         "SecAccessCreate(",
         "kSecAttrAccess: access",
@@ -426,6 +428,7 @@ fn macos_quick_unlock_records_use_only_the_executable_bound_login_keychain() {
     }
 
     for forbidden in [
+        "SecKeychainCopyDefault",
         "kSecUseDataProtectionKeychain",
         "kSecAttrSynchronizable",
         "kSecAttrAccessControl",
@@ -437,6 +440,25 @@ fn macos_quick_unlock_records_use_only_the_executable_bound_login_keychain() {
             "legacy Quick Unlock records must not use {forbidden}"
         );
     }
+}
+
+#[test]
+fn macos_native_messaging_caller_accepts_only_the_top_level_chrome_identifier() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let caller_start = swift
+        .find("// MARK: - Native Messaging Caller Verification")
+        .expect("the native messaging caller verifier must exist");
+    let caller_end = swift[caller_start..]
+        .find("private func accessControl()")
+        .map(|offset| caller_start + offset)
+        .expect("Secure Enclave access control must follow caller verification");
+    let caller = &swift[caller_start..caller_end];
+
+    assert!(caller.contains("identifier == chromeBundleIdentifier"));
+    assert!(!caller.contains("hasPrefix"));
+    assert!(!caller.contains("com.google.Chrome.helper"));
 }
 
 #[test]
