@@ -185,7 +185,7 @@ fn deleting_recent_vault_reference_removes_quick_unlock_credentials() {
 }
 
 #[test]
-fn deleting_recent_vault_reference_ignores_quick_unlock_delete_failures() {
+fn deleting_recent_vault_reference_preserves_it_when_quick_unlock_revocation_fails() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("demo-password");
@@ -209,12 +209,22 @@ fn deleting_recent_vault_reference_ignores_quick_unlock_delete_failures() {
         .handle(vaultkern_runtime_protocol::RuntimeCommand::EnableQuickUnlockForCurrentVault)
         .unwrap();
 
-    let listed = runtime
+    let error = runtime
         .delete_vault_reference(&vault_ref.vault_ref_id)
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(listed.vaults.len(), 0);
-    assert_eq!(runtime.session_state().current_vault_ref_id, None);
+    assert!(
+        error
+            .to_string()
+            .contains("injected secure storage delete failure")
+    );
+    let listed = runtime.list_recent_vaults().unwrap();
+    assert_eq!(listed.vaults.len(), 1);
+    assert_eq!(listed.vaults[0].vault_ref_id, vault_ref.vault_ref_id);
+    assert_eq!(
+        runtime.session_state().current_vault_ref_id.as_deref(),
+        Some(vault_ref.vault_ref_id.as_str())
+    );
 }
 
 #[test]

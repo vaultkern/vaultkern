@@ -23,6 +23,10 @@ pub trait QuickUnlockProvider {
         false
     }
 
+    fn requires_password_credential(&self) -> bool {
+        false
+    }
+
     fn is_supported(&self) -> bool;
     fn contains(&self, key: &str) -> Result<bool>;
     fn enable(&self, key: &str, value: &[u8], reason: &str) -> Result<()>;
@@ -84,6 +88,10 @@ impl MemoryQuickUnlockProvider {
 #[cfg(test)]
 impl QuickUnlockProvider for MemoryQuickUnlockProvider {
     fn requires_same_process_credential_proof(&self) -> bool {
+        self.requires_process_proof
+    }
+
+    fn requires_password_credential(&self) -> bool {
         self.requires_process_proof
     }
 

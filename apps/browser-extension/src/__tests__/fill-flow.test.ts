@@ -2126,6 +2126,85 @@ describe("PopupShell fill flow", () => {
     });
   });
 
+  it("does not re-enroll quick unlock when password proof makes the existing record available", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: vi.fn((_key, callback) =>
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 0,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: true
+              }
+            })
+          ),
+          set: vi.fn((_values, callback) => callback?.())
+        }
+      },
+      tabs: {
+        query: vi.fn(async () => [{ id: 7, url: "https://example.com/login" }]),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    const unavailableVault = {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    };
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listRecentVaults.mockImplementation(async () =>
+      runtimeClientMocks.unlockCurrentVault.mock.calls.length > 0
+        ? [{ ...unavailableVault, supportsQuickUnlock: true }]
+        : [unavailableVault]
+    );
+    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Personal")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    expect(await screen.findByText("Unlocked")).toBeInTheDocument();
+    expect(runtimeClientMocks.listRecentVaults).toHaveBeenCalledTimes(2);
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+  });
+
   it("does not provision quick unlock after popup unlock when biometric unlock is unsupported", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       storage: {
@@ -2288,6 +2367,83 @@ describe("PopupShell fill flow", () => {
       });
       expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("does not offer macOS quick unlock after a key-file-only unlock", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: vi.fn((_key, callback) =>
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 0,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: true
+              }
+            })
+          ),
+          set: vi.fn((_values, callback) => callback?.())
+        }
+      },
+      tabs: {
+        query: vi.fn(async () => [{ id: 7, url: "https://example.com/login" }]),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Personal",
+        sourceKind: "local",
+        sourceSummary: "personal.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true,
+      quickUnlockRequiresPassword: true
+    });
+    runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true,
+      quickUnlockRequiresPassword: true
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Personal")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Key File Path"), {
+      target: { value: "/tmp/demo.keyx" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    expect(await screen.findByText("Unlocked")).toBeInTheDocument();
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 
   it("enables quick unlock when the popup unlocks before recent vaults finish loading", async () => {

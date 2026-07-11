@@ -48,9 +48,10 @@ use sha2::{Digest, Sha256};
 use url::form_urlencoded::byte_serialize;
 use uuid::Uuid;
 use vaultkern_core::{
-    AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError, Entry,
-    EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    KdbxCipher, KdbxError, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, TotpSpec, Vault,
+    AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError,
+    CryptoError, Entry, EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate,
+    EntryUpdate, KdbxCipher, KdbxError, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, TotpSpec,
+    Vault,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
@@ -179,6 +180,7 @@ fn group_tree_contains_non_recycled_id(
 }
 
 struct LoadedVault {
+    vault_ref_id: String,
     source: VaultSource,
     name: String,
     bytes: Vec<u8>,
@@ -191,6 +193,12 @@ struct LoadedVault {
     source_status: Option<VaultSourceStatusDto>,
     source_account_label: Option<String>,
     quick_unlock_refresh_pending: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CredentialUnlockOrigin {
+    UserSupplied,
+    QuickUnlock,
 }
 
 impl LoadedVault {
@@ -353,9 +361,13 @@ struct VaultCredentials {
 impl VaultCredentials {
     fn from_parts(password: Option<&str>, key_file_path: Option<&str>) -> Result<Self> {
         let key_file_path = key_file_path
-            .map(normalize_local_path)
+            .map(|path| {
+                normalize_local_path(path).map_err(|error| {
+                    KeyFileCredentialError(format!("invalid key file path: {path}: {error:#}"))
+                })
+            })
             .transpose()
-            .context("invalid key file path")?;
+            .map_err(anyhow::Error::from)?;
         let password = password.map(ToOwned::to_owned);
         if password.is_none() && key_file_path.is_none() {
             anyhow::bail!("no unlock credentials provided");
@@ -399,6 +411,17 @@ impl Drop for VaultCredentials {
     }
 }
 
+#[derive(Debug)]
+struct KeyFileCredentialError(String);
+
+impl std::fmt::Display for KeyFileCredentialError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for KeyFileCredentialError {}
+
 pub struct Runtime {
     core: KeepassCore,
     session: SessionState,
@@ -408,6 +431,7 @@ pub struct Runtime {
     remote_cache: RemoteVaultCache,
     quick_unlock: Box<dyn QuickUnlockProvider>,
     quick_unlock_process_authorizations: BTreeSet<String>,
+    quick_unlock_suppressed_records: BTreeSet<String>,
     loaded: BTreeMap<String, LoadedVault>,
     passkey_ceremonies: BTreeMap<String, PasskeyCeremonyLedgerEntry>,
     recent_unlock_user_verification: Option<PasskeyUserVerificationProof>,
@@ -465,6 +489,7 @@ impl Runtime {
             remote_cache,
             quick_unlock,
             quick_unlock_process_authorizations: BTreeSet::new(),
+            quick_unlock_suppressed_records: BTreeSet::new(),
             loaded: BTreeMap::new(),
             passkey_ceremonies: BTreeMap::new(),
             recent_unlock_user_verification: None,
@@ -487,6 +512,7 @@ impl Runtime {
             ))),
             quick_unlock: Box::new(UnsupportedQuickUnlockProvider),
             quick_unlock_process_authorizations: BTreeSet::new(),
+            quick_unlock_suppressed_records: BTreeSet::new(),
             loaded: BTreeMap::new(),
             passkey_ceremonies: BTreeMap::new(),
             recent_unlock_user_verification: None,
@@ -693,12 +719,12 @@ impl Runtime {
         let reference = self
             .references
             .upsert_local_path(path, self.current_unix_time() as i64)?;
-        self.session
-            .set_current_vault(reference.vault_ref_id.clone());
+        self.select_current_vault(reference.vault_ref_id.clone());
 
         self.loaded.insert(
             vault_id.clone(),
             LoadedVault {
+                vault_ref_id: reference.vault_ref_id,
                 source: VaultSource::LocalPath(path.to_owned()),
                 name: name.clone(),
                 bytes,
@@ -721,7 +747,11 @@ impl Runtime {
         })
     }
 
-    fn load_source_snapshot(&mut self, source: StoredVaultSource) -> Result<VaultHandleDto> {
+    fn load_source_snapshot(
+        &mut self,
+        vault_ref_id: &str,
+        source: StoredVaultSource,
+    ) -> Result<VaultHandleDto> {
         match source {
             StoredVaultSource::LocalPath(path) => self.load_local_vault_snapshot(&path),
             StoredVaultSource::OneDriveItem {
@@ -901,6 +931,7 @@ impl Runtime {
                 self.loaded.insert(
                     vault_id.clone(),
                     LoadedVault {
+                        vault_ref_id: vault_ref_id.to_owned(),
                         source: vault_source,
                         name: name.clone(),
                         bytes,
@@ -937,7 +968,7 @@ impl Runtime {
             return Ok(());
         }
 
-        self.load_source_snapshot(source)?;
+        self.load_source_snapshot(&current_vault_ref_id, source)?;
         Ok(())
     }
 
@@ -946,8 +977,7 @@ impl Runtime {
         let reference = self
             .references
             .upsert_local_path(&path, self.current_unix_time() as i64)?;
-        self.session
-            .set_current_vault(reference.vault_ref_id.clone());
+        self.select_current_vault(reference.vault_ref_id.clone());
         Ok(reference)
     }
 
@@ -964,8 +994,7 @@ impl Runtime {
             &metadata.account_label,
             self.current_unix_time() as i64,
         )?;
-        self.session
-            .set_current_vault(reference.vault_ref_id.clone());
+        self.select_current_vault(reference.vault_ref_id.clone());
         Ok(reference)
     }
 
@@ -974,7 +1003,7 @@ impl Runtime {
         if self.quick_unlock.is_supported() {
             for vault in &mut list.vaults {
                 let storage_key = quick_unlock_storage_key(&vault.vault_ref_id);
-                vault.supports_quick_unlock = self.quick_unlock_process_is_authorized(&storage_key)
+                vault.supports_quick_unlock = self.quick_unlock_record_is_available(&storage_key)
                     && self.quick_unlock.contains(&storage_key).unwrap_or(false);
             }
         }
@@ -984,23 +1013,43 @@ impl Runtime {
     pub fn set_current_vault(&mut self, vault_ref_id: &str) -> Result<()> {
         self.references
             .mark_current(vault_ref_id, self.current_unix_time() as i64)?;
-        self.session.set_current_vault(vault_ref_id.to_owned());
+        self.select_current_vault(vault_ref_id.to_owned());
         Ok(())
     }
 
     pub fn delete_vault_reference(&mut self, vault_ref_id: &str) -> Result<VaultReferenceListDto> {
+        if !self
+            .references
+            .list_recent_vaults()
+            .vaults
+            .iter()
+            .any(|vault| vault.vault_ref_id == vault_ref_id)
+        {
+            anyhow::bail!("vault reference not found: {vault_ref_id}");
+        }
         let source = self.references.source_for(vault_ref_id).ok();
+        let storage_key = quick_unlock_storage_key(vault_ref_id);
+        let has_quick_unlock_record = self.quick_unlock.contains(&storage_key)?;
+        if has_quick_unlock_record {
+            self.require_quick_unlock_process_authorization(&storage_key)?;
+            self.quick_unlock.delete(&storage_key)?;
+        }
         if let Some(cache_key) = source.as_ref().and_then(remote_cache_key_for_stored_source) {
             self.remote_cache.delete(&cache_key)?;
         }
         let deleted_current = self.references.delete(vault_ref_id)?;
-        let storage_key = quick_unlock_storage_key(vault_ref_id);
-        if self.quick_unlock_process_is_authorized(&storage_key) {
-            let _ = self.quick_unlock.delete(&storage_key);
-        }
         self.quick_unlock_process_authorizations
             .remove(&storage_key);
-        if deleted_current {
+        self.quick_unlock_suppressed_records.remove(&storage_key);
+        let deleted_vault_id = source.as_ref().map(vault_id_for_stored_source);
+        if let Some(vault_id) = deleted_vault_id.as_deref() {
+            self.loaded.remove(vault_id);
+        }
+        if deleted_current
+            || deleted_vault_id
+                .as_deref()
+                .is_some_and(|vault_id| self.session.active_vault_id() == Some(vault_id))
+        {
             self.session.clear_current_vault();
         }
         self.list_recent_vaults()
@@ -1016,11 +1065,42 @@ impl Runtime {
         password: Option<&str>,
         key_file_path: Option<&str>,
     ) -> Result<()> {
+        self.unlock_vault_with_origin(
+            vault_id,
+            password,
+            key_file_path,
+            CredentialUnlockOrigin::UserSupplied,
+        )
+    }
+
+    fn unlock_vault_with_origin(
+        &mut self,
+        vault_id: &str,
+        password: Option<&str>,
+        key_file_path: Option<&str>,
+        origin: CredentialUnlockOrigin,
+    ) -> Result<()> {
         let mut credentials = VaultCredentials::from_parts(password, key_file_path)?;
-        let current_vault_ref_id = self
+        let has_password_proof = credentials
+            .password
+            .as_deref()
+            .is_some_and(|password| !password.is_empty());
+        let vault_ref_id = self
+            .loaded
+            .get(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?
+            .vault_ref_id
+            .clone();
+        if self.session.current_vault_ref_id() != Some(vault_ref_id.as_str()) {
+            anyhow::bail!("opened vault is not the current selection: {vault_id}");
+        }
+        let referenced_source = self
             .references
-            .find_ref_id_by_path(vault_id)
-            .or_else(|| self.session.current_vault_ref_id().map(ToOwned::to_owned));
+            .source_for(&vault_ref_id)
+            .with_context(|| format!("vault reference no longer exists: {vault_ref_id}"))?;
+        if vault_id_for_stored_source(&referenced_source) != vault_id {
+            anyhow::bail!("vault reference does not match the opened vault: {vault_ref_id}");
+        }
         let loaded = self
             .loaded
             .get_mut(vault_id)
@@ -1032,6 +1112,16 @@ impl Runtime {
             .core
             .load_database(&loaded.bytes, &key)
             .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
+        let refresh_credentials = if origin == CredentialUnlockOrigin::UserSupplied
+            && has_password_proof
+            && self.quick_unlock.requires_same_process_credential_proof()
+        {
+            Some(Zeroizing::new(serde_json::to_vec(&credentials).context(
+                "failed to encode refreshed quick unlock credentials",
+            )?))
+        } else {
+            None
+        };
         loaded.name = database.vault.name.clone();
         loaded.replace_unlock_credentials(
             credentials.password.take(),
@@ -1039,12 +1129,17 @@ impl Runtime {
         );
         loaded.vault = Some(database.vault);
         self.session
-            .unlock(vault_id.to_owned(), current_vault_ref_id.clone());
-        if self.quick_unlock.requires_same_process_credential_proof()
-            && let Some(vault_ref_id) = current_vault_ref_id
-        {
+            .unlock(vault_id.to_owned(), vault_ref_id.clone());
+        if self.quick_unlock.requires_same_process_credential_proof() && has_password_proof {
+            let storage_key = quick_unlock_storage_key(&vault_ref_id);
             self.quick_unlock_process_authorizations
-                .insert(quick_unlock_storage_key(&vault_ref_id));
+                .insert(storage_key.clone());
+            if let Some(refresh_credentials) = refresh_credentials {
+                self.refresh_existing_quick_unlock_after_manual_unlock(
+                    &storage_key,
+                    refresh_credentials.as_slice(),
+                );
+            }
         }
         self.recent_unlock_user_verification = None;
         Ok(())
@@ -1062,7 +1157,7 @@ impl Runtime {
             return self.unlock_with_password(&vault_id, password);
         }
 
-        let handle = self.load_source_snapshot(source)?;
+        let handle = self.load_source_snapshot(&current_vault_ref_id, source)?;
         self.unlock_with_password(&handle.vault_id, password)
     }
 
@@ -1070,6 +1165,19 @@ impl Runtime {
         &mut self,
         password: Option<&str>,
         key_file_path: Option<&str>,
+    ) -> Result<()> {
+        self.unlock_current_vault_with_origin(
+            password,
+            key_file_path,
+            CredentialUnlockOrigin::UserSupplied,
+        )
+    }
+
+    fn unlock_current_vault_with_origin(
+        &mut self,
+        password: Option<&str>,
+        key_file_path: Option<&str>,
+        origin: CredentialUnlockOrigin,
     ) -> Result<()> {
         let current_vault_ref_id = self
             .session
@@ -1079,19 +1187,28 @@ impl Runtime {
         let source = self.references.source_for(&current_vault_ref_id)?;
         let vault_id = vault_id_for_stored_source(&source);
         if self.loaded.contains_key(&vault_id) {
-            return self.unlock_vault(&vault_id, password, key_file_path);
+            return self.unlock_vault_with_origin(&vault_id, password, key_file_path, origin);
         }
 
-        let handle = self.load_source_snapshot(source)?;
-        self.unlock_vault(&handle.vault_id, password, key_file_path)
+        let handle = self.load_source_snapshot(&current_vault_ref_id, source)?;
+        self.unlock_vault_with_origin(&handle.vault_id, password, key_file_path, origin)
     }
 
     pub fn lock_session(&mut self) {
+        self.clear_loaded_unlock_secrets();
+        self.session.lock();
+    }
+
+    fn select_current_vault(&mut self, vault_ref_id: String) {
+        self.clear_loaded_unlock_secrets();
+        self.session.set_current_vault(vault_ref_id);
+    }
+
+    fn clear_loaded_unlock_secrets(&mut self) {
         for loaded in self.loaded.values_mut() {
             loaded.clear_unlock_secrets();
         }
         self.recent_unlock_user_verification = None;
-        self.session.lock();
     }
 
     pub fn enable_quick_unlock_for_current_vault(&mut self) -> Result<()> {
@@ -1112,12 +1229,23 @@ impl Runtime {
             .loaded
             .get(&active_vault_id)
             .with_context(|| format!("vault not opened: {active_vault_id}"))?;
+        if loaded.vault_ref_id != current_vault_ref_id {
+            anyhow::bail!("current vault reference does not match the active vault");
+        }
         let credentials = VaultCredentials {
             password: loaded.password.clone(),
             key_file_path: loaded.key_file_path.clone(),
         };
         if credentials.password.is_none() && credentials.key_file_path.is_none() {
             anyhow::bail!("current vault has no reusable unlock credentials");
+        }
+        if self.quick_unlock.requires_password_credential()
+            && !credentials
+                .password
+                .as_deref()
+                .is_some_and(|password| !password.is_empty())
+        {
+            anyhow::bail!("Quick Unlock requires a password-protected vault on macOS");
         }
 
         let bytes = Zeroizing::new(
@@ -1130,8 +1258,10 @@ impl Runtime {
             bytes.as_slice(),
             "Enable quick unlock for this vault",
         )?;
+        self.quick_unlock_suppressed_records.remove(&storage_key);
         if self.quick_unlock.requires_same_process_credential_proof() {
-            self.quick_unlock_process_authorizations.insert(storage_key);
+            self.quick_unlock_process_authorizations
+                .insert(storage_key.clone());
         }
         if let Some(loaded) = self.loaded.get_mut(&active_vault_id) {
             loaded.quick_unlock_refresh_pending = false;
@@ -1149,7 +1279,7 @@ impl Runtime {
             .context("no current vault selected")?
             .to_owned();
         let storage_key = quick_unlock_storage_key(&current_vault_ref_id);
-        self.require_quick_unlock_process_authorization(&storage_key)?;
+        self.require_quick_unlock_record_available(&storage_key)?;
         let bytes = self
             .quick_unlock
             .unlock(&storage_key, "Unlock this vault")?
@@ -1168,15 +1298,16 @@ impl Runtime {
         {
             Ok(credentials) => credentials,
             Err(error) => {
-                self.quick_unlock_process_authorizations
-                    .remove(&storage_key);
+                self.quick_unlock_suppressed_records
+                    .insert(storage_key.clone());
                 let _ = self.quick_unlock.delete(&storage_key);
                 return Err(error);
             }
         };
-        match self.unlock_current_vault(
+        match self.unlock_current_vault_with_origin(
             credentials.password.as_deref(),
             credentials.key_file_path.as_deref(),
+            CredentialUnlockOrigin::QuickUnlock,
         ) {
             Ok(()) => {
                 let active_vault_id = self.session.active_vault_id().map(ToOwned::to_owned);
@@ -1190,8 +1321,8 @@ impl Runtime {
             }
             Err(error) => {
                 if is_unlock_credentials_error(&error) {
-                    self.quick_unlock_process_authorizations
-                        .remove(&storage_key);
+                    self.quick_unlock_suppressed_records
+                        .insert(storage_key.clone());
                     let _ = self.quick_unlock.delete(&storage_key);
                 }
                 Err(error)
@@ -1210,11 +1341,15 @@ impl Runtime {
         self.quick_unlock.delete(&storage_key)?;
         self.quick_unlock_process_authorizations
             .remove(&storage_key);
+        self.quick_unlock_suppressed_records.remove(&storage_key);
         Ok(())
     }
 
     pub fn session_state(&self) -> vaultkern_runtime_protocol::SessionStateDto {
-        let mut dto = self.session.to_dto(self.quick_unlock.is_supported());
+        let mut dto = self.session.to_dto(
+            self.quick_unlock.is_supported(),
+            self.quick_unlock.requires_password_credential(),
+        );
         dto.source_status = self.current_source_status();
         dto
     }
@@ -1250,7 +1385,7 @@ impl Runtime {
             && let Some(vault_ref_id) = self.session.current_vault_ref_id()
         {
             let storage_key = quick_unlock_storage_key(vault_ref_id);
-            if self.quick_unlock_process_is_authorized(&storage_key)
+            if self.quick_unlock_record_is_available(&storage_key)
                 && self
                     .quick_unlock
                     .contains(&storage_key)
@@ -1407,7 +1542,7 @@ impl Runtime {
             anyhow::bail!("vault is locked: {vault_id}");
         }
         let storage_key = quick_unlock_storage_key(current_vault_ref_id);
-        self.require_quick_unlock_process_authorization(&storage_key)?;
+        self.require_quick_unlock_record_available(&storage_key)?;
         if !self
             .quick_unlock
             .contains(&storage_key)
@@ -5431,13 +5566,34 @@ impl Runtime {
     }
 
     fn vault_ref_id_for_loaded_vault(&self, vault_id: &str) -> Option<String> {
-        if self.session.active_vault_id() == Some(vault_id)
-            && let Some(vault_ref_id) = self.session.current_vault_ref_id()
-        {
-            return Some(vault_ref_id.to_owned());
-        }
+        self.loaded
+            .get(vault_id)
+            .map(|loaded| loaded.vault_ref_id.clone())
+    }
 
-        self.references.find_ref_id_by_path(vault_id)
+    fn refresh_existing_quick_unlock_after_manual_unlock(
+        &mut self,
+        storage_key: &str,
+        credentials: &[u8],
+    ) {
+        match self.quick_unlock.contains(storage_key) {
+            Ok(false) => {
+                self.quick_unlock_suppressed_records.remove(storage_key);
+            }
+            Ok(true) => {
+                if self.quick_unlock.refresh(storage_key, credentials).is_err() {
+                    self.quick_unlock_suppressed_records
+                        .insert(storage_key.to_owned());
+                    let _ = self.quick_unlock.delete(storage_key);
+                } else {
+                    self.quick_unlock_suppressed_records.remove(storage_key);
+                }
+            }
+            Err(_) => {
+                self.quick_unlock_suppressed_records
+                    .insert(storage_key.to_owned());
+            }
+        }
     }
 
     fn refresh_quick_unlock_credentials_after_successful_save(
@@ -5470,9 +5626,24 @@ impl Runtime {
             key_file_path: loaded.key_file_path.clone(),
         };
 
-        if credentials.password.is_none() && credentials.key_file_path.is_none() {
-            let _ = self.quick_unlock.delete(&storage_key);
-            self.clear_quick_unlock_refresh_pending(vault_id)?;
+        let requires_password_proof = self.quick_unlock.requires_password_credential();
+        let has_password_proof = credentials
+            .password
+            .as_deref()
+            .is_some_and(|password| !password.is_empty());
+        if (credentials.password.is_none() && credentials.key_file_path.is_none())
+            || (requires_password_proof && !has_password_proof)
+        {
+            if self.quick_unlock.delete(&storage_key).is_ok() {
+                if requires_password_proof {
+                    self.quick_unlock_process_authorizations
+                        .remove(&storage_key);
+                }
+                self.quick_unlock_suppressed_records.remove(&storage_key);
+                self.clear_quick_unlock_refresh_pending(vault_id)?;
+            } else {
+                self.quick_unlock_suppressed_records.insert(storage_key);
+            }
             return Ok(());
         }
 
@@ -5485,13 +5656,14 @@ impl Runtime {
             .refresh(&storage_key, bytes.as_slice())
             .is_err()
         {
-            self.quick_unlock_process_authorizations
-                .remove(&storage_key);
+            self.quick_unlock_suppressed_records
+                .insert(storage_key.clone());
             if self.quick_unlock.delete(&storage_key).is_ok() {
                 self.clear_quick_unlock_refresh_pending(vault_id)?;
             }
             return Ok(());
         }
+        self.quick_unlock_suppressed_records.remove(&storage_key);
         self.clear_quick_unlock_refresh_pending(vault_id)?;
         Ok(())
     }
@@ -5503,9 +5675,22 @@ impl Runtime {
                 .contains(storage_key)
     }
 
+    fn quick_unlock_record_is_available(&self, storage_key: &str) -> bool {
+        self.quick_unlock_process_is_authorized(storage_key)
+            && !self.quick_unlock_suppressed_records.contains(storage_key)
+    }
+
     fn require_quick_unlock_process_authorization(&self, storage_key: &str) -> Result<()> {
         if !self.quick_unlock_process_is_authorized(storage_key) {
             anyhow::bail!("Quick Unlock requires a password unlock in this native host session");
+        }
+        Ok(())
+    }
+
+    fn require_quick_unlock_record_available(&self, storage_key: &str) -> Result<()> {
+        self.require_quick_unlock_process_authorization(storage_key)?;
+        if self.quick_unlock_suppressed_records.contains(storage_key) {
+            anyhow::bail!("Quick Unlock is unavailable and must be re-enabled");
         }
         Ok(())
     }
@@ -7057,12 +7242,14 @@ fn composite_key_from_credentials(credentials: &VaultCredentials) -> Result<Comp
         key.add_password(password.clone());
     }
     if let Some(key_file_path) = credentials.key_file_path.as_ref() {
-        let bytes = Zeroizing::new(
-            fs::read(key_file_path)
-                .with_context(|| format!("failed to read key file: {key_file_path}"))?,
-        );
-        key.add_key_file_content(&bytes)
-            .with_context(|| format!("failed to parse key file: {key_file_path}"))?;
+        let bytes = Zeroizing::new(fs::read(key_file_path).map_err(|error| {
+            KeyFileCredentialError(format!("failed to read key file: {key_file_path}: {error}"))
+        })?);
+        key.add_key_file_content(&bytes).map_err(|error| {
+            KeyFileCredentialError(format!(
+                "failed to parse key file: {key_file_path}: {error}"
+            ))
+        })?;
     }
     Ok(key)
 }
@@ -7089,23 +7276,27 @@ fn quick_unlock_storage_key(vault_ref_id: &str) -> String {
 
 fn is_unlock_credentials_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<KdbxError>(),
-            Some(
-                KdbxError::HeaderHmacMismatch
-                    | KdbxError::PayloadHmacMismatch
-                    | KdbxError::HeaderHashMismatch
-                    | KdbxError::PayloadHashMismatch
+        cause.is::<KeyFileCredentialError>()
+            || matches!(
+                cause.downcast_ref::<KdbxError>(),
+                Some(
+                    KdbxError::HeaderHmacMismatch
+                        | KdbxError::PayloadHmacMismatch
+                        | KdbxError::HeaderHashMismatch
+                        | KdbxError::PayloadHashMismatch
+                        | KdbxError::Crypto(CryptoError::DecryptionFailed)
+                )
             )
-        ) || matches!(
-            cause.downcast_ref::<CoreError>(),
-            Some(CoreError::Kdbx(
-                KdbxError::HeaderHmacMismatch
-                    | KdbxError::PayloadHmacMismatch
-                    | KdbxError::HeaderHashMismatch
-                    | KdbxError::PayloadHashMismatch
-            ))
-        )
+            || matches!(
+                cause.downcast_ref::<CoreError>(),
+                Some(CoreError::Kdbx(
+                    KdbxError::HeaderHmacMismatch
+                        | KdbxError::PayloadHmacMismatch
+                        | KdbxError::HeaderHashMismatch
+                        | KdbxError::PayloadHashMismatch
+                        | KdbxError::Crypto(CryptoError::DecryptionFailed)
+                ))
+            )
     })
 }
 
@@ -7705,6 +7896,28 @@ mod tests {
         (dir, opened)
     }
 
+    fn write_key_file_vault(
+        dir: &std::path::Path,
+        name: &str,
+        password: Option<&str>,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let key_file_bytes = [0x42_u8; 32];
+        let key_file_path = dir.join(format!("{name}.key"));
+        std::fs::write(&key_file_path, key_file_bytes).unwrap();
+
+        let mut key = CompositeKey::default();
+        if let Some(password) = password {
+            key.add_password(password);
+        }
+        key.add_key_file_content(&key_file_bytes).unwrap();
+        let bytes = KeepassCore::new()
+            .save_kdbx(&Vault::empty(name), &key, SaveProfile::recommended())
+            .unwrap();
+        let vault_path = dir.join(format!("{name}.kdbx"));
+        std::fs::write(&vault_path, bytes).unwrap();
+        (vault_path, key_file_path)
+    }
+
     fn open_unlocked_demo_onedrive(runtime: &mut Runtime) -> String {
         runtime
             .add_onedrive_vault_reference("drive-1", "item-1")
@@ -8301,6 +8514,12 @@ mod tests {
         let (_first_dir, first) = open_unlocked_demo_vault(&mut runtime);
         let entry = create_demo_entry(&mut runtime, &first.vault_id);
         let fields = entry_fields(&entry);
+        runtime.save_vault(&first.vault_id).unwrap();
+        let first_ref_id = runtime
+            .session
+            .current_vault_ref_id()
+            .expect("first vault reference")
+            .to_owned();
         let (_second_dir, second) = open_unlocked_demo_vault(&mut runtime);
         assert_eq!(
             runtime.session.active_vault_id(),
@@ -8322,6 +8541,10 @@ mod tests {
             panic!("expected active-vault conflict, got {update:?}");
         };
         assert_eq!(error.code, "conflict");
+        runtime.set_current_vault(&first_ref_id).unwrap();
+        runtime
+            .unlock_current_vault_with_password("demo-password")
+            .unwrap();
         assert_eq!(
             runtime
                 .get_entry_detail(&first.vault_id, &entry.id)
@@ -12130,10 +12353,22 @@ mod tests {
                 .unwrap()
                 .quick_unlock_refresh_pending
         );
-        assert!(runtime.quick_unlock_process_authorizations.is_empty());
         operations.borrow_mut().clear();
         assert!(!runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
         assert!(operations.borrow().is_empty());
+
+        let vault_ref_id = runtime
+            .session
+            .current_vault_ref_id()
+            .expect("current reference")
+            .to_owned();
+        let delete_error = runtime.delete_vault_reference(&vault_ref_id).unwrap_err();
+        assert!(
+            format_error_chain(&delete_error).contains("injected quick unlock delete failure"),
+            "{delete_error:?}"
+        );
+        assert_eq!(operations.borrow().as_slice(), ["contains", "delete"]);
+        operations.borrow_mut().clear();
 
         runtime.enable_quick_unlock_for_current_vault().unwrap();
         assert!(runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
@@ -12187,6 +12422,522 @@ mod tests {
             runtime.session.active_vault_id(),
             Some(opened.vault_id.as_str())
         );
+    }
+
+    #[test]
+    fn process_proof_is_bound_to_the_vault_that_was_unlocked() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let (_victim_dir, victim) = open_unlocked_demo_vault(&mut runtime);
+        let victim_ref_id = runtime
+            .session
+            .current_vault_ref_id()
+            .expect("victim reference")
+            .to_owned();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+        runtime.quick_unlock_process_authorizations.clear();
+
+        let attacker_dir = tempfile::tempdir().unwrap();
+        let attacker_path = attacker_dir.path().join("attacker.kdbx");
+        let mut attacker_key = CompositeKey::default();
+        attacker_key.add_password("attacker-password");
+        let attacker_bytes = KeepassCore::new()
+            .save_kdbx(
+                &Vault::empty("attacker"),
+                &attacker_key,
+                SaveProfile::recommended(),
+            )
+            .unwrap();
+        std::fs::write(&attacker_path, attacker_bytes).unwrap();
+        let attacker = runtime
+            .open_local_vault(attacker_path.to_str().unwrap())
+            .unwrap();
+        let attacker_ref_id = runtime
+            .session
+            .current_vault_ref_id()
+            .expect("attacker reference")
+            .to_owned();
+        runtime.delete_vault_reference(&attacker_ref_id).unwrap();
+        runtime.set_current_vault(&victim_ref_id).unwrap();
+
+        let error = runtime
+            .unlock_vault(&attacker.vault_id, Some("attacker-password"), None)
+            .unwrap_err();
+
+        let victim_storage_key = quick_unlock_storage_key(&victim_ref_id);
+        assert!(
+            format_error_chain(&error).contains("vault not opened"),
+            "{error:?}"
+        );
+        assert!(
+            !runtime
+                .quick_unlock_process_authorizations
+                .contains(&victim_storage_key),
+            "unlocking an unrelated vault must not authorize the victim reference"
+        );
+        assert_ne!(
+            runtime.session.active_vault_id(),
+            Some(victim.vault_id.as_str())
+        );
+    }
+
+    #[test]
+    fn selecting_another_vault_clears_all_loaded_unlock_secrets() {
+        let mut runtime = Runtime::for_tests();
+        let (_first_dir, first) = open_unlocked_demo_vault(&mut runtime);
+        assert!(runtime.list_entries(&first.vault_id).is_ok());
+
+        let second_dir = tempfile::tempdir().unwrap();
+        let second_path = second_dir.path().join("second.kdbx");
+        let mut second_key = CompositeKey::default();
+        second_key.add_password("second-password");
+        let second_bytes = KeepassCore::new()
+            .save_kdbx(
+                &Vault::empty("second"),
+                &second_key,
+                SaveProfile::recommended(),
+            )
+            .unwrap();
+        std::fs::write(&second_path, second_bytes).unwrap();
+
+        runtime
+            .open_local_vault(second_path.to_str().unwrap())
+            .unwrap();
+
+        assert!(!runtime.session_state().unlocked);
+        let error = runtime.list_entries(&first.vault_id).unwrap_err();
+        assert!(format_error_chain(&error).contains("vault is locked"));
+        assert!(runtime.loaded.values().all(|loaded| {
+            loaded.vault.is_none() && loaded.password.is_none() && loaded.key_file_path.is_none()
+        }));
+    }
+
+    #[test]
+    fn unlock_vault_rejects_a_loaded_vault_that_is_not_selected() {
+        let mut runtime = Runtime::for_tests();
+        let first_dir = tempfile::tempdir().unwrap();
+        let first_path = first_dir.path().join("first.kdbx");
+        let second_dir = tempfile::tempdir().unwrap();
+        let second_path = second_dir.path().join("second.kdbx");
+        for (path, password) in [
+            (&first_path, "first-password"),
+            (&second_path, "second-password"),
+        ] {
+            let mut key = CompositeKey::default();
+            key.add_password(password);
+            let bytes = KeepassCore::new()
+                .save_kdbx(&Vault::empty(password), &key, SaveProfile::recommended())
+                .unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let first = runtime
+            .open_local_vault(first_path.to_str().unwrap())
+            .unwrap();
+        runtime
+            .open_local_vault(second_path.to_str().unwrap())
+            .unwrap();
+
+        let error = runtime
+            .unlock_vault(&first.vault_id, Some("first-password"), None)
+            .unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("opened vault is not the current selection"),
+            "{error:?}"
+        );
+        assert!(!runtime.session_state().unlocked);
+        assert!(runtime.loaded.values().all(|loaded| loaded.vault.is_none()));
+    }
+
+    #[test]
+    fn key_file_only_unlock_does_not_grant_macos_process_proof() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations).requiring_same_process_credential_proof(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (vault_path, key_file_path) = write_key_file_vault(dir.path(), "key-file-only", None);
+        let opened = runtime
+            .open_local_vault(vault_path.to_str().unwrap())
+            .unwrap();
+
+        runtime
+            .unlock_vault(
+                &opened.vault_id,
+                None,
+                Some(key_file_path.to_str().unwrap()),
+            )
+            .unwrap();
+
+        assert!(runtime.session_state().quick_unlock_requires_password);
+        assert!(runtime.quick_unlock_process_authorizations.is_empty());
+        let error = runtime.enable_quick_unlock_for_current_vault().unwrap_err();
+        assert!(
+            format_error_chain(&error).contains("requires a password-protected vault"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn deleting_a_quick_unlock_reference_requires_same_process_password_proof() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        let vault_ref_id = runtime
+            .session
+            .current_vault_ref_id()
+            .expect("current reference")
+            .to_owned();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+        runtime.quick_unlock_process_authorizations.clear();
+        operations.borrow_mut().clear();
+
+        let error = runtime.delete_vault_reference(&vault_ref_id).unwrap_err();
+
+        assert!(
+            format_error_chain(&error)
+                .contains("requires a password unlock in this native host session"),
+            "{error:?}"
+        );
+        assert_eq!(operations.borrow().as_slice(), ["contains"]);
+        assert_eq!(runtime.references.list_recent_vaults().vaults.len(), 1);
+        assert_eq!(runtime.loaded.len(), 1);
+    }
+
+    #[test]
+    fn deleting_an_unknown_reference_does_not_revoke_an_orphaned_quick_unlock_record() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let vault_ref_id = "missing-vault-reference";
+        let storage_key = quick_unlock_storage_key(vault_ref_id);
+        runtime
+            .quick_unlock
+            .enable(&storage_key, b"credentials", "seed orphan")
+            .unwrap();
+        runtime
+            .quick_unlock_process_authorizations
+            .insert(storage_key.clone());
+        operations.borrow_mut().clear();
+
+        let error = runtime.delete_vault_reference(vault_ref_id).unwrap_err();
+
+        assert!(
+            format_error_chain(&error).contains("vault reference not found"),
+            "{error:?}"
+        );
+        assert!(runtime.quick_unlock.contains(&storage_key).unwrap());
+        assert_eq!(operations.borrow().as_slice(), ["contains"]);
+    }
+
+    #[test]
+    fn rejected_reference_deletion_does_not_destroy_the_remote_cache_first() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = demo_onedrive_runtime(100);
+        let cache_dir = tempfile::Builder::new()
+            .prefix("vaultkern-delete-cache-test-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        runtime.remote_cache = RemoteVaultCache::new_at(cache_dir.path().join("cache"));
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations).requiring_same_process_credential_proof(),
+        );
+        let opened_vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let vault_ref_id = runtime
+            .session
+            .current_vault_ref_id()
+            .expect("current reference")
+            .to_owned();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        let cache_key =
+            remote_cache_key_for_source(&runtime.loaded.get(&opened_vault_id).unwrap().source)
+                .expect("OneDrive cache key");
+        assert!(runtime.remote_cache.read(&cache_key).unwrap().is_some());
+        runtime.lock_session();
+        runtime.quick_unlock_process_authorizations.clear();
+
+        runtime.delete_vault_reference(&vault_ref_id).unwrap_err();
+
+        assert!(runtime.remote_cache.read(&cache_key).unwrap().is_some());
+        assert_eq!(runtime.references.list_recent_vaults().vaults.len(), 1);
+    }
+
+    #[test]
+    fn failed_quick_unlock_revocation_does_not_destroy_remote_cache_or_reference() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = demo_onedrive_runtime(100);
+        let cache_dir = tempfile::Builder::new()
+            .prefix("vaultkern-delete-failure-cache-test-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        runtime.remote_cache = RemoteVaultCache::new_at(cache_dir.path().join("cache"));
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof()
+                .with_failures(MemoryQuickUnlockFailures {
+                    delete: true,
+                    ..MemoryQuickUnlockFailures::default()
+                }),
+        );
+        let opened_vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let vault_ref_id = runtime
+            .session
+            .current_vault_ref_id()
+            .expect("current reference")
+            .to_owned();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        let cache_key =
+            remote_cache_key_for_source(&runtime.loaded.get(&opened_vault_id).unwrap().source)
+                .expect("OneDrive cache key");
+        assert!(runtime.remote_cache.read(&cache_key).unwrap().is_some());
+        operations.borrow_mut().clear();
+
+        let error = runtime.delete_vault_reference(&vault_ref_id).unwrap_err();
+
+        assert!(format_error_chain(&error).contains("injected quick unlock delete failure"));
+        assert_eq!(operations.borrow().as_slice(), ["contains", "delete"]);
+        assert!(runtime.remote_cache.read(&cache_key).unwrap().is_some());
+        assert_eq!(runtime.references.list_recent_vaults().vaults.len(), 1);
+    }
+
+    #[test]
+    fn authorized_reference_deletion_revokes_quick_unlock_before_removing_loaded_state() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        let vault_ref_id = runtime
+            .session
+            .current_vault_ref_id()
+            .expect("current reference")
+            .to_owned();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        operations.borrow_mut().clear();
+
+        let listed = runtime.delete_vault_reference(&vault_ref_id).unwrap();
+
+        assert!(listed.vaults.is_empty());
+        assert!(runtime.loaded.is_empty());
+        assert_eq!(operations.borrow().as_slice(), ["contains", "delete"]);
+    }
+
+    #[test]
+    fn missing_quick_unlock_key_file_revokes_the_stale_record() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (vault_path, key_file_path) =
+            write_key_file_vault(dir.path(), "missing-key-file", Some("password"));
+        let opened = runtime
+            .open_local_vault(vault_path.to_str().unwrap())
+            .unwrap();
+        runtime
+            .unlock_vault(
+                &opened.vault_id,
+                Some("password"),
+                Some(key_file_path.to_str().unwrap()),
+            )
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+        std::fs::remove_file(&key_file_path).unwrap();
+        operations.borrow_mut().clear();
+
+        let error = runtime
+            .unlock_current_vault_with_quick_unlock()
+            .unwrap_err();
+
+        assert!(format_error_chain(&error).contains("invalid key file path"));
+        assert_eq!(
+            operations.borrow().as_slice(),
+            ["unlock:Unlock this vault", "delete"]
+        );
+        assert!(!runtime.quick_unlock_process_authorizations.is_empty());
+        operations.borrow_mut().clear();
+        let retry_error = runtime
+            .unlock_current_vault_with_quick_unlock()
+            .unwrap_err();
+        assert!(
+            format_error_chain(&retry_error).contains("must be re-enabled"),
+            "{retry_error:?}"
+        );
+        assert!(operations.borrow().is_empty());
+    }
+
+    #[test]
+    fn legacy_kdbx_decryption_failure_is_a_stale_quick_unlock_credential_error() {
+        let error = anyhow::Error::new(CoreError::Kdbx(KdbxError::Crypto(
+            CryptoError::DecryptionFailed,
+        )));
+
+        assert!(is_unlock_credentials_error(&error));
+    }
+
+    #[test]
+    fn manual_unlock_refreshes_an_existing_record_after_key_file_moves() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (vault_path, old_key_file_path) =
+            write_key_file_vault(dir.path(), "moved-key-file", Some("password"));
+        let opened = runtime
+            .open_local_vault(vault_path.to_str().unwrap())
+            .unwrap();
+        runtime
+            .unlock_vault(
+                &opened.vault_id,
+                Some("password"),
+                Some(old_key_file_path.to_str().unwrap()),
+            )
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+        let new_key_file_path = dir.path().join("moved.key");
+        std::fs::rename(&old_key_file_path, &new_key_file_path).unwrap();
+
+        runtime
+            .unlock_vault(
+                &opened.vault_id,
+                Some("password"),
+                Some(new_key_file_path.to_str().unwrap()),
+            )
+            .unwrap();
+        runtime.lock_session();
+        operations.borrow_mut().clear();
+
+        runtime.unlock_current_vault_with_quick_unlock().unwrap();
+        assert_eq!(operations.borrow().as_slice(), ["unlock:Unlock this vault"]);
+    }
+
+    #[test]
+    fn saving_a_key_file_only_credential_change_revokes_macos_quick_unlock() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (vault_path, key_file_path) =
+            write_key_file_vault(dir.path(), "remove-password", Some("password"));
+        let opened = runtime
+            .open_local_vault(vault_path.to_str().unwrap())
+            .unwrap();
+        runtime
+            .unlock_vault(
+                &opened.vault_id,
+                Some("password"),
+                Some(key_file_path.to_str().unwrap()),
+            )
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    credentials: Some(DatabaseCredentialsUpdateDto {
+                        new_password: None,
+                        remove_password: true,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+        operations.borrow_mut().clear();
+
+        runtime.save_vault(&opened.vault_id).unwrap();
+
+        assert_eq!(operations.borrow().as_slice(), ["delete"]);
+        assert!(runtime.quick_unlock_process_authorizations.is_empty());
+        operations.borrow_mut().clear();
+        assert!(!runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
+        assert!(operations.borrow().is_empty());
+    }
+
+    #[test]
+    fn failed_revocation_after_password_removal_retains_cleanup_authorization() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof()
+                .with_failures(MemoryQuickUnlockFailures {
+                    delete: true,
+                    ..MemoryQuickUnlockFailures::default()
+                }),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (vault_path, key_file_path) =
+            write_key_file_vault(dir.path(), "failed-password-removal", Some("password"));
+        let opened = runtime
+            .open_local_vault(vault_path.to_str().unwrap())
+            .unwrap();
+        runtime
+            .unlock_vault(
+                &opened.vault_id,
+                Some("password"),
+                Some(key_file_path.to_str().unwrap()),
+            )
+            .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    credentials: Some(DatabaseCredentialsUpdateDto {
+                        new_password: None,
+                        remove_password: true,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+        operations.borrow_mut().clear();
+
+        runtime.save_vault(&opened.vault_id).unwrap();
+
+        assert_eq!(operations.borrow().as_slice(), ["delete"]);
+        assert!(!runtime.quick_unlock_process_authorizations.is_empty());
+        assert!(!runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
+        operations.borrow_mut().clear();
+        let vault_ref_id = runtime
+            .session
+            .current_vault_ref_id()
+            .expect("current reference")
+            .to_owned();
+
+        let delete_error = runtime.delete_vault_reference(&vault_ref_id).unwrap_err();
+
+        assert!(
+            format_error_chain(&delete_error).contains("injected quick unlock delete failure"),
+            "{delete_error:?}"
+        );
+        assert_eq!(operations.borrow().as_slice(), ["contains", "delete"]);
     }
 
     #[test]

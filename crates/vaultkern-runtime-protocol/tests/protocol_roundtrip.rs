@@ -156,6 +156,7 @@ fn protocol_roundtrips_session_state_response() {
         active_vault_id: None,
         current_vault_ref_id: None,
         supports_biometric_unlock: false,
+        quick_unlock_requires_password: false,
         source_status: None,
     });
 
@@ -179,6 +180,7 @@ fn protocol_roundtrips_remote_source_status() {
         active_vault_id: Some("onedrive:drive-1:item-1".into()),
         current_vault_ref_id: Some("vault-ref-1".into()),
         supports_biometric_unlock: false,
+        quick_unlock_requires_password: false,
         source_status: Some(source_status.clone()),
     });
     let retry = ProtocolEnvelope::new(RuntimeCommand::RetryVaultSourceSync {
@@ -622,6 +624,7 @@ fn session_state_dto_serializes_camel_case_keys() {
         active_vault_id: Some("vault-1".into()),
         current_vault_ref_id: Some("vault-ref-1".into()),
         supports_biometric_unlock: true,
+        quick_unlock_requires_password: true,
         source_status: None,
     };
 
@@ -631,6 +634,7 @@ fn session_state_dto_serializes_camel_case_keys() {
     assert!(object.contains_key("activeVaultId"));
     assert!(object.contains_key("currentVaultRefId"));
     assert!(object.contains_key("supportsBiometricUnlock"));
+    assert!(object.contains_key("quickUnlockRequiresPassword"));
 }
 
 #[test]

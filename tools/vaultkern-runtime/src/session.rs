@@ -14,12 +14,10 @@ impl SessionState {
         self.active_vault_id = None;
     }
 
-    pub fn unlock(&mut self, vault_id: String, current_vault_ref_id: Option<String>) {
+    pub fn unlock(&mut self, vault_id: String, current_vault_ref_id: String) {
         self.unlocked = true;
         self.active_vault_id = Some(vault_id);
-        if let Some(vault_ref_id) = current_vault_ref_id {
-            self.current_vault_ref_id = Some(vault_ref_id);
-        }
+        self.current_vault_ref_id = Some(current_vault_ref_id);
     }
 
     pub fn lock(&mut self) {
@@ -40,12 +38,17 @@ impl SessionState {
         self.active_vault_id.as_deref()
     }
 
-    pub fn to_dto(&self, supports_biometric_unlock: bool) -> SessionStateDto {
+    pub fn to_dto(
+        &self,
+        supports_biometric_unlock: bool,
+        quick_unlock_requires_password: bool,
+    ) -> SessionStateDto {
         SessionStateDto {
             unlocked: self.unlocked,
             active_vault_id: self.active_vault_id.clone(),
             current_vault_ref_id: self.current_vault_ref_id.clone(),
             supports_biometric_unlock,
+            quick_unlock_requires_password,
             source_status: None,
         }
     }

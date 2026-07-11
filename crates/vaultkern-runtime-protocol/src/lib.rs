@@ -363,6 +363,8 @@ pub struct SessionStateDto {
     pub active_vault_id: Option<String>,
     pub current_vault_ref_id: Option<String>,
     pub supports_biometric_unlock: bool,
+    #[serde(default)]
+    pub quick_unlock_requires_password: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_status: Option<VaultSourceStatusDto>,
 }

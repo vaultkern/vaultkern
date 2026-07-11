@@ -40,7 +40,11 @@ type PendingAutofillUpdatePlan = Extract<
 
 type SessionStateLike = Pick<
   SessionState,
-  "unlocked" | "activeVaultId" | "currentVaultRefId" | "supportsBiometricUnlock"
+  | "unlocked"
+  | "activeVaultId"
+  | "currentVaultRefId"
+  | "supportsBiometricUnlock"
+  | "quickUnlockRequiresPassword"
 >;
 
 type PasskeyCredentialOption = {
@@ -479,37 +483,31 @@ export function PopupApp({
       return unlockedSession;
     }
 
-    let currentVault =
-      recentVaults.find(
-        (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
-      ) ??
-      recentVaults.find((vault) => vault.isCurrent) ??
-      null;
+    if (!unlockedSession.currentVaultRefId) {
+      return unlockedSession;
+    }
 
-    if (!currentVault && unlockedSession.currentVaultRefId) {
-      try {
-        const vaults = limitRecentVaults(
-          await client.listRecentVaults(),
-          settingsForUnlock.recentVaultLimit
-        );
-        setRecentVaults(vaults);
-        setRecentVaultsError(null);
-        currentVault =
-          vaults.find(
-            (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
-          ) ??
-          vaults.find((vault) => vault.isCurrent) ??
-          null;
-      } catch {
-        return unlockedSession;
-      }
+    let currentVault: VaultReference | null;
+    try {
+      const vaults = limitRecentVaults(
+        await client.listRecentVaults(),
+        settingsForUnlock.recentVaultLimit
+      );
+      setRecentVaults(vaults);
+      setRecentVaultsError(null);
+      currentVault =
+        vaults.find(
+          (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
+        ) ?? null;
+    } catch {
+      return unlockedSession;
     }
 
     if (currentVault?.supportsQuickUnlock) {
       return unlockedSession;
     }
 
-    if (!currentVault && !unlockedSession.currentVaultRefId) {
+    if (!currentVault) {
       return unlockedSession;
     }
 
@@ -1050,7 +1048,9 @@ export function PopupApp({
         keyFilePath
       });
       const shouldEnableQuickUnlock =
-        unlockPassword !== "" || unlockKeyFilePath !== "";
+        unlockPassword !== "" ||
+        (unlockKeyFilePath !== "" &&
+          unlockedSession.quickUnlockRequiresPassword !== true);
       const nextSession =
         shouldEnableQuickUnlock
           ? await enableQuickUnlockAfterPasswordUnlock(

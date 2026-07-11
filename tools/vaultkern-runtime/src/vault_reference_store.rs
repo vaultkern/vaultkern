@@ -249,14 +249,6 @@ impl VaultReferenceStore {
         Ok(StoredVaultSource::LocalPath(vault.path.clone()))
     }
 
-    pub fn find_ref_id_by_path(&self, path: &str) -> Option<String> {
-        self.data()
-            .vaults
-            .iter()
-            .find(|vault| vault.path == path)
-            .map(|vault| vault.vault_ref_id.clone())
-    }
-
     fn dto_for(&self, vault_ref_id: &str) -> VaultReferenceDto {
         let vault = self
             .data()

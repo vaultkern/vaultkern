@@ -232,6 +232,7 @@ fn runtime_unlocks_current_vault_with_device_quick_unlock() {
             active_vault_id: Some(handle.vault_id.clone()),
             current_vault_ref_id: runtime.session_state().current_vault_ref_id,
             supports_biometric_unlock: true,
+            quick_unlock_requires_password: false,
             source_status: None,
         })
     );
@@ -1697,13 +1698,6 @@ fn runtime_rejects_passkey_assertion_when_ceremony_switches_vault_after_binding(
     runtime
         .unlock_with_password(&first_handle.vault_id, "demo-password")
         .unwrap();
-    let second_handle = runtime
-        .open_local_vault(second_path.to_str().unwrap())
-        .unwrap();
-    runtime
-        .unlock_with_password(&second_handle.vault_id, "demo-password")
-        .unwrap();
-
     runtime
         .handle(RuntimeCommand::RegisterPasskeyCeremony {
             ceremony_token: "assertion-vault-binding-token".into(),
@@ -1754,6 +1748,13 @@ fn runtime_rejects_passkey_assertion_when_ceremony_switches_vault_after_binding(
             next_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
             related_origin_verified: false,
         })
+        .unwrap();
+
+    let second_handle = runtime
+        .open_local_vault(second_path.to_str().unwrap())
+        .unwrap();
+    runtime
+        .unlock_with_password(&second_handle.vault_id, "demo-password")
         .unwrap();
 
     let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdl","origin":"https://example.com","crossOrigin":false}"#;

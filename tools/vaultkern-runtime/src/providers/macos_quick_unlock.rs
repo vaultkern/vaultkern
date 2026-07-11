@@ -557,6 +557,10 @@ impl QuickUnlockProvider for MacOsQuickUnlockProvider {
         true
     }
 
+    fn requires_password_credential(&self) -> bool {
+        true
+    }
+
     fn is_supported(&self) -> bool {
         self.local_authentication.is_touch_id_available()
             && self.secure_enclave.is_available()

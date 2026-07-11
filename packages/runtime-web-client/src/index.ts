@@ -6,6 +6,7 @@ export interface SessionState {
   activeVaultId: string | null;
   currentVaultRefId: string | null;
   supportsBiometricUnlock: boolean;
+  quickUnlockRequiresPassword?: boolean;
   sourceStatus?: VaultSourceStatus | null;
 }
 
