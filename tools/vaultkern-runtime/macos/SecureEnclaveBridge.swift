@@ -32,6 +32,13 @@ private func copiedData(
     return Data(bytes: pointer, count: length)
 }
 
+private func wipeData(_ data: inout Data) {
+    data.withUnsafeMutableBytes { (buffer: UnsafeMutableRawBufferPointer) in
+        guard let baseAddress = buffer.baseAddress, !buffer.isEmpty else { return }
+        _ = memset_s(baseAddress, buffer.count, 0, buffer.count)
+    }
+}
+
 private func copiedString(
     _ pointer: UnsafePointer<UInt8>?,
     length: Int,
@@ -119,13 +126,13 @@ private func classify(_ error: Error, invalidationEligible: Bool) -> Int32 {
 
     if containsSecurityStatus(errSecInteractionNotAllowed, in: errors)
         || localAuthentication.contains(.notInteractive)
+        || localAuthentication.contains(.biometryNotAvailable)
     {
         return statusInteractionUnavailable
     }
     if invalidationEligible
         && (containsSecurityStatus(errSecItemNotFound, in: errors)
             || containsSecurityStatus(errSecDecode, in: errors)
-            || localAuthentication.contains(.biometryNotAvailable)
             || localAuthentication.contains(.biometryNotEnrolled))
     {
         return statusKeyInvalidated
@@ -244,8 +251,11 @@ public func vaultkernMacosSecureEnclaveCreate(
             sharedInfo: sharedInfo
         )
 
+        var privateKeyData = secureEnclaveKey.dataRepresentation
+        defer { wipeData(&privateKeyData) }
+
         publish(
-            secureEnclaveKey.dataRepresentation,
+            privateKeyData,
             pointerOut: privateKeyOutput.0,
             lengthOut: privateKeyOutput.1
         )
@@ -288,11 +298,12 @@ public func vaultkernMacosSecureEnclaveRestoreAndDerive(
     do {
         let kekOutput = try resetOutput(kekOut, kekLengthOut)
         _ = try resetOutput(errorOut, errorLengthOut)
-        let privateKeyData = try copiedData(
+        var privateKeyData = try copiedData(
             privateKeyPointer,
             length: privateKeyLength,
             label: "private key representation"
         )
+        defer { wipeData(&privateKeyData) }
         let peerPublicKeyData = try copiedData(
             peerPublicKeyPointer,
             length: peerPublicKeyLength,

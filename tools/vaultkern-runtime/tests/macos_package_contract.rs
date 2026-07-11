@@ -147,6 +147,108 @@ fn macos_bridge_source_contract_uses_secure_enclave_key_agreement() {
 }
 
 #[test]
+fn macos_bridge_treats_biometry_unavailable_as_transient() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let classify_start = swift
+        .find("private func classify(")
+        .expect("error classifier must exist");
+    let classify_end = swift[classify_start..]
+        .find("private func diagnostic(")
+        .map(|offset| classify_start + offset)
+        .expect("diagnostic function must follow the classifier");
+    let classify = &swift[classify_start..classify_end];
+    let invalidation_start = classify
+        .find("if invalidationEligible")
+        .expect("invalidation branch must exist");
+    let missing_start = classify[invalidation_start..]
+        .find("if containsSecurityStatus(errSecItemNotFound")
+        .map(|offset| invalidation_start + offset)
+        .expect("missing-item branch must follow invalidation");
+    let transient_branch = &classify[..invalidation_start];
+    let invalidation_branch = &classify[invalidation_start..missing_start];
+
+    assert!(
+        transient_branch.contains("localAuthentication.contains(.biometryNotAvailable)"),
+        "temporary biometric unavailability must map to interaction unavailability"
+    );
+    assert!(
+        transient_branch.contains("return statusInteractionUnavailable"),
+        "temporary biometric unavailability must use the transient bridge status"
+    );
+    assert!(
+        !invalidation_branch.contains(".biometryNotAvailable"),
+        "temporary biometric unavailability must never invalidate stored key material"
+    );
+    assert!(
+        invalidation_branch.contains("localAuthentication.contains(.biometryNotEnrolled)"),
+        "enrollment loss remains permanent invalidation evidence"
+    );
+}
+
+#[test]
+fn macos_bridge_wipes_private_key_data_copies_on_every_exit() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    for required in [
+        "private func wipeData(_ data: inout Data)",
+        "data.withUnsafeMutableBytes",
+        "memset_s(baseAddress, buffer.count, 0, buffer.count)",
+    ] {
+        assert!(
+            swift.contains(required),
+            "private-key Data wipe helper is missing {required}"
+        );
+    }
+
+    let create_start = swift
+        .find("@_cdecl(\"vaultkern_macos_secure_enclave_create\")")
+        .expect("create C ABI must exist");
+    let restore_start = swift
+        .find("@_cdecl(\"vaultkern_macos_secure_enclave_restore_and_derive\")")
+        .expect("restore C ABI must exist");
+    let free_start = swift
+        .find("@_cdecl(\"vaultkern_macos_buffer_free\")")
+        .expect("buffer free C ABI must follow restore");
+    let create = &swift[create_start..restore_start];
+    let restore = &swift[restore_start..free_start];
+
+    let create_copy = create
+        .find("var privateKeyData = secureEnclaveKey.dataRepresentation")
+        .expect("create must hold a mutable private-key representation");
+    let create_defer = create
+        .find("defer { wipeData(&privateKeyData) }")
+        .expect("create must defer wiping its private-key representation");
+    let create_publish = create
+        .find("publish(\n            privateKeyData,")
+        .expect("create must publish from the mutable private-key representation");
+    assert!(
+        create_copy < create_defer && create_defer < create_publish,
+        "create must install the wipe defer before publishing private-key bytes"
+    );
+    assert!(
+        !create.contains("publish(\n            secureEnclaveKey.dataRepresentation,"),
+        "create must not publish an unwipeable temporary Data value"
+    );
+
+    let restore_copy = restore
+        .find("var privateKeyData = try copiedData(")
+        .expect("restore must hold mutable private-key input Data");
+    let restore_defer = restore
+        .find("defer { wipeData(&privateKeyData) }")
+        .expect("restore must defer wiping its private-key input Data");
+    let next_throwing_copy = restore
+        .find("let peerPublicKeyData = try copiedData(")
+        .expect("peer public-key copy must follow private-key input");
+    assert!(
+        restore_copy < restore_defer && restore_defer < next_throwing_copy,
+        "restore must install the wipe defer before any later throwing operation"
+    );
+}
+
+#[test]
 fn macos_bridge_build_contract_uses_command_line_tools_and_macos_13_static_archive() {
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
     let build = std::fs::read_to_string(runtime.join("build.rs"))
