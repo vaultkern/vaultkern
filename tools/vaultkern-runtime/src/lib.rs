@@ -1,4 +1,6 @@
 mod command_loop;
+#[cfg(target_os = "macos")]
+mod macos_secure_enclave;
 mod match_fill;
 pub mod native_host;
 mod passkey;

@@ -36,6 +36,7 @@ objc2-local-authentication = { version = "0.3.2", default-features = false, feat
     "std", "block2", "LABiometryType", "LAContext", "LAError", "LAPersistedRight",
     "LARequirement", "LARight", "LARightStore", "LASecret",
 ] }
+zeroize.workspace = true
 
 [dev-dependencies]
 mockito = "1.5"

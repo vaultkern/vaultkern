@@ -120,6 +120,79 @@ fn write_executable(path: &Path, contents: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+#[test]
+fn macos_bridge_source_contract_uses_secure_enclave_key_agreement() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+
+    for required in [
+        "SecureEnclave.P256.KeyAgreement.PrivateKey",
+        ".privateKeyUsage",
+        ".biometryCurrentSet",
+        "kSecAttrAccessibleWhenUnlockedThisDeviceOnly",
+        "P256.KeyAgreement.PrivateKey()",
+        "hkdfDerivedSymmetricKey",
+        "SHA256.self",
+        "outputByteCount: 32",
+        "localizedReason",
+        "underlyingErrors",
+        "memset_s(pointer, length, 0, length)",
+    ] {
+        assert!(
+            swift.contains(required),
+            "Swift bridge is missing {required}"
+        );
+    }
+}
+
+#[test]
+fn macos_bridge_build_contract_uses_command_line_tools_and_macos_13_static_archive() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let build = std::fs::read_to_string(runtime.join("build.rs"))
+        .expect("vaultkern-runtime build script must exist");
+
+    for required in [
+        "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "CARGO_CFG_TARGET_OS",
+        "macos",
+        "CARGO_CFG_TARGET_ARCH",
+        "apple-macosx13.0",
+        "-emit-library",
+        "-static",
+        "vaultkern_macos_bridge",
+        "cargo:rustc-link-arg=-mmacosx-version-min=13.0",
+    ] {
+        assert!(
+            build.contains(required),
+            "build script is missing {required}"
+        );
+    }
+}
+
+#[test]
+fn macos_bridge_final_test_binary_targets_macos_13() {
+    let executable = std::env::current_exe().expect("test executable path must be available");
+    let output = Command::new("vtool")
+        .arg("-show-build")
+        .arg(&executable)
+        .output()
+        .expect("vtool must inspect the test executable");
+    assert!(
+        output.status.success(),
+        "vtool failed for {}: {}",
+        executable.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let build_version = String::from_utf8(output.stdout).expect("vtool output must be UTF-8");
+
+    assert!(
+        build_version.contains("platform MACOS") && build_version.contains("minos 13.0"),
+        "Swift-linked test executable must target macOS 13.0:\n{build_version}"
+    );
+}
+
 fn fake_signing_tools(temp: &TempDir) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
     let fake_bin = temp.path().join("fake-signing-bin");
     std::fs::create_dir(&fake_bin).unwrap();
