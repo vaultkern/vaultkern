@@ -15,6 +15,34 @@ const STATUS_PLATFORM_FAILURE: i32 = 5;
 type BufferFree = unsafe extern "C" fn(*mut c_void, usize);
 
 unsafe extern "C" {
+    fn vaultkern_macos_quick_unlock_record_store(
+        record_id: *const u8,
+        record_id_length: usize,
+        record: *const u8,
+        record_length: usize,
+        error_out: *mut *mut c_void,
+        error_length_out: *mut usize,
+    ) -> i32;
+    fn vaultkern_macos_quick_unlock_record_contains(
+        record_id: *const u8,
+        record_id_length: usize,
+        error_out: *mut *mut c_void,
+        error_length_out: *mut usize,
+    ) -> i32;
+    fn vaultkern_macos_quick_unlock_record_load(
+        record_id: *const u8,
+        record_id_length: usize,
+        record_out: *mut *mut c_void,
+        record_length_out: *mut usize,
+        error_out: *mut *mut c_void,
+        error_length_out: *mut usize,
+    ) -> i32;
+    fn vaultkern_macos_quick_unlock_record_delete(
+        record_id: *const u8,
+        record_id_length: usize,
+        error_out: *mut *mut c_void,
+        error_length_out: *mut usize,
+    ) -> i32;
     fn vaultkern_macos_secure_enclave_is_available() -> i32;
     fn vaultkern_macos_secure_enclave_create(
         salt: *const u8,
@@ -97,7 +125,7 @@ impl fmt::Display for BridgeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "macOS Secure Enclave {:?}: {}",
+            "macOS security bridge {:?}: {}",
             self.kind, self.diagnostic
         )
     }
@@ -266,6 +294,119 @@ fn ffi_pointer(bytes: &[u8]) -> *const u8 {
 pub(super) fn is_secure_enclave_available() -> bool {
     // SAFETY: This C ABI function accepts no pointers and returns 0 or 1.
     unsafe { vaultkern_macos_secure_enclave_is_available() == 1 }
+}
+
+pub(super) fn store_quick_unlock_record(record_id: &str, record: &[u8]) -> Result<(), BridgeError> {
+    let record_id = record_id.as_bytes();
+    let mut diagnostic = RawOutput::default();
+
+    // SAFETY: Both input slices remain valid for the synchronous call and the
+    // diagnostic output points to initialized stack storage.
+    let status = unsafe {
+        vaultkern_macos_quick_unlock_record_store(
+            ffi_pointer(record_id),
+            record_id.len(),
+            ffi_pointer(record),
+            record.len(),
+            &mut diagnostic.pointer,
+            &mut diagnostic.length,
+        )
+    };
+
+    // SAFETY: Swift leaves this null or transfers it to the matching free path.
+    let diagnostic = unsafe { diagnostic.into_foreign() };
+    if status != STATUS_OK {
+        return Err(BridgeError::from_status(
+            status,
+            diagnostic.diagnostic_or_fallback(status),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn quick_unlock_record_exists(record_id: &str) -> Result<bool, BridgeError> {
+    let record_id = record_id.as_bytes();
+    let mut diagnostic = RawOutput::default();
+
+    // SAFETY: The record ID remains valid for the synchronous call and the
+    // diagnostic output points to initialized stack storage.
+    let status = unsafe {
+        vaultkern_macos_quick_unlock_record_contains(
+            ffi_pointer(record_id),
+            record_id.len(),
+            &mut diagnostic.pointer,
+            &mut diagnostic.length,
+        )
+    };
+
+    // SAFETY: Swift leaves this null or transfers it to the matching free path.
+    let diagnostic = unsafe { diagnostic.into_foreign() };
+    match status {
+        STATUS_OK => Ok(true),
+        STATUS_MISSING_ITEM => Ok(false),
+        _ => Err(BridgeError::from_status(
+            status,
+            diagnostic.diagnostic_or_fallback(status),
+        )),
+    }
+}
+
+pub(super) fn load_quick_unlock_record(record_id: &str) -> Result<SensitiveBytes, BridgeError> {
+    let record_id = record_id.as_bytes();
+    let mut record = RawOutput::default();
+    let mut diagnostic = RawOutput::default();
+
+    // SAFETY: The record ID remains valid for the call and both output pairs
+    // point to initialized stack storage.
+    let status = unsafe {
+        vaultkern_macos_quick_unlock_record_load(
+            ffi_pointer(record_id),
+            record_id.len(),
+            &mut record.pointer,
+            &mut record.length,
+            &mut diagnostic.pointer,
+            &mut diagnostic.length,
+        )
+    };
+
+    // SAFETY: Swift leaves each output null or transfers ownership to the
+    // matching zeroizing free function.
+    let record = unsafe { record.into_foreign() };
+    let diagnostic = unsafe { diagnostic.into_foreign() };
+    if status != STATUS_OK {
+        return Err(BridgeError::from_status(
+            status,
+            diagnostic.diagnostic_or_fallback(status),
+        ));
+    }
+
+    Ok(SensitiveBytes(record.to_vec("Quick Unlock record")?))
+}
+
+pub(super) fn delete_quick_unlock_record(record_id: &str) -> Result<(), BridgeError> {
+    let record_id = record_id.as_bytes();
+    let mut diagnostic = RawOutput::default();
+
+    // SAFETY: The record ID remains valid for the synchronous call and the
+    // diagnostic output points to initialized stack storage.
+    let status = unsafe {
+        vaultkern_macos_quick_unlock_record_delete(
+            ffi_pointer(record_id),
+            record_id.len(),
+            &mut diagnostic.pointer,
+            &mut diagnostic.length,
+        )
+    };
+
+    // SAFETY: Swift leaves this null or transfers it to the matching free path.
+    let diagnostic = unsafe { diagnostic.into_foreign() };
+    if status != STATUS_OK {
+        return Err(BridgeError::from_status(
+            status,
+            diagnostic.diagnostic_or_fallback(status),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn create_key_material(
@@ -519,6 +660,16 @@ mod tests {
             assert_eq!(error.kind(), expected);
             assert_eq!(error.diagnostic(), diagnostic);
         }
+    }
+
+    #[test]
+    fn macos_bridge_error_display_covers_keychain_and_secure_enclave_operations() {
+        let error = BridgeError::platform("Keychain refused the request");
+
+        assert_eq!(
+            error.to_string(),
+            "macOS security bridge PlatformFailure: Keychain refused the request"
+        );
     }
 
     #[test]

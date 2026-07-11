@@ -125,6 +125,7 @@ private func classify(_ error: Error, invalidationEligible: Bool) -> Int32 {
     let localAuthentication = localAuthenticationCodes(in: errors)
 
     if containsSecurityStatus(errSecInteractionNotAllowed, in: errors)
+        || containsSecurityStatus(errSecInteractionRequired, in: errors)
         || localAuthentication.contains(.notInteractive)
         || localAuthentication.contains(.biometryNotAvailable)
     {
@@ -204,7 +205,499 @@ private func derivedKEK(
     )
 }
 
-// MARK: - C ABI
+// MARK: - Executable-bound Quick Unlock Keychain
+
+private let quickUnlockService = "com.vaultkern.runtime.quick-unlock"
+private let quickUnlockLabel = "VaultKern Quick Unlock"
+
+private func securityError(_ status: OSStatus, operation: String) -> NSError {
+    let detail = SecCopyErrorMessageString(status, nil) as String?
+        ?? "Security framework status \(status)"
+    return NSError(
+        domain: NSOSStatusErrorDomain,
+        code: Int(status),
+        userInfo: [NSLocalizedDescriptionKey: "\(operation): \(detail)"]
+    )
+}
+
+private func checkSecurityStatus(_ status: OSStatus, operation: String) throws {
+    guard status == errSecSuccess else {
+        throw securityError(status, operation: operation)
+    }
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func defaultLoginKeychain() throws -> SecKeychain {
+    var keychain: SecKeychain?
+    try checkSecurityStatus(
+        SecKeychainCopyDefault(&keychain),
+        operation: "open the default login Keychain"
+    )
+    guard let keychain else {
+        throw BridgeInputError(message: "SecKeychainCopyDefault returned no Keychain")
+    }
+    return keychain
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func currentExecutableTrustedApplication() throws -> SecTrustedApplication {
+    var trustedApplication: SecTrustedApplication?
+    try checkSecurityStatus(
+        SecTrustedApplicationCreateFromPath(nil, &trustedApplication),
+        operation: "identify the current executable for its Keychain ACL"
+    )
+    guard let trustedApplication else {
+        throw BridgeInputError(
+            message: "SecTrustedApplicationCreateFromPath returned no application"
+        )
+    }
+    return trustedApplication
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func currentExecutableAccess() throws -> SecAccess {
+    let trustedApplication = try currentExecutableTrustedApplication()
+    var access: SecAccess?
+    let trustedApplications = [trustedApplication] as CFArray
+    try checkSecurityStatus(
+        SecAccessCreate(
+            quickUnlockLabel as CFString,
+            trustedApplications,
+            &access
+        ),
+        operation: "create the Quick Unlock Keychain ACL"
+    )
+    guard let access else {
+        throw BridgeInputError(message: "SecAccessCreate returned no access object")
+    }
+    return access
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func quickUnlockRecordQuery(
+    recordID: String,
+    keychain: SecKeychain
+) -> [CFString: Any] {
+    [
+        kSecClass: kSecClassGenericPassword,
+        kSecAttrService: quickUnlockService,
+        kSecAttrAccount: recordID,
+        kSecMatchSearchList: [keychain],
+        kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
+    ]
+}
+
+private func quickUnlockRecordID(
+    _ pointer: UnsafePointer<UInt8>?,
+    length: Int
+) throws -> String {
+    let recordID = try copiedString(pointer, length: length, label: "record ID")
+    guard !recordID.isEmpty else {
+        throw BridgeInputError(message: "record ID must not be empty")
+    }
+    return recordID
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func copyQuickUnlockRecordItem(
+    recordID: String,
+    keychain: SecKeychain
+) throws -> SecKeychainItem? {
+    var query = quickUnlockRecordQuery(recordID: recordID, keychain: keychain)
+    query[kSecMatchLimit] = kSecMatchLimitOne
+    query[kSecReturnRef] = true
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    if status == errSecItemNotFound {
+        return nil
+    }
+    try checkSecurityStatus(status, operation: "find the existing Quick Unlock record")
+    guard let result, CFGetTypeID(result) == SecKeychainItemGetTypeID() else {
+        throw BridgeInputError(
+            message: "Keychain returned a non-item reference for the Quick Unlock record"
+        )
+    }
+    let item = unsafeBitCast(result, to: SecKeychainItem.self)
+    return item
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func trustedApplicationIdentity(_ application: SecTrustedApplication) throws -> CFData {
+    var identity: CFData?
+    try checkSecurityStatus(
+        SecTrustedApplicationCopyData(application, &identity),
+        operation: "copy a trusted application's Keychain identity"
+    )
+    guard let identity else {
+        throw BridgeInputError(message: "SecTrustedApplicationCopyData returned no identity")
+    }
+    return identity
+}
+
+private func object(at index: CFIndex, in array: CFArray, label: String) throws -> CFTypeRef {
+    guard let pointer = CFArrayGetValueAtIndex(array, index) else {
+        throw BridgeInputError(message: "\(label) contained a null object")
+    }
+    return Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+}
+
+private func containsAuthorization(_ authorization: CFString, in values: CFArray) -> Bool {
+    for index in 0..<CFArrayGetCount(values) {
+        guard let pointer = CFArrayGetValueAtIndex(values, index) else { continue }
+        let value = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+        if CFEqual(value, authorization) {
+            return true
+        }
+    }
+    return false
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func trustedApplication(
+    at index: CFIndex,
+    in applicationList: CFArray
+) throws -> SecTrustedApplication {
+    let application = try object(
+        at: index,
+        in: applicationList,
+        label: "Quick Unlock trusted application list"
+    )
+    guard CFGetTypeID(application) == SecTrustedApplicationGetTypeID() else {
+        throw BridgeInputError(
+            message: "Quick Unlock ACL contained a non-application trust object"
+        )
+    }
+    return unsafeBitCast(application, to: SecTrustedApplication.self)
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func applicationMatchesCurrentExecutable(
+    _ application: SecTrustedApplication,
+    currentIdentity: CFData
+) throws -> Bool {
+    let storedIdentity = try trustedApplicationIdentity(application)
+    return CFEqual(storedIdentity, currentIdentity)
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func validateSecretReadingApplicationList(
+    _ applicationList: CFArray?,
+    currentIdentity: CFData
+) throws {
+    guard let applicationList, CFArrayGetCount(applicationList) == 1 else {
+        throw BridgeInputError(
+            message: "Quick Unlock secret-reading ACL must trust exactly one executable"
+        )
+    }
+    let application = try trustedApplication(at: 0, in: applicationList)
+    guard try applicationMatchesCurrentExecutable(
+        application,
+        currentIdentity: currentIdentity
+    ) else {
+        throw BridgeInputError(
+            message: "Quick Unlock secret-reading ACL trusts another executable"
+        )
+    }
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func validateMutatingApplicationList(
+    _ applicationList: CFArray?,
+    currentIdentity: CFData
+) throws {
+    guard let applicationList else {
+        throw BridgeInputError(
+            message: "Quick Unlock mutating ACL permits every executable"
+        )
+    }
+    for index in 0..<CFArrayGetCount(applicationList) {
+        let application = try trustedApplication(at: index, in: applicationList)
+        guard try applicationMatchesCurrentExecutable(
+            application,
+            currentIdentity: currentIdentity
+        ) else {
+            throw BridgeInputError(
+                message: "Quick Unlock mutating ACL trusts another executable"
+            )
+        }
+    }
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func validateQuickUnlockRecordAccess(_ item: SecKeychainItem) throws {
+    var access: SecAccess?
+    try checkSecurityStatus(
+        SecKeychainItemCopyAccess(item, &access),
+        operation: "copy the existing Quick Unlock record's ACL"
+    )
+    guard let access else {
+        throw BridgeInputError(message: "existing Quick Unlock record has no ACL")
+    }
+
+    var aclList: CFArray?
+    try checkSecurityStatus(
+        SecAccessCopyACLList(access, &aclList),
+        operation: "copy the existing Quick Unlock record's full ACL"
+    )
+    guard let aclList else {
+        throw BridgeInputError(message: "existing Quick Unlock record has no ACL entries")
+    }
+
+    let currentApplication = try currentExecutableTrustedApplication()
+    let currentIdentity = try trustedApplicationIdentity(currentApplication)
+    var foundSecretReadingACL = false
+    for index in 0..<CFArrayGetCount(aclList) {
+        let aclObject = try object(
+            at: index,
+            in: aclList,
+            label: "Quick Unlock ACL list"
+        )
+        guard CFGetTypeID(aclObject) == SecACLGetTypeID() else {
+            throw BridgeInputError(message: "Quick Unlock access contained a non-ACL object")
+        }
+        let acl = unsafeBitCast(aclObject, to: SecACL.self)
+        let authorizations = SecACLCopyAuthorizations(acl)
+        let readsSecret = containsAuthorization(
+            kSecACLAuthorizationDecrypt,
+            in: authorizations
+        ) || containsAuthorization(
+            kSecACLAuthorizationAny,
+            in: authorizations
+        ) || containsAuthorization(
+            kSecACLAuthorizationKeychainItemRead,
+            in: authorizations
+        )
+        let mutatesAccess = containsAuthorization(
+            kSecACLAuthorizationChangeACL,
+            in: authorizations
+        ) || containsAuthorization(
+            kSecACLAuthorizationChangeOwner,
+            in: authorizations
+        ) || containsAuthorization(
+            kSecACLAuthorizationKeychainItemModify,
+            in: authorizations
+        )
+        guard readsSecret || mutatesAccess else { continue }
+
+        var applicationList: CFArray?
+        var description: CFString?
+        var promptSelector = SecKeychainPromptSelector(rawValue: 0)
+        try checkSecurityStatus(
+            SecACLCopyContents(
+                acl,
+                &applicationList,
+                &description,
+                &promptSelector
+            ),
+            operation: "inspect an existing Quick Unlock ACL entry"
+        )
+        if readsSecret {
+            try validateSecretReadingApplicationList(
+                applicationList,
+                currentIdentity: currentIdentity
+            )
+            foundSecretReadingACL = true
+        }
+        if mutatesAccess {
+            try validateMutatingApplicationList(
+                applicationList,
+                currentIdentity: currentIdentity
+            )
+        }
+    }
+    guard foundSecretReadingACL else {
+        throw BridgeInputError(
+            message: "existing Quick Unlock record has no secret-reading ACL"
+        )
+    }
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+private func storeQuickUnlockRecord(
+    recordID: String,
+    recordData: Data,
+    keychain: SecKeychain
+) throws {
+    let replacement = [kSecValueData: recordData]
+    if let existingItem = try copyQuickUnlockRecordItem(
+        recordID: recordID,
+        keychain: keychain
+    ) {
+        try validateQuickUnlockRecordAccess(existingItem)
+        let updateQuery: [CFString: Any] = [
+            kSecMatchItemList: [existingItem],
+            kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
+        ]
+        try checkSecurityStatus(
+            SecItemUpdate(updateQuery as CFDictionary, replacement as CFDictionary),
+            operation: "update the Quick Unlock record"
+        )
+        return
+    }
+
+    let access = try currentExecutableAccess()
+    let newItem: [CFString: Any] = [
+        kSecClass: kSecClassGenericPassword,
+        kSecAttrService: quickUnlockService,
+        kSecAttrAccount: recordID,
+        kSecAttrLabel: quickUnlockLabel,
+        kSecValueData: recordData,
+        kSecAttrAccess: access,
+        kSecUseKeychain: keychain,
+        kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
+    ]
+    let addStatus = SecItemAdd(newItem as CFDictionary, nil)
+    try checkSecurityStatus(addStatus, operation: "add the Quick Unlock record")
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+@_cdecl("vaultkern_macos_quick_unlock_record_store")
+public func vaultkernMacosQuickUnlockRecordStore(
+    _ recordIDPointer: UnsafePointer<UInt8>?,
+    _ recordIDLength: Int,
+    _ recordPointer: UnsafePointer<UInt8>?,
+    _ recordLength: Int,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+    _ errorLengthOut: UnsafeMutablePointer<Int>?
+) -> Int32 {
+    do {
+        _ = try resetOutput(errorOut, errorLengthOut)
+        let recordID = try quickUnlockRecordID(recordIDPointer, length: recordIDLength)
+        var recordData = try copiedData(recordPointer, length: recordLength, label: "record")
+        defer { wipeData(&recordData) }
+        guard !recordData.isEmpty else {
+            throw BridgeInputError(message: "record must not be empty")
+        }
+        let keychain = try defaultLoginKeychain()
+        try storeQuickUnlockRecord(
+            recordID: recordID,
+            recordData: recordData,
+            keychain: keychain
+        )
+        return statusOK
+    } catch {
+        return publishError(
+            error,
+            invalidationEligible: false,
+            errorOut: errorOut,
+            errorLengthOut: errorLengthOut
+        )
+    }
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+@_cdecl("vaultkern_macos_quick_unlock_record_contains")
+public func vaultkernMacosQuickUnlockRecordContains(
+    _ recordIDPointer: UnsafePointer<UInt8>?,
+    _ recordIDLength: Int,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+    _ errorLengthOut: UnsafeMutablePointer<Int>?
+) -> Int32 {
+    do {
+        _ = try resetOutput(errorOut, errorLengthOut)
+        let recordID = try quickUnlockRecordID(recordIDPointer, length: recordIDLength)
+        let keychain = try defaultLoginKeychain()
+        var query = quickUnlockRecordQuery(recordID: recordID, keychain: keychain)
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        if status == errSecSuccess {
+            return statusOK
+        }
+        if status == errSecItemNotFound {
+            return statusMissingItem
+        }
+        throw securityError(status, operation: "check for the Quick Unlock record")
+    } catch {
+        return publishError(
+            error,
+            invalidationEligible: false,
+            errorOut: errorOut,
+            errorLengthOut: errorLengthOut
+        )
+    }
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+@_cdecl("vaultkern_macos_quick_unlock_record_load")
+public func vaultkernMacosQuickUnlockRecordLoad(
+    _ recordIDPointer: UnsafePointer<UInt8>?,
+    _ recordIDLength: Int,
+    _ recordOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+    _ recordLengthOut: UnsafeMutablePointer<Int>?,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+    _ errorLengthOut: UnsafeMutablePointer<Int>?
+) -> Int32 {
+    do {
+        let recordOutput = try resetOutput(recordOut, recordLengthOut)
+        _ = try resetOutput(errorOut, errorLengthOut)
+        let recordID = try quickUnlockRecordID(recordIDPointer, length: recordIDLength)
+        let keychain = try defaultLoginKeychain()
+        guard let existingItem = try copyQuickUnlockRecordItem(
+            recordID: recordID,
+            keychain: keychain
+        ) else {
+            throw securityError(errSecItemNotFound, operation: "load the Quick Unlock record")
+        }
+        try validateQuickUnlockRecordAccess(existingItem)
+        let fetchQuery: [CFString: Any] = [
+            kSecMatchItemList: [existingItem],
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecReturnData: true,
+            kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
+        ]
+        var result: CFTypeRef?
+        try checkSecurityStatus(
+            SecItemCopyMatching(fetchQuery as CFDictionary, &result),
+            operation: "load the Quick Unlock record"
+        )
+        guard var recordData = result as? Data else {
+            throw BridgeInputError(message: "Keychain returned a non-data Quick Unlock record")
+        }
+        defer { wipeData(&recordData) }
+        publish(recordData, pointerOut: recordOutput.0, lengthOut: recordOutput.1)
+        return statusOK
+    } catch {
+        return publishError(
+            error,
+            invalidationEligible: false,
+            errorOut: errorOut,
+            errorLengthOut: errorLengthOut
+        )
+    }
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+@_cdecl("vaultkern_macos_quick_unlock_record_delete")
+public func vaultkernMacosQuickUnlockRecordDelete(
+    _ recordIDPointer: UnsafePointer<UInt8>?,
+    _ recordIDLength: Int,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+    _ errorLengthOut: UnsafeMutablePointer<Int>?
+) -> Int32 {
+    do {
+        _ = try resetOutput(errorOut, errorLengthOut)
+        let recordID = try quickUnlockRecordID(recordIDPointer, length: recordIDLength)
+        let keychain = try defaultLoginKeychain()
+        let query = quickUnlockRecordQuery(recordID: recordID, keychain: keychain)
+        let status = SecItemDelete(query as CFDictionary)
+        if status == errSecSuccess {
+            return statusOK
+        }
+        if status == errSecItemNotFound {
+            return statusMissingItem
+        }
+        throw securityError(status, operation: "delete the Quick Unlock record")
+    } catch {
+        return publishError(
+            error,
+            invalidationEligible: false,
+            errorOut: errorOut,
+            errorLengthOut: errorLengthOut
+        )
+    }
+}
+
+// MARK: - Secure Enclave C ABI
 
 @_cdecl("vaultkern_macos_secure_enclave_is_available")
 public func vaultkernMacosSecureEnclaveIsAvailable() -> Int32 {

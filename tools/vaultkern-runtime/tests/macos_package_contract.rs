@@ -188,6 +188,32 @@ fn macos_bridge_treats_biometry_unavailable_as_transient() {
 }
 
 #[test]
+fn macos_bridge_treats_both_security_interaction_statuses_as_transient() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let classify_start = swift
+        .find("private func classify(")
+        .expect("error classifier must exist");
+    let classify_end = swift[classify_start..]
+        .find("private func diagnostic(")
+        .map(|offset| classify_start + offset)
+        .expect("diagnostic function must follow the classifier");
+    let classify = &swift[classify_start..classify_end];
+    let transient_end = classify
+        .find("return statusInteractionUnavailable")
+        .expect("the transient interaction branch must exist");
+    let transient = &classify[..transient_end];
+
+    for status in ["errSecInteractionNotAllowed", "errSecInteractionRequired"] {
+        assert!(
+            transient.contains(status),
+            "{status} must map to InteractionUnavailable"
+        );
+    }
+}
+
+#[test]
 fn macos_bridge_wipes_private_key_data_copies_on_every_exit() {
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
     let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
@@ -245,6 +271,453 @@ fn macos_bridge_wipes_private_key_data_copies_on_every_exit() {
     assert!(
         restore_copy < restore_defer && restore_defer < next_throwing_copy,
         "restore must install the wipe defer before any later throwing operation"
+    );
+}
+
+#[test]
+fn macos_quick_unlock_records_use_only_the_executable_bound_login_keychain() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let keychain_start = swift
+        .find("// MARK: - Executable-bound Quick Unlock Keychain")
+        .expect("the legacy login Keychain implementation must exist");
+    let keychain_end = swift[keychain_start..]
+        .find("// MARK: - Secure Enclave C ABI")
+        .map(|offset| keychain_start + offset)
+        .expect("the Secure Enclave bridge must follow the Keychain implementation");
+    let keychain = &swift[keychain_start..keychain_end];
+
+    for required in [
+        "SecKeychainCopyDefault",
+        "SecTrustedApplicationCreateFromPath(nil",
+        "SecAccessCreate(",
+        "kSecAttrAccess: access",
+        "kSecUseKeychain: keychain",
+        "kSecMatchSearchList: [keychain]",
+        "SecItemAdd(",
+        "SecItemCopyMatching(",
+        "SecItemUpdate(",
+        "SecItemDelete(",
+        "vaultkern_macos_quick_unlock_record_store",
+        "vaultkern_macos_quick_unlock_record_contains",
+        "vaultkern_macos_quick_unlock_record_load",
+        "vaultkern_macos_quick_unlock_record_delete",
+    ] {
+        assert!(
+            keychain.contains(required),
+            "macOS Quick Unlock Keychain implementation is missing {required}"
+        );
+    }
+
+    for forbidden in [
+        "kSecUseDataProtectionKeychain",
+        "kSecAttrSynchronizable",
+        "kSecAttrAccessControl",
+        "kSecAttrAccessible",
+        "kSecAttrAccessGroup",
+    ] {
+        assert!(
+            !keychain.contains(forbidden),
+            "legacy Quick Unlock records must not use {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn macos_quick_unlock_contains_never_requests_or_publishes_secret_data() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let contains_start = swift
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_record_contains\")")
+        .expect("the record contains C ABI must exist");
+    let load_start = swift[contains_start..]
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_record_load\")")
+        .map(|offset| contains_start + offset)
+        .expect("the record load C ABI must follow contains");
+    let contains = &swift[contains_start..load_start];
+
+    assert!(
+        contains.contains("SecItemCopyMatching(query as CFDictionary, nil)"),
+        "contains must ask only whether a matching record exists"
+    );
+    assert!(
+        !contains.contains("kSecReturnData"),
+        "contains must never request the opaque record bytes"
+    );
+    assert!(
+        !contains.contains("publish("),
+        "contains must never return an allocated secret buffer"
+    );
+}
+
+#[test]
+fn macos_quick_unlock_load_validates_and_binds_the_item_before_requesting_secret_data() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let load_start = swift
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_record_load\")")
+        .expect("the record load C ABI must exist");
+    let delete_start = swift[load_start..]
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_record_delete\")")
+        .map(|offset| load_start + offset)
+        .expect("the record delete C ABI must follow load");
+    let load = &swift[load_start..delete_start];
+
+    let item_lookup = load
+        .find("copyQuickUnlockRecordItem(")
+        .expect("load must first fetch the item reference from the default Keychain");
+    let acl_validation = load
+        .find("try validateQuickUnlockRecordAccess(existingItem)")
+        .expect("load must validate the existing item's full ACL");
+    let stable_match = load
+        .find("kSecMatchItemList: [existingItem]")
+        .expect("load must bind its data request to the validated item reference");
+    let return_data = load
+        .find("kSecReturnData: true")
+        .expect("load must explicitly request data only after validation");
+    let data_fetch = load
+        .find("SecItemCopyMatching(fetchQuery as CFDictionary, &result)")
+        .expect("load must use the stable-reference fetch query");
+    assert!(
+        item_lookup < acl_validation
+            && acl_validation < stable_match
+            && stable_match < return_data
+            && return_data < data_fetch,
+        "lookup, ACL validation, stable binding, and data fetch must remain ordered"
+    );
+    assert!(
+        load.contains("kSecUseAuthenticationUI: kSecUseAuthenticationUIFail"),
+        "the stable-reference data fetch must suppress Keychain UI"
+    );
+    for forbidden in ["kSecAttrService", "kSecAttrAccount", "kSecMatchSearchList"] {
+        assert!(
+            !load[stable_match..data_fetch].contains(forbidden),
+            "the validated item fetch must not add {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn macos_quick_unlock_store_wipes_its_copied_record_bytes_on_every_exit() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let store_start = swift
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_record_store\")")
+        .expect("the record store C ABI must exist");
+    let contains_start = swift[store_start..]
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_record_contains\")")
+        .map(|offset| store_start + offset)
+        .expect("the record contains C ABI must follow store");
+    let store = &swift[store_start..contains_start];
+
+    let record_copy = store
+        .find("var recordData = try copiedData(")
+        .expect("store must keep its copied record in mutable Data");
+    let wipe = store
+        .find("defer { wipeData(&recordData) }")
+        .expect("store must defer wiping its copied record");
+    let keychain = store
+        .find("let keychain = try defaultLoginKeychain()")
+        .expect("store must explicitly select the default login Keychain");
+    assert!(
+        record_copy < wipe && wipe < keychain,
+        "store must install the record wipe before a later Keychain operation can fail"
+    );
+}
+
+#[test]
+fn macos_quick_unlock_store_updates_in_place_without_replacing_the_acl() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let helper_start = swift
+        .find("private func storeQuickUnlockRecord(")
+        .expect("the record storage helper must exist");
+    let store_export_start = swift[helper_start..]
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_record_store\")")
+        .map(|offset| helper_start + offset)
+        .expect("the record store C ABI must follow its helper");
+    let helper = &swift[helper_start..store_export_start];
+
+    let update = helper
+        .find("SecItemUpdate(")
+        .expect("existing records must be updated in place");
+    let add = helper
+        .find("SecItemAdd(")
+        .expect("a missing record must be added with its initial ACL");
+    assert!(
+        update < add,
+        "store must try an in-place update before adding"
+    );
+    assert!(
+        helper.contains("let replacement = [kSecValueData: recordData]"),
+        "in-place updates must replace only the opaque record bytes"
+    );
+    assert!(
+        !helper.contains("SecItemDelete("),
+        "store must never delete an existing record before replacing it"
+    );
+    assert!(
+        !helper.contains("kSecAttrAccess: access") || add > update,
+        "the ACL belongs only to the missing-item add path"
+    );
+}
+
+#[test]
+fn macos_quick_unlock_keychain_operations_fail_instead_of_showing_keychain_ui() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let keychain_start = swift
+        .find("// MARK: - Executable-bound Quick Unlock Keychain")
+        .expect("the legacy login Keychain implementation must exist");
+    let keychain_end = swift[keychain_start..]
+        .find("// MARK: - Secure Enclave C ABI")
+        .map(|offset| keychain_start + offset)
+        .expect("the Secure Enclave bridge must follow the Keychain implementation");
+    let keychain = &swift[keychain_start..keychain_end];
+
+    let query_start = keychain
+        .find("private func quickUnlockRecordQuery(")
+        .expect("the shared query builder must exist");
+    let record_id_start = keychain[query_start..]
+        .find("private func quickUnlockRecordID(")
+        .map(|offset| query_start + offset)
+        .expect("the record ID parser must follow the query builder");
+    let query = &keychain[query_start..record_id_start];
+    assert!(
+        query.contains("kSecUseAuthenticationUI: kSecUseAuthenticationUIFail"),
+        "every lookup, update, and delete query must suppress Keychain UI"
+    );
+
+    let new_item_start = keychain
+        .find("let newItem: [CFString: Any] = [")
+        .expect("the missing-item add dictionary must exist");
+    let add_start = keychain[new_item_start..]
+        .find("let addStatus = SecItemAdd(")
+        .map(|offset| new_item_start + offset)
+        .expect("the add call must follow its dictionary");
+    let new_item = &keychain[new_item_start..add_start];
+    assert!(
+        new_item.contains("kSecUseAuthenticationUI: kSecUseAuthenticationUIFail"),
+        "adding a record must not permit a surprise login Keychain prompt"
+    );
+
+    for exported in [
+        "vaultkern_macos_quick_unlock_record_contains",
+        "vaultkern_macos_quick_unlock_record_load",
+        "vaultkern_macos_quick_unlock_record_delete",
+    ] {
+        let exported_start = keychain
+            .find(&format!("@_cdecl(\"{exported}\")"))
+            .unwrap_or_else(|| panic!("{exported} C ABI must exist"));
+        let body = &keychain[exported_start..];
+        assert!(
+            body.contains("quickUnlockRecordQuery(recordID: recordID, keychain: keychain)"),
+            "{exported} must use the UI-suppressing, Keychain-scoped query"
+        );
+    }
+}
+
+#[test]
+fn macos_quick_unlock_add_races_fail_closed_instead_of_adopting_an_unknown_acl() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let helper_start = swift
+        .find("private func storeQuickUnlockRecord(")
+        .expect("the record storage helper must exist");
+    let store_export_start = swift[helper_start..]
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_record_store\")")
+        .map(|offset| helper_start + offset)
+        .expect("the record store C ABI must follow its helper");
+    let helper = &swift[helper_start..store_export_start];
+
+    assert_eq!(
+        helper.matches("SecItemUpdate(").count(),
+        1,
+        "store must not update a duplicate created with an unverified ACL"
+    );
+    assert!(
+        !helper.contains("addStatus == errSecDuplicateItem"),
+        "an unexpected duplicate must fail closed"
+    );
+    assert!(
+        helper.contains(
+            "try checkSecurityStatus(addStatus, operation: \"add the Quick Unlock record\")"
+        ),
+        "the duplicate Security status must be preserved as a platform error"
+    );
+}
+
+#[test]
+fn macos_quick_unlock_validates_the_exact_existing_items_decrypt_acl_before_update() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let keychain_start = swift
+        .find("// MARK: - Executable-bound Quick Unlock Keychain")
+        .expect("the legacy login Keychain implementation must exist");
+    let keychain_end = swift[keychain_start..]
+        .find("// MARK: - Secure Enclave C ABI")
+        .map(|offset| keychain_start + offset)
+        .expect("the Secure Enclave bridge must follow the Keychain implementation");
+    let keychain = &swift[keychain_start..keychain_end];
+
+    let item_start = keychain
+        .find("private func copyQuickUnlockRecordItem(")
+        .expect("updates must first copy the exact existing item reference");
+    let validation_start = keychain[item_start..]
+        .find("private func validateQuickUnlockRecordAccess(")
+        .map(|offset| item_start + offset)
+        .expect("the existing item's ACL validator must follow its lookup");
+    let item_lookup = &keychain[item_start..validation_start];
+    assert!(
+        item_lookup.contains("kSecReturnRef"),
+        "the lookup must return a stable item reference for validation and update"
+    );
+    assert!(
+        !item_lookup.contains("kSecReturnData"),
+        "ACL validation must not read the opaque record bytes"
+    );
+    assert!(
+        item_lookup.contains("quickUnlockRecordQuery(recordID: recordID, keychain: keychain)"),
+        "the item lookup must remain scoped to the explicit default Keychain with UI disabled"
+    );
+
+    let store_start = keychain[validation_start..]
+        .find("private func storeQuickUnlockRecord(")
+        .map(|offset| validation_start + offset)
+        .expect("the record storage helper must follow ACL validation");
+    let validation = &keychain[validation_start..store_start];
+    for required in [
+        "SecKeychainItemCopyAccess(",
+        "SecAccessCopyACLList(",
+        "SecACLGetTypeID()",
+        "SecACLCopyAuthorizations(",
+        "kSecACLAuthorizationDecrypt",
+        "kSecACLAuthorizationAny",
+        "kSecACLAuthorizationKeychainItemRead",
+        "kSecACLAuthorizationChangeACL",
+        "kSecACLAuthorizationChangeOwner",
+        "kSecACLAuthorizationKeychainItemModify",
+        "SecACLCopyContents(",
+        "foundSecretReadingACL",
+    ] {
+        assert!(
+            validation.contains(required),
+            "existing-item ACL validation is missing {required}"
+        );
+    }
+    assert!(
+        keychain.contains("SecTrustedApplicationCopyData("),
+        "trusted application identity comparisons must use Security framework identity data"
+    );
+    for required in [
+        "SecTrustedApplicationGetTypeID()",
+        "CFEqual(storedIdentity, currentIdentity)",
+    ] {
+        assert!(
+            keychain.contains(required),
+            "trusted application validation is missing {required}"
+        );
+    }
+    assert!(
+        !validation.contains("SecAccessCopyMatchingACLList"),
+        "validation must enumerate the full ACL so Any and item-read entries cannot be missed"
+    );
+    for helper in [
+        "validateSecretReadingApplicationList(",
+        "validateMutatingApplicationList(",
+    ] {
+        assert!(
+            keychain.contains(helper),
+            "ACL validation must fail closed through {helper}"
+        );
+    }
+
+    let store_export_start = keychain[store_start..]
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_record_store\")")
+        .map(|offset| store_start + offset)
+        .expect("the record store C ABI must follow its helper");
+    let store = &keychain[store_start..store_export_start];
+    let validate_call = store
+        .find("try validateQuickUnlockRecordAccess(")
+        .expect("an existing item must be validated");
+    let stable_match = store
+        .find("kSecMatchItemList: [existingItem]")
+        .expect("the update must stay bound to the validated item reference");
+    let update_call = store
+        .find("SecItemUpdate(")
+        .expect("the validated item must be updated in place");
+    assert!(
+        validate_call < stable_match && stable_match < update_call,
+        "ACL validation and stable item binding must both precede the in-place update"
+    );
+    let update_query_start = store[..update_call]
+        .rfind("let updateQuery: [CFString: Any] = [")
+        .expect("the stable-reference update query must be explicit");
+    let update_query = &store[update_query_start..update_call];
+    assert!(
+        update_query.contains("kSecUseAuthenticationUI: kSecUseAuthenticationUIFail"),
+        "the stable-reference update must keep Keychain UI disabled"
+    );
+    for forbidden in ["kSecAttrService", "kSecAttrAccount", "kSecMatchSearchList"] {
+        assert!(
+            !update_query.contains(forbidden),
+            "the stable-reference update query must not add {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn macos_rust_bridge_exposes_zeroizing_quick_unlock_record_storage() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rust = std::fs::read_to_string(runtime.join("src/macos_secure_enclave.rs"))
+        .expect("the private macOS bridge wrapper must exist");
+
+    for required in [
+        "fn vaultkern_macos_quick_unlock_record_store(",
+        "fn vaultkern_macos_quick_unlock_record_contains(",
+        "fn vaultkern_macos_quick_unlock_record_load(",
+        "fn vaultkern_macos_quick_unlock_record_delete(",
+        "pub(super) fn store_quick_unlock_record(",
+        "pub(super) fn quick_unlock_record_exists(",
+        "pub(super) fn load_quick_unlock_record(",
+        "pub(super) fn delete_quick_unlock_record(",
+        "Result<SensitiveBytes, BridgeError>",
+    ] {
+        assert!(
+            rust.contains(required),
+            "private Rust Keychain wrapper is missing {required}"
+        );
+    }
+
+    let contains_start = rust
+        .find("pub(super) fn quick_unlock_record_exists(")
+        .expect("record existence wrapper must exist");
+    let load_start = rust[contains_start..]
+        .find("pub(super) fn load_quick_unlock_record(")
+        .map(|offset| contains_start + offset)
+        .expect("record load wrapper must follow existence");
+    let contains = &rust[contains_start..load_start];
+    assert!(
+        contains.contains("STATUS_MISSING_ITEM => Ok(false)"),
+        "the Rust existence API must distinguish a missing record"
+    );
+
+    let load_end = rust[load_start..]
+        .find("pub(super) fn delete_quick_unlock_record(")
+        .map(|offset| load_start + offset)
+        .expect("record delete wrapper must follow load");
+    let load = &rust[load_start..load_end];
+    assert!(
+        load.contains("SensitiveBytes(record.to_vec(\"Quick Unlock record\")?)"),
+        "loaded opaque bytes must immediately enter a zeroizing Rust owner"
     );
 }
 
