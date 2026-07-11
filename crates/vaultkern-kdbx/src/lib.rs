@@ -2998,7 +2998,7 @@ fn parse_entry(
             (key, field)
         })
         .filter(|(key, _)| {
-            !(is_totp_attribute_key(key) || (has_complete_passkey && is_passkey_attribute_key(key)))
+            !(is_totp_attribute_key(key) || has_complete_passkey && is_passkey_attribute_key(key))
         })
         .collect();
 

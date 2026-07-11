@@ -448,7 +448,7 @@ pub struct DatabaseSettingsDto {
     pub has_password: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseSettingsUpdateDto {
     #[serde(default)]
