@@ -5,6 +5,10 @@ export default defineConfig({
     environment: "jsdom"
   },
   build: {
+    minify: "terser",
+    terserOptions: {
+      compress: { passes: 3 }
+    },
     rollupOptions: {
       input: {
         popup: "popup.html",
@@ -12,6 +16,7 @@ export default defineConfig({
         options: "options.html",
         background: "src/background.ts",
         contentScript: "src/contentScript.ts",
+        autofillShadowPageHook: "src/autofillShadowPageHook.ts",
         webauthnContentScript: "src/webauthnContentScript.ts",
         webauthnPageHook: "src/webauthnPageHook.ts"
       },

@@ -11,7 +11,7 @@ pub use vaultkern_kdbx::{
 pub use vaultkern_model::{
     Attachment, AutoTypeAssociation, AutoTypeConfig, CustomField, CustomIcon, DeletedObject, Entry,
     EntryFieldProtection, Group, GroupFlags, GroupTimes, MemoryProtection, MergeReport, ModelError,
-    PasskeyRecord, TotpSpec, Vault,
+    PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -699,6 +699,7 @@ pub enum MutationError {
     CustomDataNotFound(String),
     CustomIconNotFound(String),
     InvalidUuid(String),
+    UuidCollision(String),
     CannotDeleteRootGroup,
     CannotMoveRootGroup,
     CannotMoveGroupIntoDescendant,
@@ -718,6 +719,7 @@ impl fmt::Display for MutationError {
             Self::CustomDataNotFound(key) => write!(f, "custom data not found: {key}"),
             Self::CustomIconNotFound(id) => write!(f, "custom icon not found: {id}"),
             Self::InvalidUuid(value) => write!(f, "invalid uuid: {value}"),
+            Self::UuidCollision(value) => write!(f, "uuid is already in use: {value}"),
             Self::CannotDeleteRootGroup => write!(f, "cannot delete root group"),
             Self::CannotMoveRootGroup => write!(f, "cannot move root group"),
             Self::CannotMoveGroupIntoDescendant => {
@@ -1473,10 +1475,35 @@ impl KeepassCore {
         parent_group_id: &str,
         create: EntryCreate,
     ) -> Result<EntryView, MutationError> {
+        let entry_id = Uuid::new_v4().to_string();
+        self.add_entry_with_id(vault, parent_group_id, &entry_id, create)
+    }
+
+    pub fn add_entry_with_id(
+        &self,
+        vault: &mut Vault,
+        parent_group_id: &str,
+        entry_id: &str,
+        create: EntryCreate,
+    ) -> Result<EntryView, MutationError> {
+        let parsed_entry_id = parse_uuid(entry_id)?;
+        if parsed_entry_id.is_nil() || parsed_entry_id.to_string() != entry_id {
+            return Err(MutationError::InvalidUuid(entry_id.into()));
+        }
+        if group_or_entry_uses_uuid(&vault.root, parsed_entry_id)
+            || vault
+                .deleted_objects
+                .iter()
+                .any(|deleted| deleted.id == parsed_entry_id)
+        {
+            return Err(MutationError::UuidCollision(entry_id.into()));
+        }
+
         let parent = find_group_by_id_mut(&mut vault.root, parent_group_id)
             .ok_or_else(|| MutationError::GroupNotFound(parent_group_id.into()))?;
 
         let mut entry = Entry::new(create.title);
+        entry.id = parsed_entry_id;
         entry.username = create.username;
         entry.password = create.password;
         entry.url = create.url;
@@ -2966,6 +2993,15 @@ fn parse_uuid(value: &str) -> Result<Uuid, MutationError> {
     Uuid::parse_str(value).map_err(|_| MutationError::InvalidUuid(value.into()))
 }
 
+fn group_or_entry_uses_uuid(group: &Group, id: Uuid) -> bool {
+    group.id == id
+        || group.entries.iter().any(|entry| entry.id == id)
+        || group
+            .children
+            .iter()
+            .any(|child| group_or_entry_uses_uuid(child, id))
+}
+
 fn clear_custom_icon_references_from_group(group: &mut Group, icon_id: Uuid) {
     if group.custom_icon_id == Some(icon_id) {
         group.custom_icon_id = None;
@@ -3202,7 +3238,11 @@ fn build_inspection(header: KdbxHeaderSummary) -> DatabaseInspection {
 
 #[cfg(test)]
 mod internal_tests {
-    use super::{EntryLineageReportMetadataUpdate, Group, KeepassCore};
+    use super::{
+        CustomIcon, DeletedObject, EntryCreate, EntryLineageReportMetadataUpdate, Group,
+        KeepassCore, MutationError,
+    };
+    use uuid::Uuid;
     use vaultkern_model::{Entry, Vault};
 
     #[test]
@@ -3254,6 +3294,129 @@ mod internal_tests {
 
         assert!(!metadata.exclude_from_reports);
         assert!(vault.root.entries[0].raw_state.quality_check_raw.is_none());
+    }
+
+    #[test]
+    fn add_entry_with_id_rejects_invalid_nil_and_noncanonical_uuids_before_mutation() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Stable IDs");
+        let parent_group_id = vault.root.id.to_string();
+
+        for invalid in [
+            "not-a-uuid",
+            "00000000-0000-0000-0000-000000000000",
+            "12345678-1234-4ABC-8DEF-1234567890AB",
+            "1234567812344abc8def1234567890ab",
+        ] {
+            let before = vault.clone();
+            assert_eq!(
+                core.add_entry_with_id(
+                    &mut vault,
+                    &parent_group_id,
+                    invalid,
+                    stable_entry_create(),
+                ),
+                Err(MutationError::InvalidUuid(invalid.into()))
+            );
+            assert_eq!(vault, before);
+        }
+    }
+
+    #[test]
+    fn add_entry_with_id_rejects_group_entry_and_deleted_marker_collisions_before_mutation() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Stable IDs");
+        let parent_group_id = vault.root.id.to_string();
+
+        let live_group = Group::new("Live group");
+        let live_group_id = live_group.id;
+        vault.root.children.push(live_group);
+
+        let mut recycle_group = Group::new("Recycle Bin");
+        let recycle_group_id = recycle_group.id;
+        let recycled_entry = Entry::new("Recycled entry");
+        let recycled_entry_id = recycled_entry.id;
+        recycle_group.entries.push(recycled_entry);
+        vault.recycle_bin_enabled = Some(true);
+        vault.recycle_bin_group = Some(recycle_group_id);
+        vault.root.children.push(recycle_group);
+
+        let live_entry = Entry::new("Live entry");
+        let live_entry_id = live_entry.id;
+        vault.root.entries.push(live_entry);
+
+        let deleted_id = Uuid::new_v4();
+        vault.deleted_objects.push(DeletedObject {
+            id: deleted_id,
+            deleted_at: 1,
+        });
+
+        for collision in [
+            live_group_id,
+            recycle_group_id,
+            live_entry_id,
+            recycled_entry_id,
+            deleted_id,
+        ] {
+            let before = vault.clone();
+            let collision = collision.to_string();
+            assert_eq!(
+                core.add_entry_with_id(
+                    &mut vault,
+                    &parent_group_id,
+                    &collision,
+                    stable_entry_create(),
+                ),
+                Err(MutationError::UuidCollision(collision))
+            );
+            assert_eq!(vault, before);
+        }
+    }
+
+    #[test]
+    fn add_entry_with_id_uses_the_planned_uuid_and_keeps_random_add_entry_api() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Stable IDs");
+        let parent_group_id = vault.root.id.to_string();
+        let planned_id = "12345678-1234-4abc-8def-1234567890ab";
+        let planned_uuid = Uuid::parse_str(planned_id).unwrap();
+        let mut history_owner = Entry::new("History owner");
+        let mut history_snapshot = Entry::new("History snapshot");
+        history_snapshot.id = planned_uuid;
+        history_owner.history.push(history_snapshot);
+        vault.root.entries.push(history_owner);
+        vault.custom_icons.push(CustomIcon {
+            id: planned_uuid,
+            data: vec![1, 2, 3],
+            name: Some("Separate namespace".into()),
+            last_modified: None,
+        });
+
+        let planned = core
+            .add_entry_with_id(
+                &mut vault,
+                &parent_group_id,
+                planned_id,
+                stable_entry_create(),
+            )
+            .expect("create entry with planned UUID");
+        let random = core
+            .add_entry(&mut vault, &parent_group_id, stable_entry_create())
+            .expect("create entry with existing random API");
+
+        assert_eq!(planned.id, planned_id);
+        assert_ne!(random.id, planned_id);
+        assert_ne!(random.id, Uuid::nil().to_string());
+    }
+
+    fn stable_entry_create() -> EntryCreate {
+        EntryCreate {
+            title: "Example".into(),
+            username: "alice".into(),
+            password: "secret".into(),
+            url: "https://example.com/login".into(),
+            notes: "planned UUID".into(),
+        }
     }
 }
 

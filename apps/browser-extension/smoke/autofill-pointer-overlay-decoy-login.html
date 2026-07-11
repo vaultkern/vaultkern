@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Covered automatic login with a hit-test decoy</title>
+    <style>
+      body { margin: 32px; font: 16px system-ui, sans-serif; }
+      form { display: grid; gap: 12px; width: 360px; }
+      label { display: grid; gap: 4px; }
+      input { box-sizing: border-box; width: 100%; height: 40px; }
+      #visual-cover {
+        position: fixed;
+        inset: 0;
+        z-index: 2;
+        background: white;
+        pointer-events: none;
+      }
+      .sample-decoy {
+        position: fixed;
+        z-index: 3;
+        width: 4px;
+        height: 4px;
+        background: white;
+      }
+    </style>
+  </head>
+  <body>
+    <form aria-label="Sign in" action="/session/login">
+      <h1>Sign in</h1>
+      <label>
+        Username
+        <input id="decoy-username" name="username" autocomplete="username" />
+      </label>
+      <label>
+        Password
+        <input
+          id="decoy-password"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+        />
+      </label>
+      <button type="submit">Sign in</button>
+    </form>
+    <div id="visual-cover"></div>
+    <div id="username-sample-decoy" class="sample-decoy"></div>
+    <div id="password-sample-decoy" class="sample-decoy"></div>
+    <script>
+      for (const [targetId, decoyId] of [
+        ["decoy-username", "username-sample-decoy"],
+        ["decoy-password", "password-sample-decoy"]
+      ]) {
+        const box = document.getElementById(targetId).getBoundingClientRect();
+        const decoy = document.getElementById(decoyId);
+        decoy.style.left = `${box.left + 2}px`;
+        decoy.style.top = `${box.top + 2}px`;
+      }
+    </script>
+  </body>
+</html>
