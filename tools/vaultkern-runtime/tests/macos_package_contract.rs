@@ -414,6 +414,7 @@ fn macos_quick_unlock_records_use_only_the_executable_bound_login_keychain() {
         "SecItemUpdate(",
         "SecItemDelete(",
         "vaultkern_macos_quick_unlock_record_store",
+        "vaultkern_macos_quick_unlock_keychain_is_available",
         "vaultkern_macos_quick_unlock_record_contains",
         "vaultkern_macos_quick_unlock_record_load",
         "vaultkern_macos_quick_unlock_record_delete",
@@ -434,6 +435,46 @@ fn macos_quick_unlock_records_use_only_the_executable_bound_login_keychain() {
         assert!(
             !keychain.contains(forbidden),
             "legacy Quick Unlock records must not use {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn macos_quick_unlock_keychain_availability_probe_is_noninteractive_and_metadata_only() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+    let probe_start = swift
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_keychain_is_available\")")
+        .expect("the login Keychain availability probe must exist");
+    let store_start = swift[probe_start..]
+        .find("@_cdecl(\"vaultkern_macos_quick_unlock_record_store\")")
+        .map(|offset| probe_start + offset)
+        .expect("the record store C ABI must follow the availability probe");
+    let probe = &swift[probe_start..store_start];
+
+    for required in [
+        "withKeychainUserInteractionDisabled {",
+        "defaultLoginKeychain()",
+        "return 1",
+        "return 0",
+    ] {
+        assert!(
+            probe.contains(required),
+            "login Keychain availability probe is missing {required}"
+        );
+    }
+    for forbidden in [
+        "SecItem",
+        "kSecReturnData",
+        "publish(",
+        "SecKeychainCreate",
+        "SecKeychainSetDefault",
+        "SecKeychainUnlock",
+    ] {
+        assert!(
+            !probe.contains(forbidden),
+            "login Keychain availability probe must not use {forbidden}"
         );
     }
 }

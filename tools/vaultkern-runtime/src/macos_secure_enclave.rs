@@ -15,6 +15,7 @@ const STATUS_PLATFORM_FAILURE: i32 = 5;
 type BufferFree = unsafe extern "C" fn(*mut c_void, usize);
 
 unsafe extern "C" {
+    fn vaultkern_macos_quick_unlock_keychain_is_available() -> i32;
     fn vaultkern_macos_quick_unlock_record_store(
         record_id: *const u8,
         record_id_length: usize,
@@ -360,6 +361,11 @@ fn ffi_pointer(bytes: &[u8]) -> *const u8 {
 pub(super) fn is_secure_enclave_available() -> bool {
     // SAFETY: This C ABI function accepts no pointers and returns 0 or 1.
     unsafe { vaultkern_macos_secure_enclave_is_available() == 1 }
+}
+
+pub(super) fn is_quick_unlock_keychain_available() -> bool {
+    // SAFETY: This C ABI function accepts no pointers and returns 0 or 1.
+    unsafe { vaultkern_macos_quick_unlock_keychain_is_available() == 1 }
 }
 
 pub(super) fn store_quick_unlock_record(record_id: &str, record: &[u8]) -> Result<(), BridgeError> {

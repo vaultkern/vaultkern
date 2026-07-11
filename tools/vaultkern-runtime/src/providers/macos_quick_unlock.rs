@@ -154,6 +154,7 @@ impl MacSecureEnclaveApi for SystemSecureEnclave {
 }
 
 trait MacQuickUnlockRecordStore {
+    fn is_available(&self) -> bool;
     fn contains(&self, record_id: &str) -> std::result::Result<bool, BridgeError>;
     fn load(&self, record_id: &str) -> std::result::Result<SensitiveBytes, BridgeError>;
     fn store(&self, record_id: &str, bytes: &[u8]) -> std::result::Result<(), BridgeError>;
@@ -163,6 +164,10 @@ trait MacQuickUnlockRecordStore {
 struct SystemQuickUnlockRecordStore;
 
 impl MacQuickUnlockRecordStore for SystemQuickUnlockRecordStore {
+    fn is_available(&self) -> bool {
+        macos_secure_enclave::is_quick_unlock_keychain_available()
+    }
+
     fn contains(&self, record_id: &str) -> std::result::Result<bool, BridgeError> {
         macos_secure_enclave::quick_unlock_record_exists(record_id)
     }
@@ -549,7 +554,9 @@ fn decode_envelope(bytes: &[u8]) -> std::result::Result<DecodedEnvelopeV1, Envel
 
 impl QuickUnlockProvider for MacOsQuickUnlockProvider {
     fn is_supported(&self) -> bool {
-        self.local_authentication.is_touch_id_available() && self.secure_enclave.is_available()
+        self.local_authentication.is_touch_id_available()
+            && self.secure_enclave.is_available()
+            && self.records.is_available()
     }
 
     fn contains(&self, key: &str) -> Result<bool> {
@@ -655,6 +662,7 @@ mod tests {
     struct FakeState {
         available: bool,
         secure_enclave_available: bool,
+        keychain_available: bool,
         operations: Vec<String>,
         records: BTreeMap<String, Vec<u8>>,
         create_error: Option<BridgeErrorKind>,
@@ -803,6 +811,12 @@ mod tests {
     }
 
     impl MacQuickUnlockRecordStore for FakeRecordStore {
+        fn is_available(&self) -> bool {
+            let mut state = self.state.borrow_mut();
+            state.operations.push("keychain_available".into());
+            state.keychain_available
+        }
+
         fn contains(&self, record_id: &str) -> std::result::Result<bool, BridgeError> {
             let mut state = self.state.borrow_mut();
             state.operations.push(format!("contains:{record_id}"));
@@ -894,6 +908,7 @@ mod tests {
         let state = Rc::new(RefCell::new(FakeState {
             available: true,
             secure_enclave_available: true,
+            keychain_available: true,
             ..FakeState::default()
         }));
         (provider_for_extension(state.clone(), None), state)
@@ -943,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn support_requires_both_strict_touch_id_and_secure_enclave() {
+    fn support_requires_touch_id_secure_enclave_and_login_keychain() {
         let (provider, state) = provider();
         assert!(provider.is_supported());
 
@@ -951,6 +966,9 @@ mod tests {
         assert!(!provider.is_supported());
         state.borrow_mut().available = true;
         state.borrow_mut().secure_enclave_available = false;
+        assert!(!provider.is_supported());
+        state.borrow_mut().secure_enclave_available = true;
+        state.borrow_mut().keychain_available = false;
         assert!(!provider.is_supported());
     }
 

@@ -621,6 +621,19 @@ private func storeQuickUnlockRecord(
 }
 
 @available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
+@_cdecl("vaultkern_macos_quick_unlock_keychain_is_available")
+public func vaultkernMacosQuickUnlockKeychainIsAvailable() -> Int32 {
+    do {
+        return try withKeychainUserInteractionDisabled {
+            _ = try defaultLoginKeychain()
+            return 1
+        }
+    } catch {
+        return 0
+    }
+}
+
+@available(macOS, deprecated: 10.10, message: "File-based Keychain ACLs are required here")
 @_cdecl("vaultkern_macos_quick_unlock_record_store")
 public func vaultkernMacosQuickUnlockRecordStore(
     _ recordIDPointer: UnsafePointer<UInt8>?,
