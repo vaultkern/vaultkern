@@ -412,6 +412,38 @@ it("does not save quick unlock as enabled when the host does not support it", as
   });
 });
 
+it("preserves an enabled quick unlock preference while biometric support is temporarily unavailable", async () => {
+  const settingsStore = createSettingsStore({ quickUnlockEnabled: true });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null,
+      supportsBiometricUnlock: false
+    }),
+    listRecentVaults: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+
+  const quickUnlock = await screen.findByRole("checkbox", {
+    name: "Quick Unlock"
+  });
+  expect(quickUnlock).toBeChecked();
+  expect(quickUnlock).not.toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  await waitFor(() => {
+    expect(settingsStore.save).toHaveBeenCalledWith(
+      expect.objectContaining({ quickUnlockEnabled: true })
+    );
+  });
+});
+
 it("toggles quick unlock for the current vault from extension settings", async () => {
   const settingsStore = createSettingsStore();
   const recentVaults = [
@@ -602,7 +634,7 @@ it("enables a missing quick unlock record after the current vault is unlocked", 
   });
 });
 
-it("does not re-enable a quick unlock record that becomes available after password unlock", async () => {
+it("explicitly reconciles an existing quick unlock record after password unlock", async () => {
   const settingsStore = createSettingsStore({
     quickUnlockEnabled: true
   });
@@ -665,7 +697,7 @@ it("does not re-enable a quick unlock record that becomes available after passwo
 
   await waitFor(() => {
     expect(screen.getByText("No entries available.")).toBeInTheDocument();
-    expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
   });
   expect(client.listRecentVaults).toHaveBeenCalledTimes(2);
 });
@@ -727,8 +759,199 @@ it("keeps the manager unlocked when post-unlock quick unlock reconciliation cann
 
   await waitFor(() => {
     expect(screen.getByText("No entries available.")).toBeInTheDocument();
-    expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
   });
+});
+
+it("does not attempt macOS quick unlock setup after a key-file-only manager unlock", async () => {
+  const settingsStore = createSettingsStore({
+    quickUnlockEnabled: true
+  });
+  const recentVault = {
+    vaultRefId: "vault-ref-1",
+    displayName: "Personal",
+    sourceKind: "local" as const,
+    sourceSummary: "personal.kdbx",
+    lastUsedAt: 1776500000,
+    availability: "ready" as const,
+    supportsQuickUnlock: false,
+    isCurrent: true
+  };
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true,
+      quickUnlockRequiresPassword: true
+    }),
+    listRecentVaults: vi.fn(async () => [recentVault]),
+    unlockCurrentVault: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true,
+      quickUnlockRequiresPassword: true
+    })),
+    enableQuickUnlockForCurrentVault: vi.fn(),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn()
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Key File Path"), {
+    target: { value: "/tmp/demo.keyx" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+  expect(await screen.findByText("No entries available.")).toBeInTheDocument();
+  expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+});
+
+it("coalesces explicit and automatic quick unlock synchronization", async () => {
+  const settingsStore = createSettingsStore();
+  const enable = createDeferred<{
+    unlocked: boolean;
+    activeVaultId: string;
+    currentVaultRefId: string;
+    supportsBiometricUnlock: boolean;
+  }>();
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local" as const,
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready" as const,
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    enableQuickUnlockForCurrentVault: vi.fn(() => enable.promise),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn()
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByText("No entries available.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Quick Unlock" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  await waitFor(() => {
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalled();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+
+  recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
+  await act(async () => {
+    enable.resolve({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    await enable.promise;
+  });
+  await waitFor(() => {
+    expect(screen.queryByText("Saving...")).not.toBeInTheDocument();
+  });
+});
+
+it("does not immediately retry quick unlock after the user rejects setup", async () => {
+  const settingsStore = createSettingsStore({ quickUnlockEnabled: true });
+  const recentVault = {
+    vaultRefId: "vault-ref-1",
+    displayName: "Personal",
+    sourceKind: "local" as const,
+    sourceSummary: "personal.kdbx",
+    lastUsedAt: 1776500000,
+    availability: "ready" as const,
+    supportsQuickUnlock: false,
+    isCurrent: true
+  };
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(async () => [recentVault]),
+    unlockCurrentVault: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    })),
+    enableQuickUnlockForCurrentVault: vi.fn(async () => {
+      throw new Error("User canceled Touch ID");
+    }),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn()
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Master Password"), {
+    target: { value: "demo-password" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+  expect(await screen.findByText("No entries available.")).toBeInTheDocument();
+  await waitFor(() => {
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalled();
+  });
+  expect(screen.getByRole("alert")).toHaveTextContent("User canceled Touch ID");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
 });
 
 it("does not auto-enable quick unlock in the manager when biometric unlock is unsupported", async () => {

@@ -476,7 +476,10 @@ export function PopupApp({
     unlockedSession: SessionStateLike,
     settingsForUnlock = extensionSettingsRef.current
   ) {
-    if (unlockedSession.supportsBiometricUnlock !== true) {
+    if (
+      settingsForUnlock.quickUnlockEnabled &&
+      unlockedSession.supportsBiometricUnlock !== true
+    ) {
       return unlockedSession;
     }
 
@@ -484,38 +487,16 @@ export function PopupApp({
       return unlockedSession;
     }
 
-    let currentVault: VaultReference | null;
     try {
-      const vaults = limitRecentVaults(
-        await client.listRecentVaults(),
-        settingsForUnlock.recentVaultLimit
-      );
-      setRecentVaults(vaults);
-      setRecentVaultsError(null);
-      currentVault =
-        vaults.find(
-          (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
-        ) ?? null;
-    } catch {
-      return unlockedSession;
-    }
-
-    if (!currentVault) {
-      return unlockedSession;
-    }
-
-    if (currentVault.supportsQuickUnlock === settingsForUnlock.quickUnlockEnabled) {
-      return unlockedSession;
-    }
-
-    try {
-      const nextSession = settingsForUnlock.quickUnlockEnabled
-        ? await client.enableQuickUnlockForCurrentVault()
-        : await client.disableQuickUnlockForCurrentVault();
+      if (settingsForUnlock.quickUnlockEnabled) {
+        await client.enableQuickUnlockForCurrentVault();
+      } else {
+        await client.disableQuickUnlockForCurrentVault();
+      }
       const vaults = await client.listRecentVaults();
       setRecentVaults(limitRecentVaults(vaults, settingsForUnlock.recentVaultLimit));
       setRecentVaultsError(null);
-      return nextSession;
+      return unlockedSession;
     } catch (quickUnlockFailure) {
       setUnlockError(
         popupErrorMessage(
@@ -1894,6 +1875,10 @@ export function PopupApp({
         onOpenManager={handleOpenManager}
         onOpenExtensionSettings={handleOpenExtensionSettings}
       />
+      {unlockError ? <div role="alert">{unlockError}</div> : null}
+      {unlockError && renderRuntimeErrorHelp
+        ? renderRuntimeErrorHelp(unlockErrorCause)
+        : null}
       {entriesError ? <div role="alert">{entriesError}</div> : null}
       {!autofillSavePrompt && autofillSaveError ? (
         <section style={passkeyPromptStyle} aria-live="polite">

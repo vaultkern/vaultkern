@@ -50,7 +50,7 @@ export function ExtensionSettingsPanel({
           ),
           autofillOnPageLoadEnabled: draft.autofillOnPageLoadEnabled,
           passkeyProviderEnabled: draft.passkeyProviderEnabled,
-          quickUnlockEnabled: quickUnlockAvailable && draft.quickUnlockEnabled
+          quickUnlockEnabled: draft.quickUnlockEnabled
         });
       }}
     >
@@ -161,8 +161,10 @@ export function ExtensionSettingsPanel({
         <input
           aria-label={text("Quick Unlock")}
           type="checkbox"
-          checked={quickUnlockAvailable && draft.quickUnlockEnabled}
-          disabled={quickUnlockBusy || !quickUnlockAvailable}
+          checked={draft.quickUnlockEnabled}
+          disabled={
+            quickUnlockBusy || (!quickUnlockAvailable && !draft.quickUnlockEnabled)
+          }
           onChange={(event) => {
             setDraft({ ...draft, quickUnlockEnabled: event.target.checked });
           }}

@@ -579,12 +579,18 @@ impl SecureStorageProvider for FailingStoreSecureStorageProvider {
 
 pub(crate) struct FailingContainsSecureStorageProvider {
     values: RefCell<BTreeMap<String, Vec<u8>>>,
+    contains_before_failure: RefCell<usize>,
 }
 
 impl FailingContainsSecureStorageProvider {
     pub(crate) fn new() -> Self {
+        Self::new_after(0)
+    }
+
+    pub(crate) fn new_after(contains_before_failure: usize) -> Self {
         Self {
             values: RefCell::new(BTreeMap::new()),
+            contains_before_failure: RefCell::new(contains_before_failure),
         }
     }
 }
@@ -601,7 +607,12 @@ impl SecureStorageProvider for FailingContainsSecureStorageProvider {
         Ok(self.values.borrow().get(key).cloned())
     }
 
-    fn contains(&self, _key: &str) -> Result<bool> {
+    fn contains(&self, key: &str) -> Result<bool> {
+        let mut contains_before_failure = self.contains_before_failure.borrow_mut();
+        if *contains_before_failure > 0 {
+            *contains_before_failure -= 1;
+            return Ok(self.values.borrow().contains_key(key));
+        }
         anyhow::bail!("injected secure storage contains failure")
     }
 

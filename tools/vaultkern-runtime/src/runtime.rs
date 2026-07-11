@@ -579,6 +579,17 @@ impl Runtime {
         runtime
     }
 
+    pub fn for_tests_with_quick_unlock_failing_contains_after(successful_contains: usize) -> Self {
+        let mut runtime = Self::for_tests();
+        runtime.quick_unlock = Box::new(ComposedQuickUnlockProvider::new(
+            Box::new(TestBiometricProvider),
+            Box::new(FailingContainsSecureStorageProvider::new_after(
+                successful_contains,
+            )),
+        ));
+        runtime
+    }
+
     pub fn for_tests_with_quick_unlock_failing_delete() -> Self {
         let mut runtime = Self::for_tests();
         runtime.quick_unlock = Box::new(ComposedQuickUnlockProvider::new(
@@ -1092,10 +1103,6 @@ impl Runtime {
             .vault_ref_id
             .clone();
         let storage_key = quick_unlock_storage_key(&vault_ref_id);
-        let should_refresh_quick_unlock = origin == CredentialUnlockOrigin::UserSupplied
-            && self.quick_unlock.is_supported()
-            && ((self.quick_unlock.requires_same_process_credential_proof() && has_password_proof)
-                || self.quick_unlock_suppressed_records.contains(&storage_key));
         if self.session.current_vault_ref_id() != Some(vault_ref_id.as_str()) {
             anyhow::bail!("opened vault is not the current selection: {vault_id}");
         }
@@ -1117,13 +1124,6 @@ impl Runtime {
             .core
             .load_database(&loaded.bytes, &key)
             .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
-        let refresh_credentials = if should_refresh_quick_unlock {
-            Some(Zeroizing::new(serde_json::to_vec(&credentials).context(
-                "failed to encode refreshed quick unlock credentials",
-            )?))
-        } else {
-            None
-        };
         loaded.name = database.vault.name.clone();
         loaded.replace_unlock_credentials(
             credentials.password.take(),
@@ -1135,12 +1135,13 @@ impl Runtime {
         if self.quick_unlock.requires_same_process_credential_proof() && has_password_proof {
             self.quick_unlock_process_authorizations
                 .insert(storage_key.clone());
-        }
-        if let Some(refresh_credentials) = refresh_credentials {
-            self.refresh_existing_quick_unlock_after_manual_unlock(
-                &storage_key,
-                refresh_credentials.as_slice(),
-            );
+            if origin == CredentialUnlockOrigin::UserSupplied {
+                // Password proof authorizes record maintenance, but the record
+                // stays unavailable until the caller explicitly reconciles its
+                // persisted Quick Unlock preference.
+                self.quick_unlock_suppressed_records
+                    .insert(storage_key.clone());
+            }
         }
         self.recent_unlock_user_verification = None;
         Ok(())
@@ -1254,11 +1255,15 @@ impl Runtime {
                 .context("failed to encode quick unlock credentials")?,
         );
         let storage_key = quick_unlock_storage_key(&current_vault_ref_id);
-        self.quick_unlock.enable(
-            &storage_key,
-            bytes.as_slice(),
-            "Enable quick unlock for this vault",
-        )?;
+        if self.quick_unlock.contains(&storage_key)? {
+            self.quick_unlock.refresh(&storage_key, bytes.as_slice())?;
+        } else {
+            self.quick_unlock.enable(
+                &storage_key,
+                bytes.as_slice(),
+                "Enable quick unlock for this vault",
+            )?;
+        }
         self.quick_unlock_suppressed_records.remove(&storage_key);
         if self.quick_unlock.requires_same_process_credential_proof() {
             self.quick_unlock_process_authorizations
@@ -1337,8 +1342,10 @@ impl Runtime {
             .context("no current vault selected")?
             .to_owned();
         let storage_key = quick_unlock_storage_key(&current_vault_ref_id);
-        self.require_quick_unlock_process_authorization(&storage_key)?;
-        self.quick_unlock.delete(&storage_key)?;
+        if self.quick_unlock.contains(&storage_key)? {
+            self.require_quick_unlock_process_authorization(&storage_key)?;
+            self.quick_unlock.delete(&storage_key)?;
+        }
         self.quick_unlock_process_authorizations
             .remove(&storage_key);
         self.quick_unlock_suppressed_records.remove(&storage_key);
@@ -5571,30 +5578,6 @@ impl Runtime {
             .map(|loaded| loaded.vault_ref_id.clone())
     }
 
-    fn refresh_existing_quick_unlock_after_manual_unlock(
-        &mut self,
-        storage_key: &str,
-        credentials: &[u8],
-    ) {
-        match self.quick_unlock.contains(storage_key) {
-            Ok(false) => {
-                self.quick_unlock_suppressed_records.remove(storage_key);
-            }
-            Ok(true) => {
-                if self.quick_unlock.refresh(storage_key, credentials).is_err() {
-                    self.quick_unlock_suppressed_records
-                        .insert(storage_key.to_owned());
-                } else {
-                    self.quick_unlock_suppressed_records.remove(storage_key);
-                }
-            }
-            Err(_) => {
-                self.quick_unlock_suppressed_records
-                    .insert(storage_key.to_owned());
-            }
-        }
-    }
-
     fn refresh_quick_unlock_credentials_after_successful_save(
         &mut self,
         vault_id: &str,
@@ -5659,7 +5642,6 @@ impl Runtime {
                 .insert(storage_key.clone());
             return Ok(());
         }
-        self.quick_unlock_suppressed_records.remove(&storage_key);
         self.clear_quick_unlock_refresh_pending(vault_id)?;
         Ok(())
     }
@@ -12172,6 +12154,10 @@ mod tests {
 
         let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests_with_quick_unlock();
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .unwrap();
         runtime.quick_unlock = Box::new(
             MemoryQuickUnlockProvider::new(operations.clone()).with_failures(
                 MemoryQuickUnlockFailures {
@@ -12180,11 +12166,6 @@ mod tests {
                 },
             ),
         );
-        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
-        runtime
-            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
-            .unwrap();
-        runtime.enable_quick_unlock_for_current_vault().unwrap();
         runtime.lock_session();
         operations.borrow_mut().clear();
 
@@ -12319,7 +12300,44 @@ mod tests {
     }
 
     #[test]
-    fn manual_unlock_refresh_failure_preserves_the_existing_record() {
+    fn credential_save_refresh_preserves_an_existing_suppression_decision() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+        runtime.quick_unlock_process_authorizations.clear();
+        runtime
+            .unlock_current_vault_with_password("demo-password")
+            .unwrap();
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    credentials: Some(DatabaseCredentialsUpdateDto {
+                        new_password: Some("new-password".into()),
+                        remove_password: false,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+        operations.borrow_mut().clear();
+
+        runtime.save_vault(&opened.vault_id).unwrap();
+
+        assert_eq!(operations.borrow().as_slice(), ["refresh"]);
+        operations.borrow_mut().clear();
+        assert!(!runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
+        assert!(operations.borrow().is_empty());
+    }
+
+    #[test]
+    fn explicit_reconciliation_refresh_failure_preserves_the_existing_record() {
         let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
         runtime.quick_unlock = Box::new(
@@ -12338,8 +12356,12 @@ mod tests {
         runtime
             .unlock_current_vault_with_password("demo-password")
             .unwrap();
+        assert!(operations.borrow().is_empty());
+
+        let error = runtime.enable_quick_unlock_for_current_vault().unwrap_err();
 
         assert_eq!(operations.borrow().as_slice(), ["contains", "refresh"]);
+        assert!(format_error_chain(&error).contains("injected quick unlock refresh failure"));
         let storage_key = quick_unlock_storage_key(
             runtime
                 .session
@@ -12453,6 +12475,8 @@ mod tests {
         runtime
             .unlock_current_vault_with_password("demo-password")
             .unwrap();
+        assert!(!runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
         runtime.lock_session();
         assert!(runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
         runtime.unlock_current_vault_with_quick_unlock().unwrap();
@@ -12460,6 +12484,53 @@ mod tests {
             runtime.session.active_vault_id(),
             Some(opened.vault_id.as_str())
         );
+    }
+
+    #[test]
+    fn manual_password_unlock_keeps_an_existing_record_suppressed_until_explicit_reconciliation() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+        runtime.quick_unlock_process_authorizations.clear();
+        operations.borrow_mut().clear();
+
+        runtime
+            .unlock_current_vault_with_password("demo-password")
+            .unwrap();
+
+        assert_eq!(runtime.quick_unlock_process_authorizations.len(), 1);
+        assert!(!runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
+        assert!(runtime.unlock_current_vault_with_quick_unlock().is_err());
+        assert!(operations.borrow().is_empty());
+    }
+
+    #[test]
+    fn explicit_enable_refreshes_an_existing_record_without_new_biometric_enrollment() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        runtime.lock_session();
+        runtime.quick_unlock_process_authorizations.clear();
+        runtime
+            .unlock_current_vault_with_password("demo-password")
+            .unwrap();
+        operations.borrow_mut().clear();
+
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+
+        assert_eq!(operations.borrow().as_slice(), ["contains", "refresh"]);
+        assert!(runtime.list_recent_vaults().unwrap().vaults[0].supports_quick_unlock);
     }
 
     #[test]
@@ -12620,6 +12691,33 @@ mod tests {
             format_error_chain(&error).contains("requires a password-protected vault"),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn disabling_absent_quick_unlock_does_not_require_password_proof() {
+        let operations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.quick_unlock = Box::new(
+            MemoryQuickUnlockProvider::new(operations.clone())
+                .requiring_same_process_credential_proof(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (vault_path, key_file_path) = write_key_file_vault(dir.path(), "key-file-only", None);
+        let opened = runtime
+            .open_local_vault(vault_path.to_str().unwrap())
+            .unwrap();
+        runtime
+            .unlock_vault(
+                &opened.vault_id,
+                None,
+                Some(key_file_path.to_str().unwrap()),
+            )
+            .unwrap();
+        operations.borrow_mut().clear();
+
+        runtime.disable_quick_unlock_for_current_vault().unwrap();
+
+        assert_eq!(operations.borrow().as_slice(), ["contains"]);
     }
 
     #[test]
@@ -12904,6 +13002,7 @@ mod tests {
                 Some(new_key_file_path.to_str().unwrap()),
             )
             .unwrap();
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
         runtime.lock_session();
         operations.borrow_mut().clear();
 
@@ -13047,6 +13146,7 @@ mod tests {
         assert_eq!(
             operations.borrow().as_slice(),
             [
+                "contains",
                 "enable:Enable quick unlock for this vault",
                 "unlock:Unlock this vault",
             ]
@@ -13072,6 +13172,7 @@ mod tests {
                 .current_vault_ref_id()
                 .expect("current vault reference"),
         );
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
         runtime
             .quick_unlock
             .enable(
@@ -13163,6 +13264,7 @@ mod tests {
                 .current_vault_ref_id()
                 .expect("current vault reference"),
         );
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
         runtime
             .quick_unlock
             .enable(
@@ -13362,6 +13464,7 @@ mod tests {
         assert_eq!(
             operations.borrow().as_slice(),
             [
+                "contains",
                 "enable:Enable quick unlock for this vault",
                 "unlock:Unlock this vault",
             ]

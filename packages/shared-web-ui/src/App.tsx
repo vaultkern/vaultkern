@@ -146,7 +146,11 @@ function browsableOneDriveItems(items: OneDriveItem[]) {
 
 type SessionStateLike = Pick<
   SessionState,
-  "unlocked" | "activeVaultId" | "currentVaultRefId" | "sourceStatus"
+  | "unlocked"
+  | "activeVaultId"
+  | "currentVaultRefId"
+  | "sourceStatus"
+  | "quickUnlockRequiresPassword"
 > & {
   supportsBiometricUnlock?: boolean;
 };
@@ -379,6 +383,10 @@ export function App({
   const [quickUnlockBusy, setQuickUnlockBusy] = useState(false);
   const [quickUnlockError, setQuickUnlockError] = useState<string | null>(null);
   const quickUnlockAutoSyncAttempt = useRef<string | null>(null);
+  const quickUnlockSyncInFlight = useRef<{
+    key: string;
+    operation: Promise<SessionStateLike | null>;
+  } | null>(null);
 
   async function reloadLockedState() {
     const [nextSession, nextRecentVaults] = await Promise.all([
@@ -449,37 +457,71 @@ export function App({
     enabled: boolean,
     settingsForReload: ExtensionSettings,
     sessionForSync: SessionStateLike | null = session,
-    vaultsForSync: VaultReference[] = recentVaults
+    vaultsForSync: VaultReference[] = recentVaults,
+    forceAfterCredentialUnlock = false
   ): Promise<SessionStateLike | null> {
     const currentVault =
       vaultsForSync.find((vault) => vault.vaultRefId === sessionForSync?.currentVaultRefId) ??
       vaultsForSync.find((vault) => vault.isCurrent) ??
       null;
 
-    if (!currentVault || currentVault.supportsQuickUnlock === enabled) {
+    const currentVaultRefId = sessionForSync?.currentVaultRefId ?? currentVault?.vaultRefId;
+    if (!currentVaultRefId) {
+      return sessionForSync;
+    }
+    if (!forceAfterCredentialUnlock && currentVault?.supportsQuickUnlock === enabled) {
+      setQuickUnlockError(null);
+      return sessionForSync;
+    }
+    if (!forceAfterCredentialUnlock && !currentVault) {
       return sessionForSync;
     }
     if (enabled && sessionForSync?.unlocked !== true) {
       return sessionForSync;
     }
-
-    setQuickUnlockBusy(true);
-    try {
-      const nextSession = enabled
-        ? await client.enableQuickUnlockForCurrentVault()
-        : await client.disableQuickUnlockForCurrentVault();
-      await applyRecentVaultLimit(await client.listRecentVaults(), settingsForReload);
-      return nextSession;
-    } catch (quickUnlockFailure) {
-      setQuickUnlockError(
-        errorMessage(
-          quickUnlockFailure,
-          translate(extensionSettings.language, "Failed to update quick unlock")
-        )
-      );
+    if (enabled && sessionForSync?.supportsBiometricUnlock !== true) {
       return sessionForSync;
+    }
+
+    const syncKey = `${currentVaultRefId}:${
+      sessionForSync?.unlocked === true ? "unlocked" : "locked"
+    }:${enabled ? "enable" : "disable"}`;
+    quickUnlockAutoSyncAttempt.current = syncKey;
+    const inFlight = quickUnlockSyncInFlight.current;
+    if (inFlight?.key === syncKey) {
+      return inFlight.operation;
+    }
+
+    const operation = (async () => {
+      setQuickUnlockBusy(true);
+      setQuickUnlockError(null);
+      try {
+        if (enabled) {
+          await client.enableQuickUnlockForCurrentVault();
+        } else {
+          await client.disableQuickUnlockForCurrentVault();
+        }
+        await applyRecentVaultLimit(await client.listRecentVaults(), settingsForReload);
+        return sessionForSync;
+      } catch (quickUnlockFailure) {
+        setQuickUnlockError(
+          errorMessage(
+            quickUnlockFailure,
+            translate(settingsForReload.language, "Failed to update quick unlock")
+          )
+        );
+        return sessionForSync;
+      } finally {
+        setQuickUnlockBusy(false);
+      }
+    })();
+    quickUnlockSyncInFlight.current = { key: syncKey, operation };
+    try {
+      return await operation;
     } finally {
-      setQuickUnlockBusy(false);
+      if (quickUnlockSyncInFlight.current?.operation === operation) {
+        quickUnlockSyncInFlight.current = null;
+      }
     }
   }
 
@@ -1209,11 +1251,17 @@ export function App({
       recentVaults.find((vault) => vault.isCurrent) ??
       null;
 
+    if (!currentVault) {
+      return;
+    }
+    if (currentVault.supportsQuickUnlock === extensionSettings.quickUnlockEnabled) {
+      quickUnlockAutoSyncAttempt.current = null;
+      setQuickUnlockError(null);
+      return;
+    }
     if (
-      !currentVault ||
-      currentVault.supportsQuickUnlock === extensionSettings.quickUnlockEnabled ||
-      (extensionSettings.quickUnlockEnabled &&
-        session?.supportsBiometricUnlock !== true)
+      extensionSettings.quickUnlockEnabled &&
+      session?.supportsBiometricUnlock !== true
     ) {
       return;
     }
@@ -1641,30 +1689,23 @@ export function App({
               keyFilePath
             });
             let nextSession = unlockedSession;
-            try {
-              const visibleVaults = await applyRecentVaultLimit(
-                await client.listRecentVaults(),
-                extensionSettings
-              );
+            const canEnableQuickUnlock =
+              password !== "" ||
+              (keyFilePath !== "" &&
+                unlockedSession.quickUnlockRequiresPassword !== true);
+            const shouldReconcileQuickUnlock =
+              !extensionSettings.quickUnlockEnabled || canEnableQuickUnlock;
+            if (shouldReconcileQuickUnlock) {
               nextSession =
                 (await syncQuickUnlockPreferenceToCurrentVault(
                   extensionSettings.quickUnlockEnabled,
                   extensionSettings,
                   unlockedSession,
-                  visibleVaults
+                  recentVaults,
+                  true
                 )) ?? unlockedSession;
-            } catch (quickUnlockRefreshFailure) {
-              if (unlockedSession.currentVaultRefId) {
-                quickUnlockAutoSyncAttempt.current = `${unlockedSession.currentVaultRefId}:unlocked:${
-                  extensionSettings.quickUnlockEnabled ? "enable" : "disable"
-                }`;
-              }
-              setQuickUnlockError(
-                errorMessage(
-                  quickUnlockRefreshFailure,
-                  translate(extensionSettings.language, "Failed to update quick unlock")
-                )
-              );
+            } else if (unlockedSession.currentVaultRefId) {
+              quickUnlockAutoSyncAttempt.current = `${unlockedSession.currentVaultRefId}:unlocked:enable`;
             }
             setSession(nextSession);
           } catch (unlockFailure) {
@@ -1808,6 +1849,11 @@ export function App({
     <I18nProvider language={extensionSettings.language}>
       <div aria-hidden={dialogState !== null}>
         {remoteCacheWarning}
+        {quickUnlockError ? (
+          <div role="alert" style={sourceSyncBannerStyle}>
+            {quickUnlockError}
+          </div>
+        ) : null}
         <ManagerShell
           viewMode={viewMode}
           showEntryDetail={showEntryDetail}

@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const runtimeClientMocks = vi.hoisted(() => ({
@@ -192,6 +192,69 @@ it("defers options quick unlock setup until the current vault is unlocked", asyn
   });
 });
 
+it("coalesces options save and auto-sync into one quick unlock operation", async () => {
+  installChromeStorage({
+    recentVaultLimit: 10,
+    language: "en",
+    idleLockMinutes: 0,
+    clearClipboardSeconds: 30,
+    passkeyProviderEnabled: false,
+    quickUnlockEnabled: false
+  });
+  const enable = createDeferred<{
+    unlocked: boolean;
+    activeVaultId: string;
+    currentVaultRefId: string;
+    supportsBiometricUnlock: boolean;
+  }>();
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  runtimeClientMocks.getSessionState.mockResolvedValue({
+    unlocked: true,
+    activeVaultId: "vault-1",
+    currentVaultRefId: "vault-ref-1",
+    supportsBiometricUnlock: true
+  });
+  runtimeClientMocks.listRecentVaults.mockImplementation(async () => recentVaults);
+  runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReturnValue(enable.promise);
+
+  await renderOptionsPage();
+
+  const quickUnlock = await screen.findByRole("checkbox", { name: "Quick Unlock" });
+  fireEvent.click(quickUnlock);
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  await waitFor(() => {
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalled();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+
+  recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
+  await act(async () => {
+    enable.resolve({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    await enable.promise;
+  });
+  await waitFor(() => {
+    expect(screen.queryByText("Saving...")).not.toBeInTheDocument();
+  });
+});
+
 it("keeps options loading until biometric support is known", async () => {
   installChromeStorage({
     recentVaultLimit: 10,
@@ -363,6 +426,48 @@ it("preserves saved quick unlock when biometric support lookup fails", async () 
       expect.any(Function)
     );
   });
+});
+
+it("preserves enabled quick unlock without retrying setup while biometrics are unavailable", async () => {
+  const chromeStorage = installChromeStorage({
+    recentVaultLimit: 10,
+    language: "en",
+    idleLockMinutes: 0,
+    clearClipboardSeconds: 30,
+    passkeyProviderEnabled: false,
+    quickUnlockEnabled: true
+  });
+  runtimeClientMocks.getSessionState.mockResolvedValue({
+    unlocked: true,
+    activeVaultId: "vault-1",
+    currentVaultRefId: "vault-ref-1",
+    supportsBiometricUnlock: false
+  });
+  runtimeClientMocks.listRecentVaults.mockResolvedValue([
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ]);
+
+  await renderOptionsPage();
+
+  const quickUnlock = await screen.findByRole("checkbox", { name: "Quick Unlock" });
+  expect(quickUnlock).toBeChecked();
+  expect(quickUnlock).not.toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  await waitFor(() => {
+    expect(chromeStorage.set).toHaveBeenCalled();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 });
 
 it("saves local options when native recent vault operations fail", async () => {

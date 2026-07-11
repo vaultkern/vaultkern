@@ -2128,7 +2128,7 @@ describe("PopupShell fill flow", () => {
     });
   });
 
-  it("does not re-enroll quick unlock when password proof makes the existing record available", async () => {
+  it("explicitly reconciles quick unlock when password proof makes the existing record available", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       storage: {
         local: {
@@ -2204,7 +2204,7 @@ describe("PopupShell fill flow", () => {
 
     expect(await screen.findByText("Unlocked")).toBeInTheDocument();
     expect(runtimeClientMocks.listRecentVaults).toHaveBeenCalledTimes(2);
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
   });
 
   it("revokes a hidden quick unlock record after password unlock when the preference is off", async () => {
@@ -2261,13 +2261,13 @@ describe("PopupShell fill flow", () => {
       unlocked: true,
       activeVaultId: "vault-1",
       currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
+      supportsBiometricUnlock: false
     });
     runtimeClientMocks.disableQuickUnlockForCurrentVault.mockResolvedValue({
       unlocked: true,
       activeVaultId: "vault-1",
       currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
+      supportsBiometricUnlock: false
     });
     runtimeClientMocks.listEntries.mockResolvedValue([]);
     runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
@@ -2282,7 +2282,7 @@ describe("PopupShell fill flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
 
     expect(await screen.findByText("Unlocked")).toBeInTheDocument();
-    expect(runtimeClientMocks.listRecentVaults).toHaveBeenCalledTimes(3);
+    expect(runtimeClientMocks.listRecentVaults).toHaveBeenCalledTimes(2);
     expect(runtimeClientMocks.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
     expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });

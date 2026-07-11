@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
 
 usage() {
   echo "usage: package_macos.sh <aarch64-apple-darwin|x86_64-apple-darwin> [--output-root <path>] [--prebuilt-binary <path>] [--development-signing|--release-signing]" >&2

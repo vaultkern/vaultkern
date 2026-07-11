@@ -451,7 +451,7 @@ fn runtime_save_succeeds_when_quick_unlock_refresh_contains_fails() {
     let path = dir.path().join("failing-refresh-contains.kdbx");
     std::fs::write(&path, bytes).unwrap();
 
-    let mut runtime = Runtime::for_tests_with_quick_unlock_failing_contains();
+    let mut runtime = Runtime::for_tests_with_quick_unlock_failing_contains_after(1);
     let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
     runtime
         .unlock_with_password(&handle.vault_id, "old-password")
