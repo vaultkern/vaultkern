@@ -54,8 +54,14 @@ fn decode_picker_stdout(stdout: Vec<u8>) -> anyhow::Result<Option<String>> {
 }
 
 #[cfg(target_os = "macos")]
-const MACOS_PICKER_SCRIPT: &str = r#"try
-    set selectedVault to choose file with prompt "Select a KeePass vault" of type {"kdbx"} invisibles true multiple selections allowed false showing package contents false
+const MACOS_PICKER_SCRIPT: &str = r#"use framework "UniformTypeIdentifiers"
+use scripting additions
+
+try
+    set kdbxType to current application's UTType's typeWithFilenameExtension:"kdbx" conformingToType:(current application's UTTypeData)
+    if kdbxType is missing value then error "Unable to resolve the .kdbx file type"
+    set kdbxTypeIdentifier to (kdbxType's identifier()) as text
+    set selectedVault to choose file with prompt "Select a KeePass vault" of type {kdbxTypeIdentifier} invisibles true multiple selections allowed false showing package contents false
     return POSIX path of selectedVault
 on error number -128
     return ""
@@ -213,10 +219,14 @@ mod tests {
                 .map(|arg| arg.to_str().expect("UTF-8 command argument"))
                 .collect::<Vec<_>>();
             assert_eq!(args, ["-e", MACOS_PICKER_SCRIPT]);
-            assert!(MACOS_PICKER_SCRIPT.contains("of type {\"kdbx\"}"));
+            assert!(MACOS_PICKER_SCRIPT.contains("use framework \"UniformTypeIdentifiers\""));
+            assert!(MACOS_PICKER_SCRIPT.contains("use scripting additions"));
+            assert!(MACOS_PICKER_SCRIPT.contains("typeWithFilenameExtension:\"kdbx\""));
+            assert!(MACOS_PICKER_SCRIPT.contains("of type {kdbxTypeIdentifier}"));
+            assert!(!MACOS_PICKER_SCRIPT.contains("of type {\"kdbx\"}"));
             assert!(MACOS_PICKER_SCRIPT.contains("on error number -128"));
             assert!(MACOS_PICKER_SCRIPT.contains(
-                "choose file with prompt \"Select a KeePass vault\" of type {\"kdbx\"} invisibles true multiple selections allowed false showing package contents false"
+                "choose file with prompt \"Select a KeePass vault\" of type {kdbxTypeIdentifier} invisibles true multiple selections allowed false showing package contents false"
             ));
             assert!(MACOS_PICKER_SCRIPT.contains("return POSIX path"));
 
