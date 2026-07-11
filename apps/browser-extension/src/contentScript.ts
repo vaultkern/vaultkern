@@ -81,12 +81,12 @@ function fillDeliveredLoginForm(
 }
 
 function normalizedHttpPageUrl(value: unknown) {
-  if (typeof value !== "string" || value.trim() === "") {
+  if (typeof value !== "string") {
     return null;
   }
   try {
     const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
+    return /^https?:$/.test(parsed.protocol) ? parsed.href : null;
   } catch {
     return null;
   }
@@ -213,6 +213,9 @@ function rememberAutofillSubmitIntentFromEvent(
       !input.disabled &&
       (event as KeyboardEvent).key === "Enter" &&
       !(event as KeyboardEvent).isComposing &&
+      !(event as KeyboardEvent).ctrlKey &&
+      !(event as KeyboardEvent).altKey &&
+      !(event as KeyboardEvent).metaKey &&
       /^(email|number|password|search|tel|text|url)$/.test(input.type)
     ) {
       form = input.form;

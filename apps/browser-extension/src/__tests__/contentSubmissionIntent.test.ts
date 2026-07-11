@@ -298,6 +298,26 @@ describe("content-script submission intent", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
+  it("rejects a scripted submit attached to a modified Enter shortcut", async () => {
+    const form = loginFormMarkup();
+    const input = document.querySelector("#password") as HTMLInputElement;
+    input.addEventListener("keydown", () => form.requestSubmit());
+
+    dispatchTrusted(
+      input,
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+        composed: true
+      })
+    );
+    await flushSubmissionQueue();
+
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
   it("discovers a dynamically attached open shadow root from user intent", async () => {
     const host = document.createElement("div");
     document.body.append(host);

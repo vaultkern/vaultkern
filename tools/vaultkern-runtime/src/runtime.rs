@@ -1391,6 +1391,7 @@ impl Runtime {
             if let Some(history) = update.history {
                 vault.history_max_items = history.max_items_per_entry;
                 vault.history_max_size = history.max_total_size_bytes;
+                enforce_history_limits(vault);
             }
 
             if let Some(recycle_bin) = update.recycle_bin {
@@ -4244,7 +4245,14 @@ impl Runtime {
             | AutofillPersistLogicalOutcome::ReplayedNeedsPublish { entry_id }
             | AutofillPersistLogicalOutcome::Replayed { entry_id } => entry_id,
         };
-        let expected_target_state = serialized_autofill_target_state(&candidate, entry_id)?;
+        let expected_target_state =
+            if candidate.history_max_items.is_some() || candidate.history_max_size.is_some() {
+                let mut serialized_candidate = candidate.clone();
+                enforce_history_limits(&mut serialized_candidate);
+                serialized_autofill_target_state(&serialized_candidate, entry_id)?
+            } else {
+                serialized_autofill_target_state(&candidate, entry_id)?
+            };
         let bytes = save_kdbx_with_history_limits(&self.core, &mut candidate, key, save_profile)
             .context("failed to serialize the autofill candidate")?;
         let verified = self
@@ -8324,6 +8332,139 @@ mod tests {
         assert_eq!(
             restarted
                 .list_entry_history(&opened.vault_id, &entry.id)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn atomic_autofill_update_verifies_after_history_limit_pruning() {
+        let mut runtime = Runtime::for_tests_at(1_700_000_000);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+        let fields = entry_fields(&entry);
+        {
+            let loaded = runtime.loaded.get_mut(&opened.vault_id).unwrap();
+            let vault = loaded.vault.as_mut().unwrap();
+            KeepassCore::new()
+                .snapshot_entry_to_history(vault, &entry.id)
+                .unwrap();
+            vault.history_max_items = Some(1);
+        }
+        runtime.save_vault(&opened.vault_id).unwrap();
+
+        let desired_fields = EntryFieldsDto {
+            password: "durable-secret".into(),
+            ..fields.clone()
+        };
+        let response = runtime
+            .handle(RuntimeCommand::PersistAutofillMutation {
+                transaction_id: "transaction-history-limit".into(),
+                operation_id: "operation-history-limit".into(),
+                vault_id: opened.vault_id.clone(),
+                plan: AutofillPersistPlanDto::Update {
+                    entry_id: entry.id.clone(),
+                    expected_fields: fields,
+                    desired_fields: desired_fields.clone(),
+                },
+            })
+            .unwrap();
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
+                outcome: AutofillPersistOutcomeDto::Durable {
+                    disposition: AutofillPersistDispositionDto::Committed,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert_eq!(
+            entry_fields(
+                &runtime
+                    .get_entry_detail(&opened.vault_id, &entry.id)
+                    .unwrap()
+            ),
+            desired_fields
+        );
+        assert_eq!(
+            runtime
+                .list_entry_history(&opened.vault_id, &entry.id)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn lowering_history_limit_prunes_live_state_without_later_resurrection() {
+        let mut runtime = Runtime::for_tests_at(1_700_000_000);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+        {
+            let loaded = runtime.loaded.get_mut(&opened.vault_id).unwrap();
+            let vault = loaded.vault.as_mut().unwrap();
+            let core = KeepassCore::new();
+            core.snapshot_entry_to_history(vault, &entry.id).unwrap();
+            core.snapshot_entry_to_history(vault, &entry.id).unwrap();
+        }
+        assert_eq!(
+            runtime
+                .list_entry_history(&opened.vault_id, &entry.id)
+                .unwrap()
+                .items
+                .len(),
+            2
+        );
+
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    history: Some(DatabaseHistorySettingsDto {
+                        max_items_per_entry: Some(1),
+                        max_total_size_bytes: None,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .list_entry_history(&opened.vault_id, &entry.id)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        runtime.save_vault(&opened.vault_id).unwrap();
+
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    history: Some(DatabaseHistorySettingsDto {
+                        max_items_per_entry: Some(2),
+                        max_total_size_bytes: None,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+        runtime.save_vault(&opened.vault_id).unwrap();
+
+        let mut restarted = Runtime::for_tests_at(1_700_000_001);
+        let reopened = restarted.open_local_vault(&opened.path).unwrap();
+        restarted
+            .unlock_vault(&reopened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        assert_eq!(
+            restarted
+                .list_entry_history(&reopened.vault_id, &entry.id)
                 .unwrap()
                 .items
                 .len(),
