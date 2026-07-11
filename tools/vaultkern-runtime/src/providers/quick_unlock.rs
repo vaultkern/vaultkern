@@ -183,16 +183,10 @@ impl QuickUnlockProvider for ComposedQuickUnlockProvider {
     }
 
     fn refresh(&self, key: &str, value: &[u8]) -> Result<()> {
-        let refresh = (|| {
-            if self.storage.contains(key)? {
-                self.storage.store(key, value)?;
-            }
-            Ok(())
-        })();
-        if refresh.is_err() {
-            let _ = self.storage.delete(key);
+        if self.storage.contains(key)? {
+            self.storage.store(key, value)?;
         }
-        refresh
+        Ok(())
     }
 
     fn verify_user(&self, reason: &str) -> Result<()> {
@@ -466,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn composed_refresh_deletes_a_stale_record_after_store_failure() {
+    fn composed_refresh_does_not_delete_after_store_failure() {
         let events = Rc::new(RefCell::new(Vec::new()));
         let provider = composed_failing_refresh_provider(events.clone(), false, true, false);
 
@@ -475,26 +469,23 @@ mod tests {
         assert!(format!("{error:#}").contains("injected refresh store failure"));
         assert_eq!(
             events.borrow().as_slice(),
-            ["contains:vault", "store:vault", "delete:vault"]
+            ["contains:vault", "store:vault"]
         );
     }
 
     #[test]
-    fn composed_refresh_deletes_a_possibly_stale_record_after_contains_failure() {
+    fn composed_refresh_does_not_delete_after_contains_failure() {
         let events = Rc::new(RefCell::new(Vec::new()));
         let provider = composed_failing_refresh_provider(events.clone(), true, false, false);
 
         let error = provider.refresh("vault", b"new").unwrap_err();
 
         assert!(format!("{error:#}").contains("injected refresh contains failure"));
-        assert_eq!(
-            events.borrow().as_slice(),
-            ["contains:vault", "delete:vault"]
-        );
+        assert_eq!(events.borrow().as_slice(), ["contains:vault"]);
     }
 
     #[test]
-    fn composed_refresh_cleanup_failure_does_not_mask_the_primary_error() {
+    fn composed_refresh_never_attempts_destructive_cleanup_after_failure() {
         let events = Rc::new(RefCell::new(Vec::new()));
         let provider = composed_failing_refresh_provider(events.clone(), false, true, true);
 
@@ -505,7 +496,7 @@ mod tests {
         assert!(!error.contains("injected refresh cleanup failure"));
         assert_eq!(
             events.borrow().as_slice(),
-            ["contains:vault", "store:vault", "delete:vault"]
+            ["contains:vault", "store:vault"]
         );
     }
 

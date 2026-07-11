@@ -135,7 +135,7 @@ it("syncs an off quick unlock preference after options vault data finishes loadi
   slowVaults.resolve(loadedVaults);
 });
 
-it("retries options quick unlock setup after a locked current vault is unlocked", async () => {
+it("defers options quick unlock setup until the current vault is unlocked", async () => {
   installChromeStorage({
     recentVaultLimit: 10,
     language: "en",
@@ -172,25 +172,23 @@ it("retries options quick unlock setup after a locked current vault is unlocked"
       supportsBiometricUnlock: true
     });
   runtimeClientMocks.listRecentVaults.mockResolvedValue(loadedVaults);
-  runtimeClientMocks.enableQuickUnlockForCurrentVault
-    .mockRejectedValueOnce(new Error("current vault is locked"))
-    .mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
+  runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
+    unlocked: true,
+    activeVaultId: "vault-1",
+    currentVaultRefId: "vault-ref-1",
+    supportsBiometricUnlock: true
+  });
 
   await renderOptionsPage();
 
-  await waitFor(() => {
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
-  });
+  await screen.findByRole("checkbox", { name: "Quick Unlock" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 
   window.dispatchEvent(new Event("focus"));
 
   await waitFor(() => {
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(2);
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -222,6 +222,9 @@ function OptionsApp() {
     if (!currentVault || currentVault.supportsQuickUnlock === enabled) {
       return;
     }
+    if (enabled && currentSession?.unlocked !== true) {
+      return;
+    }
 
     setQuickUnlockBusy(true);
 

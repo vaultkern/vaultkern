@@ -492,7 +492,7 @@ it("toggles quick unlock for the current vault from extension settings", async (
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).not.toBeChecked();
 });
 
-it("syncs the quick unlock preference to the current vault when available", async () => {
+it("defers enabling quick unlock until the current vault is unlocked", async () => {
   const settingsStore = createSettingsStore();
   const recentVaults = [
     {
@@ -538,12 +538,13 @@ it("syncs the quick unlock preference to the current vault when available", asyn
   fireEvent.click(quickUnlock);
   fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
   await waitFor(() => {
-    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+    expect(settingsStore.save).toHaveBeenCalled();
   });
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).toBeChecked();
+  expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 });
 
-it("retries quick unlock preference sync after the current vault is unlocked", async () => {
+it("enables a missing quick unlock record after the current vault is unlocked", async () => {
   const settingsStore = createSettingsStore({
     quickUnlockEnabled: true
   });
@@ -574,26 +575,22 @@ it("retries quick unlock preference sync after the current vault is unlocked", a
       currentVaultRefId: "vault-ref-1",
       supportsBiometricUnlock: true
     })),
-    enableQuickUnlockForCurrentVault: vi
-      .fn()
-      .mockRejectedValueOnce(new Error("current vault is locked"))
-      .mockImplementation(async () => {
-        recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
-        return {
-          unlocked: true,
-          activeVaultId: "vault-1",
-          currentVaultRefId: "vault-ref-1",
-          supportsBiometricUnlock: true
-        };
-      })
+    enableQuickUnlockForCurrentVault: vi.fn(async () => {
+      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
+      return {
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      };
+    })
   } satisfies RuntimeClientLike;
 
   render(<App client={client} extensionSettingsStore={settingsStore} />);
 
   expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
-  await waitFor(() => {
-    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
-  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 
   fireEvent.change(screen.getByLabelText("Master Password"), {
     target: { value: "demo-password" }
@@ -601,7 +598,136 @@ it("retries quick unlock preference sync after the current vault is unlocked", a
   fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
 
   await waitFor(() => {
-    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(2);
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+  });
+});
+
+it("does not re-enable a quick unlock record that becomes available after password unlock", async () => {
+  const settingsStore = createSettingsStore({
+    quickUnlockEnabled: true
+  });
+  let passwordAuthorized = false;
+  const recentVault = {
+    vaultRefId: "vault-ref-1",
+    displayName: "Personal",
+    sourceKind: "local" as const,
+    sourceSummary: "personal.kdbx",
+    lastUsedAt: 1776500000,
+    availability: "ready" as const,
+    supportsQuickUnlock: false,
+    isCurrent: true
+  };
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(async () => [
+      {
+        ...recentVault,
+        supportsQuickUnlock: passwordAuthorized
+      }
+    ]),
+    unlockCurrentVault: vi.fn(async () => {
+      passwordAuthorized = true;
+      return {
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      };
+    }),
+    enableQuickUnlockForCurrentVault: vi.fn(),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn()
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Master Password"), {
+    target: { value: "demo-password" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+  await waitFor(() => {
+    expect(screen.getByText("No entries available.")).toBeInTheDocument();
+    expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+  });
+  expect(client.listRecentVaults).toHaveBeenCalledTimes(2);
+});
+
+it("keeps the manager unlocked when post-unlock quick unlock reconciliation cannot list vaults", async () => {
+  const settingsStore = createSettingsStore({
+    quickUnlockEnabled: true
+  });
+  const recentVault = {
+    vaultRefId: "vault-ref-1",
+    displayName: "Personal",
+    sourceKind: "local" as const,
+    sourceSummary: "personal.kdbx",
+    lastUsedAt: 1776500000,
+    availability: "ready" as const,
+    supportsQuickUnlock: false,
+    isCurrent: true
+  };
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi
+      .fn()
+      .mockResolvedValueOnce([recentVault])
+      .mockRejectedValueOnce(new Error("recent vault refresh failed")),
+    unlockCurrentVault: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    })),
+    enableQuickUnlockForCurrentVault: vi.fn(),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn()
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Master Password"), {
+    target: { value: "demo-password" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+  await waitFor(() => {
+    expect(screen.getByText("No entries available.")).toBeInTheDocument();
+    expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 });
 
@@ -830,6 +956,66 @@ it("trims recent vaults when the local recent database limit is lower", async ()
   await waitFor(() => {
     expect(client.deleteRecentVault).toHaveBeenCalledWith("vault-ref-3");
   });
+});
+
+it("keeps the manager usable when an overflow quick unlock reference cannot be deleted", async () => {
+  const settingsStore = createSettingsStore({
+    recentVaultLimit: 2,
+    language: "en",
+    idleLockMinutes: 0,
+    clearClipboardSeconds: 30
+  });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listRecentVaults: vi.fn(async () => [
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "One",
+        sourceKind: "local" as const,
+        sourceSummary: "one.kdbx",
+        lastUsedAt: 3,
+        availability: "ready" as const,
+        supportsQuickUnlock: false,
+        isCurrent: true
+      },
+      {
+        vaultRefId: "vault-ref-2",
+        displayName: "Two",
+        sourceKind: "local" as const,
+        sourceSummary: "two.kdbx",
+        lastUsedAt: 2,
+        availability: "ready" as const,
+        supportsQuickUnlock: false,
+        isCurrent: false
+      },
+      {
+        vaultRefId: "vault-ref-3",
+        displayName: "Three",
+        sourceKind: "local" as const,
+        sourceSummary: "three.kdbx",
+        lastUsedAt: 1,
+        availability: "ready" as const,
+        supportsQuickUnlock: false,
+        isCurrent: false
+      }
+    ]),
+    deleteRecentVault: vi.fn(async () => {
+      throw new Error("Quick Unlock requires a password unlock in this native host session");
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  expect(screen.getByText("One")).toBeInTheDocument();
+  expect(screen.getByText("Two")).toBeInTheDocument();
+  expect(screen.queryByText("Three")).not.toBeInTheDocument();
+  expect(client.deleteRecentVault).toHaveBeenCalledWith("vault-ref-3");
 });
 
 it("locks an unlocked manager after local idle timeout", async () => {

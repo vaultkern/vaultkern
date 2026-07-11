@@ -30,6 +30,7 @@ const runtimeClientMocks = vi.hoisted(() => ({
   lockSession: vi.fn(),
   unlockCurrentVault: vi.fn(),
   enableQuickUnlockForCurrentVault: vi.fn(),
+  disableQuickUnlockForCurrentVault: vi.fn(),
   unlockCurrentVaultWithQuickUnlock: vi.fn(),
   unlockWithPassword: vi.fn(),
   listGroups: vi.fn(),
@@ -185,6 +186,7 @@ beforeEach(() => {
   runtimeClientMocks.compareAndUpdateEntryFields.mockReset();
   runtimeClientMocks.saveVault.mockReset();
   runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReset();
+  runtimeClientMocks.disableQuickUnlockForCurrentVault.mockReset();
   runtimeClientMocks.listRecentVaults.mockResolvedValue([]);
   runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
     unlocked: false,
@@ -2202,6 +2204,86 @@ describe("PopupShell fill flow", () => {
 
     expect(await screen.findByText("Unlocked")).toBeInTheDocument();
     expect(runtimeClientMocks.listRecentVaults).toHaveBeenCalledTimes(2);
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+  });
+
+  it("revokes a hidden quick unlock record after password unlock when the preference is off", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      storage: {
+        local: {
+          get: vi.fn((_key, callback) =>
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 10,
+                language: "en",
+                idleLockMinutes: 0,
+                clearClipboardSeconds: 30,
+                passkeyProviderEnabled: false,
+                quickUnlockEnabled: false
+              }
+            })
+          ),
+          set: vi.fn((_values, callback) => callback?.())
+        }
+      },
+      tabs: {
+        query: vi.fn(async () => [{ id: 7, url: "https://example.com/login" }]),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    const hiddenVault = {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    };
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listRecentVaults.mockImplementation(async () =>
+      runtimeClientMocks.unlockCurrentVault.mock.calls.length > 0
+        ? [{ ...hiddenVault, supportsQuickUnlock: true }]
+        : [hiddenVault]
+    );
+    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.disableQuickUnlockForCurrentVault.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+    render(createElement(PopupShell));
+
+    expect(await screen.findByText("Personal")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    expect(await screen.findByText("Unlocked")).toBeInTheDocument();
+    expect(runtimeClientMocks.listRecentVaults).toHaveBeenCalledTimes(3);
+    expect(runtimeClientMocks.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
     expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 

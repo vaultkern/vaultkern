@@ -388,7 +388,7 @@ fn runtime_keeps_existing_quick_unlock_credentials_when_password_save_fails() {
 }
 
 #[test]
-fn runtime_deletes_quick_unlock_credentials_when_refresh_store_fails() {
+fn runtime_suppresses_quick_unlock_when_refresh_store_fails() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("old-password");

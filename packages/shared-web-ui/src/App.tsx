@@ -392,7 +392,7 @@ export function App({
   async function applyRecentVaultLimit(
     vaults: VaultReference[],
     settings: ExtensionSettings
-  ) {
+  ): Promise<VaultReference[]> {
     const limit = settings.recentVaultLimit;
     const sortedVaults = [...vaults].sort(
       (left, right) => (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0)
@@ -400,14 +400,16 @@ export function App({
     const overflowVaults = sortedVaults.slice(limit);
 
     if (overflowVaults.length > 0) {
-      await Promise.all(
+      await Promise.allSettled(
         overflowVaults.map((vault) => client.deleteRecentVault(vault.vaultRefId))
       );
-      setRecentVaults(sortedVaults.slice(0, limit));
-      return;
+      const visibleVaults = sortedVaults.slice(0, limit);
+      setRecentVaults(visibleVaults);
+      return visibleVaults;
     }
 
     setRecentVaults(sortedVaults);
+    return sortedVaults;
   }
 
   async function saveExtensionSettings(nextSettings: ExtensionSettings) {
@@ -418,11 +420,19 @@ export function App({
       const normalizedSettings = normalizeExtensionSettings(nextSettings);
       await localExtensionSettingsStore.save(normalizedSettings);
       setExtensionSettings(normalizedSettings);
-      await applyRecentVaultLimit(await client.listRecentVaults(), normalizedSettings);
-      await syncQuickUnlockPreferenceToCurrentVault(
-        normalizedSettings.quickUnlockEnabled,
+      const visibleVaults = await applyRecentVaultLimit(
+        await client.listRecentVaults(),
         normalizedSettings
       );
+      const nextSession = await syncQuickUnlockPreferenceToCurrentVault(
+        normalizedSettings.quickUnlockEnabled,
+        normalizedSettings,
+        session,
+        visibleVaults
+      );
+      if (nextSession) {
+        setSession(nextSession);
+      }
     } catch (saveFailure) {
       setExtensionSettingsError(
         errorMessage(
@@ -437,15 +447,20 @@ export function App({
 
   async function syncQuickUnlockPreferenceToCurrentVault(
     enabled: boolean,
-    settingsForReload: ExtensionSettings
-  ) {
+    settingsForReload: ExtensionSettings,
+    sessionForSync: SessionStateLike | null = session,
+    vaultsForSync: VaultReference[] = recentVaults
+  ): Promise<SessionStateLike | null> {
     const currentVault =
-      recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
-      recentVaults.find((vault) => vault.isCurrent) ??
+      vaultsForSync.find((vault) => vault.vaultRefId === sessionForSync?.currentVaultRefId) ??
+      vaultsForSync.find((vault) => vault.isCurrent) ??
       null;
 
     if (!currentVault || currentVault.supportsQuickUnlock === enabled) {
-      return;
+      return sessionForSync;
+    }
+    if (enabled && sessionForSync?.unlocked !== true) {
+      return sessionForSync;
     }
 
     setQuickUnlockBusy(true);
@@ -453,8 +468,8 @@ export function App({
       const nextSession = enabled
         ? await client.enableQuickUnlockForCurrentVault()
         : await client.disableQuickUnlockForCurrentVault();
-      setSession(nextSession);
       await applyRecentVaultLimit(await client.listRecentVaults(), settingsForReload);
+      return nextSession;
     } catch (quickUnlockFailure) {
       setQuickUnlockError(
         errorMessage(
@@ -462,6 +477,7 @@ export function App({
           translate(extensionSettings.language, "Failed to update quick unlock")
         )
       );
+      return sessionForSync;
     } finally {
       setQuickUnlockBusy(false);
     }
@@ -1213,7 +1229,11 @@ export function App({
     void syncQuickUnlockPreferenceToCurrentVault(
       extensionSettings.quickUnlockEnabled,
       extensionSettings
-    );
+    ).then((nextSession) => {
+      if (nextSession) {
+        setSession(nextSession);
+      }
+    });
   }, [
     extensionSettings,
     quickUnlockBusy,
@@ -1616,10 +1636,36 @@ export function App({
           setUnlockError(null);
           setUnlockErrorCause(null);
           try {
-            const nextSession = await client.unlockCurrentVault({
+            const unlockedSession = await client.unlockCurrentVault({
               password,
               keyFilePath
             });
+            let nextSession = unlockedSession;
+            try {
+              const visibleVaults = await applyRecentVaultLimit(
+                await client.listRecentVaults(),
+                extensionSettings
+              );
+              nextSession =
+                (await syncQuickUnlockPreferenceToCurrentVault(
+                  extensionSettings.quickUnlockEnabled,
+                  extensionSettings,
+                  unlockedSession,
+                  visibleVaults
+                )) ?? unlockedSession;
+            } catch (quickUnlockRefreshFailure) {
+              if (unlockedSession.currentVaultRefId) {
+                quickUnlockAutoSyncAttempt.current = `${unlockedSession.currentVaultRefId}:unlocked:${
+                  extensionSettings.quickUnlockEnabled ? "enable" : "disable"
+                }`;
+              }
+              setQuickUnlockError(
+                errorMessage(
+                  quickUnlockRefreshFailure,
+                  translate(extensionSettings.language, "Failed to update quick unlock")
+                )
+              );
+            }
             setSession(nextSession);
           } catch (unlockFailure) {
             setUnlockError(

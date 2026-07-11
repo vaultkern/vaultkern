@@ -62,6 +62,7 @@ export interface PopupClientLike {
   unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
   enableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
+  disableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
   unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
   listGroups(vaultId: string): Promise<GroupTree>;
   listEntries(vaultId: string): Promise<EntrySummary[]>;
@@ -471,14 +472,10 @@ export function PopupApp({
     return normalizedSettings;
   }
 
-  async function enableQuickUnlockAfterPasswordUnlock(
+  async function syncQuickUnlockAfterCredentialUnlock(
     unlockedSession: SessionStateLike,
     settingsForUnlock = extensionSettingsRef.current
   ) {
-    if (!settingsForUnlock.quickUnlockEnabled) {
-      return unlockedSession;
-    }
-
     if (unlockedSession.supportsBiometricUnlock !== true) {
       return unlockedSession;
     }
@@ -503,16 +500,18 @@ export function PopupApp({
       return unlockedSession;
     }
 
-    if (currentVault?.supportsQuickUnlock) {
-      return unlockedSession;
-    }
-
     if (!currentVault) {
       return unlockedSession;
     }
 
+    if (currentVault.supportsQuickUnlock === settingsForUnlock.quickUnlockEnabled) {
+      return unlockedSession;
+    }
+
     try {
-      const nextSession = await client.enableQuickUnlockForCurrentVault();
+      const nextSession = settingsForUnlock.quickUnlockEnabled
+        ? await client.enableQuickUnlockForCurrentVault()
+        : await client.disableQuickUnlockForCurrentVault();
       const vaults = await client.listRecentVaults();
       setRecentVaults(limitRecentVaults(vaults, settingsForUnlock.recentVaultLimit));
       setRecentVaultsError(null);
@@ -1047,13 +1046,15 @@ export function PopupApp({
         password,
         keyFilePath
       });
-      const shouldEnableQuickUnlock =
+      const canEnableQuickUnlock =
         unlockPassword !== "" ||
         (unlockKeyFilePath !== "" &&
           unlockedSession.quickUnlockRequiresPassword !== true);
+      const shouldSyncQuickUnlock =
+        !settingsForUnlock.quickUnlockEnabled || canEnableQuickUnlock;
       const nextSession =
-        shouldEnableQuickUnlock
-          ? await enableQuickUnlockAfterPasswordUnlock(
+        shouldSyncQuickUnlock
+          ? await syncQuickUnlockAfterCredentialUnlock(
               unlockedSession,
               settingsForUnlock
             )
