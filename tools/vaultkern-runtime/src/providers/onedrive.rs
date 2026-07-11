@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -63,7 +64,57 @@ pub struct OneDriveMemoryAccessCounts {
     pub remote_state_reads: usize,
     pub snapshot_reads: usize,
     pub snapshot_from_state_reads: usize,
+    pub writes: usize,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OneDriveConditionalWriteOutcome {
+    Committed {
+        fingerprint: VaultSourceFingerprint,
+        e_tag: Option<String>,
+    },
+    PreconditionFailed,
+    OutcomeUnknown {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OneDriveConditionalWriteError {
+    MissingEtag,
+    InvalidMemoryRevision,
+    Unavailable { message: String },
+    Rejected { status: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OneDriveMemoryWriteBehavior {
+    PreconditionFailed { replacement_bytes: Option<Vec<u8>> },
+    OutcomeUnknownCommitted,
+    OutcomeUnknownNotCommitted,
+}
+
+impl fmt::Display for OneDriveConditionalWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingEtag => write!(formatter, "current OneDrive item did not include an ETag"),
+            Self::InvalidMemoryRevision => {
+                write!(
+                    formatter,
+                    "current in-memory OneDrive item revision is unavailable"
+                )
+            }
+            Self::Unavailable { message } => {
+                write!(formatter, "OneDrive write unavailable: {message}")
+            }
+            Self::Rejected { status } => {
+                write!(formatter, "OneDrive write was rejected with HTTP {status}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OneDriveConditionalWriteError {}
 
 impl OneDriveRemoteState {
     pub fn matches_fingerprint(&self, fingerprint: &VaultSourceFingerprint) -> bool {
@@ -77,6 +128,10 @@ impl OneDriveRemoteState {
             .as_deref()
             .map(stable_u64_for_text)
             .is_some_and(|etag| fingerprint.modified_at == Some(etag))
+    }
+
+    pub(crate) fn memory_revision(&self) -> Option<u64> {
+        self.memory_revision
     }
 }
 
@@ -104,6 +159,8 @@ pub struct OneDriveVaultSourceProvider {
     memory_remote_state_reads: Cell<usize>,
     memory_snapshot_reads: Cell<usize>,
     memory_snapshot_from_state_reads: Cell<usize>,
+    memory_writes: Cell<usize>,
+    memory_write_behaviors: VecDeque<OneDriveMemoryWriteBehavior>,
 }
 
 struct PendingOneDriveLogin {
@@ -217,6 +274,8 @@ impl OneDriveVaultSourceProvider {
             memory_remote_state_reads: Cell::new(0),
             memory_snapshot_reads: Cell::new(0),
             memory_snapshot_from_state_reads: Cell::new(0),
+            memory_writes: Cell::new(0),
+            memory_write_behaviors: VecDeque::new(),
         }
     }
 
@@ -235,6 +294,8 @@ impl OneDriveVaultSourceProvider {
             memory_remote_state_reads: Cell::new(0),
             memory_snapshot_reads: Cell::new(0),
             memory_snapshot_from_state_reads: Cell::new(0),
+            memory_writes: Cell::new(0),
+            memory_write_behaviors: VecDeque::new(),
         }
     }
 
@@ -259,6 +320,8 @@ impl OneDriveVaultSourceProvider {
             memory_remote_state_reads: Cell::new(0),
             memory_snapshot_reads: Cell::new(0),
             memory_snapshot_from_state_reads: Cell::new(0),
+            memory_writes: Cell::new(0),
+            memory_write_behaviors: VecDeque::new(),
         }
     }
 
@@ -329,6 +392,10 @@ impl OneDriveVaultSourceProvider {
         }
     }
 
+    pub fn queue_memory_write_behavior(&mut self, behavior: OneDriveMemoryWriteBehavior) {
+        self.memory_write_behaviors.push_back(behavior);
+    }
+
     pub fn remove_memory_item(&mut self, drive_id: &str, item_id: &str) {
         self.memory_items
             .remove(&(drive_id.to_owned(), item_id.to_owned()));
@@ -338,10 +405,29 @@ impl OneDriveVaultSourceProvider {
         Ok(self.item(drive_id, item_id)?.bytes.clone())
     }
 
+    pub fn memory_item_revision(&self, drive_id: &str, item_id: &str) -> Result<u64> {
+        Ok(self.item(drive_id, item_id)?.revision)
+    }
+
+    pub fn set_memory_item_revision(
+        &mut self,
+        drive_id: &str,
+        item_id: &str,
+        revision: u64,
+    ) -> Result<()> {
+        let item = self
+            .memory_items
+            .get_mut(&(drive_id.to_owned(), item_id.to_owned()))
+            .with_context(|| format!("OneDrive item not found: {drive_id}/{item_id}"))?;
+        item.revision = revision;
+        Ok(())
+    }
+
     pub fn reset_memory_access_counts(&self) {
         self.memory_remote_state_reads.set(0);
         self.memory_snapshot_reads.set(0);
         self.memory_snapshot_from_state_reads.set(0);
+        self.memory_writes.set(0);
     }
 
     pub fn memory_access_counts(&self) -> OneDriveMemoryAccessCounts {
@@ -349,6 +435,7 @@ impl OneDriveVaultSourceProvider {
             remote_state_reads: self.memory_remote_state_reads.get(),
             snapshot_reads: self.memory_snapshot_reads.get(),
             snapshot_from_state_reads: self.memory_snapshot_from_state_reads.get(),
+            writes: self.memory_writes.get(),
         }
     }
 
@@ -597,6 +684,7 @@ impl OneDriveVaultSourceProvider {
         if_match: Option<&str>,
     ) -> Result<VaultSourceFingerprint> {
         if !self.memory_items.is_empty() {
+            self.memory_writes.set(self.memory_writes.get() + 1);
             let item = self
                 .memory_items
                 .get_mut(&(drive_id.to_owned(), item_id.to_owned()))
@@ -606,17 +694,17 @@ impl OneDriveVaultSourceProvider {
             return Ok(fingerprint_for_memory_item(item));
         }
 
-        let mut request = self.authorized_request(
-            "PUT",
-            &self.graph_url(&format!(
-                "/drives/{}/items/{}/content",
-                encode_component(drive_id),
-                encode_component(item_id)
-            )),
-        )?;
-        if let Some(etag) = if_match {
-            request = request.set("If-Match", etag);
-        }
+        let etag = if_match.context("current OneDrive item did not include an ETag")?;
+        let request = self
+            .authorized_request(
+                "PUT",
+                &self.graph_url(&format!(
+                    "/drives/{}/items/{}/content",
+                    encode_component(drive_id),
+                    encode_component(item_id)
+                )),
+            )?
+            .set("If-Match", etag);
         let response = request
             .send_bytes(bytes)
             .context("failed to upload OneDrive item content")?;
@@ -628,6 +716,100 @@ impl OneDriveVaultSourceProvider {
             bytes,
             response_etag.as_deref().or(if_match),
         ))
+    }
+
+    pub fn conditional_write(
+        &mut self,
+        drive_id: &str,
+        item_id: &str,
+        bytes: &[u8],
+        observed: &OneDriveRemoteState,
+    ) -> Result<OneDriveConditionalWriteOutcome, OneDriveConditionalWriteError> {
+        if !self.memory_items.is_empty() {
+            self.memory_writes.set(self.memory_writes.get() + 1);
+            let expected_revision = observed
+                .memory_revision
+                .ok_or(OneDriveConditionalWriteError::InvalidMemoryRevision)?;
+            let item = self
+                .memory_items
+                .get_mut(&(drive_id.to_owned(), item_id.to_owned()))
+                .ok_or_else(|| OneDriveConditionalWriteError::Unavailable {
+                    message: format!("OneDrive item not found: {drive_id}/{item_id}"),
+                })?;
+            if item.revision != expected_revision {
+                return Ok(OneDriveConditionalWriteOutcome::PreconditionFailed);
+            }
+            if let Some(behavior) = self.memory_write_behaviors.pop_front() {
+                match behavior {
+                    OneDriveMemoryWriteBehavior::PreconditionFailed { replacement_bytes } => {
+                        if let Some(replacement_bytes) = replacement_bytes {
+                            item.bytes = replacement_bytes;
+                            item.revision += 1;
+                        }
+                        return Ok(OneDriveConditionalWriteOutcome::PreconditionFailed);
+                    }
+                    OneDriveMemoryWriteBehavior::OutcomeUnknownCommitted => {
+                        item.bytes = bytes.to_vec();
+                        item.revision += 1;
+                        return Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
+                            message: "injected ambiguous committed write".into(),
+                        });
+                    }
+                    OneDriveMemoryWriteBehavior::OutcomeUnknownNotCommitted => {
+                        return Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
+                            message: "injected ambiguous uncommitted write".into(),
+                        });
+                    }
+                }
+            }
+            item.bytes = bytes.to_vec();
+            item.revision += 1;
+            return Ok(OneDriveConditionalWriteOutcome::Committed {
+                fingerprint: fingerprint_for_memory_item(item),
+                e_tag: None,
+            });
+        }
+
+        let etag = observed
+            .e_tag
+            .as_deref()
+            .ok_or(OneDriveConditionalWriteError::MissingEtag)?;
+        let request = self
+            .authorized_request(
+                "PUT",
+                &self.graph_url(&format!(
+                    "/drives/{}/items/{}/content",
+                    encode_component(drive_id),
+                    encode_component(item_id)
+                )),
+            )
+            .map_err(|error| OneDriveConditionalWriteError::Unavailable {
+                message: format!("{error:#}"),
+            })?
+            .set("If-Match", etag);
+        match request.send_bytes(bytes) {
+            Ok(response) => {
+                let response_etag = response
+                    .into_json::<GraphWriteResponse>()
+                    .ok()
+                    .and_then(|body| body.e_tag);
+                Ok(OneDriveConditionalWriteOutcome::Committed {
+                    fingerprint: fingerprint_for_graph_item(bytes, response_etag.as_deref()),
+                    e_tag: response_etag,
+                })
+            }
+            Err(ureq::Error::Status(412, _)) => {
+                Ok(OneDriveConditionalWriteOutcome::PreconditionFailed)
+            }
+            Err(ureq::Error::Status(status, _)) => {
+                Err(OneDriveConditionalWriteError::Rejected { status })
+            }
+            Err(ureq::Error::Transport(error)) => {
+                Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
+                    message: error.to_string(),
+                })
+            }
+        }
     }
 
     fn item(&self, drive_id: &str, item_id: &str) -> Result<&MemoryOneDriveItem> {
@@ -993,7 +1175,10 @@ fn encode_component(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{OneDriveVaultSourceProvider, stable_u64_for_text};
+    use super::{
+        OneDriveConditionalWriteError, OneDriveConditionalWriteOutcome,
+        OneDriveVaultSourceProvider, stable_u64_for_text,
+    };
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
@@ -1380,6 +1565,141 @@ mod tests {
         assert_eq!(fingerprint.size_bytes, 4);
         assert_eq!(fingerprint.modified_at, Some(stable_u64_for_text("etag-2")));
         write.assert();
+    }
+
+    #[test]
+    fn graph_provider_rejects_write_when_known_etag_is_missing() {
+        let mut server = mockito::Server::new();
+        let write = server
+            .mock("PUT", "/v1.0/drives/drive-1/items/item-1/content")
+            .expect(0)
+            .create();
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_test_tokens("access-1", "refresh-1");
+
+        let error = provider
+            .write_with_known_etag("drive-1", "item-1", b"next", None)
+            .expect_err("missing Graph ETag must fail before PUT");
+
+        assert!(error.to_string().contains("ETag"));
+        write.assert();
+    }
+
+    #[test]
+    fn graph_conditional_write_fails_closed_when_current_etag_is_missing() {
+        let mut server = mockito::Server::new();
+        let metadata = server
+            .mock("GET", "/v1.0/drives/drive-1/items/item-1")
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "$select".into(),
+                "id,name,size,eTag,parentReference,@microsoft.graph.downloadUrl".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"item-1","name":"Vault.kdbx","size":4,"parentReference":{"driveId":"drive-1"}}"#,
+            )
+            .create();
+        let write = server
+            .mock("PUT", "/v1.0/drives/drive-1/items/item-1/content")
+            .expect(0)
+            .create();
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_test_tokens("access-1", "refresh-1");
+        let state = provider.remote_state("drive-1", "item-1").unwrap();
+
+        let error = provider
+            .conditional_write("drive-1", "item-1", b"next", &state)
+            .expect_err("missing Graph ETag must fail closed");
+
+        assert!(matches!(error, OneDriveConditionalWriteError::MissingEtag));
+        metadata.assert();
+        write.assert();
+    }
+
+    #[test]
+    fn graph_conditional_write_returns_typed_precondition_failure_for_412() {
+        let mut server = mockito::Server::new();
+        let metadata = server
+            .mock("GET", "/v1.0/drives/drive-1/items/item-1")
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "$select".into(),
+                "id,name,size,eTag,parentReference,@microsoft.graph.downloadUrl".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"item-1","name":"Vault.kdbx","size":4,"eTag":"etag-1","parentReference":{"driveId":"drive-1"}}"#,
+            )
+            .create();
+        let write = server
+            .mock("PUT", "/v1.0/drives/drive-1/items/item-1/content")
+            .match_header("authorization", "Bearer access-1")
+            .match_header("if-match", "etag-1")
+            .with_status(412)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"code":"preconditionFailed"}}"#)
+            .create();
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_test_tokens("access-1", "refresh-1");
+        let state = provider.remote_state("drive-1", "item-1").unwrap();
+
+        let outcome = provider
+            .conditional_write("drive-1", "item-1", b"next", &state)
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            OneDriveConditionalWriteOutcome::PreconditionFailed
+        ));
+        metadata.assert();
+        write.assert();
+    }
+
+    #[test]
+    fn memory_conditional_write_compares_the_observed_revision() {
+        let mut provider = OneDriveVaultSourceProvider::new_in_memory();
+        provider.insert_memory_item(
+            "drive-1",
+            "item-1",
+            "Vault.kdbx",
+            "alice@example.com",
+            b"old".to_vec(),
+        );
+        let stale = provider.remote_state("drive-1", "item-1").unwrap();
+        provider.replace_memory_item("drive-1", "item-1", b"external".to_vec());
+
+        let outcome = provider
+            .conditional_write("drive-1", "item-1", b"must-not-win", &stale)
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            OneDriveConditionalWriteOutcome::PreconditionFailed
+        ));
+        assert_eq!(
+            provider
+                .read_memory_item_bytes("drive-1", "item-1")
+                .unwrap(),
+            b"external"
+        );
     }
 
     #[test]

@@ -6862,6 +6862,23 @@ function waitForPromptSignal<
   });
 }
 
+function dismissPromptState<
+  TContext extends WebAuthnPromptContext,
+  TCompleteSignal
+>(
+  state: PromptState<TContext, TCompleteSignal>,
+  clearPromptState: PromptClearState,
+  promptKey: string
+) {
+  clearPromptState(promptKey, { preserveDismissed: true });
+  state.dismissedPromptKeys.add(promptKey);
+  const waiters = [...(state.dismissWaiters.get(promptKey) ?? [])];
+  for (const waiter of waiters) {
+    waiter();
+  }
+  return waiters.length;
+}
+
 async function openPromptWindow<
   TContext extends WebAuthnPromptContext,
   TCompleteSignal
@@ -6986,18 +7003,13 @@ function watchPromptWindow<
       return;
     }
 
-    clearPromptState(promptKey, { preserveDismissed: true });
-    state.dismissedPromptKeys.add(promptKey);
+    const waiterCount = dismissPromptState(state, clearPromptState, promptKey);
     void recordWebAuthnDebug(chromeApi, {
       event: config.dismissedDebugEvent,
       requestId,
       windowId
     });
-    const waiters = [...(state.dismissWaiters.get(promptKey) ?? [])];
-    for (const waiter of waiters) {
-      waiter();
-    }
-    if (waiters.length === 0 && !state.activeDrivers.has(promptKey)) {
+    if (waiterCount === 0 && !state.activeDrivers.has(promptKey)) {
       onUnobservedDismissed?.();
     }
   };
@@ -7138,7 +7150,7 @@ async function closePromptWindowForRequest<
     .map((promptKey) => state.windowIds.get(promptKey))
     .filter((windowId): windowId is number => typeof windowId === "number");
   for (const promptKey of promptKeys) {
-    clearPromptState(promptKey);
+    dismissPromptState(state, clearPromptState, promptKey);
   }
   if (!chromeApi.windows?.remove) {
     return;

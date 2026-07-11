@@ -103,6 +103,7 @@ export interface EntrySummary {
   username: string;
   url: string;
   groupId?: string;
+  hasTotp?: boolean;
 }
 
 export interface GroupNode {
@@ -236,6 +237,89 @@ export interface EntryDraft {
   totpUri: string | null;
   customFields: EntryCustomField[];
 }
+
+export type AutofillPersistPlan =
+  | {
+      mode: "update";
+      entryId: string;
+      expectedFields: EntryDraft;
+      desiredFields: EntryDraft;
+    }
+  | {
+      mode: "create";
+      parentGroupId: string;
+      plannedEntryId: string;
+      expectedMatchingEntryIds: string[];
+      desiredFields: EntryDraft;
+    };
+
+export interface PersistAutofillMutationRequest {
+  transactionId: string;
+  operationId: string;
+  vaultId: string;
+  plan: AutofillPersistPlan;
+}
+
+export type AutofillPersistConflictCode =
+  | "active_vault_mismatch"
+  | "update_precondition_failed"
+  | "create_matching_set_changed"
+  | "planned_entry_id_collision"
+  | "operation_binding_mismatch"
+  | "concurrent_vault_changes"
+  | "source_changed_retry_exhausted"
+  | "legacy_create_outcome_ambiguous";
+
+interface AutofillPersistResultBase {
+  type: "autofill_persist_result";
+  transactionId: string;
+  operationId: string;
+  vaultId: string;
+}
+
+export type AutofillPersistResult = AutofillPersistResultBase &
+  (
+    | ({
+        outcome: "durable";
+        disposition: "committed" | "replayed";
+        entryId: string;
+        committedFingerprint: {
+          contentSha256: string;
+          sizeBytes: number;
+        };
+        mergeSummary: {
+          mergedEntries: number;
+          historySnapshotsAdded: number;
+        } | null;
+        receiptVersion: 1;
+      } &
+        (
+          | {
+              durability: "source";
+              cacheState: "not_applicable" | "current" | "write_failed";
+            }
+          | {
+              durability: "pending_remote_cache";
+              cacheState: "pending_sync";
+            }
+        ))
+    | ({
+        outcome: "conflict";
+      } &
+        (
+          | {
+              code: "active_vault_mismatch" | "source_changed_retry_exhausted";
+              retryable: true;
+            }
+          | {
+              code: Exclude<
+                AutofillPersistConflictCode,
+                "active_vault_mismatch" | "source_changed_retry_exhausted"
+              >;
+              retryable: false;
+            }
+        ))
+  );
 
 export interface EntryCreateInput extends EntryDraft {
   parentGroupId: string;
@@ -529,6 +613,41 @@ export class RuntimeClient {
     });
   }
 
+  async compareAndUpdateEntryFields(
+    vaultId: string,
+    entryId: string,
+    expectedFields: EntryDraft,
+    desiredFields: EntryDraft
+  ): Promise<EntryDetail> {
+    return this.sendCommand<EntryDetail>({
+      type: "compare_and_update_entry_fields",
+      vault_id: vaultId,
+      entry_id: entryId,
+      expected_fields: entryFieldsCommand(expectedFields),
+      desired_fields: entryFieldsCommand(desiredFields)
+    });
+  }
+
+  async persistAutofillMutation(
+    request: PersistAutofillMutationRequest
+  ): Promise<AutofillPersistResult> {
+    const snapshot = snapshotAutofillPersistRequest(request);
+    if (
+      snapshot.binding.mode === "create" &&
+      !isCanonicalNonNilUuid(snapshot.binding.entryId)
+    ) {
+      throw new TypeError("planned entry id must be a canonical non-nil UUID");
+    }
+    const response = await this.sendCommand<unknown>({
+      type: "persist_autofill_mutation",
+      transaction_id: snapshot.binding.transactionId,
+      operation_id: snapshot.binding.operationId,
+      vault_id: snapshot.binding.vaultId,
+      plan: snapshot.commandPlan
+    });
+    return parseAutofillPersistResult(response, snapshot.binding);
+  }
+
   async clearEntryTotp(
     vaultId: string,
     entryId: string
@@ -704,6 +823,21 @@ export class RuntimeClient {
     return response.entries;
   }
 
+  async findExactMatchingEntryIds(
+    vaultId: string,
+    fields: EntryDraft
+  ): Promise<string[]> {
+    const response = await this.sendCommand<{
+      type: "entry_id_list";
+      entryIds: string[];
+    }>({
+      type: "find_exact_matching_entry_ids",
+      vault_id: vaultId,
+      fields: entryFieldsCommand(fields)
+    });
+    return response.entryIds;
+  }
+
   private async sendCommand<T>(command: Record<string, unknown>): Promise<T> {
     const response = await this.transport.send({
       version: 1,
@@ -735,4 +869,259 @@ function normalizeOptionalSecret(value: string | null | undefined): string | nul
     return null;
   }
   return value;
+}
+
+function entryFieldsCommand(fields: EntryDraft) {
+  return {
+    title: fields.title,
+    username: fields.username,
+    password: fields.password,
+    url: fields.url,
+    notes: fields.notes,
+    totpUri: fields.totpUri,
+    customFields: fields.customFields.map((field) => ({
+      key: field.key,
+      value: field.value,
+      protected: field.protected
+    }))
+  };
+}
+
+interface AutofillPersistRequestBinding {
+  readonly transactionId: string;
+  readonly operationId: string;
+  readonly vaultId: string;
+  readonly mode: AutofillPersistPlan["mode"];
+  readonly entryId: string;
+}
+
+function snapshotAutofillPersistRequest(request: PersistAutofillMutationRequest) {
+  const transactionId = request.transactionId;
+  const operationId = request.operationId;
+  const vaultId = request.vaultId;
+  const plan = request.plan;
+  if (plan.mode === "update") {
+    const entryId = plan.entryId;
+    return {
+      binding: Object.freeze({
+        transactionId,
+        operationId,
+        vaultId,
+        mode: "update" as const,
+        entryId
+      }),
+      commandPlan: {
+        mode: "update",
+        entry_id: entryId,
+        expected_fields: entryFieldsCommand(plan.expectedFields),
+        desired_fields: entryFieldsCommand(plan.desiredFields)
+      }
+    };
+  }
+
+  const entryId = plan.plannedEntryId;
+  return {
+    binding: Object.freeze({
+      transactionId,
+      operationId,
+      vaultId,
+      mode: "create" as const,
+      entryId
+    }),
+    commandPlan: {
+      mode: "create",
+      parent_group_id: plan.parentGroupId,
+      planned_entry_id: entryId,
+      expected_matching_entry_ids: [...plan.expectedMatchingEntryIds],
+      desired_fields: entryFieldsCommand(plan.desiredFields)
+    }
+  };
+}
+
+function isCanonicalNonNilUuid(value: string): boolean {
+  return (
+    value !== "00000000-0000-0000-0000-000000000000" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+  );
+}
+
+const AUTOFILL_CONFLICT_CODES = new Set<AutofillPersistConflictCode>([
+  "active_vault_mismatch",
+  "update_precondition_failed",
+  "create_matching_set_changed",
+  "planned_entry_id_collision",
+  "operation_binding_mismatch",
+  "concurrent_vault_changes",
+  "source_changed_retry_exhausted",
+  "legacy_create_outcome_ambiguous"
+]);
+
+function parseAutofillPersistResult(
+  value: unknown,
+  binding: AutofillPersistRequestBinding
+): AutofillPersistResult {
+  if (!isRecord(value) || value.type !== "autofill_persist_result") {
+    throw invalidAutofillPersistResult("unexpected response type");
+  }
+  if (
+    value.transactionId !== binding.transactionId ||
+    value.operationId !== binding.operationId ||
+    value.vaultId !== binding.vaultId
+  ) {
+    throw invalidAutofillPersistResult("response identity does not match request");
+  }
+
+  if (value.outcome === "conflict") {
+    requireExactKeys(value, [
+      "type",
+      "transactionId",
+      "operationId",
+      "vaultId",
+      "outcome",
+      "code",
+      "retryable"
+    ]);
+    if (
+      typeof value.code !== "string" ||
+      !AUTOFILL_CONFLICT_CODES.has(value.code as AutofillPersistConflictCode) ||
+      typeof value.retryable !== "boolean" ||
+      !validConflictForPlan(
+        binding.mode,
+        value.code as AutofillPersistConflictCode,
+        value.retryable
+      )
+    ) {
+      throw invalidAutofillPersistResult("invalid conflict outcome");
+    }
+    return value as unknown as AutofillPersistResult;
+  }
+
+  if (value.outcome !== "durable") {
+    throw invalidAutofillPersistResult("unknown outcome");
+  }
+  requireExactKeys(value, [
+    "type",
+    "transactionId",
+    "operationId",
+    "vaultId",
+    "outcome",
+    "disposition",
+    "entryId",
+    "durability",
+    "cacheState",
+    "committedFingerprint",
+    "mergeSummary",
+    "receiptVersion"
+  ]);
+
+  if (
+    (value.disposition !== "committed" && value.disposition !== "replayed") ||
+    value.entryId !== binding.entryId ||
+    (value.durability !== "source" && value.durability !== "pending_remote_cache") ||
+    !validCacheState(value.cacheState) ||
+    !validDurabilityCachePair(value.durability, value.cacheState) ||
+    !validCommittedFingerprint(value.committedFingerprint) ||
+    !validMergeSummary(value.mergeSummary) ||
+    value.receiptVersion !== 1
+  ) {
+    throw invalidAutofillPersistResult("invalid durable outcome");
+  }
+  return value as unknown as AutofillPersistResult;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireExactKeys(value: Record<string, unknown>, expected: string[]): void {
+  const actual = Object.keys(value);
+  if (actual.length !== expected.length || expected.some((key) => !hasOwn(value, key))) {
+    throw invalidAutofillPersistResult("unexpected response fields");
+  }
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function validCacheState(
+  value: unknown
+): value is "not_applicable" | "current" | "pending_sync" | "write_failed" {
+  return (
+    value === "not_applicable" ||
+    value === "current" ||
+    value === "pending_sync" ||
+    value === "write_failed"
+  );
+}
+
+function validDurabilityCachePair(
+  durability: "source" | "pending_remote_cache",
+  cacheState: "not_applicable" | "current" | "pending_sync" | "write_failed"
+): boolean {
+  return durability === "pending_remote_cache"
+    ? cacheState === "pending_sync"
+    : cacheState !== "pending_sync";
+}
+
+function validConflictForPlan(
+  mode: AutofillPersistPlan["mode"],
+  code: AutofillPersistConflictCode,
+  retryable: boolean
+): boolean {
+  const expectedRetryable =
+    code === "active_vault_mismatch" || code === "source_changed_retry_exhausted";
+  if (retryable !== expectedRetryable) {
+    return false;
+  }
+  if (mode === "update") {
+    return (
+      code !== "create_matching_set_changed" &&
+      code !== "planned_entry_id_collision" &&
+      code !== "legacy_create_outcome_ambiguous"
+    );
+  }
+  return code !== "update_precondition_failed";
+}
+
+function validCommittedFingerprint(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  try {
+    requireExactKeys(value, ["contentSha256", "sizeBytes"]);
+  } catch {
+    return false;
+  }
+  return (
+    typeof value.contentSha256 === "string" &&
+    /^[0-9a-f]{64}$/.test(value.contentSha256) &&
+    typeof value.sizeBytes === "number" &&
+    Number.isSafeInteger(value.sizeBytes) &&
+    value.sizeBytes >= 0
+  );
+}
+
+function validMergeSummary(value: unknown): boolean {
+  if (value === null) {
+    return true;
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+  try {
+    requireExactKeys(value, ["mergedEntries", "historySnapshotsAdded"]);
+  } catch {
+    return false;
+  }
+  return isNonnegativeSafeInteger(value.mergedEntries) &&
+    isNonnegativeSafeInteger(value.historySnapshotsAdded);
+}
+
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function invalidAutofillPersistResult(reason: string): TypeError {
+  return new TypeError(`invalid autofill persist result: ${reason}`);
 }

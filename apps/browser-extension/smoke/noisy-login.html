@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VaultKern Noisy Login Smoke</title>
+  </head>
+  <body>
+    <main>
+      <form id="vaultkern-smoke-search-form" action="/search">
+        <label for="vaultkern-smoke-query">
+          Search
+          <input id="vaultkern-smoke-query" name="query" type="search" />
+        </label>
+      </form>
+
+      <form id="vaultkern-smoke-newsletter-form" class="newsletter-signup">
+        <h2>Subscribe to our newsletter</h2>
+        <label for="vaultkern-smoke-newsletter-email">
+          Email
+          <input id="vaultkern-smoke-newsletter-email" name="newsletter_email" type="email" />
+        </label>
+      </form>
+
+      <form id="vaultkern-smoke-register-form" action="/register">
+        <h2>Create account</h2>
+        <label for="vaultkern-smoke-signup-email">
+          Email
+          <input
+            id="vaultkern-smoke-signup-email"
+            name="signup_email"
+            type="email"
+            autocomplete="email"
+          />
+        </label>
+        <label for="vaultkern-smoke-new-password">
+          New password
+          <input
+            id="vaultkern-smoke-new-password"
+            name="new_password"
+            type="password"
+            autocomplete="new-password"
+          />
+        </label>
+      </form>
+
+      <section>
+        <h2>Sign in</h2>
+        <form id="vaultkern-smoke-noisy-login-form" action="/login" method="post">
+          <label for="vaultkern-smoke-noisy-user">
+            Username
+            <input
+              id="vaultkern-smoke-noisy-user"
+              name="login_user"
+              type="text"
+              autocomplete="username"
+            />
+          </label>
+          <label for="vaultkern-smoke-noisy-password">
+            Password
+            <input
+              id="vaultkern-smoke-noisy-password"
+              name="login_password"
+              type="password"
+              autocomplete="current-password"
+            />
+          </label>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

@@ -10,6 +10,19 @@ it("normalizes missing extension settings to defaults", () => {
   expect(normalizeExtensionSettings({})).toEqual(DEFAULT_EXTENSION_SETTINGS);
 });
 
+it("keeps page-load autofill disabled unless the user explicitly enables it", () => {
+  expect(normalizeExtensionSettings({})).toMatchObject({
+    autofillOnPageLoadEnabled: false
+  });
+  expect(
+    normalizeExtensionSettings({
+      autofillOnPageLoadEnabled: true
+    })
+  ).toMatchObject({
+    autofillOnPageLoadEnabled: true
+  });
+});
+
 it("persists extension settings in the memory store", async () => {
   const store = createMemoryExtensionSettingsStore();
 
@@ -18,6 +31,7 @@ it("persists extension settings in the memory store", async () => {
     language: "zh-CN",
     idleLockMinutes: 5,
     clearClipboardSeconds: 20,
+    autofillOnPageLoadEnabled: true,
     passkeyProviderEnabled: false,
     quickUnlockEnabled: true
   });
@@ -27,6 +41,7 @@ it("persists extension settings in the memory store", async () => {
     language: "zh-CN",
     idleLockMinutes: 5,
     clearClipboardSeconds: 20,
+    autofillOnPageLoadEnabled: true,
     passkeyProviderEnabled: false,
     quickUnlockEnabled: true
   });

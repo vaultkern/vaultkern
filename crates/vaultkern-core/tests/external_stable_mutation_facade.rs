@@ -172,6 +172,39 @@ fn external_stable_mutation_oracle_preserves_fixture_matrix_on_roundtrip() {
     assert_eq!(merge_after, merge_before);
 }
 
+#[test]
+fn external_fixture_preserves_a_preplanned_entry_uuid_on_roundtrip() {
+    let core = KeepassCore::new();
+    let mut vault = load_fixture(&core, FIXTURE_SYNC_DATABASE, "a");
+    let subgroup =
+        find_group_by_path(&vault.root, &["Homebanking", "Subgroup"]).expect("sync subgroup");
+    let subgroup_id = subgroup.id.to_string();
+    let planned_id = "12345678-1234-4abc-8def-1234567890ab";
+
+    let created = core
+        .add_entry_with_id(
+            &mut vault,
+            &subgroup_id,
+            planned_id,
+            EntryCreate {
+                title: "Stable Planned Entry".into(),
+                username: "stable-user".into(),
+                password: "stable-password".into(),
+                url: "https://stable.example.com".into(),
+                notes: "stable UUID roundtrip".into(),
+            },
+        )
+        .expect("add entry with planned UUID");
+    assert_eq!(created.id, planned_id);
+
+    let reloaded = save_and_reload(&core, &vault, "a");
+    let detail = core
+        .project_entry_detail(&reloaded, planned_id)
+        .expect("find planned entry after reload");
+    assert_eq!(detail.id, planned_id);
+    assert_eq!(detail.password, "stable-password");
+}
+
 fn apply_browser_mutations(core: &KeepassCore, vault: &mut Vault) -> BrowserMutationRefs {
     let subgroup =
         find_group_by_path(&vault.root, &["Homebanking", "Subgroup"]).expect("browser subgroup");

@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import type {
   EntryDetail,
   EntrySummary,
+  GroupTree,
   SessionState,
   UnlockCredentials,
   VaultReference
@@ -21,7 +22,21 @@ import { PopupSearch } from "./PopupSearch";
 import { PopupStatusStrip } from "./PopupStatusStrip";
 import { SiteCandidateList } from "./SiteCandidateList";
 import { PopupVaultList } from "./PopupVaultList";
+import { checkedEntryDetail } from "./checkedEntryDetail";
 import { popupErrorMessage, popupTheme } from "./theme";
+import { sameExactHttpOrigin } from "../autofill/originPolicy";
+import {
+  type PendingAutofillDesiredFields,
+  type PendingAutofillPlanInput,
+  type PendingAutofillSubmission,
+  type PendingAutofillTransaction
+} from "../autofill/pendingSubmission";
+
+type PendingAutofillPromptTransaction = PendingAutofillTransaction;
+type PendingAutofillUpdatePlan = Extract<
+  PendingAutofillPlanInput,
+  { mode: "update" }
+>;
 
 type SessionStateLike = Pick<
   SessionState,
@@ -44,8 +59,126 @@ export interface PopupClientLike {
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
   enableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
   unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
+  listGroups(vaultId: string): Promise<GroupTree>;
   listEntries(vaultId: string): Promise<EntrySummary[]>;
   getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
+  findExactMatchingEntryIds?(
+    vaultId: string,
+    fields: PendingAutofillDesiredFields
+  ): Promise<string[]>;
+}
+
+const AUTOFILL_ENTRY_ID_MISMATCH_MESSAGE =
+  "Autofill entry detail did not match the requested entry";
+
+class AutofillEntryIdMismatchError extends Error {
+  constructor() {
+    super(AUTOFILL_ENTRY_ID_MISMATCH_MESSAGE);
+    this.name = "AutofillEntryIdMismatchError";
+  }
+}
+
+async function loadCheckedAutofillEntryDetail(
+  client: Pick<PopupClientLike, "getEntryDetail">,
+  vaultId: string,
+  requestedEntryId: string
+) {
+  const detail = await client.getEntryDetail(vaultId, requestedEntryId);
+  return checkedEntryDetail(
+    detail,
+    requestedEntryId,
+    () => new AutofillEntryIdMismatchError()
+  );
+}
+
+function sameCustomFields(
+  left: PendingAutofillDesiredFields["customFields"],
+  right: PendingAutofillDesiredFields["customFields"]
+) {
+  return (
+    left.length === right.length &&
+    left.every((field, index) => {
+      const other = right[index];
+      return (
+        other !== undefined &&
+        field.key === other.key &&
+        field.value === other.value &&
+        field.protected === other.protected
+      );
+    })
+  );
+}
+
+function rebaseIntendedString(
+  expected: string,
+  desired: string,
+  current: string
+) {
+  if (expected === desired || current === desired) {
+    return current;
+  }
+  return current === expected ? desired : null;
+}
+
+function rebasePendingAutofillUpdate(
+  plan: PendingAutofillUpdatePlan,
+  current: PendingAutofillDesiredFields
+): PendingAutofillUpdatePlan | null {
+  const expected = plan.expectedFields;
+  const desired = plan.desiredFields;
+  if (
+    expected.title !== desired.title ||
+    expected.url !== desired.url ||
+    expected.notes !== desired.notes ||
+    expected.totpUri !== desired.totpUri ||
+    !sameCustomFields(expected.customFields, desired.customFields)
+  ) {
+    return null;
+  }
+  const username = rebaseIntendedString(
+    expected.username,
+    desired.username,
+    current.username
+  );
+  const password = rebaseIntendedString(
+    expected.password,
+    desired.password,
+    current.password
+  );
+  if (username === null || password === null) {
+    return null;
+  }
+  return {
+    mode: "update",
+    entryId: plan.entryId,
+    expectedFields: current,
+    desiredFields: {
+      ...current,
+      username,
+      password
+    }
+  };
+}
+
+type AutofillSavePrompt =
+  | {
+      mode: "save";
+      submission: PendingAutofillPromptTransaction;
+      createdDetail?: EntryDetail;
+      ambiguous?: true;
+    }
+  | {
+      mode: "update";
+      submission: PendingAutofillPromptTransaction;
+      entry: EntrySummary;
+    }
+  | {
+      mode: "retry";
+      submission: PendingAutofillPromptTransaction;
+    };
+
+interface FillEntryOptions {
+  requireSiteCandidate?: boolean;
 }
 
 function limitRecentVaults(vaults: VaultReference[], limit: number) {
@@ -144,6 +277,10 @@ export function PopupApp({
   findCandidates,
   fillEntry,
   activeSite,
+  loadPendingAutofillSubmission,
+  planPendingAutofillSubmission,
+  dismissPendingAutofillSubmission,
+  executePendingAutofillMutation,
   extensionSettingsStore,
   renderRuntimeErrorHelp,
   onUnlockComplete,
@@ -151,9 +288,30 @@ export function PopupApp({
   onWebAuthnUserVerificationComplete
 }: {
   client: PopupClientLike;
-  findCandidates: (vaultId: string) => Promise<EntrySummary[]>;
-  fillEntry: (vaultId: string, entryId: string) => Promise<void>;
+  findCandidates: (vaultId: string, siteUrl?: string) => Promise<EntrySummary[]>;
+  fillEntry: (vaultId: string, entryId: string, options?: FillEntryOptions) => Promise<void>;
   activeSite: () => Promise<string>;
+  loadPendingAutofillSubmission?: () => Promise<PendingAutofillPromptTransaction | null>;
+  planPendingAutofillSubmission?: (
+    transactionId: string,
+    tabId: number,
+    vaultId: string,
+    plan: PendingAutofillPlanInput
+  ) => Promise<PendingAutofillPromptTransaction | null>;
+  dismissPendingAutofillSubmission?: (
+    transactionId: string,
+    tabId: number
+  ) => Promise<boolean>;
+  executePendingAutofillMutation?: (
+    transactionId: string,
+    tabId: number
+  ) => Promise<{
+    ok: boolean;
+    expired?: boolean;
+    conflict?: boolean;
+    pending?: PendingAutofillPromptTransaction | null;
+    errorMessage?: string;
+  }>;
   extensionSettingsStore?: ExtensionSettingsStore;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
   onUnlockComplete?: (
@@ -178,8 +336,15 @@ export function PopupApp({
   const [entriesError, setEntriesError] = useState<string | null>(null);
   const [searchValue, setSearchValue] = useState("");
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
-  const [selectedDetail, setSelectedDetail] = useState<EntryDetail | null>(null);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const [pendingAutofillSubmission, setPendingAutofillSubmission] =
+    useState<PendingAutofillPromptTransaction | null>(null);
+  const [autofillSavePrompt, setAutofillSavePrompt] =
+    useState<AutofillSavePrompt | null>(null);
+  const [autofillSaveError, setAutofillSaveError] = useState<string | null>(null);
+  const [pendingAutofillRetryVersion, setPendingAutofillRetryVersion] =
+    useState(0);
+  const [savingAutofillPrompt, setSavingAutofillPrompt] = useState(false);
+  const savingAutofillPromptRef = useRef(false);
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [unlockErrorCause, setUnlockErrorCause] = useState<unknown>(null);
   const [recentVaults, setRecentVaults] = useState<VaultReference[]>([]);
@@ -219,6 +384,70 @@ export function PopupApp({
       recentVaults.find((vault) => vault.isCurrent) ??
       null
     );
+  }
+
+  function pendingSubmission(
+    transaction: PendingAutofillPromptTransaction
+  ): PendingAutofillSubmission | null {
+    if (transaction.state === "captured") {
+      return transaction.submission;
+    }
+    if (!("plan" in transaction)) {
+      return null;
+    }
+    return {
+      url: transaction.plan.desiredFields.url,
+      username: transaction.plan.desiredFields.username,
+      password: transaction.plan.desiredFields.password,
+      submittedAt: transaction.submittedAt
+    };
+  }
+
+  function pendingPassword(transaction: PendingAutofillPromptTransaction) {
+    const submission = pendingSubmission(transaction);
+    if (!submission) {
+      throw new Error("Pending login save has no recoverable fields");
+    }
+    return submission.newPassword ?? submission.password;
+  }
+
+  function pendingTransactionState(transaction: PendingAutofillPromptTransaction) {
+    return transaction.state;
+  }
+
+  function titleForPendingSubmission(transaction: PendingAutofillPromptTransaction) {
+    const url = pendingSubmission(transaction)?.url ?? transaction.origin;
+    try {
+      return new URL(url).host || url;
+    } catch {
+      return url;
+    }
+  }
+
+  function savedUrlForPendingSubmission(
+    transaction: PendingAutofillPromptTransaction
+  ) {
+    const urlValue = pendingSubmission(transaction)?.url ?? transaction.origin;
+    try {
+      const url = new URL(urlValue);
+      url.search = "";
+      url.hash = "";
+      return url.href;
+    } catch {
+      return urlValue.split(/[?#]/, 1)[0] || urlValue;
+    }
+  }
+
+  function entryMatchesPendingUsername(
+    entry: EntrySummary,
+    transaction: PendingAutofillPromptTransaction
+  ) {
+    const submission = pendingSubmission(transaction);
+    if (!submission) {
+      return false;
+    }
+    const submittedUsername = submission.username.trim();
+    return submittedUsername !== "" && entry.username === submittedUsername;
   }
 
   function canQuickUnlockVault(vault: VaultReference | null) {
@@ -415,9 +644,17 @@ export function PopupApp({
   }, [recentVaultsLoading, session?.currentVaultRefId, session?.unlocked]);
 
   useEffect(() => {
-    setSelectedPasskeyCredentialId(
-      passkeyCredentialOptions[0]?.credentialId ?? ""
-    );
+    setSelectedPasskeyCredentialId((currentCredentialId) => {
+      if (
+        currentCredentialId &&
+        passkeyCredentialOptions.some(
+          (option) => option.credentialId === currentCredentialId
+        )
+      ) {
+        return currentCredentialId;
+      }
+      return passkeyCredentialOptions[0]?.credentialId ?? "";
+    });
   }, [passkeyCredentialOptions]);
 
   useEffect(() => {
@@ -521,8 +758,6 @@ export function PopupApp({
       setEntries([]);
       setCandidates([]);
       setSelectedEntryId(null);
-      setSelectedDetail(null);
-      setDetailError(null);
       return;
     }
 
@@ -530,8 +765,6 @@ export function PopupApp({
       setEntries([]);
       setCandidates([]);
       setSelectedEntryId(null);
-      setSelectedDetail(null);
-      setDetailError(null);
       return;
     }
 
@@ -584,34 +817,34 @@ export function PopupApp({
   ]);
 
   useEffect(() => {
-    if (webAuthnCeremonyPrompt) {
-      setSelectedDetail(null);
-      setDetailError(null);
-      return;
-    }
-
-    if (!session?.activeVaultId || !selectedEntryId) {
-      setSelectedDetail(null);
-      setDetailError(null);
+    if (
+      webAuthnCeremonyPrompt ||
+      !session?.unlocked ||
+      !session.activeVaultId ||
+      !loadPendingAutofillSubmission
+    ) {
+      setPendingAutofillSubmission(null);
+      setAutofillSavePrompt(null);
+      setAutofillSaveError(null);
       return;
     }
 
     let cancelled = false;
-
-    Promise.resolve(client.getEntryDetail(session.activeVaultId, selectedEntryId))
-      .then((detail) => {
+    loadPendingAutofillSubmission()
+      .then((submission) => {
         if (!cancelled) {
-          setSelectedDetail(detail ?? null);
-          setDetailError(null);
+          setPendingAutofillSubmission(submission);
+          setAutofillSaveError(null);
         }
       })
-      .catch((loadError) => {
+      .catch((loadFailure) => {
         if (!cancelled) {
-          setSelectedDetail(null);
-          setDetailError(
+          setPendingAutofillSubmission(null);
+          setAutofillSavePrompt(null);
+          setAutofillSaveError(
             popupErrorMessage(
-              loadError,
-              translate(extensionSettings.language, "Failed to load record detail")
+              loadFailure,
+              "Failed to recover pending login save"
             )
           );
         }
@@ -621,11 +854,174 @@ export function PopupApp({
       cancelled = true;
     };
   }, [
-    client,
-    extensionSettings.language,
-    selectedEntryId,
+    loadPendingAutofillSubmission,
+    pendingAutofillRetryVersion,
     session?.activeVaultId,
+    session?.unlocked,
     webAuthnCeremonyPrompt
+  ]);
+
+  useEffect(() => {
+    if (!pendingAutofillSubmission || !session?.activeVaultId) {
+      setAutofillSavePrompt(null);
+      return;
+    }
+    const activeVaultId = session.activeVaultId;
+    const transactionState = pendingTransactionState(pendingAutofillSubmission);
+    const submission = pendingSubmission(pendingAutofillSubmission);
+    const existingPlan =
+      "plan" in pendingAutofillSubmission
+        ? pendingAutofillSubmission.plan
+        : null;
+
+    let cancelled = false;
+    setAutofillSavePrompt(null);
+    setAutofillSaveError(null);
+    if (
+      "vaultId" in pendingAutofillSubmission &&
+      pendingAutofillSubmission.vaultId !== activeVaultId
+    ) {
+      return;
+    }
+    if (
+      transactionState !== "captured" &&
+      existingPlan?.mode === "update"
+    ) {
+      setAutofillSavePrompt({
+        mode: "update",
+        submission: pendingAutofillSubmission,
+        entry: {
+          id: existingPlan.entryId,
+          title: existingPlan.desiredFields.title,
+          username: existingPlan.desiredFields.username,
+          url: existingPlan.desiredFields.url
+        }
+      });
+      return;
+    }
+    if (
+      (pendingAutofillSubmission.state === "captured" &&
+        pendingAutofillSubmission.submission.saveOnly) ||
+      (transactionState !== "captured" &&
+        existingPlan?.mode === "create")
+    ) {
+      setAutofillSavePrompt({
+        mode: "save",
+        submission: pendingAutofillSubmission
+      });
+      return;
+    }
+
+    if (!submission) {
+      setAutofillSavePrompt({
+        mode: "retry",
+        submission: pendingAutofillSubmission
+      });
+      setAutofillSaveError("Pending login outcome is ambiguous; discard and submit again");
+      return;
+    }
+
+    findCandidates(activeVaultId, submission.url)
+      .then(async (pendingCandidates) => {
+        if (cancelled) {
+          return;
+        }
+
+        const exactOriginCandidates = pendingCandidates.filter((entry) =>
+          sameExactHttpOrigin(entry.url, submission.url)
+        );
+        const hasSubmittedUsername = submission.username.trim() !== "";
+        if (!exactOriginCandidates.length) {
+          setAutofillSavePrompt({
+            mode: "save",
+            submission: pendingAutofillSubmission
+          });
+          return;
+        }
+
+        try {
+          if (hasSubmittedUsername) {
+            const matchingEntries = exactOriginCandidates.filter((entry) =>
+              entryMatchesPendingUsername(entry, pendingAutofillSubmission)
+            );
+            if (!matchingEntries.length) {
+              setAutofillSavePrompt({
+                mode: "save",
+                submission: pendingAutofillSubmission
+              });
+              return;
+            }
+            if (matchingEntries.length !== 1) {
+              setAutofillSavePrompt({
+                mode: "save",
+                submission: pendingAutofillSubmission,
+                ambiguous: true
+              });
+              return;
+            }
+
+            setAutofillSavePrompt({
+              mode: "update",
+              submission: pendingAutofillSubmission,
+              entry: matchingEntries[0]
+            });
+            return;
+          }
+
+          if (exactOriginCandidates.length !== 1) {
+            setAutofillSavePrompt({
+              mode: "save",
+              submission: pendingAutofillSubmission,
+              ambiguous: true
+            });
+            return;
+          }
+
+          setAutofillSavePrompt({
+            mode: "update",
+            submission: pendingAutofillSubmission,
+            entry: exactOriginCandidates[0]
+          });
+        } catch (lookupFailure) {
+          if (!cancelled) {
+            setAutofillSavePrompt({
+              mode: "retry",
+              submission: pendingAutofillSubmission
+            });
+            setAutofillSaveError(
+              popupErrorMessage(
+                lookupFailure,
+                "Failed to match pending login"
+              )
+            );
+          }
+        }
+      })
+      .catch((lookupFailure) => {
+        if (cancelled) {
+          return;
+        }
+        setAutofillSavePrompt({
+          mode: "retry",
+          submission: pendingAutofillSubmission
+        });
+        setAutofillSaveError(
+          popupErrorMessage(
+            lookupFailure,
+            "Failed to match pending login"
+          )
+        );
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    client,
+    findCandidates,
+    pendingAutofillRetryVersion,
+    pendingAutofillSubmission,
+    session?.activeVaultId
   ]);
 
   async function handleUnlock() {
@@ -861,6 +1257,286 @@ export function PopupApp({
     }
   }
 
+  function clearAutofillPromptLocally() {
+    setPendingAutofillSubmission(null);
+    setAutofillSavePrompt(null);
+    setAutofillSaveError(null);
+  }
+
+  function retryPendingAutofillPrompt() {
+    setAutofillSaveError(null);
+    setPendingAutofillRetryVersion((version) => version + 1);
+  }
+
+  async function planAutofillTransaction(
+    vaultId: string,
+    plan: PendingAutofillPlanInput
+  ) {
+    const currentSubmission =
+      autofillSavePrompt?.submission ?? pendingAutofillSubmission;
+    if (!currentSubmission) {
+      throw new Error("Pending login save is no longer available");
+    }
+    if (!planPendingAutofillSubmission) {
+      throw new Error("Background login save planning is unavailable");
+    }
+    const planned = await planPendingAutofillSubmission(
+      currentSubmission.transactionId,
+      currentSubmission.tabId,
+      vaultId,
+      plan
+    );
+    if (!planned) {
+      throw new Error("Failed to persist a changed login save plan");
+    }
+    setPendingAutofillSubmission(planned);
+    setAutofillSavePrompt((currentPrompt) =>
+      currentPrompt
+        ? { ...currentPrompt, submission: planned }
+        : currentPrompt
+    );
+    return planned;
+  }
+
+  async function dismissAutofillPrompt() {
+    try {
+      const currentSubmission =
+        autofillSavePrompt?.submission ?? pendingAutofillSubmission;
+      if (!currentSubmission) {
+        throw new Error("Pending login save is no longer available");
+      }
+      if (
+        !dismissPendingAutofillSubmission ||
+        !(await dismissPendingAutofillSubmission(
+          currentSubmission.transactionId,
+          currentSubmission.tabId
+        ))
+      ) {
+        throw new Error("Failed to discard login save");
+      }
+      clearAutofillPromptLocally();
+    } catch (dismissFailure) {
+      setAutofillSaveError(
+        popupErrorMessage(dismissFailure, "Failed to dismiss login save")
+      );
+    }
+  }
+
+  async function refreshEntriesAfterAutofillSave(vaultId: string) {
+    const [nextEntries, nextCandidates] = await Promise.all([
+      client.listEntries(vaultId),
+      findCandidates(vaultId)
+    ]);
+    setEntries(nextEntries);
+    setCandidates(nextCandidates);
+  }
+
+  async function loadSelectedEntryDetail() {
+    if (!session?.activeVaultId || !selectedEntryId) {
+      return null;
+    }
+    return client.getEntryDetail(session.activeVaultId, selectedEntryId);
+  }
+
+  async function handleSavePendingLogin() {
+    if (
+      !session?.activeVaultId ||
+      !autofillSavePrompt ||
+      savingAutofillPromptRef.current
+    ) {
+      return;
+    }
+
+    savingAutofillPromptRef.current = true;
+    setSavingAutofillPrompt(true);
+    setAutofillSaveError(null);
+    const activeVaultId = session.activeVaultId;
+    let transaction = autofillSavePrompt.submission;
+    let plan = "plan" in transaction ? transaction.plan : null;
+
+    try {
+      if ("vaultId" in transaction && transaction.vaultId !== activeVaultId) {
+        throw new Error("Pending login save belongs to another vault");
+      }
+
+      if (
+        transaction.state === "persist_conflict" &&
+        plan &&
+        !transaction.conflict.retryable
+      ) {
+        if (plan.mode === "update") {
+          const detail = await loadCheckedAutofillEntryDetail(
+            client,
+            activeVaultId,
+            plan.entryId
+          );
+          const currentFields: PendingAutofillDesiredFields = {
+            title: detail.title,
+            username: detail.username,
+            password: detail.password,
+            url: detail.url,
+            notes: detail.notes,
+            totpUri: detail.totpUri ?? null,
+            customFields: detail.customFields ?? []
+          };
+          const rebased = rebasePendingAutofillUpdate(plan, currentFields);
+          if (!rebased) {
+            throw new Error(
+              "The login changed in the same field; review it before updating"
+            );
+          }
+          transaction = await planAutofillTransaction(activeVaultId, rebased);
+        } else {
+          if (transaction.conflict.code === "planned_entry_id_collision") {
+            transaction = await planAutofillTransaction(activeVaultId, {
+              mode: "create",
+              parentGroupId: plan.parentGroupId,
+              expectedMatchingEntryIds: plan.expectedMatchingEntryIds,
+              desiredFields: plan.desiredFields
+            });
+          } else {
+            if (!client.findExactMatchingEntryIds) {
+              throw new Error("Exact login matching is unavailable");
+            }
+            const matchingEntryIds = await client.findExactMatchingEntryIds(
+              activeVaultId,
+              plan.desiredFields
+            );
+            throw new Error(
+              matchingEntryIds.length > 0
+                ? "An exact login already exists; use the existing entry"
+                : "The matching login set changed; review before saving"
+            );
+          }
+        }
+        plan = "plan" in transaction ? transaction.plan : null;
+      } else if (!plan && autofillSavePrompt.mode === "update") {
+        const submission = pendingSubmission(transaction);
+        if (!submission) {
+          throw new Error("Pending login save has no recoverable fields");
+        }
+        const detail = await loadCheckedAutofillEntryDetail(
+          client,
+          activeVaultId,
+          autofillSavePrompt.entry.id
+        );
+        if (
+          typeof submission.newPassword === "string" &&
+          detail.password !== submission.password
+        ) {
+          await dismissAutofillPrompt();
+          return;
+        }
+        const nextPlan: PendingAutofillPlanInput = {
+          mode: "update",
+          entryId: autofillSavePrompt.entry.id,
+          expectedFields: {
+            title: detail.title,
+            username: detail.username,
+            password: detail.password,
+            url: detail.url,
+            notes: detail.notes,
+            totpUri: detail.totpUri ?? null,
+            customFields: detail.customFields ?? []
+          },
+          desiredFields: {
+            title: detail.title,
+            username:
+              submission.username.trim() === ""
+                ? detail.username
+                : submission.username,
+            password: pendingPassword(transaction),
+            url: detail.url || savedUrlForPendingSubmission(transaction),
+            notes: detail.notes,
+            totpUri: detail.totpUri ?? null,
+            customFields: detail.customFields ?? []
+          }
+        };
+        transaction = await planAutofillTransaction(activeVaultId, nextPlan);
+        plan = "plan" in transaction ? transaction.plan : null;
+      } else if (!plan && autofillSavePrompt.mode === "save") {
+        const submission = pendingSubmission(transaction);
+        if (!submission) {
+          throw new Error("Pending login save has no recoverable fields");
+        }
+        const groupTree = await client.listGroups(activeVaultId);
+        const desiredFields: PendingAutofillDesiredFields = {
+          title: titleForPendingSubmission(transaction),
+          username: submission.username,
+          password: pendingPassword(transaction),
+          url: savedUrlForPendingSubmission(transaction),
+          notes: "",
+          totpUri: null,
+          customFields: []
+        };
+        if (!client.findExactMatchingEntryIds) {
+          throw new Error("Exact login matching is unavailable");
+        }
+        const expectedMatchingEntryIds = await client.findExactMatchingEntryIds(
+          activeVaultId,
+          desiredFields
+        );
+        const nextPlan: PendingAutofillPlanInput = {
+          mode: "create",
+          parentGroupId: groupTree.root.id,
+          expectedMatchingEntryIds,
+          desiredFields
+        };
+        transaction = await planAutofillTransaction(activeVaultId, nextPlan);
+        plan = "plan" in transaction ? transaction.plan : null;
+      }
+
+      if (transaction.state === "persisted") {
+        clearAutofillPromptLocally();
+        await refreshEntriesAfterAutofillSave(activeVaultId);
+        return;
+      }
+      if (
+        transaction.state === "persist_conflict" &&
+        !transaction.conflict.retryable
+      ) {
+        throw new Error("The login changed; review it before saving again");
+      }
+      if (!plan) {
+        throw new Error("Pending login save has no mutation plan");
+      }
+      if (!executePendingAutofillMutation) {
+        throw new Error("Background login save execution is unavailable");
+      }
+      const execution = await executePendingAutofillMutation(
+        transaction.transactionId,
+        transaction.tabId
+      );
+      if (!execution.ok) {
+        if (execution.expired) {
+          clearAutofillPromptLocally();
+          return;
+        }
+        if (execution.pending) {
+          transaction = execution.pending;
+          setPendingAutofillSubmission(transaction);
+          setAutofillSavePrompt((currentPrompt) =>
+            currentPrompt
+              ? { ...currentPrompt, submission: transaction }
+              : currentPrompt
+          );
+        }
+        throw new Error(
+          execution.errorMessage ?? "Background login save did not complete"
+        );
+      }
+      clearAutofillPromptLocally();
+      await refreshEntriesAfterAutofillSave(activeVaultId);
+    } catch (saveFailure) {
+      setAutofillSaveError(
+        popupErrorMessage(saveFailure, "Failed to save login")
+      );
+    } finally {
+      savingAutofillPromptRef.current = false;
+      setSavingAutofillPrompt(false);
+    }
+  }
+
   async function handleLock() {
     setLocking(true);
 
@@ -868,7 +1544,6 @@ export function PopupApp({
       const nextSession = await client.lockSession();
       setSession(nextSession);
       setEntriesError(null);
-      setDetailError(null);
       setUnlockError(null);
       setUnlockErrorCause(null);
       setPassword("");
@@ -899,6 +1574,14 @@ export function PopupApp({
         )
       )
     : [];
+  const selectedEntry = selectedEntryId
+    ? candidates.find((entry) => entry.id === selectedEntryId) ??
+      entries.find((entry) => entry.id === selectedEntryId) ??
+      null
+    : null;
+  const selectedEntryIsSiteCandidate = selectedEntryId
+    ? candidates.some((entry) => entry.id === selectedEntryId)
+    : false;
 
   if (!session) {
     if (sessionError) {
@@ -1211,9 +1894,83 @@ export function PopupApp({
         onOpenExtensionSettings={handleOpenExtensionSettings}
       />
       {entriesError ? <div role="alert">{entriesError}</div> : null}
+      {!autofillSavePrompt && autofillSaveError ? (
+        <section style={passkeyPromptStyle} aria-live="polite">
+          <div role="alert">{autofillSaveError}</div>
+          <button
+            type="button"
+            onClick={retryPendingAutofillPrompt}
+            style={primaryActionStyle}
+          >
+            Retry
+          </button>
+        </section>
+      ) : null}
+      {autofillSavePrompt ? (
+        <section style={passkeyPromptStyle} aria-live="polite">
+          <strong>
+            {autofillSavePrompt.mode === "update"
+              ? "Update password?"
+              : autofillSavePrompt.mode === "retry"
+                ? "Retry login lookup?"
+                : autofillSavePrompt.ambiguous
+                  ? "Save new login?"
+                  : "Save login?"}
+          </strong>
+          <div style={{ color: popupTheme.colors.textMuted, fontSize: "0.86rem" }}>
+            {titleForPendingSubmission(autofillSavePrompt.submission)}
+          </div>
+          {autofillSaveError ? <div role="alert">{autofillSaveError}</div> : null}
+          <div style={{ display: "flex", gap: popupTheme.spacing.sm, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() => {
+                if (autofillSavePrompt.mode === "retry") {
+                  retryPendingAutofillPrompt();
+                } else {
+                  void handleSavePendingLogin();
+                }
+              }}
+              disabled={savingAutofillPrompt}
+              style={primaryActionStyle}
+            >
+              {autofillSavePrompt.mode === "update"
+                ? pendingTransactionState(autofillSavePrompt.submission) ===
+                  "persist_conflict"
+                  ? autofillSavePrompt.submission.state === "persist_conflict" &&
+                    autofillSavePrompt.submission.conflict.retryable
+                    ? "Retry Update"
+                    : "Replan Update"
+                  : "Update Password"
+                : autofillSavePrompt.mode === "retry"
+                  ? "Retry"
+                  : autofillSavePrompt.ambiguous
+                    ? "Save New Login"
+                    : "Save Login"}
+            </button>
+            {pendingTransactionState(autofillSavePrompt.submission) !==
+            "persisting" ? (
+              <button
+                type="button"
+                onClick={() => {
+                  void dismissAutofillPrompt();
+                }}
+                disabled={savingAutofillPrompt}
+                style={secondaryActionStyle}
+              >
+                Dismiss
+              </button>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
       <SiteCandidateList
         candidates={candidates}
-        onFill={(entryId) => fillEntry(session.activeVaultId ?? "", entryId)}
+        onFill={(entryId) =>
+          fillEntry(session.activeVaultId ?? "", entryId, {
+            requireSiteCandidate: true
+          })
+        }
         onSelectEntry={setSelectedEntryId}
       />
       <PopupSearch
@@ -1223,13 +1980,15 @@ export function PopupApp({
         selectedEntryId={selectedEntryId}
         onSelectEntry={setSelectedEntryId}
       />
-      {detailError ? <div role="alert">{detailError}</div> : null}
       <PopupRecordCard
-        detail={selectedDetail}
+        entry={selectedEntry}
+        loadDetail={loadSelectedEntryDetail}
         clearClipboardSeconds={extensionSettings.clearClipboardSeconds}
         onFill={() =>
           selectedEntryId
-            ? fillEntry(session.activeVaultId ?? "", selectedEntryId)
+            ? fillEntry(session.activeVaultId ?? "", selectedEntryId, {
+                requireSiteCandidate: selectedEntryIsSiteCandidate
+              })
             : Promise.resolve()
         }
       />

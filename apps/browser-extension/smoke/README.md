@@ -1,6 +1,6 @@
 # Browser v0 Smoke Test
 
-This directory contains the fixed login page used by the browser extension v0 smoke test. It validates the smallest autofill path: the extension recognizes a normal HTTP login page and fills the selected entry's username and password into the page.
+This directory contains fixed pages used by the browser extension v0 smoke and autofill regression tests. The automated Chrome smoke currently drives the smallest autofill path: the extension recognizes a normal HTTP login page and fills the selected entry's username and password into the page.
 
 This is not a product page and does not replace unit tests. Its value is providing a stable, repeatable browser scene for regression checks.
 
@@ -12,7 +12,7 @@ This is not a product page and does not replace unit tests. Its value is providi
 
 ## Page
 
-Smoke page:
+Chrome E2E smoke page:
 
 ```text
 apps/browser-extension/smoke/basic-login.html
@@ -24,6 +24,20 @@ The page provides two stable inputs:
 - `#vaultkern-smoke-password`
 
 They use standard `autocomplete="username"` and `autocomplete="current-password"` attributes, which are recognized by the current content-script field selection rules.
+
+Additional autofill regression fixtures:
+
+```text
+apps/browser-extension/smoke/username-first-login.html
+apps/browser-extension/smoke/password-step-login.html
+apps/browser-extension/smoke/noisy-login.html
+apps/browser-extension/smoke/register.html
+apps/browser-extension/smoke/change-password.html
+apps/browser-extension/smoke/totp.html
+apps/browser-extension/smoke/totp-split.html
+```
+
+These pages are covered by unit tests. They verify username-first login, password-only login steps, noisy pages with search, newsletter, and registration fields that should not receive login credentials, registration forms with new-password confirmation, password-change forms with current/new/confirm fields, and TOTP pages using both single-code and split-code layouts.
 
 ## Manual Verification
 
@@ -113,7 +127,31 @@ The real browser/native smoke path is available as a repository command:
 npm run smoke:e2e --workspace @vaultkern/browser-extension
 ```
 
-The command:
+With no arguments, the command runs every required Chromium case. The registry is
+strict: `--case` requires a known name, and unknown or stray arguments exit nonzero
+instead of falling back to the native smoke.
+
+Run one case while developing with:
+
+```bash
+npm run smoke:e2e --workspace @vaultkern/browser-extension -- --case controlled-react-input
+```
+
+Required cases:
+
+```text
+native-kdbx-totp-passkey
+exact-origin-automatic-authorization
+autofill-shadow-visibility
+dynamic-shadow-submit
+nested-dynamic-shadow-submit
+trusted-spa-submit
+controlled-react-input
+large-dom-performance
+mv3-pending-session-reload
+```
+
+The full command:
 
 - builds an E2E extension with a dev/test manifest `key`
 - fixes the E2E extension id to `akgcahfkhhffgcafpbbeihpmniekohik`
@@ -122,7 +160,21 @@ The command:
 - starts a temporary HTTP smoke server
 - writes `NativeMessagingHosts/com.vaultkern.runtime.json` under a temporary Chrome for Testing profile
 - runs `open -> unlock -> create -> save -> find candidates -> fill` through the real extension background native bridge
+- proves a message without a fill capability releases nothing, then fills with a manual capability bound to the real entry id
 - verifies the final submit result: `submitted:smoke-user@example.com:12`
+- verifies automatic fill through the native/background/page-load/content chain for an exact origin while rejecting different ports, sibling hosts, and HTTPS-to-HTTP downgrade pages; a held page resource keeps load incomplete until the isolated probe and attempt-sequence baseline are installed, and every assertion waits for the correlated terminal background diagnostic
+- covers open, closed, nested dynamic, and unslotted shadow DOM plus real Chromium occlusion and hit-testing
+- bundles the repository's local React 19 into a temporary fixture and checks DOM value, React state, events, and rerender stability
+- measures seven fills after two warmups against 50,000 noise nodes and 20 credential fields, requiring a median at or below 500 ms and bounded hot-path DOM instrumentation
+- terminates and restarts the MV3 worker twice through CDP; after each recovery it verifies the same session key, no local/sync secret copy, denied ISOLATED-world access, and restoration through a newly opened popup
+
+Each successful invocation ends with an `executedCases` list. This makes it clear
+which named cases actually ran in CI logs.
+
+Chromium currently reuses the CDP target id and Playwright `Worker` wrapper when
+restarting the same service-worker version. The MV3 case therefore also requires
+an observed `stopped` lifecycle state and a fresh worker-realm nonce; the old nonce
+must be absent before the popup recovery assertion is allowed to pass.
 
 Normal release builds still use:
 

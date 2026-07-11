@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Autofill shadow visibility</title>
+    <style>
+      body { margin: 32px; }
+      #host, #closed-host, #unslotted-host { display: block; width: 320px; margin-block: 12px; }
+    </style>
+  </head>
+  <body>
+    <div id="host"></div>
+    <div id="closed-host"></div>
+    <div id="unslotted-host">
+      <input
+        id="unslotted-password"
+        type="password"
+        autocomplete="current-password"
+      />
+    </div>
+    <script>
+      const root = document.querySelector("#host").attachShadow({ mode: "open" });
+      root.innerHTML = `
+        <style>
+          input { box-sizing: border-box; width: 280px; height: 40px; }
+        </style>
+        <input id="shadow-password" type="password" autocomplete="current-password">
+      `;
+
+      const closedRoot = document.querySelector("#closed-host").attachShadow({
+        mode: "closed"
+      });
+      closedRoot.innerHTML = `
+        <style>
+          input { box-sizing: border-box; width: 280px; height: 40px; }
+        </style>
+        <input id="closed-shadow-password" type="password" autocomplete="current-password">
+      `;
+      const closedPassword = closedRoot.querySelector("#closed-shadow-password");
+      globalThis.__vaultkernClosedShadowProbe = () => ({
+        value: closedPassword.value,
+        width: closedPassword.getBoundingClientRect().width,
+        height: closedPassword.getBoundingClientRect().height,
+        publicRoot: document.querySelector("#closed-host").shadowRoot
+      });
+
+      document.querySelector("#unslotted-host").attachShadow({ mode: "open" }).innerHTML = `
+        <style>:host { display: block; }</style>
+        <p>There is deliberately no slot.</p>
+      `;
+    </script>
+  </body>
+</html>

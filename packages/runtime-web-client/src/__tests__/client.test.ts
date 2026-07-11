@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { RuntimeClient } from "../index";
+import {
+  RuntimeClient,
+  type PersistAutofillMutationRequest
+} from "../index";
 
 describe("RuntimeClient", () => {
+  it("does not expose the superseded conditional create command", () => {
+    const client = new RuntimeClient({ send: vi.fn() });
+
+    expect("createEntryIfMatchingEntryIds" in client).toBe(false);
+  });
+
   it("requests session state through the configured transport", async () => {
     const transport = {
       send: vi.fn().mockResolvedValue({
@@ -655,6 +664,579 @@ describe("RuntimeClient", () => {
         entry_id: "entry-1"
       }
     });
+  });
+
+  it("sends the atomic autofill update precondition and matching lookup", async () => {
+    const transport = {
+      send: vi
+        .fn()
+        .mockResolvedValueOnce({ type: "entry_detail", id: "entry-1" })
+        .mockResolvedValueOnce({
+          type: "entry_id_list",
+          entryIds: ["entry-existing"]
+        })
+    };
+    const client = new RuntimeClient(transport);
+    const expectedFields = {
+      title: "Example",
+      username: "alice",
+      password: "old-secret",
+      url: "https://example.com/login",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    };
+    const desiredFields = { ...expectedFields, password: "new-secret" };
+
+    await client.compareAndUpdateEntryFields(
+      "vault-1",
+      "entry-1",
+      expectedFields,
+      desiredFields
+    );
+    await expect(
+      client.findExactMatchingEntryIds("vault-1", desiredFields)
+    ).resolves.toEqual(["entry-existing"]);
+
+    expect(transport.send).toHaveBeenNthCalledWith(1, {
+      version: 1,
+      command: {
+        type: "compare_and_update_entry_fields",
+        vault_id: "vault-1",
+        entry_id: "entry-1",
+        expected_fields: {
+          title: "Example",
+          username: "alice",
+          password: "old-secret",
+          url: "https://example.com/login",
+          notes: "",
+          totpUri: null,
+          customFields: []
+        },
+        desired_fields: {
+          title: "Example",
+          username: "alice",
+          password: "new-secret",
+          url: "https://example.com/login",
+          notes: "",
+          totpUri: null,
+          customFields: []
+        }
+      }
+    });
+    expect(transport.send).toHaveBeenNthCalledWith(2, {
+      version: 1,
+      command: {
+        type: "find_exact_matching_entry_ids",
+        vault_id: "vault-1",
+        fields: {
+          title: "Example",
+          username: "alice",
+          password: "new-secret",
+          url: "https://example.com/login",
+          notes: "",
+          totpUri: null,
+          customFields: []
+        }
+      }
+    });
+  });
+
+  it("sends one atomic autofill persist envelope and validates its durable binding", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue({
+        type: "autofill_persist_result",
+        transactionId: "transaction-1",
+        operationId: "operation-1",
+        vaultId: "vault-1",
+        outcome: "durable",
+        disposition: "committed",
+        entryId: "entry-1",
+        durability: "source",
+        cacheState: "current",
+        committedFingerprint: {
+          contentSha256:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          sizeBytes: 4096
+        },
+        mergeSummary: {
+          mergedEntries: 2,
+          historySnapshotsAdded: 1
+        },
+        receiptVersion: 1
+      })
+    };
+    const client = new RuntimeClient(transport);
+    const expectedFields = {
+      title: "Example",
+      username: "alice",
+      password: "old-secret",
+      url: "https://example.com/login",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    };
+
+    await expect(
+      client.persistAutofillMutation({
+        transactionId: "transaction-1",
+        operationId: "operation-1",
+        vaultId: "vault-1",
+        plan: {
+          mode: "update",
+          entryId: "entry-1",
+          expectedFields,
+          desiredFields: { ...expectedFields, password: "new-secret" }
+        }
+      })
+    ).resolves.toMatchObject({
+      outcome: "durable",
+      entryId: "entry-1",
+      durability: "source"
+    });
+
+    expect(transport.send).toHaveBeenCalledTimes(1);
+    expect(transport.send).toHaveBeenCalledWith({
+      version: 1,
+      command: {
+        type: "persist_autofill_mutation",
+        transaction_id: "transaction-1",
+        operation_id: "operation-1",
+        vault_id: "vault-1",
+        plan: {
+          mode: "update",
+          entry_id: "entry-1",
+          expected_fields: {
+            title: "Example",
+            username: "alice",
+            password: "old-secret",
+            url: "https://example.com/login",
+            notes: "",
+            totpUri: null,
+            customFields: []
+          },
+          desired_fields: {
+            title: "Example",
+            username: "alice",
+            password: "new-secret",
+            url: "https://example.com/login",
+            notes: "",
+            totpUri: null,
+            customFields: []
+          }
+        }
+      }
+    });
+  });
+
+  it("sends a preplanned UUID and exact matching baseline for atomic create", async () => {
+    const plannedEntryId = "12345678-1234-4abc-8def-1234567890ab";
+    const transport = {
+      send: vi.fn().mockResolvedValue({
+        type: "autofill_persist_result",
+        transactionId: "transaction-2",
+        operationId: "operation-2",
+        vaultId: "vault-1",
+        outcome: "durable",
+        disposition: "replayed",
+        entryId: plannedEntryId,
+        durability: "pending_remote_cache",
+        cacheState: "pending_sync",
+        committedFingerprint: {
+          contentSha256:
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+          sizeBytes: 2048
+        },
+        mergeSummary: null,
+        receiptVersion: 1
+      })
+    };
+    const client = new RuntimeClient(transport);
+    const desiredFields = {
+      title: "Example",
+      username: "alice",
+      password: "new-secret",
+      url: "https://example.com/login",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    };
+
+    await expect(
+      client.persistAutofillMutation({
+        transactionId: "transaction-2",
+        operationId: "operation-2",
+        vaultId: "vault-1",
+        plan: {
+          mode: "create",
+          parentGroupId: "group-root",
+          plannedEntryId,
+          expectedMatchingEntryIds: ["entry-a", "entry-b"],
+          desiredFields
+        }
+      })
+    ).resolves.toMatchObject({ disposition: "replayed", entryId: plannedEntryId });
+
+    expect(transport.send).toHaveBeenCalledWith({
+      version: 1,
+      command: {
+        type: "persist_autofill_mutation",
+        transaction_id: "transaction-2",
+        operation_id: "operation-2",
+        vault_id: "vault-1",
+        plan: {
+          mode: "create",
+          parent_group_id: "group-root",
+          planned_entry_id: plannedEntryId,
+          expected_matching_entry_ids: ["entry-a", "entry-b"],
+          desired_fields: {
+            title: "Example",
+            username: "alice",
+            password: "new-secret",
+            url: "https://example.com/login",
+            notes: "",
+            totpUri: null,
+            customFields: []
+          }
+        }
+      }
+    });
+  });
+
+  it("rejects nil and noncanonical planned entry UUIDs before transport", async () => {
+    const send = vi.fn().mockResolvedValue({
+      type: "autofill_persist_result",
+      transactionId: "transaction-2",
+      operationId: "operation-2",
+      vaultId: "vault-1",
+      outcome: "conflict",
+      code: "create_matching_set_changed",
+      retryable: false
+    });
+    const client = new RuntimeClient({ send });
+    const desiredFields = {
+      title: "Example",
+      username: "alice",
+      password: "new-secret",
+      url: "https://example.com/login",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    };
+
+    for (const plannedEntryId of [
+      "00000000-0000-0000-0000-000000000000",
+      "12345678-1234-4ABC-8DEF-1234567890AB",
+      "1234567812344abc8def1234567890ab"
+    ]) {
+      await expect(
+        client.persistAutofillMutation({
+          transactionId: "transaction-2",
+          operationId: "operation-2",
+          vaultId: "vault-1",
+          plan: {
+            mode: "create",
+            parentGroupId: "group-root",
+            plannedEntryId,
+            expectedMatchingEntryIds: [],
+            desiredFields
+          }
+        })
+      ).rejects.toThrow(/canonical|uuid/i);
+    }
+
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("validates a delayed response against the immutable sent identity and mode", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const transport = {
+      send: vi.fn(async () => {
+        await gate;
+        return {
+          type: "autofill_persist_result",
+          transactionId: "transaction-original",
+          operationId: "operation-original",
+          vaultId: "vault-original",
+          outcome: "conflict",
+          code: "create_matching_set_changed",
+          retryable: false
+        };
+      })
+    };
+    const fields = {
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com/login",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    };
+    const request: PersistAutofillMutationRequest = {
+      transactionId: "transaction-original",
+      operationId: "operation-original",
+      vaultId: "vault-original",
+      plan: {
+        mode: "create",
+        parentGroupId: "group-root",
+        plannedEntryId: "12345678-1234-4abc-8def-1234567890ab",
+        expectedMatchingEntryIds: [],
+        desiredFields: fields
+      }
+    };
+    const pending = new RuntimeClient(transport).persistAutofillMutation(request);
+
+    request.transactionId = "transaction-mutated";
+    request.operationId = "operation-mutated";
+    request.vaultId = "vault-mutated";
+    request.plan = {
+      mode: "update",
+      entryId: "entry-mutated",
+      expectedFields: fields,
+      desiredFields: fields
+    };
+    release();
+
+    await expect(pending).resolves.toMatchObject({
+      transactionId: "transaction-original",
+      operationId: "operation-original",
+      vaultId: "vault-original",
+      code: "create_matching_set_changed"
+    });
+  });
+
+  it("deeply snapshots the command plan before deferred transport serialization", async () => {
+    let release!: () => void;
+    let observedMessage: unknown;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const transport = {
+      send: vi.fn(async (message: unknown) => {
+        await gate;
+        observedMessage = structuredClone(message);
+        return {
+          type: "autofill_persist_result",
+          transactionId: "transaction-2",
+          operationId: "operation-2",
+          vaultId: "vault-1",
+          outcome: "conflict",
+          code: "create_matching_set_changed",
+          retryable: false
+        };
+      })
+    };
+    const request: PersistAutofillMutationRequest = {
+      transactionId: "transaction-2",
+      operationId: "operation-2",
+      vaultId: "vault-1",
+      plan: {
+        mode: "create",
+        parentGroupId: "group-root",
+        plannedEntryId: "12345678-1234-4abc-8def-1234567890ab",
+        expectedMatchingEntryIds: ["entry-existing"],
+        desiredFields: {
+          title: "Example",
+          username: "alice",
+          password: "secret",
+          url: "https://example.com/login",
+          notes: "",
+          totpUri: null,
+          customFields: [
+            { key: "Tenant", value: "original", protected: false }
+          ]
+        }
+      }
+    };
+    if (request.plan.mode !== "create") {
+      throw new Error("expected create plan fixture");
+    }
+    const plan = request.plan;
+    const pending = new RuntimeClient(transport).persistAutofillMutation(request);
+
+    plan.expectedMatchingEntryIds.push("entry-late");
+    plan.desiredFields.customFields[0]!.value = "mutated";
+    plan.desiredFields.customFields.push({
+      key: "Late",
+      value: "added",
+      protected: true
+    });
+    release();
+    await pending;
+
+    expect(observedMessage).toMatchObject({
+      command: {
+        plan: {
+          expected_matching_entry_ids: ["entry-existing"],
+          desired_fields: {
+            customFields: [
+              { key: "Tenant", value: "original", protected: false }
+            ]
+          }
+        }
+      }
+    });
+  });
+
+  it("rejects malformed, mismatched, legacy, and impossible atomic persist results", async () => {
+    const request = {
+      transactionId: "transaction-1",
+      operationId: "operation-1",
+      vaultId: "vault-1",
+      plan: {
+        mode: "update" as const,
+        entryId: "entry-1",
+        expectedFields: {
+          title: "Example",
+          username: "alice",
+          password: "old-secret",
+          url: "https://example.com/login",
+          notes: "",
+          totpUri: null,
+          customFields: []
+        },
+        desiredFields: {
+          title: "Example",
+          username: "alice",
+          password: "new-secret",
+          url: "https://example.com/login",
+          notes: "",
+          totpUri: null,
+          customFields: []
+        }
+      }
+    };
+    const valid = {
+      type: "autofill_persist_result",
+      transactionId: "transaction-1",
+      operationId: "operation-1",
+      vaultId: "vault-1",
+      outcome: "durable",
+      disposition: "committed",
+      entryId: "entry-1",
+      durability: "source",
+      cacheState: "current",
+      committedFingerprint: {
+        contentSha256:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        sizeBytes: 4096
+      },
+      mergeSummary: null,
+      receiptVersion: 1
+    };
+    const { operationId: _operationId, ...missingOperationId } = valid;
+    const { entryId: _entryId, ...missingEntryId } = valid;
+    const invalidResponses = [
+      missingOperationId,
+      missingEntryId,
+      { ...valid, transactionId: "transaction-other" },
+      { ...valid, operationId: "operation-other" },
+      { ...valid, vaultId: "vault-other" },
+      { ...valid, entryId: "entry-other" },
+      { ...valid, durability: "pending_remote_cache", cacheState: "current" },
+      { ...valid, durability: "source", cacheState: "pending_sync" },
+      {
+        ...valid,
+        committedFingerprint: { contentSha256: "not-a-sha", sizeBytes: -1 }
+      },
+      { ...valid, receiptVersion: 2 },
+      { type: "save_vault_result", status: "saved" },
+      { ...valid, outcome: "eventually_durable" }
+    ];
+
+    for (const response of invalidResponses) {
+      const client = new RuntimeClient({ send: vi.fn().mockResolvedValue(response) });
+      await expect(client.persistAutofillMutation(request)).rejects.toThrow();
+    }
+  });
+
+  it("accepts only plan-compatible atomic persist conflicts with fixed retryability", async () => {
+    const fields = {
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com/login",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    };
+    const updateRequest = {
+      transactionId: "transaction-1",
+      operationId: "operation-1",
+      vaultId: "vault-1",
+      plan: {
+        mode: "update" as const,
+        entryId: "entry-1",
+        expectedFields: fields,
+        desiredFields: fields
+      }
+    };
+    const createRequest = {
+      transactionId: "transaction-1",
+      operationId: "operation-1",
+      vaultId: "vault-1",
+      plan: {
+        mode: "create" as const,
+        parentGroupId: "group-root",
+        plannedEntryId: "12345678-1234-4abc-8def-1234567890ab",
+        expectedMatchingEntryIds: ["entry-existing"],
+        desiredFields: fields
+      }
+    };
+    const response = (code: string, retryable: boolean) => ({
+      type: "autofill_persist_result",
+      transactionId: "transaction-1",
+      operationId: "operation-1",
+      vaultId: "vault-1",
+      outcome: "conflict",
+      code,
+      retryable
+    });
+    const validCases = [
+      [updateRequest, "active_vault_mismatch", true],
+      [updateRequest, "update_precondition_failed", false],
+      [updateRequest, "operation_binding_mismatch", false],
+      [updateRequest, "concurrent_vault_changes", false],
+      [updateRequest, "source_changed_retry_exhausted", true],
+      [createRequest, "active_vault_mismatch", true],
+      [createRequest, "create_matching_set_changed", false],
+      [createRequest, "planned_entry_id_collision", false],
+      [createRequest, "operation_binding_mismatch", false],
+      [createRequest, "concurrent_vault_changes", false],
+      [createRequest, "source_changed_retry_exhausted", true],
+      [createRequest, "legacy_create_outcome_ambiguous", false]
+    ] as const;
+
+    for (const [request, code, retryable] of validCases) {
+      const client = new RuntimeClient({
+        send: vi.fn().mockResolvedValue(response(code, retryable))
+      });
+      await expect(client.persistAutofillMutation(request)).resolves.toEqual(
+        response(code, retryable)
+      );
+    }
+
+    const invalidCases = [
+      [updateRequest, "create_matching_set_changed", false],
+      [updateRequest, "planned_entry_id_collision", false],
+      [updateRequest, "legacy_create_outcome_ambiguous", false],
+      [createRequest, "update_precondition_failed", false],
+      [updateRequest, "active_vault_mismatch", false],
+      [updateRequest, "source_changed_retry_exhausted", false],
+      [updateRequest, "concurrent_vault_changes", true],
+      [updateRequest, "update_precondition_failed", true],
+      [updateRequest, "overwrite_anyway", true]
+    ] as const;
+    for (const [request, code, retryable] of invalidCases) {
+      const client = new RuntimeClient({
+        send: vi.fn().mockResolvedValue(response(code, retryable))
+      });
+      await expect(client.persistAutofillMutation(request)).rejects.toThrow();
+    }
   });
 
   it("sets and clears entry passkeys through dedicated helpers", async () => {

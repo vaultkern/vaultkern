@@ -1,10 +1,13 @@
 use vaultkern_runtime_protocol::{
-    DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto,
-    DatabaseKdfSettingsDto, DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto,
-    DatabaseRecycleBinSettingsDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
-    EntryAttachmentContentDto, EntryDetailDto, EntryHistoryDetailDto, EntryHistoryItemDto,
-    EntryHistoryListDto, EntryPasskeyDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto,
-    GroupTreeDto, MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
+    AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
+    AutofillPersistDispositionDto, AutofillPersistDurabilityDto, AutofillPersistOutcomeDto,
+    AutofillPersistPlanDto, AutofillPersistResultDto, DatabaseCredentialsUpdateDto,
+    DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseKdfSettingsDto,
+    DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
+    DatabaseSettingsDto, DatabaseSettingsUpdateDto, EntryAttachmentContentDto, EntryDetailDto,
+    EntryFieldsDto, EntryHistoryDetailDto, EntryHistoryItemDto, EntryHistoryListDto,
+    EntryPasskeyDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto,
+    MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
     OneDriveItemListDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
     PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
     PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
@@ -28,6 +31,30 @@ fn protocol_envelope_serializes_open_local_vault_command() {
     assert!(json.contains("\"version\":1"));
     assert!(json.contains("\"open_local_vault\""));
     assert!(json.contains("/tmp/demo.kdbx"));
+}
+
+#[test]
+fn protocol_rejects_the_superseded_conditional_create_command() {
+    let json = r#"{
+        "version": 1,
+        "command": {
+            "type": "create_entry_if_matching_entry_ids",
+            "vault_id": "vault-1",
+            "parent_group_id": "group-root",
+            "fields": {
+                "title": "Example",
+                "username": "alice",
+                "password": "secret",
+                "url": "https://example.com",
+                "notes": "",
+                "totpUri": null,
+                "customFields": [{"key":"Tenant","value":"prod","protected":true}]
+            },
+            "expected_matching_entry_ids": []
+        }
+    }"#;
+
+    assert!(serde_json::from_str::<ProtocolEnvelope>(json).is_err());
 }
 
 #[test]
@@ -533,6 +560,7 @@ fn protocol_roundtrips_fill_candidates_response_shape() {
             username: "user@example.com".into(),
             url: "https://example.com".into(),
             group_id: "group-1".into(),
+            has_totp: true,
         }],
     });
 
@@ -543,6 +571,7 @@ fn protocol_roundtrips_fill_candidates_response_shape() {
     let entries = object.get("entries").unwrap().as_array().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].get("id").unwrap(), "entry-1");
+    assert_eq!(entries[0].get("hasTotp").unwrap().as_bool(), Some(true));
     assert_eq!(entries[0].get("title").unwrap(), "Email");
     assert_eq!(entries[0].get("username").unwrap(), "user@example.com");
     assert_eq!(entries[0].get("url").unwrap(), "https://example.com");
@@ -711,6 +740,19 @@ fn protocol_roundtrips_list_groups_command() {
 
 #[test]
 fn protocol_roundtrips_entry_mutation_commands() {
+    let expected_fields = EntryFieldsDto {
+        title: "Example".into(),
+        username: "alice".into(),
+        password: "secret".into(),
+        url: "https://example.com".into(),
+        notes: "demo".into(),
+        totp_uri: None,
+        custom_fields: vec![],
+    };
+    let desired_fields = EntryFieldsDto {
+        password: "secret-2".into(),
+        ..expected_fields.clone()
+    };
     let create = ProtocolEnvelope::new(RuntimeCommand::CreateEntry {
         vault_id: "vault-1".into(),
         parent_group_id: "group-root".into(),
@@ -738,6 +780,12 @@ fn protocol_roundtrips_entry_mutation_commands() {
             protected: true,
         }],
     });
+    let compare_and_update = ProtocolEnvelope::new(RuntimeCommand::CompareAndUpdateEntryFields {
+        vault_id: "vault-1".into(),
+        entry_id: "entry-1".into(),
+        expected_fields: expected_fields.clone(),
+        desired_fields: desired_fields.clone(),
+    });
     let clear_totp = ProtocolEnvelope::new(RuntimeCommand::ClearEntryTotp {
         vault_id: "vault-1".into(),
         entry_id: "entry-1".into(),
@@ -747,10 +795,223 @@ fn protocol_roundtrips_entry_mutation_commands() {
         entry_id: "entry-1".into(),
     });
 
-    for envelope in [create, update, clear_totp, delete] {
+    for envelope in [create, update, compare_and_update, clear_totp, delete] {
         let json = serde_json::to_string(&envelope).unwrap();
         let decoded: ProtocolEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, envelope);
+    }
+}
+
+#[test]
+fn protocol_accepts_runtime_web_client_atomic_entry_field_shape() {
+    let envelope: ProtocolEnvelope = serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "command": {
+            "type": "compare_and_update_entry_fields",
+            "vault_id": "vault-1",
+            "entry_id": "entry-1",
+            "expected_fields": {
+                "title": "Example",
+                "username": "alice",
+                "password": "old-secret",
+                "url": "https://example.com/login",
+                "notes": "",
+                "totpUri": null,
+                "customFields": []
+            },
+            "desired_fields": {
+                "title": "Example",
+                "username": "alice",
+                "password": "new-secret",
+                "url": "https://example.com/login",
+                "notes": "",
+                "totpUri": null,
+                "customFields": []
+            }
+        }
+    }))
+    .expect("deserialize runtime web client envelope");
+
+    let RuntimeCommand::CompareAndUpdateEntryFields {
+        expected_fields,
+        desired_fields,
+        ..
+    } = envelope.command
+    else {
+        panic!("expected atomic update command");
+    };
+    assert_eq!(expected_fields.password, "old-secret");
+    assert_eq!(desired_fields.password, "new-secret");
+}
+
+#[test]
+fn protocol_roundtrips_atomic_autofill_persist_plans_with_snake_case_commands() {
+    let expected_fields = EntryFieldsDto {
+        title: "Example".into(),
+        username: "alice".into(),
+        password: "old-secret".into(),
+        url: "https://example.com/login".into(),
+        notes: String::new(),
+        totp_uri: None,
+        custom_fields: vec![],
+    };
+    let desired_fields = EntryFieldsDto {
+        password: "new-secret".into(),
+        ..expected_fields.clone()
+    };
+    let update = ProtocolEnvelope::new(RuntimeCommand::PersistAutofillMutation {
+        transaction_id: "transaction-1".into(),
+        operation_id: "operation-1".into(),
+        vault_id: "vault-1".into(),
+        plan: AutofillPersistPlanDto::Update {
+            entry_id: "entry-1".into(),
+            expected_fields: expected_fields.clone(),
+            desired_fields: desired_fields.clone(),
+        },
+    });
+    let create = ProtocolEnvelope::new(RuntimeCommand::PersistAutofillMutation {
+        transaction_id: "transaction-2".into(),
+        operation_id: "operation-2".into(),
+        vault_id: "vault-1".into(),
+        plan: AutofillPersistPlanDto::Create {
+            parent_group_id: "group-root".into(),
+            planned_entry_id: "12345678-1234-4abc-8def-1234567890ab".into(),
+            expected_matching_entry_ids: vec!["entry-existing".into()],
+            desired_fields,
+        },
+    });
+
+    for envelope in [update, create] {
+        let json = serde_json::to_value(&envelope).expect("serialize atomic persist plan");
+        assert_eq!(json["command"]["type"], "persist_autofill_mutation");
+        assert!(json["command"].get("transaction_id").is_some());
+        assert!(json["command"].get("operation_id").is_some());
+        assert!(json["command"].get("vault_id").is_some());
+        assert!(json["command"]["plan"].get("desired_fields").is_some());
+        assert!(json["command"].get("transactionId").is_none());
+        assert_eq!(
+            serde_json::from_value::<ProtocolEnvelope>(json).expect("roundtrip atomic plan"),
+            envelope
+        );
+    }
+}
+
+#[test]
+fn protocol_roundtrips_atomic_autofill_durable_results_with_camel_case_fields() {
+    for disposition in [
+        AutofillPersistDispositionDto::Committed,
+        AutofillPersistDispositionDto::Replayed,
+    ] {
+        let response = RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
+            transaction_id: "transaction-1".into(),
+            operation_id: "operation-1".into(),
+            vault_id: "vault-1".into(),
+            outcome: AutofillPersistOutcomeDto::Durable {
+                disposition,
+                entry_id: "entry-1".into(),
+                durability: AutofillPersistDurabilityDto::Source,
+                cache_state: AutofillCacheStateDto::Current,
+                committed_fingerprint: AutofillCommittedFingerprintDto {
+                    content_sha256:
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                    size_bytes: 4096,
+                },
+                merge_summary: Some(MergeSummaryDto {
+                    merged_entries: 2,
+                    history_snapshots_added: 1,
+                }),
+                receipt_version: 1,
+            },
+        });
+
+        let json = serde_json::to_value(&response).expect("serialize atomic durable response");
+        assert_eq!(json["type"], "autofill_persist_result");
+        assert_eq!(json["transactionId"], "transaction-1");
+        assert_eq!(json["operationId"], "operation-1");
+        assert_eq!(json["vaultId"], "vault-1");
+        assert_eq!(json["outcome"], "durable");
+        assert!(json.get("entryId").is_some());
+        assert!(json.get("cacheState").is_some());
+        assert!(json.get("committedFingerprint").is_some());
+        assert!(json.get("receiptVersion").is_some());
+        assert!(json.get("transaction_id").is_none());
+        assert_eq!(
+            serde_json::from_value::<RuntimeResponse>(json).expect("roundtrip durable response"),
+            response
+        );
+    }
+}
+
+#[test]
+fn protocol_roundtrips_every_atomic_autofill_conflict_code() {
+    let codes = [
+        AutofillPersistConflictCodeDto::ActiveVaultMismatch,
+        AutofillPersistConflictCodeDto::UpdatePreconditionFailed,
+        AutofillPersistConflictCodeDto::CreateMatchingSetChanged,
+        AutofillPersistConflictCodeDto::PlannedEntryIdCollision,
+        AutofillPersistConflictCodeDto::OperationBindingMismatch,
+        AutofillPersistConflictCodeDto::ConcurrentVaultChanges,
+        AutofillPersistConflictCodeDto::SourceChangedRetryExhausted,
+        AutofillPersistConflictCodeDto::LegacyCreateOutcomeAmbiguous,
+    ];
+
+    for code in codes {
+        let response = RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
+            transaction_id: "transaction-1".into(),
+            operation_id: "operation-1".into(),
+            vault_id: "vault-1".into(),
+            outcome: AutofillPersistOutcomeDto::Conflict {
+                code,
+                retryable: matches!(
+                    code,
+                    AutofillPersistConflictCodeDto::ActiveVaultMismatch
+                        | AutofillPersistConflictCodeDto::SourceChangedRetryExhausted
+                ),
+            },
+        });
+        let json = serde_json::to_value(&response).expect("serialize conflict response");
+        assert_eq!(json["outcome"], "conflict");
+        assert_eq!(
+            serde_json::from_value::<RuntimeResponse>(json).expect("roundtrip conflict response"),
+            response
+        );
+    }
+}
+
+#[test]
+fn protocol_rejects_unknown_or_malformed_atomic_autofill_results() {
+    let unknown_outcome = serde_json::json!({
+        "type": "autofill_persist_result",
+        "transactionId": "transaction-1",
+        "operationId": "operation-1",
+        "vaultId": "vault-1",
+        "outcome": "eventually_durable"
+    });
+    let unknown_conflict = serde_json::json!({
+        "type": "autofill_persist_result",
+        "transactionId": "transaction-1",
+        "operationId": "operation-1",
+        "vaultId": "vault-1",
+        "outcome": "conflict",
+        "code": "overwrite_anyway",
+        "retryable": false
+    });
+    let missing_fingerprint = serde_json::json!({
+        "type": "autofill_persist_result",
+        "transactionId": "transaction-1",
+        "operationId": "operation-1",
+        "vaultId": "vault-1",
+        "outcome": "durable",
+        "disposition": "committed",
+        "entryId": "entry-1",
+        "durability": "source",
+        "cacheState": "current",
+        "mergeSummary": null,
+        "receiptVersion": 1
+    });
+
+    for malformed in [unknown_outcome, unknown_conflict, missing_fingerprint] {
+        assert!(serde_json::from_value::<RuntimeResponse>(malformed).is_err());
     }
 }
 

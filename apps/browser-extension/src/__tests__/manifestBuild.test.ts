@@ -11,6 +11,10 @@ import {
   E2E_MANIFEST_KEY,
   writeManifest
 } from "../../scripts/manifestBuild.mjs";
+import {
+  assertClassicContentScript,
+  CLASSIC_CONTENT_SCRIPT_BUDGET_BYTES
+} from "../../scripts/verifyClassicContentScript.mjs";
 
 const baseManifest = {
   manifest_version: 3,
@@ -21,6 +25,51 @@ const baseManifest = {
 };
 
 describe("manifest build", () => {
+  it("rejects module syntax in the classic autofill content script", () => {
+    expect(() => assertClassicContentScript("const installed = true;"))
+      .not.toThrow();
+    expect(() => assertClassicContentScript('import "./shared.js";')).toThrow(
+      "must be a standalone classic script"
+    );
+    expect(() => assertClassicContentScript("export const installed = true;"))
+      .toThrow("must be a standalone classic script");
+    expect(() => assertClassicContentScript('void import("./shared.js");'))
+      .toThrow("must not import additional chunks");
+  });
+
+  it("enforces the classic autofill content script byte budget inclusively", () => {
+    expect(() =>
+      assertClassicContentScript(" ".repeat(CLASSIC_CONTENT_SCRIPT_BUDGET_BYTES))
+    ).not.toThrow();
+    expect(() =>
+      assertClassicContentScript(
+        " ".repeat(CLASSIC_CONTENT_SCRIPT_BUDGET_BYTES + 1)
+      )
+    ).toThrow("61441 bytes and exceeds the 61440-byte budget");
+  });
+
+  it("rejects a production content bundle that exposes the synthetic submit bypass", () => {
+    expect(() =>
+      assertClassicContentScript(
+        "globalThis.__vaultkernAllowSyntheticAutofillSubmitForTests = true;"
+      )
+    ).toThrow("must not expose the synthetic autofill submit test bypass");
+  });
+
+  it("measures the classic autofill content script budget as UTF-8 bytes", () => {
+    const source = `//${"\u00e9".repeat(CLASSIC_CONTENT_SCRIPT_BUDGET_BYTES / 2)}`;
+
+    expect(source.length).toBeLessThanOrEqual(
+      CLASSIC_CONTENT_SCRIPT_BUDGET_BYTES
+    );
+    expect(Buffer.byteLength(source, "utf8")).toBeGreaterThan(
+      CLASSIC_CONTENT_SCRIPT_BUDGET_BYTES
+    );
+    expect(() => assertClassicContentScript(source)).toThrow(
+      "bytes and exceeds the 61440-byte budget"
+    );
+  });
+
   it("declares a standalone extension options page", () => {
     const repoManifest = JSON.parse(
       readFileSync(
@@ -59,14 +108,41 @@ describe("manifest build", () => {
     expect(manifest.key).toBe(E2E_MANIFEST_KEY);
   });
 
-  it("keeps autofill top-frame only while injecting the isolated WebAuthn bridge in all frames", () => {
+  it("installs the main-world autofill hook before the isolated content script", () => {
+    const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
+
+    const shadowHookIndex = manifest.content_scripts.findIndex(
+      (script: { js?: string[] }) =>
+        script.js?.includes("autofillShadowPageHook.js")
+    );
+    const autofillScriptIndex = manifest.content_scripts.findIndex(
+      (script: { js?: string[] }) => script.js?.includes("contentScript.js")
+    );
+
+    expect(shadowHookIndex).toBeGreaterThanOrEqual(0);
+    expect(autofillScriptIndex).toBeGreaterThan(shadowHookIndex);
+
+    const shadowHook = manifest.content_scripts[shadowHookIndex];
+    const autofillScript = manifest.content_scripts[autofillScriptIndex];
+    expect(shadowHook).toMatchObject({
+      js: ["autofillShadowPageHook.js"],
+      run_at: "document_start",
+      world: "MAIN"
+    });
+    expect(autofillScript).toMatchObject({
+      js: ["contentScript.js"],
+      run_at: "document_start"
+    });
+    expect(autofillScript.world ?? "ISOLATED").toBe("ISOLATED");
+    expect(autofillScript.all_frames).not.toBe(true);
+    expect(shadowHook?.all_frames).not.toBe(true);
+  });
+
+  it("keeps WebAuthn handling in every frame without a manifest page hook", () => {
     const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
 
     expect(manifest.content_scripts).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          js: ["contentScript.js"]
-        }),
         expect.objectContaining({
           js: ["webauthnContentScript.js"],
           all_frames: true,
@@ -74,10 +150,6 @@ describe("manifest build", () => {
         })
       ])
     );
-    const autofillScript = manifest.content_scripts.find(
-      (script: { js?: string[] }) => script.js?.includes("contentScript.js")
-    );
-    expect(autofillScript?.all_frames).not.toBe(true);
     expect(manifest.content_scripts).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
