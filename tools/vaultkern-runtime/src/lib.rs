@@ -1,3 +1,4 @@
+mod autofill_persist;
 mod command_loop;
 #[cfg(target_os = "macos")]
 mod macos_secure_enclave;

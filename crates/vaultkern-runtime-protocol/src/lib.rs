@@ -113,6 +113,18 @@ pub enum RuntimeCommand {
         totp_uri: Option<String>,
         custom_fields: Vec<EntryCustomFieldDto>,
     },
+    CompareAndUpdateEntryFields {
+        vault_id: String,
+        entry_id: String,
+        expected_fields: EntryFieldsDto,
+        desired_fields: EntryFieldsDto,
+    },
+    PersistAutofillMutation {
+        transaction_id: String,
+        operation_id: String,
+        vault_id: String,
+        plan: AutofillPersistPlanDto,
+    },
     ClearEntryTotp {
         vault_id: String,
         entry_id: String,
@@ -300,6 +312,10 @@ pub enum RuntimeCommand {
         vault_id: String,
         url: String,
     },
+    FindExactMatchingEntryIds {
+        vault_id: String,
+        fields: EntryFieldsDto,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +336,7 @@ pub enum RuntimeResponse {
     EntryHistoryDetail(EntryHistoryDetailDto),
     EntryAttachmentContent(EntryAttachmentContentDto),
     FillCandidates(FillCandidateListDto),
+    EntryIdList(EntryIdListDto),
     PasskeyAssertion(PasskeyAssertionDto),
     PasskeyRegistration(PasskeyRegistrationDto),
     PasskeyCredentialStatus(PasskeyCredentialStatusDto),
@@ -335,6 +352,7 @@ pub enum RuntimeResponse {
     DatabaseSettings(DatabaseSettingsDto),
     Saved,
     SaveVaultResult(SaveVaultResultDto),
+    AutofillPersistResult(AutofillPersistResultDto),
     Error(ErrorDto),
 }
 
@@ -511,6 +529,7 @@ pub struct EntrySummaryDto {
     pub username: String,
     pub url: String,
     pub group_id: String,
+    pub has_totp: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,6 +556,12 @@ pub struct EntryListDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EntryIdListDto {
+    pub entry_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EntryDetailDto {
     pub id: String,
     pub title: String,
@@ -551,6 +576,34 @@ pub struct EntryDetailDto {
     pub field_protection: EntryFieldProtectionDto,
     pub custom_fields: Vec<EntryCustomFieldDto>,
     pub attachments: Vec<EntryAttachmentDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryFieldsDto {
+    pub title: String,
+    pub username: String,
+    pub password: String,
+    pub url: String,
+    pub notes: String,
+    pub totp_uri: Option<String>,
+    pub custom_fields: Vec<EntryCustomFieldDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum AutofillPersistPlanDto {
+    Update {
+        entry_id: String,
+        expected_fields: EntryFieldsDto,
+        desired_fields: EntryFieldsDto,
+    },
+    Create {
+        parent_group_id: String,
+        planned_entry_id: String,
+        expected_matching_entry_ids: Vec<String>,
+        desired_fields: EntryFieldsDto,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -767,6 +820,81 @@ pub struct MergeSummaryDto {
 pub struct SaveVaultResultDto {
     pub status: SaveVaultStatusDto,
     pub merge_summary: Option<MergeSummaryDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutofillPersistResultDto {
+    pub transaction_id: String,
+    pub operation_id: String,
+    pub vault_id: String,
+    #[serde(flatten)]
+    pub outcome: AutofillPersistOutcomeDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "outcome",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AutofillPersistOutcomeDto {
+    Durable {
+        disposition: AutofillPersistDispositionDto,
+        entry_id: String,
+        durability: AutofillPersistDurabilityDto,
+        cache_state: AutofillCacheStateDto,
+        committed_fingerprint: AutofillCommittedFingerprintDto,
+        merge_summary: Option<MergeSummaryDto>,
+        receipt_version: u32,
+    },
+    Conflict {
+        code: AutofillPersistConflictCodeDto,
+        retryable: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutofillCommittedFingerprintDto {
+    pub content_sha256: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutofillPersistDispositionDto {
+    Committed,
+    Replayed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutofillPersistDurabilityDto {
+    Source,
+    PendingRemoteCache,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutofillCacheStateDto {
+    NotApplicable,
+    Current,
+    PendingSync,
+    WriteFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutofillPersistConflictCodeDto {
+    ActiveVaultMismatch,
+    UpdatePreconditionFailed,
+    CreateMatchingSetChanged,
+    PlannedEntryIdCollision,
+    OperationBindingMismatch,
+    ConcurrentVaultChanges,
+    SourceChangedRetryExhausted,
+    LegacyCreateOutcomeAmbiguous,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

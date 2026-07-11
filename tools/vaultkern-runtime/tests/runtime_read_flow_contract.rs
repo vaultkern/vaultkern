@@ -122,6 +122,7 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
                     username: "bob".into(),
                     url: "https://example.net".into(),
                     group_id: root_id.clone(),
+                    has_totp: false,
                 },
                 vaultkern_runtime_protocol::EntrySummaryDto {
                     id: entry_id.clone(),
@@ -129,6 +130,7 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
                     username: "alice".into(),
                     url: "https://app.example.com/login".into(),
                     group_id: child_group_id.clone(),
+                    has_totp: true,
                 },
             ],
         })
@@ -191,6 +193,7 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
                 username: "alice".into(),
                 url: "https://app.example.com/login".into(),
                 group_id: child_group_id,
+                has_totp: true,
             }],
         })
     );
@@ -649,6 +652,7 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
                     username: "exact".into(),
                     url: "https://app.example.com/login/reset".into(),
                     group_id: root_id.clone(),
+                    has_totp: false,
                 },
                 vaultkern_runtime_protocol::EntrySummaryDto {
                     id: broader_path_id,
@@ -656,6 +660,7 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
                     username: "broad".into(),
                     url: "https://app.example.com/login".into(),
                     group_id: root_id.clone(),
+                    has_totp: false,
                 },
                 vaultkern_runtime_protocol::EntrySummaryDto {
                     id: ancestor_id,
@@ -663,6 +668,7 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
                     username: "ancestor".into(),
                     url: "https://example.com/login/reset".into(),
                     group_id: root_id.clone(),
+                    has_totp: false,
                 },
                 vaultkern_runtime_protocol::EntrySummaryDto {
                     id: descendant_id,
@@ -670,6 +676,7 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
                     username: "descendant".into(),
                     url: "https://auth.app.example.com/login/reset".into(),
                     group_id: root_id.clone(),
+                    has_totp: false,
                 },
                 vaultkern_runtime_protocol::EntrySummaryDto {
                     id: sibling_id,
@@ -677,6 +684,7 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
                     username: "sibling".into(),
                     url: "https://admin.example.com/login/reset".into(),
                     group_id: root_id,
+                    has_totp: false,
                 },
             ],
         })
@@ -728,6 +736,7 @@ fn runtime_includes_moved_live_entries_in_fill_candidates() {
                 username: "alice".into(),
                 url: "https://app.example.com/login".into(),
                 group_id: root_id.to_string(),
+                has_totp: false,
             }],
         })
     );
@@ -847,6 +856,7 @@ fn runtime_excludes_passkey_only_entries_from_password_fill_candidates() {
                 username: "alice@example.com".into(),
                 url: "https://example.com/login".into(),
                 group_id: root_id,
+                has_totp: false,
             }],
         })
     );
@@ -909,6 +919,7 @@ fn runtime_excludes_recycle_bin_entries_from_password_fill_candidates() {
                 username: "alice@example.com".into(),
                 url: "https://example.com/login".into(),
                 group_id: root_id,
+                has_totp: false,
             }],
         })
     );

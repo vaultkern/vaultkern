@@ -5,6 +5,7 @@ export interface ExtensionSettings {
   language: ExtensionLanguage;
   idleLockMinutes: number;
   clearClipboardSeconds: number;
+  autofillOnPageLoadEnabled: boolean;
   passkeyProviderEnabled: boolean;
   quickUnlockEnabled: boolean;
 }
@@ -19,6 +20,7 @@ export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings = {
   language: "en",
   idleLockMinutes: 10,
   clearClipboardSeconds: 30,
+  autofillOnPageLoadEnabled: false,
   passkeyProviderEnabled: false,
   quickUnlockEnabled: false
 };
@@ -34,6 +36,7 @@ export function normalizeExtensionSettings(value: unknown): ExtensionSettings {
     language: source.language === "zh-CN" ? "zh-CN" : "en",
     idleLockMinutes: clampInteger(source.idleLockMinutes, 0, 240, 10),
     clearClipboardSeconds: clampInteger(source.clearClipboardSeconds, 0, 3600, 30),
+    autofillOnPageLoadEnabled: source.autofillOnPageLoadEnabled === true,
     passkeyProviderEnabled: source.passkeyProviderEnabled === true,
     quickUnlockEnabled: source.quickUnlockEnabled === true
   };

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Cursor as IoCursor, Read, Write};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -1028,13 +1028,10 @@ fn build_xml(
     root.children.push(XMLNode::Element(meta));
 
     let mut root_node = Element::new("Root");
+    let mut root_group = group_to_xml(&vault.root, attachment_refs, version)?;
     let mut protected = ProtectedStream::new_chacha(inner_key)?;
-    root_node.children.push(XMLNode::Element(group_to_xml(
-        &vault.root,
-        attachment_refs,
-        &mut protected,
-        version,
-    )?));
+    protect_xml_group(&mut root_group, &mut protected)?;
+    root_node.children.push(XMLNode::Element(root_group));
     root_node
         .children
         .push(XMLNode::Element(deleted_objects_to_xml(
@@ -1044,6 +1041,7 @@ fn build_xml(
     append_opaque_xml(&mut root_node, &vault.root_opaque_xml)?;
     root.children.push(XMLNode::Element(root_node));
 
+    validate_xml_text(&root)?;
     let mut bytes = Vec::new();
     root.write(&mut bytes)
         .map_err(|error| KdbxError::Xml(error.to_string()))?;
@@ -1053,7 +1051,6 @@ fn build_xml(
 fn group_to_xml(
     group: &Group,
     attachment_refs: &HashMap<(usize, String), usize>,
-    protected: &mut ProtectedStream,
     version: KdbxVersion,
 ) -> Result<Element> {
     let mut element = Element::new("Group");
@@ -1172,7 +1169,6 @@ fn group_to_xml(
         element.children.push(XMLNode::Element(entry_to_xml(
             entry,
             attachment_refs,
-            protected,
             true,
             version,
         )?));
@@ -1181,7 +1177,6 @@ fn group_to_xml(
         element.children.push(XMLNode::Element(group_to_xml(
             child,
             attachment_refs,
-            protected,
             version,
         )?));
     }
@@ -1193,7 +1188,6 @@ fn group_to_xml(
 fn entry_to_xml(
     entry: &Entry,
     attachment_refs: &HashMap<(usize, String), usize>,
-    protected: &mut ProtectedStream,
     include_history: bool,
     version: KdbxVersion,
 ) -> Result<Element> {
@@ -1364,9 +1358,9 @@ fn entry_to_xml(
     }
 
     for (key, field) in fields {
-        element.children.push(XMLNode::Element(string_field_to_xml(
-            &key, &field, protected,
-        )));
+        element
+            .children
+            .push(XMLNode::Element(string_field_to_xml(&key, &field)));
     }
 
     for attachment in entry.attachments.values() {
@@ -1401,7 +1395,6 @@ fn entry_to_xml(
             history.children.push(XMLNode::Element(entry_to_xml(
                 old_entry,
                 attachment_refs,
-                protected,
                 false,
                 version,
             )?));
@@ -1687,30 +1680,110 @@ fn reorder_known_xml_nodes(children: &mut Vec<XMLNode>, original_order: &[String
     }
 
     let original_children = std::mem::take(children);
-    let mut known_nodes = original_children
-        .into_iter()
-        .filter_map(|child| match child {
-            XMLNode::Element(element) => Some((element.name.clone(), XMLNode::Element(element))),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let mut rebuilt = Vec::new();
+    let mut canonical_nodes = Vec::<Option<(String, XMLNode)>>::new();
+    let mut indices_by_name = HashMap::<String, VecDeque<usize>>::new();
+    for child in original_children {
+        let XMLNode::Element(element) = child else {
+            continue;
+        };
+        let name = element.name.clone();
+        let canonical_index = canonical_nodes.len();
+        canonical_nodes.push(Some((name.clone(), XMLNode::Element(element))));
+        indices_by_name
+            .entry(name)
+            .or_default()
+            .push_back(canonical_index);
+    }
+
+    let mut ordered_nodes = Vec::<(usize, String, XMLNode)>::new();
 
     for name in original_order {
-        if let Some(index) = known_nodes
-            .iter()
-            .position(|(node_name, _)| node_name == name)
-        {
-            let (_, node) = known_nodes.remove(index);
-            rebuilt.push(node);
+        let Some(canonical_index) = indices_by_name.get_mut(name).and_then(VecDeque::pop_front)
+        else {
+            continue;
+        };
+        let (node_name, node) = canonical_nodes[canonical_index]
+            .take()
+            .expect("queued canonical node");
+        ordered_nodes.push((canonical_index, node_name, node));
+    }
+
+    let mut base_position_by_canonical_index = vec![None; canonical_nodes.len()];
+    let mut last_base_position_by_name = HashMap::<String, usize>::new();
+    for (base_position, (canonical_index, name, _)) in ordered_nodes.iter().enumerate() {
+        base_position_by_canonical_index[*canonical_index] = Some(base_position);
+        last_base_position_by_name.insert(name.clone(), base_position);
+    }
+
+    let mut previous_base_position = vec![None; canonical_nodes.len()];
+    let mut previous = None;
+    for canonical_index in 0..canonical_nodes.len() {
+        previous_base_position[canonical_index] = previous;
+        if let Some(base_position) = base_position_by_canonical_index[canonical_index] {
+            previous = Some(base_position);
+        }
+    }
+    let mut next_base_position = vec![None; canonical_nodes.len()];
+    let mut next = None;
+    for canonical_index in (0..canonical_nodes.len()).rev() {
+        next_base_position[canonical_index] = next;
+        if let Some(base_position) = base_position_by_canonical_index[canonical_index] {
+            next = Some(base_position);
         }
     }
 
-    rebuilt.extend(known_nodes.into_iter().map(|(_, node)| node));
+    let mut leftover_by_name = HashMap::<String, Vec<(usize, XMLNode)>>::new();
+    for (canonical_index, slot) in canonical_nodes.into_iter().enumerate() {
+        if let Some((name, node)) = slot {
+            leftover_by_name
+                .entry(name)
+                .or_default()
+                .push((canonical_index, node));
+        }
+    }
+
+    let mut gap_nodes = (0..=ordered_nodes.len())
+        .map(|_| Vec::<(usize, Vec<XMLNode>)>::new())
+        .collect::<Vec<_>>();
+    for (name, nodes) in leftover_by_name {
+        let first_canonical_index = nodes[0].0;
+        let gap = last_base_position_by_name
+            .get(&name)
+            .map(|position| position + 1)
+            .or_else(|| previous_base_position[first_canonical_index].map(|position| position + 1))
+            .or(next_base_position[first_canonical_index])
+            .unwrap_or(0);
+        gap_nodes[gap].push((
+            first_canonical_index,
+            nodes.into_iter().map(|(_, node)| node).collect(),
+        ));
+    }
+
+    let mut ordered_nodes = ordered_nodes
+        .into_iter()
+        .map(|(_, _, node)| Some(node))
+        .collect::<Vec<_>>();
+    let mut rebuilt = Vec::with_capacity(
+        ordered_nodes.len()
+            + gap_nodes
+                .iter()
+                .flat_map(|groups| groups.iter())
+                .map(|(_, nodes)| nodes.len())
+                .sum::<usize>(),
+    );
+    for (gap, groups) in gap_nodes.iter_mut().enumerate() {
+        groups.sort_by_key(|(canonical_index, _)| *canonical_index);
+        for (_, nodes) in groups.drain(..) {
+            rebuilt.extend(nodes);
+        }
+        if gap < ordered_nodes.len() {
+            rebuilt.push(ordered_nodes[gap].take().expect("ordered canonical node"));
+        }
+    }
     *children = rebuilt;
 }
 
-fn string_field_to_xml(key: &str, field: &CustomField, protected: &mut ProtectedStream) -> Element {
+fn string_field_to_xml(key: &str, field: &CustomField) -> Element {
     let mut string = Element::new("String");
     string
         .children
@@ -1718,14 +1791,69 @@ fn string_field_to_xml(key: &str, field: &CustomField, protected: &mut Protected
     let mut value = Element::new("Value");
     if field.protected {
         value.attributes.insert("Protected".into(), "True".into());
-        let mut bytes = field.value.as_bytes().to_vec();
-        protected.apply(&mut bytes);
-        value.children.push(XMLNode::Text(STANDARD.encode(bytes)));
-    } else {
-        value.children.push(XMLNode::Text(field.value.clone()));
     }
+    value.children.push(XMLNode::Text(field.value.clone()));
     string.children.push(XMLNode::Element(value));
     string
+}
+
+fn protect_xml_group(group: &mut Element, protected: &mut ProtectedStream) -> Result<()> {
+    for child in &mut group.children {
+        let XMLNode::Element(child) = child else {
+            continue;
+        };
+        match child.name.as_str() {
+            "Entry" => protect_xml_entry(child, protected)?,
+            "Group" => protect_xml_group(child, protected)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn protect_xml_entry(entry: &mut Element, protected: &mut ProtectedStream) -> Result<()> {
+    for child in &mut entry.children {
+        let XMLNode::Element(child) = child else {
+            continue;
+        };
+        match child.name.as_str() {
+            "String" => protect_xml_string(child, protected)?,
+            "History" => {
+                for history_child in &mut child.children {
+                    if let XMLNode::Element(history_entry) = history_child
+                        && history_entry.name == "Entry"
+                    {
+                        protect_xml_entry(history_entry, protected)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn protect_xml_string(string: &mut Element, protected: &mut ProtectedStream) -> Result<()> {
+    let value = string
+        .get_mut_child("Value")
+        .ok_or(KdbxError::InvalidValue)?;
+    let is_protected = value
+        .attributes
+        .get("Protected")
+        .map(|value| parse_bool_text(value))
+        .unwrap_or(false);
+    if !is_protected {
+        return Ok(());
+    }
+
+    let mut bytes = value
+        .get_text()
+        .map(|text| text.as_bytes().to_vec())
+        .unwrap_or_default();
+    protected.apply(&mut bytes);
+    value.children.clear();
+    value.children.push(XMLNode::Text(STANDARD.encode(bytes)));
+    Ok(())
 }
 
 fn parse_xml(
@@ -3545,6 +3673,46 @@ fn text_element(name: &str, text: &str) -> Element {
     element
 }
 
+fn is_xml_10_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'
+    )
+}
+
+fn validate_xml_text(root: &Element) -> Result<()> {
+    let mut pending = vec![root];
+    while let Some(element) = pending.pop() {
+        if element
+            .attributes
+            .values()
+            .any(|value| !value.chars().all(is_xml_10_character))
+        {
+            return Err(KdbxError::InvalidValue);
+        }
+        for child in &element.children {
+            match child {
+                XMLNode::Element(child) => pending.push(child),
+                XMLNode::Comment(value) | XMLNode::CData(value) | XMLNode::Text(value) => {
+                    if !value.chars().all(is_xml_10_character) {
+                        return Err(KdbxError::InvalidValue);
+                    }
+                }
+                XMLNode::ProcessingInstruction(target, value) => {
+                    if !target.chars().all(is_xml_10_character)
+                        || value
+                            .as_deref()
+                            .is_some_and(|value| !value.chars().all(is_xml_10_character))
+                    {
+                        return Err(KdbxError::InvalidValue);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn version_to_u32(version: KdbxVersion) -> u32 {
     match version {
         KdbxVersion::V2_0 => 0x0002_0004,
@@ -3815,7 +3983,9 @@ mod compatibility_tests {
         sha256_seeded, text_element,
     };
     use vaultkern_crypto::{CompositeKey, sha256_bytes};
-    use vaultkern_model::{CustomField, Entry, PasskeyRecord, Vault};
+    use vaultkern_model::{
+        CustomField, Entry, Group, PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
+    };
     use xmltree::{Element, XMLNode};
 
     fn fast_profile() -> SaveProfile {
@@ -3939,6 +4109,282 @@ mod compatibility_tests {
             .and_then(|root| root.get_child("Group"))
             .and_then(|group| group.get_child("Entry"))
             .expect("live entry")
+    }
+
+    #[test]
+    fn loaded_entry_with_history_accepts_new_protected_totp_and_custom_field() {
+        let mut vault = Vault::empty("ProtectedHistoryMutation");
+        let mut entry = Entry::new("Live");
+        entry.password = "live-password".into();
+        let mut history = Entry::new("History");
+        history.password = "history-password".into();
+        entry.history.push(history);
+        vault.root.entries.push(entry);
+
+        let key = test_key("protected-history-mutation");
+        let seed = save_kdbx(&vault, &key, &fast_profile()).expect("save seed");
+        let mut loaded = load_kdbx(&seed, &key).expect("load seed");
+        let entry = &mut loaded.root.entries[0];
+        entry.attributes.insert(
+            "NewProtectedField".into(),
+            CustomField {
+                value: "new-custom-secret".into(),
+                protected: true,
+            },
+        );
+        entry.totp = Some(TotpSpec {
+            secret_base32: "JBSWY3DPEHPK3PXP".into(),
+            algorithm: TotpAlgorithm::Sha256,
+            digits: 8,
+            period_seconds: 45,
+            issuer: Some("Example".into()),
+            account_name: Some("alice".into()),
+        });
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("save mutation");
+        let reloaded = load_kdbx(&rewritten, &key).expect("load mutation");
+        let entry = &reloaded.root.entries[0];
+
+        assert_eq!(entry.password, "live-password");
+        assert_eq!(entry.history[0].password, "history-password");
+        assert_eq!(
+            entry
+                .attributes
+                .get("NewProtectedField")
+                .map(|field| (field.value.as_str(), field.protected)),
+            Some(("new-custom-secret", true))
+        );
+        assert_eq!(
+            entry.totp.as_ref().map(|totp| (
+                totp.secret_base32.as_str(),
+                totp.algorithm.clone(),
+                totp.digits,
+                totp.period_seconds,
+            )),
+            Some(("JBSWY3DPEHPK3PXP", TotpAlgorithm::Sha256, 8, 45))
+        );
+    }
+
+    #[test]
+    fn save_rejects_unprotected_xml_forbidden_characters() {
+        let invalid_title = Entry::new("invalid\0title");
+        let mut invalid_custom = Entry::new("Valid title");
+        invalid_custom.attributes.insert(
+            "Unprotected".into(),
+            CustomField {
+                value: "invalid\0value".into(),
+                protected: false,
+            },
+        );
+
+        for entry in [invalid_title, invalid_custom] {
+            let mut vault = Vault::empty("InvalidXmlText");
+            vault.root.entries.push(entry);
+            assert!(matches!(
+                save_kdbx(&vault, &test_key("invalid-xml-text"), &fast_profile()),
+                Err(super::KdbxError::InvalidValue)
+            ));
+        }
+    }
+
+    #[test]
+    fn protected_xml_forbidden_characters_roundtrip() {
+        let mut vault = Vault::empty("ProtectedInvalidXmlText");
+        let mut entry = Entry::new("Protected");
+        entry.password = "password\0value".into();
+        entry.attributes.insert(
+            "ProtectedValue".into(),
+            CustomField {
+                value: "custom\0value".into(),
+                protected: true,
+            },
+        );
+        vault.root.entries.push(entry);
+        let key = test_key("protected-invalid-xml-text");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save protected text");
+        let loaded = load_kdbx(&bytes, &key).expect("load protected text");
+
+        assert_eq!(loaded.root.entries[0].password, "password\0value");
+        assert_eq!(
+            loaded.root.entries[0].attributes["ProtectedValue"].value,
+            "custom\0value"
+        );
+    }
+
+    #[test]
+    fn entry_history_and_strings_use_final_xml_order_for_protected_stream() {
+        let mut vault = Vault::empty("MixedEntryOrder");
+        let mut entry = Entry::new("Live");
+        entry.password = "live-secret".into();
+        let mut history = Entry::new("History");
+        history.password = "history-secret".into();
+        entry.history.push(history);
+        entry.raw_state.node_order = vec![
+            "UUID".into(),
+            "IconID".into(),
+            "Times".into(),
+            "History".into(),
+            "String".into(),
+            "String".into(),
+            "String".into(),
+            "String".into(),
+            "String".into(),
+            "AutoType".into(),
+        ];
+        vault.root.entries.push(entry);
+
+        let key = test_key("mixed-entry-order");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save mixed entry order");
+        let loaded = load_kdbx(&bytes, &key).expect("load mixed entry order");
+
+        assert_eq!(loaded.root.entries[0].password, "live-secret");
+        assert_eq!(loaded.root.entries[0].history[0].password, "history-secret");
+    }
+
+    #[test]
+    fn group_entries_and_children_use_final_xml_order_for_protected_stream() {
+        let mut vault = Vault::empty("MixedGroupOrder");
+        let mut root_entry = Entry::new("Root entry");
+        root_entry.password = "root-entry-secret".into();
+        vault.root.entries.push(root_entry);
+
+        let mut child = Group::new("Child");
+        let mut child_entry = Entry::new("Child entry");
+        child_entry.password = "child-entry-secret".into();
+        child.entries.push(child_entry);
+        vault.root.children.push(child);
+        vault.root.raw_state.node_order = vec!["Group".into(), "Entry".into()];
+
+        let key = test_key("mixed-group-order");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save mixed group order");
+        let loaded = load_kdbx(&bytes, &key).expect("load mixed group order");
+
+        assert_eq!(loaded.root.entries[0].password, "root-entry-secret");
+        assert_eq!(
+            loaded.root.children[0].entries[0].password,
+            "child-entry-secret"
+        );
+    }
+
+    #[test]
+    fn final_order_protection_matches_kdbx3_and_kdbx4_parsers() {
+        let mut vault = Vault::empty("VersionedProtectedOrder");
+        let mut root_entry = Entry::new("Root entry");
+        root_entry.password = "root-entry-secret".into();
+        let mut history = Entry::new("History");
+        history.password = "history-secret".into();
+        root_entry.history.push(history);
+        root_entry.raw_state.node_order = vec!["History".into(), "String".into()];
+        vault.root.entries.push(root_entry);
+
+        let mut child = Group::new("Child");
+        let mut child_entry = Entry::new("Child entry");
+        child_entry.password = "child-entry-secret".into();
+        child.entries.push(child_entry);
+        vault.root.children.push(child);
+        vault.root.raw_state.node_order = vec!["Group".into(), "Entry".into()];
+
+        for (version, stream_id) in [(KdbxVersion::V3_1, 2), (KdbxVersion::V4_1, 3)] {
+            let inner_key = [0x42_u8; 64];
+            let mut group =
+                super::group_to_xml(&vault.root, &std::collections::HashMap::new(), version)
+                    .expect("build group xml");
+            let mut writer =
+                super::ProtectedStream::from_stream(stream_id, &inner_key).expect("writer stream");
+            super::protect_xml_group(&mut group, &mut writer).expect("protect group xml");
+
+            let mut reader =
+                super::ProtectedStream::from_stream(stream_id, &inner_key).expect("reader stream");
+            let parsed = super::parse_group(&group, &[], &mut reader).expect("parse group xml");
+
+            assert_eq!(parsed.entries[0].password, "root-entry-secret");
+            assert_eq!(parsed.entries[0].history[0].password, "history-secret");
+            assert_eq!(parsed.children[0].entries[0].password, "child-entry-secret");
+        }
+    }
+
+    #[test]
+    fn new_string_occurrences_stay_before_existing_history_node() {
+        let mut vault = Vault::empty("NewStringPlacement");
+        let mut entry = Entry::new("Live");
+        entry.password = "live-secret".into();
+        let mut history = Entry::new("History");
+        history.password = "history-secret".into();
+        entry.history.push(history);
+        vault.root.entries.push(entry);
+
+        let key = test_key("new-string-placement");
+        let seed = save_kdbx(&vault, &key, &fast_profile()).expect("save seed");
+        let mut loaded = load_kdbx(&seed, &key).expect("load seed");
+        loaded.root.entries[0].attributes.insert(
+            "NewProtectedField".into(),
+            CustomField {
+                value: "new-secret".into(),
+                protected: true,
+            },
+        );
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("save new field");
+        let xml = extract_kdbx4_xml(&rewritten, &key).expect("extract rewritten xml");
+        let parsed = Element::parse(std::io::Cursor::new(xml.as_bytes())).expect("parse xml");
+        let entry = first_live_entry(&parsed);
+        let names = entry
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                XMLNode::Element(element) => Some(element.name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let history_index = names
+            .iter()
+            .position(|name| *name == "History")
+            .expect("history node");
+
+        assert!(
+            names
+                .iter()
+                .enumerate()
+                .filter(|(_, name)| **name == "String")
+                .all(|(index, _)| index < history_index),
+            "all String nodes must remain before History: {names:?}"
+        );
+    }
+
+    #[test]
+    fn new_known_node_name_uses_its_canonical_neighbor() {
+        let mut vault = Vault::empty("NewKnownNodePlacement");
+        let mut entry = Entry::new("Live");
+        entry.history.push(Entry::new("History"));
+        vault.root.entries.push(entry);
+
+        let key = test_key("new-known-node-placement");
+        let seed = save_kdbx(&vault, &key, &fast_profile()).expect("save seed");
+        let mut loaded = load_kdbx(&seed, &key).expect("load seed");
+        loaded.root.entries[0].tags.insert("new-tag".into());
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("save new tag");
+        let xml = extract_kdbx4_xml(&rewritten, &key).expect("extract rewritten xml");
+        let parsed = Element::parse(std::io::Cursor::new(xml.as_bytes())).expect("parse xml");
+        let names = first_live_entry(&parsed)
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                XMLNode::Element(element) => Some(element.name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tags_index = names
+            .iter()
+            .position(|name| *name == "Tags")
+            .expect("tags node");
+        let times_index = names
+            .iter()
+            .position(|name| *name == "Times")
+            .expect("times node");
+
+        assert_eq!(tags_index + 1, times_index, "unexpected order: {names:?}");
     }
 
     #[test]

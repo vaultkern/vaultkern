@@ -48,6 +48,7 @@ export function ExtensionSettingsPanel({
             3600,
             30
           ),
+          autofillOnPageLoadEnabled: draft.autofillOnPageLoadEnabled,
           passkeyProviderEnabled: draft.passkeyProviderEnabled,
           quickUnlockEnabled: quickUnlockAvailable && draft.quickUnlockEnabled
         });
@@ -141,6 +142,20 @@ export function ExtensionSettingsPanel({
           />
           {text("VaultKern passkey provider")}
         </label>
+        <label style={checkboxFieldStyle}>
+          <input
+            aria-label={text("Page-load autofill")}
+            type="checkbox"
+            checked={draft.autofillOnPageLoadEnabled}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                autofillOnPageLoadEnabled: event.target.checked
+              })
+            }
+          />
+          {text("Page-load autofill")}
+        </label>
       </div>
       <label style={toggleRowStyle}>
         <input
@@ -169,6 +184,7 @@ function toDraft(settings: ExtensionSettings) {
     language: settings.language,
     idleLockMinutes: String(settings.idleLockMinutes),
     clearClipboardSeconds: String(settings.clearClipboardSeconds),
+    autofillOnPageLoadEnabled: settings.autofillOnPageLoadEnabled,
     passkeyProviderEnabled: settings.passkeyProviderEnabled,
     quickUnlockEnabled: settings.quickUnlockEnabled
   };

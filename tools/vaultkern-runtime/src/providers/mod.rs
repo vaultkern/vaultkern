@@ -1,4 +1,5 @@
 pub mod biometric;
+pub mod durable_file;
 pub mod local_file;
 #[cfg(target_os = "macos")]
 mod macos_local_authentication;

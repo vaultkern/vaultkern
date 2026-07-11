@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Large DOM autofill performance</title>
+    <style>
+      body { margin: 24px; font: 16px system-ui, sans-serif; }
+      #noise, #formless-fields, #heading-load, #nested-scope-load { display: none; }
+      #credential-forms { display: grid; gap: 16px; }
+      form { display: grid; grid-template-columns: 180px 180px; gap: 8px; }
+      input { box-sizing: border-box; width: 172px; height: 36px; }
+    </style>
+  </head>
+  <body>
+    <div id="noise"></div>
+    <div id="formless-fields" aria-hidden="true"></div>
+    <div id="nested-scope-load" aria-hidden="true"></div>
+    <main id="credential-forms"></main>
+    <script>
+      const noise = document.querySelector("#noise");
+      const noiseFragment = document.createDocumentFragment();
+      for (let index = 0; index < 50_000; index += 1) {
+        const item = document.createElement("span");
+        item.dataset.noiseIndex = String(index);
+        noiseFragment.append(item);
+      }
+      noise.append(noiseFragment);
+
+      const formLessFields = document.querySelector("#formless-fields");
+      const formLessFragment = document.createDocumentFragment();
+      for (let index = 0; index < 1_000; index += 1) {
+        const field = document.createElement("input");
+        field.name = `formless-decoy-${index}`;
+        field.type = "hidden";
+        formLessFragment.append(field);
+      }
+      formLessFields.append(formLessFragment);
+
+      const nestedScopeLoad = document.querySelector("#nested-scope-load");
+      let nestedScope = document.createElement("section");
+      nestedScopeLoad.append(nestedScope);
+      for (let index = 0; index < 40; index += 1) {
+        nestedScope.id = `nested-scope-${index}`;
+        if (index >= 35) {
+          const heading = document.createElement("h2");
+          heading.textContent = `Nested heading ${index}`;
+          nestedScope.append(heading);
+        }
+        const form = document.createElement("form");
+        form.id = `nested-form-${index}`;
+        const formField = document.createElement("input");
+        formField.type = "hidden";
+        form.append(formField);
+        const first = document.createElement("input");
+        first.type = "hidden";
+        const second = document.createElement("input");
+        second.type = "hidden";
+        nestedScope.append(form, first, second);
+        if (index + 1 < 40) {
+          const childScope = document.createElement("section");
+          nestedScope.append(childScope);
+          nestedScope = childScope;
+        }
+      }
+
+      const forms = document.querySelector("#credential-forms");
+      const headingLoad = document.createElement("div");
+      headingLoad.id = "heading-load";
+      for (let index = 0; index < 200; index += 1) {
+        const heading = document.createElement("h2");
+        heading.textContent = `Heading ${index}`;
+        const form = document.createElement("form");
+        form.id = `heading-form-${index}`;
+        headingLoad.append(heading, form);
+      }
+      forms.append(headingLoad);
+
+      for (let index = 0; index < 10; index += 1) {
+        const form = document.createElement("form");
+        form.id = index === 0 ? "performance-target" : `performance-decoy-${index}`;
+        form.setAttribute("aria-label", index === 0 ? "Sign in" : `Account ${index} sign in`);
+        form.innerHTML = `
+          <label>
+            Username ${index}
+            <input
+              ${index === 0 ? 'id="performance-username"' : ""}
+              name="username-${index}"
+              type="email"
+              autocomplete="username"
+            />
+          </label>
+          <label>
+            Password ${index}
+            <input
+              ${index === 0 ? 'id="performance-password"' : ""}
+              name="password-${index}"
+              type="password"
+              autocomplete="current-password"
+            />
+          </label>
+        `;
+        forms.append(form);
+      }
+
+      globalThis.__vaultkernLargeDomReady = {
+        noiseNodes: noise.children.length,
+        credentialFields: forms.querySelectorAll("input").length,
+        formLessFields: formLessFields.querySelectorAll("input").length,
+        headingForms: headingLoad.querySelectorAll("form").length,
+        headingNodes: headingLoad.querySelectorAll("h2").length,
+        nestedScopes: nestedScopeLoad.querySelectorAll("section").length,
+        nestedFields: nestedScopeLoad.querySelectorAll("input").length,
+        nestedForms: nestedScopeLoad.querySelectorAll("form").length,
+        nestedHeadings: nestedScopeLoad.querySelectorAll("h2").length
+      };
+    </script>
+  </body>
+</html>

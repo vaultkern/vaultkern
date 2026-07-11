@@ -31,6 +31,7 @@ type TranslationKey =
   | "Clear Clipboard Seconds"
   | "Language"
   | "VaultKern passkey provider"
+  | "Page-load autofill"
   | "Quick Unlock"
   | "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret."
   | "Database"
@@ -237,6 +238,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Clear Clipboard Seconds": "清空剪贴板秒数",
   Language: "语言",
   "VaultKern passkey provider": "VaultKern 通行密钥提供器",
+  "Page-load autofill": "页面加载时自动填充",
   "Quick Unlock": "快速解锁",
   "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.": "剪贴板清空会在延迟后写入空字符串。浏览器 API 不允许后台可靠确认剪贴板仍包含刚复制的秘密。",
   Database: "数据库",

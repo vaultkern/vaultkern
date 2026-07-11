@@ -7,6 +7,7 @@
     "nativeMessaging",
     "tabs",
     "activeTab",
+    "alarms",
     "scripting",
     "webAuthenticationProxy"
   ],
@@ -15,6 +16,12 @@
   "action": { "default_popup": "popup.html" },
   "options_page": "options.html",
   "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["autofillShadowPageHook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": ["<all_urls>"],
       "js": ["contentScript.js"],
