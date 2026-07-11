@@ -595,7 +595,9 @@ private func storeQuickUnlockRecord(
     ) {
         try validateQuickUnlockRecordAccess(existingItem)
         let updateQuery: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
             kSecMatchItemList: [existingItem],
+            kSecMatchSearchList: [keychain],
             kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
         ]
         try checkSecurityStatus(
@@ -726,7 +728,9 @@ public func vaultkernMacosQuickUnlockRecordLoad(
             }
             try validateQuickUnlockRecordAccess(existingItem)
             let fetchQuery: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
                 kSecMatchItemList: [existingItem],
+                kSecMatchSearchList: [keychain],
                 kSecMatchLimit: kSecMatchLimitOne,
                 kSecReturnData: true,
                 kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
@@ -776,7 +780,9 @@ public func vaultkernMacosQuickUnlockRecordDelete(
             }
             try validateQuickUnlockRecordAccess(existingItem)
             let deleteQuery: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
                 kSecMatchItemList: [existingItem],
+                kSecMatchSearchList: [keychain],
                 kSecUseAuthenticationUI: kSecUseAuthenticationUIFail,
             ]
             try checkSecurityStatus(

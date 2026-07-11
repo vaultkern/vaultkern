@@ -646,10 +646,52 @@ fn macos_quick_unlock_load_validates_and_binds_the_item_before_requesting_secret
         load.contains("kSecUseAuthenticationUI: kSecUseAuthenticationUIFail"),
         "the stable-reference data fetch must suppress Keychain UI"
     );
-    for forbidden in ["kSecAttrService", "kSecAttrAccount", "kSecMatchSearchList"] {
+    assert!(
+        load[stable_match..data_fetch].contains("kSecMatchSearchList: [keychain]"),
+        "the validated item fetch must remain scoped to the opened login Keychain"
+    );
+    for forbidden in ["kSecAttrService", "kSecAttrAccount"] {
         assert!(
             !load[stable_match..data_fetch].contains(forbidden),
             "the validated item fetch must not add {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn macos_quick_unlock_stable_item_queries_keep_class_and_login_keychain_scope() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let swift = std::fs::read_to_string(runtime.join("macos/SecureEnclaveBridge.swift"))
+        .expect("the macOS Swift bridge source must exist");
+
+    for (query_start, operation) in [
+        ("let updateQuery: [CFString: Any] = [", "SecItemUpdate("),
+        (
+            "let fetchQuery: [CFString: Any] = [",
+            "SecItemCopyMatching(fetchQuery",
+        ),
+        ("let deleteQuery: [CFString: Any] = [", "SecItemDelete("),
+    ] {
+        let start = swift
+            .find(query_start)
+            .unwrap_or_else(|| panic!("stable-reference query {query_start} must exist"));
+        let end = swift[start..]
+            .find(operation)
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("{operation} must follow {query_start}"));
+        let query = &swift[start..end];
+
+        assert!(
+            query.contains("kSecClass: kSecClassGenericPassword"),
+            "{query_start} must identify the validated item as a generic password"
+        );
+        assert!(
+            query.contains("kSecMatchItemList: [existingItem]"),
+            "{query_start} must stay bound to the validated item reference"
+        );
+        assert!(
+            query.contains("kSecMatchSearchList: [keychain]"),
+            "{query_start} must stay scoped to the opened login Keychain"
         );
     }
 }
@@ -920,7 +962,11 @@ fn macos_quick_unlock_validates_the_exact_existing_items_decrypt_acl_before_upda
         update_query.contains("kSecUseAuthenticationUI: kSecUseAuthenticationUIFail"),
         "the stable-reference update must keep Keychain UI disabled"
     );
-    for forbidden in ["kSecAttrService", "kSecAttrAccount", "kSecMatchSearchList"] {
+    assert!(
+        update_query.contains("kSecMatchSearchList: [keychain]"),
+        "the validated item update must remain scoped to the opened login Keychain"
+    );
+    for forbidden in ["kSecAttrService", "kSecAttrAccount"] {
         assert!(
             !update_query.contains(forbidden),
             "the stable-reference update query must not add {forbidden}"
