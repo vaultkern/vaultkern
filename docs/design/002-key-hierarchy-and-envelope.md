@@ -1,6 +1,6 @@
 # 002 — Key Hierarchy and the Quick Unlock Envelope
 
-Status: **Decided — r4** (three external review rounds). 2026-07-12.
+Status: **Decided — r5** (four external review rounds). 2026-07-12.
 Upstream decisions: D2, D8, D9, D10 (000).
 
 ## Derivation chain (current, unchanged)
@@ -141,11 +141,14 @@ directory (POSIX); on Windows use `ReplaceFile`/`MoveFileEx` with
 write-through. Cleanup failure in step 3 is harmless — an orphaned
 content-addressed file can never be mistaken for the current cache.
 `source_etag` is `None` for local-file vaults (the fingerprint alone is the
-identity). The manifest deliberately carries **no journal generation**: the
-extension overlays whatever journal records still exist in its segment, and
-overlaying an op whose effect is already in the cache is a no-op by the
-journal's semantic-idempotence layer (003) — cache and journal need no
-cross-coordination.
+identity). The manifest deliberately carries **no journal generation** — but
+cache and journal do need **one** coordination point, and it is an ordering,
+not a field: **publication-before-prune** (003). A journal record may be
+pruned only after a cache containing its effect has been durably published;
+until then the record stays in its segment and the extension's overlay keeps
+the mutation visible. With that ordering pinned, overlaying an op whose
+effect is already in the cache is a no-op by the journal's
+semantic-idempotence layer, and no manifest field is required.
 
 ## Extension unlock path (Apple / Android)
 
@@ -161,6 +164,13 @@ Windows: Hello CNG unseals the same payload (the existing v2 envelope format is
          remade per this document; D10 permits shipping without migration).
 ```
 
+On every platform, the **physical record key includes the generation**:
+records are stored under `(identifier_scope, vault_ref_id, record_generation)`
+— sealing generation N+1 creates a *new* record and never overwrites
+generation N (required by 003's cross-store write-order axiom; an
+overwrite-in-place implementation would destroy the current record before the
+ledger commits).
+
 - Extensions **never run the KDF** (D9): with no envelope, or an expired one,
   they direct the user to the main app — no fallback.
 - The SE envelope cryptography carries over from the Touch ID branch
@@ -175,11 +185,12 @@ Windows: Hello CNG unseals the same payload (the existing v2 envelope format is
 - Mobile main app: Argon2 > 128 MiB is refused with a hint to lower the
   parameters on desktop.
 - **AES-KDF has no memory parameter; its cap is a rounds threshold.**
-  Initial values (baseline: the KeePass default of 60 M rounds ≈ 1 s on a
-  modern desktop): desktop confirms above **600 M rounds** (~10 s) and refuses
-  above **6 G rounds**; mobile refuses above **600 M rounds**. These are
-  configuration constants, not protocol: Phase 1 recalibrates them on real
-  target hardware without any format change.
+  Initial policy defaults: desktop confirms above **600 M rounds** and refuses
+  above **6 G rounds**; mobile refuses above **600 M rounds**. (The sizing
+  intuition — KeePass's 60 M-round default lands around a second on 2020s
+  desktop hardware — is device-relative and indicative only, **not** protocol
+  semantics.) These are configuration constants: Phase 1 recalibrates them on
+  the pinned spike hardware without any format change.
 - Extensions: never run any KDF (above).
 - **Enforcement point**: in the core, after KDBX header decode and before KDF
   profile construction. The host injects a policy value —

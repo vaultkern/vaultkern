@@ -1,6 +1,6 @@
 # 001 — Sync and Merge Semantics
 
-Status: **Decided — r4** (three external review rounds). 2026-07-12.
+Status: **Decided — r5** (four external review rounds). 2026-07-12.
 Upstream decision: D1 (000).
 
 ## Model
@@ -38,7 +38,7 @@ Match keys and rules per type:
 | Entry | UUID (vault-wide index) | fields newest-wins by `modified_at`; the losing version goes intact into the winner's history; location decided separately by the newer `location_changed_at` |
 | Entry history | UUID + `modified_at` + canonical content hash (the dedupe key) | union of both sides, ordered by time, trimmed per entry by maxItems/maxSize (attachment sizes count toward maxSize) |
 | Group | UUID (vault-wide) | metadata newest-wins; children merge recursively; deletion follows the DeletedObject rule; a group with surviving newer entries survives (entries are never orphaned) |
-| DeletedObject | UUID. KDBX tombstones carry no type field — entry and group UUIDs share one global space; this is a format constraint, not a modeling gap, and adding a type field would break interoperability | union of both sides, keeping the earliest deletion time per UUID; a tombstone wins against objects modified before it and loses against objects modified after it (edit-resurrects). **Retention: tombstones are permanent — no pruning of any kind, automatic or user-invoked.** Any pruning path (including an explicit "compact") re-opens resurrection by long-offline replicas and makes the convergence property conditional; permanence makes it unconditional. Tombstones are ~24 bytes each and deletions are rare in a password vault; the cost is accepted, and no maintenance operation is offered |
+| DeletedObject | UUID. KDBX tombstones carry no type field — entry and group UUIDs share one global space; this is a format constraint, not a modeling gap, and adding a type field would break interoperability | union of both sides, keeping the **latest** deletion time per UUID; a tombstone wins against objects modified before it and loses against objects modified after it (edit-resurrects). The tombstone is itself an LWW fact: only the latest deletion event competes with the latest edit. Keeping the earliest would break delete→resurrect→delete-again (tombstone t=10, edit t=20 resurrects, delete t=30: an earliest-kept t=10 loses to the t=20 edit and the t=30 deletion vanishes; latest-kept t=30 wins — correct). **Retention: tombstones are permanent — no pruning of any kind, automatic or user-invoked.** Any pruning path (including an explicit "compact") re-opens resurrection by long-offline replicas and makes the convergence property conditional; permanence makes it unconditional. Tombstones are ~24 bytes each and deletions are rare in a password vault; the cost is accepted, and no maintenance operation is offered |
 | Entry `custom_data` (untimestamped string map) | map key | key-level union; on a same-key conflict the value rides the entry winner (part of entry newest-wins) |
 | `CustomDataItem` blocks (carry `last_modified`) | item key | newest-wins by `last_modified` |
 | Custom icons | UUID | union; if the same UUID carries different data/name, newest-wins by the icon's `last_modified` where present, else byte-wise ordering of the content hash (same determinism family as the entry tie rule). **The losing icon version is discarded** — icons are decorative, carry no user secrets, and do not participate in history |
@@ -54,7 +54,7 @@ history (M4 union semantics); no conflict-copy files are created.
 | local \ remote | edit | delete | move | no-op |
 |---|---|---|---|---|
 | **edit** | newer wins, loser into history; same-second ties broken by the tie rule below | edit time > deletion time ⇒ resurrect with the edit; otherwise deletion wins | edit and move are orthogonal: fields from the edit, location from the newer `location_changed_at` | local wins |
-| **delete** | symmetric to top-right | deleted; the earlier deletion time enters `deleted_objects` | deletion time > `location_changed_at` ⇒ deleted; otherwise the entry survives at the new location | deletion propagates |
+| **delete** | symmetric to top-right | deleted; the **later** deletion time enters `deleted_objects` (the tombstone is an LWW fact — see the DeletedObject rule) | deletion time > `location_changed_at` ⇒ deleted; otherwise the entry survives at the new location | deletion propagates |
 | **move** | symmetric | symmetric | newer `location_changed_at` wins | local location |
 | **group rename/attrs** | — | group deletion vs. newer entries inside ⇒ the group survives (entries are never orphaned) | — | local wins |
 
@@ -95,7 +95,11 @@ Supplementary rules:
 - `usage_count` merges as max.
 - Timestamps are second-granularity local clocks. **The backstop for ties and
   clock skew is deterministic tie-breaking + history**: any discarded version
-  must be recoverable from history. Merge never silently destroys data.
+  of **entry data** must be recoverable from history. Merge never silently
+  destroys user secrets. Meta fields and custom icons are explicitly exempt
+  from this promise — they are decorative/configuration data, carry no
+  secrets, and have no history mechanism in KDBX; their losers are discarded
+  (consistent with the CustomIcon rule above).
 - Merge results are reported to the UI via `MergeSummaryDto` ("merged, N spots
   resolved to the newer version"); the UI takes part in no merge decision (D5).
 

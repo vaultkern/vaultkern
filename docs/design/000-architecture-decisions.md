@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided — r4** (three external review rounds). 2026-07-12.
+Status: **Decided — r5** (four external review rounds). 2026-07-12.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -66,16 +66,24 @@ does not build on an unvalidated assumption:
 - **Background-lifecycle spike (both mobile platforms) passes when**: the
   extension completes its full chain with the main app killed.
 
+Spike hardware is pinned to the low end of each platform floor so results are
+reproducible and conservative — e.g. an iPhone SE (3rd gen) on the minimum
+supported iOS 17.x for Apple, a Pixel 6a on Android 14 for Android; the exact
+device, OS build, and the measured (not assumed) extension memory ceiling are
+recorded in the spike report and become the calibration reference for the 002
+KDF caps.
+
 ## Execution discipline
 
 1. No implementation code before 001/002/003 are complete and frozen. **The
-   contract freeze (004) is the final Phase 0 deliverable**, not the first
-   Phase 1 task: CacheManifest, JournalRecord, LedgerEntry, the canonical
+   contract freeze (004) is the final Phase 0 deliverable, produced on this
+   design branch** — not deferred again: CacheManifest, JournalRecord,
+   LedgerEntry (including the platform record key structure), the canonical
    serialization byte layout, and the MergeSummaryDto extension are pinned as
-   concrete schemas before any consumer is written. The canonical source of
-   the protocol schema is the Rust types in `vaultkern-runtime-protocol`
-   (serde); a generated JSON Schema artifact is checked in, and CI snapshot-
-   diffs it to enforce additive-only evolution.
+   concrete, checked-in schema files before any consumer is written. The
+   canonical source of the protocol schema is the Rust types in
+   `vaultkern-runtime-protocol` (serde); the generated JSON Schema artifact
+   and its CI snapshot check land in the same freeze commit.
 2. Any business state or reconciliation logic appearing in a UI layer is an
    architecture violation (Touch ID branch lesson: the UI-side reconciliation
    code was ultimately deleted wholesale, −465 lines).
@@ -117,3 +125,16 @@ does not build on an unvalidated assumption:
   which is now explicitly the final Phase 0 deliverable; spike pass criteria
   are made concrete; the dead-letter segment and the NeedsReenroll DTO nuance
   are specified.
+- r5 (2026-07-12): fourth review round. Tombstone merge keeps the **latest**
+  deletion time (earliest broke delete→resurrect→delete-again — the tombstone
+  is itself an LWW fact); the platform record key must contain the generation
+  (`identifier_scope, vault_ref_id, record_generation`) so seal-first never
+  overwrites the current record; the cache/journal commit boundary is pinned
+  as publication-before-prune with a crash matrix (an acknowledged extension
+  mutation can never vanish from its view); kdf_generation has a single
+  authoritative formula in 002, referenced by 003's registry; the history
+  recoverability promise is scoped to entry data (Meta/icons exempt); spike
+  hardware is pinned; dead-letter records are excluded from applied-set
+  maintenance; writer-id lifecycle and stale-cache overlay rules are
+  specified; the provider negative test covers old-generation caching,
+  self-directed cleanup, and overwrite-in-place storage.

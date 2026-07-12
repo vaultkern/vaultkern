@@ -1,6 +1,6 @@
 # 003 — Quick Unlock State Machine and Process Topology
 
-Status: **Decided — r4** (three external review rounds). 2026-07-12.
+Status: **Decided — r5** (four external review rounds). 2026-07-12.
 Upstream decisions: D3, D4, D5 (000).
 
 ## Part 1: the quick unlock state machine (platform-neutral, designed once)
@@ -43,15 +43,24 @@ Ledger and platform secure storage are two stores; no cross-store transaction
 exists, and none is needed — the ordering rule plus generation semantics *is*
 the transaction:
 
+- **Precondition — the platform record key contains the generation**:
+  records are physically stored under
+  `(identifier_scope, vault_ref_id, record_generation)` (002). Sealing
+  `gen+1` therefore creates a **new** record and never overwrites the current
+  one. An overwrite-in-place implementation would falsify this entire axiom
+  (the crash window would destroy the current record while the ledger still
+  points at it); the LedgerEntry/secure-record contract pins this key
+  structure, and the provider negative test (004) enforces it.
 - **Enroll / re-seal: seal the platform record first (at `gen+1`), then commit
   the ledger** (one atomic write: `state=Enrolled, generation=gen+1`). The
   ledger write is the **only commit point**.
   - Seal fails ⇒ ledger untouched, nothing changed.
   - Seal succeeds, crash before the ledger write ⇒ the platform holds a
-    `gen+1` record while the ledger still says `gen` — the record is
-    equivalent to non-existent (generation mismatch), a **harmless orphan**;
-    the ledger state (`Disabled`/`NeedsReenroll`) still tells the truth, and
-    the next attempt seals at `gen+2` and cleans up best-effort.
+    `gen+1` record while the ledger still says `gen` — the `gen` record is
+    untouched and still fully usable, the `gen+1` record is equivalent to
+    non-existent (generation mismatch), a **harmless orphan**; the ledger
+    state still tells the truth, and the next attempt seals at `gen+2` and
+    cleans up best-effort.
 - **Disable: the reverse order** — commit the ledger first
   (`Disabled, gen+1`), which cryptographically kills every existing record,
   then delete platform records best-effort (already specified above).
@@ -206,12 +215,32 @@ JournalRecord {
      **Applied-set lifecycle (bounded by construction)**: an applied entry
      exists only to skip a journal record that is still physically present;
      once that record is pruned it can never replay again, so its applied
-     entry is deleted in the same maintenance pass (write applied set → prune
-     records → drop their applied entries). A crash between prune and drop
-     leaves surplus applied entries, which the next pass removes by
-     intersecting the applied set with the records that still exist. The set's
-     size is therefore bounded by the number of un-pruned journal records plus
-     one maintenance window — it cannot grow without bound.
+     entry is deleted in the same maintenance pass. A crash between prune and
+     drop leaves surplus applied entries, which the next pass removes by
+     intersecting the applied set with the records that still exist
+     (dead-letter records are outside this intersection — see below). The
+     set's size is therefore bounded by the number of un-pruned journal
+     records plus one maintenance window — it cannot grow without bound.
+
+- **Maintenance ordering — publication-before-prune (the cache/journal
+  commit boundary)**: the full post-replay sequence is pinned as
+
+  `source save → CacheManifest publication (002) → applied-set commit →
+  journal prune → applied-entry drop`
+
+  The invariant: **a journal record may be pruned only after a durably
+  published cache contains its effect.** Without this, an extension whose
+  acknowledged mutation was just pruned would see an old cache and no overlay
+  — a confirmed passkey silently vanishing from its view. Crash matrix:
+
+  | crash after… | journal | cache | extension view |
+  |---|---|---|---|
+  | save only | intact | old | overlay on old cache — mutation visible |
+  | cache published | intact | new | overlay is a no-op (idempotence) — correct |
+  | applied-set commit | intact | new | overlay no-op; next pass re-prunes |
+  | prune | pruned | new | cache already contains the effect — correct |
+
+  No interleaving makes an acknowledged mutation invisible.
 - **Crash cases**: crash mid-append ⇒ the ceremony was never reported
   successful; the torn record fails CRC and is discarded. Crash after replay
   but before save ⇒ no applied marker exists; the next replay redoes the work.
@@ -220,10 +249,21 @@ JournalRecord {
   layer 1. No interleaving loses a durably-acknowledged mutation.
 - **Replay-time validation**: payloads are validated like any protocol input,
   against the record's target `vault_ref_id` and the current ledger; a record
-  that fails validation moves to a **dead-letter segment** (a dedicated file
-  alongside the journal segments, same framing), surfaced to the UI, never
-  silently dropped. Dead-letter records are not retried automatically; the
-  user resolves them explicitly (retry once the cause is fixed, or discard).
+  that fails validation is **moved out of its segment into a dead-letter
+  segment** (a dedicated file alongside the journal segments, same framing),
+  surfaced to the UI, never silently dropped. Dead-letter records never enter
+  the applied set and are invisible to the applied-set intersection
+  maintenance — they cannot be mistaken for processed. They are not retried
+  automatically; the user resolves them explicitly (retry once the cause is
+  fixed, or discard).
+- **Writer-id lifecycle**: a writer id is a fresh UUID per process instance,
+  never reused. Segments of dead writers are replayed and pruned by the app
+  like any other; a fully-pruned segment file is deleted.
+- **Overlay on a stale cache**: a creation-type op (e.g. passkey
+  registration creating a credential) synthesizes a provisional entry in the
+  extension's read view; a mutation-type op whose target entry is absent from
+  the stale cache is surfaced as pending-sync rather than applied — the
+  authoritative application always happens in the app's replay+merge.
 - **Trust boundary**: the container is writable only by same-signature
   processes — a **product security assumption** (platform code-signing
   isolation), not a cryptographic guarantee.
@@ -233,7 +273,7 @@ JournalRecord {
 | Identifier | Lives in | Changes when | Semantics |
 |---|---|---|---|
 | `record_generation` | quick unlock ledger | enroll / re-enroll / disable | monotonic ordering per (extension scope, vault) |
-| `kdf_generation` | derived from the KDBX header (hash of KDF uuid + params + salt) | master-credential change (ours); any salt rotation (third parties) | equality check, not an ordering |
+| `kdf_generation` | derived from the KDBX header: `H(canonical(KdfParameters VariantDictionary))` — the dictionary already contains `$UUID` and the salt as entries (002's single authoritative formula) | master-credential change (ours); any salt rotation (third parties) | equality check, not an ordering |
 | vault fingerprint | storage layer / cache manifest | every save | identity check for CAS; not an ordering |
 | pending-chain generation | remote cache manifest | each offline-queued save | ordering within one cached remote vault |
 
