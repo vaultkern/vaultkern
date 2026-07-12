@@ -102,7 +102,12 @@ private func errorChain(_ error: Error) -> [NSError] {
             continue
         }
         errors.append(value)
-        pending.append(contentsOf: value.underlyingErrors.map { ($0 as NSError, depth + 1) })
+        if let underlying = value.userInfo[NSUnderlyingErrorKey] as? NSError {
+            pending.append((underlying, depth + 1))
+        }
+        if let underlying = value.userInfo[NSMultipleUnderlyingErrorsKey] as? [NSError] {
+            pending.append(contentsOf: underlying.map { ($0, depth + 1) })
+        }
     }
     return errors
 }

@@ -136,7 +136,8 @@ fn macos_bridge_source_contract_uses_secure_enclave_key_agreement() {
         "SHA256.self",
         "outputByteCount: 32",
         "localizedReason",
-        "underlyingErrors",
+        "NSUnderlyingErrorKey",
+        "NSMultipleUnderlyingErrorsKey",
         "memset_s(pointer, length, 0, length)",
     ] {
         assert!(
@@ -144,6 +145,11 @@ fn macos_bridge_source_contract_uses_secure_enclave_key_agreement() {
             "Swift bridge is missing {required}"
         );
     }
+
+    assert!(
+        !swift.contains(".underlyingErrors"),
+        "Swift bridge must read underlying NSError values through userInfo for SDK compatibility"
+    );
 }
 
 #[test]
