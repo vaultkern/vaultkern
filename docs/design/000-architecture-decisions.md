@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided — r2** (revised after external review). 2026-07-12.
+Status: **Decided — r3** (two external review rounds). 2026-07-12.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -28,7 +28,7 @@ classes at the design level.
 | D2 | The quick unlock envelope stores only post-KDF derived key material (the transformed key), never passwords or credential copies | 002 |
 | D3 | The quick unlock state machine is platform-neutral and designed once: explicit per-vault state + a monotonic generation baked into the envelope AAD; records in platform secure storage are ciphertext caches, not sources of truth | 003 |
 | D4 | The **target** process topology is identical on all four platforms: a resident app owns runtime state and is the sole KDBX writer; system extensions and the browser extension are clients (extensions append to a journal, never the vault file). Windows runs a **sanctioned transition topology** (extension + per-port native host) until the plugin-authenticator phase, under two binding constraints: its state layer uses the shared core ledger (no platform fork) and all KDBX writes go through the writer lock | 003 |
-| D5 | The Rust core is the sole product substance, exposed via UniFFI; protocol DTOs are the single behavioral spec **and the FFI vocabulary** (initially crossing the FFI as JSON strings, typed bindings later), with version negotiation. UI holds zero business state and zero policy — it renders DTOs and sends commands; transient view state is allowed, persistent domain state and reconciliation logic are not | 003 |
+| D5 | The Rust core is the sole product substance, exposed via UniFFI; protocol DTOs are the single behavioral spec **and the FFI vocabulary** (initially crossing the FFI as JSON strings, typed bindings later), with version negotiation. Typed bindings are **generated from the same DTO schema** — field names, optionality, and enum representation have the protocol schema as their sole authority, so going typed is a representation change, never a semantic one; any field change follows the protocol's additive-versioning rule. Credentials appear only in dedicated input DTOs (unlock, credential change); key material never appears in any DTO (002). UI holds zero business state and zero policy — it renders DTOs and sends commands; transient view state is allowed, persistent domain state and reconciliation logic are not | 003 |
 | D6 | Platform floors: iOS 17+ / macOS 14+ / Android 14+ / Windows 11 (for the plugin-authenticator phase). No compatibility branches below these | — |
 | D7 | Three UIs: SwiftUI (one codebase for macOS+iOS), Compose (Android), Web (browser extension + Windows desktop for now). The macOS manager goes straight to SwiftUI — no WebView transition period | — |
 | D8 | Both Apple platforms use the data protection keychain + keychain-access-groups. The file-based legacy keychain, SecTrustedApplication, and SecAccessCreate are banned from the codebase | 002 |
@@ -48,6 +48,12 @@ classes at the design level.
 Phase 2 (iOS) precedes Android because iOS reuses everything Phase 1 produces
 (UniFFI bindings, the SE envelope Swift, the AuthenticationServices extension,
 the SwiftUI screens) — it is the highest-reuse step.
+
+The per-platform integration schemes in this matrix are **target designs, not
+verified feasibility claims** — no platform shell exists on main yet. Each
+phase's first milestone is a spike that validates its platform assumptions
+(extension memory ceiling, keychain/keystore behavior, store review
+constraints) before feature work builds on them.
 
 ## Execution discipline
 
@@ -70,3 +76,15 @@ the SwiftUI screens) — it is the highest-reuse step.
   envelope↔cache binding posture and the KDF-cap enforcement point; 003 gains a
   total transition table, the journal contract, the generation registry, and
   the access matrix; extensions are now journal-only writers.
+- r3 (2026-07-12): second review round. Tombstones are never auto-pruned
+  (offline-replica resurrection); Meta merge drops file-mtime for per-field
+  timestamps + content-hash fallback; journal gains two correctness layers
+  (semantic idempotence of every op + applied set bound to the durable save;
+  increment ops forbidden; seq + CRC framing; dead-letter); "master-credential
+  change" corrected to "collect at least one credential"; CacheManifest wire
+  format + content-addressed two-file commit; AES-KDF rounds cap;
+  kdf_generation canonical encoding; totality formally defined; access matrix
+  gains a target/transition mode column; D5 gains the JSON→typed migration
+  rule and the key-material-in-DTO ban; platform matrix marked as
+  target-not-verified with per-phase spikes; 004 gains the contract-freeze
+  root node and the provider statelessness negative test.

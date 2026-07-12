@@ -1,6 +1,6 @@
 # 002 — Key Hierarchy and the Quick Unlock Envelope
 
-Status: **Decided — r2** (revised after external review). 2026-07-12.
+Status: **Decided — r3** (two external review rounds). 2026-07-12.
 Upstream decisions: D2, D8, D9, D10 (000).
 
 ## Derivation chain (current, unchanged)
@@ -21,10 +21,15 @@ any replayable user credential.**
 ```
 EnvelopePayload {
     transformed_key: [u8; 32],
-    kdf_generation:  H(kdf_uuid ‖ kdf_params ‖ kdf_salt),   // bound to the KDF generation that produced it
+    kdf_generation:  H(kdf_uuid ‖ canonical(kdf_params)),   // bound to the KDF generation that produced it
 }
 envelope AAD ⊇ { vault_ref_id, identifier_scope, record_generation (see 003), kdf_generation }
 ```
+
+`canonical(kdf_params)` = the KDBX VariantDictionary serialized canonically:
+entries sorted by key, each as `key ‖ type-tag ‖ little-endian value bytes`
+(this includes the salt/seed). The encoding is pinned and versioned with the
+envelope format.
 
 Rationale (two independent lines of reasoning converge, hence fixed):
 
@@ -52,11 +57,13 @@ envelope. Therefore:
   KDF parameter change). Cryptographically, a salt must be unique per vault —
   per-save rotation is not required; `master_seed` still rotates every save and
   carries that duty.
-- **A master-credential change necessarily involves a password entry**, which is
-  the natural re-enrollment point for every device: the local device re-seals
-  immediately with the new transformed key; other devices' envelopes fall into
-  `NeedsReenroll` on `kdf_generation` mismatch and re-enroll automatically at
-  their next password unlock (see the 003 state machine) with no explicit user
+- **A master-credential change necessarily involves collecting at least one
+  master credential and re-running the KDF** (a key-file swap or KDF-parameter
+  change does not always re-prompt for the password), which is the natural
+  re-enrollment point: the local device re-seals immediately with the new
+  transformed key; other devices' envelopes fall into `NeedsReenroll` on
+  `kdf_generation` mismatch and re-enroll automatically at their next
+  full-credential unlock (see the 003 state machine) with no explicit user
   action.
 - **Third-party tools (KeePassXC) may rotate the salt on save — degrade
   gracefully**: same path as above; `kdf_generation` mismatch ⇒ `NeedsReenroll`;
@@ -94,9 +101,38 @@ The binding rules:
   differs from the one in the envelope AAD.
 - **Rollback posture**: substituting an older-but-genuine cached file (plus its
   then-valid envelope) requires write access to the app group container —
-  i.e., a same-signature process, which is inside the trust boundary; this is
-  explicitly out of scope. Stale-but-genuine caches are an accepted read state
-  per 003.
+  i.e., a same-signature process. This is a **product security assumption**
+  (platform code-signing isolation), not a cryptographic guarantee, and it is
+  explicitly the trust boundary; attacks from within it are out of scope.
+  Stale-but-genuine caches are an accepted read state per 003.
+
+### CacheManifest wire format and atomic publication
+
+```
+CacheManifest {
+    schema_version:      u32,
+    vault_ref_id:        string,
+    content_fingerprint: H(cached bytes),     // also the cache file's name
+    kdf_generation:      as above,
+    source_etag:         optional string,     // remote identity at snapshot time
+    published_at:        u64,
+}
+```
+
+Publication protocol (two-file commit; **the manifest is the authority**):
+
+1. Write the new vault bytes to a file named by their `content_fingerprint`
+   (content-addressed), fsync.
+2. Atomically replace the manifest (temp + rename + fsync) pointing at the new
+   fingerprint.
+3. Delete orphaned old cache files (best-effort).
+
+Readers verify `H(bytes) == manifest.content_fingerprint`; any mismatch —
+including every possible crash interleaving of steps 1–3 — degrades to
+"no cache" (fail closed; the extension directs the user to the main app).
+A crash between 1 and 2 leaves the old manifest pointing at the old,
+still-present file: consistent. Content-addressing makes a torn or partial
+state impossible to mistake for a valid one.
 
 ## Extension unlock path (Apple / Android)
 
@@ -121,11 +157,14 @@ Windows: Hello CNG unseals the same payload (the existing v2 envelope format is
 
 ## KDF cap for external files (D9 expanded)
 
-- Desktop: opening a file with KDF memory > 256 MiB requires explicit
+- Desktop: opening a file with Argon2 memory > 256 MiB requires explicit
   confirmation; > 1 GiB is refused.
-- Mobile main app: > 128 MiB is refused with a hint to lower the parameters on
-  desktop.
-- Extensions: never run the KDF (above).
+- Mobile main app: Argon2 > 128 MiB is refused with a hint to lower the
+  parameters on desktop.
+- **AES-KDF has no memory parameter; its cap is a rounds threshold** sized to
+  equivalent wall-clock (~10 s on the target device class): desktop confirms
+  above it, mobile refuses above it.
+- Extensions: never run any KDF (above).
 - **Enforcement point**: in the core, after KDBX header decode and before KDF
   profile construction. The host injects a policy value —
   `Allow | Confirm(limit) | Refuse(limit) | Forbid` — so no UI or entry path

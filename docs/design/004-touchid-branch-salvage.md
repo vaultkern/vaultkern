@@ -1,6 +1,6 @@
 # 004 — Touch ID Branch Salvage Manifest
 
-Status: **Decided — r2** (revised after external review). 2026-07-12.
+Status: **Decided — r3** (two external review rounds). 2026-07-12.
 Subject: `codex/macos-touch-id-quick-unlock` (38 commits, +11.7k/−1.0k,
 **will not be merged**). The branch is kept as a read-only reference; items are
 carried over per the tables below, **remade** to the 000–003 designs rather than
@@ -52,12 +52,24 @@ now abolished).
    this dependency graph (an item starts only when its parents have merged):
 
 ```
-ledger storage pattern (durable write + fail-fast lock)
-  └─> state machine core (003 transitions + error taxonomy)
-        ├─> envelope remake (002 payload: transformed key + kdf_generation)
-        │     └─> SE bridge port (data protection keychain, Apple-shared)
-        ├─> journal contract (003) ──> extension read path (cache + overlay)
-        └─> merge algebra (001) ────> save/replay flow
-model/session memory refactor (002 items 2–3)  — independent track
-runtime modularization ──> UniFFI surface      — gates all platform shells
+contract freeze (wire formats pinned before any consumer:
+  CacheManifest, JournalRecord, LedgerEntry, canonical serialization,
+  MergeSummaryDto extension)
+  └─> ledger storage pattern (durable write + fail-fast lock)
+        └─> state machine core (003 transitions + error taxonomy)
+              ├─> envelope remake (002 payload: transformed key + kdf_generation)
+              │     └─> SE bridge port (data protection keychain, Apple-shared)
+              ├─> journal contract (003) ──> extension read path (cache + overlay)
+              └─> merge algebra (001) ────> save/replay flow
+model/session memory refactor (002 items 2–3) — starts independently, but its
+  content-addressed attachment model must land before the merge algebra's
+  history union / content hashing builds on it (the two tracks converge there)
+runtime modularization ──> UniFFI surface     — gates all platform shells
 ```
+
+   The mechanism-only constraint on `QuickUnlockProvider` gets a **negative
+   test**: providers are verified to hold no lifecycle state (a fake provider
+   asserting statelessness across enroll/unseal/disable cycles), and provider
+   errors must surface as raw platform (domain, code) pairs mapped **only** by
+   the core taxonomy table — a provider returning a pre-classified category is
+   a test failure.

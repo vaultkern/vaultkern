@@ -1,6 +1,6 @@
 # 003 — Quick Unlock State Machine and Process Topology
 
-Status: **Decided — r2** (revised after external review). 2026-07-12.
+Status: **Decided — r3** (two external review rounds). 2026-07-12.
 Upstream decisions: D3, D4, D5 (000).
 
 ## Part 1: the quick unlock state machine (platform-neutral, designed once)
@@ -55,13 +55,19 @@ Enrolled        --NotEnrolled at runtime (biometrics removed in OS settings)-->
                     Android/Windows:  key still valid ⇒ treated as
                                       TemporarilyUnavailable (record kept;
                                       user directed to system settings)
-NeedsReenroll   --next successful password unlock-->              Enrolled(gen+1, automatic re-seal)
+NeedsReenroll   --next successful full-credential unlock-->       Enrolled(gen+1, automatic re-seal)
 any             --user disables policy-->                         Disabled (single atomic write, above)
 ```
 
-The transition table is **total** over (state × error category): table-driven
-tests enumerate the full cross product, so no category can be handled by
-accident of implementation.
+**Totality, precisely defined.** Error categories are inputs only to the
+`Enrolled` unlock/re-seal operations; in `Disabled` there is no record to
+operate on, and in `NeedsReenroll` quick unlock attempts are gated off
+(refused with guidance toward a full-credential unlock) before any platform
+call happens. The table is total in this form: for every (state, operation,
+result-category) triple, **any triple not listed above means "refused or
+no-op, no state change"** — and the table-driven tests enumerate the full
+cross product to verify exactly that, so no cell's behavior is an accident of
+implementation.
 
 ### Four-platform error taxonomy (defined once in the core; platforms only map)
 
@@ -93,10 +99,12 @@ suite.
 
 ### Fixed rules
 
-1. **The resident app is the sole KDBX writer. Extensions never write the
-   vault file.** Extension-originated mutations (passkey registration,
-   usage_count) are appended to a persistent journal in the app group
-   container; a WebAuthn ceremony completes once its journal append is durable.
+1. **The resident app is the sole KDBX writer (target topology; the Windows
+   transition exception is confined to the access matrix below). Extensions
+   never write the vault file.** System-extension mutations (passkey
+   registration, usage_count) are appended to a persistent journal in the app
+   group container; a WebAuthn ceremony completes once its journal append is
+   durable.
    The app replays the journal idempotently on activation, then saves through
    the 001 merge flow.
    - The extension's read view = the cached vault copy **plus an overlay of its
@@ -132,28 +140,53 @@ suite.
 
 ```
 JournalRecord {
-    op_id:            UUIDv7,        // idempotency key; replay dedupes on it
+    seq:              u64,           // per-scope monotonic sequence, assigned at append
+    op_id:            UUIDv7,        // idempotency identity of the mutation
     kind:             PasskeyRegistration | UsageCount | ...,
-    payload:          kind-specific DTO,
+    payload:          kind-specific DTO (includes the target vault_ref_id),
     base_fingerprint: fingerprint of the cached vault the extension saw
                       (diagnostic only; replay does not require a match),
     created_at:       u64,
 }
 ```
 
+- **Framing**: length-prefixed records with a per-record CRC and a
+  `schema_version`; a record failing length or CRC checks is discarded and
+  counted (surfaced to the UI as a diagnostic), never silently.
 - **Storage**: append-only file per extension scope inside the app group
-  container; fsync per append; the atomicity unit is one record — a truncated
-  tail record is discarded at replay.
-- **Replay**: idempotent by `op_id` (the applied-set high-water mark persists
-  in the ledger store); application is a semantic merge per 001, not a byte
-  patch; applied records are pruned only after a successful save.
-- **Crash cases**: append-then-crash ⇒ applied exactly once via `op_id`;
-  replay-then-crash-before-prune ⇒ next replay skips via the applied set;
-  crash mid-append ⇒ the ceremony was never reported successful, and the
-  truncated record is discarded.
-- **Trust boundary**: the app group container is writable only by
-  same-signature processes; that is the authentication of the journal. Payloads
-  are still validated like any protocol input.
+  container (Windows target-state equivalent: a dedicated `%LOCALAPPDATA%`
+  directory with a restrictive ACL; the Windows *transition* topology has no
+  system extension and therefore no journal); fsync per append; the atomicity
+  unit is one record — a truncated tail record is discarded at replay.
+- **Two correctness layers** (both required):
+  1. **Semantic idempotence of every op kind**: applying an op to a vault that
+     already contains its effect is a no-op. Passkey registration inserts by
+     credential UUID (already present ⇒ no-op); usage-count ops carry the
+     observed value and merge as max — **increment-style ops are forbidden**.
+     This makes correctness independent of applied-marker timing.
+  2. **Applied tracking bound to the save, not to replay**: replay applies
+     records to the in-memory vault only (no persistent marker written).
+     Only after the 001 save flow durably commits does the app persist the
+     **complete set of applied `(seq, op_id)` pairs** (recorded together with
+     the saved vault's fingerprint), then prune those records. A high-water
+     mark alone is insufficient — records may be appended concurrently and
+     out of order, so the durable applied set is authoritative, and layer 1
+     covers the residual window (crash after save, before the applied-set
+     write: re-applying to a vault that already contains the effect is a
+     no-op).
+- **Crash cases**: crash mid-append ⇒ the ceremony was never reported
+  successful; the torn record fails CRC and is discarded. Crash after replay
+  but before save ⇒ no applied marker exists; the next replay redoes the work.
+  Crash after save but before the applied-set write ⇒ the next replay
+  re-applies onto a vault that already contains the effect — a no-op by
+  layer 1. No interleaving loses a durably-acknowledged mutation.
+- **Replay-time validation**: payloads are validated like any protocol input,
+  against the record's target `vault_ref_id` and the current ledger; a record
+  that fails validation moves to a dead-letter section (kept, surfaced to the
+  UI), never silently dropped.
+- **Trust boundary**: the container is writable only by same-signature
+  processes — a **product security assumption** (platform code-signing
+  isolation), not a cryptographic guarantee.
 
 ### Generation registry (all "generations" in one place)
 
@@ -172,13 +205,21 @@ chain are orderings; the rest are equality/identity checks.
 
 ### Access matrix
 
-| Actor | read cached vault | write KDBX | append journal | write ledger | run KDF |
-|---|---|---|---|---|---|
-| resident app | yes | **sole writer** | (applies/prunes) | **sole writer** | yes |
-| system extension | yes (+ own journal overlay) | never | yes | never | never |
-| shim | no | no | no | no | no |
-| browser extension | via protocol only | never | never (its writes are protocol commands) | never | never |
-| Windows transition native host | yes | yes (under the writer lock) | n/a | yes (same core ledger code) | yes |
+| Actor | mode | read cached vault | write KDBX | append journal | write ledger | run KDF |
+|---|---|---|---|---|---|---|
+| resident app | target | yes | **sole writer** | (applies/prunes) | **sole writer** | yes |
+| system extension | target | yes (+ own journal overlay) | never | yes | never | never |
+| shim | target | no | no | no | no | no |
+| browser extension | target | via protocol only | never | never — its mutations are protocol commands executed **inside the app process**; they never touch the journal | never | never |
+| Windows per-port native host | **transition exception (D4)** | yes | yes (under the writer lock) | n/a (no system extension exists in this mode) | yes (same core ledger code) | yes |
+
+The last row is the sanctioned D4 transition state, not part of the target
+topology; it disappears at the plugin-authenticator phase. In the target
+state the "sole KDBX writer" claim holds without exception.
+
+Scope note: the OS writer lock serializes **local file access** only. The
+remote copy (OneDrive) is serialized by the transport layer's eTag CAS (001);
+the two mechanisms compose, they do not overlap.
 
 ### Lifecycle notes
 
