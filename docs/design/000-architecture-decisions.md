@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided — r7** (six external review rounds). 2026-07-12.
+Status: **Decided — r8** (seven external review rounds). 2026-07-12.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -27,7 +27,7 @@ classes at the design level.
 | D1 | KDBX is the on-disk format and the interoperability contract; sync = file-level sync + full semantic merge | 001 |
 | D2 | The quick unlock envelope stores only post-KDF derived key material (the transformed key), never passwords or credential copies | 002 |
 | D3 | The quick unlock state machine is platform-neutral and designed once: explicit per-vault state + a monotonic generation baked into the envelope AAD; records in platform secure storage are ciphertext caches, not sources of truth | 003 |
-| D4 | The **target** process topology is identical on all four platforms: a resident app owns runtime state and is the sole KDBX writer; system extensions and the browser extension are clients (extensions append to a journal, never the vault file). Windows runs a **sanctioned transition topology** (extension + per-port native host) until the plugin-authenticator phase, under two binding constraints: its state layer uses the shared core ledger (no platform fork) and all KDBX writes go through the writer lock | 003 |
+| D4 | The **target** process topology is identical on all four platforms: a resident app owns runtime state and is the sole KDBX writer; system extensions and the browser extension are clients. Client write paths differ by kind and are fixed in the 003 access matrix: **Apple system extensions** (separate appex processes) append to a journal and never touch the vault file; the **browser extension**'s mutations are protocol commands executed inside the app process — it writes neither the vault nor the journal; **Android services** run inside the app process and invoke the core directly (they *are* the resident app; no journal). Windows runs a **sanctioned transition topology** (extension + per-port native host) until the plugin-authenticator phase, under two binding constraints: its state layer uses the shared core ledger (no platform fork) and all KDBX writes go through the writer lock | 003 |
 | D5 | The Rust core is the sole product substance, exposed via UniFFI; protocol DTOs are the single behavioral spec **and the FFI vocabulary** (initially crossing the FFI as JSON strings, typed bindings later), with version negotiation. Typed bindings are **generated from the same DTO schema** — field names, optionality, and enum representation have the protocol schema as their sole authority, so going typed is a representation change, never a semantic one; any field change follows the protocol's additive-versioning rule. Credentials appear only in dedicated input DTOs (unlock, credential change); key material never appears in any DTO (002). UI holds zero business state and zero policy — it renders DTOs and sends commands; transient view state is allowed, persistent domain state and reconciliation logic are not | 003 |
 | D6 | Platform floors: iOS 17+ / macOS 14+ / Android 14+ / Windows 11 (for the plugin-authenticator phase). No compatibility branches below these | — |
 | D7 | Three UIs: SwiftUI (one codebase for macOS+iOS), Compose (Android), Web (browser extension + Windows desktop for now). The macOS manager goes straight to SwiftUI — no WebView transition period | — |
@@ -159,3 +159,17 @@ KDF caps.
   sealing. Fixed-point termination is promoted from example behavior to a
   contract law: every op kind must declare idempotence/monotonicity laws and
   ship a termination property test; sealed segments are never compacted.
+- r8 (2026-07-12): seventh review round. kdf_generation gains full KDBX
+  format coverage (KDBX3's discrete AES-KDF header fields normalize into a
+  synthetic canonical dictionary; any parameter change fails toward
+  NeedsReenroll; per-(format, KDF) fixtures with pinned generations ship in
+  the freeze). D4 spells out the three client write paths (Apple appex →
+  journal; browser extension → in-app protocol commands; Android services →
+  they ARE the resident app, no journal), matching the 003 access matrix.
+  Corrupt-record parsing becomes one three-case algorithm. The shim↔app
+  channel gains explicit security requirements (mutual peer auth, framing,
+  request IDs, user-verification command class, signature-change refusal).
+  Capacity posture stated for tombstones and journal (visibility instead of
+  GC; support-procedure recovery). On-disk segment states clarified (only
+  active and *.sealed exist physically). Remaining Phase 0 exit gate
+  unchanged: execute the contract-freeze commit.

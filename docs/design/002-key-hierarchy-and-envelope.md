@@ -1,6 +1,6 @@
 # 002 — Key Hierarchy and the Quick Unlock Envelope
 
-Status: **Decided — r7** (six external review rounds). 2026-07-12.
+Status: **Decided — r8** (seven external review rounds). 2026-07-12.
 Upstream decisions: D2, D8, D9, D10 (000).
 
 ## Derivation chain (current, unchanged)
@@ -32,6 +32,24 @@ value bytes`. The dictionary **already contains** the KDF `$UUID` and the
 salt/seed as entries, so nothing is concatenated externally — hashing the
 canonical dictionary alone avoids double-encoding. The encoding is pinned and
 versioned with the envelope format.
+
+**Format coverage (every supported KDBX form has a defined generation):**
+
+- **KDBX4** carries KdfParameters as a VariantDictionary (AES-KDF, Argon2d,
+  Argon2id) — hashed as-is per the rule above.
+- **KDBX3** carries AES-KDF parameters as discrete header fields
+  (TransformSeed, TransformRounds) with no dictionary; they are **normalized
+  into a synthetic canonical dictionary** (`$UUID` = AES-KDF, `R` = rounds,
+  `S` = seed) and hashed by the same rule — one formula covers every
+  supported form.
+- **Conservative failure direction**: any byte-level parameter change —
+  including unknown/extra dictionary keys written by third-party tools, or a
+  KDBX3→KDBX4 format upgrade — changes the generation and triggers
+  `NeedsReenroll`. The rule errs toward re-enrollment (a normal, automatic
+  path per 003), never toward wrongly accepting a stale key.
+- The contract freeze ships **one fixture per supported (format version, KDF)
+  combination with a pinned generation value**, so no implementation can
+  drift on this formula.
 
 Rationale (two independent lines of reasoning converge, hence fixed):
 
@@ -157,9 +175,12 @@ Apple:   envelope in the data protection keychain (shared access group, D8) +
          SE P256 key (.biometryCurrentSet); inside the extension:
          Face ID/Touch ID → SE unseals KEK → unseal transformed →
          decrypt the cached vault copy in the app group container.
-Android: AutofillService/CredentialProviderService share the app's process
-         domain; a Keystore key (setUserAuthenticationRequired + StrongBox
-         where available) unseals the same payload.
+Android: AutofillService/CredentialProviderService run inside the app's own
+         process — the OS starts that process on demand, so the service IS
+         the resident app (no separate extension process, no journal; direct
+         in-process core invocation). A Keystore key
+         (setUserAuthenticationRequired + StrongBox where available) unseals
+         the same payload.
 Windows: Hello CNG unseals the same payload (the existing v2 envelope format is
          remade per this document; D10 permits shipping without migration).
 ```

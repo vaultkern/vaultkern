@@ -1,6 +1,6 @@
 # 001 — Sync and Merge Semantics
 
-Status: **Decided — r7** (six external review rounds). 2026-07-12.
+Status: **Decided — r8** (seven external review rounds). 2026-07-12.
 Upstream decision: D1 (000).
 
 ## Model
@@ -108,6 +108,12 @@ Supplementary rules:
   `MergeSummaryDto` (consistent with the CustomIcon rule above).
 - Merge results are reported to the UI via `MergeSummaryDto` ("merged, N spots
   resolved to the newer version"); the UI takes part in no merge decision (D5).
+
+**Capacity posture for permanent tombstones**: at ~24 bytes each, even ten
+thousand lifetime deletions cost ≈ 240 KB — negligible against attachments in
+any realistic vault. The tombstone count is surfaced in diagnostics; there is
+no silent growth and no GC. Retiring a pathological vault's history is a
+support procedure (export to a fresh vault), not a protocol feature.
 
 ## Convergence requirements (these become tests)
 

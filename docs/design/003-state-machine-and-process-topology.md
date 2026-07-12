@@ -1,6 +1,6 @@
 # 003 — Quick Unlock State Machine and Process Topology
 
-Status: **Decided — r7** (six external review rounds). 2026-07-12.
+Status: **Decided — r8** (seven external review rounds). 2026-07-12.
 Upstream decisions: D3, D4, D5 (000).
 
 ## Part 1: the quick unlock state machine (platform-neutral, designed once)
@@ -147,10 +147,24 @@ suite.
      ExclusiveFileLock blocks indefinitely; abolished).
 2. **The browser extension only ever speaks native messaging to the shim**; the
    shim is stateless and logic-free — forwarding plus peer authentication only.
-   macOS: XPC + code-signing requirement; Windows: named pipe + SID check. The
-   Touch ID branch's "verify the parent process is Chrome" mechanism is
+   The Touch ID branch's "verify the parent process is Chrome" mechanism is
    abolished in the app world (the trust boundary moves to the shim↔app
-   channel).
+   channel). The channel's security requirements (details pinned in the
+   contract freeze):
+   - **Mutual peer authentication**, both directions: macOS XPC with a
+     code-signing requirement validated on the peer connection; Windows named
+     pipe with a restrictive ACL, SID check, and impersonation rejected.
+   - **Framing**: length-prefixed messages with a hard maximum size; request
+     IDs with timeout and cancellation semantics.
+   - **Replay posture**: this is local OS IPC, not a network — replay
+     protection is the OS channel semantics plus request IDs; no additional
+     cryptographic session layer is added.
+   - **User-verification-required command class**: commands that release
+     secrets or change policy are marked in the protocol and require a fresh
+     interactive verification regardless of channel trust.
+   - **Signature change**: a peer whose code signature no longer satisfies
+     the requirement (upgrade gone wrong, resigned binary) is treated as
+     untrusted — connection refused, no degraded mode.
 3. **Extension read path**: the cached vault copy in the app group container +
    the envelope in shared secure storage (002) + its own journal overlay.
    Stale reads are possible — accepted (001).
@@ -199,7 +213,10 @@ JournalRecord {
   re-passing. fsync per append; the atomicity unit is one record — a
   truncated tail record is discarded at replay.
 - **Segment lifecycle and ownership — `active → sealed → replayed → deleted`**
-  (writer-vs-pruner concurrency is dissolved by construction, not by care):
+  (writer-vs-pruner concurrency is dissolved by construction, not by care).
+  On disk only two states exist: the active file and `*.sealed`; `replayed`
+  and `deleted` are logical phases tracked via the applied set and file
+  removal, not file suffixes:
   - A writer holds an OS advisory lock on its segment file for its entire
     lifetime. The app may **read** active segments at any time (for overlay
     and replay) but never renames, truncates, edits, or deletes them.
@@ -235,6 +252,13 @@ JournalRecord {
   record keeps its segment alive; that is accepted (records are tiny, pending
   is rare and surfaced to the UI) — compaction would rewrite files and
   complicate `op_id`/applied-set accounting for no real gain.
+  **Capacity posture (growth is visible, not silent)**: journal segments are
+  bounded by the replay/prune cadence in normal operation; what can persist
+  is pending records and dead-letters, both of which are rare, tiny (one
+  framed record each), and **surfaced as counts in the diagnostics DTO** —
+  the design substitutes visibility for garbage collection. Recovering a
+  pathological store (or retiring long-dead replicas) is a support procedure
+  — export to a fresh vault — not a protocol feature.
 - **Two correctness layers** (both required):
   1. **Semantic idempotence of every op kind**: applying an op to a vault that
      already contains its effect is a no-op. Passkey registration inserts by
@@ -303,11 +327,19 @@ JournalRecord {
   the cause is fixed, or discard). The dead-letter file itself is owned and
   written **only by the app** (its writes are serialized by the app
   internally; no lock ceremony needed).
-- **Torn tail records**: in a **sealed** segment (writer provably dead) a
-  record failing length/CRC checks is definitively discarded and counted. In
-  an **active** segment a torn tail may simply be an append in progress —
-  replay skips it without counting or judging it; it is re-examined on the
-  next pass and adjudicated only once the segment is sealed.
+- **Corrupt-record parsing algorithm (one rule set, no ambiguity)** — framing
+  is sequential, so a bad record makes everything after it unreachable:
+  1. **Sealed segment**: any length/CRC failure ⇒ the failing record and all
+     unreachable bytes after it are definitively discarded and **counted**
+     (surfaced as a diagnostic).
+  2. **Active segment, failure at EOF** (trailing incomplete record): this
+     may simply be an append in progress — skipped silently, not counted,
+     re-examined next pass, adjudicated only at sealing.
+  3. **Active segment, failure followed by further valid bytes**: genuine
+     corruption, surfaced as a diagnostic immediately — but the file is
+     still never edited; final accounting happens at sealing like case 1.
+  The earlier "discarded and counted" framing rule is case 1/3; the torn-tail
+  exception is exactly and only case 2.
 - **Writer-id lifecycle**: a writer id is a fresh UUID per process instance,
   never reused. Segments of dead writers are replayed and pruned by the app
   like any other; a fully-pruned segment file is deleted.
@@ -349,6 +381,11 @@ The last row is the sanctioned D4 transition state, not part of the target
 topology; it disappears at the plugin-authenticator phase. In the target
 state the "sole KDBX writer" claim holds without exception.
 
+Row scoping: the "system extension" row applies to **Apple appexes** (separate
+processes). Android's AutofillService/CredentialProviderService run inside the
+app process and therefore occupy the **resident app** row (see Lifecycle
+notes) — they never use the journal.
+
 Scope note: the OS writer lock serializes **local file access** only. The
 remote copy (OneDrive) is serialized by the transport layer's eTag CAS (001);
 the two mechanisms compose, they do not overlap.
@@ -363,9 +400,22 @@ the two mechanisms compose, they do not overlap.
   the state layer uses this document's ledger via the shared Rust core (no
   platform fork), and all KDBX writes go through the writer lock. Convergence
   to the resident app happens in the plugin-authenticator phase.
-- Mobile: after the system kills the main app, the extension must complete the
-  full chain independently — "biometric → envelope unseal → read cached copy
-  (+ journal overlay) → fill" (002 guarantees its memory feasibility).
+- **Android — no separate extension process, therefore no journal**: unlike
+  iOS/macOS appexes, AutofillService/CredentialProviderService components run
+  inside the app's own process, and the OS starts that process on demand —
+  the service entry point *is* the resident app. Android therefore needs no
+  app group container, no journal, and no overlay: service-originated
+  mutations invoke the core in-process like any other app code path, under
+  the same writer lock. The journal/overlay machinery exists only where the
+  platform forces a separate extension process (Apple appexes). In the access
+  matrix, Android services occupy the resident-app row, not the
+  system-extension row. The 000 background-lifecycle spike validates the
+  cold-start chain: process spawned by the system → ledger/cache/envelope
+  read → biometric unseal → fill.
+- Mobile (Apple): after the system kills the main app, the extension must
+  complete the full chain independently — "biometric → envelope unseal → read
+  cached copy (+ journal overlay) → fill" (002 guarantees its memory
+  feasibility).
 
 ### UI "zero state", precisely
 
