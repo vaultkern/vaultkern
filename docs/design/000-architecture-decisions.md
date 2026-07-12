@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided — r3** (two external review rounds). 2026-07-12.
+Status: **Decided — r4** (three external review rounds). 2026-07-12.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -51,13 +51,31 @@ the SwiftUI screens) — it is the highest-reuse step.
 
 The per-platform integration schemes in this matrix are **target designs, not
 verified feasibility claims** — no platform shell exists on main yet. Each
-phase's first milestone is a spike that validates its platform assumptions
-(extension memory ceiling, keychain/keystore behavior, store review
-constraints) before feature work builds on them.
+phase's first milestone is a spike with explicit pass criteria; feature work
+does not build on an unvalidated assumption:
+
+- **iOS spike passes when**: a credential provider extension on a real device
+  completes "biometric unseal → decrypt a cached 1000-entry vault → return a
+  credential" within the extension memory ceiling.
+- **Apple shared-keychain spike passes when**: the app and the extension read
+  and write the same data protection keychain record through an access group,
+  and `.biometryCurrentSet` invalidation behaves as 003 assumes (enrollment
+  change ⇒ PermanentlyInvalidated).
+- **Android spike passes when**: a CredentialProviderService completes a
+  minimal passkey registration + assertion round-trip against the Rust core.
+- **Background-lifecycle spike (both mobile platforms) passes when**: the
+  extension completes its full chain with the main app killed.
 
 ## Execution discipline
 
-1. No implementation code before 001/002/003 are complete and frozen.
+1. No implementation code before 001/002/003 are complete and frozen. **The
+   contract freeze (004) is the final Phase 0 deliverable**, not the first
+   Phase 1 task: CacheManifest, JournalRecord, LedgerEntry, the canonical
+   serialization byte layout, and the MergeSummaryDto extension are pinned as
+   concrete schemas before any consumer is written. The canonical source of
+   the protocol schema is the Rust types in `vaultkern-runtime-protocol`
+   (serde); a generated JSON Schema artifact is checked in, and CI snapshot-
+   diffs it to enforce additive-only evolution.
 2. Any business state or reconciliation logic appearing in a UI layer is an
    architecture violation (Touch ID branch lesson: the UI-side reconciliation
    code was ultimately deleted wholesale, −465 lines).
@@ -88,3 +106,14 @@ constraints) before feature work builds on them.
   rule and the key-material-in-DTO ban; platform matrix marked as
   target-not-verified with per-phase spikes; 004 gains the contract-freeze
   root node and the provider statelessness negative test.
+- r4 (2026-07-12): third review round. Tombstones become fully permanent —
+  the explicit compact escape hatch is removed, making convergence
+  unconditional; the cross-store write-order axiom closes the ledger↔secure-
+  storage transaction gap (seal first, ledger commit second, orphans inert by
+  generation); the journal moves to single-writer segment files (dissolving
+  seq allocation and append concurrency) with a bounded applied-set lifecycle
+  tied to prune; AES-KDF caps get concrete rounds values; canonical
+  serialization and kdf_generation encoding move into the contract freeze,
+  which is now explicitly the final Phase 0 deliverable; spike pass criteria
+  are made concrete; the dead-letter segment and the NeedsReenroll DTO nuance
+  are specified.

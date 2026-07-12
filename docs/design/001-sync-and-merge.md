@@ -1,6 +1,6 @@
 # 001 — Sync and Merge Semantics
 
-Status: **Decided — r3** (two external review rounds). 2026-07-12.
+Status: **Decided — r4** (three external review rounds). 2026-07-12.
 Upstream decision: D1 (000).
 
 ## Model
@@ -38,10 +38,10 @@ Match keys and rules per type:
 | Entry | UUID (vault-wide index) | fields newest-wins by `modified_at`; the losing version goes intact into the winner's history; location decided separately by the newer `location_changed_at` |
 | Entry history | UUID + `modified_at` + canonical content hash (the dedupe key) | union of both sides, ordered by time, trimmed per entry by maxItems/maxSize (attachment sizes count toward maxSize) |
 | Group | UUID (vault-wide) | metadata newest-wins; children merge recursively; deletion follows the DeletedObject rule; a group with surviving newer entries survives (entries are never orphaned) |
-| DeletedObject | UUID. KDBX tombstones carry no type field — entry and group UUIDs share one global space; this is a format constraint, not a modeling gap, and adding a type field would break interoperability | union of both sides, keeping the earliest deletion time per UUID; a tombstone wins against objects modified before it and loses against objects modified after it (edit-resurrects). **Retention: tombstones are never auto-pruned** — time-based GC would let a long-offline device resurrect deleted entries after the tombstone disappears. Tombstones are ~24 bytes each and deletions are rare in a password vault; the cost is accepted. An explicit user-invoked "compact" maintenance action may prune them, with a warning about long-offline replicas |
+| DeletedObject | UUID. KDBX tombstones carry no type field — entry and group UUIDs share one global space; this is a format constraint, not a modeling gap, and adding a type field would break interoperability | union of both sides, keeping the earliest deletion time per UUID; a tombstone wins against objects modified before it and loses against objects modified after it (edit-resurrects). **Retention: tombstones are permanent — no pruning of any kind, automatic or user-invoked.** Any pruning path (including an explicit "compact") re-opens resurrection by long-offline replicas and makes the convergence property conditional; permanence makes it unconditional. Tombstones are ~24 bytes each and deletions are rare in a password vault; the cost is accepted, and no maintenance operation is offered |
 | Entry `custom_data` (untimestamped string map) | map key | key-level union; on a same-key conflict the value rides the entry winner (part of entry newest-wins) |
 | `CustomDataItem` blocks (carry `last_modified`) | item key | newest-wins by `last_modified` |
-| Custom icons | UUID | union; if the same UUID carries different data/name, newest-wins by the icon's `last_modified` where present, else byte-wise ordering of the content hash (same determinism family as the entry tie rule) |
+| Custom icons | UUID | union; if the same UUID carries different data/name, newest-wins by the icon's `last_modified` where present, else byte-wise ordering of the content hash (same determinism family as the entry tie rule). **The losing icon version is discarded** — icons are decorative, carry no user secrets, and do not participate in history |
 | Meta / recycle-bin config | — | newest-wins by the per-field change timestamps KDBX Meta records (NameChanged, RecycleBinChanged, SettingsChanged, …). For the few fields with no timestamp, the fallback is byte-wise ordering of the field's canonical content hash — **never physical file mtime**, which is not a comparable clock across devices/transports. Resolved Meta conflicts are counted in `MergeSummaryDto` (this requires extending the current DTO — an additive protocol change: e.g. `meta_conflicts_resolved`) |
 | Attachments | content (the binaries pool is content-addressed at serialization) | no independent merge — attachment references ride their entry version; the pool deduplicates identical bytes |
 
@@ -68,7 +68,8 @@ loser enters history like any other loser.
 **Canonical serialization** is a fixed, versioned encoding: field order and
 optional-value encoding as defined by the protocol schema, UTF-8 strings,
 history excluded, attachments represented by their content hashes (not bytes).
-Its exact byte layout is pinned in the Phase 1 spec and carries a
+Its exact byte layout is pinned **in the contract freeze (the final Phase 0
+deliverable, per 004) — before any merge code is written**, and carries a
 `schema_version`; two implementations at the same version must produce
 identical bytes, or same-second ties diverge.
 
@@ -77,6 +78,13 @@ Edge rules:
 - `location_changed_at` absent is treated as the epoch (loses to any present
   value); if absent on both sides and the groups differ, the winner is chosen
   by byte-wise ordering of the two group UUIDs — deterministic on both ends.
+  This corner is **arbitrary by necessity**: KDBX records only
+  `previous_parent` + `location_changed_at`, no move lineage, and inventing a
+  richer versioned location object would break interoperability (third-party
+  tools would not maintain it). Both-sides-absent means a third-party file
+  moved the entry without stamping a time — there is no reliable parent signal
+  to prefer, so the rule optimizes for deterministic convergence, with history
+  preserving the losing version's fields as always.
 - Re-creating an object with a previously deleted UUID is the edit-resurrects
   rule in action (new `modified_at` > deletion time ⇒ the object wins). Our
   own implementation always generates fresh UUIDs for new objects; UUID reuse

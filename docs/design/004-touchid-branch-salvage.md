@@ -1,6 +1,6 @@
 # 004 — Touch ID Branch Salvage Manifest
 
-Status: **Decided — r3** (two external review rounds). 2026-07-12.
+Status: **Decided — r4** (three external review rounds). 2026-07-12.
 Subject: `codex/macos-touch-id-quick-unlock` (38 commits, +11.7k/−1.0k,
 **will not be merged**). The branch is kept as a read-only reference; items are
 carried over per the tables below, **remade** to the 000–003 designs rather than
@@ -44,7 +44,10 @@ now abolished).
 ## Sequencing
 
 1. Phase 0 (the branch holding this document): the three design documents are
-   frozen.
+   frozen, **then the contract freeze is executed as the final Phase 0
+   deliverable** — CacheManifest, JournalRecord, LedgerEntry, the canonical
+   serialization byte layout, and the MergeSummaryDto extension become
+   concrete, testable schemas before Phase 1 opens.
 2. The four independent fixes can proceed at any time; they do not depend on
    Phase 0.
 3. When Phase 1 starts, carry-over items are remade one by one per the table —
@@ -68,8 +71,9 @@ runtime modularization ──> UniFFI surface     — gates all platform shells
 ```
 
    The mechanism-only constraint on `QuickUnlockProvider` gets a **negative
-   test**: providers are verified to hold no lifecycle state (a fake provider
-   asserting statelessness across enroll/unseal/disable cycles), and provider
-   errors must surface as raw platform (domain, code) pairs mapped **only** by
-   the core taxonomy table — a provider returning a pre-classified category is
-   a test failure.
+   test**: providers are verified to hold no lifecycle state — no generation,
+   no policy, no reenroll reason, no applied-journal state — asserted across
+   enroll/unseal/disable cycles with a fake provider, and provider errors must
+   surface as raw platform (domain, code) pairs mapped **only** by the core
+   taxonomy table — a provider returning a pre-classified category is a test
+   failure.

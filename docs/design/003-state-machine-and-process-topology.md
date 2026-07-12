@@ -1,6 +1,6 @@
 # 003 — Quick Unlock State Machine and Process Topology
 
-Status: **Decided — r3** (two external review rounds). 2026-07-12.
+Status: **Decided — r4** (three external review rounds). 2026-07-12.
 Upstream decisions: D3, D4, D5 (000).
 
 ## Part 1: the quick unlock state machine (platform-neutral, designed once)
@@ -36,6 +36,28 @@ caches indexed by generation**: a mismatch of `generation` or `kdf_generation`
   tombstones / poison flag / process_authorizations / refresh_pending) are all
   abolished or demoted to values derived from the ledger. UI-visible state =
   `f(ledger, current operation result)` — a single function, table-testable.
+
+### Cross-store write-order axiom (enroll / re-seal / disable)
+
+Ledger and platform secure storage are two stores; no cross-store transaction
+exists, and none is needed — the ordering rule plus generation semantics *is*
+the transaction:
+
+- **Enroll / re-seal: seal the platform record first (at `gen+1`), then commit
+  the ledger** (one atomic write: `state=Enrolled, generation=gen+1`). The
+  ledger write is the **only commit point**.
+  - Seal fails ⇒ ledger untouched, nothing changed.
+  - Seal succeeds, crash before the ledger write ⇒ the platform holds a
+    `gen+1` record while the ledger still says `gen` — the record is
+    equivalent to non-existent (generation mismatch), a **harmless orphan**;
+    the ledger state (`Disabled`/`NeedsReenroll`) still tells the truth, and
+    the next attempt seals at `gen+2` and cleans up best-effort.
+- **Disable: the reverse order** — commit the ledger first
+  (`Disabled, gen+1`), which cryptographically kills every existing record,
+  then delete platform records best-effort (already specified above).
+- Every crash interleaving therefore fails closed; "ledger says Enrolled but
+  no usable record exists" is impossible by construction, and orphaned
+  platform records are inert by generation mismatch.
 
 ### State transitions (total over the error taxonomy; every cell is tested)
 
@@ -140,7 +162,8 @@ suite.
 
 ```
 JournalRecord {
-    seq:              u64,           // per-scope monotonic sequence, assigned at append
+    seq:              u64,           // monotonic within one writer's segment (single
+                                     // writer per segment ⇒ no allocation contention)
     op_id:            UUIDv7,        // idempotency identity of the mutation
     kind:             PasskeyRegistration | UsageCount | ...,
     payload:          kind-specific DTO (includes the target vault_ref_id),
@@ -153,11 +176,18 @@ JournalRecord {
 - **Framing**: length-prefixed records with a per-record CRC and a
   `schema_version`; a record failing length or CRC checks is discarded and
   counted (surfaced to the UI as a diagnostic), never silently.
-- **Storage**: append-only file per extension scope inside the app group
-  container (Windows target-state equivalent: a dedicated `%LOCALAPPDATA%`
-  directory with a restrictive ACL; the Windows *transition* topology has no
-  system extension and therefore no journal); fsync per append; the atomicity
-  unit is one record — a truncated tail record is discarded at replay.
+- **Storage — one segment file per writer, never shared**: each writer
+  instance (an extension process) appends to its own segment file, named by
+  its writer id (a per-instance UUID), inside the app group container
+  (Windows target-state equivalent: a dedicated `%LOCALAPPDATA%` directory
+  with a restrictive ACL; the Windows *transition* topology has no system
+  extension and therefore no journal). Single-writer segments dissolve the
+  concurrency questions entirely: `seq` is allocated trivially by its sole
+  writer, there is no append lock, no cross-process ordering, and no seq-hole
+  recovery. Replay reads **all** segments; application order across segments
+  is irrelevant because every op is semantically idempotent and application is
+  a semantic merge. fsync per append; the atomicity unit is one record — a
+  truncated tail record is discarded at replay.
 - **Two correctness layers** (both required):
   1. **Semantic idempotence of every op kind**: applying an op to a vault that
      already contains its effect is a no-op. Passkey registration inserts by
@@ -167,13 +197,21 @@ JournalRecord {
   2. **Applied tracking bound to the save, not to replay**: replay applies
      records to the in-memory vault only (no persistent marker written).
      Only after the 001 save flow durably commits does the app persist the
-     **complete set of applied `(seq, op_id)` pairs** (recorded together with
-     the saved vault's fingerprint), then prune those records. A high-water
-     mark alone is insufficient — records may be appended concurrently and
-     out of order, so the durable applied set is authoritative, and layer 1
-     covers the residual window (crash after save, before the applied-set
-     write: re-applying to a vault that already contains the effect is a
-     no-op).
+     **complete set of applied `op_id`s** — written into the ledger store
+     document itself, in the same durable atomic write that records the saved
+     vault's fingerprint (one physical commit, no cross-file ordering) — then
+     prune those journal records. Layer 1 covers the residual window (crash
+     after save, before the applied-set write: re-applying to a vault that
+     already contains the effect is a no-op).
+     **Applied-set lifecycle (bounded by construction)**: an applied entry
+     exists only to skip a journal record that is still physically present;
+     once that record is pruned it can never replay again, so its applied
+     entry is deleted in the same maintenance pass (write applied set → prune
+     records → drop their applied entries). A crash between prune and drop
+     leaves surplus applied entries, which the next pass removes by
+     intersecting the applied set with the records that still exist. The set's
+     size is therefore bounded by the number of un-pruned journal records plus
+     one maintenance window — it cannot grow without bound.
 - **Crash cases**: crash mid-append ⇒ the ceremony was never reported
   successful; the torn record fails CRC and is discarded. Crash after replay
   but before save ⇒ no applied marker exists; the next replay redoes the work.
@@ -182,8 +220,10 @@ JournalRecord {
   layer 1. No interleaving loses a durably-acknowledged mutation.
 - **Replay-time validation**: payloads are validated like any protocol input,
   against the record's target `vault_ref_id` and the current ledger; a record
-  that fails validation moves to a dead-letter section (kept, surfaced to the
-  UI), never silently dropped.
+  that fails validation moves to a **dead-letter segment** (a dedicated file
+  alongside the journal segments, same framing), surfaced to the UI, never
+  silently dropped. Dead-letter records are not retried automatically; the
+  user resolves them explicitly (retry once the cause is fixed, or discard).
 - **Trust boundary**: the container is writable only by same-signature
   processes — a **product security assumption** (platform code-signing
   isolation), not a cryptographic guarantee.
@@ -241,6 +281,11 @@ Zero business state means: no persistent domain state, no reconciliation
 logic, no caches that acquire authority of their own. Transient view state —
 in-flight operation flags, error banners, the last DTO held for rendering — is
 expected and allowed.
+
+One DTO nuance: in `NeedsReenroll`, the state DTO distinguishes "attempt gated
+off before any platform call" from "a platform call was made and failed"
+(derived from the current-operation result), so the UI can word the two cases
+differently without owning any state.
 
 ## Testing doctrine (D5 expanded; applies uniformly to 001/002/003)
 

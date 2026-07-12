@@ -1,6 +1,6 @@
 # 002 — Key Hierarchy and the Quick Unlock Envelope
 
-Status: **Decided — r3** (two external review rounds). 2026-07-12.
+Status: **Decided — r4** (three external review rounds). 2026-07-12.
 Upstream decisions: D2, D8, D9, D10 (000).
 
 ## Derivation chain (current, unchanged)
@@ -21,15 +21,17 @@ any replayable user credential.**
 ```
 EnvelopePayload {
     transformed_key: [u8; 32],
-    kdf_generation:  H(kdf_uuid ‖ canonical(kdf_params)),   // bound to the KDF generation that produced it
+    kdf_generation:  H(canonical(kdf_params)),   // bound to the KDF generation that produced it
 }
 envelope AAD ⊇ { vault_ref_id, identifier_scope, record_generation (see 003), kdf_generation }
 ```
 
-`canonical(kdf_params)` = the KDBX VariantDictionary serialized canonically:
-entries sorted by key, each as `key ‖ type-tag ‖ little-endian value bytes`
-(this includes the salt/seed). The encoding is pinned and versioned with the
-envelope format.
+`canonical(kdf_params)` = the KDBX KdfParameters VariantDictionary serialized
+canonically: entries sorted by key, each as `key ‖ type-tag ‖ little-endian
+value bytes`. The dictionary **already contains** the KDF `$UUID` and the
+salt/seed as entries, so nothing is concatenated externally — hashing the
+canonical dictionary alone avoids double-encoding. The encoding is pinned and
+versioned with the envelope format.
 
 Rationale (two independent lines of reasoning converge, hence fixed):
 
@@ -134,6 +136,17 @@ A crash between 1 and 2 leaves the old manifest pointing at the old,
 still-present file: consistent. Content-addressing makes a torn or partial
 state impossible to mistake for a valid one.
 
+Platform details, pinned with the contract: after the rename, fsync the parent
+directory (POSIX); on Windows use `ReplaceFile`/`MoveFileEx` with
+write-through. Cleanup failure in step 3 is harmless — an orphaned
+content-addressed file can never be mistaken for the current cache.
+`source_etag` is `None` for local-file vaults (the fingerprint alone is the
+identity). The manifest deliberately carries **no journal generation**: the
+extension overlays whatever journal records still exist in its segment, and
+overlaying an op whose effect is already in the cache is a no-op by the
+journal's semantic-idempotence layer (003) — cache and journal need no
+cross-coordination.
+
 ## Extension unlock path (Apple / Android)
 
 ```
@@ -161,9 +174,12 @@ Windows: Hello CNG unseals the same payload (the existing v2 envelope format is
   confirmation; > 1 GiB is refused.
 - Mobile main app: Argon2 > 128 MiB is refused with a hint to lower the
   parameters on desktop.
-- **AES-KDF has no memory parameter; its cap is a rounds threshold** sized to
-  equivalent wall-clock (~10 s on the target device class): desktop confirms
-  above it, mobile refuses above it.
+- **AES-KDF has no memory parameter; its cap is a rounds threshold.**
+  Initial values (baseline: the KeePass default of 60 M rounds ≈ 1 s on a
+  modern desktop): desktop confirms above **600 M rounds** (~10 s) and refuses
+  above **6 G rounds**; mobile refuses above **600 M rounds**. These are
+  configuration constants, not protocol: Phase 1 recalibrates them on real
+  target hardware without any format change.
 - Extensions: never run any KDF (above).
 - **Enforcement point**: in the core, after KDBX header decode and before KDF
   profile construction. The host injects a policy value —
