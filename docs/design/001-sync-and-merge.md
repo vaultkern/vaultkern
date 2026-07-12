@@ -1,7 +1,6 @@
 # 001 — Sync and Merge Semantics
 
-Status: **Decided** (conflict-matrix cells may be added before freeze; the model
-itself may not change). 2026-07-12.
+Status: **Decided — r2** (revised after external review). 2026-07-12.
 Upstream decision: D1 (000).
 
 ## Model
@@ -24,10 +23,27 @@ newest-wins additive merge. Missing:
 
 | # | Gap | Consequence | Target behavior |
 |---|-----|-------------|-----------------|
-| M1 | `deleted_objects` is never read or written | deletions resurrect | deletion time > entry's last modification ⇒ deletion wins; otherwise the entry wins (edit-resurrects rule, matching KeePassXC). Local deletions are recorded in `deleted_objects` and persisted with the file |
+| M1 | `deleted_objects` is not consulted by the merge (the KDBX layer already parses and serializes it; only `merge_from` ignores it) | deletions resurrect | deletion time > the object's last modification ⇒ deletion wins; otherwise the object wins (edit-resurrects rule, matching KeePassXC). Local deletions are recorded in `deleted_objects` and persisted with the file |
 | M2 | entries match by UUID only within the same group | moves create duplicate entries | vault-wide UUID index; group membership decided by the newer `location_changed_at` |
 | M3 | group metadata is not merged | group renames/attribute changes are lost | groups match by UUID, metadata newest-wins; group deletion follows M1 |
-| M4 | local history is truncated on overwrite | history chains are lost | history is merged as a union by modification time, deduplicated, respecting maxItems/maxSize trimming. The existing test that pins the wrong behavior (asserting only two history entries survive) is rewritten to the new semantics |
+| M4 | local history is truncated on overwrite | history chains are lost | history is merged as a union (dedupe key below), respecting maxItems/maxSize trimming. The existing test that pins the wrong behavior (asserting only two history entries survive) is rewritten to the new semantics |
+
+## Merge algebra: per-type rules
+
+The merge is defined over the whole vault object graph, not just entries.
+Match keys and rules per type:
+
+| Object | Match key | Rule |
+|---|---|---|
+| Entry | UUID (vault-wide index) | fields newest-wins by `modified_at`; the losing version goes intact into the winner's history; location decided separately by the newer `location_changed_at` |
+| Entry history | UUID + `modified_at` + canonical content hash (the dedupe key) | union of both sides, ordered by time, trimmed per entry by maxItems/maxSize (attachment sizes count toward maxSize) |
+| Group | UUID (vault-wide) | metadata newest-wins; children merge recursively; deletion follows the DeletedObject rule; a group with surviving newer entries survives (entries are never orphaned) |
+| DeletedObject | UUID. KDBX tombstones carry no type field — entry and group UUIDs share one global space; this is a format constraint, not a modeling gap, and adding a type field would break interoperability | union of both sides, keeping the earliest deletion time per UUID; a tombstone wins against objects modified before it and loses against objects modified after it (edit-resurrects). Retention: a tombstone is pruned once it is older than 365 days and its UUID appears in neither side's live set |
+| Entry `custom_data` (untimestamped string map) | map key | key-level union; on a same-key conflict the value rides the entry winner (part of entry newest-wins) |
+| `CustomDataItem` blocks (carry `last_modified`) | item key | newest-wins by `last_modified` |
+| Custom icons | UUID | union |
+| Meta / recycle-bin config | — | newest-wins by the Meta change timestamps KDBX records; where KDBX records none, the side with the newer file-level modification wins and the choice is surfaced in `MergeSummaryDto` |
+| Attachments | content (the binaries pool is content-addressed at serialization) | no independent merge — attachment references ride their entry version; the pool deduplicates identical bytes |
 
 ## Conflict matrix
 
@@ -37,15 +53,21 @@ history (M4 union semantics); no conflict-copy files are created.
 
 | local \ remote | edit | delete | move | no-op |
 |---|---|---|---|---|
-| **edit** | newer wins, loser into history; same-second ties broken deterministically by UUID ordering so both devices converge identically | edit time > deletion time ⇒ resurrect with the edit; otherwise deletion wins | edit and move are orthogonal: fields from the edit, location from the newer `location_changed_at` | local wins |
+| **edit** | newer wins, loser into history; same-second ties broken by the tie rule below | edit time > deletion time ⇒ resurrect with the edit; otherwise deletion wins | edit and move are orthogonal: fields from the edit, location from the newer `location_changed_at` | local wins |
 | **delete** | symmetric to top-right | deleted; the earlier deletion time enters `deleted_objects` | deletion time > `location_changed_at` ⇒ deleted; otherwise the entry survives at the new location | deletion propagates |
 | **move** | symmetric | symmetric | newer `location_changed_at` wins | local location |
 | **group rename/attrs** | — | group deletion vs. newer entries inside ⇒ the group survives (entries are never orphaned) | — | local wins |
 
+**Tie rule (same-second conflicts).** Both versions share the entry's UUID, so
+UUID ordering cannot decide between them. When `modified_at` is equal, the
+winner is chosen by byte-wise comparison of the two versions' canonical content
+hashes (canonical serialization of the entry fields, excluding history). Both
+devices compute the same ordering, so both converge on the same winner; the
+loser enters history like any other loser.
+
 Supplementary rules:
 
-- `usage_count` merges as max; `custom_data` / Meta are newest-wins by their own
-  timestamps where KDBX provides them; custom icons merge as a union by UUID.
+- `usage_count` merges as max.
 - Timestamps are second-granularity local clocks. **The backstop for ties and
   clock skew is deterministic tie-breaking + history**: any discarded version
   must be recoverable from history. Merge never silently destroys data.
@@ -54,20 +76,25 @@ Supplementary rules:
 
 ## Convergence requirements (these become tests)
 
-Table-driven tests cover every cell of the matrix, plus two property tests:
+Table-driven tests cover every cell of the matrix — including same-second tie
+cases — plus two property tests:
 
 1. **Two-sided convergence**: A merge B and B merge A produce semantically
    equivalent vaults (same entry set, locations, and history sets).
 2. **Idempotence**: merging the same input twice equals merging it once.
 
+Third-party semantics (KeePassXC move/delete/history behavior) are validated
+against real fixture files, not assumed.
+
 ## Platform and process constraints
 
-- Only the resident app performs sync (D4); extensions read the cached copy in
-  the app group container and may see stale data — **accepted**; no sync path
-  is added for extensions.
-- Writes produced by extensions (passkey registration, usage_count) enter the
-  main store via the writer lock / journal defined in 003 and participate in
-  the next save's merge.
+- Only the resident app performs sync and writes the KDBX file (D4/003);
+  extensions read the cached copy in the app group container and may see stale
+  data — **accepted**; no sync path is added for extensions.
+- Extension-originated mutations (passkey registration, usage_count) are
+  **journal-only** (003's journal contract): the app replays them into the
+  vault, and they participate in the next save's merge like any other local
+  change.
 
 ## Immediate fixes (do not wait for the new architecture; fix on main)
 

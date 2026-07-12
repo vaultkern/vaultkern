@@ -1,6 +1,6 @@
 # 002 — Key Hierarchy and the Quick Unlock Envelope
 
-Status: **Decided**. 2026-07-12.
+Status: **Decided — r2** (revised after external review). 2026-07-12.
 Upstream decisions: D2, D8, D9, D10 (000).
 
 ## Derivation chain (current, unchanged)
@@ -72,9 +72,31 @@ envelope. Therefore:
   `password: Option<String>` long-term is abolished.
 - Saving no longer re-runs the KDF (currently every save re-reads the key file
   and re-runs Argon2): with an unchanged salt, the session's `transformed` is
-  reused directly.
+  reused directly. **The save API consumes the session's key-material handle,
+  not credentials** — only a master-credential change collects credentials and
+  re-derives.
 - A master-credential change is the only operation that re-collects credentials
   and re-runs the KDF.
+
+## Envelope↔cache binding and rollback posture
+
+The extension decrypts the cached vault copy with an unsealed `transformed`.
+The binding rules:
+
+- **Cryptographic fail-closed is the base layer**: if the cached file's header
+  carries a different KDF generation than the envelope's `transformed`, the
+  derived `encryption_key = SHA256(master_seed ‖ transformed)` is wrong and the
+  header MAC check fails — a stale envelope cannot silently decrypt the wrong
+  file. The explicit `kdf_generation` equality check exists on top of this to
+  produce a friendly `NeedsReenroll` instead of a generic open failure.
+- **Cache identity**: the cache manifest binds the cached bytes to a
+  `vault_ref_id`; the extension refuses a cache whose manifest `vault_ref_id`
+  differs from the one in the envelope AAD.
+- **Rollback posture**: substituting an older-but-genuine cached file (plus its
+  then-valid envelope) requires write access to the app group container —
+  i.e., a same-signature process, which is inside the trust boundary; this is
+  explicitly out of scope. Stale-but-genuine caches are an accepted read state
+  per 003.
 
 ## Extension unlock path (Apple / Android)
 
@@ -104,6 +126,10 @@ Windows: Hello CNG unseals the same payload (the existing v2 envelope format is
 - Mobile main app: > 128 MiB is refused with a hint to lower the parameters on
   desktop.
 - Extensions: never run the KDF (above).
+- **Enforcement point**: in the core, after KDBX header decode and before KDF
+  profile construction. The host injects a policy value —
+  `Allow | Confirm(limit) | Refuse(limit) | Forbid` — so no UI or entry path
+  can bypass the check, and the extension profile is simply `Forbid`.
 
 ## Memory hygiene (implementation constraints, fixed with this document)
 
@@ -116,3 +142,7 @@ Windows: Hello CNG unseals the same payload (the existing v2 envelope format is
    history snapshots do not clone attachment bytes (currently N references cost
    N+1 copies). The extension memory budget is designed around "KDBX ciphertext
    + XML plaintext + model (without attachments)".
+
+Items 2–3 are a **structural refactor** of the KDBX/model/session layers, not a
+provider swap; they are scheduled as their own Phase 1 work items in the 004
+sequencing, separate from the envelope work.

@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided**. 2026-07-12.
+Status: **Decided — r2** (revised after external review). 2026-07-12.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -27,8 +27,8 @@ classes at the design level.
 | D1 | KDBX is the on-disk format and the interoperability contract; sync = file-level sync + full semantic merge | 001 |
 | D2 | The quick unlock envelope stores only post-KDF derived key material (the transformed key), never passwords or credential copies | 002 |
 | D3 | The quick unlock state machine is platform-neutral and designed once: explicit per-vault state + a monotonic generation baked into the envelope AAD; records in platform secure storage are ciphertext caches, not sources of truth | 003 |
-| D4 | Process topology is identical on all four platforms: a resident app owns runtime state; vault writes are serialized by a single OS-level writer lock; system extensions and the browser extension are clients | 003 |
-| D5 | The Rust core is the sole product substance, exposed via UniFFI; protocol DTOs are the single behavioral spec, with version negotiation. UI holds zero business state and zero policy — it renders DTOs and sends commands | 003 |
+| D4 | The **target** process topology is identical on all four platforms: a resident app owns runtime state and is the sole KDBX writer; system extensions and the browser extension are clients (extensions append to a journal, never the vault file). Windows runs a **sanctioned transition topology** (extension + per-port native host) until the plugin-authenticator phase, under two binding constraints: its state layer uses the shared core ledger (no platform fork) and all KDBX writes go through the writer lock | 003 |
+| D5 | The Rust core is the sole product substance, exposed via UniFFI; protocol DTOs are the single behavioral spec **and the FFI vocabulary** (initially crossing the FFI as JSON strings, typed bindings later), with version negotiation. UI holds zero business state and zero policy — it renders DTOs and sends commands; transient view state is allowed, persistent domain state and reconciliation logic are not | 003 |
 | D6 | Platform floors: iOS 17+ / macOS 14+ / Android 14+ / Windows 11 (for the plugin-authenticator phase). No compatibility branches below these | — |
 | D7 | Three UIs: SwiftUI (one codebase for macOS+iOS), Compose (Android), Web (browser extension + Windows desktop for now). The macOS manager goes straight to SwiftUI — no WebView transition period | — |
 | D8 | Both Apple platforms use the data protection keychain + keychain-access-groups. The file-based legacy keychain, SecTrustedApplication, and SecAccessCreate are banned from the codebase | 002 |
@@ -60,3 +60,13 @@ the SwiftUI screens) — it is the highest-reuse step.
 4. Testing doctrine: state-machine behavior is covered by table-driven tests in
    the Rust core; platform providers get thin integration tests only; source-text
    assertions (grep-as-test) are banned.
+
+## Revision history
+
+- r1 (2026-07-12): initial version.
+- r2 (2026-07-12): revised after an external adversarial review (Codex). D4
+  split into target/transition topology; D5 pins the FFI vocabulary; 001 gains
+  the per-type merge algebra and a workable same-second tie rule; 002 gains the
+  envelope↔cache binding posture and the KDF-cap enforcement point; 003 gains a
+  total transition table, the journal contract, the generation registry, and
+  the access matrix; extensions are now journal-only writers.
