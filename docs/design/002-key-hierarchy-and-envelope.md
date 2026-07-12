@@ -1,6 +1,6 @@
 # 002 — Key Hierarchy and the Quick Unlock Envelope
 
-Status: **Decided — r5** (four external review rounds). 2026-07-12.
+Status: **Decided — r6** (five external review rounds). 2026-07-12.
 Upstream decisions: D2, D8, D9, D10 (000).
 
 ## Derivation chain (current, unchanged)

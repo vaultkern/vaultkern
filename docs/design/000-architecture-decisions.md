@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided — r5** (four external review rounds). 2026-07-12.
+Status: **Decided — r6** (five external review rounds). 2026-07-12.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -138,3 +138,14 @@ KDF caps.
   maintenance; writer-id lifecycle and stale-cache overlay rules are
   specified; the provider negative test covers old-generation caching,
   self-directed cleanup, and overwrite-in-place storage.
+- r6 (2026-07-12): fifth review round. Journal segments gain an explicit
+  lifecycle (`active → sealed → replayed → deleted`) with lock-gated,
+  app-driven sealing — a sealed segment provably has no living writer, so
+  append-vs-prune concurrency is impossible by construction; replay runs to a
+  fixed point, making cross-segment order irrelevant even for dependent ops,
+  with pending records blocking their segment's deletion and dead-lettering
+  only on a confirmed-dead target; "cache contains the effect" is noted as
+  holding by construction (the cache is serialized from the post-replay saved
+  vault); icon conflicts join Meta conflicts in MergeSummaryDto. The
+  remaining Phase 0 exit gate is executing the contract freeze commit
+  (schema artifacts + CI snapshot check) — the docs themselves are complete.

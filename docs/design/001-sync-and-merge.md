@@ -1,6 +1,6 @@
 # 001 — Sync and Merge Semantics
 
-Status: **Decided — r5** (four external review rounds). 2026-07-12.
+Status: **Decided — r6** (five external review rounds). 2026-07-12.
 Upstream decision: D1 (000).
 
 ## Model
@@ -41,7 +41,7 @@ Match keys and rules per type:
 | DeletedObject | UUID. KDBX tombstones carry no type field — entry and group UUIDs share one global space; this is a format constraint, not a modeling gap, and adding a type field would break interoperability | union of both sides, keeping the **latest** deletion time per UUID; a tombstone wins against objects modified before it and loses against objects modified after it (edit-resurrects). The tombstone is itself an LWW fact: only the latest deletion event competes with the latest edit. Keeping the earliest would break delete→resurrect→delete-again (tombstone t=10, edit t=20 resurrects, delete t=30: an earliest-kept t=10 loses to the t=20 edit and the t=30 deletion vanishes; latest-kept t=30 wins — correct). **Retention: tombstones are permanent — no pruning of any kind, automatic or user-invoked.** Any pruning path (including an explicit "compact") re-opens resurrection by long-offline replicas and makes the convergence property conditional; permanence makes it unconditional. Tombstones are ~24 bytes each and deletions are rare in a password vault; the cost is accepted, and no maintenance operation is offered |
 | Entry `custom_data` (untimestamped string map) | map key | key-level union; on a same-key conflict the value rides the entry winner (part of entry newest-wins) |
 | `CustomDataItem` blocks (carry `last_modified`) | item key | newest-wins by `last_modified` |
-| Custom icons | UUID | union; if the same UUID carries different data/name, newest-wins by the icon's `last_modified` where present, else byte-wise ordering of the content hash (same determinism family as the entry tie rule). **The losing icon version is discarded** — icons are decorative, carry no user secrets, and do not participate in history |
+| Custom icons | UUID | union; if the same UUID carries different data/name, newest-wins by the icon's `last_modified` where present, else byte-wise ordering of the content hash (same determinism family as the entry tie rule). **The losing icon version is discarded** — icons are decorative, carry no user secrets, and do not participate in history. Icon conflicts are still counted in `MergeSummaryDto` (`icon_conflicts_resolved`, alongside `meta_conflicts_resolved`) so the user can see that a configuration conflict occurred even though the loser is not kept |
 | Meta / recycle-bin config | — | newest-wins by the per-field change timestamps KDBX Meta records (NameChanged, RecycleBinChanged, SettingsChanged, …). For the few fields with no timestamp, the fallback is byte-wise ordering of the field's canonical content hash — **never physical file mtime**, which is not a comparable clock across devices/transports. Resolved Meta conflicts are counted in `MergeSummaryDto` (this requires extending the current DTO — an additive protocol change: e.g. `meta_conflicts_resolved`) |
 | Attachments | content (the binaries pool is content-addressed at serialization) | no independent merge — attachment references ride their entry version; the pool deduplicates identical bytes |
 

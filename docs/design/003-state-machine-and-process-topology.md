@@ -1,6 +1,6 @@
 # 003 — Quick Unlock State Machine and Process Topology
 
-Status: **Decided — r5** (four external review rounds). 2026-07-12.
+Status: **Decided — r6** (five external review rounds). 2026-07-12.
 Upstream decisions: D3, D4, D5 (000).
 
 ## Part 1: the quick unlock state machine (platform-neutral, designed once)
@@ -190,13 +190,37 @@ JournalRecord {
   its writer id (a per-instance UUID), inside the app group container
   (Windows target-state equivalent: a dedicated `%LOCALAPPDATA%` directory
   with a restrictive ACL; the Windows *transition* topology has no system
-  extension and therefore no journal). Single-writer segments dissolve the
-  concurrency questions entirely: `seq` is allocated trivially by its sole
-  writer, there is no append lock, no cross-process ordering, and no seq-hole
-  recovery. Replay reads **all** segments; application order across segments
-  is irrelevant because every op is semantically idempotent and application is
-  a semantic merge. fsync per append; the atomicity unit is one record — a
+  extension and therefore no journal). Single-writer segments dissolve
+  writer-vs-writer concurrency entirely: `seq` is allocated trivially by its
+  sole writer, there is no append lock, no cross-process ordering, and no
+  seq-hole recovery. Replay reads **all** segments and runs to a fixed point
+  (below), which makes application order across segments irrelevant — for
+  independent ops by semantic idempotence, and for dependent ops by
+  re-passing. fsync per append; the atomicity unit is one record — a
   truncated tail record is discarded at replay.
+- **Segment lifecycle and ownership — `active → sealed → replayed → deleted`**
+  (writer-vs-pruner concurrency is dissolved by construction, not by care):
+  - A writer holds an OS advisory lock on its segment file for its entire
+    lifetime. The app may **read** active segments at any time (for overlay
+    and replay) but never renames, truncates, edits, or deletes them.
+  - **Sealing is app-driven and lock-gated**: if the app can acquire a
+    segment's lock, its writer is dead; the app atomically renames the file
+    to `*.sealed`, claiming ownership. Writers never reopen old segments — a
+    restarted extension is a new writer id with a new file — so a sealed
+    segment provably has no living writer, and append-vs-prune overlap is
+    impossible rather than unlikely.
+  - **Deletion is whole-segment only**, and only when every record in the
+    sealed segment is either in the applied set or moved to dead-letter.
+    Records replayed out of still-active segments simply remain in the
+    applied set until their segment is eventually sealed and deleted.
+- **Fixed-point replay**: one replay pass applies every applicable record
+  from every segment; passes repeat until a pass makes no progress. A
+  creation in segment A and a dependent mutation in segment B therefore land
+  regardless of scan order — the mutation applies one pass later at worst.
+  Records still unapplicable at the fixed point are **pending**: they stay in
+  their segment (blocking its deletion), are excluded from the applied set,
+  and are retried on every future replay; a pending record whose target is
+  confirmed dead (a newer tombstone) moves to dead-letter with that reason.
 - **Two correctness layers** (both required):
   1. **Semantic idempotence of every op kind**: applying an op to a vault that
      already contains its effect is a no-op. Passkey registration inserts by
@@ -229,9 +253,12 @@ JournalRecord {
   journal prune → applied-entry drop`
 
   The invariant: **a journal record may be pruned only after a durably
-  published cache contains its effect.** Without this, an extension whose
-  acknowledged mutation was just pruned would see an old cache and no overlay
-  — a confirmed passkey silently vanishing from its view. Crash matrix:
+  published cache contains its effect.** "Contains its effect" holds **by
+  construction**, not by per-record marking: the published cache is
+  serialized from the exact post-replay merged vault that the save committed.
+  Without this invariant, an extension whose acknowledged mutation was just
+  pruned would see an old cache and no overlay — a confirmed passkey silently
+  vanishing from its view. Crash matrix:
 
   | crash after… | journal | cache | extension view |
   |---|---|---|---|
