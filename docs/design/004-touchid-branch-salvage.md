@@ -1,6 +1,6 @@
 # 004 — Touch ID Branch Salvage Manifest
 
-Status: **Decided — r6** (five external review rounds). 2026-07-12.
+Status: **Decided — r7** (six external review rounds). 2026-07-12.
 Subject: `codex/macos-touch-id-quick-unlock` (38 commits, +11.7k/−1.0k,
 **will not be merged**). The branch is kept as a read-only reference; items are
 carried over per the tables below, **remade** to the 000–003 designs rather than
@@ -57,8 +57,9 @@ now abolished).
 ```
 contract freeze (wire formats pinned before any consumer:
   CacheManifest, JournalRecord + segment lifecycle & fixed-point replay
-  rules, LedgerEntry incl. the platform record key, canonical
-  serialization, MergeSummaryDto extension)
+  rules incl. per-kind idempotence/monotonicity laws, LedgerEntry incl.
+  the platform record key, canonical serialization, MergeSummaryDto
+  extension)
   └─> ledger storage pattern (durable write + fail-fast lock)
         └─> state machine core (003 transitions + error taxonomy)
               ├─> envelope remake (002 payload: transformed key + kdf_generation)

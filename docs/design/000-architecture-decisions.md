@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided — r6** (five external review rounds). 2026-07-12.
+Status: **Decided — r7** (six external review rounds). 2026-07-12.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -149,3 +149,13 @@ KDF caps.
   vault); icon conflicts join Meta conflicts in MergeSummaryDto. The
   remaining Phase 0 exit gate is executing the contract freeze commit
   (schema artifacts + CI snapshot check) — the docs themselves are complete.
+- r7 (2026-07-12): sixth review round — two internal contradictions
+  resolved. The entry-data recoverability promise is scoped by the vault's
+  own history retention policy (retention is the single user-controlled
+  exception; merge never discards outside it; no out-of-format conflict
+  archive). Dead-lettering becomes copy-and-mark instead of move, so the
+  "app never edits active segments" ownership rule holds without exception;
+  torn tail records in active segments are skipped without judgment until
+  sealing. Fixed-point termination is promoted from example behavior to a
+  contract law: every op kind must declare idempotence/monotonicity laws and
+  ship a termination property test; sealed segments are never compacted.

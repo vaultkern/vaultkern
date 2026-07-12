@@ -1,6 +1,6 @@
 # 003 — Quick Unlock State Machine and Process Topology
 
-Status: **Decided — r6** (five external review rounds). 2026-07-12.
+Status: **Decided — r7** (six external review rounds). 2026-07-12.
 Upstream decisions: D3, D4, D5 (000).
 
 ## Part 1: the quick unlock state machine (platform-neutral, designed once)
@@ -220,7 +220,21 @@ JournalRecord {
   Records still unapplicable at the fixed point are **pending**: they stay in
   their segment (blocking its deletion), are excluded from the applied set,
   and are retried on every future replay; a pending record whose target is
-  confirmed dead (a newer tombstone) moves to dead-letter with that reason.
+  confirmed dead (a newer tombstone) is dead-lettered (by copy, as above)
+  with that reason.
+  **Termination is a contract law, not a property of the current examples**:
+  every journal op kind — present and future — MUST be idempotent
+  (re-application to a vault already containing its effect is a no-op) and
+  monotonic (applying one op never un-applies or oscillates another). A new
+  `kind` cannot be added to the vocabulary without declaring its idempotence
+  and monotonicity laws, its applicability predicate, and shipping a
+  termination property test. Under these laws each pass strictly grows the
+  applied set or halts, and the record count is finite — the fixed point
+  always exists and is order-independent.
+  **No segment compaction**: sealed segments are never rewritten. A pending
+  record keeps its segment alive; that is accepted (records are tiny, pending
+  is rare and surfaced to the UI) — compaction would rewrite files and
+  complicate `op_id`/applied-set accounting for no real gain.
 - **Two correctness layers** (both required):
   1. **Semantic idempotence of every op kind**: applying an op to a vault that
      already contains its effect is a no-op. Passkey registration inserts by
@@ -276,13 +290,24 @@ JournalRecord {
   layer 1. No interleaving loses a durably-acknowledged mutation.
 - **Replay-time validation**: payloads are validated like any protocol input,
   against the record's target `vault_ref_id` and the current ledger; a record
-  that fails validation is **moved out of its segment into a dead-letter
-  segment** (a dedicated file alongside the journal segments, same framing),
-  surfaced to the UI, never silently dropped. Dead-letter records never enter
-  the applied set and are invisible to the applied-set intersection
-  maintenance — they cannot be mistaken for processed. They are not retried
-  automatically; the user resolves them explicitly (retry once the cause is
-  fixed, or discard).
+  that fails validation is **dead-lettered by copy, never by moving**: the
+  record is appended to the app-owned dead-letter file (same framing) and its
+  `op_id` is marked dead-lettered — the original stays untouched in its
+  segment (active segments are never edited; the ownership rule holds without
+  exception) and is excluded from replay by the dead-letter marking. When the
+  segment is eventually sealed and deleted, dead-lettered `op_id`s count as
+  resolved for the whole-segment-deletion accounting. Dead-letter records
+  never enter the applied set and are invisible to the applied-set
+  intersection maintenance — they cannot be mistaken for processed. They are
+  not retried automatically; the user resolves them explicitly (retry once
+  the cause is fixed, or discard). The dead-letter file itself is owned and
+  written **only by the app** (its writes are serialized by the app
+  internally; no lock ceremony needed).
+- **Torn tail records**: in a **sealed** segment (writer provably dead) a
+  record failing length/CRC checks is definitively discarded and counted. In
+  an **active** segment a torn tail may simply be an append in progress —
+  replay skips it without counting or judging it; it is re-examined on the
+  next pass and adjudicated only once the segment is sealed.
 - **Writer-id lifecycle**: a writer id is a fresh UUID per process instance,
   never reused. Segments of dead writers are replayed and pruned by the app
   like any other; a fully-pruned segment file is deleted.

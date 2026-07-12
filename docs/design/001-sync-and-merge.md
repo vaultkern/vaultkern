@@ -1,6 +1,6 @@
 # 001 — Sync and Merge Semantics
 
-Status: **Decided — r6** (five external review rounds). 2026-07-12.
+Status: **Decided — r7** (six external review rounds). 2026-07-12.
 Upstream decision: D1 (000).
 
 ## Model
@@ -95,11 +95,17 @@ Supplementary rules:
 - `usage_count` merges as max.
 - Timestamps are second-granularity local clocks. **The backstop for ties and
   clock skew is deterministic tie-breaking + history**: any discarded version
-  of **entry data** must be recoverable from history. Merge never silently
-  destroys user secrets. Meta fields and custom icons are explicitly exempt
-  from this promise — they are decorative/configuration data, carry no
-  secrets, and have no history mechanism in KDBX; their losers are discarded
-  (consistent with the CustomIcon rule above).
+  of **entry data** must be recoverable from history, **subject to the
+  vault's own history retention policy** (maxItems/maxSize). Retention is the
+  single, deliberate, user-controlled exception: merge losers enter history
+  like any other snapshot and age out under the same policy as any other
+  snapshot — **merge itself never discards entry data outside of what
+  retention would**. No separate conflict archive is introduced (it would
+  live outside the KDBX format and break interoperability). Meta fields and
+  custom icons are explicitly exempt from this promise — they are
+  decorative/configuration data, carry no secrets, and have no history
+  mechanism in KDBX; their losers are discarded but counted in
+  `MergeSummaryDto` (consistent with the CustomIcon rule above).
 - Merge results are reported to the UI via `MergeSummaryDto` ("merged, N spots
   resolved to the newer version"); the UI takes part in no merge decision (D5).
 
