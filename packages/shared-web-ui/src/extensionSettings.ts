@@ -1,3 +1,5 @@
+import type { QuickUnlockState } from "@vaultkern/runtime-web-client";
+
 export type ExtensionLanguage = "en" | "zh-CN";
 
 export interface ExtensionSettings {
@@ -13,6 +15,15 @@ export interface ExtensionSettings {
 export interface ExtensionSettingsStore {
   load(): Promise<ExtensionSettings>;
   save(settings: ExtensionSettings): Promise<void>;
+}
+
+interface RuntimeQuickUnlockPolicyClient {
+  getQuickUnlockState(): Promise<QuickUnlockState>;
+  initializeQuickUnlockPolicy(enabled: boolean): Promise<QuickUnlockState>;
+}
+
+interface RuntimeQuickUnlockPolicyWriter {
+  setQuickUnlockPolicy(enabled: boolean): Promise<QuickUnlockState>;
 }
 
 export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings = {
@@ -55,6 +66,47 @@ export function createMemoryExtensionSettingsStore(
       current = normalizeExtensionSettings(settings);
     }
   };
+}
+
+export async function loadRuntimeOwnedExtensionSettings(
+  store: ExtensionSettingsStore,
+  client: RuntimeQuickUnlockPolicyClient
+) {
+  const localSettings = normalizeExtensionSettings(await store.load());
+  let quickUnlockState = await client.getQuickUnlockState();
+  if (quickUnlockState.policyEnabled === null) {
+    quickUnlockState = await client.initializeQuickUnlockPolicy(
+      localSettings.quickUnlockEnabled
+    );
+  }
+
+  const quickUnlockEnabled = quickUnlockState.policyEnabled === true;
+  const settings = {
+    ...localSettings,
+    quickUnlockEnabled
+  };
+  if (localSettings.quickUnlockEnabled !== quickUnlockEnabled) {
+    await store.save(settings);
+  }
+
+  return { settings, quickUnlockState };
+}
+
+export async function saveRuntimeOwnedExtensionSettings(
+  store: ExtensionSettingsStore,
+  client: RuntimeQuickUnlockPolicyWriter,
+  settings: ExtensionSettings
+) {
+  const normalized = normalizeExtensionSettings(settings);
+  const quickUnlockState = await client.setQuickUnlockPolicy(
+    normalized.quickUnlockEnabled
+  );
+  const authoritativeSettings = {
+    ...normalized,
+    quickUnlockEnabled: quickUnlockState.policyEnabled === true
+  };
+  await store.save(authoritativeSettings);
+  return quickUnlockState;
 }
 
 function clampInteger(

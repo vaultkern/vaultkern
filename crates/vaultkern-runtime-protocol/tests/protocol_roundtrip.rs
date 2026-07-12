@@ -15,8 +15,9 @@ use vaultkern_runtime_protocol::{
     PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto,
     PasskeyFrameKindDto, PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto,
     PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto,
-    PasskeyUserVerifiedDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-    SaveVaultStatusDto, SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
+    PasskeyUserVerifiedDto, ProtocolEnvelope, QuickUnlockCapabilityDto, QuickUnlockRecordStateDto,
+    QuickUnlockStateDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto,
+    SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
     VaultSourceStatusDto,
 };
 
@@ -164,6 +165,43 @@ fn protocol_roundtrips_session_state_response() {
     let decoded: RuntimeResponse = serde_json::from_str(&json).unwrap();
 
     assert_eq!(decoded, response);
+}
+
+#[test]
+fn protocol_roundtrips_runtime_owned_quick_unlock_policy_and_state() {
+    let commands = [
+        ProtocolEnvelope::new(RuntimeCommand::GetQuickUnlockState),
+        ProtocolEnvelope::new(RuntimeCommand::InitializeQuickUnlockPolicy { enabled: true }),
+        ProtocolEnvelope::new(RuntimeCommand::SetQuickUnlockPolicy { enabled: false }),
+    ];
+
+    for command in commands {
+        let json = serde_json::to_string(&command).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProtocolEnvelope>(&json).unwrap(),
+            command
+        );
+    }
+
+    let response = RuntimeResponse::QuickUnlockState(QuickUnlockStateDto {
+        policy_enabled: Some(true),
+        capability: QuickUnlockCapabilityDto::Available,
+        record_state: QuickUnlockRecordStateDto::Ready,
+        can_quick_unlock: true,
+        requires_password: true,
+        last_error: None,
+    });
+    let value = serde_json::to_value(&response).unwrap();
+
+    assert_eq!(value["type"], "quick_unlock_state");
+    assert_eq!(value["policyEnabled"], true);
+    assert_eq!(value["capability"], "available");
+    assert_eq!(value["recordState"], "ready");
+    assert_eq!(value["canQuickUnlock"], true);
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(value).unwrap(),
+        response
+    );
 }
 
 #[test]

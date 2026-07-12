@@ -10,6 +10,29 @@ export interface SessionState {
   sourceStatus?: VaultSourceStatus | null;
 }
 
+export type QuickUnlockCapability =
+  | "available"
+  | "temporarily_unavailable"
+  | "unsupported";
+
+export type QuickUnlockRecordState =
+  | "absent"
+  | "ready"
+  | "suppressed"
+  | "setup_required"
+  | "cleanup_pending"
+  | "unknown";
+
+export interface QuickUnlockState {
+  type: "quick_unlock_state";
+  policyEnabled: boolean | null;
+  capability: QuickUnlockCapability;
+  recordState: QuickUnlockRecordState;
+  canQuickUnlock: boolean;
+  requiresPassword: boolean;
+  lastError: string | null;
+}
+
 export interface VaultSourceStatus {
   type?: "vault_source_status";
   sourceKind: string;
@@ -514,6 +537,26 @@ export class RuntimeClient {
   async enableQuickUnlockForCurrentVault(): Promise<SessionState> {
     return this.sendCommand<SessionState>({
       type: "enable_quick_unlock_for_current_vault"
+    });
+  }
+
+  async getQuickUnlockState(): Promise<QuickUnlockState> {
+    return this.sendCommand<QuickUnlockState>({
+      type: "get_quick_unlock_state"
+    });
+  }
+
+  async initializeQuickUnlockPolicy(enabled: boolean): Promise<QuickUnlockState> {
+    return this.sendCommand<QuickUnlockState>({
+      type: "initialize_quick_unlock_policy",
+      enabled
+    });
+  }
+
+  async setQuickUnlockPolicy(enabled: boolean): Promise<QuickUnlockState> {
+    return this.sendCommand<QuickUnlockState>({
+      type: "set_quick_unlock_policy",
+      enabled
     });
   }
 

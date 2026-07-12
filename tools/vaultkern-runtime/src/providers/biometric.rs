@@ -2,6 +2,10 @@ use anyhow::Result;
 
 #[allow(dead_code)]
 pub trait BiometricProvider {
+    fn is_implemented(&self) -> bool {
+        true
+    }
+
     fn supports_quick_unlock(&self) -> bool;
     fn authorize(&self, reason: &str) -> Result<()>;
 }
@@ -9,6 +13,10 @@ pub trait BiometricProvider {
 pub struct UnsupportedBiometricProvider;
 
 impl BiometricProvider for UnsupportedBiometricProvider {
+    fn is_implemented(&self) -> bool {
+        false
+    }
+
     fn supports_quick_unlock(&self) -> bool {
         false
     }

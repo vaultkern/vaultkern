@@ -57,6 +57,13 @@ pub enum RuntimeCommand {
         password: Option<String>,
         key_file_path: Option<String>,
     },
+    GetQuickUnlockState,
+    InitializeQuickUnlockPolicy {
+        enabled: bool,
+    },
+    SetQuickUnlockPolicy {
+        enabled: bool,
+    },
     EnableQuickUnlockForCurrentVault,
     UnlockCurrentVaultWithQuickUnlock,
     DisableQuickUnlockForCurrentVault,
@@ -322,6 +329,7 @@ pub enum RuntimeCommand {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeResponse {
     SessionState(SessionStateDto),
+    QuickUnlockState(QuickUnlockStateDto),
     VaultReferenceList(VaultReferenceListDto),
     VaultReference(VaultReferenceDto),
     OneDriveAuthSession(OneDriveAuthSessionDto),
@@ -367,6 +375,36 @@ pub struct SessionStateDto {
     pub quick_unlock_requires_password: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_status: Option<VaultSourceStatusDto>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickUnlockCapabilityDto {
+    Available,
+    TemporarilyUnavailable,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickUnlockRecordStateDto {
+    Absent,
+    Ready,
+    Suppressed,
+    SetupRequired,
+    CleanupPending,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickUnlockStateDto {
+    pub policy_enabled: Option<bool>,
+    pub capability: QuickUnlockCapabilityDto,
+    pub record_state: QuickUnlockRecordStateDto,
+    pub can_quick_unlock: bool,
+    pub requires_password: bool,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

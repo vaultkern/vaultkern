@@ -19,6 +19,10 @@ use super::secure_storage::{
 };
 
 pub trait QuickUnlockProvider {
+    fn is_implemented(&self) -> bool {
+        true
+    }
+
     fn requires_same_process_credential_proof(&self) -> bool {
         false
     }
@@ -164,6 +168,10 @@ impl ComposedQuickUnlockProvider {
 }
 
 impl QuickUnlockProvider for ComposedQuickUnlockProvider {
+    fn is_implemented(&self) -> bool {
+        self.biometric.is_implemented()
+    }
+
     fn is_supported(&self) -> bool {
         self.biometric.supports_quick_unlock()
     }
@@ -201,6 +209,10 @@ impl QuickUnlockProvider for ComposedQuickUnlockProvider {
 pub(crate) struct UnsupportedQuickUnlockProvider;
 
 impl QuickUnlockProvider for UnsupportedQuickUnlockProvider {
+    fn is_implemented(&self) -> bool {
+        false
+    }
+
     fn is_supported(&self) -> bool {
         false
     }

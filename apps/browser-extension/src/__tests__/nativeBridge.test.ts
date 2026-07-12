@@ -728,6 +728,43 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
+  it("uses the interactive timeout while enabling runtime-owned quick unlock policy", async () => {
+    vi.useFakeTimers();
+
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: { connectNative }
+    };
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 25,
+      interactiveTimeoutMs: 1_000
+    });
+
+    const request = bridge.send({
+      version: 1,
+      command: { type: "set_quick_unlock_policy", enabled: true }
+    });
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(port.disconnect).not.toHaveBeenCalled();
+    port.emitMessage({
+      type: "quick_unlock_state",
+      policyEnabled: true,
+      capability: "available",
+      recordState: "ready",
+      canQuickUnlock: true,
+      requiresPassword: false,
+      lastError: null
+    });
+    await expect(request).resolves.toMatchObject({
+      type: "quick_unlock_state",
+      policyEnabled: true
+    });
+
+    vi.useRealTimers();
+  });
+
   it("uses the interactive timeout while unlocking with quick unlock", async () => {
     vi.useFakeTimers();
 

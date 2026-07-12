@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -42,6 +43,10 @@ pub enum StoredVaultSource {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct VaultReferenceStoreData {
     current_vault_ref_id: Option<String>,
+    #[serde(default)]
+    quick_unlock_enabled: Option<bool>,
+    #[serde(default)]
+    quick_unlock_invalidated_vault_ref_ids: BTreeSet<String>,
     vaults: Vec<StoredVaultReference>,
 }
 
@@ -85,6 +90,62 @@ impl VaultReferenceStore {
 
     pub fn current_vault_ref_id(&self) -> Option<&str> {
         self.data().current_vault_ref_id.as_deref()
+    }
+
+    pub fn quick_unlock_policy(&self) -> Option<bool> {
+        self.data().quick_unlock_enabled
+    }
+
+    pub fn initialize_quick_unlock_policy(&mut self, enabled: bool) -> Result<bool> {
+        if self.data().quick_unlock_enabled.is_some() {
+            return Ok(false);
+        }
+        let data = self.data_mut();
+        data.quick_unlock_enabled = Some(enabled);
+        if !enabled {
+            data.quick_unlock_invalidated_vault_ref_ids
+                .extend(data.vaults.iter().map(|vault| vault.vault_ref_id.clone()));
+        }
+        self.persist()?;
+        Ok(true)
+    }
+
+    pub fn set_quick_unlock_policy(&mut self, enabled: bool) -> Result<()> {
+        let data = self.data_mut();
+        data.quick_unlock_enabled = Some(enabled);
+        if !enabled {
+            data.quick_unlock_invalidated_vault_ref_ids
+                .extend(data.vaults.iter().map(|vault| vault.vault_ref_id.clone()));
+        }
+        self.persist()
+    }
+
+    pub fn quick_unlock_record_is_invalidated(&self, vault_ref_id: &str) -> bool {
+        self.data()
+            .quick_unlock_invalidated_vault_ref_ids
+            .contains(vault_ref_id)
+    }
+
+    pub fn invalidate_quick_unlock_record(&mut self, vault_ref_id: &str) -> Result<()> {
+        if !self
+            .data_mut()
+            .quick_unlock_invalidated_vault_ref_ids
+            .insert(vault_ref_id.to_owned())
+        {
+            return Ok(());
+        }
+        self.persist()
+    }
+
+    pub fn clear_quick_unlock_record_invalidation(&mut self, vault_ref_id: &str) -> Result<()> {
+        if !self
+            .data_mut()
+            .quick_unlock_invalidated_vault_ref_ids
+            .remove(vault_ref_id)
+        {
+            return Ok(());
+        }
+        self.persist()
     }
 
     pub fn upsert_local_path(
@@ -222,6 +283,8 @@ impl VaultReferenceStore {
         if deleted_current {
             data.current_vault_ref_id = None;
         }
+        data.quick_unlock_invalidated_vault_ref_ids
+            .remove(vault_ref_id);
 
         self.persist()?;
         Ok(deleted_current)
@@ -361,4 +424,39 @@ fn source_summary_for_path(path: &str) -> String {
 
 fn default_store_path() -> PathBuf {
     runtime_state_dir().join("vault-references.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VaultReferenceStore;
+
+    #[test]
+    fn quick_unlock_policy_persists_and_initialization_is_one_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault-references.json");
+        let mut store = VaultReferenceStore::new_at(path.clone());
+
+        assert_eq!(store.quick_unlock_policy(), None);
+        assert!(store.initialize_quick_unlock_policy(true).unwrap());
+        assert!(!store.initialize_quick_unlock_policy(false).unwrap());
+        assert_eq!(store.quick_unlock_policy(), Some(true));
+
+        let mut reloaded = VaultReferenceStore::new_at(path);
+        assert_eq!(reloaded.quick_unlock_policy(), Some(true));
+        reloaded.set_quick_unlock_policy(false).unwrap();
+        assert_eq!(reloaded.quick_unlock_policy(), Some(false));
+    }
+
+    #[test]
+    fn disabling_quick_unlock_persistently_invalidates_known_vault_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault-references.json");
+        let mut store = VaultReferenceStore::new_at(path.clone());
+        let reference = store.upsert_local_path("/tmp/personal.kdbx", 1).unwrap();
+
+        store.set_quick_unlock_policy(false).unwrap();
+
+        let reloaded = VaultReferenceStore::new_at(path);
+        assert!(reloaded.quick_unlock_record_is_invalidated(&reference.vault_ref_id));
+    }
 }

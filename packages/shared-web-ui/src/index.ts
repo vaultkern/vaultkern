@@ -5,7 +5,9 @@ export { ExtensionSettingsPanel } from "./screens/ExtensionSettingsPanel";
 export {
   DEFAULT_EXTENSION_SETTINGS,
   createMemoryExtensionSettingsStore,
-  normalizeExtensionSettings
+  loadRuntimeOwnedExtensionSettings,
+  normalizeExtensionSettings,
+  saveRuntimeOwnedExtensionSettings
 } from "./extensionSettings";
 export type { ExtensionSettings, ExtensionSettingsStore } from "./extensionSettings";
 export { I18nProvider, showMoreText, translate, useLanguage, useText } from "./i18n";

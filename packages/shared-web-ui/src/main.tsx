@@ -6,6 +6,16 @@ const unsupported = async () => {
   throw new Error("unsupported in standalone demo");
 };
 
+const unsupportedQuickUnlockState = {
+  type: "quick_unlock_state" as const,
+  policyEnabled: false,
+  capability: "unsupported" as const,
+  recordState: "absent" as const,
+  canQuickUnlock: false,
+  requiresPassword: false,
+  lastError: null
+};
+
 const unsupportedClient = {
   async getSessionState() {
     return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
@@ -44,13 +54,16 @@ const unsupportedClient = {
   async unlockCurrentVault() {
     return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
   },
-  async enableQuickUnlockForCurrentVault() {
-    return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
+  async getQuickUnlockState() {
+    return unsupportedQuickUnlockState;
+  },
+  async initializeQuickUnlockPolicy() {
+    return unsupportedQuickUnlockState;
+  },
+  async setQuickUnlockPolicy() {
+    return unsupportedQuickUnlockState;
   },
   async unlockCurrentVaultWithQuickUnlock() {
-    return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
-  },
-  async disableQuickUnlockForCurrentVault() {
     return { unlocked: false, activeVaultId: null, currentVaultRefId: null };
   },
   unlockWithPassword: unsupported,

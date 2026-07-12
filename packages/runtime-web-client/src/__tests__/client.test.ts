@@ -324,6 +324,37 @@ describe("RuntimeClient", () => {
     });
   });
 
+  it("reads, initializes, and updates the runtime-owned quick unlock policy", async () => {
+    const state = {
+      type: "quick_unlock_state",
+      policyEnabled: true,
+      capability: "available",
+      recordState: "ready",
+      canQuickUnlock: true,
+      requiresPassword: true,
+      lastError: null
+    };
+    const transport = { send: vi.fn().mockResolvedValue(state) };
+    const client = new RuntimeClient(transport);
+
+    expect(await client.getQuickUnlockState()).toEqual(state);
+    await client.initializeQuickUnlockPolicy(true);
+    await client.setQuickUnlockPolicy(false);
+
+    expect(transport.send).toHaveBeenNthCalledWith(1, {
+      version: 1,
+      command: { type: "get_quick_unlock_state" }
+    });
+    expect(transport.send).toHaveBeenNthCalledWith(2, {
+      version: 1,
+      command: { type: "initialize_quick_unlock_policy", enabled: true }
+    });
+    expect(transport.send).toHaveBeenNthCalledWith(3, {
+      version: 1,
+      command: { type: "set_quick_unlock_policy", enabled: false }
+    });
+  });
+
   it("locks the active session and returns the locked session state", async () => {
     const transport = {
       send: vi.fn().mockResolvedValue({

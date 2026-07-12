@@ -22,6 +22,9 @@ useDomRenderEnvironment();
 
 const runtimeClientMocks = vi.hoisted(() => ({
   getSessionState: vi.fn(),
+  getQuickUnlockState: vi.fn(),
+  initializeQuickUnlockPolicy: vi.fn(),
+  setQuickUnlockPolicy: vi.fn(),
   listRecentVaults: vi.fn(),
   preloadCurrentVault: vi.fn(),
   addLocalVaultReference: vi.fn(),
@@ -167,6 +170,9 @@ beforeEach(() => {
     __vaultkernAllowSyntheticAutofillSubmitForTests?: boolean;
   }).__vaultkernAllowSyntheticAutofillSubmitForTests;
   runtimeClientMocks.getSessionState.mockReset();
+  runtimeClientMocks.getQuickUnlockState.mockReset();
+  runtimeClientMocks.initializeQuickUnlockPolicy.mockReset();
+  runtimeClientMocks.setQuickUnlockPolicy.mockReset();
   runtimeClientMocks.listRecentVaults.mockReset();
   runtimeClientMocks.preloadCurrentVault.mockReset();
   runtimeClientMocks.addLocalVaultReference.mockReset();
@@ -187,6 +193,24 @@ beforeEach(() => {
   runtimeClientMocks.saveVault.mockReset();
   runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReset();
   runtimeClientMocks.disableQuickUnlockForCurrentVault.mockReset();
+  runtimeClientMocks.getQuickUnlockState.mockResolvedValue({
+    type: "quick_unlock_state",
+    policyEnabled: null,
+    capability: "available",
+    recordState: "absent",
+    canQuickUnlock: false,
+    requiresPassword: false,
+    lastError: null
+  });
+  runtimeClientMocks.initializeQuickUnlockPolicy.mockImplementation(async (enabled) => ({
+    type: "quick_unlock_state",
+    policyEnabled: enabled,
+    capability: "available",
+    recordState: enabled ? "setup_required" : "absent",
+    canQuickUnlock: false,
+    requiresPassword: false,
+    lastError: null
+  }));
   runtimeClientMocks.listRecentVaults.mockResolvedValue([]);
   runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
     unlocked: false,
@@ -2043,7 +2067,7 @@ describe("PopupShell fill flow", () => {
     expect(screen.queryByText("secret-123")).not.toBeInTheDocument();
   });
 
-  it("enables quick unlock during the first popup password unlock when the extension preference is on", async () => {
+  it("lets the runtime enroll quick unlock during the first popup password unlock", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       storage: {
         local: {
@@ -2124,11 +2148,11 @@ describe("PopupShell fill flow", () => {
         password: "demo-password",
         keyFilePath: ""
       });
-      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
     });
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 
-  it("explicitly reconciles quick unlock when password proof makes the existing record available", async () => {
+  it("reads runtime-owned quick unlock state after password proof makes the record available", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       storage: {
         local: {
@@ -2204,10 +2228,10 @@ describe("PopupShell fill flow", () => {
 
     expect(await screen.findByText("Unlocked")).toBeInTheDocument();
     expect(runtimeClientMocks.listRecentVaults).toHaveBeenCalledTimes(2);
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 
-  it("revokes a hidden quick unlock record after password unlock when the preference is off", async () => {
+  it("leaves hidden record cleanup to the runtime-owned off policy", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       storage: {
         local: {
@@ -2283,7 +2307,7 @@ describe("PopupShell fill flow", () => {
 
     expect(await screen.findByText("Unlocked")).toBeInTheDocument();
     expect(runtimeClientMocks.listRecentVaults).toHaveBeenCalledTimes(2);
-    expect(runtimeClientMocks.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+    expect(runtimeClientMocks.disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
     expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 
@@ -2366,7 +2390,7 @@ describe("PopupShell fill flow", () => {
     expect(screen.queryByText("Failed to update quick unlock")).not.toBeInTheDocument();
   });
 
-  it("enables quick unlock during the first popup key-file-only unlock when the extension preference is on", async () => {
+  it("leaves key-file-only enrollment decisions to the runtime", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       storage: {
         local: {
@@ -2447,8 +2471,8 @@ describe("PopupShell fill flow", () => {
         password: "",
         keyFilePath: "/tmp/demo.keyx"
       });
-      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
     });
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 
   it("does not offer macOS quick unlock after a key-file-only unlock", async () => {
@@ -2528,7 +2552,7 @@ describe("PopupShell fill flow", () => {
     expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 
-  it("enables quick unlock when the popup unlocks before recent vaults finish loading", async () => {
+  it("does not wait for recent vaults before runtime-owned reconciliation", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       storage: {
         local: {
@@ -2621,13 +2645,14 @@ describe("PopupShell fill flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
 
     await waitFor(() => {
-      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledTimes(1);
     });
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 
     slowVaults.resolve(loadedVaults);
   });
 
-  it("uses the saved quick unlock preference when unlocking before popup settings finish loading", async () => {
+  it("initializes runtime policy before unlocking when popup settings finish loading late", async () => {
     const storageCallbacks: Array<(items: Record<string, unknown>) => void> = [];
     const savedSettings = {
       recentVaultLimit: 10,
@@ -2717,8 +2742,9 @@ describe("PopupShell fill flow", () => {
 
     await waitFor(() => {
       resolveSavedSettings();
-      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+      expect(runtimeClientMocks.initializeQuickUnlockPolicy).toHaveBeenCalledWith(true);
     });
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 
   it("keeps the popup unlocked when quick unlock vault refresh fails after unlock", async () => {

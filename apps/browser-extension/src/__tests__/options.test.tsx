@@ -4,11 +4,26 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const runtimeClientMocks = vi.hoisted(() => ({
   getSessionState: vi.fn(),
+  getQuickUnlockState: vi.fn(),
+  initializeQuickUnlockPolicy: vi.fn(),
+  setQuickUnlockPolicy: vi.fn(),
   listRecentVaults: vi.fn(),
   deleteRecentVault: vi.fn(),
   enableQuickUnlockForCurrentVault: vi.fn(),
   disableQuickUnlockForCurrentVault: vi.fn()
 }));
+
+function quickUnlockState(policyEnabled: boolean | null) {
+  return {
+    type: "quick_unlock_state" as const,
+    policyEnabled,
+    capability: "available" as const,
+    recordState: policyEnabled ? ("setup_required" as const) : ("absent" as const),
+    canQuickUnlock: false,
+    requiresPassword: false,
+    lastError: null
+  };
+}
 
 vi.mock("@vaultkern/runtime-web-client", () => ({
   RuntimeClient: vi.fn(() => runtimeClientMocks)
@@ -58,17 +73,27 @@ beforeEach(() => {
   document.body.innerHTML = "";
   delete (globalThis as typeof globalThis & { chrome?: unknown }).chrome;
   runtimeClientMocks.getSessionState.mockReset();
+  runtimeClientMocks.getQuickUnlockState.mockReset();
+  runtimeClientMocks.initializeQuickUnlockPolicy.mockReset();
+  runtimeClientMocks.setQuickUnlockPolicy.mockReset();
   runtimeClientMocks.listRecentVaults.mockReset();
   runtimeClientMocks.deleteRecentVault.mockReset();
   runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReset();
   runtimeClientMocks.disableQuickUnlockForCurrentVault.mockReset();
+  runtimeClientMocks.getQuickUnlockState.mockResolvedValue(quickUnlockState(null));
+  runtimeClientMocks.initializeQuickUnlockPolicy.mockImplementation(async (enabled) =>
+    quickUnlockState(enabled)
+  );
+  runtimeClientMocks.setQuickUnlockPolicy.mockImplementation(async (enabled) =>
+    quickUnlockState(enabled)
+  );
 });
 
 afterEach(() => {
   cleanup();
 });
 
-it("syncs an off quick unlock preference after options vault data finishes loading", async () => {
+it("updates the runtime-owned off policy without waiting for vault data", async () => {
   installChromeStorage({
     recentVaultLimit: 10,
     language: "en",
@@ -129,13 +154,13 @@ it("syncs an off quick unlock preference after options vault data finishes loadi
   fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
 
   await waitFor(() => {
-    expect(runtimeClientMocks.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+    expect(runtimeClientMocks.setQuickUnlockPolicy).toHaveBeenCalledWith(false);
   });
 
   slowVaults.resolve(loadedVaults);
 });
 
-it("defers options quick unlock setup until the current vault is unlocked", async () => {
+it("does not run provider enrollment from options refreshes", async () => {
   installChromeStorage({
     recentVaultLimit: 10,
     language: "en",
@@ -184,15 +209,19 @@ it("defers options quick unlock setup until the current vault is unlocked", asyn
   await screen.findByRole("checkbox", { name: "Quick Unlock" });
   await new Promise((resolve) => setTimeout(resolve, 50));
   expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+  const stateReadsBeforeFocus = runtimeClientMocks.getQuickUnlockState.mock.calls.length;
 
   window.dispatchEvent(new Event("focus"));
 
   await waitFor(() => {
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+    expect(runtimeClientMocks.getQuickUnlockState.mock.calls.length).toBeGreaterThan(
+      stateReadsBeforeFocus
+    );
   });
+  expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 });
 
-it("coalesces options save and auto-sync into one quick unlock operation", async () => {
+it("submits one runtime-owned quick unlock policy update from options", async () => {
   installChromeStorage({
     recentVaultLimit: 10,
     language: "en",
@@ -201,12 +230,7 @@ it("coalesces options save and auto-sync into one quick unlock operation", async
     passkeyProviderEnabled: false,
     quickUnlockEnabled: false
   });
-  const enable = createDeferred<{
-    unlocked: boolean;
-    activeVaultId: string;
-    currentVaultRefId: string;
-    supportsBiometricUnlock: boolean;
-  }>();
+  const update = createDeferred<ReturnType<typeof quickUnlockState>>();
   const recentVaults = [
     {
       vaultRefId: "vault-ref-1",
@@ -226,7 +250,7 @@ it("coalesces options save and auto-sync into one quick unlock operation", async
     supportsBiometricUnlock: true
   });
   runtimeClientMocks.listRecentVaults.mockImplementation(async () => recentVaults);
-  runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReturnValue(enable.promise);
+  runtimeClientMocks.setQuickUnlockPolicy.mockReturnValue(update.promise);
 
   await renderOptionsPage();
 
@@ -235,27 +259,22 @@ it("coalesces options save and auto-sync into one quick unlock operation", async
   fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
 
   await waitFor(() => {
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalled();
+    expect(runtimeClientMocks.setQuickUnlockPolicy).toHaveBeenCalledWith(true);
   });
   await new Promise((resolve) => setTimeout(resolve, 25));
-  expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+  expect(runtimeClientMocks.setQuickUnlockPolicy).toHaveBeenCalledTimes(1);
 
   recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
   await act(async () => {
-    enable.resolve({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    await enable.promise;
+    update.resolve(quickUnlockState(true));
+    await update.promise;
   });
   await waitFor(() => {
     expect(screen.queryByText("Saving...")).not.toBeInTheDocument();
   });
 });
 
-it("keeps options loading until biometric support is known", async () => {
+it("keeps options loading until runtime quick unlock state is known", async () => {
   installChromeStorage({
     recentVaultLimit: 10,
     language: "en",
@@ -265,14 +284,9 @@ it("keeps options loading until biometric support is known", async () => {
     quickUnlockEnabled: false
   });
 
-  const slowSession = createDeferred<{
-    unlocked: boolean;
-    activeVaultId: string | null;
-    currentVaultRefId: string | null;
-    supportsBiometricUnlock: boolean;
-  }>();
+  const slowState = createDeferred<ReturnType<typeof quickUnlockState>>();
 
-  runtimeClientMocks.getSessionState.mockReturnValue(slowSession.promise);
+  runtimeClientMocks.getQuickUnlockState.mockReturnValue(slowState.promise);
   runtimeClientMocks.listRecentVaults.mockResolvedValue([]);
 
   await renderOptionsPage();
@@ -280,15 +294,10 @@ it("keeps options loading until biometric support is known", async () => {
   expect(await screen.findByText("Loading...")).toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "Quick Unlock" })).not.toBeInTheDocument();
 
-  slowSession.resolve({
-    unlocked: false,
-    activeVaultId: null,
-    currentVaultRefId: null,
-    supportsBiometricUnlock: false
-  });
+  slowState.resolve(quickUnlockState(false));
 });
 
-it("syncs the off quick unlock preference on options refreshes", async () => {
+it("does not run legacy disable operations on options refreshes", async () => {
   installChromeStorage({
     recentVaultLimit: 10,
     language: "en",
@@ -325,9 +334,8 @@ it("syncs the off quick unlock preference on options refreshes", async () => {
 
   await renderOptionsPage();
 
-  await waitFor(() => {
-    expect(runtimeClientMocks.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
-  });
+  await screen.findByRole("checkbox", { name: "Quick Unlock" });
+  expect(runtimeClientMocks.disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 });
 
 it("applies the recent vault limit when options settings are saved", async () => {
@@ -405,7 +413,9 @@ it("preserves saved quick unlock when biometric support lookup fails", async () 
     quickUnlockEnabled: true
   });
 
-  runtimeClientMocks.getSessionState.mockRejectedValue(new Error("native host unavailable"));
+  runtimeClientMocks.getQuickUnlockState.mockRejectedValue(
+    new Error("native host unavailable")
+  );
   runtimeClientMocks.listRecentVaults.mockResolvedValue([]);
 
   await renderOptionsPage();
@@ -442,6 +452,10 @@ it("preserves enabled quick unlock without retrying setup while biometrics are u
     activeVaultId: "vault-1",
     currentVaultRefId: "vault-ref-1",
     supportsBiometricUnlock: false
+  });
+  runtimeClientMocks.getQuickUnlockState.mockResolvedValue({
+    ...quickUnlockState(true),
+    capability: "temporarily_unavailable"
   });
   runtimeClientMocks.listRecentVaults.mockResolvedValue([
     {
@@ -492,14 +506,18 @@ it("saves local options when native recent vault operations fail", async () => {
     }>
   >();
 
-  runtimeClientMocks.getSessionState.mockRejectedValue(new Error("native host unavailable"));
+  runtimeClientMocks.getQuickUnlockState.mockRejectedValue(
+    new Error("native host unavailable")
+  );
   runtimeClientMocks.listRecentVaults
     .mockRejectedValueOnce(new Error("native host unavailable"))
     .mockReturnValueOnce(saveRecentVaults.promise);
 
   await renderOptionsPage();
 
-  fireEvent.click(await screen.findByText("中文"));
+  await screen.findByText("中文");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  fireEvent.click(screen.getByText("中文"));
   fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
 
   await waitFor(() => {
