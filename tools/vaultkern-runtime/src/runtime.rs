@@ -1122,15 +1122,6 @@ impl Runtime {
                 self.quick_unlock_process_authorizations
                     .remove(&storage_key);
                 self.quick_unlock_suppressed_records.remove(&storage_key);
-                if let Err(error) = self
-                    .references
-                    .clear_quick_unlock_record_invalidation(&vault.vault_ref_id)
-                {
-                    if vault.is_current {
-                        self.quick_unlock_last_error =
-                            Some((vault.vault_ref_id, format_error_chain(&error)));
-                    }
-                }
             }
         }
     }
@@ -12657,6 +12648,59 @@ mod tests {
             "{error:?}"
         );
         assert!(operations.borrow().is_empty());
+    }
+
+    #[test]
+    fn successful_policy_cleanup_keeps_revocation_tombstone_until_reenrollment() {
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.enable_quick_unlock_for_current_vault().unwrap();
+        let vault_ref_id = runtime
+            .session
+            .current_vault_ref_id()
+            .expect("current reference")
+            .to_owned();
+        runtime.lock_session();
+
+        runtime.set_quick_unlock_policy(false).unwrap();
+
+        assert!(
+            runtime
+                .references
+                .quick_unlock_record_is_invalidated(&vault_ref_id)
+        );
+
+        let storage_key = quick_unlock_storage_key(&vault_ref_id);
+        let restored_credentials = serde_json::to_vec(&VaultCredentials {
+            password: Some("demo-password".into()),
+            key_file_path: None,
+        })
+        .unwrap();
+        runtime
+            .quick_unlock
+            .enable(
+                &storage_key,
+                &restored_credentials,
+                "restore revoked record",
+            )
+            .unwrap();
+        runtime.set_quick_unlock_policy(true).unwrap();
+        let error = runtime
+            .unlock_current_vault_with_quick_unlock()
+            .unwrap_err();
+        assert!(
+            format_error_chain(&error).contains("must be re-enrolled after policy revocation"),
+            "{error:?}"
+        );
+        runtime
+            .unlock_current_vault_with_password("demo-password")
+            .unwrap();
+
+        assert!(
+            !runtime
+                .references
+                .quick_unlock_record_is_invalidated(&vault_ref_id)
+        );
     }
 
     #[test]

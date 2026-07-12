@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use vaultkern_runtime_protocol::{VaultReferenceDto, VaultReferenceListDto};
 
+use crate::providers::durable_file::{
+    DurableFaultInjector, DurableFaultPoint, TargetExpectation, TempWriteFaultPoints,
+    create_dir_all_durable, path_file_identity, publish_temp, remove_if_exists, sync_parent,
+    unique_sibling_path, write_verified_temp,
+};
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +52,8 @@ struct VaultReferenceStoreData {
     quick_unlock_enabled: Option<bool>,
     #[serde(default)]
     quick_unlock_invalidated_vault_ref_ids: BTreeSet<String>,
+    #[serde(default)]
+    quick_unlock_invalidate_new_vault_records: bool,
     vaults: Vec<StoredVaultReference>,
 }
 
@@ -72,10 +79,14 @@ impl VaultReferenceStore {
     }
 
     fn new_at(path: PathBuf) -> Self {
-        let data = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<VaultReferenceStoreData>(&bytes).ok())
-            .unwrap_or_default();
+        let data = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<VaultReferenceStoreData>(&bytes)
+                .unwrap_or_else(|_| fail_closed_store_data()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                VaultReferenceStoreData::default()
+            }
+            Err(_) => fail_closed_store_data(),
+        };
 
         Self {
             backing: StoreBacking::Persistent { path, data },
@@ -103,6 +114,7 @@ impl VaultReferenceStore {
         let data = self.data_mut();
         data.quick_unlock_enabled = Some(enabled);
         if !enabled {
+            data.quick_unlock_invalidate_new_vault_records = true;
             data.quick_unlock_invalidated_vault_ref_ids
                 .extend(data.vaults.iter().map(|vault| vault.vault_ref_id.clone()));
         }
@@ -114,6 +126,7 @@ impl VaultReferenceStore {
         let data = self.data_mut();
         data.quick_unlock_enabled = Some(enabled);
         if !enabled {
+            data.quick_unlock_invalidate_new_vault_records = true;
             data.quick_unlock_invalidated_vault_ref_ids
                 .extend(data.vaults.iter().map(|vault| vault.vault_ref_id.clone()));
         }
@@ -179,6 +192,10 @@ impl VaultReferenceStore {
         }
 
         data.current_vault_ref_id = Some(vault_ref_id.clone());
+        if data.quick_unlock_invalidate_new_vault_records {
+            data.quick_unlock_invalidated_vault_ref_ids
+                .insert(vault_ref_id.clone());
+        }
         sort_vaults(&mut data.vaults);
         self.persist()?;
         Ok(self.dto_for(&vault_ref_id))
@@ -228,6 +245,10 @@ impl VaultReferenceStore {
         }
 
         data.current_vault_ref_id = Some(vault_ref_id.clone());
+        if data.quick_unlock_invalidate_new_vault_records {
+            data.quick_unlock_invalidated_vault_ref_ids
+                .insert(vault_ref_id.clone());
+        }
         sort_vaults(&mut data.vaults);
         self.persist()?;
         Ok(self.dto_for(&vault_ref_id))
@@ -359,20 +380,86 @@ impl VaultReferenceStore {
             return Ok(());
         };
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create vault reference store dir: {}",
-                    parent.display()
-                )
-            })?;
-        }
-
-        let bytes =
-            serde_json::to_vec_pretty(data).context("failed to encode vault reference store")?;
-        fs::write(path, bytes)
-            .with_context(|| format!("failed to write vault reference store: {}", path.display()))
+        persist_data_at_with_faults(path, data, &DurableFaultInjector::default())
     }
+}
+
+fn fail_closed_store_data() -> VaultReferenceStoreData {
+    VaultReferenceStoreData {
+        quick_unlock_enabled: Some(false),
+        quick_unlock_invalidate_new_vault_records: true,
+        ..VaultReferenceStoreData::default()
+    }
+}
+
+fn persist_data_at_with_faults(
+    path: &Path,
+    data: &VaultReferenceStoreData,
+    faults: &DurableFaultInjector,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("vault reference store path has no parent directory")?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create vault reference store dir: {}",
+            parent.display()
+        )
+    })?;
+    let durable_parent = fs::canonicalize(parent).with_context(|| {
+        format!(
+            "failed to resolve vault reference store dir: {}",
+            parent.display()
+        )
+    })?;
+    create_dir_all_durable(&durable_parent).with_context(|| {
+        format!(
+            "failed to validate vault reference store dir: {}",
+            durable_parent.display()
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .context("vault reference store path has no file name")?;
+    let durable_path = durable_parent.join(file_name);
+    let bytes =
+        serde_json::to_vec_pretty(data).context("failed to encode vault reference store")?;
+    let expectation = match fs::symlink_metadata(&durable_path) {
+        Ok(metadata) => TargetExpectation::Identity(
+            path_file_identity(&durable_path, &metadata)
+                .context("failed to identify the existing vault reference store")?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => TargetExpectation::Missing,
+        Err(error) => return Err(error).context("failed to inspect the vault reference store"),
+    };
+    let backup = unique_sibling_path(&durable_path, "backup")
+        .context("failed to allocate a vault reference store backup path")?;
+    let temp = write_verified_temp(
+        &durable_path,
+        &bytes,
+        faults,
+        TempWriteFaultPoints {
+            created: DurableFaultPoint::ManifestTempCreated,
+            written: DurableFaultPoint::ManifestTempWritten,
+            synced: DurableFaultPoint::ManifestTempSynced,
+            verified: DurableFaultPoint::ManifestReadbackVerified,
+        },
+    )
+    .context("failed to write a durable vault reference store temporary file")?;
+    publish_temp(
+        temp,
+        &durable_path,
+        expectation,
+        Some(&backup),
+        faults,
+        DurableFaultPoint::BeforeManifestReplace,
+        DurableFaultPoint::ManifestReplaced,
+        DurableFaultPoint::ManifestParentSynced,
+    )
+    .map_err(|error| error.source)
+    .context("failed to publish the vault reference store")?;
+    remove_if_exists(&backup).context("failed to remove the vault reference store backup")?;
+    sync_parent(&durable_path).context("failed to sync vault reference store backup cleanup")
 }
 
 fn sort_vaults(vaults: &mut [StoredVaultReference]) {
@@ -428,12 +515,15 @@ fn default_store_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::VaultReferenceStore;
+    use super::{VaultReferenceStore, persist_data_at_with_faults};
+    use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
 
     #[test]
     fn quick_unlock_policy_persists_and_initialization_is_one_time() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vault-references.json");
+        let path = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("vault-references.json");
         let mut store = VaultReferenceStore::new_at(path.clone());
 
         assert_eq!(store.quick_unlock_policy(), None);
@@ -450,7 +540,9 @@ mod tests {
     #[test]
     fn disabling_quick_unlock_persistently_invalidates_known_vault_records() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vault-references.json");
+        let path = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("vault-references.json");
         let mut store = VaultReferenceStore::new_at(path.clone());
         let reference = store.upsert_local_path("/tmp/personal.kdbx", 1).unwrap();
 
@@ -458,5 +550,49 @@ mod tests {
 
         let reloaded = VaultReferenceStore::new_at(path);
         assert!(reloaded.quick_unlock_record_is_invalidated(&reference.vault_ref_id));
+    }
+
+    #[test]
+    fn corrupt_store_fails_closed_and_invalidates_readded_vaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("vault-references.json");
+        std::fs::write(&path, b"{truncated").unwrap();
+
+        let mut store = VaultReferenceStore::new_at(path);
+        assert_eq!(store.quick_unlock_policy(), Some(false));
+
+        store.set_quick_unlock_policy(true).unwrap();
+        let reference = store
+            .upsert_local_path("/tmp/readded-personal.kdbx", 1)
+            .unwrap();
+
+        assert!(store.quick_unlock_record_is_invalidated(&reference.vault_ref_id));
+    }
+
+    #[test]
+    fn failed_atomic_policy_write_preserves_the_previous_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("vault-references.json");
+        let mut store = VaultReferenceStore::new_at(path.clone());
+        store.set_quick_unlock_policy(true).unwrap();
+        let mut replacement = store.data().clone();
+        replacement.quick_unlock_enabled = Some(false);
+
+        let error = persist_data_at_with_faults(
+            &path,
+            &replacement,
+            &DurableFaultInjector::fail_once(DurableFaultPoint::ManifestTempSynced),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("injected durable file failure"));
+        assert_eq!(
+            VaultReferenceStore::new_at(path).quick_unlock_policy(),
+            Some(true)
+        );
     }
 }
