@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod contracts;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolEnvelope {
     pub version: u32,
@@ -607,6 +609,7 @@ pub enum AutofillPersistPlanDto {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EntryPasskeyDto {
     pub username: String,
@@ -813,6 +816,15 @@ pub enum SaveVaultStatusDto {
 pub struct MergeSummaryDto {
     pub merged_entries: usize,
     pub history_snapshots_added: usize,
+    /// 001 merge algebra: resolved Meta / recycle-bin config conflicts.
+    /// Additive extension pinned by the Phase 0 contract freeze (004).
+    #[serde(default)]
+    pub meta_conflicts_resolved: u32,
+    /// 001 merge algebra: custom icon conflicts where the losing version was
+    /// discarded (counted so the user can see a configuration conflict
+    /// occurred). Additive extension pinned by the Phase 0 contract freeze.
+    #[serde(default)]
+    pub icon_conflicts_resolved: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

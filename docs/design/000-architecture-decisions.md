@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided — r8** (seven external review rounds). 2026-07-12.
+Status: **Decided — r9** (seven external review rounds + freeze hardening). 2026-07-13.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -173,3 +173,18 @@ KDF caps.
   GC; support-procedure recovery). On-disk segment states clarified (only
   active and *.sealed exist physically). Remaining Phase 0 exit gate
   unchanged: execute the contract-freeze commit.
+- r9 (2026-07-13): freeze hardening — two gaps exposed by executing the
+  contract freeze itself. (1) Journal op payloads are sealed at rest
+  (003): AES-256-GCM under a key derived from the session's transformed
+  key (HKDF-SHA256, info = "vaultkern.journal.v1"), per-record random
+  nonce, AAD = op_id ‖ vault_ref_id; the target `vault_ref_id` stays
+  plaintext in the record header for routing and is authenticated by the
+  AAD. The journal was the only on-disk location outside the vault that
+  could hold secrets (passkey private keys) — container same-signature
+  isolation argues write integrity, not confidentiality. Master-credential
+  changes drain the journal before rotating kdf_generation; undecryptable
+  leftovers dead-letter as `kdf_rotated` and are surfaced, never silent.
+  (2) The canonical kdf_params encoding (002) gains u32 LE length prefixes
+  on key and value, removing the concatenation ambiguity between adjacent
+  entries; the frozen per-(format, KDF) generation fixtures are re-pinned
+  accordingly.

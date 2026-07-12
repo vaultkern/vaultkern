@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QuickUnlockLedgerEntry",
+  "description": "003 §\"Source of truth\" — one row per vault in the per-extension-scope quick unlock ledger. Records in platform secure storage are ciphertext caches indexed by generation; **this row is the only source of truth**.",
+  "type": "object",
+  "required": [
+    "generation",
+    "policy",
+    "state"
+  ],
+  "properties": {
+    "generation": {
+      "description": "Monotonically increasing, baked into the envelope AAD. A platform record whose generation mismatches this value is equivalent to non-existent. Disable/rotation = one atomic ledger write (`policy=false, state=Disabled, generation+1`) — the write itself is the revocation.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "policy": {
+      "description": "User intent: quick unlock enabled or not.",
+      "type": "boolean"
+    },
+    "state": {
+      "description": "Current state; errors drive state transitions, never record destruction (003 axiom).",
+      "allOf": [
+        {
+          "$ref": "#/definitions/QuickUnlockState"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "NeedsReenrollReason": {
+      "description": "Why a vault fell into [`QuickUnlockState::NeedsReenroll`] (003 transition table).",
+      "oneOf": [
+        {
+          "description": "The platform reported `PermanentlyInvalidated` (e.g. `biometryCurrentSet` invalidation — the biometric enrollment set changed).",
+          "type": "string",
+          "enum": [
+            "biometry_changed"
+          ]
+        },
+        {
+          "description": "`kdf_generation` mismatch against the file header (002): a master-credential change or a third-party salt rotation.",
+          "type": "string",
+          "enum": [
+            "kdf_rotated"
+          ]
+        }
+      ]
+    },
+    "QuickUnlockState": {
+      "description": "003 quick unlock states. There is no `Revoked` state (generation mismatch is the revocation) and no stored \"cleanup pending\" state (that is a derived display state).",
+      "oneOf": [
+        {
+          "description": "Quick unlock is off for this vault.",
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "disabled"
+              ]
+            }
+          }
+        },
+        {
+          "description": "A platform record at the ledger's current generation is expected to exist and be usable.",
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "enrolled"
+              ]
+            }
+          }
+        },
+        {
+          "description": "The envelope is invalid; re-enrollment happens automatically at the next successful full-credential unlock (`Enrolled(gen+1)`).",
+          "type": "object",
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "needs_reenroll"
+              ]
+            },
+            "reason": {
+              "$ref": "#/definitions/NeedsReenrollReason"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

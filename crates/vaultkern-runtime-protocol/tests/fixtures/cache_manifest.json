@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "vault_ref_id": "vault-ref-0f6c",
+  "content_fingerprint": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "kdf_generation": "6c2923f403eb289a70ddd461feeda074ee18a01e7140b8020ad525becfa49398",
+  "source_etag": "\"etag-1234\"",
+  "published_at": 1783900800
+}

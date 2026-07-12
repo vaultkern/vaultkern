@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CacheManifest",
+  "description": "002 §\"CacheManifest wire format and atomic publication\".\n\nBinds the cached vault bytes in the app group container to a `vault_ref_id` and a KDF generation. The manifest is **the authority** in the two-file commit: readers verify `H(bytes) == content_fingerprint` and degrade to \"no cache\" on any mismatch (fail closed).",
+  "type": "object",
+  "required": [
+    "content_fingerprint",
+    "kdf_generation",
+    "published_at",
+    "schema_version",
+    "vault_ref_id"
+  ],
+  "properties": {
+    "content_fingerprint": {
+      "description": "SHA-256 of the cached vault bytes, lowercase hex. Content-addressed: this is also the cache file's name.",
+      "type": "string"
+    },
+    "kdf_generation": {
+      "description": "`H(canonical(KdfParameters VariantDictionary))`, lowercase hex — 002's single authoritative formula (see `vaultkern-kdbx`'s `kdf_generation` module). Equality check, not an ordering.",
+      "type": "string"
+    },
+    "published_at": {
+      "description": "Publication time, seconds since the Unix epoch.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "schema_version": {
+      "description": "Format version of this manifest document. Currently [`CacheManifest::SCHEMA_VERSION`].",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "source_etag": {
+      "description": "Remote identity at snapshot time; `None` for local-file vaults (the fingerprint alone is the identity).",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "vault_ref_id": {
+      "description": "The vault reference this cache belongs to. The extension refuses a cache whose `vault_ref_id` differs from the one in the envelope AAD (002 §\"Envelope↔cache binding\").",
+      "type": "string"
+    }
+  }
+}

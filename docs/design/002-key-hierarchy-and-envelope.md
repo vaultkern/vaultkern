@@ -1,6 +1,6 @@
 # 002 — Key Hierarchy and the Quick Unlock Envelope
 
-Status: **Decided — r8** (seven external review rounds). 2026-07-12.
+Status: **Decided — r9** (seven external review rounds + freeze hardening). 2026-07-13.
 Upstream decisions: D2, D8, D9, D10 (000).
 
 ## Derivation chain (current, unchanged)
@@ -27,10 +27,13 @@ envelope AAD ⊇ { vault_ref_id, identifier_scope, record_generation (see 003), 
 ```
 
 `canonical(kdf_params)` = the KDBX KdfParameters VariantDictionary serialized
-canonically: entries sorted by key, each as `key ‖ type-tag ‖ little-endian
-value bytes`. The dictionary **already contains** the KDF `$UUID` and the
-salt/seed as entries, so nothing is concatenated externally — hashing the
-canonical dictionary alone avoids double-encoding. The encoding is pinned and
+canonically: entries sorted by key, each as `len(key) u32 LE ‖ key ‖
+type-tag ‖ len(value) u32 LE ‖ little-endian value bytes` (the length
+prefixes remove concatenation ambiguity between adjacent entries — without
+them two different dictionaries could encode to the same byte stream). The
+dictionary **already contains** the KDF `$UUID` and the salt/seed as
+entries, so nothing is concatenated externally — hashing the canonical
+dictionary alone avoids double-encoding. The encoding is pinned and
 versioned with the envelope format.
 
 **Format coverage (every supported KDBX form has a defined generation):**
@@ -221,7 +224,9 @@ ledger commits).
 ## Memory hygiene (implementation constraints, fixed with this document)
 
 1. `transformed` and all key material use zeroizing types; they must never
-   enter a `String`, a log line, or a DTO.
+   enter a `String`, a log line, or a DTO. The journal's at-rest payload
+   sealing (op payloads carry passkey private keys) derives its key from
+   `transformed` — see 003's journal contract.
 2. The full encrypted file bytes are not retained after unlock (the current
    long-lived `LoadedVault.bytes` is abolished; re-reads come from the cache
    file).

@@ -1,0 +1,8 @@
+{
+  "state": {
+    "kind": "needs_reenroll",
+    "reason": "kdf_rotated"
+  },
+  "generation": 3,
+  "policy": true
+}

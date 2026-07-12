@@ -14,6 +14,9 @@ spec/*
 !docs/design/
 !docs/design/*.md
 fixtures/
+# Phase 0 contract-freeze goldens are checked in (000, execution discipline
+# #1): they are the CI wire snapshot, not test-generated data.
+!crates/vaultkern-runtime-protocol/tests/fixtures/
 tools/deploy_windows_edge.sh
 node_modules/
 dist/

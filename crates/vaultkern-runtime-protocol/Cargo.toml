@@ -4,6 +4,13 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[features]
+# Generates the frozen JSON Schema artifacts under schemas/ from the Rust
+# contract types (000, Execution discipline #1). CI runs the snapshot test
+# with this feature enabled.
+json-schema = ["dep:schemars"]
+
 [dependencies]
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true

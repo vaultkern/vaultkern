@@ -1,6 +1,6 @@
 # 004 — Touch ID Branch Salvage Manifest
 
-Status: **Decided — r8** (seven external review rounds). 2026-07-12.
+Status: **Decided — r9** (seven external review rounds + freeze hardening). 2026-07-13.
 Subject: `codex/macos-touch-id-quick-unlock` (38 commits, +11.7k/−1.0k,
 **will not be merged**). The branch is kept as a read-only reference; items are
 carried over per the tables below, **remade** to the 000–003 designs rather than

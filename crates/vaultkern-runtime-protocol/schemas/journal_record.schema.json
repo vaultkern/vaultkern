@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JournalRecord",
+  "description": "003 §\"Journal contract\" — one record appended by a system-extension writer to its own single-writer segment file.\n\nThe framing around this body (length prefix, per-record CRC, and the framing-level `schema_version`) belongs to the segment file layer and is **not** part of this JSON body; [`JournalRecord::SCHEMA_VERSION`] is the value the framing carries for records of this shape.\n\nThe op vocabulary is **sealed at rest** (003 r9, payload sealing): `payload_sealed` is the AES-256-GCM ciphertext of the serialized [`JournalOpKind`] document, under `key = HKDF-SHA256(transformed, info = \"vaultkern.journal.v1\")`, with a fresh random 12-byte nonce per record and `AAD = op_id ‖ vault_ref_id`. The journal is the only on-disk location outside the vault that can hold secrets (passkey private keys); container same-signature isolation argues write integrity, not confidentiality.",
+  "type": "object",
+  "required": [
+    "base_fingerprint",
+    "created_at",
+    "nonce",
+    "op_id",
+    "payload_sealed",
+    "seq",
+    "vault_ref_id"
+  ],
+  "properties": {
+    "base_fingerprint": {
+      "description": "Fingerprint (lowercase hex SHA-256) of the cached vault the extension saw when it appended this record. **Diagnostic only**; replay does not require a match.",
+      "type": "string"
+    },
+    "created_at": {
+      "description": "Append time, seconds since the Unix epoch.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "nonce": {
+      "description": "The record's fresh random 12-byte GCM nonce, encoded as **standard base64 (RFC 4648 §4, with padding)** — same pinned encoding as `payload_sealed`.",
+      "type": "string"
+    },
+    "op_id": {
+      "description": "UUIDv7 string — the idempotency identity of the mutation. Replay dedup and the applied set key off this value alone; it is also the first component of the sealing AAD.",
+      "type": "string"
+    },
+    "payload_sealed": {
+      "description": "AES-256-GCM ciphertext (including the GCM tag) of the serialized [`JournalOpKind`] document, encoded as **standard base64 (RFC 4648 §4, with padding)** — the encoding is part of the frozen contract.",
+      "type": "string"
+    },
+    "seq": {
+      "description": "Monotonic within one writer's segment (single writer per segment ⇒ no allocation contention).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "vault_ref_id": {
+      "description": "Target vault, **plaintext**: routing + pre-replay validation. Lives only here (payloads do not duplicate it) and is bound into the sealing AAD, so it cannot be swapped without failing the GCM tag.",
+      "type": "string"
+    }
+  }
+}

@@ -19,6 +19,8 @@ use vaultkern_model::{
 };
 use xmltree::{Element, XMLNode};
 
+pub mod kdf_generation;
+
 #[derive(Debug, Error)]
 pub enum KdbxError {
     #[error("unexpected end of input")]

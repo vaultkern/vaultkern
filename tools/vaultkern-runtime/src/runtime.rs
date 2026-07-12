@@ -4418,6 +4418,10 @@ impl Runtime {
                 Some(MergeSummaryDto {
                     merged_entries: summary.merged_entries,
                     history_snapshots_added: summary.history_snapshots_added,
+                    // Frozen additively by the Phase 0 contract (004); the
+                    // 001 merge algebra populates these in Phase 1.
+                    meta_conflicts_resolved: 0,
+                    icon_conflicts_resolved: 0,
                 })
             };
             let bytes = save_kdbx_with_history_limits(&self.core, vault, &key, save_profile)

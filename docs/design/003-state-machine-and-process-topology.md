@@ -1,6 +1,6 @@
 # 003 — Quick Unlock State Machine and Process Topology
 
-Status: **Decided — r8** (seven external review rounds). 2026-07-12.
+Status: **Decided — r9** (seven external review rounds + freeze hardening). 2026-07-13.
 Upstream decisions: D3, D4, D5 (000).
 
 ## Part 1: the quick unlock state machine (platform-neutral, designed once)
@@ -188,14 +188,42 @@ JournalRecord {
     seq:              u64,           // monotonic within one writer's segment (single
                                      // writer per segment ⇒ no allocation contention)
     op_id:            UUIDv7,        // idempotency identity of the mutation
-    kind:             PasskeyRegistration | UsageCount | ...,
-    payload:          kind-specific DTO (includes the target vault_ref_id),
+    vault_ref_id:     string,        // plaintext: routing + pre-replay validation;
+                                     // authenticated via the sealing AAD (below)
+    payload_sealed:   bytes,         // AES-256-GCM ciphertext of the op vocabulary:
+                                     // kind (PasskeyRegistration | UsageCount | ...)
+                                     // + the kind-specific payload DTO
+    nonce:            bytes,         // fresh random 12-byte per-record GCM nonce
     base_fingerprint: fingerprint of the cached vault the extension saw
                       (diagnostic only; replay does not require a match),
     created_at:       u64,
 }
 ```
 
+- **Payload sealing (at-rest confidentiality)**: the op vocabulary — `kind`
+  plus its kind-specific payload DTO — is stored **sealed**:
+  AES-256-GCM with `key = HKDF-SHA256(transformed, info =
+  "vaultkern.journal.v1")`, a fresh random nonce per record, and
+  `AAD = op_id ‖ vault_ref_id`. Rationale: the journal is the only on-disk
+  location outside the vault itself that can hold secrets (a passkey
+  registration carries the private key); the container's same-signature
+  isolation argues **write integrity, not confidentiality** — sealing under
+  a key derived from the vault session's `transformed` puts journal secrets
+  in the same protection class as the vault body. Both sides can
+  seal/unseal: the extension holds `transformed` after its biometric unseal
+  (registration happens inside an already-unlocked autofill session by
+  construction), and the app holds it after any unlock. The target
+  `vault_ref_id` lives **only** in the plaintext record header — kept there
+  for routing and pre-replay validation, bound into the AAD so it cannot be
+  swapped; payload DTOs do not duplicate it.
+- **Sealing vs. KDF rotation — drain before rotate**: sealed records are
+  bound to the current `transformed`, so a master-credential change MUST
+  first drain the journal (replay + prune to empty) and only then rotate
+  `kdf_generation`. If a crash leaves old sealed records behind after the
+  rotation, they are undecryptable: they are dead-lettered (by copy, per
+  the dead-letter rule below) with reason `kdf_rotated` and surfaced to the
+  UI — the affected passkeys need re-registration. The corner case is made
+  visible, never silent.
 - **Framing**: length-prefixed records with a per-record CRC and a
   `schema_version`; a record failing length or CRC checks is discarded and
   counted (surfaced to the UI as a diagnostic), never silently.
@@ -363,9 +391,13 @@ JournalRecord {
 
 Relationships: envelope validity = `record_generation` matches the ledger AND
 `kdf_generation` matches the file header — and a stale envelope also fails
-closed cryptographically (002). Journal replay depends on none of these
-(idempotency comes from `op_id`). Only `record_generation` and the pending
-chain are orderings; the rest are equality/identity checks.
+closed cryptographically (002). Journal replay **ordering** depends on none
+of these (idempotency comes from `op_id`); **unsealing** a record's payload
+does require the `transformed` of the KDF generation it was sealed under —
+the drain-before-rotate rule (journal contract) keeps that the current one,
+and leftovers sealed under a rotated-away generation dead-letter as
+`kdf_rotated`. Only `record_generation` and the pending chain are orderings;
+the rest are equality/identity checks.
 
 ### Access matrix
 

@@ -1,0 +1,15 @@
+{
+  "kind": "passkey_registration",
+  "payload": {
+    "passkey": {
+      "username": "alice@example.com",
+      "credentialId": "u9ZLeKUO3lVBqPlpX0QU1w",
+      "generatedUserId": null,
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMIG…\n-----END PRIVATE KEY-----\n",
+      "relyingParty": "example.com",
+      "userHandle": "bXktdXNlci1oYW5kbGU",
+      "backupEligible": true,
+      "backupState": false
+    }
+  }
+}
