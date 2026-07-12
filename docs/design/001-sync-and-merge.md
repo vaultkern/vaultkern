@@ -1,6 +1,6 @@
 # 001 — Sync and Merge Semantics
 
-Status: **Decided — r9** (seven external review rounds + freeze hardening). 2026-07-13.
+Status: **Decided — r10** (seven external review rounds + two freeze-hardening rounds). 2026-07-13.
 Upstream decision: D1 (000).
 
 ## Model
@@ -113,7 +113,9 @@ Supplementary rules:
 thousand lifetime deletions cost ≈ 240 KB — negligible against attachments in
 any realistic vault. The tombstone count is surfaced in diagnostics; there is
 no silent growth and no GC. Retiring a pathological vault's history is a
-support procedure (export to a fresh vault), not a protocol feature.
+support procedure, not a protocol feature; its minimal form is three steps:
+(1) export entries and attachments into a fresh vault, (2) re-enroll quick
+unlock on every device, (3) archive the old vault read-only.
 
 ## Convergence requirements (these become tests)
 

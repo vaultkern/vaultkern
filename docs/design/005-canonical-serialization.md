@@ -1,6 +1,7 @@
 # 005 — Canonical Serialization Byte Layout (v1)
 
-Status: **Frozen with the Phase 0 contract freeze**. 2026-07-12.
+Status: **Frozen — r10** (frozen with the Phase 0 contract freeze; two
+freeze-hardening rounds). 2026-07-13.
 Upstream: 001 (same-second tie rule, history dedupe key, Meta content-hash
 fallback), 000 Execution discipline #1, 004 (contract-freeze root node).
 
@@ -8,10 +9,12 @@ This document pins the **canonical serialization** that 001 depends on: a
 fixed, versioned byte encoding of an entry's persistent fields whose SHA-256
 digest is the entry's *canonical content hash*. Two implementations at the
 same `schema_version` MUST produce identical bytes for the same entry, or
-same-second ties diverge (001). This is a **specification only** — no
-implementation ships in Phase 0; the merge algebra work item (004 sequencing)
-implements it and must add golden byte fixtures pinning digests the same way
-the `kdf_generation` fixtures pin theirs.
+same-second ties diverge (001). **The spec is frozen; the encoder
+implementation and its byte goldens are the first deliverable of the
+merge-algebra track and MUST land before any merge logic** — no merge code
+may be written against an unimplemented tie rule. The implementation adds
+golden byte fixtures pinning digests the same way the `kdf_generation`
+fixtures pin theirs.
 
 ## 1. Purpose and scope
 

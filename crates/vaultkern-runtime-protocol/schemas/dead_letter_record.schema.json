@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DeadLetterRecord",
+  "description": "003 §\"Journal contract\" (r10) — the body of a dead-letter file frame.\n\nThe dead-letter file uses the same binary framing as journal segments ([`crate::framing`]); each frame's body is this document: the original record **copied verbatim** (originals in their segments are never edited) plus the reason it was dead-lettered.",
+  "type": "object",
+  "required": [
+    "reason",
+    "record"
+  ],
+  "properties": {
+    "reason": {
+      "description": "Why the record was dead-lettered. Frozen values so far (an additive vocabulary; see [`dead_letter_reason`]): `kdf_rotated` (sealed under a rotated-away KDF generation), `payload_conflict` (passkey registration with same credential UUID but differing payload), `user_discarded` (explicit user discard during a credential-change drain), plus replay validation failures.",
+      "type": "string",
+      "minLength": 1
+    },
+    "record": {
+      "description": "The original record, byte-for-byte as it appeared in its segment.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/JournalRecord"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "JournalRecord": {
+      "description": "003 §\"Journal contract\" — one record appended by a system-extension writer to its own single-writer segment file.\n\nThe binary framing around this body is frozen in the [`crate::framing`] module (003 r10): `len u32 LE ‖ record_version u16 LE ‖ body ‖ crc u32 LE`, where the body is this document as canonical JSON (UTF-8); [`JournalRecord::SCHEMA_VERSION`] is the `record_version` the framing carries for records of this shape.\n\nThe op vocabulary is **sealed at rest** (003 r9, payload sealing): `payload_sealed` is the AES-256-GCM ciphertext of the serialized [`JournalOpKind`] document, under `key = HKDF-SHA256(transformed, info = \"vaultkern.journal.v1\")`, with a fresh random 12-byte nonce per record and `AAD = op_id ‖ vault_ref_id`. The journal is the only on-disk location outside the vault that can hold secrets (passkey private keys); container same-signature isolation argues write integrity, not confidentiality.",
+      "type": "object",
+      "required": [
+        "base_fingerprint",
+        "created_at",
+        "nonce",
+        "op_id",
+        "payload_sealed",
+        "seq",
+        "vault_ref_id"
+      ],
+      "properties": {
+        "base_fingerprint": {
+          "description": "Fingerprint (lowercase hex SHA-256) of the cached vault the extension saw when it appended this record. **Diagnostic only**; replay does not require a match and an implausible value never rejects a record.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "created_at": {
+          "description": "Append time, seconds since the Unix epoch. **Diagnostic field**.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "nonce": {
+          "description": "The record's fresh random 12-byte GCM nonce, encoded as **standard base64 (RFC 4648 §4, with padding)** — same pinned encoding as `payload_sealed`. 12 bytes encode to exactly 16 base64 characters (no padding).",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{16}$"
+        },
+        "op_id": {
+          "description": "UUIDv7 string — the idempotency identity of the mutation. Replay dedup and the applied set key off this value alone; it is also the first component of the sealing AAD.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "payload_sealed": {
+          "description": "AES-256-GCM ciphertext (including the GCM tag) of the serialized [`JournalOpKind`] document, encoded as **standard base64 (RFC 4648 §4, with padding)** — the encoding is part of the frozen contract. Minimum length 24 characters (the 16-byte GCM tag alone).",
+          "type": "string",
+          "minLength": 24,
+          "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+        },
+        "seq": {
+          "description": "Monotonic within one writer's segment (single writer per segment ⇒ no allocation contention). **Diagnostic field** (003 r10): an implausible value never rejects a record, and `seq` holes from a writer crash are tolerated.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "vault_ref_id": {
+          "description": "Target vault, **plaintext**: routing + pre-replay validation. Lives only here (payloads do not duplicate it) and is bound into the sealing AAD, so it cannot be swapped without failing the GCM tag.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

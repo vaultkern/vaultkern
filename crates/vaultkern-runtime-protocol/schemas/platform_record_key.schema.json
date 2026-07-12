@@ -11,7 +11,8 @@
   "properties": {
     "identifier_scope": {
       "description": "The extension scope this record belongs to (per-scope ledger, 003).",
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "record_generation": {
       "description": "The ledger generation this record was sealed at.",
@@ -21,7 +22,8 @@
     },
     "vault_ref_id": {
       "description": "The vault the sealed envelope unlocks.",
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     }
   }
 }

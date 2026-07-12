@@ -1,6 +1,6 @@
 # 002 — Key Hierarchy and the Quick Unlock Envelope
 
-Status: **Decided — r9** (seven external review rounds + freeze hardening). 2026-07-13.
+Status: **Decided — r10** (seven external review rounds + two freeze-hardening rounds). 2026-07-13.
 Upstream decisions: D2, D8, D9, D10 (000).
 
 ## Derivation chain (current, unchanged)

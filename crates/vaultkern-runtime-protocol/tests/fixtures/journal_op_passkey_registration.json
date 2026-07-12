@@ -5,7 +5,7 @@
       "username": "alice@example.com",
       "credentialId": "u9ZLeKUO3lVBqPlpX0QU1w",
       "generatedUserId": null,
-      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMIG…\n-----END PRIVATE KEY-----\n",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nTEST-FIXTURE-NOT-A-REAL-KEY\n-----END PRIVATE KEY-----",
       "relyingParty": "example.com",
       "userHandle": "bXktdXNlci1oYW5kbGU",
       "backupEligible": true,

@@ -39,20 +39,49 @@ use crate::{KDF_AES_KDBX3_UUID, VariantDictionary, VariantValue, encode_variant_
 /// remove concatenation ambiguity between adjacent entries — without them
 /// two different dictionaries could encode to the same byte stream.
 ///
-/// The type tags are the KDBX VariantDictionary wire tags (0x04 UInt32,
-/// 0x05 UInt64, 0x08 Bool, 0x0C Int32, 0x0D Int64, 0x18 String,
-/// 0x42 Bytes); integer values are little-endian, strings are UTF-8 bytes,
-/// byte values are raw. Lengths count bytes, not characters.
+/// For known entries the type tags are the KDBX VariantDictionary wire
+/// tags (0x04 UInt32, 0x05 UInt64, 0x08 Bool, 0x0C Int32, 0x0D Int64,
+/// 0x18 String, 0x42 Bytes); integer values are little-endian, strings are
+/// UTF-8 bytes, byte values are raw. Lengths count bytes, not characters.
+/// This is a thin wrapper over [`canonical_kdf_entries`], which is the
+/// tag-generic encoder.
 pub fn canonical_kdf_params(params: &VariantDictionary) -> Vec<u8> {
+    let encoded: Vec<(&str, u8, Vec<u8>)> = params
+        .iter()
+        .map(|(key, value)| {
+            let (tag, value_bytes) = encode_variant_value(value);
+            (key.as_str(), tag, value_bytes)
+        })
+        .collect();
+    canonical_kdf_entries(
+        encoded
+            .iter()
+            .map(|(key, tag, value)| (*key, *tag, value.as_slice())),
+    )
+}
+
+/// The tag-generic canonical encoder (002 r10 hardening): **any** `u8`
+/// type tag with its raw little-endian value bytes participates — there is
+/// deliberately no tag whitelist. 002's conservative failure direction
+/// requires unknown/extra dictionary entries written by third-party tools
+/// to flow into the hash and perturb the generation; an encoder that
+/// dropped or rejected unknown tags would silently accept a changed KDF
+/// configuration.
+///
+/// `entries` MUST be supplied in ascending byte order of the keys (the
+/// `VariantDictionary` wrapper guarantees this via its ordered map).
+pub fn canonical_kdf_entries<'a, I>(entries: I) -> Vec<u8>
+where
+    I: IntoIterator<Item = (&'a str, u8, &'a [u8])>,
+{
     let mut bytes = Vec::new();
-    for (key, value) in params.iter() {
-        let (tag, value_bytes) = encode_variant_value(value);
+    for (key, tag, value) in entries {
         let key_bytes = key.as_bytes();
         bytes.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(key_bytes);
         bytes.push(tag);
-        bytes.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&value_bytes);
+        bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(value);
     }
     bytes
 }
@@ -210,6 +239,56 @@ mod tests {
         let mut params = kdbx4_aes_params();
         params.insert("X-ThirdParty", VariantValue::Bool(true));
         assert_ne!(kdf_generation(&params), kdf_generation(&kdbx4_aes_params()));
+    }
+
+    #[test]
+    fn dictionary_wrapper_and_generic_encoder_agree() {
+        let params = kdbx4_aes_params();
+        let encoded: Vec<(String, u8, Vec<u8>)> = params
+            .iter()
+            .map(|(key, value)| {
+                let (tag, bytes) = crate::encode_variant_value(value);
+                (key.clone(), tag, bytes)
+            })
+            .collect();
+        let via_entries = canonical_kdf_entries(
+            encoded
+                .iter()
+                .map(|(key, tag, value)| (key.as_str(), *tag, value.as_slice())),
+        );
+        assert_eq!(canonical_kdf_params(&params), via_entries);
+    }
+
+    #[test]
+    fn unknown_type_tags_pass_through_generically() {
+        // 002 r10: the encoder has no tag whitelist. A third-party entry
+        // with an unknown tag (0x77 is no KDBX wire tag) participates in
+        // the canonical bytes exactly as given and perturbs the generation.
+        let rounds_le = 60_000_000_u64.to_le_bytes();
+        let known: Vec<(&str, u8, &[u8])> = vec![
+            ("$UUID", 0x42, &[0xAA; 16][..]),
+            ("R", 0x05, &rounds_le[..]),
+        ];
+        let mut with_unknown = known.clone();
+        let exotic_value = [0xDE, 0xAD, 0xBE, 0xEF];
+        with_unknown.push(("Z-Exotic", 0x77, &exotic_value[..]));
+
+        let base = canonical_kdf_entries(known);
+        let extended = canonical_kdf_entries(with_unknown);
+
+        // The unknown entry is appended verbatim: len(key) ‖ key ‖ tag ‖
+        // len(value) ‖ value.
+        let mut expected_suffix = Vec::new();
+        expected_suffix.extend_from_slice(&8_u32.to_le_bytes());
+        expected_suffix.extend_from_slice(b"Z-Exotic");
+        expected_suffix.push(0x77);
+        expected_suffix.extend_from_slice(&4_u32.to_le_bytes());
+        expected_suffix.extend_from_slice(&exotic_value);
+        assert_eq!(extended[..base.len()], base[..]);
+        assert_eq!(extended[base.len()..], expected_suffix[..]);
+
+        // And it perturbs the generation (conservative failure direction).
+        assert_ne!(sha256_bytes(&base), sha256_bytes(&extended));
     }
 
     #[test]

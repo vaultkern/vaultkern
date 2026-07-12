@@ -11,8 +11,10 @@
 use std::path::PathBuf;
 
 use schemars::{JsonSchema, schema_for};
+use vaultkern_runtime_protocol::MergeSummaryDto;
 use vaultkern_runtime_protocol::contracts::{
-    CacheManifest, JournalOpKind, JournalRecord, PlatformRecordKey, QuickUnlockLedgerEntry,
+    CacheManifest, DeadLetterRecord, JournalOpKind, JournalRecord, PlatformRecordKey,
+    QuickUnlockLedgerEntry,
 };
 
 fn schema_path(name: &str) -> PathBuf {
@@ -27,6 +29,9 @@ fn assert_schema_matches<T: JsonSchema>(name: &str) {
     let path = schema_path(name);
 
     if std::env::var_os("VAULTKERN_BLESS").is_some() {
+        if std::env::var_os("CI").is_some() {
+            panic!("VAULTKERN_BLESS is set in CI; schemas are developer-machine only");
+        }
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, &rendered).unwrap();
         return;
@@ -68,4 +73,17 @@ fn quick_unlock_ledger_entry_schema_is_frozen() {
 #[test]
 fn platform_record_key_schema_is_frozen() {
     assert_schema_matches::<PlatformRecordKey>("platform_record_key.schema.json");
+}
+
+#[test]
+fn dead_letter_record_schema_is_frozen() {
+    assert_schema_matches::<DeadLetterRecord>("dead_letter_record.schema.json");
+}
+
+#[test]
+fn merge_summary_dto_schema_is_frozen() {
+    // M2: MergeSummaryDto joins the freeze — it is a protocol DTO, but its
+    // two conflict counters are pinned by 001/004 alongside the storage
+    // contracts.
+    assert_schema_matches::<MergeSummaryDto>("merge_summary_dto.schema.json");
 }

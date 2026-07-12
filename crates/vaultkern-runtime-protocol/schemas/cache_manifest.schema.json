@@ -13,11 +13,13 @@
   "properties": {
     "content_fingerprint": {
       "description": "SHA-256 of the cached vault bytes, lowercase hex. Content-addressed: this is also the cache file's name.",
-      "type": "string"
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "kdf_generation": {
       "description": "`H(canonical(KdfParameters VariantDictionary))`, lowercase hex — 002's single authoritative formula (see `vaultkern-kdbx`'s `kdf_generation` module). Equality check, not an ordering.",
-      "type": "string"
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "published_at": {
       "description": "Publication time, seconds since the Unix epoch.",
@@ -29,7 +31,7 @@
       "description": "Format version of this manifest document. Currently [`CacheManifest::SCHEMA_VERSION`].",
       "type": "integer",
       "format": "uint32",
-      "minimum": 0.0
+      "const": 1
     },
     "source_etag": {
       "description": "Remote identity at snapshot time; `None` for local-file vaults (the fingerprint alone is the identity).",
@@ -41,7 +43,8 @@
     },
     "vault_ref_id": {
       "description": "The vault reference this cache belongs to. The extension refuses a cache whose `vault_ref_id` differs from the one in the envelope AAD (002 §\"Envelope↔cache binding\").",
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     }
   }
 }

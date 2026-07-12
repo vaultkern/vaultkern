@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod contracts;
+pub mod framing;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolEnvelope {
@@ -812,6 +813,7 @@ pub enum SaveVaultStatusDto {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct MergeSummaryDto {
     pub merged_entries: usize,

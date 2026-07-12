@@ -28,6 +28,7 @@ flate2 = "1.0"
 hmac = "0.12"
 psl = "2.1"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+regex = "1"
 rust_argon2 = { package = "rust-argon2", version = "3.0.0" }
 salsa20 = "0.10"
 schemars = "0.8"

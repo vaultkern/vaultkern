@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided — r9** (seven external review rounds + freeze hardening). 2026-07-13.
+Status: **Decided — r10** (seven external review rounds + two freeze-hardening rounds). 2026-07-13.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -28,7 +28,7 @@ classes at the design level.
 | D2 | The quick unlock envelope stores only post-KDF derived key material (the transformed key), never passwords or credential copies | 002 |
 | D3 | The quick unlock state machine is platform-neutral and designed once: explicit per-vault state + a monotonic generation baked into the envelope AAD; records in platform secure storage are ciphertext caches, not sources of truth | 003 |
 | D4 | The **target** process topology is identical on all four platforms: a resident app owns runtime state and is the sole KDBX writer; system extensions and the browser extension are clients. Client write paths differ by kind and are fixed in the 003 access matrix: **Apple system extensions** (separate appex processes) append to a journal and never touch the vault file; the **browser extension**'s mutations are protocol commands executed inside the app process — it writes neither the vault nor the journal; **Android services** run inside the app process and invoke the core directly (they *are* the resident app; no journal). Windows runs a **sanctioned transition topology** (extension + per-port native host) until the plugin-authenticator phase, under two binding constraints: its state layer uses the shared core ledger (no platform fork) and all KDBX writes go through the writer lock | 003 |
-| D5 | The Rust core is the sole product substance, exposed via UniFFI; protocol DTOs are the single behavioral spec **and the FFI vocabulary** (initially crossing the FFI as JSON strings, typed bindings later), with version negotiation. Typed bindings are **generated from the same DTO schema** — field names, optionality, and enum representation have the protocol schema as their sole authority, so going typed is a representation change, never a semantic one; any field change follows the protocol's additive-versioning rule. Credentials appear only in dedicated input DTOs (unlock, credential change); key material never appears in any DTO (002). UI holds zero business state and zero policy — it renders DTOs and sends commands; transient view state is allowed, persistent domain state and reconciliation logic are not | 003 |
+| D5 | The Rust core is the sole product substance, exposed via UniFFI; protocol DTOs are the single behavioral spec **and the FFI vocabulary** (initially crossing the FFI as JSON strings, typed bindings later), with version negotiation. Typed bindings are **generated from the same DTO schema** — field names, optionality, and enum representation have the protocol schema as their sole authority, so going typed is a representation change, never a semantic one; any field change follows the protocol's additive-versioning rule. Credentials appear only in dedicated input DTOs (unlock, credential change); **vault key-hierarchy material (raw_key / transformed / encryption_key / KEK / DEK) never appears in any DTO** (002). Entry-level secrets (passwords, passkey private keys) are vault content and necessarily flow through the protocol, under fixed constraints: they never enter logs, Debug/Display representations are redacted, the core zeroizes them, and at rest they exist only inside the encrypted vault or the sealed journal (003). UI holds zero business state and zero policy — it renders DTOs and sends commands; transient view state is allowed, persistent domain state and reconciliation logic are not | 003 |
 | D6 | Platform floors: iOS 17+ / macOS 14+ / Android 14+ / Windows 11 (for the plugin-authenticator phase). No compatibility branches below these | — |
 | D7 | Three UIs: SwiftUI (one codebase for macOS+iOS), Compose (Android), Web (browser extension + Windows desktop for now). The macOS manager goes straight to SwiftUI — no WebView transition period | — |
 | D8 | Both Apple platforms use the data protection keychain + keychain-access-groups. The file-based legacy keychain, SecTrustedApplication, and SecAccessCreate are banned from the codebase | 002 |
@@ -62,7 +62,14 @@ does not build on an unvalidated assumption:
   and `.biometryCurrentSet` invalidation behaves as 003 assumes (enrollment
   change ⇒ PermanentlyInvalidated).
 - **Android spike passes when**: a CredentialProviderService completes a
-  minimal passkey registration + assertion round-trip against the Rust core.
+  minimal passkey registration + assertion round-trip against the Rust core,
+  **and additionally**: (1) the service cold-starts with the main app never
+  started, and again after it is killed; (2) Rust core / UniFFI
+  initialization completes inside the service process; (3) the in-process
+  chain "Keystore unseal → cached-vault read → passkey assertion" succeeds;
+  (4) the service's memory ceiling is measured (not assumed) and recorded;
+  (5) the service recovers from a request timeout, a mid-request process
+  kill, and duplicate requests.
 - **Background-lifecycle spike (both mobile platforms) passes when**: the
   extension completes its full chain with the main app killed.
 
@@ -188,3 +195,23 @@ KDF caps.
   on key and value, removing the concatenation ambiguity between adjacent
   entries; the frozen per-(format, KDF) generation fixtures are re-pinned
   accordingly.
+- r10 (2026-07-13): second freeze-hardening round (three blockers + four
+  majors from the external review of the freeze commit). The journal's
+  binary framing is frozen as a concrete byte layout in 003 (segment
+  header `"VKJS" ‖ format_version u16 LE`; record frame `len u32 LE ‖
+  record_version u16 LE ‖ body JSON ‖ crc u32 LE` with CRC-32/ISO-HDLC
+  over `len ‖ record_version ‖ body`; 1 MiB record cap enforced both
+  ways; the dead-letter file shares the framing with a `DeadLetterRecord`
+  body). The passkey-registration idempotence law becomes three-branch
+  (identical payload ⇒ no-op; same credential UUID with differing payload
+  ⇒ dead-letter as `payload_conflict`, silent overwrite/keep both
+  forbidden; no passkey update semantics exist). D5's key-material ban is
+  made precise (vault key-hierarchy material never in DTOs; entry-level
+  secrets flow under redaction/zeroize/no-log/at-rest-encrypted
+  constraints). Schemas gain semantic format constraints (hex/UUIDv7/
+  base64 patterns, non-empty strings, schema_version const) with negative
+  tests; MergeSummaryDto joins the freeze with goldens and a schema; the
+  drain-before-rotate flow gains its pending-records failure path
+  (explicit user discard as `user_discarded` or abort; no persisted
+  "rotation pending" state); the Android spike criteria are expanded to
+  five service-lifecycle items.

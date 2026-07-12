@@ -1,6 +1,6 @@
 # 003 — Quick Unlock State Machine and Process Topology
 
-Status: **Decided — r9** (seven external review rounds + freeze hardening). 2026-07-13.
+Status: **Decided — r10** (seven external review rounds + two freeze-hardening rounds). 2026-07-13.
 Upstream decisions: D3, D4, D5 (000).
 
 ## Part 1: the quick unlock state machine (platform-neutral, designed once)
@@ -219,14 +219,40 @@ JournalRecord {
 - **Sealing vs. KDF rotation — drain before rotate**: sealed records are
   bound to the current `transformed`, so a master-credential change MUST
   first drain the journal (replay + prune to empty) and only then rotate
-  `kdf_generation`. If a crash leaves old sealed records behind after the
-  rotation, they are undecryptable: they are dead-lettered (by copy, per
-  the dead-letter rule below) with reason `kdf_rotated` and surfaced to the
-  UI — the affected passkeys need re-registration. The corner case is made
-  visible, never silent.
-- **Framing**: length-prefixed records with a per-record CRC and a
-  `schema_version`; a record failing length or CRC checks is discarded and
-  counted (surfaced to the UI as a diagnostic), never silently.
+  `kdf_generation`. The credential-change flow first replays to the fixed
+  point; records **still pending at that point are presented to the user
+  as a list** with exactly two choices — discard them explicitly
+  (dead-lettered with reason `user_discarded`) or abort the credential
+  change. No new persisted ledger state is introduced: once the drain is
+  empty the rotation completes atomically within the same session — there
+  is no on-disk "rotation pending" state. Crash before the rotation ⇒
+  nothing has changed; crash after ⇒ any leftover sealed records are
+  undecryptable and follow the existing rule: dead-lettered (by copy, per
+  the dead-letter rule below) with reason `kdf_rotated` and surfaced to
+  the UI — the affected passkeys need re-registration. The corner case is
+  made visible, never silent.
+- **Framing (frozen byte layout)**: a segment file begins with the header
+
+  `magic "VKJS" (4 bytes) ‖ format_version u16 LE`
+
+  followed by zero or more record frames:
+
+  `len u32 LE (byte length of body) ‖ record_version u16 LE ‖
+  body (the JournalRecord canonical JSON, UTF-8) ‖ crc u32 LE`
+
+  where `crc` is CRC-32/ISO-HDLC (the zlib `crc32`) computed over
+  `len ‖ record_version ‖ body`. The maximum record length is **1 MiB**,
+  enforced in both directions: a writer refuses to append an oversized
+  record, and a reader treats an oversized `len` as corruption. A record
+  failing length or CRC checks is discarded and counted (surfaced to the
+  UI as a diagnostic), never silently; sealed-EOF and corruption
+  adjudication follows the three-case algorithm below.
+  `base_fingerprint`, `created_at`, and `seq` are **diagnostic fields**:
+  implausible values never cause a record to be rejected (only framing
+  does), and `seq` holes — a single writer that crashed mid-append —
+  are tolerated. The **dead-letter file uses this same framing**; its
+  body is a `DeadLetterRecord { reason, record }` document wrapping the
+  original record verbatim.
 - **Storage — one segment file per writer, never shared**: each writer
   instance (an extension process) appends to its own segment file, named by
   its writer id (a per-instance UUID), inside the app group container
@@ -240,7 +266,8 @@ JournalRecord {
   independent ops by semantic idempotence, and for dependent ops by
   re-passing. fsync per append; the atomicity unit is one record — a
   truncated tail record is discarded at replay.
-- **Segment lifecycle and ownership — `active → sealed → replayed → deleted`**
+- **Segment lifecycle and ownership — `active → sealed → replayed (logical)
+  → deleted (logical)`**
   (writer-vs-pruner concurrency is dissolved by construction, not by care).
   On disk only two states exist: the active file and `*.sealed`; `replayed`
   and `deleted` are logical phases tracked via the applied set and file
@@ -290,9 +317,16 @@ JournalRecord {
 - **Two correctness layers** (both required):
   1. **Semantic idempotence of every op kind**: applying an op to a vault that
      already contains its effect is a no-op. Passkey registration inserts by
-     credential UUID (already present ⇒ no-op); usage-count ops carry the
-     observed value and merge as max — **increment-style ops are forbidden**.
-     This makes correctness independent of applied-marker timing.
+     credential UUID under a **three-branch law**: (a) a credential with the
+     same UUID exists and its stored data equals the record's full canonical
+     payload ⇒ no-op; (b) same UUID but a differing payload ⇒ the record is
+     dead-lettered (by copy) with reason `payload_conflict` — **silent
+     overwrite and silent keep are both forbidden**; (c) no such UUID ⇒
+     insert. No passkey update semantics exist (a WebAuthn private key has
+     no update scenario; a re-registration arrives as a new credential
+     UUID). Usage-count ops carry the observed value and merge as max —
+     **increment-style ops are forbidden**. This makes correctness
+     independent of applied-marker timing.
   2. **Applied tracking bound to the save, not to replay**: replay applies
      records to the in-memory vault only (no persistent marker written).
      Only after the 001 save flow durably commits does the app persist the
