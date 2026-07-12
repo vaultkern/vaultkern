@@ -8,9 +8,9 @@ use sha2::{Digest, Sha256};
 use vaultkern_runtime_protocol::{VaultReferenceDto, VaultReferenceListDto};
 
 use crate::providers::durable_file::{
-    DurableFaultInjector, DurableFaultPoint, TargetExpectation, TempWriteFaultPoints,
-    create_dir_all_durable, path_file_identity, publish_temp, remove_if_exists, sync_parent,
-    unique_sibling_path, write_verified_temp,
+    DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, TargetExpectation,
+    TempWriteFaultPoints, create_dir_all_durable, path_file_identity, publish_temp,
+    remove_if_exists, sync_parent, unique_sibling_path, write_verified_temp,
 };
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
@@ -62,6 +62,12 @@ enum StoreBacking {
     Persistent {
         path: PathBuf,
         data: VaultReferenceStoreData,
+        _lock: ExclusiveFileLock,
+        faults: DurableFaultInjector,
+    },
+    Unavailable {
+        data: VaultReferenceStoreData,
+        error: String,
     },
 }
 
@@ -79,17 +85,14 @@ impl VaultReferenceStore {
     }
 
     fn new_at(path: PathBuf) -> Self {
-        let data = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<VaultReferenceStoreData>(&bytes)
-                .unwrap_or_else(|_| fail_closed_store_data()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                VaultReferenceStoreData::default()
-            }
-            Err(_) => fail_closed_store_data(),
-        };
-
-        Self {
-            backing: StoreBacking::Persistent { path, data },
+        match open_persistent_backing(&path) {
+            Ok(backing) => Self { backing },
+            Err(error) => Self {
+                backing: StoreBacking::Unavailable {
+                    data: fail_closed_store_data(),
+                    error: format!("{error:#}"),
+                },
+            },
         }
     }
 
@@ -97,6 +100,14 @@ impl VaultReferenceStore {
         Self {
             backing: StoreBacking::InMemory(VaultReferenceStoreData::default()),
         }
+    }
+
+    #[cfg(test)]
+    fn set_test_faults(&mut self, next_faults: DurableFaultInjector) {
+        let StoreBacking::Persistent { faults, .. } = &mut self.backing else {
+            panic!("test faults require a persistent store");
+        };
+        *faults = next_faults;
     }
 
     pub fn current_vault_ref_id(&self) -> Option<&str> {
@@ -111,26 +122,28 @@ impl VaultReferenceStore {
         if self.data().quick_unlock_enabled.is_some() {
             return Ok(false);
         }
-        let data = self.data_mut();
-        data.quick_unlock_enabled = Some(enabled);
-        if !enabled {
-            data.quick_unlock_invalidate_new_vault_records = true;
-            data.quick_unlock_invalidated_vault_ref_ids
-                .extend(data.vaults.iter().map(|vault| vault.vault_ref_id.clone()));
-        }
-        self.persist()?;
+        self.update(|data| {
+            data.quick_unlock_enabled = Some(enabled);
+            if !enabled {
+                data.quick_unlock_invalidate_new_vault_records = true;
+                data.quick_unlock_invalidated_vault_ref_ids
+                    .extend(data.vaults.iter().map(|vault| vault.vault_ref_id.clone()));
+            }
+            Ok(())
+        })?;
         Ok(true)
     }
 
     pub fn set_quick_unlock_policy(&mut self, enabled: bool) -> Result<()> {
-        let data = self.data_mut();
-        data.quick_unlock_enabled = Some(enabled);
-        if !enabled {
-            data.quick_unlock_invalidate_new_vault_records = true;
-            data.quick_unlock_invalidated_vault_ref_ids
-                .extend(data.vaults.iter().map(|vault| vault.vault_ref_id.clone()));
-        }
-        self.persist()
+        self.update(|data| {
+            data.quick_unlock_enabled = Some(enabled);
+            if !enabled {
+                data.quick_unlock_invalidate_new_vault_records = true;
+                data.quick_unlock_invalidated_vault_ref_ids
+                    .extend(data.vaults.iter().map(|vault| vault.vault_ref_id.clone()));
+            }
+            Ok(())
+        })
     }
 
     pub fn quick_unlock_record_is_invalidated(&self, vault_ref_id: &str) -> bool {
@@ -140,25 +153,25 @@ impl VaultReferenceStore {
     }
 
     pub fn invalidate_quick_unlock_record(&mut self, vault_ref_id: &str) -> Result<()> {
-        if !self
-            .data_mut()
-            .quick_unlock_invalidated_vault_ref_ids
-            .insert(vault_ref_id.to_owned())
-        {
+        if self.quick_unlock_record_is_invalidated(vault_ref_id) {
             return Ok(());
         }
-        self.persist()
+        self.update(|data| {
+            data.quick_unlock_invalidated_vault_ref_ids
+                .insert(vault_ref_id.to_owned());
+            Ok(())
+        })
     }
 
     pub fn clear_quick_unlock_record_invalidation(&mut self, vault_ref_id: &str) -> Result<()> {
-        if !self
-            .data_mut()
-            .quick_unlock_invalidated_vault_ref_ids
-            .remove(vault_ref_id)
-        {
+        if !self.quick_unlock_record_is_invalidated(vault_ref_id) {
             return Ok(());
         }
-        self.persist()
+        self.update(|data| {
+            data.quick_unlock_invalidated_vault_ref_ids
+                .remove(vault_ref_id);
+            Ok(())
+        })
     }
 
     pub fn upsert_local_path(
@@ -169,35 +182,35 @@ impl VaultReferenceStore {
         let vault_ref_id = local_vault_ref_id(path);
         let display_name = display_name_for_path(path);
         let source_summary = source_summary_for_path(path);
-        let data = self.data_mut();
+        self.update(|data| {
+            if let Some(vault) = data
+                .vaults
+                .iter_mut()
+                .find(|vault| vault.vault_ref_id == vault_ref_id)
+            {
+                vault.display_name = display_name;
+                vault.source_summary = source_summary;
+                vault.last_used_at = last_used_at;
+            } else {
+                data.vaults.push(StoredVaultReference {
+                    vault_ref_id: vault_ref_id.clone(),
+                    path: path.to_owned(),
+                    source_kind: "local".into(),
+                    one_drive: None,
+                    display_name,
+                    source_summary,
+                    last_used_at,
+                });
+            }
 
-        if let Some(vault) = data
-            .vaults
-            .iter_mut()
-            .find(|vault| vault.vault_ref_id == vault_ref_id)
-        {
-            vault.display_name = display_name;
-            vault.source_summary = source_summary;
-            vault.last_used_at = last_used_at;
-        } else {
-            data.vaults.push(StoredVaultReference {
-                vault_ref_id: vault_ref_id.clone(),
-                path: path.to_owned(),
-                source_kind: "local".into(),
-                one_drive: None,
-                display_name,
-                source_summary,
-                last_used_at,
-            });
-        }
-
-        data.current_vault_ref_id = Some(vault_ref_id.clone());
-        if data.quick_unlock_invalidate_new_vault_records {
-            data.quick_unlock_invalidated_vault_ref_ids
-                .insert(vault_ref_id.clone());
-        }
-        sort_vaults(&mut data.vaults);
-        self.persist()?;
+            data.current_vault_ref_id = Some(vault_ref_id.clone());
+            if data.quick_unlock_invalidate_new_vault_records {
+                data.quick_unlock_invalidated_vault_ref_ids
+                    .insert(vault_ref_id.clone());
+            }
+            sort_vaults(&mut data.vaults);
+            Ok(())
+        })?;
         Ok(self.dto_for(&vault_ref_id))
     }
 
@@ -211,46 +224,46 @@ impl VaultReferenceStore {
     ) -> Result<VaultReferenceDto> {
         let vault_ref_id = onedrive_vault_ref_id(drive_id, item_id);
         let source_summary = format!("{account_label} / {display_name}");
-        let data = self.data_mut();
-
-        if let Some(vault) = data
-            .vaults
-            .iter_mut()
-            .find(|vault| vault.vault_ref_id == vault_ref_id)
-        {
-            vault.source_kind = "onedrive".into();
-            vault.path.clear();
-            vault.one_drive = Some(StoredOneDriveReference {
-                drive_id: drive_id.to_owned(),
-                item_id: item_id.to_owned(),
-                account_label: account_label.to_owned(),
-            });
-            vault.display_name = display_name_for_cloud_name(display_name);
-            vault.source_summary = source_summary;
-            vault.last_used_at = last_used_at;
-        } else {
-            data.vaults.push(StoredVaultReference {
-                vault_ref_id: vault_ref_id.clone(),
-                source_kind: "onedrive".into(),
-                path: String::new(),
-                one_drive: Some(StoredOneDriveReference {
+        self.update(|data| {
+            if let Some(vault) = data
+                .vaults
+                .iter_mut()
+                .find(|vault| vault.vault_ref_id == vault_ref_id)
+            {
+                vault.source_kind = "onedrive".into();
+                vault.path.clear();
+                vault.one_drive = Some(StoredOneDriveReference {
                     drive_id: drive_id.to_owned(),
                     item_id: item_id.to_owned(),
                     account_label: account_label.to_owned(),
-                }),
-                display_name: display_name_for_cloud_name(display_name),
-                source_summary,
-                last_used_at,
-            });
-        }
+                });
+                vault.display_name = display_name_for_cloud_name(display_name);
+                vault.source_summary = source_summary;
+                vault.last_used_at = last_used_at;
+            } else {
+                data.vaults.push(StoredVaultReference {
+                    vault_ref_id: vault_ref_id.clone(),
+                    source_kind: "onedrive".into(),
+                    path: String::new(),
+                    one_drive: Some(StoredOneDriveReference {
+                        drive_id: drive_id.to_owned(),
+                        item_id: item_id.to_owned(),
+                        account_label: account_label.to_owned(),
+                    }),
+                    display_name: display_name_for_cloud_name(display_name),
+                    source_summary,
+                    last_used_at,
+                });
+            }
 
-        data.current_vault_ref_id = Some(vault_ref_id.clone());
-        if data.quick_unlock_invalidate_new_vault_records {
-            data.quick_unlock_invalidated_vault_ref_ids
-                .insert(vault_ref_id.clone());
-        }
-        sort_vaults(&mut data.vaults);
-        self.persist()?;
+            data.current_vault_ref_id = Some(vault_ref_id.clone());
+            if data.quick_unlock_invalidate_new_vault_records {
+                data.quick_unlock_invalidated_vault_ref_ids
+                    .insert(vault_ref_id.clone());
+            }
+            sort_vaults(&mut data.vaults);
+            Ok(())
+        })?;
         Ok(self.dto_for(&vault_ref_id))
     }
 
@@ -274,41 +287,41 @@ impl VaultReferenceStore {
     }
 
     pub fn mark_current(&mut self, vault_ref_id: &str, last_used_at: i64) -> Result<()> {
-        let data = self.data_mut();
-        let Some(vault) = data
-            .vaults
-            .iter_mut()
-            .find(|vault| vault.vault_ref_id == vault_ref_id)
-        else {
-            anyhow::bail!("vault reference not found: {vault_ref_id}");
-        };
+        self.update(|data| {
+            let Some(vault) = data
+                .vaults
+                .iter_mut()
+                .find(|vault| vault.vault_ref_id == vault_ref_id)
+            else {
+                anyhow::bail!("vault reference not found: {vault_ref_id}");
+            };
 
-        vault.last_used_at = last_used_at;
-        data.current_vault_ref_id = Some(vault_ref_id.to_owned());
-        sort_vaults(&mut data.vaults);
-        self.persist()
+            vault.last_used_at = last_used_at;
+            data.current_vault_ref_id = Some(vault_ref_id.to_owned());
+            sort_vaults(&mut data.vaults);
+            Ok(())
+        })
     }
 
     pub fn delete(&mut self, vault_ref_id: &str) -> Result<bool> {
-        let data = self.data_mut();
-        let initial_len = data.vaults.len();
-        data.vaults
-            .retain(|vault| vault.vault_ref_id != vault_ref_id);
-        let removed = data.vaults.len() != initial_len;
+        self.update(|data| {
+            let initial_len = data.vaults.len();
+            data.vaults
+                .retain(|vault| vault.vault_ref_id != vault_ref_id);
+            let removed = data.vaults.len() != initial_len;
 
-        if !removed {
-            anyhow::bail!("vault reference not found: {vault_ref_id}");
-        }
+            if !removed {
+                anyhow::bail!("vault reference not found: {vault_ref_id}");
+            }
 
-        let deleted_current = data.current_vault_ref_id.as_deref() == Some(vault_ref_id);
-        if deleted_current {
-            data.current_vault_ref_id = None;
-        }
-        data.quick_unlock_invalidated_vault_ref_ids
-            .remove(vault_ref_id);
-
-        self.persist()?;
-        Ok(deleted_current)
+            let deleted_current = data.current_vault_ref_id.as_deref() == Some(vault_ref_id);
+            if deleted_current {
+                data.current_vault_ref_id = None;
+            }
+            data.quick_unlock_invalidated_vault_ref_ids
+                .remove(vault_ref_id);
+            Ok(deleted_current)
+        })
     }
 
     pub fn source_for(&self, vault_ref_id: &str) -> Result<StoredVaultSource> {
@@ -365,22 +378,34 @@ impl VaultReferenceStore {
         match &self.backing {
             StoreBacking::InMemory(data) => data,
             StoreBacking::Persistent { data, .. } => data,
+            StoreBacking::Unavailable { data, .. } => data,
         }
     }
 
-    fn data_mut(&mut self) -> &mut VaultReferenceStoreData {
+    fn update<T>(
+        &mut self,
+        operation: impl FnOnce(&mut VaultReferenceStoreData) -> Result<T>,
+    ) -> Result<T> {
         match &mut self.backing {
-            StoreBacking::InMemory(data) => data,
-            StoreBacking::Persistent { data, .. } => data,
+            StoreBacking::InMemory(data) => {
+                let mut candidate = data.clone();
+                let result = operation(&mut candidate)?;
+                *data = candidate;
+                Ok(result)
+            }
+            StoreBacking::Persistent {
+                path, data, faults, ..
+            } => {
+                let mut candidate = data.clone();
+                let result = operation(&mut candidate)?;
+                persist_data_at_with_faults(path, &candidate, faults)?;
+                *data = candidate;
+                Ok(result)
+            }
+            StoreBacking::Unavailable { error, .. } => {
+                anyhow::bail!("vault reference store is unavailable: {error}")
+            }
         }
-    }
-
-    fn persist(&self) -> Result<()> {
-        let StoreBacking::Persistent { path, data } = &self.backing else {
-            return Ok(());
-        };
-
-        persist_data_at_with_faults(path, data, &DurableFaultInjector::default())
     }
 }
 
@@ -392,11 +417,40 @@ fn fail_closed_store_data() -> VaultReferenceStoreData {
     }
 }
 
-fn persist_data_at_with_faults(
-    path: &Path,
-    data: &VaultReferenceStoreData,
-    faults: &DurableFaultInjector,
-) -> Result<()> {
+fn open_persistent_backing(path: &Path) -> Result<StoreBacking> {
+    let durable_path = durable_store_path(path)?;
+    let lock_path = lock_path(&durable_path);
+    let store_lock = ExclusiveFileLock::acquire(&lock_path).with_context(|| {
+        format!(
+            "failed to lock vault reference store: {}",
+            lock_path.display()
+        )
+    })?;
+    let (data, data_existed) = match fs::read(&durable_path) {
+        Ok(bytes) => (
+            serde_json::from_slice::<VaultReferenceStoreData>(&bytes)
+                .unwrap_or_else(|_| fail_closed_store_data()),
+            true,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            (fail_closed_store_data(), false)
+        }
+        Err(_) => (fail_closed_store_data(), true),
+    };
+
+    if !data_existed {
+        persist_data_at_with_faults(&durable_path, &data, &DurableFaultInjector::default())?;
+    }
+
+    Ok(StoreBacking::Persistent {
+        path: durable_path,
+        data,
+        _lock: store_lock,
+        faults: DurableFaultInjector::default(),
+    })
+}
+
+fn durable_store_path(path: &Path) -> Result<PathBuf> {
     let parent = path
         .parent()
         .context("vault reference store path has no parent directory")?;
@@ -421,7 +475,23 @@ fn persist_data_at_with_faults(
     let file_name = path
         .file_name()
         .context("vault reference store path has no file name")?;
-    let durable_path = durable_parent.join(file_name);
+    Ok(durable_parent.join(file_name))
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .expect("vault reference store path must have a file name")
+        .to_string_lossy();
+    path.with_file_name(format!(".{file_name}.lock"))
+}
+
+fn persist_data_at_with_faults(
+    path: &Path,
+    data: &VaultReferenceStoreData,
+    faults: &DurableFaultInjector,
+) -> Result<()> {
+    let durable_path = durable_store_path(path)?;
     let bytes =
         serde_json::to_vec_pretty(data).context("failed to encode vault reference store")?;
     let expectation = match fs::symlink_metadata(&durable_path) {
@@ -515,22 +585,26 @@ fn default_store_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{VaultReferenceStore, persist_data_at_with_faults};
+    use super::VaultReferenceStore;
     use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
+    use std::sync::mpsc::sync_channel;
+    use std::time::Duration;
 
     #[test]
-    fn quick_unlock_policy_persists_and_initialization_is_one_time() {
+    fn new_store_starts_disabled_and_policy_persists() {
         let dir = tempfile::tempdir().unwrap();
         let path = std::fs::canonicalize(dir.path())
             .unwrap()
             .join("vault-references.json");
         let mut store = VaultReferenceStore::new_at(path.clone());
 
-        assert_eq!(store.quick_unlock_policy(), None);
-        assert!(store.initialize_quick_unlock_policy(true).unwrap());
+        assert_eq!(store.quick_unlock_policy(), Some(false));
+        assert!(!store.initialize_quick_unlock_policy(true).unwrap());
         assert!(!store.initialize_quick_unlock_policy(false).unwrap());
+        store.set_quick_unlock_policy(true).unwrap();
         assert_eq!(store.quick_unlock_policy(), Some(true));
 
+        drop(store);
         let mut reloaded = VaultReferenceStore::new_at(path);
         assert_eq!(reloaded.quick_unlock_policy(), Some(true));
         reloaded.set_quick_unlock_policy(false).unwrap();
@@ -548,6 +622,7 @@ mod tests {
 
         store.set_quick_unlock_policy(false).unwrap();
 
+        drop(store);
         let reloaded = VaultReferenceStore::new_at(path);
         assert!(reloaded.quick_unlock_record_is_invalidated(&reference.vault_ref_id));
     }
@@ -579,20 +654,61 @@ mod tests {
             .join("vault-references.json");
         let mut store = VaultReferenceStore::new_at(path.clone());
         store.set_quick_unlock_policy(true).unwrap();
-        let mut replacement = store.data().clone();
-        replacement.quick_unlock_enabled = Some(false);
+        store.set_test_faults(DurableFaultInjector::fail_once(
+            DurableFaultPoint::ManifestTempSynced,
+        ));
 
-        let error = persist_data_at_with_faults(
-            &path,
-            &replacement,
-            &DurableFaultInjector::fail_once(DurableFaultPoint::ManifestTempSynced),
-        )
-        .unwrap_err();
+        let error = store.set_quick_unlock_policy(false).unwrap_err();
 
         assert!(format!("{error:#}").contains("injected durable file failure"));
+        assert_eq!(store.quick_unlock_policy(), Some(true));
+        drop(store);
         assert_eq!(
             VaultReferenceStore::new_at(path).quick_unlock_policy(),
             Some(true)
         );
+    }
+
+    #[test]
+    fn persistent_store_serializes_native_host_lifetimes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("vault-references.json");
+        let store = VaultReferenceStore::new_at(path.clone());
+        let (sender, receiver) = sync_channel(1);
+
+        let waiter = std::thread::spawn(move || {
+            let second = VaultReferenceStore::new_at(path);
+            sender.send(second.quick_unlock_policy()).unwrap();
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(store);
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Some(false)
+        );
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn missing_store_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("vault-references.json");
+        let store = VaultReferenceStore::new_at(path.clone());
+        drop(store);
+        std::fs::remove_file(&path).unwrap();
+
+        let mut reloaded = VaultReferenceStore::new_at(path);
+
+        assert_eq!(reloaded.quick_unlock_policy(), Some(false));
+        reloaded.set_quick_unlock_policy(true).unwrap();
+        let reference = reloaded
+            .upsert_local_path("/tmp/readded-after-loss.kdbx", 1)
+            .unwrap();
+        assert!(reloaded.quick_unlock_record_is_invalidated(&reference.vault_ref_id));
     }
 }
