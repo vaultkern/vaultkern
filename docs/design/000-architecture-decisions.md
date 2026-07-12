@@ -1,0 +1,62 @@
+# 000 — Architecture Decision Record (Phase 0)
+
+Status: **Decided**. 2026-07-12.
+
+This is the top-level decision record for the four-platform product form
+(Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
+deliberate close-out: overturning any of them requires a new numbered document
+explaining why — silent drift during implementation is not allowed. The three
+load-bearing design documents (001/002/003) expand the decisions that need
+detail; 004 is the salvage manifest for the `codex/macos-touch-id-quick-unlock`
+branch (which will not be merged).
+
+## Background summary
+
+Post-mortem of the macOS Touch ID branch (38 commits / +11.7k lines / 20+ fixes):
+the feature's technical choices were sound, but (1) state had no single owner
+(one fact stored in five places), (2) the envelope stored a credential copy that
+inevitably went stale, (3) the product form (headless native host) lagged behind
+feature requirements (both Touch ID and system-level passkeys demand a real app),
+and (4) branch scope was uncontrolled. This record closes out all four problem
+classes at the design level.
+
+## Decisions
+
+| # | Decision | Expanded in |
+|---|----------|-------------|
+| D1 | KDBX is the on-disk format and the interoperability contract; sync = file-level sync + full semantic merge | 001 |
+| D2 | The quick unlock envelope stores only post-KDF derived key material (the transformed key), never passwords or credential copies | 002 |
+| D3 | The quick unlock state machine is platform-neutral and designed once: explicit per-vault state + a monotonic generation baked into the envelope AAD; records in platform secure storage are ciphertext caches, not sources of truth | 003 |
+| D4 | Process topology is identical on all four platforms: a resident app owns runtime state; vault writes are serialized by a single OS-level writer lock; system extensions and the browser extension are clients | 003 |
+| D5 | The Rust core is the sole product substance, exposed via UniFFI; protocol DTOs are the single behavioral spec, with version negotiation. UI holds zero business state and zero policy — it renders DTOs and sends commands | 003 |
+| D6 | Platform floors: iOS 17+ / macOS 14+ / Android 14+ / Windows 11 (for the plugin-authenticator phase). No compatibility branches below these | — |
+| D7 | Three UIs: SwiftUI (one codebase for macOS+iOS), Compose (Android), Web (browser extension + Windows desktop for now). The macOS manager goes straight to SwiftUI — no WebView transition period | — |
+| D8 | Both Apple platforms use the data protection keychain + keychain-access-groups. The file-based legacy keychain, SecTrustedApplication, and SecAccessCreate are banned from the codebase | 002 |
+| D9 | KDF parameters of externally-created KDBX files are capped (desktop requires explicit confirmation above the cap; extension processes never run the KDF — envelope path only) | 002 |
+| D10 | Compatibility baseline: the product is pre-release. The redesign of envelope formats, state storage, and the key hierarchy ships without migration — re-enroll everywhere. This window closes at the first public release | — |
+
+## Platform integration matrix (fixed together with D6)
+
+| Capability | Windows | macOS | iOS | Android |
+|------------|---------|-------|-----|---------|
+| Biometrics | Windows Hello (CNG) | Touch ID (SE + LAContext) | Face ID (SE + LAContext) | BiometricPrompt + Keystore (StrongBox where available) |
+| System-level passkeys | plugin authenticator (last) | ASCredentialProviderExtension | ASCredentialProviderExtension (shared code with macOS) | CredentialProviderService (Credential Manager) |
+| Autofill | browser extension | browser extension + credential provider | credential provider | AutofillService |
+| UI | shared-web-ui (interim) | SwiftUI | SwiftUI (shared with macOS) | Compose |
+| Sequence | status quo serves; last in queue | Phase 1 | Phase 2 | Phase 3 |
+
+Phase 2 (iOS) precedes Android because iOS reuses everything Phase 1 produces
+(UniFFI bindings, the SE envelope Swift, the AuthenticationServices extension,
+the SwiftUI screens) — it is the highest-reuse step.
+
+## Execution discipline
+
+1. No implementation code before 001/002/003 are complete and frozen.
+2. Any business state or reconciliation logic appearing in a UI layer is an
+   architecture violation (Touch ID branch lesson: the UI-side reconciliation
+   code was ultimately deleted wholesale, −465 lines).
+3. A single feature branch must not touch multiple decision domains;
+   packaging/signing/release infrastructure stays out of feature branches.
+4. Testing doctrine: state-machine behavior is covered by table-driven tests in
+   the Rust core; platform providers get thin integration tests only; source-text
+   assertions (grep-as-test) are banned.

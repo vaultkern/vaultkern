@@ -4,13 +4,15 @@
 .superpowers/
 AGENTS.md
 CLAUDE.md
-docs/
+docs/*
 spec/*
 *.md
 *.txt
 *.rst
 *.adoc
 !README.md
+!docs/design/
+!docs/design/*.md
 fixtures/
 tools/deploy_windows_edge.sh
 node_modules/
