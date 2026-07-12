@@ -1,10 +1,16 @@
 //! Binary framing snapshot for journal segment files (003 r10, B1).
 //!
 //! `tests/fixtures/journal_segment.bin` is a golden **binary** segment:
-//! segment header + one framed sealed `JournalRecord` (canonical compact
-//! JSON body). The tests cover the three parse cases of 003's
-//! corruption algorithm against these exact bytes: a normal record, a
-//! truncated tail, and a CRC-corrupted record.
+//! segment header + one framed sealed `JournalRecord` (this
+//! implementation's compact serde_json body). The tests cover the three
+//! parse cases of 003's corruption algorithm against these exact bytes:
+//! a normal record, a truncated tail, and a CRC-corrupted record.
+//!
+//! Scope (003 r11): this golden pins **this Rust implementation's
+//! serialization as a regression baseline**, not a cross-language byte
+//! spec. Any schema-conforming JSON body is a valid frame body; the CRC
+//! covers whatever bytes the writer wrote, and no correctness property
+//! depends on byte shape.
 
 use std::path::PathBuf;
 
@@ -18,8 +24,8 @@ fn fixture_path() -> PathBuf {
 }
 
 /// Same sealed record as the JSON golden (`journal_record_sealed.json`),
-/// framed as canonical **compact** JSON — the body encoding pinned by the
-/// binary golden.
+/// framed with this implementation's compact serde_json output — a
+/// regression baseline, not a canonical form (003 r11).
 fn golden_record() -> JournalRecord {
     JournalRecord {
         seq: 1,

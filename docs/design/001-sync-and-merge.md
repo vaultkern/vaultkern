@@ -1,6 +1,6 @@
 # 001 — Sync and Merge Semantics
 
-Status: **Decided — r10** (seven external review rounds + two freeze-hardening rounds). 2026-07-13.
+Status: **Decided — r11** (seven external review rounds + three freeze-hardening rounds). 2026-07-13.
 Upstream decision: D1 (000).
 
 ## Model

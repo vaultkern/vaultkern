@@ -1,6 +1,6 @@
 # 005 — Canonical Serialization Byte Layout (v1)
 
-Status: **Frozen — r10** (frozen with the Phase 0 contract freeze; two
+Status: **Frozen — r11** (frozen with the Phase 0 contract freeze; three
 freeze-hardening rounds). 2026-07-13.
 Upstream: 001 (same-second tie rule, history dedupe key, Meta content-hash
 fallback), 000 Execution discipline #1, 004 (contract-freeze root node).
@@ -32,6 +32,11 @@ The encoding is **never written to disk and never crosses the protocol**; it
 exists only as the input to SHA-256. It is therefore *not* subject to the
 JSON contracts' additive-evolution rule: **any change whatsoever to this
 layout is a breaking change** and requires a new `schema_version` (§7).
+
+**Boundary (r11)**: this spec governs only the entry content-hash domain.
+It constrains no JSON wire format anywhere in the system — in particular,
+journal frame bodies (003) are ordinary schema-conforming JSON with no
+byte-determinism requirement of any kind.
 
 ## 2. Primitive encodings
 

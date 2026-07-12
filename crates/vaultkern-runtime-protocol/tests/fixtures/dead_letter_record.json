@@ -1,12 +1,5 @@
 {
   "reason": "payload_conflict",
-  "record": {
-    "seq": 1,
-    "op_id": "0197f9a0-5c00-7000-8000-3b9e21f04d11",
-    "vault_ref_id": "vault-ref-0f6c",
-    "payload_sealed": "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWl",
-    "nonce": "AAECAwQFBgcICQoL",
-    "base_fingerprint": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-    "created_at": 1783900801
-  }
+  "captured_at": 1783900803,
+  "frame_b64": "NQEAAAEAeyJzZXEiOjEsIm9wX2lkIjoiMDE5N2Y5YTAtNWMwMC03MDAwLTgwMDAtM2I5ZTIxZjA0ZDExIiwidmF1bHRfcmVmX2lkIjoidmF1bHQtcmVmLTBmNmMiLCJwYXlsb2FkX3NlYWxlZCI6InBhV2xwYVdscGFXbHBhV2xwYVdscGFXbHBhV2xwYVdscGFXbHBhV2xwYVdscGFXbHBhV2xwYVdscGFXbHBhV2wiLCJub25jZSI6IkFBRUNBd1FGQmdjSUNRb0wiLCJiYXNlX2ZpbmdlcnByaW50IjoiOWY4NmQwODE4ODRjN2Q2NTlhMmZlYWEwYzU1YWQwMTVhM2JmNGYxYjJiMGI4MjJjZDE1ZDZjMTViMGYwMGEwOCIsImNyZWF0ZWRfYXQiOjE3ODM5MDA4MDF9iY3gkw=="
 }

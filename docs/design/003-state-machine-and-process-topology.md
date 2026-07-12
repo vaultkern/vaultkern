@@ -1,6 +1,6 @@
 # 003 — Quick Unlock State Machine and Process Topology
 
-Status: **Decided — r10** (seven external review rounds + two freeze-hardening rounds). 2026-07-13.
+Status: **Decided — r11** (seven external review rounds + three freeze-hardening rounds). 2026-07-13.
 Upstream decisions: D3, D4, D5 (000).
 
 ## Part 1: the quick unlock state machine (platform-neutral, designed once)
@@ -185,8 +185,8 @@ suite.
 
 ```
 JournalRecord {
-    seq:              u64,           // monotonic within one writer's segment (single
-                                     // writer per segment ⇒ no allocation contention)
+    seq:              u64,           // normally monotonic within its writer's segment;
+                                     // diagnostic only — plays no part in correctness
     op_id:            UUIDv7,        // idempotency identity of the mutation
     vault_ref_id:     string,        // plaintext: routing + pre-replay validation;
                                      // authenticated via the sealing AAD (below)
@@ -238,21 +238,31 @@ JournalRecord {
   followed by zero or more record frames:
 
   `len u32 LE (byte length of body) ‖ record_version u16 LE ‖
-  body (the JournalRecord canonical JSON, UTF-8) ‖ crc u32 LE`
+  body (JournalRecord JSON, UTF-8) ‖ crc u32 LE`
 
   where `crc` is CRC-32/ISO-HDLC (the zlib `crc32`) computed over
-  `len ‖ record_version ‖ body`. The maximum record length is **1 MiB**,
-  enforced in both directions: a writer refuses to append an oversized
-  record, and a reader treats an oversized `len` as corruption. A record
-  failing length or CRC checks is discarded and counted (surfaced to the
-  UI as a diagnostic), never silently; sealed-EOF and corruption
-  adjudication follows the three-case algorithm below.
+  `len ‖ record_version ‖ body`. The **body is any valid UTF-8 JSON
+  serialization conforming to the JournalRecord schema** — a writer uses
+  its language's standard serializer; the CRC covers the exact bytes that
+  writer wrote. **Cross-writer byte determinism is neither required nor
+  assumed**: idempotence and dedup rest entirely on `op_id`, and no
+  correctness property depends on the body's byte shape. (The only place
+  that does require byte determinism is 005's canonical entry
+  serialization — a binary encoding feeding the tie-break hash — which has
+  nothing to do with journal JSON.) The maximum record length is **1
+  MiB**, enforced in both directions: a writer refuses to append an
+  oversized record, and a reader treats an oversized `len` as corruption.
+  A record failing length or CRC checks is discarded and counted
+  (surfaced to the UI as a diagnostic), never silently; sealed-EOF and
+  corruption adjudication follows the three-case algorithm below.
   `base_fingerprint`, `created_at`, and `seq` are **diagnostic fields**:
   implausible values never cause a record to be rejected (only framing
   does), and `seq` holes — a single writer that crashed mid-append —
   are tolerated. The **dead-letter file uses this same framing**; its
-  body is a `DeadLetterRecord { reason, record }` document wrapping the
-  original record verbatim.
+  body is a `DeadLetterRecord { reason, captured_at, frame_b64 }`
+  document that carries the original frame's **raw bytes**
+  (`len ‖ record_version ‖ body ‖ crc`, standard base64) verbatim — never
+  a re-serialization.
 - **Storage — one segment file per writer, never shared**: each writer
   instance (an extension process) appends to its own segment file, named by
   its writer id (a per-instance UUID), inside the app group container
@@ -260,8 +270,9 @@ JournalRecord {
   with a restrictive ACL; the Windows *transition* topology has no system
   extension and therefore no journal). Single-writer segments dissolve
   writer-vs-writer concurrency entirely: `seq` is allocated trivially by its
-  sole writer, there is no append lock, no cross-process ordering, and no
-  seq-hole recovery. Replay reads **all** segments and runs to a fixed point
+  sole writer (normally monotonic within the segment, but diagnostic only —
+  correctness never depends on it), there is no append lock, no
+  cross-process ordering, and no seq-hole recovery. Replay reads **all** segments and runs to a fixed point
   (below), which makes application order across segments irrelevant — for
   independent ops by semantic idempotence, and for dependent ops by
   re-passing. fsync per append; the atomicity unit is one record — a
@@ -377,10 +388,14 @@ JournalRecord {
 - **Replay-time validation**: payloads are validated like any protocol input,
   against the record's target `vault_ref_id` and the current ledger; a record
   that fails validation is **dead-lettered by copy, never by moving**: the
-  record is appended to the app-owned dead-letter file (same framing) and its
-  `op_id` is marked dead-lettered — the original stays untouched in its
-  segment (active segments are never edited; the ownership rule holds without
-  exception) and is excluded from replay by the dead-letter marking. When the
+  original frame's raw bytes are captured **byte-for-byte** into a
+  `DeadLetterRecord` appended to the app-owned dead-letter file (same
+  framing) and its `op_id` is marked dead-lettered — the original stays
+  untouched in its segment (active segments are never edited; the ownership
+  rule holds without exception) and is excluded from replay by the
+  dead-letter marking. Because the capture is the raw frame, unknown
+  fields, the writer's original serialization, and even undecodable bodies
+  survive intact; a retry re-parses from those bytes. When the
   segment is eventually sealed and deleted, dead-lettered `op_id`s count as
   resolved for the whole-segment-deletion accounting. Dead-letter records
   never enter the applied set and are invisible to the applied-set
@@ -402,6 +417,17 @@ JournalRecord {
      still never edited; final accounting happens at sealing like case 1.
   The earlier "discarded and counted" framing rule is case 1/3; the torn-tail
   exception is exactly and only case 2.
+  **Truncation is accepted by design; the unreachable bytes are archived.**
+  No resync marker is added to the format: with tiny single-writer segments,
+  mid-segment corruption is effectively hardware failure, and a resync
+  scan cannot distinguish a genuine next frame from stale garbage that
+  happens to frame-parse — so the design does not pretend to recover.
+  Instead, the entire unreachable region (from the failing frame to EOF)
+  is captured as **one** dead-letter entry — reason
+  `corruption_unreachable`, `frame_b64` holding the raw unreachable bytes
+  verbatim — and counted in the diagnostics surfaced to the UI. The bytes
+  remain available for manual forensics: "never silently lost" is made
+  literal.
 - **Writer-id lifecycle**: a writer id is a fresh UUID per process instance,
   never reused. Segments of dead writers are replayed and pruned by the app
   like any other; a fully-pruned segment file is deleted.
@@ -413,6 +439,38 @@ JournalRecord {
 - **Trust boundary**: the container is writable only by same-signature
   processes — a **product security assumption** (platform code-signing
   isolation), not a cryptographic guarantee.
+
+### Vocabulary evolution and the version matrix
+
+Every enum in the frozen vocabulary has a defined unknown-variant
+behavior — no reader may ever guess:
+
+- **Protocol DTO enums**: an unknown variant fails that request with a
+  self-describing error DTO. Capability negotiation (rule 4 above)
+  prevents sending a new variant to a peer that never declared it, so
+  this path is a defense layer, not the normal case.
+- **Ledger — unknown `state`**: **fail closed.** Quick unlock for that
+  vault is gated off exactly as in `NeedsReenroll` (treated as "this app
+  is too old for this ledger"), surfaced to the UI with an
+  update-the-app hint. The ledger is never guessed at and never
+  rewritten by the older reader.
+- **Journal — unknown op `kind`**: the record is dead-lettered (raw
+  frame bytes preserved) with reason `unknown_kind`; the segment is not
+  blocked. A newer app can later retry the dead-letter from its
+  preserved bytes.
+- **Unknown dead-letter `reason` strings**: displayed verbatim and
+  handled generically (retry/discard); reasons are an additive
+  vocabulary, not an enum.
+
+Version fields, who increments them, and what a reader does when it
+meets a higher one:
+
+| Version | Level | Incremented when | Reader on higher version |
+|---|---|---|---|
+| segment `format_version` | file (segment header) | the frame byte layout itself changes | reject the **entire file**, fail closed, surface a diagnostic (an unreadable layout cannot be partially trusted) |
+| `record_version` | frame | the JournalRecord body shape changes incompatibly | dead-letter that record (raw bytes preserved, `unknown_kind`-family semantics); the segment is not blocked |
+| contract `SCHEMA_VERSION`s | JSON document (CacheManifest / JournalRecord / DeadLetterRecord / ledger) | an incompatible document change (additive changes do **not** increment) | as above per domain: cache manifest ⇒ treated as no cache (fail closed); ledger ⇒ quick unlock gated; journal ⇒ dead-letter with bytes preserved |
+| `protocol_version` | handshake | protocol majors | below the core's minimum ⇒ refused with a self-describing error DTO (rule 4) |
 
 ### Generation registry (all "generations" in one place)
 

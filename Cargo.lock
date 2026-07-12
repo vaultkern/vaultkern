@@ -3299,6 +3299,7 @@ dependencies = [
 name = "vaultkern-runtime-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "regex",
  "schemars",
  "serde",

@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided — r10** (seven external review rounds + two freeze-hardening rounds). 2026-07-13.
+Status: **Decided — r11** (seven external review rounds + three freeze-hardening rounds). 2026-07-13.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -28,7 +28,7 @@ classes at the design level.
 | D2 | The quick unlock envelope stores only post-KDF derived key material (the transformed key), never passwords or credential copies | 002 |
 | D3 | The quick unlock state machine is platform-neutral and designed once: explicit per-vault state + a monotonic generation baked into the envelope AAD; records in platform secure storage are ciphertext caches, not sources of truth | 003 |
 | D4 | The **target** process topology is identical on all four platforms: a resident app owns runtime state and is the sole KDBX writer; system extensions and the browser extension are clients. Client write paths differ by kind and are fixed in the 003 access matrix: **Apple system extensions** (separate appex processes) append to a journal and never touch the vault file; the **browser extension**'s mutations are protocol commands executed inside the app process — it writes neither the vault nor the journal; **Android services** run inside the app process and invoke the core directly (they *are* the resident app; no journal). Windows runs a **sanctioned transition topology** (extension + per-port native host) until the plugin-authenticator phase, under two binding constraints: its state layer uses the shared core ledger (no platform fork) and all KDBX writes go through the writer lock | 003 |
-| D5 | The Rust core is the sole product substance, exposed via UniFFI; protocol DTOs are the single behavioral spec **and the FFI vocabulary** (initially crossing the FFI as JSON strings, typed bindings later), with version negotiation. Typed bindings are **generated from the same DTO schema** — field names, optionality, and enum representation have the protocol schema as their sole authority, so going typed is a representation change, never a semantic one; any field change follows the protocol's additive-versioning rule. Credentials appear only in dedicated input DTOs (unlock, credential change); **vault key-hierarchy material (raw_key / transformed / encryption_key / KEK / DEK) never appears in any DTO** (002). Entry-level secrets (passwords, passkey private keys) are vault content and necessarily flow through the protocol, under fixed constraints: they never enter logs, Debug/Display representations are redacted, the core zeroizes them, and at rest they exist only inside the encrypted vault or the sealed journal (003). UI holds zero business state and zero policy — it renders DTOs and sends commands; transient view state is allowed, persistent domain state and reconciliation logic are not | 003 |
+| D5 | The Rust core is the sole product substance, exposed via UniFFI; protocol DTOs are the single behavioral spec **and the FFI vocabulary** (initially crossing the FFI as JSON strings, typed bindings later), with version negotiation. Typed bindings are **generated from the same DTO schema** — field names, optionality, and enum representation have the protocol schema as their sole authority, so going typed is a representation change, never a semantic one; any field change follows the protocol's additive-versioning rule. Credentials appear only in dedicated input DTOs (unlock, credential change); **vault key-hierarchy material (raw_key / transformed / encryption_key / KEK / DEK) never appears in any DTO** (002). Entry-level secrets (passwords, passkey private keys) are vault content and necessarily flow through the protocol, under fixed constraints: they never enter logs, Debug/Display representations are redacted, the core zeroizes them, and at rest they exist only inside the encrypted vault or the sealed journal (003). The zeroize promise's territory is **buffers the core owns**; during serde/FFI transit a secret transiently exists as a plain string — a **bounded, recorded exception** (vault content must be able to flow), defended by the no-log + redaction + encrypted-at-rest constraints; and secret-bearing DTOs do not derive `Clone` (a contract rule). UI holds zero business state and zero policy — it renders DTOs and sends commands; transient view state is allowed, persistent domain state and reconciliation logic are not | 003 |
 | D6 | Platform floors: iOS 17+ / macOS 14+ / Android 14+ / Windows 11 (for the plugin-authenticator phase). No compatibility branches below these | — |
 | D7 | Three UIs: SwiftUI (one codebase for macOS+iOS), Compose (Android), Web (browser extension + Windows desktop for now). The macOS manager goes straight to SwiftUI — no WebView transition period | — |
 | D8 | Both Apple platforms use the data protection keychain + keychain-access-groups. The file-based legacy keychain, SecTrustedApplication, and SecAccessCreate are banned from the codebase | 002 |
@@ -90,7 +90,11 @@ KDF caps.
    concrete, checked-in schema files before any consumer is written. The
    canonical source of the protocol schema is the Rust types in
    `vaultkern-runtime-protocol` (serde); the generated JSON Schema artifact
-   and its CI snapshot check land in the same freeze commit.
+   and its CI snapshot check land in the same freeze commit. The 005
+   canonical-serialization **encoder implementation and its byte goldens
+   are explicitly not an unfinished item of this freeze** — they are the
+   first task of the merge-algebra track (consistent with 005's own
+   status statement); the freeze pins the spec.
 2. Any business state or reconciliation logic appearing in a UI layer is an
    architecture violation (Touch ID branch lesson: the UI-side reconciliation
    code was ultimately deleted wholesale, −465 lines).
@@ -215,3 +219,23 @@ KDF caps.
   (explicit user discard as `user_discarded` or abort; no persisted
   "rotation pending" state); the Android spike criteria are expanded to
   five service-lifecycle items.
+- r11 (2026-07-13): third freeze-hardening round (two blockers + three
+  majors). The "canonical JSON" pseudo-requirement on journal frame
+  bodies is **dissolved, not satisfied**: a body is any schema-conforming
+  UTF-8 JSON, the CRC covers the writer's exact bytes, and no
+  correctness property depends on body byte shape (byte determinism
+  exists only in 005's binary entry serialization). `DeadLetterRecord`
+  now archives the **raw frame bytes** (`reason`, `captured_at`,
+  `frame_b64`) instead of a re-parsed record, so unknown fields, original
+  serialization, and undecodable bodies survive verbatim; sealed-segment
+  truncation is accepted by design (no resync marker) with the whole
+  unreachable region archived as one `corruption_unreachable`
+  dead-letter. D5's secret-lifecycle promise is honestly narrowed
+  (zeroize territory = core-owned buffers; serde/FFI transit is a
+  bounded, recorded exception; secret-bearing DTOs don't derive Clone)
+  and the model/session refactor track gains a zeroizing-types work
+  item. 003 gains the vocabulary-evolution rules and the four-level
+  version matrix (segment format_version / record_version / contract
+  schema_versions / protocol_version) with pinned unknown-variant
+  behavior per domain (`unknown_kind` dead-letters; unknown ledger state
+  fails closed).

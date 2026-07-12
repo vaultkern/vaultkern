@@ -14,15 +14,22 @@
 //! reviewing the diff. Blessing is refused in CI (guard below): goldens
 //! may only be rewritten on a developer machine where the diff is
 //! reviewed before it is committed.
+//!
+//! Scope of the goldens (003 r11): they pin **this Rust implementation's
+//! serialization as a regression baseline**, not a cross-language byte
+//! spec — journal bodies are any schema-conforming JSON, and no
+//! correctness property depends on byte shape. Byte determinism exists
+//! only in 005's canonical entry serialization.
 
 use std::path::PathBuf;
 
+use base64::Engine as _;
 use vaultkern_runtime_protocol::contracts::{
     CacheManifest, DeadLetterRecord, JournalOpKind, JournalRecord, NeedsReenrollReason,
     PasskeyRegistrationOutcome, PasskeyRegistrationPayload, PlatformRecordKey,
     QuickUnlockLedgerEntry, QuickUnlockState, UsageCountPayload, dead_letter_reason,
 };
-use vaultkern_runtime_protocol::{EntryPasskeyDto, MergeSummaryDto};
+use vaultkern_runtime_protocol::{EntryPasskeyDto, MergeSummaryDto, framing};
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -142,9 +149,15 @@ fn sealed_journal_record() -> JournalRecord {
 }
 
 fn dead_letter_record() -> DeadLetterRecord {
+    // 003 r11: the dead-letter archives the original frame's raw bytes
+    // verbatim. The fixture frame wraps the sealed golden record exactly
+    // as the binary segment golden does.
+    let body = serde_json::to_vec(&sealed_journal_record()).unwrap();
+    let frame = framing::encode_frame(JournalRecord::SCHEMA_VERSION as u16, &body).unwrap();
     DeadLetterRecord {
         reason: dead_letter_reason::PAYLOAD_CONFLICT.into(),
-        record: sealed_journal_record(),
+        captured_at: 1_783_900_803,
+        frame_b64: base64::engine::general_purpose::STANDARD.encode(&frame),
     }
 }
 
@@ -224,6 +237,33 @@ fn journal_record_sealed_matches_golden() {
 #[test]
 fn dead_letter_record_matches_golden() {
     assert_matches_golden("dead_letter_record.json", &dead_letter_record());
+}
+
+#[test]
+fn dead_letter_frame_bytes_roundtrip_to_the_original_record() {
+    // The archived bytes are the frame verbatim: decoding them re-parses
+    // to exactly the original record (the retry path).
+    let dead_letter = dead_letter_record();
+    let frame_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&dead_letter.frame_b64)
+        .expect("frame_b64 is valid base64");
+    let decoded = framing::decode_frame(&frame_bytes).expect("archived frame decodes");
+    assert_eq!(decoded.record_version, 1);
+    let record: JournalRecord =
+        serde_json::from_slice(&decoded.body).expect("archived body re-parses");
+    assert_eq!(record, sealed_journal_record());
+}
+
+#[test]
+fn dead_letter_reason_strings_are_pinned() {
+    assert_eq!(dead_letter_reason::KDF_ROTATED, "kdf_rotated");
+    assert_eq!(dead_letter_reason::PAYLOAD_CONFLICT, "payload_conflict");
+    assert_eq!(dead_letter_reason::USER_DISCARDED, "user_discarded");
+    assert_eq!(dead_letter_reason::UNKNOWN_KIND, "unknown_kind");
+    assert_eq!(
+        dead_letter_reason::CORRUPTION_UNREACHABLE,
+        "corruption_unreachable"
+    );
 }
 
 #[test]
@@ -551,6 +591,13 @@ fn schema_constrains_op_id_to_uuidv7_and_payload_sealed_to_base64() {
     let sealed_pattern = regex::Regex::new(sealed["pattern"].as_str().unwrap()).unwrap();
     assert!(sealed_pattern.is_match(FAKE_PAYLOAD_SEALED_B64));
     assert!(!sealed_pattern.is_match("not base64!!"));
+
+    // The dead-letter's archived frame carries the same base64 constraint
+    // plus the one-valid-frame floor (10 bytes ⇒ 16 base64 chars).
+    let frame = schema_property("dead_letter_record.schema.json", "frame_b64");
+    assert!(frame["minLength"].as_u64().unwrap() >= 16);
+    let frame_pattern = regex::Regex::new(frame["pattern"].as_str().unwrap()).unwrap();
+    assert!(!frame_pattern.is_match("not base64!!"));
 }
 
 #[test]

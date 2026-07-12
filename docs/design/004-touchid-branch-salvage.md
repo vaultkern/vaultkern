@@ -1,6 +1,6 @@
 # 004 — Touch ID Branch Salvage Manifest
 
-Status: **Decided — r10** (seven external review rounds + two freeze-hardening rounds). 2026-07-13.
+Status: **Decided — r11** (seven external review rounds + three freeze-hardening rounds). 2026-07-13.
 Subject: `codex/macos-touch-id-quick-unlock` (38 commits, +11.7k/−1.0k,
 **will not be merged**). The branch is kept as a read-only reference; items are
 carried over per the tables below, **remade** to the 000–003 designs rather than
@@ -68,7 +68,9 @@ contract freeze (wire formats pinned before any consumer:
               └─> merge algebra (001) ────> save/replay flow
 model/session memory refactor (002 items 2–3) — starts independently, but its
   content-addressed attachment model must land before the merge algebra's
-  history union / content hashing builds on it (the two tracks converge there)
+  history union / content hashing builds on it (the two tracks converge there).
+  Includes: entry-level secrets move to dedicated zeroizing types (covering
+  serde buffers and journal unseal buffers), replacing bare String (D5 r11)
 runtime modularization ──> UniFFI surface     — gates all platform shells
 ```
 

@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "JournalRecord",
-  "description": "003 §\"Journal contract\" — one record appended by a system-extension writer to its own single-writer segment file.\n\nThe binary framing around this body is frozen in the [`crate::framing`] module (003 r10): `len u32 LE ‖ record_version u16 LE ‖ body ‖ crc u32 LE`, where the body is this document as canonical JSON (UTF-8); [`JournalRecord::SCHEMA_VERSION`] is the `record_version` the framing carries for records of this shape.\n\nThe op vocabulary is **sealed at rest** (003 r9, payload sealing): `payload_sealed` is the AES-256-GCM ciphertext of the serialized [`JournalOpKind`] document, under `key = HKDF-SHA256(transformed, info = \"vaultkern.journal.v1\")`, with a fresh random 12-byte nonce per record and `AAD = op_id ‖ vault_ref_id`. The journal is the only on-disk location outside the vault that can hold secrets (passkey private keys); container same-signature isolation argues write integrity, not confidentiality.",
+  "description": "003 §\"Journal contract\" — one record appended by a system-extension writer to its own single-writer segment file.\n\nThe binary framing around this body is frozen in the [`crate::framing`] module (003 r10): `len u32 LE ‖ record_version u16 LE ‖ body ‖ crc u32 LE`, where the body is this document as **any schema-conforming UTF-8 JSON** — a writer uses its language's standard serializer, the CRC covers the exact bytes that writer wrote, and no correctness property depends on the body's byte shape (idempotence and dedup rest entirely on `op_id`; 003 r11). [`JournalRecord::SCHEMA_VERSION`] is the `record_version` the framing carries for records of this shape.\n\nThe op vocabulary is **sealed at rest** (003 r9, payload sealing): `payload_sealed` is the AES-256-GCM ciphertext of the serialized [`JournalOpKind`] document, under `key = HKDF-SHA256(transformed, info = \"vaultkern.journal.v1\")`, with a fresh random 12-byte nonce per record and `AAD = op_id ‖ vault_ref_id`. The journal is the only on-disk location outside the vault that can hold secrets (passkey private keys); container same-signature isolation argues write integrity, not confidentiality.",
   "type": "object",
   "required": [
     "base_fingerprint",
@@ -41,7 +41,7 @@
       "pattern": "^[A-Za-z0-9+/]+={0,2}$"
     },
     "seq": {
-      "description": "Monotonic within one writer's segment (single writer per segment ⇒ no allocation contention). **Diagnostic field** (003 r10): an implausible value never rejects a record, and `seq` holes from a writer crash are tolerated.",
+      "description": "Normally monotonic within its writer's segment, but **diagnostic only — it plays no part in correctness** (003 r11): an implausible value never rejects a record, and `seq` holes from a writer crash are tolerated.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0.0

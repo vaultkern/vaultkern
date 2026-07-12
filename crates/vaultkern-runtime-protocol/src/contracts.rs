@@ -81,9 +81,12 @@ impl CacheManifest {
 ///
 /// The binary framing around this body is frozen in the [`crate::framing`]
 /// module (003 r10): `len u32 LE ‖ record_version u16 LE ‖ body ‖ crc u32
-/// LE`, where the body is this document as canonical JSON (UTF-8);
-/// [`JournalRecord::SCHEMA_VERSION`] is the `record_version` the framing
-/// carries for records of this shape.
+/// LE`, where the body is this document as **any schema-conforming UTF-8
+/// JSON** — a writer uses its language's standard serializer, the CRC
+/// covers the exact bytes that writer wrote, and no correctness property
+/// depends on the body's byte shape (idempotence and dedup rest entirely
+/// on `op_id`; 003 r11). [`JournalRecord::SCHEMA_VERSION`] is the
+/// `record_version` the framing carries for records of this shape.
 ///
 /// The op vocabulary is **sealed at rest** (003 r9, payload sealing):
 /// `payload_sealed` is the AES-256-GCM ciphertext of the serialized
@@ -96,10 +99,10 @@ impl CacheManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct JournalRecord {
-    /// Monotonic within one writer's segment (single writer per segment ⇒
-    /// no allocation contention). **Diagnostic field** (003 r10): an
-    /// implausible value never rejects a record, and `seq` holes from a
-    /// writer crash are tolerated.
+    /// Normally monotonic within its writer's segment, but **diagnostic
+    /// only — it plays no part in correctness** (003 r11): an implausible
+    /// value never rejects a record, and `seq` holes from a writer crash
+    /// are tolerated.
     pub seq: u64,
     /// UUIDv7 string — the idempotency identity of the mutation. Replay
     /// dedup and the applied set key off this value alone; it is also the
@@ -150,33 +153,51 @@ impl JournalRecord {
     pub const SCHEMA_VERSION: u32 = 1;
 }
 
-/// 003 §"Journal contract" (r10) — the body of a dead-letter file frame.
+/// 003 §"Journal contract" (r11) — the body of a dead-letter file frame.
 ///
 /// The dead-letter file uses the same binary framing as journal segments
-/// ([`crate::framing`]); each frame's body is this document: the original
-/// record **copied verbatim** (originals in their segments are never
-/// edited) plus the reason it was dead-lettered.
+/// ([`crate::framing`]); each frame's body is this document. It archives
+/// the original frame's **raw bytes, verbatim** — never a
+/// re-serialization: unknown fields, the writer's original serialization,
+/// and even undecodable bodies survive intact, and the retry path
+/// re-parses from these bytes. (Originals in their segments are never
+/// edited; this is the copy.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct DeadLetterRecord {
     /// Why the record was dead-lettered. Frozen values so far (an additive
-    /// vocabulary; see [`dead_letter_reason`]): `kdf_rotated` (sealed under
-    /// a rotated-away KDF generation), `payload_conflict` (passkey
-    /// registration with same credential UUID but differing payload),
-    /// `user_discarded` (explicit user discard during a credential-change
-    /// drain), plus replay validation failures.
+    /// vocabulary; see [`dead_letter_reason`]): `kdf_rotated`,
+    /// `payload_conflict`, `user_discarded`, `unknown_kind`,
+    /// `corruption_unreachable`, plus replay validation failures. Unknown
+    /// reason strings are displayed verbatim and handled generically
+    /// (003 r11, vocabulary evolution).
     #[cfg_attr(feature = "json-schema", schemars(length(min = 1)))]
     pub reason: String,
-    /// The original record, byte-for-byte as it appeared in its segment.
-    pub record: JournalRecord,
+    /// When this dead-letter entry was captured, seconds since the Unix
+    /// epoch.
+    pub captured_at: u64,
+    /// The original frame's raw bytes — `len ‖ record_version ‖ body ‖
+    /// crc` exactly as they appeared in the segment — encoded as
+    /// **standard base64 (RFC 4648 §4, with padding)**. For
+    /// `corruption_unreachable` entries this holds the entire unreachable
+    /// region (failing frame through EOF) rather than one well-formed
+    /// frame. A valid frame is at least 10 bytes, hence at least 16
+    /// base64 characters.
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(length(min = 16), regex(pattern = r"^[A-Za-z0-9+/]+={0,2}$"))
+    )]
+    pub frame_b64: String,
 }
 
 impl DeadLetterRecord {
     pub const SCHEMA_VERSION: u32 = 1;
 }
 
-/// The frozen `DeadLetterRecord.reason` vocabulary (003 r10). Additive:
-/// new reasons may be added; existing strings never change meaning.
+/// The frozen `DeadLetterRecord.reason` vocabulary (003 r10/r11).
+/// Additive: new reasons may be added; existing strings never change
+/// meaning; unknown strings are displayed verbatim and handled
+/// generically.
 pub mod dead_letter_reason {
     /// Sealed under a KDF generation that has been rotated away — the
     /// payload is undecryptable (003, drain-before-rotate).
@@ -187,6 +208,14 @@ pub mod dead_letter_reason {
     /// Explicitly discarded by the user during a credential-change drain
     /// (003, drain-before-rotate failure path).
     pub const USER_DISCARDED: &str = "user_discarded";
+    /// The op `kind` (or a higher `record_version`) is unknown to this
+    /// reader; the raw bytes are preserved so a newer app can retry
+    /// (003 r11, vocabulary evolution).
+    pub const UNKNOWN_KIND: &str = "unknown_kind";
+    /// A sealed segment's unreachable region after a framing failure,
+    /// archived byte-for-byte for manual forensics (003 r11 — truncation
+    /// is accepted by design; no resync marker exists).
+    pub const CORRUPTION_UNREACHABLE: &str = "corruption_unreachable";
 }
 
 /// 003 journal op vocabulary — **the plaintext content of
@@ -202,7 +231,12 @@ pub mod dead_letter_reason {
 ///
 /// Increment-style ops are forbidden (003, correctness layer 1): every op
 /// carries observed absolute state so re-application is a no-op.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Deliberately does **not** derive `Clone`: the passkey variant carries
+/// entry-level secret material, and secret-bearing DTOs do not derive
+/// Clone (D5 r11 contract rule — copies of secrets must be explicit and
+/// justified, never ambient).
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum JournalOpKind {
@@ -257,8 +291,10 @@ pub enum JournalOpKind {
 ///
 /// `Debug` is **hand-written and redacted** (D5 r10: entry-level secrets
 /// never enter logs; Debug/Display representations are redacted) — the
-/// private key renders as `[REDACTED]`.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// private key renders as `[REDACTED]`. Deliberately does **not** derive
+/// `Clone` (D5 r11: secret-bearing DTOs do not derive Clone; a copy of a
+/// private key must be an explicit, justified operation).
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct PasskeyRegistrationPayload {
     /// The registered credential as it is to exist in the vault. Its

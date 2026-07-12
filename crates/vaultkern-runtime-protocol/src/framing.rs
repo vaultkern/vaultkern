@@ -7,9 +7,18 @@
 //! segment file = magic "VKJS" (4 bytes) ‖ format_version u16 LE ‖ frame*
 //! frame        = len u32 LE (byte length of body)
 //!              ‖ record_version u16 LE
-//!              ‖ body (canonical JSON, UTF-8)
+//!              ‖ body (schema-conforming JSON, UTF-8)
 //!              ‖ crc u32 LE
 //! ```
+//!
+//! A body is **any valid UTF-8 JSON conforming to the record's schema**
+//! (003 r11): writers use their language's standard serializer, the CRC
+//! covers the exact bytes the writer wrote, and **no correctness property
+//! depends on the body's byte shape** — idempotence and dedup rest
+//! entirely on `op_id`. Cross-writer byte determinism is neither required
+//! nor assumed (the only byte-deterministic encoding in the system is
+//! 005's canonical entry serialization, which is unrelated to journal
+//! JSON).
 //!
 //! `crc` is CRC-32/ISO-HDLC (the zlib `crc32`: reflected, polynomial
 //! 0xEDB88320, init 0xFFFFFFFF, xorout 0xFFFFFFFF) computed over
@@ -66,7 +75,8 @@ pub struct DecodedFrame {
     /// The `record_version` the frame carries (for `JournalRecord` bodies
     /// this is `JournalRecord::SCHEMA_VERSION`).
     pub record_version: u16,
-    /// The frame body bytes (canonical JSON, UTF-8).
+    /// The frame body bytes (schema-conforming JSON, UTF-8, exactly as
+    /// the writer wrote them).
     pub body: Vec<u8>,
     /// Total bytes this frame occupied in the input (advance the cursor by
     /// this much to reach the next frame).

@@ -6,6 +6,17 @@
 //! Run with `cargo test -p vaultkern-runtime-protocol --features
 //! json-schema`. Regenerate after an intentional (additive) contract change
 //! with `VAULTKERN_BLESS=1` and review the diff.
+//!
+//! Deliberate trade-off (r11): the semantic-constraint negative tests (in
+//! `contract_freeze.rs`) validate values by executing the exact
+//! `pattern`/`minLength`/`const` constraints read from these frozen
+//! artifacts with the `regex` crate, instead of full-document validation
+//! via the `jsonschema` crate — that crate is unavailable in the offline
+//! registry cache. Because this snapshot test pins the artifacts
+//! byte-exactly against the Rust types, the executed constraints are
+//! guaranteed to be the frozen ones; the coverage difference (whole-
+//! document assembly rules) is carried by the golden-fixture round-trip
+//! tests.
 #![cfg(feature = "json-schema")]
 
 use std::path::PathBuf;
