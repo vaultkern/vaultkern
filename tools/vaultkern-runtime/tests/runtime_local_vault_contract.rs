@@ -732,6 +732,8 @@ fn runtime_merges_changed_source_before_save_without_overwriting_external_entrie
                 Some(MergeSummaryDto {
                     merged_entries: 1,
                     history_snapshots_added: 0,
+                    meta_conflicts_resolved: 0,
+                    icon_conflicts_resolved: 0,
                 })
             );
         }

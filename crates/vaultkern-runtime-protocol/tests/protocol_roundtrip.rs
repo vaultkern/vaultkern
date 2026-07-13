@@ -225,6 +225,8 @@ fn protocol_roundtrips_save_vault_result_response() {
         merge_summary: Some(MergeSummaryDto {
             merged_entries: 2,
             history_snapshots_added: 1,
+            meta_conflicts_resolved: 1,
+            icon_conflicts_resolved: 1,
         }),
     });
 
@@ -233,6 +235,16 @@ fn protocol_roundtrips_save_vault_result_response() {
     assert_eq!(value["status"], "merged");
     assert_eq!(value["mergeSummary"]["mergedEntries"], 2);
     assert_eq!(value["mergeSummary"]["historySnapshotsAdded"], 1);
+    assert_eq!(value["mergeSummary"]["metaConflictsResolved"], 1);
+    assert_eq!(value["mergeSummary"]["iconConflictsResolved"], 1);
+
+    // Additive evolution: a summary emitted by an older peer (without the
+    // two conflict counters) still deserializes, defaulting them to zero.
+    let legacy: MergeSummaryDto =
+        serde_json::from_str(r#"{"mergedEntries":2,"historySnapshotsAdded":1}"#)
+            .expect("deserialize legacy merge summary");
+    assert_eq!(legacy.meta_conflicts_resolved, 0);
+    assert_eq!(legacy.icon_conflicts_resolved, 0);
 
     let decoded: RuntimeResponse = serde_json::from_value(value).expect("deserialize response");
     assert_eq!(decoded, response);
@@ -919,6 +931,8 @@ fn protocol_roundtrips_atomic_autofill_durable_results_with_camel_case_fields() 
                 merge_summary: Some(MergeSummaryDto {
                     merged_entries: 2,
                     history_snapshots_added: 1,
+                    meta_conflicts_resolved: 0,
+                    icon_conflicts_resolved: 0,
                 }),
                 receipt_version: 1,
             },

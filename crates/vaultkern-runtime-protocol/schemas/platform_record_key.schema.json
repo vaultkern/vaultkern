@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PlatformRecordKey",
+  "description": "003 cross-store write-order axiom, precondition: the **physical key** a platform secure-storage record is stored under.\n\nThe key contains the generation, so sealing `gen+1` creates a **new** record and never overwrites the current one — an overwrite-in-place provider would destroy the current record before the ledger commits and falsifies the axiom (the 004 provider negative test enforces this). Orphaned records (seal succeeded, crash before the ledger write) are inert by generation mismatch.",
+  "type": "object",
+  "required": [
+    "identifier_scope",
+    "record_generation",
+    "vault_ref_id"
+  ],
+  "properties": {
+    "identifier_scope": {
+      "description": "The extension scope this record belongs to (per-scope ledger, 003).",
+      "type": "string",
+      "minLength": 1
+    },
+    "record_generation": {
+      "description": "The ledger generation this record was sealed at.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "vault_ref_id": {
+      "description": "The vault the sealed envelope unlocks.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

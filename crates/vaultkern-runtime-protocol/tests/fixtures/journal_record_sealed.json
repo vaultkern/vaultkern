@@ -1,0 +1,9 @@
+{
+  "seq": 1,
+  "op_id": "0197f9a0-5c00-7000-8000-3b9e21f04d11",
+  "vault_ref_id": "vault-ref-0f6c",
+  "payload_sealed": "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWl",
+  "nonce": "AAECAwQFBgcICQoL",
+  "base_fingerprint": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "created_at": 1783900801
+}

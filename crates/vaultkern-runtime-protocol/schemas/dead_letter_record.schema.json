@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DeadLetterRecord",
+  "description": "003 §\"Journal contract\" (r11) — the body of a dead-letter file frame.\n\nThe dead-letter file uses the same binary framing as journal segments ([`crate::framing`]); each frame's body is this document. It archives the original frame's **raw bytes, verbatim** — never a re-serialization: unknown fields, the writer's original serialization, and even undecodable bodies survive intact, and the retry path re-parses from these bytes. (Originals in their segments are never edited; this is the copy.)",
+  "type": "object",
+  "required": [
+    "captured_at",
+    "frame_b64",
+    "reason"
+  ],
+  "properties": {
+    "archived_segment": {
+      "description": "When the region exceeded [`DeadLetterRecord::MAX_ARCHIVED_BYTES`]: the file name of the corrupt segment, renamed to `*.corrupt` and kept whole in the container — never parsed again, read directly by the support procedure. `None` when nothing was truncated. Additive field (r12).",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "captured_at": {
+      "description": "When this dead-letter entry was captured, seconds since the Unix epoch.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "frame_b64": {
+      "description": "The archived raw bytes, encoded as **standard base64 (RFC 4648 §4, with padding)**. Two distinct semantics (r12):\n\n- For per-record reasons (`kdf_rotated`, `payload_conflict`, `user_discarded`, `unknown_kind`, validation failures): one **complete frame** — `len ‖ record_version ‖ body ‖ crc` exactly as it appeared in the segment. - For `corruption_unreachable`: the **raw unreachable region** (failing frame through EOF), which is *not* a well-formed frame and can be as short as **one byte** (e.g. a tail torn inside the length prefix itself).\n\nHence a one-byte corruption region encodes to the four-character `AA==` minimum. At most [`DeadLetterRecord::MAX_ARCHIVED_BYTES`] raw bytes are stored here; a longer region keeps its prefix, with `region_len` and `archived_segment` recording the rest (r12).",
+      "type": "string",
+      "minLength": 4,
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "reason": {
+      "description": "Why the record was dead-lettered. Frozen values so far (an additive vocabulary; see [`dead_letter_reason`]): `kdf_rotated`, `payload_conflict`, `user_discarded`, `unknown_kind`, `corruption_unreachable`, plus replay validation failures. Unknown reason strings are displayed verbatim and handled generically (003 r11, vocabulary evolution).",
+      "type": "string",
+      "minLength": 1
+    },
+    "region_len": {
+      "description": "Total byte length of the full original region, whether or not it was truncated to fit `frame_b64`. Additive field (r12); `0` in a pre-r12 document means \"unrecorded — equal to the archived bytes\".",
+      "default": 0,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

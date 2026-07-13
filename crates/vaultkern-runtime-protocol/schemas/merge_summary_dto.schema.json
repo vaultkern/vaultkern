@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MergeSummaryDto",
+  "type": "object",
+  "required": [
+    "historySnapshotsAdded",
+    "mergedEntries"
+  ],
+  "properties": {
+    "historySnapshotsAdded": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "iconConflictsResolved": {
+      "description": "001 merge algebra: custom icon conflicts where the losing version was discarded (counted so the user can see a configuration conflict occurred). Additive extension pinned by the Phase 0 contract freeze.",
+      "default": 0,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "mergedEntries": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
+    "metaConflictsResolved": {
+      "description": "001 merge algebra: resolved Meta / recycle-bin config conflicts. Additive extension pinned by the Phase 0 contract freeze (004).",
+      "default": 0,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  }
+}
