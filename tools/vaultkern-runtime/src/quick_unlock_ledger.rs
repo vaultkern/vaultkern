@@ -77,10 +77,26 @@ struct LedgerDocumentWire {
     unknown: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct LedgerRowWire {
+    schema_version: u32,
+    state: Value,
+    #[serde(rename = "generation")]
+    _generation: u64,
+    #[serde(rename = "policy")]
+    _policy: bool,
+}
+
 #[derive(Debug, Clone)]
-struct StoredLedgerRow {
-    value: QuickUnlockLedgerEntry,
-    unknown: BTreeMap<String, Value>,
+enum StoredLedgerRow {
+    Known {
+        value: QuickUnlockLedgerEntry,
+        unknown: BTreeMap<String, Value>,
+    },
+    UnknownState {
+        kind: String,
+        raw: Value,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +130,37 @@ impl LedgerDocument {
             if vault_ref_id.is_empty() {
                 return Err(invalid_data("vault_ref_id must not be empty"));
             }
+            let row_wire: LedgerRowWire = serde_json::from_value(row_value.clone()).map_err(
+                |source| {
+                    invalid_data(format!(
+                        "row {vault_ref_id:?} could not be decoded: {source}"
+                    ))
+                },
+            )?;
+            if row_wire.schema_version != QuickUnlockLedgerEntry::SCHEMA_VERSION {
+                return Err(invalid_data(format!(
+                    "unsupported row schema version {}",
+                    row_wire.schema_version
+                )));
+            }
+            let state_kind = row_wire
+                .state
+                .as_object()
+                .and_then(|state| state.get("kind"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    invalid_data(format!("row {vault_ref_id:?} state has no string kind"))
+                })?;
+            if !matches!(state_kind, "disabled" | "enrolled" | "needs_reenroll") {
+                entries.insert(
+                    vault_ref_id,
+                    StoredLedgerRow::UnknownState {
+                        kind: state_kind.to_owned(),
+                        raw: row_value,
+                    },
+                );
+                continue;
+            }
             let mut unknown = row_value
                 .as_object()
                 .cloned()
@@ -130,7 +177,7 @@ impl LedgerDocument {
             }
             entries.insert(
                 vault_ref_id,
-                StoredLedgerRow {
+                StoredLedgerRow::Known {
                     value,
                     unknown: unknown.into_iter().collect(),
                 },
@@ -148,16 +195,22 @@ impl LedgerDocument {
         document.insert("schema_version".into(), Value::from(LEDGER_SCHEMA_VERSION));
         let mut entries = Map::new();
         for (vault_ref_id, row) in &self.entries {
-            let mut value = serde_json::to_value(&row.value)
-                .map_err(|source| invalid_data(format!("could not encode row: {source}")))?;
-            let object = value
-                .as_object_mut()
-                .ok_or_else(|| invalid_data("encoded ledger row is not an object"))?;
-            for (key, value) in &row.unknown {
-                if !object.contains_key(key) {
-                    object.insert(key.clone(), value.clone());
+            let value = match row {
+                StoredLedgerRow::Known { value, unknown } => {
+                    let mut encoded = serde_json::to_value(value)
+                        .map_err(|source| invalid_data(format!("could not encode row: {source}")))?;
+                    let object = encoded
+                        .as_object_mut()
+                        .ok_or_else(|| invalid_data("encoded ledger row is not an object"))?;
+                    for (key, value) in unknown {
+                        if !object.contains_key(key) {
+                            object.insert(key.clone(), value.clone());
+                        }
+                    }
+                    encoded
                 }
-            }
+                StoredLedgerRow::UnknownState { raw, .. } => raw.clone(),
+            };
             entries.insert(vault_ref_id.clone(), value);
         }
         document.insert("entries".into(), Value::Object(entries));
@@ -255,17 +308,13 @@ impl QuickUnlockLedgerStore {
                 let document = document
                     .lock()
                     .map_err(|_| invalid_data("in-memory ledger lock is poisoned"))?;
-                return Ok(document
-                    .entries
-                    .get(vault_ref_id)
-                    .map(|row| row.value.clone()));
+                return read_entry(&document, vault_ref_id);
             }
-            LedgerBacking::Persistent { path, .. } => read_persistent_document(path)?.0,
+            LedgerBacking::Persistent {
+                path, lock_timeout, ..
+            } => read_persistent_document_locked(path, *lock_timeout)?,
         };
-        Ok(document
-            .entries
-            .get(vault_ref_id)
-            .map(|row| row.value.clone()))
+        read_entry(&document, vault_ref_id)
     }
 
     pub(crate) fn compare_and_swap(
@@ -386,21 +435,26 @@ fn apply_compare_and_swap(
     next: QuickUnlockLedgerEntry,
 ) -> Result<(), LedgerStoreError> {
     match document.entries.get_mut(vault_ref_id) {
-        Some(current) => {
-            if expected != Some(&current.value) {
+        Some(StoredLedgerRow::Known { value, .. }) => {
+            if expected != Some(&*value) {
                 return Err(LedgerStoreError::Conflict {
                     message: format!("row {vault_ref_id:?} no longer matches the expected value"),
                 });
             }
-            if next.generation < current.value.generation {
+            if next.generation < value.generation {
                 return Err(LedgerStoreError::Conflict {
                     message: format!(
                         "row {vault_ref_id:?} generation cannot decrease from {} to {}",
-                        current.value.generation, next.generation
+                        value.generation, next.generation
                     ),
                 });
             }
-            current.value = next;
+            *value = next;
+        }
+        Some(StoredLedgerRow::UnknownState { kind, .. }) => {
+            return Err(invalid_data(format!(
+                "row {vault_ref_id:?} has unsupported state {kind:?}"
+            )));
         }
         None => {
             if expected.is_some() {
@@ -410,7 +464,7 @@ fn apply_compare_and_swap(
             }
             document.entries.insert(
                 vault_ref_id.to_owned(),
-                StoredLedgerRow {
+                StoredLedgerRow::Known {
                     value: next,
                     unknown: BTreeMap::new(),
                 },
@@ -420,10 +474,47 @@ fn apply_compare_and_swap(
     Ok(())
 }
 
+fn read_entry(
+    document: &LedgerDocument,
+    vault_ref_id: &str,
+) -> Result<Option<QuickUnlockLedgerEntry>, LedgerStoreError> {
+    match document.entries.get(vault_ref_id) {
+        Some(StoredLedgerRow::Known { value, .. }) => Ok(Some(value.clone())),
+        Some(StoredLedgerRow::UnknownState { kind, .. }) => Err(invalid_data(format!(
+            "row {vault_ref_id:?} has unsupported state {kind:?}"
+        ))),
+        None => Ok(None),
+    }
+}
+
 fn ledger_lock_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(".lock");
     PathBuf::from(name)
+}
+
+fn read_persistent_document_locked(
+    path: &Path,
+    lock_timeout: Duration,
+) -> Result<LedgerDocument, LedgerStoreError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(LedgerDocument::empty());
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let _lock = ExclusiveFileLock::acquire_with_timeout(&ledger_lock_path(path), lock_timeout)
+        .map_err(|source| {
+            if source.kind() == io::ErrorKind::WouldBlock {
+                LedgerStoreError::Busy {
+                    message: source.to_string(),
+                }
+            } else {
+                LedgerStoreError::Io(source)
+            }
+        })?;
+    Ok(read_persistent_document(path)?.0)
 }
 
 fn read_persistent_document(
@@ -518,7 +609,9 @@ fn reject_reparse_point(_metadata: &Metadata) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LedgerDocument, LedgerStoreError, QuickUnlockLedgerStore};
+    use super::{
+        LedgerDocument, LedgerStoreError, QuickUnlockLedgerStore, ledger_lock_path,
+    };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock,
     };
@@ -634,6 +727,34 @@ mod tests {
         let (_dir, store) = persistent_store(&document);
 
         assert!(store.get("vault-1").is_err());
+    }
+
+    #[test]
+    fn decoder_scopes_unknown_state_to_its_vault_and_preserves_the_raw_row() {
+        let mut document = valid_document();
+        let future_row = json!({
+            "schema_version": 1,
+            "state": { "kind": "future_state", "future_detail": "retained" },
+            "generation": 11,
+            "policy": true,
+            "future_row_field": [1, 2, 3]
+        });
+        document["entries"]["vault-future"] = future_row.clone();
+        let (dir, store) = persistent_store(&document);
+
+        assert_eq!(store.get("vault-1").unwrap(), Some(enrolled(7)));
+        assert!(matches!(
+            store.get("vault-future"),
+            Err(LedgerStoreError::InvalidData { .. })
+        ));
+        store
+            .compare_and_swap("vault-1", Some(&enrolled(7)), enrolled(8))
+            .unwrap();
+
+        let published: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("quick-unlock-ledger.json")).unwrap())
+                .unwrap();
+        assert_eq!(published["entries"]["vault-future"], future_row);
     }
 
     #[test]
@@ -826,6 +947,24 @@ mod tests {
         let error = store
             .compare_and_swap("vault-1", None, disabled(0))
             .unwrap_err();
+
+        assert!(matches!(error, LedgerStoreError::Busy { .. }));
+        drop(held);
+    }
+
+    #[test]
+    fn persistent_get_reports_busy_when_the_ledger_lock_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("ledger");
+        let path = parent.join("quick-unlock.json");
+        let store = QuickUnlockLedgerStore::persistent(path.clone(), Duration::from_secs(1));
+        store
+            .compare_and_swap("vault-1", None, enrolled(7))
+            .unwrap();
+        let held = ExclusiveFileLock::acquire(&ledger_lock_path(&path)).unwrap();
+        let reader = QuickUnlockLedgerStore::persistent(path, Duration::from_millis(20));
+
+        let error = reader.get("vault-1").unwrap_err();
 
         assert!(matches!(error, LedgerStoreError::Busy { .. }));
         drop(held);
