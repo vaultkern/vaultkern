@@ -125,7 +125,7 @@ pub(crate) fn reduce(
                 disposition: ReductionDisposition::SealThenCommit,
             })
         }
-        (_, QuickUnlockOperation::Disable, _) => {
+        (_, QuickUnlockOperation::Disable, QuickUnlockOperationResult::Success) => {
             let mut next = current.clone();
             next.state = QuickUnlockState::Disabled;
             next.generation = next_generation(current.generation)?;
@@ -820,7 +820,7 @@ mod tests {
                             QuickUnlockOperation::FullCredentialUnlock,
                             QuickUnlockOperationResult::Success,
                         ) => ReductionDisposition::SealThenCommit,
-                        (_, QuickUnlockOperation::Disable, _) => {
+                        (_, QuickUnlockOperation::Disable, QuickUnlockOperationResult::Success) => {
                             ReductionDisposition::CommitThenCleanup
                         }
                         _ => ReductionDisposition::Refused,
@@ -862,7 +862,7 @@ mod tests {
                             },
                             12,
                         ),
-                        (_, QuickUnlockOperation::Disable, _) => {
+                        (_, QuickUnlockOperation::Disable, QuickUnlockOperationResult::Success) => {
                             entry(QuickUnlockState::Disabled, 13)
                         }
                         _ => current.clone(),
