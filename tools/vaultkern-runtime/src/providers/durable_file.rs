@@ -849,7 +849,8 @@ pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 pub(crate) fn sync_directory(_path: &Path) -> io::Result<()> {
-    // Publish operations use WRITE_THROUGH on Windows.
+    // The published target is flushed explicitly. MoveFileExW also uses
+    // WRITE_THROUGH when publishing to a previously missing target.
     Ok(())
 }
 
@@ -1120,12 +1121,15 @@ fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(),
         }
     };
     if result == 0 {
+        let source = io::Error::last_os_error();
         Err(ReplaceError {
-            // ReplaceFileW can report partial-failure states after moving the
-            // original, replacement, or backup. Treat every existing-target
-            // failure as outcome unknown and retain all recovery artifacts.
-            published: windows_replace_failure_is_outcome_unknown(replacing_existing),
-            source: io::Error::last_os_error(),
+            // Only the documented partial-failure states can have moved the
+            // original or replacement. Preserve their recovery artifacts.
+            published: windows_replace_failure_is_outcome_unknown(
+                replacing_existing,
+                source.raw_os_error(),
+            ),
+            source,
         })
     } else {
         Ok(())
@@ -1135,9 +1139,24 @@ fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(),
 #[cfg(windows)]
 const WINDOWS_REPLACE_FILE_FLAGS: u32 = 0;
 
-#[cfg(windows)]
-fn windows_replace_failure_is_outcome_unknown(replacing_existing: bool) -> bool {
+#[cfg(any(windows, test))]
+const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT: i32 = 1176;
+#[cfg(any(windows, test))]
+const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
+
+#[cfg(any(windows, test))]
+fn windows_replace_failure_is_outcome_unknown(
+    replacing_existing: bool,
+    raw_os_error: Option<i32>,
+) -> bool {
     replacing_existing
+        && matches!(
+            raw_os_error,
+            Some(
+                WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT
+                    | WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2
+            )
+        )
 }
 
 #[cfg(not(windows))]
@@ -1220,11 +1239,34 @@ mod tests {
         temp.discard().unwrap();
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_replace_contract_uses_supported_flags_and_conservative_failure_classification() {
-        assert_eq!(super::WINDOWS_REPLACE_FILE_FLAGS, 0);
-        assert!(super::windows_replace_failure_is_outcome_unknown(true));
-        assert!(!super::windows_replace_failure_is_outcome_unknown(false));
+    fn windows_replace_failure_classification_preserves_only_partial_failure_artifacts() {
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            false,
+            Some(1176)
+        ));
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            true,
+            Some(5)
+        ));
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            true,
+            Some(32)
+        ));
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            true,
+            Some(1175)
+        ));
+        assert!(super::windows_replace_failure_is_outcome_unknown(
+            true,
+            Some(1176)
+        ));
+        assert!(super::windows_replace_failure_is_outcome_unknown(
+            true,
+            Some(1177)
+        ));
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            true, None
+        ));
     }
 }
