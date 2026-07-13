@@ -17,6 +17,14 @@ use std::time::UNIX_EPOCH;
 pub struct LocalFileSnapshot {
     pub bytes: Vec<u8>,
     pub fingerprint: VaultSourceFingerprint,
+    pub(crate) write_token: LocalFileWriteToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalFileWriteToken {
+    target: PathBuf,
+    identity: DurableFileIdentity,
+    fingerprint: VaultSourceFingerprint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +175,28 @@ impl LocalFileVaultSourceProvider {
         }
         let (transaction, _) = self.begin_write(path).map_err(classify_begin_write_error)?;
         transaction.commit_inner(expected, bytes, &self.write_faults)
+    }
+
+    pub(crate) fn write_token_if_unchanged(
+        &self,
+        path: &str,
+        expected: &LocalFileWriteToken,
+        bytes: &[u8],
+    ) -> Result<DurableCommit, LocalFileCommitError> {
+        #[cfg(test)]
+        if let Some(before_write) = &self.before_write {
+            before_write();
+        }
+        let (transaction, _) = self.begin_write(path).map_err(classify_begin_write_error)?;
+        if transaction.target != expected.target
+            || transaction.initial_identity != expected.identity
+            || transaction.initial_fingerprint != expected.fingerprint
+        {
+            return Err(LocalFileCommitError::Conflict {
+                message: "merge snapshot does not match the opened target generation".to_owned(),
+            });
+        }
+        transaction.commit_inner(&expected.fingerprint, bytes, &self.write_faults)
     }
 }
 
@@ -443,10 +473,16 @@ fn read_opened_snapshot(path: &Path, reject_hard_links: bool) -> io::Result<Open
         ));
     }
 
+    let fingerprint = fingerprint_for_bytes(&bytes, &after);
     Ok(OpenedSnapshot {
         snapshot: LocalFileSnapshot {
-            fingerprint: fingerprint_for_bytes(&bytes, &after),
+            fingerprint: fingerprint.clone(),
             bytes,
+            write_token: LocalFileWriteToken {
+                target: path.to_path_buf(),
+                identity: after_identity,
+                fingerprint,
+            },
         },
         identity: after_identity,
         metadata: after,
@@ -921,6 +957,33 @@ mod tests {
         assert!(sidecar_artifacts(dir.path()).is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_bound_write_rejects_same_content_target_redirection() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        let redirected = dir.path().join("redirected.kdbx");
+        fs::write(&path, b"generation-a").unwrap();
+        fs::write(&redirected, b"generation-a").unwrap();
+        let provider = LocalFileVaultSourceProvider::default();
+        let baseline = provider.read_snapshot(path.to_str().unwrap()).unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink(&redirected, &path).unwrap();
+
+        let error = provider
+            .write_token_if_unchanged(
+                path.to_str().unwrap(),
+                &baseline.write_token,
+                b"candidate-generation",
+            )
+            .expect_err("the merge snapshot must remain bound to its target generation");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert_eq!(fs::read(&redirected).unwrap(), b"generation-a");
+    }
+
     #[test]
     fn write_if_unchanged_classifies_locked_read_races_as_conflicts() {
         let error = super::classify_begin_write_error(std::io::Error::new(
@@ -971,6 +1034,7 @@ mod tests {
             DurableFaultPoint::TempReadbackVerified,
             DurableFaultPoint::BackupPublished,
             DurableFaultPoint::BeforeTargetReplace,
+            DurableFaultPoint::AfterTargetValidation,
         ];
 
         for point in points {
@@ -1033,6 +1097,7 @@ mod tests {
         for point in [
             DurableFaultPoint::BackupPublished,
             DurableFaultPoint::BeforeTargetReplace,
+            DurableFaultPoint::AfterTargetValidation,
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("vault.kdbx");
@@ -1082,6 +1147,86 @@ mod tests {
                 ),
             )
             .expect_err("same-inode content change must fail the final CAS");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert_eq!(fs::read(&path).unwrap(), b"external-generation");
+        assert!(sidecar_artifacts(dir.path()).is_empty());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn final_cas_restores_a_path_replacement_after_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let path = root.join("vault.kdbx");
+        fs::write(&path, b"old-generation").unwrap();
+        let provider = LocalFileVaultSourceProvider::default();
+        let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
+
+        let error = transaction
+            .commit_with_faults(
+                &snapshot.fingerprint,
+                b"candidate-generation",
+                &DurableFaultInjector::run_once(
+                    DurableFaultPoint::AfterTargetValidation,
+                    move || {
+                        let replacement = root.join("external-generation.kdbx");
+                        fs::write(&replacement, b"external-generation").unwrap();
+                        fs::rename(replacement, root.join("vault.kdbx")).unwrap();
+                    },
+                ),
+            )
+            .expect_err("the path replacement must win the final CAS");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert_eq!(fs::read(&path).unwrap(), b"external-generation");
+        assert!(sidecar_artifacts(dir.path()).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn final_cas_restores_a_windows_path_replacement_after_validation() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let path = root.join("vault.kdbx");
+        fs::write(&path, b"old-generation").unwrap();
+        let provider = LocalFileVaultSourceProvider::default();
+        let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
+
+        let error = transaction
+            .commit_with_faults(
+                &snapshot.fingerprint,
+                b"candidate-generation",
+                &DurableFaultInjector::run_once(
+                    DurableFaultPoint::AfterTargetValidation,
+                    move || {
+                        let replacement = root.join("external-generation.kdbx");
+                        let target = root.join("vault.kdbx");
+                        fs::write(&replacement, b"external-generation").unwrap();
+                        let replacement: Vec<u16> = replacement
+                            .as_os_str()
+                            .encode_wide()
+                            .chain(Some(0))
+                            .collect();
+                        let target: Vec<u16> =
+                            target.as_os_str().encode_wide().chain(Some(0)).collect();
+                        let result = unsafe {
+                            MoveFileExW(
+                                replacement.as_ptr(),
+                                target.as_ptr(),
+                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                            )
+                        };
+                        assert_ne!(result, 0, "failed to install external generation");
+                    },
+                ),
+            )
+            .expect_err("the path replacement must win the final CAS");
 
         assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
         assert_eq!(fs::read(&path).unwrap(), b"external-generation");
@@ -1407,6 +1552,7 @@ mod tests {
                     | DurableFaultPoint::TempReadbackVerified
                     | DurableFaultPoint::BackupPublished
                     | DurableFaultPoint::BeforeTargetReplace
+                    | DurableFaultPoint::AfterTargetValidation
             ) {
                 assert_eq!(visible.bytes, b"old-generation", "{point:?}");
             }
