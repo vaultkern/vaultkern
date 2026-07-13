@@ -183,6 +183,7 @@ struct OneDriveTokenState {
 enum RefreshTokenOrigin {
     Environment,
     Store,
+    Unpersisted,
 }
 
 #[derive(Deserialize)]
@@ -1034,6 +1035,7 @@ impl OneDriveVaultSourceProvider {
             .into_json::<TokenResponse>()
             .context("failed to decode OneDrive refresh response")?;
         let expires_at = access_expires_at(&token);
+        let mut persistence_error = None;
         let (next_refresh, next_origin) = match token.refresh_token {
             Some(next_refresh) => {
                 let next_origin = match self.store_refresh_token(&next_refresh) {
@@ -1044,7 +1046,10 @@ impl OneDriveVaultSourceProvider {
                     {
                         RefreshTokenOrigin::Environment
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        persistence_error = Some(error);
+                        RefreshTokenOrigin::Unpersisted
+                    }
                 };
                 (next_refresh, next_origin)
             }
@@ -1054,8 +1059,11 @@ impl OneDriveVaultSourceProvider {
             None => {
                 let next_origin = match self.store_refresh_token(&refresh_token) {
                     Ok(()) => RefreshTokenOrigin::Store,
-                    Err(error) if is_unavailable_error(&error) => RefreshTokenOrigin::Environment,
-                    Err(error) => return Err(error),
+                    Err(error) if is_unavailable_error(&error) => refresh_token_origin,
+                    Err(error) => {
+                        persistence_error = Some(error);
+                        RefreshTokenOrigin::Unpersisted
+                    }
                 };
                 (refresh_token, next_origin)
             }
@@ -1066,6 +1074,9 @@ impl OneDriveVaultSourceProvider {
             refresh_token: next_refresh,
             refresh_token_origin: next_origin,
         }));
+        if let Some(error) = persistence_error {
+            return Err(error);
+        }
         Ok(token.access_token)
     }
 
@@ -1291,6 +1302,10 @@ mod tests {
         store_calls: Arc<AtomicUsize>,
     }
 
+    struct RotatedTokenFailingStore {
+        store_calls: Arc<AtomicUsize>,
+    }
+
     impl OneDriveRefreshTokenStore for FailingRefreshTokenStore {
         fn load(&self) -> Result<Option<Zeroizing<String>>> {
             Ok(None)
@@ -1327,6 +1342,21 @@ mod tests {
         fn store(&self, _token: &str) -> Result<()> {
             self.store_calls.fetch_add(1, Ordering::SeqCst);
             anyhow::bail!("store must not be called without token rotation")
+        }
+
+        fn delete(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl OneDriveRefreshTokenStore for RotatedTokenFailingStore {
+        fn load(&self) -> Result<Option<Zeroizing<String>>> {
+            Ok(Some(Zeroizing::new("refresh-1".to_owned())))
+        }
+
+        fn store(&self, _token: &str) -> Result<()> {
+            self.store_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("simulated rotated-token persistence failure")
         }
 
         fn delete(&self) -> Result<()> {
@@ -2080,6 +2110,55 @@ mod tests {
         provider.list_children(None).unwrap();
 
         assert_eq!(store_calls.load(Ordering::SeqCst), 0);
+        refresh.assert();
+        children.assert();
+    }
+
+    #[test]
+    fn refresh_persistence_failure_keeps_rotated_token_in_memory() {
+        let store_calls = Arc::new(AtomicUsize::new(0));
+        let mut server = mockito::Server::new();
+        let refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "refresh_token".into(),
+                "refresh-1".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"access-2","refresh_token":"refresh-2","expires_in":3600}"#,
+            )
+            .expect(1)
+            .create();
+        let children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-2")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"value":[]}"#)
+            .expect(1)
+            .create();
+        let provider = OneDriveVaultSourceProvider::new_for_graph_tests_with_refresh_token_store(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+            Box::new(RotatedTokenFailingStore {
+                store_calls: store_calls.clone(),
+            }),
+        );
+
+        let error = provider
+            .list_children(None)
+            .expect_err("the refresh call must report the persistence failure");
+        assert!(format!("{error:#}").contains("rotated-token persistence failure"));
+        provider
+            .list_children(None)
+            .expect("the rotated in-memory token must remain usable");
+
+        assert_eq!(store_calls.load(Ordering::SeqCst), 1);
         refresh.assert();
         children.assert();
     }
