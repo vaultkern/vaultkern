@@ -131,6 +131,18 @@ impl LocalFileVaultSourceProvider {
             .map(|_| ())
             .map_err(LocalFileCommitError::into_io_error)
     }
+
+    pub fn write_if_unchanged(
+        &self,
+        path: &str,
+        expected: &VaultSourceFingerprint,
+        bytes: &[u8],
+    ) -> Result<DurableCommit, LocalFileCommitError> {
+        let (transaction, _) = self
+            .begin_write(path)
+            .map_err(|source| LocalFileCommitError::BeforePublish { source })?;
+        transaction.commit(expected, bytes)
+    }
 }
 
 impl LocalFileWriteTxn {
@@ -850,6 +862,28 @@ mod tests {
 
         assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
         assert_eq!(fs::read(&path).unwrap(), b"external-generation");
+        assert!(sidecar_artifacts(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn write_if_unchanged_rejects_stale_baseline_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        fs::write(&path, b"generation-a").unwrap();
+        let provider = LocalFileVaultSourceProvider;
+        let baseline = provider.read_snapshot(path.to_str().unwrap()).unwrap();
+
+        fs::write(&path, b"generation-b").unwrap();
+        let error = provider
+            .write_if_unchanged(
+                path.to_str().unwrap(),
+                &baseline.fingerprint,
+                b"generation-c",
+            )
+            .expect_err("stale merge baseline must conflict");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert_eq!(fs::read(&path).unwrap(), b"generation-b");
         assert!(sidecar_artifacts(dir.path()).is_empty());
     }
 
