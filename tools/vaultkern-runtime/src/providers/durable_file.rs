@@ -1151,6 +1151,22 @@ fn replace_file(temp: &Path, target: &Path, _backup: Option<&Path>) -> Result<()
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsReplaceFileApi {
+    MoveFileExWriteThrough,
+    ReplaceFile,
+}
+
+#[cfg(windows)]
+fn windows_replace_file_api(backup: Option<&Path>) -> WindowsReplaceFileApi {
+    if backup.is_some() {
+        WindowsReplaceFileApi::ReplaceFile
+    } else {
+        WindowsReplaceFileApi::MoveFileExWriteThrough
+    }
+}
+
+#[cfg(windows)]
 fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(), ReplaceError> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
@@ -1167,8 +1183,8 @@ fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(),
     let backup_wide = backup.map(wide);
     let replacing_existing = target.exists();
     let result = unsafe {
-        if replacing_existing {
-            ReplaceFileW(
+        match windows_replace_file_api(backup) {
+            WindowsReplaceFileApi::ReplaceFile => ReplaceFileW(
                 target_wide.as_ptr(),
                 temp_wide.as_ptr(),
                 backup_wide
@@ -1177,13 +1193,12 @@ fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(),
                 WINDOWS_REPLACE_FILE_FLAGS,
                 ptr::null_mut(),
                 ptr::null_mut(),
-            )
-        } else {
-            MoveFileExW(
+            ),
+            WindowsReplaceFileApi::MoveFileExWriteThrough => MoveFileExW(
                 temp_wide.as_ptr(),
                 target_wide.as_ptr(),
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
+            ),
         }
     };
     if result == 0 {
@@ -1427,6 +1442,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_backup_free_publication_uses_write_through_move() {
+        assert_eq!(
+            super::windows_replace_file_api(None),
+            super::WindowsReplaceFileApi::MoveFileExWriteThrough
+        );
+        assert_eq!(
+            super::windows_replace_file_api(Some(std::path::Path::new("backup"))),
+            super::WindowsReplaceFileApi::ReplaceFile
+        );
     }
 
     #[cfg(windows)]

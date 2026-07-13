@@ -130,13 +130,12 @@ impl LedgerDocument {
             if vault_ref_id.is_empty() {
                 return Err(invalid_data("vault_ref_id must not be empty"));
             }
-            let row_wire: LedgerRowWire = serde_json::from_value(row_value.clone()).map_err(
-                |source| {
+            let row_wire: LedgerRowWire =
+                serde_json::from_value(row_value.clone()).map_err(|source| {
                     invalid_data(format!(
                         "row {vault_ref_id:?} could not be decoded: {source}"
                     ))
-                },
-            )?;
+                })?;
             if row_wire.schema_version != QuickUnlockLedgerEntry::SCHEMA_VERSION {
                 return Err(invalid_data(format!(
                     "unsupported row schema version {}",
@@ -151,11 +150,22 @@ impl LedgerDocument {
                 .ok_or_else(|| {
                     invalid_data(format!("row {vault_ref_id:?} state has no string kind"))
                 })?;
-            if !matches!(state_kind, "disabled" | "enrolled" | "needs_reenroll") {
+            let unknown_state = match state_kind {
+                "disabled" | "enrolled" => None,
+                "needs_reenroll" => row_wire
+                    .state
+                    .as_object()
+                    .and_then(|state| state.get("reason"))
+                    .and_then(Value::as_str)
+                    .filter(|reason| !matches!(*reason, "biometry_changed" | "kdf_rotated"))
+                    .map(|reason| format!("needs_reenroll/{reason}")),
+                kind => Some(kind.to_owned()),
+            };
+            if let Some(kind) = unknown_state {
                 entries.insert(
                     vault_ref_id,
                     StoredLedgerRow::UnknownState {
-                        kind: state_kind.to_owned(),
+                        kind,
                         raw: row_value,
                     },
                 );
@@ -197,8 +207,9 @@ impl LedgerDocument {
         for (vault_ref_id, row) in &self.entries {
             let value = match row {
                 StoredLedgerRow::Known { value, unknown } => {
-                    let mut encoded = serde_json::to_value(value)
-                        .map_err(|source| invalid_data(format!("could not encode row: {source}")))?;
+                    let mut encoded = serde_json::to_value(value).map_err(|source| {
+                        invalid_data(format!("could not encode row: {source}"))
+                    })?;
                     let object = encoded
                         .as_object_mut()
                         .ok_or_else(|| invalid_data("encoded ledger row is not an object"))?;
@@ -609,9 +620,7 @@ fn reject_reparse_point(_metadata: &Metadata) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LedgerDocument, LedgerStoreError, QuickUnlockLedgerStore, ledger_lock_path,
-    };
+    use super::{LedgerDocument, LedgerStoreError, QuickUnlockLedgerStore, ledger_lock_path};
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock,
     };
@@ -735,6 +744,34 @@ mod tests {
         let future_row = json!({
             "schema_version": 1,
             "state": { "kind": "future_state", "future_detail": "retained" },
+            "generation": 11,
+            "policy": true,
+            "future_row_field": [1, 2, 3]
+        });
+        document["entries"]["vault-future"] = future_row.clone();
+        let (dir, store) = persistent_store(&document);
+
+        assert_eq!(store.get("vault-1").unwrap(), Some(enrolled(7)));
+        assert!(matches!(
+            store.get("vault-future"),
+            Err(LedgerStoreError::InvalidData { .. })
+        ));
+        store
+            .compare_and_swap("vault-1", Some(&enrolled(7)), enrolled(8))
+            .unwrap();
+
+        let published: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("quick-unlock-ledger.json")).unwrap())
+                .unwrap();
+        assert_eq!(published["entries"]["vault-future"], future_row);
+    }
+
+    #[test]
+    fn decoder_scopes_unknown_reenroll_reason_to_its_vault_and_preserves_the_raw_row() {
+        let mut document = valid_document();
+        let future_row = json!({
+            "schema_version": 1,
+            "state": { "kind": "needs_reenroll", "reason": "future_reason" },
             "generation": 11,
             "policy": true,
             "future_row_field": [1, 2, 3]
