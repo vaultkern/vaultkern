@@ -4,7 +4,7 @@ use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
@@ -207,85 +207,108 @@ pub(crate) struct ExclusiveFileLock {
 
 impl ExclusiveFileLock {
     pub(crate) fn acquire(path: &Path) -> io::Result<Self> {
-        if let Some(parent) = path.parent() {
-            let metadata = fs::symlink_metadata(parent)?;
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "durable lock parent is not a real directory",
-                ));
-            }
-            reject_reparse_point(&metadata)?;
-        }
-        let mut options = OpenOptions::new();
-        options.create(true).read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-            let file = options.open(path)?;
-            let metadata = file.metadata()?;
-            let path_metadata = fs::symlink_metadata(path)?;
-            if !metadata.is_file()
-                || metadata.dev() != path_metadata.dev()
-                || metadata.ino() != path_metadata.ino()
-                || metadata.nlink() != 1
-                || path_metadata.nlink() != 1
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "durable lock path is not a private regular file",
-                ));
-            }
-            if metadata.uid() != unsafe { libc::geteuid() } {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "durable lock path is owned by another user",
-                ));
-            }
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
-            file.lock()?;
-            return Ok(Self { file });
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
-            };
+        let file = open_validated_lock_file(path)?;
+        file.lock()?;
+        Ok(Self { file })
+    }
 
-            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-            let file = options.open(path)?;
-            let metadata = file.metadata()?;
-            let path_metadata = fs::symlink_metadata(path)?;
-            let information = windows_file_information(&file)?;
-            if !metadata.is_file()
-                || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                || path_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                || information.nNumberOfLinks != 1
-                || opened_file_identity(&file, &metadata)?
-                    != path_file_identity(path, &path_metadata)?
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "durable lock path is not a private regular file",
-                ));
+    pub(crate) fn acquire_with_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
+        let file = open_validated_lock_file(path)?;
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { file }),
+                Err(fs::TryLockError::WouldBlock) => {
+                    let elapsed = started.elapsed();
+                    if elapsed >= timeout {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!("timed out acquiring durable lock {}", path.display()),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10).min(timeout - elapsed));
+                }
+                Err(fs::TryLockError::Error(error)) => return Err(error),
             }
-            file.lock()?;
-            return Ok(Self { file });
         }
-        #[cfg(not(any(unix, windows)))]
+    }
+}
+
+fn open_validated_lock_file(path: &Path) -> io::Result<File> {
+    if let Some(parent) = path.parent() {
+        let metadata = fs::symlink_metadata(parent)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "durable lock parent is not a real directory",
+            ));
+        }
+        reject_reparse_point(&metadata)?;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        let path_metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_file()
+            || metadata.dev() != path_metadata.dev()
+            || metadata.ino() != path_metadata.ino()
+            || metadata.nlink() != 1
+            || path_metadata.nlink() != 1
         {
-            let file = options.open(path)?;
-            if !file.metadata()?.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "durable lock path is not a regular file",
-                ));
-            }
-            file.lock()?;
-            Ok(Self { file })
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "durable lock path is not a private regular file",
+            ));
         }
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "durable lock path is owned by another user",
+            ));
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        return Ok(file);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        let path_metadata = fs::symlink_metadata(path)?;
+        let information = windows_file_information(&file)?;
+        if !metadata.is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || path_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || information.nNumberOfLinks != 1
+            || opened_file_identity(&file, &metadata)? != path_file_identity(path, &path_metadata)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "durable lock path is not a private regular file",
+            ));
+        }
+        return Ok(file);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "durable lock path is not a regular file",
+            ));
+        }
+        Ok(file)
     }
 }
 
@@ -1170,12 +1193,64 @@ pub(crate) fn remove_if_exists(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::unique_sibling_path;
     #[cfg(unix)]
     use super::{
         DurableFaultInjector, DurableFaultPoint, TempWriteFaultPoints, write_verified_temp,
     };
+    use super::{ExclusiveFileLock, unique_sibling_path};
     use std::fs;
+    use std::io;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn bounded_lock_times_out_under_contention_and_recovers_after_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("ledger.lock");
+        let holder_path = lock_path.clone();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let held = ExclusiveFileLock::acquire(&holder_path).unwrap();
+            acquired_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(held);
+        });
+        acquired_rx.recv().unwrap();
+
+        let started = Instant::now();
+        let error = ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_millis(40))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_secs(1)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_lock_rejects_symlink_parent_like_blocking_acquisition() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real");
+        let linked_parent = dir.path().join("linked");
+        fs::create_dir(&real_parent).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        let lock_path = linked_parent.join("ledger.lock");
+
+        let blocking = ExclusiveFileLock::acquire(&lock_path).unwrap_err();
+        let bounded =
+            ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_millis(40))
+                .unwrap_err();
+
+        assert_eq!(blocking.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(bounded.kind(), blocking.kind());
+    }
 
     #[test]
     fn sidecar_names_use_a_process_nonce_and_skip_existing_candidates() {
