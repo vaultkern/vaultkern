@@ -1266,9 +1266,12 @@ mod tests {
                         if matches!(
                             error.kind(),
                             std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock
-                        ) || (cfg!(windows) && error.kind() == std::io::ErrorKind::NotFound) =>
+                        ) || (cfg!(windows)
+                            && (error.kind() == std::io::ErrorKind::NotFound
+                                || error.raw_os_error() == Some(32))) =>
                     {
-                        // ReplaceFileW can briefly make a concurrent path open miss;
+                        // ReplaceFileW can briefly make a concurrent path open miss or
+                        // return ERROR_SHARING_VIOLATION;
                         // every successful read must still be a complete generation.
                     }
                     Err(error) => panic!("concurrent quick unlock read failed: {error}"),
