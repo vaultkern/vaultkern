@@ -3293,6 +3293,7 @@ dependencies = [
  "vaultkern-runtime-protocol",
  "windows",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

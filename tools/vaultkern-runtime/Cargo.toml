@@ -21,6 +21,7 @@ sha2.workspace = true
 ureq = { version = "2.10", features = ["json"] }
 url = "2.5"
 uuid.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
