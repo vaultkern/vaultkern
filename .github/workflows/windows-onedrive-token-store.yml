@@ -1,0 +1,32 @@
+name: Windows OneDrive Token Store
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "tools/vaultkern-runtime/**"
+      - ".github/workflows/windows-onedrive-token-store.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "tools/vaultkern-runtime/**"
+      - ".github/workflows/windows-onedrive-token-store.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  onedrive-token-store:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test protected token store
+        run: cargo test --locked -p vaultkern-runtime providers::onedrive_token_store
+      - name: Test OneDrive provider
+        run: cargo test --locked -p vaultkern-runtime providers::onedrive
