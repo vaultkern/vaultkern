@@ -26,18 +26,11 @@ pub struct VaultSourceFingerprint {
     pub modified_at: Option<u64>,
 }
 
+#[derive(Default)]
 pub struct LocalFileVaultSourceProvider {
+    write_faults: DurableFaultInjector,
     #[cfg(test)]
     before_write: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
-}
-
-impl Default for LocalFileVaultSourceProvider {
-    fn default() -> Self {
-        Self {
-            #[cfg(test)]
-            before_write: None,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -108,7 +101,16 @@ impl LocalFileVaultSourceProvider {
         before_write: std::sync::Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
         Self {
+            write_faults: DurableFaultInjector::default(),
             before_write: Some(before_write),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_write_faults(write_faults: DurableFaultInjector) -> Self {
+        Self {
+            write_faults,
+            before_write: None,
         }
     }
 
@@ -164,7 +166,7 @@ impl LocalFileVaultSourceProvider {
             before_write();
         }
         let (transaction, _) = self.begin_write(path).map_err(classify_begin_write_error)?;
-        transaction.commit(expected, bytes)
+        transaction.commit_inner(expected, bytes, &self.write_faults)
     }
 }
 

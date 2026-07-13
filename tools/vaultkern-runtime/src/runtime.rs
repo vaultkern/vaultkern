@@ -328,6 +328,8 @@ pub struct Runtime {
     passkey_credential_id_generator: Box<dyn FnMut() -> String>,
     fixed_unix_time: Option<u64>,
     fixed_unix_time_ms: Option<u64>,
+    #[cfg(test)]
+    local_save_warnings: Vec<String>,
 }
 
 impl Runtime {
@@ -379,6 +381,8 @@ impl Runtime {
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
             fixed_unix_time_ms: None,
+            #[cfg(test)]
+            local_save_warnings: Vec::new(),
         }
     }
 
@@ -401,6 +405,8 @@ impl Runtime {
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
             fixed_unix_time_ms: None,
+            #[cfg(test)]
+            local_save_warnings: Vec::new(),
         }
     }
 
@@ -4350,23 +4356,10 @@ impl Runtime {
 
     fn save_vault_command(&mut self, vault_id: &str) -> Result<RuntimeResponse> {
         match self.save_vault(vault_id) {
-            Err(error)
-                if matches!(
-                    error.downcast_ref::<LocalFileCommitError>(),
-                    Some(LocalFileCommitError::Conflict { .. })
-                ) =>
-            {
-                Ok(RuntimeResponse::Error(ErrorDto {
-                    code: "conflict".into(),
-                    message: format_error_chain(&error),
-                }))
-            }
-            Err(error) if error.is::<PendingAutofillSyncRequired>() => {
-                Ok(RuntimeResponse::Error(ErrorDto {
-                    code: "pending_autofill_sync_required".into(),
-                    message: error.to_string(),
-                }))
-            }
+            Err(error) => match classified_runtime_error_response(&error) {
+                Some(response) => Ok(response),
+                None => Err(error),
+            },
             result => result,
         }
     }
@@ -5262,12 +5255,21 @@ impl Runtime {
                 let commit = self
                     .local_files
                     .write_if_unchanged(&path, expected, bytes)?;
+                self.record_local_save_warnings(commit.warnings);
                 Ok(Some(commit.fingerprint))
             }
             VaultSource::OneDriveItem { drive_id, item_id } => Ok(Some(
                 self.one_drive
                     .write_with_known_etag(&drive_id, &item_id, bytes, one_drive_etag)?,
             )),
+        }
+    }
+
+    fn record_local_save_warnings(&mut self, warnings: Vec<String>) {
+        for warning in warnings {
+            eprintln!("vaultkern local save warning: {warning}");
+            #[cfg(test)]
+            self.local_save_warnings.push(warning);
         }
     }
 
@@ -6960,10 +6962,26 @@ fn is_unlock_credentials_error(error: &anyhow::Error) -> bool {
     })
 }
 
+fn classified_runtime_error_response(error: &anyhow::Error) -> Option<RuntimeResponse> {
+    let code = match error.downcast_ref::<LocalFileCommitError>() {
+        Some(LocalFileCommitError::Conflict { .. }) => "conflict",
+        Some(LocalFileCommitError::BeforePublish { .. }) => "persist_io_unavailable",
+        Some(LocalFileCommitError::OutcomeUnknown { .. }) => "persist_outcome_unknown",
+        None if error.is::<PendingAutofillSyncRequired>() => "pending_autofill_sync_required",
+        None => return None,
+    };
+    Some(RuntimeResponse::Error(ErrorDto {
+        code: code.into(),
+        message: format_error_chain(error),
+    }))
+}
+
 fn query_error_response(error: anyhow::Error) -> RuntimeResponse {
-    RuntimeResponse::Error(ErrorDto {
-        code: "invalid_request".into(),
-        message: format_error_chain(&error),
+    classified_runtime_error_response(&error).unwrap_or_else(|| {
+        RuntimeResponse::Error(ErrorDto {
+            code: "invalid_request".into(),
+            message: format_error_chain(&error),
+        })
     })
 }
 
@@ -7459,6 +7477,7 @@ struct RankedFillCandidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use vaultkern_runtime_protocol::{
@@ -7663,6 +7682,11 @@ mod tests {
             }));
     }
 
+    fn arm_local_write_fault(runtime: &mut Runtime, point: DurableFaultPoint) {
+        runtime.local_files =
+            LocalFileVaultSourceProvider::with_write_faults(DurableFaultInjector::fail_once(point));
+    }
+
     #[test]
     fn save_rejects_source_change_after_merge_snapshot() {
         let mut runtime = Runtime::for_tests();
@@ -7721,6 +7745,136 @@ mod tests {
         assert_eq!(error.code, "conflict");
         assert!(error.message.contains("local vault write conflict"));
         assert!(!std::path::Path::new(&opened.path).exists());
+    }
+
+    #[test]
+    fn save_command_reports_pre_publish_failure_as_io_unavailable() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        arm_local_write_fault(&mut runtime, DurableFaultPoint::BeforeTargetReplace);
+
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("pre-publish failures must be command responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected local save failure response, got {response:?}");
+        };
+        assert_eq!(error.code, "persist_io_unavailable");
+        assert!(error.message.contains("failed before publish"));
+    }
+
+    #[test]
+    fn save_command_reports_post_publish_failure_as_outcome_unknown() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        arm_local_write_fault(&mut runtime, DurableFaultPoint::TargetReplaced);
+
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("post-publish failures must be command responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected unknown local save outcome, got {response:?}");
+        };
+        assert_eq!(error.code, "persist_outcome_unknown");
+        assert!(error.message.contains("durability is unknown"));
+    }
+
+    #[test]
+    fn successful_save_records_durable_cleanup_warnings() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        arm_local_write_fault(&mut runtime, DurableFaultPoint::Cleanup);
+
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("cleanup failure does not invalidate a durable save");
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+        assert_eq!(runtime.local_save_warnings.len(), 1);
+        assert!(runtime.local_save_warnings[0].contains("retained durable backup"));
+    }
+
+    #[test]
+    fn passkey_save_command_preserves_local_conflict_code() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+        let ceremony_token = "ceremony-local-save-conflict";
+        insert_test_create_passkey_ceremony(
+            &mut runtime,
+            ceremony_token,
+            &opened.vault_id,
+            &entry.id,
+            PasskeyCeremonyDurableStateDto::Mutated,
+        );
+        arm_source_change_after_merge_snapshot(&mut runtime, &opened);
+
+        let response = runtime
+            .handle(RuntimeCommand::SavePasskeyRegistration {
+                ceremony_token: ceremony_token.into(),
+                expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("passkey save conflicts must be command responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected passkey save conflict, got {response:?}");
+        };
+        assert_eq!(error.code, "conflict");
+        assert_eq!(
+            runtime.passkey_ceremonies[ceremony_token].durable_state,
+            PasskeyCeremonyDurableStateDto::Mutated
+        );
+    }
+
+    #[test]
+    fn passkey_rollback_command_preserves_local_conflict_code() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+        let ceremony_token = "ceremony-local-rollback-conflict";
+        insert_test_create_passkey_ceremony(
+            &mut runtime,
+            ceremony_token,
+            &opened.vault_id,
+            &entry.id,
+            PasskeyCeremonyDurableStateDto::Saved,
+        );
+        arm_source_change_after_merge_snapshot(&mut runtime, &opened);
+
+        let response = runtime
+            .handle(RuntimeCommand::AbortPasskeyRegistration {
+                ceremony_token: ceremony_token.into(),
+                expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                closed_phase: PasskeyCeremonyPhaseDto::ClosedAborted,
+            })
+            .expect("passkey rollback conflicts must be command responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected passkey rollback conflict, got {response:?}");
+        };
+        assert_eq!(error.code, "conflict");
+        assert_eq!(
+            runtime.passkey_ceremonies[ceremony_token].phase,
+            PasskeyCeremonyPhaseDto::CompletionAndMutation
+        );
     }
 
     fn open_unlocked_demo_onedrive(runtime: &mut Runtime) -> String {
