@@ -1,4 +1,5 @@
 use crate::quick_unlock_ledger::{LedgerStoreError, QuickUnlockLedgerStore};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use vaultkern_runtime_protocol::contracts::{
@@ -159,8 +160,25 @@ impl PlatformError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SealOutcome {
+    Created,
+    AlreadyExists,
+}
+
 pub(crate) trait QuickUnlockRecordStore: Send + Sync {
-    fn seal(&self, key: &PlatformRecordKey, opaque_envelope: &[u8]) -> Result<(), PlatformError>;
+    /// Returns generations present in physical storage, without inferring lifecycle state.
+    fn record_generations(
+        &self,
+        identifier_scope: &str,
+        vault_ref_id: &str,
+    ) -> Result<Vec<u64>, PlatformError>;
+    /// Atomically creates a new key; an existing key must never be replaced.
+    fn seal(
+        &self,
+        key: &PlatformRecordKey,
+        opaque_envelope: &[u8],
+    ) -> Result<SealOutcome, PlatformError>;
     fn unseal(&self, key: &PlatformRecordKey) -> Result<Vec<u8>, PlatformError>;
     fn delete(&self, key: &PlatformRecordKey) -> Result<(), PlatformError>;
 }
@@ -182,18 +200,18 @@ pub(crate) enum EnvelopeInspection {
     KdfGenerationMismatch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EnableOutcome {
-    Enabled,
+    Enabled { cleanup: CleanupStatus },
     PasswordUnlockRequired,
     Refused(QuickUnlockError),
     Failed(QuickUnlockError),
     NoChange,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FullCredentialOutcome {
-    Resealed,
+    Resealed { cleanup: CleanupStatus },
     Failed(QuickUnlockError),
     NoChange,
 }
@@ -222,6 +240,7 @@ pub(crate) enum CoordinatorError {
     Ledger(LedgerStoreError),
     GenerationOverflow,
     InvalidIdentifierScope,
+    RecordConflict,
 }
 
 impl fmt::Display for CoordinatorError {
@@ -234,6 +253,9 @@ impl fmt::Display for CoordinatorError {
             Self::InvalidIdentifierScope => {
                 formatter.write_str("quick unlock identifier_scope must not be empty")
             }
+            Self::RecordConflict => {
+                formatter.write_str("quick unlock platform record already exists")
+            }
         }
     }
 }
@@ -242,7 +264,7 @@ impl std::error::Error for CoordinatorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Ledger(error) => Some(error),
-            Self::GenerationOverflow | Self::InvalidIdentifierScope => None,
+            Self::GenerationOverflow | Self::InvalidIdentifierScope | Self::RecordConflict => None,
         }
     }
 }
@@ -264,6 +286,11 @@ pub(crate) struct QuickUnlockCoordinator {
     records: Arc<dyn QuickUnlockRecordStore>,
     classifier: Arc<dyn PlatformErrorClassifier>,
     transition_lock: Mutex<()>,
+}
+
+enum NextGenerationError {
+    Platform(PlatformError),
+    Overflow,
 }
 
 impl QuickUnlockCoordinator {
@@ -293,7 +320,7 @@ impl QuickUnlockCoordinator {
             return Ok(EnableOutcome::PasswordUnlockRequired);
         }
         let (stored, current) = self.current_entry(vault_ref_id)?;
-        let reduction = reduce(
+        let mut reduction = reduce(
             &current,
             QuickUnlockOperation::Enable,
             QuickUnlockOperationResult::Success,
@@ -301,21 +328,47 @@ impl QuickUnlockCoordinator {
         if reduction.disposition != ReductionDisposition::SealThenCommit {
             return Ok(EnableOutcome::NoChange);
         }
+        reduction.next.generation = match self.next_available_generation(
+            identifier_scope,
+            vault_ref_id,
+            current.generation,
+        ) {
+            Ok(generation) => generation,
+            Err(NextGenerationError::Overflow) => {
+                return Err(CoordinatorError::GenerationOverflow);
+            }
+            Err(NextGenerationError::Platform(error)) => {
+                let category = self
+                    .classifier
+                    .classify(QuickUnlockOperation::Enable, &error);
+                return Ok(if category == QuickUnlockError::NotEnrolled {
+                    EnableOutcome::Refused(category)
+                } else {
+                    EnableOutcome::Failed(category)
+                });
+            }
+        };
         let record_key =
             platform_record_key(identifier_scope, vault_ref_id, reduction.next.generation);
-        if let Err(error) = self.records.seal(&record_key, opaque_envelope) {
-            let category = self
-                .classifier
-                .classify(QuickUnlockOperation::Enable, &error);
-            return Ok(if category == QuickUnlockError::NotEnrolled {
-                EnableOutcome::Refused(category)
-            } else {
-                EnableOutcome::Failed(category)
-            });
+        match self.records.seal(&record_key, opaque_envelope) {
+            Ok(SealOutcome::Created) => {}
+            Ok(SealOutcome::AlreadyExists) => return Err(CoordinatorError::RecordConflict),
+            Err(error) => {
+                let category = self
+                    .classifier
+                    .classify(QuickUnlockOperation::Enable, &error);
+                return Ok(if category == QuickUnlockError::NotEnrolled {
+                    EnableOutcome::Refused(category)
+                } else {
+                    EnableOutcome::Failed(category)
+                });
+            }
         }
+        let active_generation = reduction.next.generation;
         self.ledger
             .compare_and_swap(vault_ref_id, stored.as_ref(), reduction.next)?;
-        Ok(EnableOutcome::Enabled)
+        let cleanup = self.cleanup_records(identifier_scope, vault_ref_id, Some(active_generation));
+        Ok(EnableOutcome::Enabled { cleanup })
     }
 
     pub(crate) fn full_credential_unlocked(
@@ -327,7 +380,7 @@ impl QuickUnlockCoordinator {
         validate_identifier_scope(identifier_scope)?;
         let _transition_guard = self.lock_transitions();
         let (stored, current) = self.current_entry(vault_ref_id)?;
-        let reduction = reduce(
+        let mut reduction = reduce(
             &current,
             QuickUnlockOperation::FullCredentialUnlock,
             QuickUnlockOperationResult::Success,
@@ -335,17 +388,39 @@ impl QuickUnlockCoordinator {
         if reduction.disposition != ReductionDisposition::SealThenCommit {
             return Ok(FullCredentialOutcome::NoChange);
         }
+        reduction.next.generation = match self.next_available_generation(
+            identifier_scope,
+            vault_ref_id,
+            current.generation,
+        ) {
+            Ok(generation) => generation,
+            Err(NextGenerationError::Overflow) => {
+                return Err(CoordinatorError::GenerationOverflow);
+            }
+            Err(NextGenerationError::Platform(error)) => {
+                return Ok(FullCredentialOutcome::Failed(
+                    self.classifier
+                        .classify(QuickUnlockOperation::FullCredentialUnlock, &error),
+                ));
+            }
+        };
         let record_key =
             platform_record_key(identifier_scope, vault_ref_id, reduction.next.generation);
-        if let Err(error) = self.records.seal(&record_key, opaque_envelope) {
-            return Ok(FullCredentialOutcome::Failed(
-                self.classifier
-                    .classify(QuickUnlockOperation::FullCredentialUnlock, &error),
-            ));
+        match self.records.seal(&record_key, opaque_envelope) {
+            Ok(SealOutcome::Created) => {}
+            Ok(SealOutcome::AlreadyExists) => return Err(CoordinatorError::RecordConflict),
+            Err(error) => {
+                return Ok(FullCredentialOutcome::Failed(
+                    self.classifier
+                        .classify(QuickUnlockOperation::FullCredentialUnlock, &error),
+                ));
+            }
         }
+        let active_generation = reduction.next.generation;
         self.ledger
             .compare_and_swap(vault_ref_id, stored.as_ref(), reduction.next)?;
-        Ok(FullCredentialOutcome::Resealed)
+        let cleanup = self.cleanup_records(identifier_scope, vault_ref_id, Some(active_generation));
+        Ok(FullCredentialOutcome::Resealed { cleanup })
     }
 
     pub(crate) fn unlock<F>(
@@ -426,11 +501,7 @@ impl QuickUnlockCoordinator {
         )?;
         self.ledger
             .compare_and_swap(vault_ref_id, stored.as_ref(), reduction.next)?;
-        let old_key = platform_record_key(identifier_scope, vault_ref_id, current.generation);
-        let cleanup = match self.records.delete(&old_key) {
-            Ok(()) => CleanupStatus::Complete,
-            Err(error) => CleanupStatus::Pending(error),
-        };
+        let cleanup = self.cleanup_records(identifier_scope, vault_ref_id, None);
         Ok(DisableOutcome { cleanup })
     }
 
@@ -447,6 +518,50 @@ impl QuickUnlockCoordinator {
         self.transition_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn next_available_generation(
+        &self,
+        identifier_scope: &str,
+        vault_ref_id: &str,
+        ledger_generation: u64,
+    ) -> Result<u64, NextGenerationError> {
+        let highest = self
+            .records
+            .record_generations(identifier_scope, vault_ref_id)
+            .map_err(NextGenerationError::Platform)?
+            .into_iter()
+            .fold(ledger_generation, u64::max);
+        highest.checked_add(1).ok_or(NextGenerationError::Overflow)
+    }
+
+    fn cleanup_records(
+        &self,
+        identifier_scope: &str,
+        vault_ref_id: &str,
+        keep_generation: Option<u64>,
+    ) -> CleanupStatus {
+        let generations = match self
+            .records
+            .record_generations(identifier_scope, vault_ref_id)
+        {
+            Ok(generations) => generations,
+            Err(error) => return CleanupStatus::Pending(error),
+        };
+        let mut first_error = None;
+        for generation in generations.into_iter().collect::<BTreeSet<_>>() {
+            if keep_generation == Some(generation) {
+                continue;
+            }
+            let key = platform_record_key(identifier_scope, vault_ref_id, generation);
+            if let Err(error) = self.records.delete(&key) {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            Some(error) => CleanupStatus::Pending(error),
+            None => CleanupStatus::Complete,
+        }
     }
 }
 
@@ -494,11 +609,11 @@ mod tests {
         CleanupStatus, CoordinatorError, DisableOutcome, EnableOutcome, EnvelopeInspection,
         FullCredentialOutcome, PlatformError, PlatformErrorClassifier, QuickUnlockCoordinator,
         QuickUnlockError, QuickUnlockOperation, QuickUnlockOperationResult, QuickUnlockRecordStore,
-        ReduceError, ReductionDisposition, SessionUnlockKind, UnlockOutcome, reduce,
+        ReduceError, ReductionDisposition, SealOutcome, SessionUnlockKind, UnlockOutcome, reduce,
     };
     use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
     use crate::quick_unlock_ledger::{LedgerStoreError, QuickUnlockLedgerStore};
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{Arc, Barrier, Mutex, mpsc};
     use std::thread;
     use std::time::Duration;
     use vaultkern_runtime_protocol::contracts::{
@@ -715,12 +830,18 @@ mod tests {
         after_seal_cas: Mutex<Option<ForcedCas>>,
         after_unseal_cas: Mutex<Option<ForcedCas>>,
         seal_gate: Option<SealGate>,
+        generation_gate: Option<GenerationGate>,
         delete_observer: Mutex<Option<DeleteObserver>>,
     }
 
     struct SealGate {
         entered: mpsc::Sender<()>,
         release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    struct GenerationGate {
+        barrier: Arc<Barrier>,
+        entered: Mutex<u8>,
     }
 
     struct ForcedCas {
@@ -747,6 +868,7 @@ mod tests {
                 after_seal_cas: Mutex::new(None),
                 after_unseal_cas: Mutex::new(None),
                 seal_gate: None,
+                generation_gate: None,
                 delete_observer: Mutex::new(None),
             }
         }
@@ -756,6 +878,16 @@ mod tests {
                 seal_gate: Some(SealGate {
                     entered,
                     release: Mutex::new(release),
+                }),
+                ..Self::new()
+            }
+        }
+
+        fn with_generation_barrier(barrier: Arc<Barrier>) -> Self {
+            Self {
+                generation_gate: Some(GenerationGate {
+                    barrier,
+                    entered: Mutex::new(0),
                 }),
                 ..Self::new()
             }
@@ -776,11 +908,40 @@ mod tests {
     }
 
     impl QuickUnlockRecordStore for FakeRecordStore {
+        fn record_generations(
+            &self,
+            identifier_scope: &str,
+            vault_ref_id: &str,
+        ) -> Result<Vec<u64>, PlatformError> {
+            let generations = self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(key, _)| {
+                    key.identifier_scope == identifier_scope && key.vault_ref_id == vault_ref_id
+                })
+                .map(|(key, _)| key.record_generation)
+                .collect();
+            if let Some(gate) = &self.generation_gate {
+                let should_wait = {
+                    let mut entered = gate.entered.lock().unwrap();
+                    let should_wait = *entered < 2;
+                    *entered += 1;
+                    should_wait
+                };
+                if should_wait {
+                    gate.barrier.wait();
+                }
+            }
+            Ok(generations)
+        }
+
         fn seal(
             &self,
             key: &PlatformRecordKey,
             opaque_envelope: &[u8],
-        ) -> Result<(), PlatformError> {
+        ) -> Result<SealOutcome, PlatformError> {
             self.calls
                 .lock()
                 .unwrap()
@@ -788,10 +949,13 @@ mod tests {
             if let Some(error) = self.seal_error.lock().unwrap().clone() {
                 return Err(error);
             }
-            self.records
-                .lock()
-                .unwrap()
-                .push((key.clone(), opaque_envelope.to_vec()));
+            {
+                let mut records = self.records.lock().unwrap();
+                if records.iter().any(|(stored, _)| stored == key) {
+                    return Ok(SealOutcome::AlreadyExists);
+                }
+                records.push((key.clone(), opaque_envelope.to_vec()));
+            }
             if let Some(forced) = self.after_seal_cas.lock().unwrap().take() {
                 forced
                     .ledger
@@ -802,7 +966,7 @@ mod tests {
                 gate.entered.send(()).unwrap();
                 gate.release.lock().unwrap().recv().unwrap();
             }
-            Ok(())
+            Ok(SealOutcome::Created)
         }
 
         fn unseal(&self, key: &PlatformRecordKey) -> Result<Vec<u8>, PlatformError> {
@@ -946,7 +1110,9 @@ mod tests {
                     b"opaque-envelope",
                 )
                 .unwrap(),
-            EnableOutcome::Enabled
+            EnableOutcome::Enabled {
+                cleanup: CleanupStatus::Complete
+            }
         );
 
         assert_eq!(
@@ -1042,6 +1208,72 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_a_crash_skips_and_cleans_the_orphaned_generation() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        let disabled = entry(QuickUnlockState::Disabled, 7);
+        ledger.compare_and_swap("vault", None, disabled).unwrap();
+        let records = Arc::new(FakeRecordStore::new());
+        records.insert(key("scope", "vault", 7), b"old-envelope");
+        records.insert(key("scope", "vault", 8), b"crash-orphan");
+
+        let outcome = coordinator(ledger.clone(), Arc::clone(&records))
+            .enable(
+                "scope",
+                "vault",
+                SessionUnlockKind::PasswordUnlocked,
+                b"replacement",
+            )
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            EnableOutcome::Enabled {
+                cleanup: CleanupStatus::Complete
+            }
+        );
+        assert_eq!(
+            ledger.get("vault").unwrap(),
+            Some(entry(QuickUnlockState::Enrolled, 9))
+        );
+        assert_eq!(records.record(7), None);
+        assert_eq!(records.record(8), None);
+        assert_eq!(records.record(9), Some(b"replacement".to_vec()));
+    }
+
+    #[test]
+    fn successful_enroll_exposes_incomplete_orphan_cleanup() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        ledger
+            .compare_and_swap("vault", None, entry(QuickUnlockState::Disabled, 7))
+            .unwrap();
+        let records = Arc::new(FakeRecordStore::new());
+        records.insert(key("scope", "vault", 7), b"old-envelope");
+        records.insert(key("scope", "vault", 8), b"crash-orphan");
+        let cleanup_error = PlatformError::new("fake-delete", 99);
+        *records.delete_error.lock().unwrap() = Some(cleanup_error.clone());
+
+        let outcome = coordinator(ledger.clone(), records)
+            .enable(
+                "scope",
+                "vault",
+                SessionUnlockKind::PasswordUnlocked,
+                b"replacement",
+            )
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            EnableOutcome::Enabled {
+                cleanup: CleanupStatus::Pending(cleanup_error)
+            }
+        );
+        assert_eq!(
+            ledger.get("vault").unwrap(),
+            Some(entry(QuickUnlockState::Enrolled, 9))
+        );
+    }
+
+    #[test]
     fn disable_commits_before_best_effort_delete_and_never_rolls_back_cleanup_failure() {
         let ledger = QuickUnlockLedgerStore::in_memory();
         ledger
@@ -1071,6 +1303,39 @@ mod tests {
         assert_eq!(ledger.get("vault").unwrap(), Some(disabled.clone()));
         assert_eq!(*observed.lock().unwrap(), Some(disabled));
         assert_eq!(records.record(7), Some(b"old".to_vec()));
+    }
+
+    #[test]
+    fn disable_reports_complete_only_after_all_generations_are_deleted() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        ledger
+            .compare_and_swap("vault", None, entry(QuickUnlockState::Enrolled, 3))
+            .unwrap();
+        let records = Arc::new(FakeRecordStore::new());
+        for generation in 1..=3 {
+            records.insert(
+                key("scope", "vault", generation),
+                format!("generation-{generation}").as_bytes(),
+            );
+        }
+
+        let outcome = coordinator(ledger.clone(), Arc::clone(&records))
+            .disable("scope", "vault")
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            DisableOutcome {
+                cleanup: CleanupStatus::Complete
+            }
+        );
+        assert_eq!(
+            ledger.get("vault").unwrap(),
+            Some(entry(QuickUnlockState::Disabled, 4))
+        );
+        for generation in 1..=3 {
+            assert_eq!(records.record(generation), None);
+        }
     }
 
     #[test]
@@ -1150,7 +1415,9 @@ mod tests {
             coordinator(ledger.clone(), Arc::clone(&records))
                 .full_credential_unlocked("scope", "vault", b"replacement")
                 .unwrap(),
-            FullCredentialOutcome::Resealed
+            FullCredentialOutcome::Resealed {
+                cleanup: CleanupStatus::Complete
+            }
         );
         assert_eq!(
             ledger.get("vault").unwrap(),
@@ -1265,7 +1532,7 @@ mod tests {
         assert_eq!(
             results
                 .iter()
-                .filter(|result| matches!(result, Ok(EnableOutcome::Enabled)))
+                .filter(|result| matches!(result, Ok(EnableOutcome::Enabled { .. })))
                 .count(),
             1
         );
@@ -1289,6 +1556,59 @@ mod tests {
         assert_eq!(
             ledger.get("vault").unwrap(),
             Some(entry(QuickUnlockState::Enrolled, 1))
+        );
+    }
+
+    #[test]
+    fn independent_coordinators_cannot_overwrite_the_same_record_key() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        let records = Arc::new(FakeRecordStore::with_generation_barrier(Arc::new(
+            Barrier::new(2),
+        )));
+        let first_coordinator = coordinator(ledger.clone(), Arc::clone(&records));
+        let second_coordinator = coordinator(ledger.clone(), Arc::clone(&records));
+
+        let first = thread::spawn(move || {
+            first_coordinator.enable(
+                "scope",
+                "vault",
+                SessionUnlockKind::PasswordUnlocked,
+                b"first",
+            )
+        });
+        let second = thread::spawn(move || {
+            second_coordinator.enable(
+                "scope",
+                "vault",
+                SessionUnlockKind::PasswordUnlocked,
+                b"second",
+            )
+        });
+        let results = [first.join().unwrap(), second.join().unwrap()];
+
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Ok(EnableOutcome::Enabled { .. })))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(CoordinatorError::RecordConflict)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(stored, _)| stored == &key("scope", "vault", 1))
+                .count(),
+            1
         );
     }
 }
