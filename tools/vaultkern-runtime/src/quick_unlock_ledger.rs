@@ -508,12 +508,16 @@ fn read_persistent_document_locked(
     path: &Path,
     lock_timeout: Duration,
 ) -> Result<LedgerDocument, LedgerStoreError> {
-    match fs::symlink_metadata(path) {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| invalid_data("persistent ledger path has no parent directory"))?;
+    match fs::symlink_metadata(parent) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(LedgerDocument::empty());
         }
         Err(error) => return Err(error.into()),
-        Ok(_) => {}
+        Ok(_) => create_dir_all_durable(parent)?,
     }
     let _lock = ExclusiveFileLock::acquire_with_timeout(&ledger_lock_path(path), lock_timeout)
         .map_err(|source| {
@@ -1005,6 +1009,43 @@ mod tests {
 
         assert!(matches!(error, LedgerStoreError::Busy { .. }));
         drop(held);
+    }
+
+    #[test]
+    fn persistent_get_reports_busy_when_a_missing_ledger_is_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("ledger");
+        fs::create_dir(&parent).unwrap();
+        let path = parent.join("quick-unlock.json");
+        let held = ExclusiveFileLock::acquire(&ledger_lock_path(&path)).unwrap();
+        let reader = QuickUnlockLedgerStore::persistent(path, Duration::from_millis(20));
+
+        let error = reader.get("vault-1").unwrap_err();
+
+        assert!(matches!(error, LedgerStoreError::Busy { .. }));
+        drop(held);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_get_rejects_a_group_or_world_writable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger").join("quick-unlock.json");
+        let store = QuickUnlockLedgerStore::persistent(path.clone(), Duration::from_secs(1));
+        store
+            .compare_and_swap("vault-1", None, enrolled(7))
+            .unwrap();
+        fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o777)).unwrap();
+
+        let error = store.get("vault-1").unwrap_err();
+
+        assert!(matches!(
+            error,
+            LedgerStoreError::Io(ref source)
+                if source.kind() == std::io::ErrorKind::PermissionDenied
+        ));
     }
 
     #[test]
