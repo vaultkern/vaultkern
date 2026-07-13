@@ -559,11 +559,15 @@ impl QuickUnlockCoordinator {
             .record_generations(identifier_scope, vault_ref_id)
         {
             Ok(generations) => generations,
-            Err(error) => return Ok(CleanupInspection::Unavailable(error)),
+            Err(error) => {
+                self.ledger.assert_snapshot(vault_ref_id, stored.as_ref())?;
+                return Ok(CleanupInspection::Unavailable(error));
+            }
         };
+        let cleanup_range = cleanup_range(&current);
         let pending = generations
             .into_iter()
-            .any(|generation| generation_needs_cleanup(&current, generation));
+            .any(|generation| cleanup_range.contains(generation));
         let inspection = if pending {
             CleanupInspection::Pending
         } else {
@@ -701,15 +705,6 @@ fn cleanup_range(entry: &QuickUnlockLedgerEntry) -> CleanupRange {
         QuickUnlockState::Disabled => CleanupRange::Through(entry.generation),
         QuickUnlockState::Enrolled | QuickUnlockState::NeedsReenroll { .. } => {
             CleanupRange::Before(entry.generation)
-        }
-    }
-}
-
-fn generation_needs_cleanup(entry: &QuickUnlockLedgerEntry, generation: u64) -> bool {
-    match entry.state {
-        QuickUnlockState::Disabled => true,
-        QuickUnlockState::Enrolled | QuickUnlockState::NeedsReenroll { .. } => {
-            generation != entry.generation
         }
     }
 }
@@ -939,6 +934,7 @@ mod tests {
         seal_error: Mutex<Option<PlatformError>>,
         unseal_error: Mutex<Option<PlatformError>>,
         delete_error: Mutex<Option<PlatformError>>,
+        generation_error: Mutex<Option<PlatformError>>,
         after_seal_cas: Mutex<Option<ForcedCas>>,
         after_unseal_cas: Mutex<Option<ForcedCas>>,
         seal_gate: Option<SealGate>,
@@ -985,6 +981,7 @@ mod tests {
                 seal_error: Mutex::new(None),
                 unseal_error: Mutex::new(None),
                 delete_error: Mutex::new(None),
+                generation_error: Mutex::new(None),
                 after_seal_cas: Mutex::new(None),
                 after_unseal_cas: Mutex::new(None),
                 seal_gate: None,
@@ -1064,6 +1061,9 @@ mod tests {
                     pause.entered.send(()).unwrap();
                     pause.release.lock().unwrap().recv().unwrap();
                 }
+            }
+            if let Some(error) = self.generation_error.lock().unwrap().clone() {
+                return Err(error);
             }
             let generations = self
                 .records
@@ -1883,7 +1883,7 @@ mod tests {
         records.insert(key("scope", "vault", 8), b"disabled-orphan");
         records.insert(key("scope", "vault", 9), b"future");
 
-        let cleanup = coordinator(ledger, Arc::clone(&records))
+        let cleanup = coordinator(ledger.clone(), Arc::clone(&records))
             .recover_pending_cleanup("scope", "vault")
             .unwrap();
 
@@ -1891,6 +1891,12 @@ mod tests {
         assert_eq!(records.record(7), None);
         assert_eq!(records.record(8), None);
         assert_eq!(records.record(9), Some(b"future".to_vec()));
+        assert_eq!(
+            coordinator(ledger, records)
+                .inspect_cleanup("scope", "vault")
+                .unwrap(),
+            CleanupInspection::Complete
+        );
     }
 
     #[test]
@@ -1918,6 +1924,34 @@ mod tests {
             ledger.get("vault").unwrap(),
             Some(entry(QuickUnlockState::Disabled, 2))
         );
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            inspection.join().unwrap(),
+            Err(CoordinatorError::Ledger(LedgerStoreError::Conflict { .. }))
+        ));
+    }
+
+    #[test]
+    fn unavailable_cleanup_inspection_rejects_a_changed_ledger_snapshot() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        ledger
+            .compare_and_swap("vault", None, entry(QuickUnlockState::Enrolled, 1))
+            .unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let records = Arc::new(FakeRecordStore::with_first_generation_pause(
+            entered_tx, release_rx,
+        ));
+        *records.generation_error.lock().unwrap() = Some(PlatformError::new("fake-list", 99));
+
+        let inspecting = coordinator(ledger.clone(), Arc::clone(&records));
+        let inspection = thread::spawn(move || inspecting.inspect_cleanup("scope", "vault"));
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        coordinator(ledger.clone(), Arc::clone(&records))
+            .disable("scope", "vault")
+            .unwrap();
         release_tx.send(()).unwrap();
 
         assert!(matches!(
