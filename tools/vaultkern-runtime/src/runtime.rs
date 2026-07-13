@@ -328,6 +328,8 @@ pub struct Runtime {
     passkey_credential_id_generator: Box<dyn FnMut() -> String>,
     fixed_unix_time: Option<u64>,
     fixed_unix_time_ms: Option<u64>,
+    #[cfg(test)]
+    local_save_warnings: Vec<String>,
 }
 
 impl Runtime {
@@ -368,7 +370,7 @@ impl Runtime {
             core: KeepassCore::new(),
             session,
             references,
-            local_files: LocalFileVaultSourceProvider,
+            local_files: LocalFileVaultSourceProvider::default(),
             one_drive,
             remote_cache,
             biometric: default_biometric_provider(),
@@ -379,6 +381,8 @@ impl Runtime {
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
             fixed_unix_time_ms: None,
+            #[cfg(test)]
+            local_save_warnings: Vec::new(),
         }
     }
 
@@ -387,7 +391,7 @@ impl Runtime {
             core: KeepassCore::new(),
             session: SessionState::default(),
             references: VaultReferenceStore::new_in_memory(),
-            local_files: LocalFileVaultSourceProvider,
+            local_files: LocalFileVaultSourceProvider::default(),
             one_drive: OneDriveVaultSourceProvider::new_in_memory(),
             remote_cache: RemoteVaultCache::new_at(std::env::temp_dir().join(format!(
                 "vaultkern-runtime-test-remote-cache-{}",
@@ -401,6 +405,8 @@ impl Runtime {
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
             fixed_unix_time_ms: None,
+            #[cfg(test)]
+            local_save_warnings: Vec::new(),
         }
     }
 
@@ -4350,12 +4356,10 @@ impl Runtime {
 
     fn save_vault_command(&mut self, vault_id: &str) -> Result<RuntimeResponse> {
         match self.save_vault(vault_id) {
-            Err(error) if error.is::<PendingAutofillSyncRequired>() => {
-                Ok(RuntimeResponse::Error(ErrorDto {
-                    code: "pending_autofill_sync_required".into(),
-                    message: error.to_string(),
-                }))
-            }
+            Err(error) => match classified_runtime_error_response(&error) {
+                Some(response) => Ok(response),
+                None => Err(error),
+            },
             result => result,
         }
     }
@@ -4429,26 +4433,29 @@ impl Runtime {
             (bytes, merge_summary)
         };
 
-        let write_fingerprint =
-            match self.write_source(vault_id, &bytes, current.one_drive_etag.as_deref()) {
-                Ok(fingerprint) => fingerprint,
-                Err(error) => {
-                    if remote_cache_key_for_source(&source).is_some() {
-                        let remote_error = format_error_chain(&error);
-                        return self.save_remote_vault_to_pending_cache(
-                            vault_id,
-                            source,
-                            bytes,
-                            &baseline_fingerprint,
-                            display_name,
-                            account_label,
-                            remote_error,
-                        );
-                    }
-                    return Err(error)
-                        .with_context(|| format!("failed to write vault: {vault_id}"));
+        let write_fingerprint = match self.write_source(
+            vault_id,
+            &bytes,
+            &current.fingerprint,
+            current.one_drive_etag.as_deref(),
+        ) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                if remote_cache_key_for_source(&source).is_some() {
+                    let remote_error = format_error_chain(&error);
+                    return self.save_remote_vault_to_pending_cache(
+                        vault_id,
+                        source,
+                        bytes,
+                        &baseline_fingerprint,
+                        display_name,
+                        account_label,
+                        remote_error,
+                    );
                 }
-            };
+                return Err(error).with_context(|| format!("failed to write vault: {vault_id}"));
+            }
+        };
         let (next_bytes, next_fingerprint) = if let Some(fingerprint) = write_fingerprint {
             (bytes, fingerprint)
         } else {
@@ -5234,6 +5241,7 @@ impl Runtime {
         &mut self,
         vault_id: &str,
         bytes: &[u8],
+        expected: &VaultSourceFingerprint,
         one_drive_etag: Option<&str>,
     ) -> Result<Option<VaultSourceFingerprint>> {
         let source = self
@@ -5244,13 +5252,26 @@ impl Runtime {
             .clone();
         match source {
             VaultSource::LocalPath(path) => {
-                self.local_files.write(&path, bytes)?;
-                Ok(None)
+                let commit = self
+                    .local_files
+                    .write_if_unchanged(&path, expected, bytes)?;
+                self.record_local_save_warnings(commit.warnings);
+                Ok(Some(commit.fingerprint))
             }
             VaultSource::OneDriveItem { drive_id, item_id } => Ok(Some(
                 self.one_drive
                     .write_with_known_etag(&drive_id, &item_id, bytes, one_drive_etag)?,
             )),
+        }
+    }
+
+    fn record_local_save_warnings(&mut self, warnings: Vec<String>) {
+        let stderr = std::io::stderr();
+        let mut stderr = stderr.lock();
+        for warning in warnings {
+            write_local_save_warning(&mut stderr, &warning);
+            #[cfg(test)]
+            self.local_save_warnings.push(warning);
         }
     }
 
@@ -6943,10 +6964,30 @@ fn is_unlock_credentials_error(error: &anyhow::Error) -> bool {
     })
 }
 
+fn write_local_save_warning(destination: &mut impl std::io::Write, warning: &str) {
+    let _ = writeln!(destination, "vaultkern local save warning: {warning}");
+}
+
+fn classified_runtime_error_response(error: &anyhow::Error) -> Option<RuntimeResponse> {
+    let code = match error.downcast_ref::<LocalFileCommitError>() {
+        Some(LocalFileCommitError::Conflict { .. }) => "conflict",
+        Some(LocalFileCommitError::BeforePublish { .. }) => "persist_io_unavailable",
+        Some(LocalFileCommitError::OutcomeUnknown { .. }) => "persist_outcome_unknown",
+        None if error.is::<PendingAutofillSyncRequired>() => "pending_autofill_sync_required",
+        None => return None,
+    };
+    Some(RuntimeResponse::Error(ErrorDto {
+        code: code.into(),
+        message: format_error_chain(error),
+    }))
+}
+
 fn query_error_response(error: anyhow::Error) -> RuntimeResponse {
-    RuntimeResponse::Error(ErrorDto {
-        code: "invalid_request".into(),
-        message: format_error_chain(&error),
+    classified_runtime_error_response(&error).unwrap_or_else(|| {
+        RuntimeResponse::Error(ErrorDto {
+            code: "invalid_request".into(),
+            message: format_error_chain(&error),
+        })
     })
 }
 
@@ -7442,6 +7483,7 @@ struct RankedFillCandidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use vaultkern_runtime_protocol::{
@@ -7614,6 +7656,301 @@ mod tests {
             .unlock_vault(&opened.vault_id, Some("demo-password"), None)
             .unwrap();
         (dir, opened)
+    }
+
+    fn arm_source_change_after_merge_snapshot(
+        runtime: &mut Runtime,
+        opened: &VaultHandleDto,
+    ) -> Vec<u8> {
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let generation_b = KeepassCore::new()
+            .save_kdbx(
+                &Vault::empty("external-generation"),
+                &key,
+                SaveProfile::recommended(),
+            )
+            .unwrap();
+        let path = opened.path.clone();
+        let replacement = generation_b.clone();
+        runtime.local_files =
+            LocalFileVaultSourceProvider::with_before_write_hook(std::sync::Arc::new(move || {
+                std::fs::write(&path, &replacement).unwrap()
+            }));
+        generation_b
+    }
+
+    fn arm_source_deletion_after_merge_snapshot(runtime: &mut Runtime, opened: &VaultHandleDto) {
+        let path = opened.path.clone();
+        runtime.local_files =
+            LocalFileVaultSourceProvider::with_before_write_hook(std::sync::Arc::new(move || {
+                std::fs::remove_file(&path).unwrap()
+            }));
+    }
+
+    fn arm_local_write_fault(runtime: &mut Runtime, point: DurableFaultPoint) {
+        runtime.local_files =
+            LocalFileVaultSourceProvider::with_write_faults(DurableFaultInjector::fail_once(point));
+    }
+
+    #[test]
+    fn save_rejects_source_change_after_merge_snapshot() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        let generation_b = arm_source_change_after_merge_snapshot(&mut runtime, &opened);
+
+        let error = runtime
+            .save_vault(&opened.vault_id)
+            .expect_err("source change after the merge snapshot must conflict");
+
+        assert!(matches!(
+            error.downcast_ref::<LocalFileCommitError>(),
+            Some(LocalFileCommitError::Conflict { .. })
+        ));
+        assert_eq!(std::fs::read(&opened.path).unwrap(), generation_b);
+    }
+
+    #[test]
+    fn save_after_merge_uses_the_current_source_fingerprint() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let external = KeepassCore::new()
+            .save_kdbx(
+                &Vault::empty("external-generation"),
+                &key,
+                SaveProfile::recommended(),
+            )
+            .unwrap();
+        std::fs::write(&opened.path, external).unwrap();
+
+        let response = runtime
+            .save_vault(&opened.vault_id)
+            .expect("the generation used for merge must be the write baseline");
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn local_write_source_returns_the_commit_fingerprint() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let expected = runtime
+            .local_files
+            .read_snapshot(&opened.path)
+            .unwrap()
+            .fingerprint;
+
+        let committed = runtime
+            .write_source(&opened.vault_id, b"candidate-generation", &expected, None)
+            .unwrap()
+            .expect("local writes must return the conditional commit fingerprint");
+        let visible = runtime.local_files.read_snapshot(&opened.path).unwrap();
+
+        assert_eq!(committed, visible.fingerprint);
+        assert_eq!(visible.bytes, b"candidate-generation");
+    }
+
+    #[test]
+    fn save_command_reports_source_change_as_conflict() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        let generation_b = arm_source_change_after_merge_snapshot(&mut runtime, &opened);
+
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("source conflicts must be command responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected source conflict response, got {response:?}");
+        };
+        assert_eq!(error.code, "conflict");
+        assert!(error.message.contains("local vault write conflict"));
+        assert_eq!(std::fs::read(&opened.path).unwrap(), generation_b);
+    }
+
+    #[test]
+    fn save_command_reports_source_deletion_as_conflict() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        arm_source_deletion_after_merge_snapshot(&mut runtime, &opened);
+
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("source deletion must be a command response");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected source conflict response, got {response:?}");
+        };
+        assert_eq!(error.code, "conflict");
+        assert!(error.message.contains("local vault write conflict"));
+        assert!(!std::path::Path::new(&opened.path).exists());
+    }
+
+    #[test]
+    fn save_command_reports_pre_publish_failure_as_io_unavailable() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        arm_local_write_fault(&mut runtime, DurableFaultPoint::BeforeTargetReplace);
+
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("pre-publish failures must be command responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected local save failure response, got {response:?}");
+        };
+        assert_eq!(error.code, "persist_io_unavailable");
+        assert!(error.message.contains("failed before publish"));
+    }
+
+    #[test]
+    fn save_command_reports_post_publish_failure_as_outcome_unknown() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        arm_local_write_fault(&mut runtime, DurableFaultPoint::TargetReplaced);
+
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("post-publish failures must be command responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected unknown local save outcome, got {response:?}");
+        };
+        assert_eq!(error.code, "persist_outcome_unknown");
+        assert!(error.message.contains("durability is unknown"));
+    }
+
+    #[test]
+    fn successful_save_records_durable_cleanup_warnings() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        arm_local_write_fault(&mut runtime, DurableFaultPoint::Cleanup);
+
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("cleanup failure does not invalidate a durable save");
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+        assert_eq!(runtime.local_save_warnings.len(), 1);
+        assert!(runtime.local_save_warnings[0].contains("retained durable backup"));
+    }
+
+    struct RejectingWarningWriter;
+
+    impl std::io::Write for RejectingWarningWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "warning sink is unavailable",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn local_save_warning_output_failure_is_ignored() {
+        write_local_save_warning(&mut RejectingWarningWriter, "retained durable backup");
+    }
+
+    #[test]
+    fn passkey_save_command_preserves_local_conflict_code() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+        let ceremony_token = "ceremony-local-save-conflict";
+        insert_test_create_passkey_ceremony(
+            &mut runtime,
+            ceremony_token,
+            &opened.vault_id,
+            &entry.id,
+            PasskeyCeremonyDurableStateDto::Mutated,
+        );
+        arm_source_change_after_merge_snapshot(&mut runtime, &opened);
+
+        let response = runtime
+            .handle(RuntimeCommand::SavePasskeyRegistration {
+                ceremony_token: ceremony_token.into(),
+                expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("passkey save conflicts must be command responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected passkey save conflict, got {response:?}");
+        };
+        assert_eq!(error.code, "conflict");
+        assert_eq!(
+            runtime.passkey_ceremonies[ceremony_token].durable_state,
+            PasskeyCeremonyDurableStateDto::Mutated
+        );
+    }
+
+    #[test]
+    fn passkey_rollback_command_preserves_local_conflict_code() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+        let ceremony_token = "ceremony-local-rollback-conflict";
+        insert_test_create_passkey_ceremony(
+            &mut runtime,
+            ceremony_token,
+            &opened.vault_id,
+            &entry.id,
+            PasskeyCeremonyDurableStateDto::Saved,
+        );
+        arm_source_change_after_merge_snapshot(&mut runtime, &opened);
+
+        let response = runtime
+            .handle(RuntimeCommand::AbortPasskeyRegistration {
+                ceremony_token: ceremony_token.into(),
+                expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                closed_phase: PasskeyCeremonyPhaseDto::ClosedAborted,
+            })
+            .expect("passkey rollback conflicts must be command responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected passkey rollback conflict, got {response:?}");
+        };
+        assert_eq!(error.code, "conflict");
+        assert_eq!(
+            runtime.passkey_ceremonies[ceremony_token].phase,
+            PasskeyCeremonyPhaseDto::CompletionAndMutation
+        );
     }
 
     fn open_unlocked_demo_onedrive(runtime: &mut Runtime) -> String {
