@@ -30,3 +30,5 @@ jobs:
         run: cargo test --locked -p vaultkern-runtime providers::onedrive_token_store
       - name: Test OneDrive provider
         run: cargo test --locked -p vaultkern-runtime providers::onedrive
+      - name: Test quick-unlock record publication
+        run: cargo test --locked -p vaultkern-runtime providers::secure_storage
