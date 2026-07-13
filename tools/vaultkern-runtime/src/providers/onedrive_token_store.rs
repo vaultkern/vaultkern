@@ -1247,10 +1247,11 @@ mod tests {
     use super::{
         MAX_PROTECTED_REFRESH_TOKEN_BYTES, TokenSecurityContext, acquire_token_store_lock,
         enforce_temp_metadata_or_discard, production_for_extension_id, production_store,
-        read_bounded_protected_payload, token_backup_path, token_lock_path, token_target_exists,
-        validate_existing_directory_identity, validate_protected_payload_size,
-        validate_single_link_count, zeroize_plaintext_bytes,
+        read_bounded_protected_payload, token_backup_path, token_lock_path,
+        validate_protected_payload_size, validate_single_link_count, zeroize_plaintext_bytes,
     };
+    #[cfg(unix)]
+    use super::{token_target_exists, validate_existing_directory_identity};
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, TempWriteFaultPoints, write_verified_temp,
     };
