@@ -571,7 +571,7 @@ pub(crate) fn unique_sibling_path(target: &Path, marker: &str) -> io::Result<Pat
 #[derive(Debug)]
 pub(crate) struct VerifiedTemp {
     path: PathBuf,
-    file: File,
+    file: Option<File>,
     identity: DurableFileIdentity,
     expected_sha256: String,
     expected_size: u64,
@@ -583,12 +583,14 @@ impl VerifiedTemp {
     }
 
     pub(crate) fn file(&self) -> &File {
-        &self.file
+        self.file
+            .as_ref()
+            .expect("verified temp file handle is available before publish")
     }
 
-    pub(crate) fn discard(self) -> io::Result<()> {
+    pub(crate) fn discard(mut self) -> io::Result<()> {
         let path = self.path;
-        drop(self.file);
+        drop(self.file.take());
         remove_if_exists(&path)
     }
 
@@ -612,19 +614,22 @@ impl VerifiedTemp {
     }
 
     fn verify_opened_contents(&mut self) -> io::Result<()> {
-        self.file.sync_all()?;
-        let before = self.file.metadata()?;
-        if opened_file_identity(&self.file, &before)? != self.identity {
+        let file = self.file.as_mut().ok_or_else(|| {
+            io::Error::other("verified temp file handle is unavailable during verification")
+        })?;
+        file.sync_all()?;
+        let before = file.metadata()?;
+        if opened_file_identity(file, &before)? != self.identity {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "durable temp handle identity changed",
             ));
         }
-        self.file.rewind()?;
+        file.rewind()?;
         let mut readback = Vec::with_capacity(self.expected_size as usize);
-        self.file.read_to_end(&mut readback)?;
-        let after = self.file.metadata()?;
-        if opened_file_identity(&self.file, &after)? != self.identity
+        file.read_to_end(&mut readback)?;
+        let after = file.metadata()?;
+        if opened_file_identity(file, &after)? != self.identity
             || before.len() != after.len()
             || before.modified().ok() != after.modified().ok()
             || readback.len() as u64 != self.expected_size
@@ -635,6 +640,25 @@ impl VerifiedTemp {
                 "durable temp changed after readback verification",
             ));
         }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn close_before_replace(&mut self) {
+        drop(self.file.take());
+    }
+
+    #[cfg(windows)]
+    fn reopen_published(&mut self, target: &Path) -> io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        self.file = Some(options.open(target)?);
         Ok(())
     }
 }
@@ -720,7 +744,7 @@ pub(crate) fn write_verified_temp(
     };
     Ok(VerifiedTemp {
         path,
-        file,
+        file: Some(file),
         identity,
         expected_sha256,
         expected_size: bytes.len() as u64,
@@ -927,6 +951,10 @@ pub(crate) fn publish_temp(
             source,
         });
     }
+    // ReplaceFileW opens the replacement with no sharing mode, so its verified
+    // handle must be closed for the duration of the path-based replacement.
+    #[cfg(windows)]
+    temp.close_before_replace();
     if let Err(error) = replace_file(temp.path(), target, backup) {
         if error.published {
             drop(temp);
@@ -964,6 +992,13 @@ pub(crate) fn publish_temp(
             ),
         });
     }
+    #[cfg(windows)]
+    temp.reopen_published(target)
+        .map_err(|source| PublishError {
+            published: true,
+            target_conflict: false,
+            source,
+        })?;
     faults.check(after_replace).map_err(|source| PublishError {
         published: true,
         target_conflict: false,
@@ -1202,7 +1237,7 @@ pub(crate) fn remove_if_exists(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use super::{
         DurableFaultInjector, DurableFaultPoint, TempWriteFaultPoints, write_verified_temp,
     };
@@ -1356,6 +1391,42 @@ mod tests {
             0o600
         );
         temp.discard().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publish_closes_and_reopens_the_verified_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ledger.json");
+        fs::write(&target, b"old").unwrap();
+        let metadata = fs::symlink_metadata(&target).unwrap();
+        let identity = super::path_file_identity(&target, &metadata).unwrap();
+        let temp = write_verified_temp(
+            &target,
+            b"new",
+            &DurableFaultInjector::default(),
+            TempWriteFaultPoints {
+                created: DurableFaultPoint::TempCreated,
+                written: DurableFaultPoint::TempWritten,
+                synced: DurableFaultPoint::TempSynced,
+                verified: DurableFaultPoint::TempReadbackVerified,
+            },
+        )
+        .unwrap();
+
+        super::publish_temp(
+            temp,
+            &target,
+            super::TargetExpectation::Identity(identity),
+            None,
+            &DurableFaultInjector::default(),
+            DurableFaultPoint::BeforeTargetReplace,
+            DurableFaultPoint::TargetReplaced,
+            DurableFaultPoint::ParentSynced,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new");
     }
 
     #[cfg(windows)]
