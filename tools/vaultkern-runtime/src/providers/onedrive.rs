@@ -17,8 +17,9 @@ use vaultkern_runtime_protocol::{
 
 use crate::providers::local_file::VaultSourceFingerprint;
 use crate::providers::onedrive_token_store::{
-    EphemeralOneDriveRefreshTokenStore, OneDriveRefreshTokenStore, is_unavailable_error,
-    production_default, production_for_extension_id,
+    EphemeralOneDriveRefreshTokenStore, OneDriveRefreshTokenStore,
+    OneDriveRefreshTokenStoreOutcome, is_unavailable_error, production_default,
+    production_for_extension_id,
 };
 use zeroize::Zeroizing;
 
@@ -595,7 +596,7 @@ impl OneDriveVaultSourceProvider {
         let refresh_token = token
             .refresh_token
             .context("OneDrive token response did not include refresh_token")?;
-        self.store_refresh_token(&refresh_token)?;
+        let store_outcome = self.store_refresh_token(&refresh_token)?;
         self.refresh_token_load_error = None;
         self.token_state.replace(Some(OneDriveTokenState {
             access_token: Some(token.access_token),
@@ -603,7 +604,9 @@ impl OneDriveVaultSourceProvider {
             refresh_token,
             refresh_token_origin: RefreshTokenOrigin::Store,
         }));
-
+        if let OneDriveRefreshTokenStoreOutcome::PublishedDurabilityUnknown(error) = store_outcome {
+            return Err(error.context("OneDrive refresh-token persistence durability is unknown"));
+        }
         Ok(OneDriveAuthStatusDto {
             status: "authorized".into(),
             account_label: Some(self.account_label()?),
@@ -1036,13 +1039,16 @@ impl OneDriveVaultSourceProvider {
             .context("failed to decode OneDrive refresh response")?;
         let expires_at = access_expires_at(&token);
         let next_refresh = token.refresh_token.unwrap_or(refresh_token);
-        let next_origin = match self.store_refresh_token(&next_refresh) {
-            Ok(()) => RefreshTokenOrigin::Store,
+        let (next_origin, durability_error) = match self.store_refresh_token(&next_refresh) {
+            Ok(OneDriveRefreshTokenStoreOutcome::Durable) => (RefreshTokenOrigin::Store, None),
+            Ok(OneDriveRefreshTokenStoreOutcome::PublishedDurabilityUnknown(error)) => {
+                (RefreshTokenOrigin::Store, Some(error))
+            }
             Err(error)
                 if refresh_token_origin == RefreshTokenOrigin::Environment
                     && is_unavailable_error(&error) =>
             {
-                RefreshTokenOrigin::Environment
+                (RefreshTokenOrigin::Environment, None)
             }
             Err(error) => return Err(error),
         };
@@ -1052,10 +1058,13 @@ impl OneDriveVaultSourceProvider {
             refresh_token: next_refresh,
             refresh_token_origin: next_origin,
         }));
+        if let Some(error) = durability_error {
+            return Err(error.context("OneDrive refresh-token persistence durability is unknown"));
+        }
         Ok(token.access_token)
     }
 
-    fn store_refresh_token(&self, refresh_token: &str) -> Result<()> {
+    fn store_refresh_token(&self, refresh_token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
         self.refresh_token_store.store(refresh_token)
     }
 }
@@ -1259,6 +1268,7 @@ mod tests {
     };
     use crate::providers::onedrive_token_store::{
         MemoryOneDriveRefreshTokenStore, OneDriveRefreshTokenStore,
+        OneDriveRefreshTokenStoreOutcome,
     };
     use anyhow::Result;
     use std::io::{Read, Write};
@@ -1269,12 +1279,14 @@ mod tests {
 
     struct LoadFailingRefreshTokenStore;
 
+    struct PublishedDurabilityUnknownRefreshTokenStore;
+
     impl OneDriveRefreshTokenStore for FailingRefreshTokenStore {
         fn load(&self) -> Result<Option<Zeroizing<String>>> {
             Ok(None)
         }
 
-        fn store(&self, _token: &str) -> Result<()> {
+        fn store(&self, _token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
             anyhow::bail!("simulated secure store failure")
         }
 
@@ -1288,8 +1300,26 @@ mod tests {
             anyhow::bail!("simulated secure store load failure")
         }
 
-        fn store(&self, _token: &str) -> Result<()> {
+        fn store(&self, _token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
+            Ok(OneDriveRefreshTokenStoreOutcome::Durable)
+        }
+
+        fn delete(&self) -> Result<()> {
             Ok(())
+        }
+    }
+
+    impl OneDriveRefreshTokenStore for PublishedDurabilityUnknownRefreshTokenStore {
+        fn load(&self) -> Result<Option<Zeroizing<String>>> {
+            Ok(Some(Zeroizing::new("refresh-1".to_owned())))
+        }
+
+        fn store(&self, _token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
+            Ok(
+                OneDriveRefreshTokenStoreOutcome::PublishedDurabilityUnknown(anyhow::anyhow!(
+                    "simulated durability failure after publish"
+                )),
+            )
         }
 
         fn delete(&self) -> Result<()> {
@@ -1299,7 +1329,10 @@ mod tests {
 
     #[test]
     fn provider_uses_compile_time_public_client_id_for_pkce_login_when_configured() {
-        let result = OneDriveVaultSourceProvider::new_from_env().begin_login();
+        let result = OneDriveVaultSourceProvider::new_from_env_with_refresh_token_store(Box::new(
+            MemoryOneDriveRefreshTokenStore::default(),
+        ))
+        .begin_login();
 
         match option_env!("VAULTKERN_ONEDRIVE_CLIENT_ID") {
             Some(client_id) => {
@@ -2004,6 +2037,51 @@ mod tests {
     }
 
     #[test]
+    fn refresh_token_store_published_unknown_keeps_refreshed_tokens_in_memory() {
+        let mut server = mockito::Server::new();
+        let refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "refresh_token".into(),
+                "refresh-1".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"access-2","refresh_token":"refresh-2","expires_in":3600}"#,
+            )
+            .expect(1)
+            .create();
+        let children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-2")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"value":[]}"#)
+            .expect(1)
+            .create();
+        let provider = OneDriveVaultSourceProvider::new_for_graph_tests_with_refresh_token_store(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+            Box::new(PublishedDurabilityUnknownRefreshTokenStore),
+        );
+
+        let error = provider
+            .list_children(None)
+            .expect_err("the first request must report unknown persistence durability");
+        assert!(format!("{error:#}").contains("simulated durability failure after publish"));
+        assert!(format!("{error:#}").contains("durability is unknown"));
+
+        provider.list_children(None).unwrap();
+
+        refresh.assert();
+        children.assert();
+    }
+
+    #[test]
     fn refresh_token_store_failure_fails_oauth_completion() {
         let mut server = mockito::Server::new();
         let token = server
@@ -2029,6 +2107,48 @@ mod tests {
 
         assert!(format!("{error:#}").contains("simulated secure store failure"));
         token.assert();
+    }
+
+    #[test]
+    fn refresh_token_store_published_unknown_keeps_oauth_tokens_in_memory() {
+        let mut server = mockito::Server::new();
+        let token = server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"access-1","refresh_token":"refresh-2","expires_in":3600}"#,
+            )
+            .expect(1)
+            .create();
+        let children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"value":[]}"#)
+            .expect(1)
+            .create();
+        let mut provider =
+            OneDriveVaultSourceProvider::new_for_graph_tests_with_refresh_token_store(
+                "client-1",
+                &format!("{}/authorize", server.url()),
+                &format!("{}/token", server.url()),
+                &format!("{}/v1.0", server.url()),
+                Box::new(PublishedDurabilityUnknownRefreshTokenStore),
+            );
+
+        let error = provider
+            .complete_login("auth-code", "http://127.0.0.1:53121/callback", "verifier")
+            .expect_err("OAuth completion must report unknown persistence durability");
+        assert!(format!("{error:#}").contains("simulated durability failure after publish"));
+        assert!(format!("{error:#}").contains("durability is unknown"));
+
+        provider.list_children(None).unwrap();
+
+        token.assert();
+        children.assert();
     }
 
     #[test]

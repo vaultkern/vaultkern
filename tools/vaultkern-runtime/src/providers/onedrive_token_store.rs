@@ -2,13 +2,15 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use anyhow::Context;
 use anyhow::Result;
 use zeroize::Zeroizing;
 
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
+#[cfg(any(windows, test))]
+use crate::providers::durable_file::VerifiedTemp;
 #[cfg(windows)]
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, TargetExpectation, TempWriteFaultPoints,
@@ -17,12 +19,21 @@ use crate::providers::durable_file::{
 };
 
 const TOKEN_FILE_NAME: &str = "onedrive-refresh-token.dpapi";
+#[cfg(any(windows, test))]
+const MAX_PROTECTED_REFRESH_TOKEN_BYTES: usize = 64 * 1024;
 
 pub(crate) trait OneDriveRefreshTokenStore {
     fn load(&self) -> Result<Option<Zeroizing<String>>>;
-    fn store(&self, token: &str) -> Result<()>;
+    fn store(&self, token: &str) -> Result<OneDriveRefreshTokenStoreOutcome>;
     #[allow(dead_code)]
     fn delete(&self) -> Result<()>;
+}
+
+#[derive(Debug)]
+pub(crate) enum OneDriveRefreshTokenStoreOutcome {
+    Durable,
+    #[allow(dead_code)]
+    PublishedDurabilityUnknown(anyhow::Error),
 }
 
 #[derive(Debug)]
@@ -96,9 +107,9 @@ impl OneDriveRefreshTokenStore for EphemeralOneDriveRefreshTokenStore {
         Ok(self.token.borrow().as_ref().cloned())
     }
 
-    fn store(&self, token: &str) -> Result<()> {
+    fn store(&self, token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
         self.token.replace(Some(Zeroizing::new(token.to_owned())));
-        Ok(())
+        Ok(OneDriveRefreshTokenStoreOutcome::Durable)
     }
 
     fn delete(&self) -> Result<()> {
@@ -116,13 +127,29 @@ impl OneDriveRefreshTokenStore for UnavailableOneDriveRefreshTokenStore {
         unavailable()
     }
 
-    fn store(&self, _token: &str) -> Result<()> {
+    fn store(&self, _token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
         unavailable()
     }
 
     fn delete(&self) -> Result<()> {
         unavailable()
     }
+}
+
+#[cfg(any(windows, test))]
+fn enforce_temp_metadata_or_discard(
+    temp: VerifiedTemp,
+    enforce: impl FnOnce(&std::path::Path) -> Result<()>,
+) -> Result<VerifiedTemp> {
+    if let Err(error) = enforce(temp.path()) {
+        return match temp.discard() {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(error).context(format!(
+                "failed to discard OneDrive refresh-token temp file after metadata enforcement failure: {cleanup_error}"
+            )),
+        };
+    }
+    Ok(temp)
 }
 
 #[cfg(not(windows))]
@@ -134,6 +161,7 @@ fn unavailable<T>() -> Result<T> {
 pub(crate) struct WindowsOneDriveRefreshTokenStore {
     path: PathBuf,
     entropy: [u8; 32],
+    faults: DurableFaultInjector,
 }
 
 #[cfg(windows)]
@@ -147,7 +175,15 @@ impl WindowsOneDriveRefreshTokenStore {
         Self {
             path,
             entropy: hasher.finalize().into(),
+            faults: DurableFaultInjector::default(),
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_faults(path: PathBuf, scope: &str, faults: DurableFaultInjector) -> Self {
+        let mut store = Self::new(path, scope);
+        store.faults = faults;
+        store
     }
 }
 
@@ -168,7 +204,7 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
             .map(Some)
     }
 
-    fn store(&self, token: &str) -> Result<()> {
+    fn store(&self, token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
         let parent = self
             .path
             .parent()
@@ -186,11 +222,10 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
         let protected = protect_refresh_token(token, &self.entropy)
             .context("failed to protect OneDrive refresh token")?;
         let expectation = target_expectation(&self.path)?;
-        let faults = DurableFaultInjector::default();
         let temp = write_verified_temp(
             &self.path,
             &protected,
-            &faults,
+            &self.faults,
             TempWriteFaultPoints {
                 created: DurableFaultPoint::TempCreated,
                 written: DurableFaultPoint::TempWritten,
@@ -204,25 +239,36 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
                 self.path.display()
             )
         })?;
-        enforce_private_acl(temp.path(), false)?;
-        publish_temp(
+        let temp = enforce_temp_metadata_or_discard(temp, |path| enforce_private_acl(path, false))?;
+        let publish_result = publish_temp(
             temp,
             &self.path,
             expectation,
             None,
-            &faults,
+            &self.faults,
             DurableFaultPoint::BeforeTargetReplace,
             DurableFaultPoint::TargetReplaced,
             DurableFaultPoint::ParentSynced,
-        )
-        .map_err(|error| error.source)
-        .with_context(|| {
-            format!(
+        );
+        if let Err(error) = publish_result {
+            let published = error.published;
+            let error = anyhow::Error::new(error.source).context(format!(
                 "failed to publish protected OneDrive refresh token: {}",
                 self.path.display()
-            )
-        })?;
-        enforce_private_acl(&self.path, false)
+            ));
+            if published {
+                return Ok(OneDriveRefreshTokenStoreOutcome::PublishedDurabilityUnknown(error));
+            }
+            return Err(error);
+        }
+        match enforce_private_acl(&self.path, false) {
+            Ok(()) => Ok(OneDriveRefreshTokenStoreOutcome::Durable),
+            Err(error) => Ok(
+                OneDriveRefreshTokenStoreOutcome::PublishedDurabilityUnknown(error.context(
+                    "protected OneDrive refresh token was published but final ACL verification failed",
+                )),
+            ),
+        }
     }
 
     fn delete(&self) -> Result<()> {
@@ -446,7 +492,6 @@ fn target_expectation(path: &std::path::Path) -> Result<TargetExpectation> {
 
 #[cfg(windows)]
 fn read_regular_file(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
-    use std::io::Read;
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
@@ -475,8 +520,7 @@ fn read_regular_file(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
     if !before.is_file() || opened_file_identity(&file, &before)? != expected_identity {
         anyhow::bail!("protected OneDrive refresh-token file changed while opening");
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    let bytes = read_bounded_protected_payload(&mut file, before.len())?;
     let after = file.metadata()?;
     let final_path_metadata = fs::symlink_metadata(path)?;
     if opened_file_identity(&file, &after)? != expected_identity
@@ -487,6 +531,25 @@ fn read_regular_file(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
         anyhow::bail!("protected OneDrive refresh-token file changed while reading");
     }
     Ok(Some(bytes))
+}
+
+#[cfg(any(windows, test))]
+fn read_bounded_protected_payload(
+    reader: &mut impl std::io::Read,
+    declared_len: u64,
+) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    if declared_len > MAX_PROTECTED_REFRESH_TOKEN_BYTES as u64 {
+        anyhow::bail!("protected OneDrive refresh-token payload is too large");
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::take(reader, (MAX_PROTECTED_REFRESH_TOKEN_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PROTECTED_REFRESH_TOKEN_BYTES {
+        anyhow::bail!("protected OneDrive refresh-token payload is too large");
+    }
+    Ok(bytes)
 }
 
 #[cfg(windows)]
@@ -632,10 +695,10 @@ impl OneDriveRefreshTokenStore for MemoryOneDriveRefreshTokenStore {
         Ok(self.token.lock().expect("memory token store lock").clone())
     }
 
-    fn store(&self, token: &str) -> Result<()> {
+    fn store(&self, token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
         *self.token.lock().expect("memory token store lock") =
             Some(Zeroizing::new(token.to_owned()));
-        Ok(())
+        Ok(OneDriveRefreshTokenStoreOutcome::Durable)
     }
 
     fn delete(&self) -> Result<()> {
@@ -648,7 +711,68 @@ impl OneDriveRefreshTokenStore for MemoryOneDriveRefreshTokenStore {
 mod tests {
     #[cfg(windows)]
     use super::OneDriveRefreshTokenStore;
-    use super::production_store;
+    use super::{
+        MAX_PROTECTED_REFRESH_TOKEN_BYTES, enforce_temp_metadata_or_discard, production_store,
+        read_bounded_protected_payload,
+    };
+    use crate::providers::durable_file::{
+        DurableFaultInjector, DurableFaultPoint, TempWriteFaultPoints, write_verified_temp,
+    };
+
+    #[test]
+    fn private_temp_enforcement_failure_discards_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("onedrive-refresh-token.dpapi");
+        let temp = write_verified_temp(
+            &target,
+            b"protected-payload",
+            &DurableFaultInjector::default(),
+            TempWriteFaultPoints {
+                created: DurableFaultPoint::TempCreated,
+                written: DurableFaultPoint::TempWritten,
+                synced: DurableFaultPoint::TempSynced,
+                verified: DurableFaultPoint::TempReadbackVerified,
+            },
+        )
+        .unwrap();
+        let temp_path = temp.path().to_owned();
+
+        let error = enforce_temp_metadata_or_discard(temp, |_| {
+            anyhow::bail!("simulated ACL enforcement failure")
+        })
+        .expect_err("metadata enforcement failure must be reported");
+
+        assert!(format!("{error:#}").contains("simulated ACL enforcement failure"));
+        assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn protected_payload_reader_rejects_declared_size_above_limit() {
+        let mut bytes = std::io::Cursor::new(vec![0_u8; MAX_PROTECTED_REFRESH_TOKEN_BYTES + 1]);
+
+        let error = read_bounded_protected_payload(
+            &mut bytes,
+            (MAX_PROTECTED_REFRESH_TOKEN_BYTES + 1) as u64,
+        )
+        .expect_err("oversized protected token payload must be rejected");
+
+        assert!(format!("{error:#}").contains("too large"));
+    }
+
+    #[test]
+    fn protected_payload_reader_stops_growth_beyond_limit() {
+        let mut bytes = std::io::Cursor::new(vec![0_u8; MAX_PROTECTED_REFRESH_TOKEN_BYTES + 1]);
+
+        let error =
+            read_bounded_protected_payload(&mut bytes, MAX_PROTECTED_REFRESH_TOKEN_BYTES as u64)
+                .expect_err("a growing protected token payload must remain bounded");
+
+        assert!(format!("{error:#}").contains("too large"));
+        assert_eq!(
+            bytes.position(),
+            (MAX_PROTECTED_REFRESH_TOKEN_BYTES + 1) as u64
+        );
+    }
 
     #[test]
     fn production_store_removes_the_selected_legacy_plaintext_file() {
@@ -713,6 +837,49 @@ mod tests {
         store.delete().unwrap();
         assert!(!path.exists());
         assert!(store.load().unwrap().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_store_preserves_published_token_when_durability_is_unknown() {
+        use super::{OneDriveRefreshTokenStoreOutcome, WindowsOneDriveRefreshTokenStore};
+
+        const TOKEN: &str = "fixture-refresh-token-published-before-failure";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("onedrive-refresh-token.dpapi");
+        let store = WindowsOneDriveRefreshTokenStore::new_with_faults(
+            path,
+            "test/default",
+            DurableFaultInjector::fail_once(DurableFaultPoint::TargetReplaced),
+        );
+
+        let outcome = store.store(TOKEN).unwrap();
+
+        let OneDriveRefreshTokenStoreOutcome::PublishedDurabilityUnknown(error) = outcome else {
+            panic!("post-publish failure must report unknown durability")
+        };
+        assert!(format!("{error:#}").contains("TargetReplaced"));
+        assert_eq!(
+            store.load().unwrap().as_deref().map(String::as_str),
+            Some(TOKEN)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_store_rejects_oversized_protected_payload_before_dpapi() {
+        use super::WindowsOneDriveRefreshTokenStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("onedrive-refresh-token.dpapi");
+        std::fs::write(&path, vec![0_u8; MAX_PROTECTED_REFRESH_TOKEN_BYTES + 1]).unwrap();
+        let store = WindowsOneDriveRefreshTokenStore::new(path, "test/default");
+
+        let error = store
+            .load()
+            .expect_err("oversized protected payload must fail before DPAPI processing");
+
+        assert!(format!("{error:#}").contains("too large"));
     }
 
     #[cfg(windows)]
