@@ -56,7 +56,7 @@ use crate::providers::biometric::{
     default_biometric_provider,
 };
 use crate::providers::local_file::{
-    LocalFileCommitError, LocalFileVaultSourceProvider, LocalFileWriteToken, VaultSourceFingerprint,
+    LocalFileCommitError, LocalFileVaultSourceProvider, VaultSourceFingerprint,
 };
 use crate::providers::onedrive::{
     OneDriveConditionalWriteOutcome, OneDriveMemoryAccessCounts, OneDriveMemoryWriteBehavior,
@@ -211,7 +211,6 @@ enum VaultSource {
 struct LoadedSourceSnapshot {
     bytes: Option<Vec<u8>>,
     fingerprint: VaultSourceFingerprint,
-    local_write_token: Option<LocalFileWriteToken>,
     one_drive_etag: Option<String>,
 }
 
@@ -4395,7 +4394,6 @@ impl Runtime {
                         display_name,
                         account_label,
                         remote_error,
-                        None,
                     );
                 }
                 return Err(error)
@@ -4403,15 +4401,14 @@ impl Runtime {
             }
         };
 
-        let (bytes, merge_summary, candidate_vault) = {
+        let (bytes, merge_summary) = {
             let loaded = self
                 .loaded
-                .get(vault_id)
+                .get_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
-            let Some(vault) = loaded.vault.as_ref() else {
+            let Some(vault) = loaded.vault.as_mut() else {
                 anyhow::bail!("vault is locked: {vault_id}");
             };
-            let mut candidate = vault.clone();
             let merge_summary = if current.fingerprint == baseline_fingerprint {
                 None
             } else {
@@ -4420,7 +4417,7 @@ impl Runtime {
                 })?;
                 let summary = self
                     .core
-                    .load_and_merge_kdbx(&mut candidate, current_bytes, &key)
+                    .load_and_merge_kdbx(vault, current_bytes, &key)
                     .with_context(|| format!("failed to merge current vault source: {vault_id}"))?;
                 Some(MergeSummaryDto {
                     merged_entries: summary.merged_entries,
@@ -4431,16 +4428,15 @@ impl Runtime {
                     icon_conflicts_resolved: 0,
                 })
             };
-            let bytes =
-                save_kdbx_with_history_limits(&self.core, &mut candidate, &key, save_profile)
-                    .with_context(|| format!("failed to save vault: {vault_id}"))?;
-            (bytes, merge_summary, candidate)
+            let bytes = save_kdbx_with_history_limits(&self.core, vault, &key, save_profile)
+                .with_context(|| format!("failed to save vault: {vault_id}"))?;
+            (bytes, merge_summary)
         };
 
         let write_fingerprint = match self.write_source(
             vault_id,
             &bytes,
-            current.local_write_token.as_ref(),
+            &current.fingerprint,
             current.one_drive_etag.as_deref(),
         ) {
             Ok(fingerprint) => fingerprint,
@@ -4455,7 +4451,6 @@ impl Runtime {
                         display_name,
                         account_label,
                         remote_error,
-                        Some(candidate_vault),
                     );
                 }
                 return Err(error).with_context(|| format!("failed to write vault: {vault_id}"));
@@ -4505,7 +4500,6 @@ impl Runtime {
         if let Some(status) = next_source_status {
             loaded.source_status = Some(status);
         }
-        loaded.vault = Some(candidate_vault);
         loaded.bytes = next_bytes;
         loaded.baseline_fingerprint = next_fingerprint;
         self.refresh_quick_unlock_credentials_after_successful_save(vault_id)?;
@@ -4545,7 +4539,6 @@ impl Runtime {
         display_name: String,
         account_label: Option<String>,
         remote_error: String,
-        candidate_vault: Option<Vault>,
     ) -> Result<RuntimeResponse> {
         let cache_key = remote_cache_key_for_source(&source).context("source is not remote")?;
         let cached_at = self.current_unix_time() as i64;
@@ -4574,9 +4567,6 @@ impl Runtime {
             .loaded
             .get_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
-        if let Some(candidate_vault) = candidate_vault {
-            loaded.vault = Some(candidate_vault);
-        }
         loaded.bytes = bytes;
         loaded.baseline_fingerprint = fingerprint;
         loaded.source_status = Some(status);
@@ -5218,11 +5208,9 @@ impl Runtime {
                     .local_files
                     .read_snapshot(path)
                     .with_context(|| format!("failed to read current vault source: {path}"))?;
-                let write_token = snapshot.write_token.clone();
                 Ok(LoadedSourceSnapshot {
                     bytes: Some(snapshot.bytes),
                     fingerprint: snapshot.fingerprint,
-                    local_write_token: Some(write_token),
                     one_drive_etag: None,
                 })
             }
@@ -5233,7 +5221,6 @@ impl Runtime {
                         return Ok(LoadedSourceSnapshot {
                             bytes: None,
                             fingerprint: baseline.clone(),
-                            local_write_token: None,
                             one_drive_etag: state.e_tag,
                         });
                     }
@@ -5244,7 +5231,6 @@ impl Runtime {
                 Ok(LoadedSourceSnapshot {
                     bytes: Some(snapshot.bytes),
                     fingerprint: snapshot.fingerprint,
-                    local_write_token: None,
                     one_drive_etag: state.e_tag,
                 })
             }
@@ -5255,7 +5241,7 @@ impl Runtime {
         &mut self,
         vault_id: &str,
         bytes: &[u8],
-        local_write_token: Option<&LocalFileWriteToken>,
+        expected: &VaultSourceFingerprint,
         one_drive_etag: Option<&str>,
     ) -> Result<Option<VaultSourceFingerprint>> {
         let source = self
@@ -5266,11 +5252,9 @@ impl Runtime {
             .clone();
         match source {
             VaultSource::LocalPath(path) => {
-                let local_write_token = local_write_token
-                    .context("local vault write is missing its merge snapshot token")?;
-                let commit =
-                    self.local_files
-                        .write_token_if_unchanged(&path, local_write_token, bytes)?;
+                let commit = self
+                    .local_files
+                    .write_if_unchanged(&path, expected, bytes)?;
                 self.record_local_save_warnings(commit.warnings);
                 Ok(Some(commit.fingerprint))
             }
@@ -5282,10 +5266,11 @@ impl Runtime {
     }
 
     fn record_local_save_warnings(&mut self, warnings: Vec<String>) {
-        let stderr = std::io::stderr();
-        write_local_save_warnings(&mut stderr.lock(), &warnings);
-        #[cfg(test)]
-        self.local_save_warnings.extend(warnings);
+        for warning in warnings {
+            eprintln!("vaultkern local save warning: {warning}");
+            #[cfg(test)]
+            self.local_save_warnings.push(warning);
+        }
     }
 
     fn current_unix_time(&self) -> u64 {
@@ -7000,12 +6985,6 @@ fn query_error_response(error: anyhow::Error) -> RuntimeResponse {
     })
 }
 
-fn write_local_save_warnings(writer: &mut dyn std::io::Write, warnings: &[String]) {
-    for warning in warnings {
-        let _ = writeln!(writer, "vaultkern local save warning: {warning}");
-    }
-}
-
 fn validate_passkey_ceremony_ttl(
     registered_at_epoch_ms: u64,
     expires_at_epoch_ms: u64,
@@ -7727,47 +7706,6 @@ mod tests {
     }
 
     #[test]
-    fn save_conflict_does_not_install_an_unpublished_merge_candidate() {
-        let mut runtime = Runtime::for_tests();
-        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        let generation_a = std::fs::read(&opened.path).unwrap();
-        let mut generation_b_vault = runtime.loaded_vault(&opened.vault_id).unwrap().clone();
-        let external_entry = Entry::new("external-generation-b");
-        let external_entry_id = external_entry.id.to_string();
-        generation_b_vault.root.entries.push(external_entry);
-        let mut key = CompositeKey::default();
-        key.add_password("demo-password");
-        let generation_b = KeepassCore::new()
-            .save_kdbx(&generation_b_vault, &key, SaveProfile::recommended())
-            .unwrap();
-        std::fs::write(&opened.path, generation_b).unwrap();
-        let path = opened.path.clone();
-        runtime.local_files =
-            LocalFileVaultSourceProvider::with_before_write_hook(std::sync::Arc::new(move || {
-                std::fs::write(&path, &generation_a).unwrap()
-            }));
-
-        let error = runtime
-            .save_vault(&opened.vault_id)
-            .expect_err("a newer source generation must win the local CAS");
-
-        assert!(matches!(
-            error.downcast_ref::<LocalFileCommitError>(),
-            Some(LocalFileCommitError::Conflict { .. })
-        ));
-        assert!(
-            runtime
-                .loaded_vault(&opened.vault_id)
-                .unwrap()
-                .root
-                .entries
-                .iter()
-                .all(|entry| entry.id.to_string() != external_entry_id),
-            "the failed attempt must not turn source B into local intent"
-        );
-    }
-
-    #[test]
     fn save_command_reports_source_change_as_conflict() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
@@ -7807,36 +7745,6 @@ mod tests {
         assert_eq!(error.code, "conflict");
         assert!(error.message.contains("local vault write conflict"));
         assert!(!std::path::Path::new(&opened.path).exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn save_rejects_same_content_source_redirection() {
-        use std::os::unix::fs::symlink;
-
-        let mut runtime = Runtime::for_tests();
-        let (dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        create_demo_entry(&mut runtime, &opened.vault_id);
-        let redirected = dir.path().join("redirected.kdbx");
-        let generation_a = std::fs::read(&opened.path).unwrap();
-        std::fs::write(&redirected, &generation_a).unwrap();
-        let path = opened.path.clone();
-        let redirected_for_hook = redirected.clone();
-        runtime.local_files =
-            LocalFileVaultSourceProvider::with_before_write_hook(std::sync::Arc::new(move || {
-                std::fs::remove_file(&path).unwrap();
-                symlink(&redirected_for_hook, &path).unwrap();
-            }));
-
-        let error = runtime
-            .save_vault(&opened.vault_id)
-            .expect_err("a redirected source must not receive the candidate generation");
-
-        assert!(matches!(
-            error.downcast_ref::<LocalFileCommitError>(),
-            Some(LocalFileCommitError::Conflict { .. })
-        ));
-        assert_eq!(std::fs::read(redirected).unwrap(), generation_a);
     }
 
     #[test]
@@ -7901,26 +7809,6 @@ mod tests {
         ));
         assert_eq!(runtime.local_save_warnings.len(), 1);
         assert!(runtime.local_save_warnings[0].contains("retained durable backup"));
-    }
-
-    #[test]
-    fn local_save_warning_output_failure_is_non_fatal() {
-        struct FailingWriter;
-
-        impl std::io::Write for FailingWriter {
-            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "closed diagnostics sink",
-                ))
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        write_local_save_warnings(&mut FailingWriter, &["retained durable backup".to_owned()]);
     }
 
     #[test]

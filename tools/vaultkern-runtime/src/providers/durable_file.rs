@@ -21,7 +21,6 @@ pub(crate) enum DurableFaultPoint {
     TempReadbackVerified,
     BackupPublished,
     BeforeTargetReplace,
-    AfterTargetValidation,
     TargetReplaced,
     ParentSynced,
     Cleanup,
@@ -178,7 +177,6 @@ impl DurableFaultPoint {
             "TempReadbackVerified" => Self::TempReadbackVerified,
             "BackupPublished" => Self::BackupPublished,
             "BeforeTargetReplace" => Self::BeforeTargetReplace,
-            "AfterTargetValidation" => Self::AfterTargetValidation,
             "TargetReplaced" => Self::TargetReplaced,
             "ParentSynced" => Self::ParentSynced,
             "Cleanup" => Self::Cleanup,
@@ -328,13 +326,6 @@ pub(crate) enum TargetExpectation {
 struct ReplaceError {
     published: bool,
     source: io::Error,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ReplaceOutcome {
-    exchanged: bool,
-    #[cfg(windows)]
-    backed_up: bool,
 }
 
 #[cfg(unix)]
@@ -896,7 +887,7 @@ pub(crate) fn publish_temp(
             source,
         });
     }
-    if let Err(source) = verify_target_expectation(target, target_expectation.clone()) {
+    if let Err(source) = verify_target_expectation(target, target_expectation) {
         let _ = temp.discard();
         return Err(PublishError {
             published: false,
@@ -904,91 +895,17 @@ pub(crate) fn publish_temp(
             source,
         });
     }
-    if let Err(source) = faults.check(DurableFaultPoint::AfterTargetValidation) {
-        let _ = temp.discard();
-        return Err(PublishError {
-            published: false,
-            target_conflict: false,
-            source,
-        });
-    }
-    let expectation_for_displaced = target_expectation.clone();
-    let replace_outcome = match replace_file(temp.path(), target, backup) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            if error.published {
-                drop(temp);
-            } else {
-                let _ = temp.discard();
-            }
-            return Err(PublishError {
-                published: error.published,
-                target_conflict: false,
-                source: error.source,
-            });
-        }
-    };
-    if replace_outcome.exchanged {
-        if let Err(source) =
-            verify_target_expectation(temp.path(), expectation_for_displaced.clone())
-        {
-            let rollback = rollback_exchange(&mut temp, target);
-            return match rollback {
-                Ok(()) => {
-                    let _ = temp.discard();
-                    Err(PublishError {
-                        published: false,
-                        target_conflict: true,
-                        source,
-                    })
-                }
-                Err(rollback_error) => {
-                    drop(temp);
-                    Err(PublishError {
-                        published: true,
-                        target_conflict: true,
-                        source: io::Error::other(format!(
-                            "target changed after validation ({source}); rollback failed: {rollback_error}"
-                        )),
-                    })
-                }
-            };
-        }
-        if let Err(source) = remove_if_exists(temp.path()) {
+    if let Err(error) = replace_file(temp.path(), target, backup) {
+        if error.published {
             drop(temp);
-            return Err(PublishError {
-                published: true,
-                target_conflict: false,
-                source,
-            });
+        } else {
+            let _ = temp.discard();
         }
-    }
-    #[cfg(windows)]
-    if replace_outcome.backed_up {
-        let backup = backup.expect("backup publication requires a backup path");
-        if let Err(source) = verify_target_expectation(backup, target_expectation) {
-            let rollback = rollback_windows_replace(&mut temp, target, backup);
-            return match rollback {
-                Ok(()) => {
-                    let _ = temp.discard();
-                    Err(PublishError {
-                        published: false,
-                        target_conflict: true,
-                        source,
-                    })
-                }
-                Err(rollback_error) => {
-                    drop(temp);
-                    Err(PublishError {
-                        published: true,
-                        target_conflict: true,
-                        source: io::Error::other(format!(
-                            "target changed after validation ({source}); rollback failed: {rollback_error}"
-                        )),
-                    })
-                }
-            };
-        }
+        return Err(PublishError {
+            published: error.published,
+            target_conflict: false,
+            source: error.source,
+        });
     }
     let published_metadata = fs::symlink_metadata(target).map_err(|source| PublishError {
         published: true,
@@ -1158,144 +1075,16 @@ fn verify_target_content(
     Ok(())
 }
 
-fn rollback_exchange(temp: &mut VerifiedTemp, target: &Path) -> io::Result<()> {
-    let displaced_metadata = fs::symlink_metadata(temp.path())?;
-    reject_reparse_point(&displaced_metadata)?;
-    let displaced_identity = path_file_identity(temp.path(), &displaced_metadata)?;
-    let candidate_identity = temp.identity;
-
-    exchange_paths(temp.path(), target)?;
-
-    let restored_metadata = fs::symlink_metadata(target)?;
-    reject_reparse_point(&restored_metadata)?;
-    let candidate_path_metadata = fs::symlink_metadata(temp.path())?;
-    reject_reparse_point(&candidate_path_metadata)?;
-    if path_file_identity(target, &restored_metadata)? != displaced_identity
-        || path_file_identity(temp.path(), &candidate_path_metadata)? != candidate_identity
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "target changed while rolling back the conditional exchange",
-        ));
-    }
-    temp.verify_opened_contents()?;
-    sync_parent(target)
-}
-
-#[cfg(windows)]
-fn rollback_windows_replace(
-    temp: &mut VerifiedTemp,
-    target: &Path,
-    displaced_backup: &Path,
-) -> io::Result<()> {
-    let displaced_metadata = fs::symlink_metadata(displaced_backup)?;
-    reject_reparse_point(&displaced_metadata)?;
-    let displaced_identity = path_file_identity(displaced_backup, &displaced_metadata)?;
-    let candidate_identity = temp.identity;
-    match fs::symlink_metadata(temp.path()) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "durable temp path reappeared before rollback",
-            ));
-        }
-    }
-
-    replace_file(displaced_backup, target, Some(temp.path())).map_err(|error| error.source)?;
-
-    let restored_metadata = fs::symlink_metadata(target)?;
-    reject_reparse_point(&restored_metadata)?;
-    let candidate_path_metadata = fs::symlink_metadata(temp.path())?;
-    reject_reparse_point(&candidate_path_metadata)?;
-    if path_file_identity(target, &restored_metadata)? != displaced_identity
-        || path_file_identity(temp.path(), &candidate_path_metadata)? != candidate_identity
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "target changed while rolling back the conditional replacement",
-        ));
-    }
-    temp.verify_opened_contents()?;
-    sync_published_target(target)?;
-    sync_parent(target)
-}
-
-#[cfg(target_os = "linux")]
-fn exchange_paths(left: &Path, right: &Path) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let left = std::ffi::CString::new(left.as_os_str().as_bytes())?;
-    let right = std::ffi::CString::new(right.as_os_str().as_bytes())?;
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            left.as_ptr(),
-            libc::AT_FDCWD,
-            right.as_ptr(),
-            libc::RENAME_EXCHANGE,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn exchange_paths(left: &Path, right: &Path) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let left = std::ffi::CString::new(left.as_os_str().as_bytes())?;
-    let right = std::ffi::CString::new(right.as_os_str().as_bytes())?;
-    let result = unsafe { libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn exchange_paths(_left: &Path, _right: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "atomic file exchange is unavailable on this platform",
-    ))
-}
-
 #[cfg(not(windows))]
-fn replace_file(
-    temp: &Path,
-    target: &Path,
-    backup: Option<&Path>,
-) -> Result<ReplaceOutcome, ReplaceError> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if backup.is_some() {
-        exchange_paths(temp, target).map_err(|source| ReplaceError {
-            published: false,
-            source,
-        })?;
-        return Ok(ReplaceOutcome { exchanged: true });
-    }
-
-    fs::rename(temp, target)
-        .map(|()| ReplaceOutcome { exchanged: false })
-        .map_err(|source| ReplaceError {
-            published: false,
-            source,
-        })
+fn replace_file(temp: &Path, target: &Path, _backup: Option<&Path>) -> Result<(), ReplaceError> {
+    fs::rename(temp, target).map_err(|source| ReplaceError {
+        published: false,
+        source,
+    })
 }
 
 #[cfg(windows)]
-fn replace_file(
-    temp: &Path,
-    target: &Path,
-    backup: Option<&Path>,
-) -> Result<ReplaceOutcome, ReplaceError> {
+fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(), ReplaceError> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1339,10 +1128,7 @@ fn replace_file(
             source: io::Error::last_os_error(),
         })
     } else {
-        Ok(ReplaceOutcome {
-            exchanged: false,
-            backed_up: replacing_existing && backup.is_some(),
-        })
+        Ok(())
     }
 }
 
