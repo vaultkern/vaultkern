@@ -1,6 +1,6 @@
 # 001 — Sync and Merge Semantics
 
-Status: **Decided — r12** (seven external review rounds + four freeze-hardening rounds). 2026-07-13.
+Status: **Frozen — r12** (seven external review rounds + four freeze-hardening rounds). 2026-07-13. Amendments only via the 000 revision process; contracts evolve additively per the 003 version matrix.
 Upstream decision: D1 (000).
 
 ## Model

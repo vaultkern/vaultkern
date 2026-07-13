@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Decided — r12** (seven external review rounds + four freeze-hardening rounds). 2026-07-13.
+Status: **Frozen — r12** (seven external review rounds + four freeze-hardening rounds). 2026-07-13. Amendments only via the 000 revision process; contracts evolve additively per the 003 version matrix.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
