@@ -176,22 +176,90 @@ pub struct DeadLetterRecord {
     /// When this dead-letter entry was captured, seconds since the Unix
     /// epoch.
     pub captured_at: u64,
-    /// The original frame's raw bytes — `len ‖ record_version ‖ body ‖
-    /// crc` exactly as they appeared in the segment — encoded as
-    /// **standard base64 (RFC 4648 §4, with padding)**. For
-    /// `corruption_unreachable` entries this holds the entire unreachable
-    /// region (failing frame through EOF) rather than one well-formed
-    /// frame. A valid frame is at least 10 bytes, hence at least 16
-    /// base64 characters.
+    /// The archived raw bytes, encoded as **standard base64 (RFC 4648 §4,
+    /// with padding)**. Two distinct semantics (r12):
+    ///
+    /// - For per-record reasons (`kdf_rotated`, `payload_conflict`,
+    ///   `user_discarded`, `unknown_kind`, validation failures): one
+    ///   **complete frame** — `len ‖ record_version ‖ body ‖ crc` exactly
+    ///   as it appeared in the segment.
+    /// - For `corruption_unreachable`: the **raw unreachable region**
+    ///   (failing frame through EOF), which is *not* a well-formed frame
+    ///   and can be as short as **one byte** (e.g. a tail torn inside the
+    ///   length prefix itself).
+    ///
+    /// Hence the only floor is non-emptiness. At most
+    /// [`DeadLetterRecord::MAX_ARCHIVED_BYTES`] raw bytes are stored
+    /// here; a longer region keeps its prefix, with `region_len` and
+    /// `archived_segment` recording the rest (r12).
     #[cfg_attr(
         feature = "json-schema",
-        schemars(length(min = 16), regex(pattern = r"^[A-Za-z0-9+/]+={0,2}$"))
+        schemars(length(min = 1), regex(pattern = r"^[A-Za-z0-9+/]+={0,2}$"))
     )]
     pub frame_b64: String,
+    /// Total byte length of the full original region, whether or not it
+    /// was truncated to fit `frame_b64`. Additive field (r12); `0` in a
+    /// pre-r12 document means "unrecorded — equal to the archived bytes".
+    #[serde(default)]
+    pub region_len: u64,
+    /// When the region exceeded [`DeadLetterRecord::MAX_ARCHIVED_BYTES`]:
+    /// the file name of the corrupt segment, renamed to `*.corrupt` and
+    /// kept whole in the container — never parsed again, read directly by
+    /// the support procedure. `None` when nothing was truncated. Additive
+    /// field (r12).
+    #[serde(default)]
+    pub archived_segment: Option<String>,
 }
 
 impl DeadLetterRecord {
     pub const SCHEMA_VERSION: u32 = 1;
+
+    /// Cap on raw bytes archived in `frame_b64`: 1 MiB, deliberately
+    /// equal to the frame-body cap ([`crate::framing::MAX_RECORD_LEN`]) —
+    /// a dead-letter entry is never larger than the largest legal record
+    /// (003 r12). Diagnostics DTOs carry only counts and sizes, never
+    /// bytes.
+    pub const MAX_ARCHIVED_BYTES: usize = crate::framing::MAX_RECORD_LEN as usize;
+
+    /// Assembles a dead-letter entry from a raw byte region under the
+    /// production cap ([`Self::MAX_ARCHIVED_BYTES`]). Pure assembly — no
+    /// I/O: renaming an over-limit segment to `*.corrupt` is the caller's
+    /// act, reported here via `archived_segment`.
+    pub fn archive(
+        reason: impl Into<String>,
+        captured_at: u64,
+        region: &[u8],
+        archived_segment: Option<String>,
+    ) -> Self {
+        Self::archive_with_limit(
+            reason,
+            captured_at,
+            region,
+            Self::MAX_ARCHIVED_BYTES,
+            archived_segment,
+        )
+    }
+
+    /// [`Self::archive`] with an injectable cap — the test seam that pins
+    /// the truncation rule (store the prefix, record the full length);
+    /// production code uses [`Self::archive`].
+    pub fn archive_with_limit(
+        reason: impl Into<String>,
+        captured_at: u64,
+        region: &[u8],
+        max_archived_bytes: usize,
+        archived_segment: Option<String>,
+    ) -> Self {
+        use base64::Engine as _;
+        let stored = &region[..region.len().min(max_archived_bytes)];
+        Self {
+            reason: reason.into(),
+            captured_at,
+            frame_b64: base64::engine::general_purpose::STANDARD.encode(stored),
+            region_len: region.len() as u64,
+            archived_segment,
+        }
+    }
 }
 
 /// The frozen `DeadLetterRecord.reason` vocabulary (003 r10/r11).
@@ -235,7 +303,12 @@ pub mod dead_letter_reason {
 /// Deliberately does **not** derive `Clone`: the passkey variant carries
 /// entry-level secret material, and secret-bearing DTOs do not derive
 /// Clone (D5 r11 contract rule — copies of secrets must be explicit and
-/// justified, never ambient).
+/// justified, never ambient). Guarded against regression:
+///
+/// ```compile_fail
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<vaultkern_runtime_protocol::contracts::JournalOpKind>();
+/// ```
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
@@ -293,7 +366,13 @@ pub enum JournalOpKind {
 /// never enter logs; Debug/Display representations are redacted) — the
 /// private key renders as `[REDACTED]`. Deliberately does **not** derive
 /// `Clone` (D5 r11: secret-bearing DTOs do not derive Clone; a copy of a
-/// private key must be an explicit, justified operation).
+/// private key must be an explicit, justified operation). Guarded
+/// against regression:
+///
+/// ```compile_fail
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<vaultkern_runtime_protocol::contracts::PasskeyRegistrationPayload>();
+/// ```
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct PasskeyRegistrationPayload {

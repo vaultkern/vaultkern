@@ -149,16 +149,19 @@ fn sealed_journal_record() -> JournalRecord {
 }
 
 fn dead_letter_record() -> DeadLetterRecord {
-    // 003 r11: the dead-letter archives the original frame's raw bytes
-    // verbatim. The fixture frame wraps the sealed golden record exactly
-    // as the binary segment golden does.
+    // 003 r11/r12: the dead-letter archives the original frame's raw
+    // bytes verbatim, assembled through the frozen archive() rule. The
+    // fixture frame wraps the sealed golden record exactly as the binary
+    // segment golden does; it is far below the 1 MiB cap, so nothing is
+    // truncated and archived_segment stays None.
     let body = serde_json::to_vec(&sealed_journal_record()).unwrap();
     let frame = framing::encode_frame(JournalRecord::SCHEMA_VERSION as u16, &body).unwrap();
-    DeadLetterRecord {
-        reason: dead_letter_reason::PAYLOAD_CONFLICT.into(),
-        captured_at: 1_783_900_803,
-        frame_b64: base64::engine::general_purpose::STANDARD.encode(&frame),
-    }
+    DeadLetterRecord::archive(
+        dead_letter_reason::PAYLOAD_CONFLICT,
+        1_783_900_803,
+        &frame,
+        None,
+    )
 }
 
 fn fixture_passkey() -> EntryPasskeyDto {
@@ -247,11 +250,68 @@ fn dead_letter_frame_bytes_roundtrip_to_the_original_record() {
     let frame_bytes = base64::engine::general_purpose::STANDARD
         .decode(&dead_letter.frame_b64)
         .expect("frame_b64 is valid base64");
+    // Untruncated entry: region_len records the archived length, no
+    // segment was renamed.
+    assert_eq!(dead_letter.region_len, frame_bytes.len() as u64);
+    assert_eq!(dead_letter.archived_segment, None);
     let decoded = framing::decode_frame(&frame_bytes).expect("archived frame decodes");
     assert_eq!(decoded.record_version, 1);
     let record: JournalRecord =
         serde_json::from_slice(&decoded.body).expect("archived body re-parses");
     assert_eq!(record, sealed_journal_record());
+}
+
+#[test]
+fn dead_letter_archive_truncates_over_limit_regions_to_the_prefix() {
+    // M2 (r12), via the injectable-limit test seam: an over-limit region
+    // stores its prefix, records the full length, and names the renamed
+    // *.corrupt segment. Production uses MAX_ARCHIVED_BYTES (= 1 MiB,
+    // the record cap).
+    assert_eq!(
+        DeadLetterRecord::MAX_ARCHIVED_BYTES,
+        framing::MAX_RECORD_LEN as usize
+    );
+    let region: Vec<u8> = (0..100u8).collect();
+    let entry = DeadLetterRecord::archive_with_limit(
+        dead_letter_reason::CORRUPTION_UNREACHABLE,
+        1_783_900_804,
+        &region,
+        10,
+        Some("0197f9a0-writer.corrupt".into()),
+    );
+    let stored = base64::engine::general_purpose::STANDARD
+        .decode(&entry.frame_b64)
+        .unwrap();
+    assert_eq!(stored, &region[..10], "prefix only");
+    assert_eq!(entry.region_len, 100, "full length recorded");
+    assert_eq!(
+        entry.archived_segment.as_deref(),
+        Some("0197f9a0-writer.corrupt")
+    );
+    // Under-limit regions are stored whole.
+    let whole = DeadLetterRecord::archive_with_limit(
+        dead_letter_reason::CORRUPTION_UNREACHABLE,
+        1_783_900_804,
+        &region,
+        1000,
+        None,
+    );
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&whole.frame_b64)
+            .unwrap(),
+        region
+    );
+    assert_eq!(whole.region_len, 100);
+
+    // Additive evolution: a pre-r12 document without the two new fields
+    // still deserializes (region_len defaults to 0, segment to None).
+    let legacy: DeadLetterRecord = serde_json::from_str(
+        r#"{"reason":"payload_conflict","captured_at":1,"frame_b64":"AA=="}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.region_len, 0);
+    assert_eq!(legacy.archived_segment, None);
 }
 
 #[test]
@@ -592,11 +652,13 @@ fn schema_constrains_op_id_to_uuidv7_and_payload_sealed_to_base64() {
     assert!(sealed_pattern.is_match(FAKE_PAYLOAD_SEALED_B64));
     assert!(!sealed_pattern.is_match("not base64!!"));
 
-    // The dead-letter's archived frame carries the same base64 constraint
-    // plus the one-valid-frame floor (10 bytes ⇒ 16 base64 chars).
+    // The dead-letter's archived bytes carry the same base64 constraint;
+    // the only floor is non-emptiness (r12): a corruption_unreachable
+    // region can be a single raw byte, so no frame-size floor applies.
     let frame = schema_property("dead_letter_record.schema.json", "frame_b64");
-    assert!(frame["minLength"].as_u64().unwrap() >= 16);
+    assert_eq!(frame["minLength"].as_u64().unwrap(), 1);
     let frame_pattern = regex::Regex::new(frame["pattern"].as_str().unwrap()).unwrap();
+    assert!(frame_pattern.is_match("AA=="), "1 raw byte is archivable");
     assert!(!frame_pattern.is_match("not base64!!"));
 }
 

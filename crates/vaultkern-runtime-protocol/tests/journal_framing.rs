@@ -14,7 +14,10 @@
 
 use std::path::PathBuf;
 
-use vaultkern_runtime_protocol::contracts::JournalRecord;
+use base64::Engine as _;
+use vaultkern_runtime_protocol::contracts::{
+    DeadLetterRecord, JournalRecord, dead_letter_reason,
+};
 use vaultkern_runtime_protocol::framing::{
     self, FramingError, MAX_RECORD_LEN, SEGMENT_HEADER_LEN,
 };
@@ -127,5 +130,97 @@ fn oversized_length_prefix_is_corruption_not_allocation() {
     assert_eq!(
         framing::decode_frame(&forged),
         Err(FramingError::RecordTooLong(MAX_RECORD_LEN + 1))
+    );
+}
+
+#[test]
+fn one_to_nine_byte_torn_tails_archive_as_valid_dead_letters() {
+    // B1 (r12): a sealed segment can end inside the length prefix or the
+    // version field — 1 to 9 bytes of unreachable tail, shorter than any
+    // well-formed frame. Each such region must (a) parse as Truncated and
+    // (b) archive into a schema-valid DeadLetterRecord.
+    let segment = load_golden();
+    let frame = &segment[SEGMENT_HEADER_LEN..];
+    for cut in 1..=9usize {
+        let torn = &frame[..cut];
+        assert_eq!(
+            framing::decode_frame(torn),
+            Err(FramingError::Truncated),
+            "cut at {cut}"
+        );
+        let entry = DeadLetterRecord::archive(
+            dead_letter_reason::CORRUPTION_UNREACHABLE,
+            1_783_900_805,
+            torn,
+            None,
+        );
+        assert!(!entry.frame_b64.is_empty(), "non-empty floor holds");
+        assert_eq!(entry.region_len, cut as u64);
+        // Round-trips through the wire format and back to the same bytes.
+        let json = serde_json::to_string(&entry).unwrap();
+        let decoded: DeadLetterRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, entry);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&decoded.frame_b64)
+                .unwrap(),
+            torn
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// M3 (r12): cross-serializer acceptance — "any schema-conforming JSON"
+// as a tested fact, not a slogan. Four non-Rust-styled bodies must (a)
+// deserialize to the very same record and (b) frame + CRC + decode
+// cleanly with their exact bytes.
+// ---------------------------------------------------------------------
+
+fn assert_foreign_body_accepted(body: &[u8]) {
+    // (a) Deserializes to the same record as the golden.
+    let record: JournalRecord =
+        serde_json::from_slice(body).expect("foreign-styled body deserializes");
+    assert_eq!(record, golden_record());
+    // (b) Frames, CRC-checks, and decodes with the exact foreign bytes.
+    let frame = framing::encode_frame(1, body).expect("frames");
+    let decoded = framing::decode_frame(&frame).expect("CRC + decode pass");
+    assert_eq!(decoded.body, body, "the writer's exact bytes survive");
+}
+
+#[test]
+fn accepts_reordered_fields() {
+    assert_foreign_body_accepted(
+        br#"{"created_at":1783900801,"base_fingerprint":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","nonce":"AAECAwQFBgcICQoL","payload_sealed":"paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWl","vault_ref_id":"vault-ref-0f6c","op_id":"0197f9a0-5c00-7000-8000-3b9e21f04d11","seq":1}"#,
+    );
+}
+
+#[test]
+fn accepts_unknown_fields() {
+    assert_foreign_body_accepted(
+        br#"{"seq":1,"op_id":"0197f9a0-5c00-7000-8000-3b9e21f04d11","vault_ref_id":"vault-ref-0f6c","payload_sealed":"paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWl","nonce":"AAECAwQFBgcICQoL","base_fingerprint":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","created_at":1783900801,"x_writer_hint":{"platform":"ios","nested":[1,2,3]}}"#,
+    );
+}
+
+#[test]
+fn accepts_unicode_escaped_strings() {
+    // - is '-' — a serializer may \uXXXX-escape anything it likes;
+    // the decoded value, not the escape form, is what the schema sees.
+    assert_foreign_body_accepted(
+        br#"{"seq":1,"op_id":"0197f9a0-5c00-7000-8000-3b9e21f04d11","vault_ref_id":"vault\u002dref\u002d0f6c","payload_sealed":"paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWl","nonce":"AAECAwQFBgcICQoL","base_fingerprint":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","created_at":1783900801}"#,
+    );
+}
+
+#[test]
+fn accepts_pretty_printed_bodies() {
+    assert_foreign_body_accepted(
+        br#"{
+    "seq": 1,
+    "op_id": "0197f9a0-5c00-7000-8000-3b9e21f04d11",
+    "vault_ref_id": "vault-ref-0f6c",
+    "payload_sealed": "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWl",
+    "nonce": "AAECAwQFBgcICQoL",
+    "base_fingerprint": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "created_at": 1783900801
+}"#,
     );
 }

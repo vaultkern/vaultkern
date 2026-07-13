@@ -11,13 +11,13 @@ version.workspace = true
 json-schema = ["dep:schemars"]
 
 [dependencies]
+# base64: DeadLetterRecord::archive encodes archived raw frame bytes.
+base64.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-# base64: builds DeadLetterRecord.frame_b64 fixtures from raw frame bytes.
-base64.workspace = true
 # Used by the contract-freeze negative tests to execute the format
 # constraints (pattern/minLength) frozen in the schema artifacts. The
 # jsonschema crate would validate whole documents, but it is not available

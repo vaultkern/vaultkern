@@ -9,6 +9,14 @@
     "reason"
   ],
   "properties": {
+    "archived_segment": {
+      "description": "When the region exceeded [`DeadLetterRecord::MAX_ARCHIVED_BYTES`]: the file name of the corrupt segment, renamed to `*.corrupt` and kept whole in the container — never parsed again, read directly by the support procedure. `None` when nothing was truncated. Additive field (r12).",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "captured_at": {
       "description": "When this dead-letter entry was captured, seconds since the Unix epoch.",
       "type": "integer",
@@ -16,15 +24,22 @@
       "minimum": 0.0
     },
     "frame_b64": {
-      "description": "The original frame's raw bytes — `len ‖ record_version ‖ body ‖ crc` exactly as they appeared in the segment — encoded as **standard base64 (RFC 4648 §4, with padding)**. For `corruption_unreachable` entries this holds the entire unreachable region (failing frame through EOF) rather than one well-formed frame. A valid frame is at least 10 bytes, hence at least 16 base64 characters.",
+      "description": "The archived raw bytes, encoded as **standard base64 (RFC 4648 §4, with padding)**. Two distinct semantics (r12):\n\n- For per-record reasons (`kdf_rotated`, `payload_conflict`, `user_discarded`, `unknown_kind`, validation failures): one **complete frame** — `len ‖ record_version ‖ body ‖ crc` exactly as it appeared in the segment. - For `corruption_unreachable`: the **raw unreachable region** (failing frame through EOF), which is *not* a well-formed frame and can be as short as **one byte** (e.g. a tail torn inside the length prefix itself).\n\nHence the only floor is non-emptiness. At most [`DeadLetterRecord::MAX_ARCHIVED_BYTES`] raw bytes are stored here; a longer region keeps its prefix, with `region_len` and `archived_segment` recording the rest (r12).",
       "type": "string",
-      "minLength": 16,
+      "minLength": 1,
       "pattern": "^[A-Za-z0-9+/]+={0,2}$"
     },
     "reason": {
       "description": "Why the record was dead-lettered. Frozen values so far (an additive vocabulary; see [`dead_letter_reason`]): `kdf_rotated`, `payload_conflict`, `user_discarded`, `unknown_kind`, `corruption_unreachable`, plus replay validation failures. Unknown reason strings are displayed verbatim and handled generically (003 r11, vocabulary evolution).",
       "type": "string",
       "minLength": 1
+    },
+    "region_len": {
+      "description": "Total byte length of the full original region, whether or not it was truncated to fit `frame_b64`. Additive field (r12); `0` in a pre-r12 document means \"unrecorded — equal to the archived bytes\".",
+      "default": 0,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
     }
   }
 }

@@ -1,6 +1,6 @@
 # 003 — Quick Unlock State Machine and Process Topology
 
-Status: **Decided — r11** (seven external review rounds + three freeze-hardening rounds). 2026-07-13.
+Status: **Decided — r12** (seven external review rounds + four freeze-hardening rounds). 2026-07-13.
 Upstream decisions: D3, D4, D5 (000).
 
 ## Part 1: the quick unlock state machine (platform-neutral, designed once)
@@ -185,8 +185,7 @@ suite.
 
 ```
 JournalRecord {
-    seq:              u64,           // normally monotonic within its writer's segment;
-                                     // diagnostic only — plays no part in correctness
+    seq:              u64,           // diagnostic field — see the framing note
     op_id:            UUIDv7,        // idempotency identity of the mutation
     vault_ref_id:     string,        // plaintext: routing + pre-replay validation;
                                      // authenticated via the sealing AAD (below)
@@ -249,7 +248,8 @@ JournalRecord {
   correctness property depends on the body's byte shape. (The only place
   that does require byte determinism is 005's canonical entry
   serialization — a binary encoding feeding the tie-break hash — which has
-  nothing to do with journal JSON.) The maximum record length is **1
+  nothing to do with journal JSON; 005's own Boundary note states the
+  same separation from its side.) The maximum record length is **1
   MiB**, enforced in both directions: a writer refuses to append an
   oversized record, and a reader treats an oversized `len` as corruption.
   A record failing length or CRC checks is discarded and counted
@@ -257,12 +257,14 @@ JournalRecord {
   corruption adjudication follows the three-case algorithm below.
   `base_fingerprint`, `created_at`, and `seq` are **diagnostic fields**:
   implausible values never cause a record to be rejected (only framing
-  does), and `seq` holes — a single writer that crashed mid-append —
-  are tolerated. The **dead-letter file uses this same framing**; its
-  body is a `DeadLetterRecord { reason, captured_at, frame_b64 }`
-  document that carries the original frame's **raw bytes**
-  (`len ‖ record_version ‖ body ‖ crc`, standard base64) verbatim — never
-  a re-serialization.
+  does). `seq` is normally monotonic within its writer's segment but
+  plays no part in correctness; `seq` holes — a single writer that
+  crashed mid-append — are tolerated. The **dead-letter file uses this same framing**; its
+  body is a `DeadLetterRecord { reason, captured_at, frame_b64,
+  region_len, archived_segment }` document that carries the original
+  frame's **raw bytes** (`len ‖ record_version ‖ body ‖ crc`, standard
+  base64) verbatim — never a re-serialization (size cap and truncation
+  fields per the corruption-algorithm note below).
 - **Storage — one segment file per writer, never shared**: each writer
   instance (an extension process) appends to its own segment file, named by
   its writer id (a per-instance UUID), inside the app group container
@@ -395,7 +397,11 @@ JournalRecord {
   rule holds without exception) and is excluded from replay by the
   dead-letter marking. Because the capture is the raw frame, unknown
   fields, the writer's original serialization, and even undecodable bodies
-  survive intact; a retry re-parses from those bytes. When the
+  survive intact; a retry re-parses from those bytes. No extra encryption
+  layer is needed for the dead-letter file: the archived frame's payload
+  is already sealed (under the HKDF(transformed) key), the only plaintext
+  is the routing header — its at-rest protection is exactly that of the
+  journal segments it copies from. When the
   segment is eventually sealed and deleted, dead-lettered `op_id`s count as
   resolved for the whole-segment-deletion accounting. Dead-letter records
   never enter the applied set and are invisible to the applied-set
@@ -428,6 +434,15 @@ JournalRecord {
   verbatim — and counted in the diagnostics surfaced to the UI. The bytes
   remain available for manual forensics: "never silently lost" is made
   literal.
+  **Archive size cap (r12)**: a single dead-letter entry archives at most
+  **1 MiB** of raw bytes — deliberately equal to the record cap, so a
+  dead-letter entry is never larger than the largest legal record. A
+  longer unreachable region stores its first 1 MiB as the prefix, records
+  the full length in `region_len`, and the corrupt segment file itself is
+  renamed to `*.corrupt` and kept whole in the container (named by
+  `archived_segment`; never parsed again, read directly by the support
+  procedure). Diagnostics DTOs carry only counts and sizes — never
+  bytes.
 - **Writer-id lifecycle**: a writer id is a fresh UUID per process instance,
   never reused. Segments of dead writers are replayed and pruned by the app
   like any other; a fully-pruned segment file is deleted.
@@ -471,6 +486,15 @@ meets a higher one:
 | `record_version` | frame | the JournalRecord body shape changes incompatibly | dead-letter that record (raw bytes preserved, `unknown_kind`-family semantics); the segment is not blocked |
 | contract `SCHEMA_VERSION`s | JSON document (CacheManifest / JournalRecord / DeadLetterRecord / ledger) | an incompatible document change (additive changes do **not** increment) | as above per domain: cache manifest ⇒ treated as no cache (fail closed); ledger ⇒ quick unlock gated; journal ⇒ dead-letter with bytes preserved |
 | `protocol_version` | handshake | protocol majors | below the core's minimum ⇒ refused with a self-describing error DTO (rule 4) |
+
+**Additive-field iron law (r12)**: an additive field on `JournalRecord`
+or on any op kind's payload MUST be **ignore-safe** — an old reader that
+drops it must not change the replay semantics of the fields it does
+understand; this is enforced at review time for every added field. Any
+field whose omission would mis-replay the record is by definition an
+incompatible change ⇒ bump `record_version`, and old readers dead-letter
+it under the existing rule instead of silently mis-applying it. In one
+line: **additive = ignore-safe; semantic = version bump ⇒ dead-letter.**
 
 ### Generation registry (all "generations" in one place)
 
