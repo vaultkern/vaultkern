@@ -4,7 +4,7 @@ use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
@@ -207,85 +207,117 @@ pub(crate) struct ExclusiveFileLock {
 
 impl ExclusiveFileLock {
     pub(crate) fn acquire(path: &Path) -> io::Result<Self> {
-        if let Some(parent) = path.parent() {
-            let metadata = fs::symlink_metadata(parent)?;
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "durable lock parent is not a real directory",
-                ));
-            }
-            reject_reparse_point(&metadata)?;
-        }
-        let mut options = OpenOptions::new();
-        options.create(true).read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-            let file = options.open(path)?;
-            let metadata = file.metadata()?;
-            let path_metadata = fs::symlink_metadata(path)?;
-            if !metadata.is_file()
-                || metadata.dev() != path_metadata.dev()
-                || metadata.ino() != path_metadata.ino()
-                || metadata.nlink() != 1
-                || path_metadata.nlink() != 1
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "durable lock path is not a private regular file",
-                ));
-            }
-            if metadata.uid() != unsafe { libc::geteuid() } {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "durable lock path is owned by another user",
-                ));
-            }
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
-            file.lock()?;
-            return Ok(Self { file });
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
-            };
+        let file = open_validated_lock_file(path)?;
+        file.lock()?;
+        Ok(Self { file })
+    }
 
-            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-            let file = options.open(path)?;
-            let metadata = file.metadata()?;
-            let path_metadata = fs::symlink_metadata(path)?;
-            let information = windows_file_information(&file)?;
-            if !metadata.is_file()
-                || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                || path_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                || information.nNumberOfLinks != 1
-                || opened_file_identity(&file, &metadata)?
-                    != path_file_identity(path, &path_metadata)?
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "durable lock path is not a private regular file",
-                ));
+    pub(crate) fn acquire_with_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
+        let started = Instant::now();
+        let file = open_validated_lock_file(path)?;
+        let mut first_attempt = true;
+        loop {
+            if (!first_attempt || !timeout.is_zero()) && started.elapsed() >= timeout {
+                return Err(lock_timeout_error(path));
             }
-            file.lock()?;
-            return Ok(Self { file });
+            first_attempt = false;
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { file }),
+                Err(fs::TryLockError::WouldBlock) => {
+                    let elapsed = started.elapsed();
+                    if elapsed >= timeout {
+                        return Err(lock_timeout_error(path));
+                    }
+                    std::thread::sleep(Duration::from_millis(10).min(timeout - elapsed));
+                }
+                Err(fs::TryLockError::Error(error)) => return Err(error),
+            }
         }
-        #[cfg(not(any(unix, windows)))]
+    }
+}
+
+fn lock_timeout_error(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!("timed out acquiring durable lock {}", path.display()),
+    )
+}
+
+fn open_validated_lock_file(path: &Path) -> io::Result<File> {
+    if let Some(parent) = path.parent() {
+        let metadata = fs::symlink_metadata(parent)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "durable lock parent is not a real directory",
+            ));
+        }
+        reject_reparse_point(&metadata)?;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        let path_metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_file()
+            || metadata.dev() != path_metadata.dev()
+            || metadata.ino() != path_metadata.ino()
+            || metadata.nlink() != 1
+            || path_metadata.nlink() != 1
         {
-            let file = options.open(path)?;
-            if !file.metadata()?.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "durable lock path is not a regular file",
-                ));
-            }
-            file.lock()?;
-            Ok(Self { file })
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "durable lock path is not a private regular file",
+            ));
         }
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "durable lock path is owned by another user",
+            ));
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        return Ok(file);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        let path_metadata = fs::symlink_metadata(path)?;
+        let information = windows_file_information(&file)?;
+        if !metadata.is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || path_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || information.nNumberOfLinks != 1
+            || opened_file_identity(&file, &metadata)? != path_file_identity(path, &path_metadata)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "durable lock path is not a private regular file",
+            ));
+        }
+        return Ok(file);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "durable lock path is not a regular file",
+            ));
+        }
+        Ok(file)
     }
 }
 
@@ -539,7 +571,7 @@ pub(crate) fn unique_sibling_path(target: &Path, marker: &str) -> io::Result<Pat
 #[derive(Debug)]
 pub(crate) struct VerifiedTemp {
     path: PathBuf,
-    file: File,
+    file: Option<File>,
     identity: DurableFileIdentity,
     expected_sha256: String,
     expected_size: u64,
@@ -551,12 +583,14 @@ impl VerifiedTemp {
     }
 
     pub(crate) fn file(&self) -> &File {
-        &self.file
+        self.file
+            .as_ref()
+            .expect("verified temp file handle is available before publish")
     }
 
-    pub(crate) fn discard(self) -> io::Result<()> {
+    pub(crate) fn discard(mut self) -> io::Result<()> {
         let path = self.path;
-        drop(self.file);
+        drop(self.file.take());
         remove_if_exists(&path)
     }
 
@@ -580,19 +614,22 @@ impl VerifiedTemp {
     }
 
     fn verify_opened_contents(&mut self) -> io::Result<()> {
-        self.file.sync_all()?;
-        let before = self.file.metadata()?;
-        if opened_file_identity(&self.file, &before)? != self.identity {
+        let file = self.file.as_mut().ok_or_else(|| {
+            io::Error::other("verified temp file handle is unavailable during verification")
+        })?;
+        file.sync_all()?;
+        let before = file.metadata()?;
+        if opened_file_identity(file, &before)? != self.identity {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "durable temp handle identity changed",
             ));
         }
-        self.file.rewind()?;
+        file.rewind()?;
         let mut readback = Vec::with_capacity(self.expected_size as usize);
-        self.file.read_to_end(&mut readback)?;
-        let after = self.file.metadata()?;
-        if opened_file_identity(&self.file, &after)? != self.identity
+        file.read_to_end(&mut readback)?;
+        let after = file.metadata()?;
+        if opened_file_identity(file, &after)? != self.identity
             || before.len() != after.len()
             || before.modified().ok() != after.modified().ok()
             || readback.len() as u64 != self.expected_size
@@ -603,6 +640,25 @@ impl VerifiedTemp {
                 "durable temp changed after readback verification",
             ));
         }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn close_before_replace(&mut self) {
+        drop(self.file.take());
+    }
+
+    #[cfg(windows)]
+    fn reopen_published(&mut self, target: &Path) -> io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        self.file = Some(options.open(target)?);
         Ok(())
     }
 }
@@ -688,7 +744,7 @@ pub(crate) fn write_verified_temp(
     };
     Ok(VerifiedTemp {
         path,
-        file,
+        file: Some(file),
         identity,
         expected_sha256,
         expected_size: bytes.len() as u64,
@@ -896,6 +952,10 @@ pub(crate) fn publish_temp(
             source,
         });
     }
+    // ReplaceFileW opens the replacement with no sharing mode, so its verified
+    // handle must be closed for the duration of the path-based replacement.
+    #[cfg(windows)]
+    temp.close_before_replace();
     if let Err(error) = replace_file(temp.path(), target, backup) {
         if error.published {
             drop(temp);
@@ -933,6 +993,13 @@ pub(crate) fn publish_temp(
             ),
         });
     }
+    #[cfg(windows)]
+    temp.reopen_published(target)
+        .map_err(|source| PublishError {
+            published: true,
+            target_conflict: false,
+            source,
+        })?;
     faults.check(after_replace).map_err(|source| PublishError {
         published: true,
         target_conflict: false,
@@ -1085,6 +1152,22 @@ fn replace_file(temp: &Path, target: &Path, _backup: Option<&Path>) -> Result<()
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsReplaceFileApi {
+    MoveFileExWriteThrough,
+    ReplaceFile,
+}
+
+#[cfg(windows)]
+fn windows_replace_file_api(backup: Option<&Path>) -> WindowsReplaceFileApi {
+    if backup.is_some() {
+        WindowsReplaceFileApi::ReplaceFile
+    } else {
+        WindowsReplaceFileApi::MoveFileExWriteThrough
+    }
+}
+
+#[cfg(windows)]
 fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(), ReplaceError> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
@@ -1101,8 +1184,8 @@ fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(),
     let backup_wide = backup.map(wide);
     let replacing_existing = target.exists();
     let result = unsafe {
-        if replacing_existing {
-            ReplaceFileW(
+        match windows_replace_file_api(backup) {
+            WindowsReplaceFileApi::ReplaceFile => ReplaceFileW(
                 target_wide.as_ptr(),
                 temp_wide.as_ptr(),
                 backup_wide
@@ -1111,13 +1194,12 @@ fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(),
                 WINDOWS_REPLACE_FILE_FLAGS,
                 ptr::null_mut(),
                 ptr::null_mut(),
-            )
-        } else {
-            MoveFileExW(
+            ),
+            WindowsReplaceFileApi::MoveFileExWriteThrough => MoveFileExW(
                 temp_wide.as_ptr(),
                 target_wide.as_ptr(),
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
+            ),
         }
     };
     if result == 0 {
@@ -1189,12 +1271,118 @@ pub(crate) fn remove_if_exists(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::unique_sibling_path;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use super::{
         DurableFaultInjector, DurableFaultPoint, TempWriteFaultPoints, write_verified_temp,
     };
+    use super::{ExclusiveFileLock, unique_sibling_path};
     use std::fs;
+    use std::io;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn bounded_lock_times_out_under_contention_and_recovers_after_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("ledger.lock");
+        let holder_path = lock_path.clone();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let held = ExclusiveFileLock::acquire(&holder_path).unwrap();
+            acquired_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(held);
+        });
+        acquired_rx.recv().unwrap();
+
+        let started = Instant::now();
+        let error = ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_millis(40))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn bounded_lock_does_not_acquire_after_deadline_when_released_during_final_sleep() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("ledger.lock");
+        let holder_path = lock_path.clone();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (start_release_tx, start_release_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let held = ExclusiveFileLock::acquire(&holder_path).unwrap();
+            acquired_tx.send(()).unwrap();
+            start_release_rx.recv().unwrap();
+            thread::sleep(Duration::from_millis(95));
+            drop(held);
+        });
+        acquired_rx.recv().unwrap();
+
+        let started = Instant::now();
+        start_release_tx.send(()).unwrap();
+        let error = ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_millis(100))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_millis(300));
+        holder.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_lock_rejects_symlink_parent_like_blocking_acquisition() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real");
+        let linked_parent = dir.path().join("linked");
+        fs::create_dir(&real_parent).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        let lock_path = linked_parent.join("ledger.lock");
+
+        let blocking = ExclusiveFileLock::acquire(&lock_path).unwrap_err();
+        let bounded =
+            ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_millis(40))
+                .unwrap_err();
+
+        assert_eq!(blocking.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(bounded.kind(), blocking.kind());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_lock_rejects_reparse_parent_like_blocking_acquisition() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real");
+        let linked_parent = dir.path().join("linked");
+        fs::create_dir(&real_parent).unwrap();
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&linked_parent)
+            .arg(&real_parent)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "could not create test directory junction");
+        let lock_path = linked_parent.join("ledger.lock");
+
+        let blocking = ExclusiveFileLock::acquire(&lock_path).unwrap_err();
+        let bounded =
+            ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_millis(40))
+                .unwrap_err();
+
+        assert_eq!(blocking.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(bounded.kind(), blocking.kind());
+    }
 
     #[test]
     fn sidecar_names_use_a_process_nonce_and_skip_existing_candidates() {
@@ -1237,6 +1425,55 @@ mod tests {
             0o600
         );
         temp.discard().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publish_closes_and_reopens_the_verified_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ledger.json");
+        fs::write(&target, b"old").unwrap();
+        let metadata = fs::symlink_metadata(&target).unwrap();
+        let identity = super::path_file_identity(&target, &metadata).unwrap();
+        let temp = write_verified_temp(
+            &target,
+            b"new",
+            &DurableFaultInjector::default(),
+            TempWriteFaultPoints {
+                created: DurableFaultPoint::TempCreated,
+                written: DurableFaultPoint::TempWritten,
+                synced: DurableFaultPoint::TempSynced,
+                verified: DurableFaultPoint::TempReadbackVerified,
+            },
+        )
+        .unwrap();
+
+        super::publish_temp(
+            temp,
+            &target,
+            super::TargetExpectation::Identity(identity),
+            None,
+            &DurableFaultInjector::default(),
+            DurableFaultPoint::BeforeTargetReplace,
+            DurableFaultPoint::TargetReplaced,
+            DurableFaultPoint::ParentSynced,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_backup_free_publication_uses_write_through_move() {
+        assert_eq!(
+            super::windows_replace_file_api(None),
+            super::WindowsReplaceFileApi::MoveFileExWriteThrough
+        );
+        assert_eq!(
+            super::windows_replace_file_api(Some(std::path::Path::new("backup"))),
+            super::WindowsReplaceFileApi::ReplaceFile
+        );
     }
 
     #[test]
