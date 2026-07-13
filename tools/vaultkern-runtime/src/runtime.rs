@@ -4350,6 +4350,17 @@ impl Runtime {
 
     fn save_vault_command(&mut self, vault_id: &str) -> Result<RuntimeResponse> {
         match self.save_vault(vault_id) {
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<LocalFileCommitError>(),
+                    Some(LocalFileCommitError::Conflict { .. })
+                ) =>
+            {
+                Ok(RuntimeResponse::Error(ErrorDto {
+                    code: "conflict".into(),
+                    message: format_error_chain(&error),
+                }))
+            }
             Err(error) if error.is::<PendingAutofillSyncRequired>() => {
                 Ok(RuntimeResponse::Error(ErrorDto {
                     code: "pending_autofill_sync_required".into(),
@@ -7622,12 +7633,10 @@ mod tests {
         (dir, opened)
     }
 
-    #[test]
-    fn save_rejects_source_change_after_merge_snapshot() {
-        let mut runtime = Runtime::for_tests();
-        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        create_demo_entry(&mut runtime, &opened.vault_id);
-
+    fn arm_source_change_after_merge_snapshot(
+        runtime: &mut Runtime,
+        opened: &VaultHandleDto,
+    ) -> Vec<u8> {
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
         let generation_b = KeepassCore::new()
@@ -7643,6 +7652,15 @@ mod tests {
             LocalFileVaultSourceProvider::with_before_write_hook(std::sync::Arc::new(move || {
                 std::fs::write(&path, &replacement).unwrap()
             }));
+        generation_b
+    }
+
+    #[test]
+    fn save_rejects_source_change_after_merge_snapshot() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        let generation_b = arm_source_change_after_merge_snapshot(&mut runtime, &opened);
 
         let error = runtime
             .save_vault(&opened.vault_id)
@@ -7652,6 +7670,27 @@ mod tests {
             error.downcast_ref::<LocalFileCommitError>(),
             Some(LocalFileCommitError::Conflict { .. })
         ));
+        assert_eq!(std::fs::read(&opened.path).unwrap(), generation_b);
+    }
+
+    #[test]
+    fn save_command_reports_source_change_as_conflict() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        let generation_b = arm_source_change_after_merge_snapshot(&mut runtime, &opened);
+
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("source conflicts must be command responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected source conflict response, got {response:?}");
+        };
+        assert_eq!(error.code, "conflict");
+        assert!(error.message.contains("local vault write conflict"));
         assert_eq!(std::fs::read(&opened.path).unwrap(), generation_b);
     }
 

@@ -163,10 +163,18 @@ impl LocalFileVaultSourceProvider {
         if let Some(before_write) = &self.before_write {
             before_write();
         }
-        let (transaction, _) = self
-            .begin_write(path)
-            .map_err(|source| LocalFileCommitError::BeforePublish { source })?;
+        let (transaction, _) = self.begin_write(path).map_err(classify_begin_write_error)?;
         transaction.commit(expected, bytes)
+    }
+}
+
+fn classify_begin_write_error(source: io::Error) -> LocalFileCommitError {
+    if source.kind() == io::ErrorKind::WouldBlock {
+        LocalFileCommitError::Conflict {
+            message: source.to_string(),
+        }
+    } else {
+        LocalFileCommitError::BeforePublish { source }
     }
 }
 
@@ -910,6 +918,21 @@ mod tests {
         assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
         assert_eq!(fs::read(&path).unwrap(), b"generation-b");
         assert!(sidecar_artifacts(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn write_if_unchanged_classifies_locked_read_races_as_conflicts() {
+        let error = super::classify_begin_write_error(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "local vault changed while it was being read",
+        ));
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("changed while it was being read")
+        );
     }
 
     #[test]
