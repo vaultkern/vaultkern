@@ -19,6 +19,14 @@ use vaultkern_model::{
 };
 use xmltree::{Element, XMLNode};
 
+mod external_kdf;
+pub use external_kdf::{
+    DESKTOP_AES_CONFIRM_ROUNDS, DESKTOP_AES_REFUSE_ROUNDS, DESKTOP_ARGON2_CONFIRM_BYTES,
+    DESKTOP_ARGON2_REFUSE_BYTES, ExternalKdfAlgorithm, ExternalKdfConfirmation,
+    ExternalKdfDecision, ExternalKdfParameter, ExternalKdfParameters, ExternalKdfPolicy,
+    ExternalKdfRequest, ExternalKdfResource, KdfPolicyEvaluator, MOBILE_AES_REFUSE_ROUNDS,
+    MOBILE_ARGON2_REFUSE_BYTES, enforce_external_kdf_policy,
+};
 pub mod kdf_generation;
 
 #[derive(Debug, Error)]
@@ -41,6 +49,20 @@ pub enum KdbxError {
     UnsupportedKdf,
     #[error("unsupported inner stream")]
     UnsupportedInnerStream,
+    #[error("invalid external KDF parameter {parameter:?}={value} for algorithm {algorithm:?}")]
+    InvalidKdfParameters {
+        algorithm: ExternalKdfAlgorithm,
+        parameter: ExternalKdfParameter,
+        value: u64,
+    },
+    #[error(
+        "external KDF policy {decision:?} for algorithm {algorithm:?} with observed value {observed}"
+    )]
+    ExternalKdfPolicy {
+        algorithm: ExternalKdfAlgorithm,
+        observed: u64,
+        decision: ExternalKdfDecision,
+    },
     #[error("xml error: {0}")]
     Xml(String),
     #[error(transparent)]
@@ -408,15 +430,36 @@ pub fn save_kdbx(
 }
 
 pub fn load_kdbx(bytes: &[u8], composite_key: &CompositeKey) -> Result<Vault> {
+    load_kdbx_with_policy(
+        bytes,
+        composite_key,
+        &ExternalKdfPolicy::Mobile,
+        ExternalKdfConfirmation::Unconfirmed,
+    )
+}
+
+pub fn load_kdbx_with_policy(
+    bytes: &[u8],
+    composite_key: &CompositeKey,
+    policy: &dyn KdfPolicyEvaluator,
+    confirmation: ExternalKdfConfirmation,
+) -> Result<Vault> {
     match detect_file_version(bytes)? {
         KdbxVersion::V2_0 | KdbxVersion::V3_0 | KdbxVersion::V3_1 => {
-            load_kdbx3(bytes, composite_key)
+            load_kdbx3(bytes, composite_key, policy, confirmation)
         }
-        KdbxVersion::V4_0 | KdbxVersion::V4_1 => load_kdbx4(bytes, composite_key),
+        KdbxVersion::V4_0 | KdbxVersion::V4_1 => {
+            load_kdbx4(bytes, composite_key, policy, confirmation)
+        }
     }
 }
 
-fn load_kdbx4(bytes: &[u8], composite_key: &CompositeKey) -> Result<Vault> {
+fn load_kdbx4(
+    bytes: &[u8],
+    composite_key: &CompositeKey,
+    policy: &dyn KdfPolicyEvaluator,
+    confirmation: ExternalKdfConfirmation,
+) -> Result<Vault> {
     let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
     let mut cursor = Cursor::new(&bytes[header_len..]);
     let stored_header_hash = cursor.read_exact(32)?.to_vec();
@@ -428,8 +471,10 @@ fn load_kdbx4(bytes: &[u8], composite_key: &CompositeKey) -> Result<Vault> {
         return Err(KdbxError::HeaderHashMismatch);
     }
 
+    let parameters = ExternalKdfParameters::decode_kdbx4(&header.kdf_parameters)?;
+    enforce_external_kdf_policy(&parameters, policy, confirmation)?;
+    let kdf = parameters.into_profile();
     let raw_key = composite_key.raw_key()?;
-    let kdf = kdf_from_variant_dict(&header.kdf_parameters)?;
     let transformed = kdf.derive_key(&raw_key)?;
     let encryption_key = sha256_seeded(&header.master_seed, &transformed);
     let mac_seed = mac_seed(&header.master_seed, &transformed);
@@ -455,14 +500,19 @@ fn load_kdbx4(bytes: &[u8], composite_key: &CompositeKey) -> Result<Vault> {
     parse_xml(xml_bytes, &header, inner_algorithm, &inner_key, &binaries)
 }
 
-fn load_kdbx3(bytes: &[u8], composite_key: &CompositeKey) -> Result<Vault> {
+fn load_kdbx3(
+    bytes: &[u8],
+    composite_key: &CompositeKey,
+    policy: &dyn KdfPolicyEvaluator,
+    confirmation: ExternalKdfConfirmation,
+) -> Result<Vault> {
     let (header, header_len) = decode_kdbx3_header(bytes)?;
+    let parameters =
+        ExternalKdfParameters::decode_kdbx3(header.transform_rounds, header.transform_seed)?;
+    enforce_external_kdf_policy(&parameters, policy, confirmation)?;
+    let kdf = parameters.into_profile();
     let raw_key = composite_key.raw_key()?;
-    let transformed = KdfProfile::AesKdbx3 {
-        rounds: header.transform_rounds,
-        salt: header.transform_seed,
-    }
-    .derive_key(&raw_key)?;
+    let transformed = kdf.derive_key(&raw_key)?;
     let encryption_key = sha256_seeded(&header.master_seed, &transformed);
     let encrypted_payload = &bytes[header_len..];
     let payload = decrypt_payload(
@@ -676,62 +726,9 @@ fn kdf_to_variant_dict(kdf: &KdfProfile) -> VariantDictionary {
     dict
 }
 
+#[cfg(test)]
 fn kdf_from_variant_dict(dict: &VariantDictionary) -> Result<KdfProfile> {
-    let uuid = match dict.get("$UUID") {
-        Some(VariantValue::Bytes(bytes)) => {
-            Uuid::from_slice(bytes).map_err(|_| KdbxError::InvalidValue)?
-        }
-        _ => return Err(KdbxError::UnsupportedKdf),
-    };
-
-    if uuid == KDF_AES_KDBX4_UUID || uuid == KDF_AES_KDBX3_UUID {
-        let rounds = match dict.get("R") {
-            Some(VariantValue::UInt64(value)) => *value,
-            _ => return Err(KdbxError::UnsupportedKdf),
-        };
-        let salt = match dict.get("S") {
-            Some(VariantValue::Bytes(bytes)) => bytes
-                .clone()
-                .try_into()
-                .map_err(|_| KdbxError::InvalidValue)?,
-            _ => return Err(KdbxError::UnsupportedKdf),
-        };
-        Ok(KdfProfile::AesKdbx4 { rounds, salt })
-    } else if uuid == KDF_ARGON2D_UUID || uuid == KDF_ARGON2ID_UUID {
-        let iterations = match dict.get("I") {
-            Some(VariantValue::UInt64(value)) => *value as u32,
-            _ => return Err(KdbxError::UnsupportedKdf),
-        };
-        let memory_kib = match dict.get("M") {
-            Some(VariantValue::UInt64(value)) => (*value / 1024) as u32,
-            _ => return Err(KdbxError::UnsupportedKdf),
-        };
-        let parallelism = match dict.get("P") {
-            Some(VariantValue::UInt32(value)) => *value,
-            _ => return Err(KdbxError::UnsupportedKdf),
-        };
-        let salt = match dict.get("S") {
-            Some(VariantValue::Bytes(bytes)) => bytes.clone(),
-            _ => return Err(KdbxError::UnsupportedKdf),
-        };
-        if uuid == KDF_ARGON2D_UUID {
-            Ok(KdfProfile::Argon2d {
-                iterations,
-                memory_kib,
-                parallelism,
-                salt,
-            })
-        } else {
-            Ok(KdfProfile::Argon2id {
-                iterations,
-                memory_kib,
-                parallelism,
-                salt,
-            })
-        }
-    } else {
-        Err(KdbxError::UnsupportedKdf)
-    }
+    Ok(ExternalKdfParameters::decode_kdbx4(dict)?.into_profile())
 }
 
 fn encrypt_payload(
@@ -3973,6 +3970,422 @@ impl<'a> Cursor<'a> {
         let slice = &self.bytes[self.position..];
         self.position = self.bytes.len();
         slice
+    }
+}
+
+#[cfg(test)]
+mod external_kdf_policy_tests {
+    use super::{
+        ExternalKdfAlgorithm, ExternalKdfConfirmation, ExternalKdfDecision, ExternalKdfParameter,
+        ExternalKdfParameters, ExternalKdfPolicy, KDF_AES_KDBX4_UUID, KDF_ARGON2D_UUID,
+        KDF_ARGON2ID_UUID, KdbxError, KdfPolicyEvaluator, VariantDictionary, VariantValue,
+        enforce_external_kdf_policy, load_kdbx, load_kdbx_with_policy, save_kdbx,
+    };
+    use vaultkern_crypto::{CompositeKey, sha256_bytes};
+    use vaultkern_model::Vault;
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn argon_request(algorithm: ExternalKdfAlgorithm, memory_bytes: u64) -> ExternalKdfParameters {
+        ExternalKdfParameters::argon2_for_test(algorithm, 2, memory_bytes, 1)
+    }
+
+    fn aes_request(algorithm: ExternalKdfAlgorithm, rounds: u64) -> ExternalKdfParameters {
+        ExternalKdfParameters::aes_for_test(algorithm, rounds)
+    }
+
+    #[test]
+    fn fixed_policy_threshold_matrix_covers_below_equal_and_above() {
+        let desktop = ExternalKdfPolicy::Desktop;
+        let mobile = ExternalKdfPolicy::Mobile;
+        let extension = ExternalKdfPolicy::Extension;
+
+        for algorithm in [
+            ExternalKdfAlgorithm::Argon2d,
+            ExternalKdfAlgorithm::Argon2id,
+        ] {
+            assert_eq!(
+                desktop.evaluate(argon_request(algorithm, 256 * MIB - 1024).request()),
+                ExternalKdfDecision::Allow
+            );
+            assert_eq!(
+                desktop.evaluate(argon_request(algorithm, 256 * MIB).request()),
+                ExternalKdfDecision::Allow
+            );
+            assert_eq!(
+                desktop.evaluate(argon_request(algorithm, 256 * MIB + 1024).request()),
+                ExternalKdfDecision::Confirm(256 * MIB)
+            );
+            assert_eq!(
+                desktop.evaluate(argon_request(algorithm, 1024 * MIB - 1024).request()),
+                ExternalKdfDecision::Confirm(256 * MIB)
+            );
+            assert_eq!(
+                desktop.evaluate(argon_request(algorithm, 1024 * MIB).request()),
+                ExternalKdfDecision::Confirm(256 * MIB)
+            );
+            assert_eq!(
+                desktop.evaluate(argon_request(algorithm, 1024 * MIB + 1024).request()),
+                ExternalKdfDecision::Refuse(1024 * MIB)
+            );
+
+            assert_eq!(
+                mobile.evaluate(argon_request(algorithm, 128 * MIB - 1024).request()),
+                ExternalKdfDecision::Allow
+            );
+            assert_eq!(
+                mobile.evaluate(argon_request(algorithm, 128 * MIB).request()),
+                ExternalKdfDecision::Allow
+            );
+            assert_eq!(
+                mobile.evaluate(argon_request(algorithm, 128 * MIB + 1024).request()),
+                ExternalKdfDecision::Refuse(128 * MIB)
+            );
+            assert_eq!(
+                extension.evaluate(argon_request(algorithm, 1024).request()),
+                ExternalKdfDecision::Forbid
+            );
+        }
+
+        for algorithm in [
+            ExternalKdfAlgorithm::AesKdbx3,
+            ExternalKdfAlgorithm::AesKdbx4,
+        ] {
+            assert_eq!(
+                desktop.evaluate(aes_request(algorithm, 599_999_999).request()),
+                ExternalKdfDecision::Allow
+            );
+            assert_eq!(
+                desktop.evaluate(aes_request(algorithm, 600_000_000).request()),
+                ExternalKdfDecision::Allow
+            );
+            assert_eq!(
+                desktop.evaluate(aes_request(algorithm, 600_000_001).request()),
+                ExternalKdfDecision::Confirm(600_000_000)
+            );
+            assert_eq!(
+                desktop.evaluate(aes_request(algorithm, 5_999_999_999).request()),
+                ExternalKdfDecision::Confirm(600_000_000)
+            );
+            assert_eq!(
+                desktop.evaluate(aes_request(algorithm, 6_000_000_000).request()),
+                ExternalKdfDecision::Confirm(600_000_000)
+            );
+            assert_eq!(
+                desktop.evaluate(aes_request(algorithm, 6_000_000_001).request()),
+                ExternalKdfDecision::Refuse(6_000_000_000)
+            );
+            assert_eq!(
+                mobile.evaluate(aes_request(algorithm, 599_999_999).request()),
+                ExternalKdfDecision::Allow
+            );
+            assert_eq!(
+                mobile.evaluate(aes_request(algorithm, 600_000_000).request()),
+                ExternalKdfDecision::Allow
+            );
+            assert_eq!(
+                mobile.evaluate(aes_request(algorithm, 600_000_001).request()),
+                ExternalKdfDecision::Refuse(600_000_000)
+            );
+            assert_eq!(
+                extension.evaluate(aes_request(algorithm, 1).request()),
+                ExternalKdfDecision::Forbid
+            );
+        }
+    }
+
+    #[test]
+    fn confirmation_only_authorizes_confirm_decisions() {
+        let confirm = aes_request(ExternalKdfAlgorithm::AesKdbx4, 600_000_001);
+        let refuse = aes_request(ExternalKdfAlgorithm::AesKdbx4, 6_000_000_001);
+
+        assert!(matches!(
+            enforce_external_kdf_policy(
+                &confirm,
+                &ExternalKdfPolicy::Desktop,
+                ExternalKdfConfirmation::Unconfirmed
+            ),
+            Err(KdbxError::ExternalKdfPolicy {
+                decision: ExternalKdfDecision::Confirm(600_000_000),
+                ..
+            })
+        ));
+        assert!(
+            enforce_external_kdf_policy(
+                &confirm,
+                &ExternalKdfPolicy::Desktop,
+                ExternalKdfConfirmation::Confirmed
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            enforce_external_kdf_policy(
+                &refuse,
+                &ExternalKdfPolicy::Desktop,
+                ExternalKdfConfirmation::Confirmed
+            ),
+            Err(KdbxError::ExternalKdfPolicy {
+                decision: ExternalKdfDecision::Refuse(6_000_000_000),
+                ..
+            })
+        ));
+        assert!(matches!(
+            enforce_external_kdf_policy(
+                &confirm,
+                &ExternalKdfPolicy::Extension,
+                ExternalKdfConfirmation::Confirmed
+            ),
+            Err(KdbxError::ExternalKdfPolicy {
+                decision: ExternalKdfDecision::Forbid,
+                ..
+            })
+        ));
+    }
+
+    fn argon_dict(uuid: uuid::Uuid, iterations: u64, memory_bytes: u64) -> VariantDictionary {
+        let mut dict = VariantDictionary::default();
+        dict.insert("$UUID", VariantValue::Bytes(uuid.into_bytes().to_vec()));
+        dict.insert("I", VariantValue::UInt64(iterations));
+        dict.insert("M", VariantValue::UInt64(memory_bytes));
+        dict.insert("P", VariantValue::UInt32(1));
+        dict.insert("S", VariantValue::Bytes(vec![7; 32]));
+        dict
+    }
+
+    fn aes_dict(rounds: u64) -> VariantDictionary {
+        let mut dict = VariantDictionary::default();
+        dict.insert(
+            "$UUID",
+            VariantValue::Bytes(KDF_AES_KDBX4_UUID.into_bytes().to_vec()),
+        );
+        dict.insert("R", VariantValue::UInt64(rounds));
+        dict.insert("S", VariantValue::Bytes(vec![7; 32]));
+        dict
+    }
+
+    #[test]
+    fn raw_kdbx4_parameters_fail_closed_before_profile_conversion() {
+        for uuid in [KDF_ARGON2D_UUID, KDF_ARGON2ID_UUID] {
+            for (iterations, memory, parameter) in [
+                (0, 1024, ExternalKdfParameter::Iterations),
+                (
+                    u64::from(u32::MAX) + 1,
+                    1024,
+                    ExternalKdfParameter::Iterations,
+                ),
+                (u64::MAX, 1024, ExternalKdfParameter::Iterations),
+                (1, 0, ExternalKdfParameter::MemoryBytes),
+                (1, 1025, ExternalKdfParameter::MemoryBytes),
+                (
+                    1,
+                    (u64::from(u32::MAX) + 1) * 1024,
+                    ExternalKdfParameter::MemoryBytes,
+                ),
+                (1, u64::MAX, ExternalKdfParameter::MemoryBytes),
+            ] {
+                assert!(matches!(
+                    ExternalKdfParameters::decode_kdbx4(&argon_dict(uuid, iterations, memory)),
+                    Err(KdbxError::InvalidKdfParameters { parameter: observed, .. }) if observed == parameter
+                ));
+            }
+        }
+
+        for rounds in [0, u64::MAX] {
+            assert!(matches!(
+                ExternalKdfParameters::decode_kdbx4(&aes_dict(rounds)),
+                Err(KdbxError::InvalidKdfParameters {
+                    parameter: ExternalKdfParameter::Rounds,
+                    ..
+                })
+            ));
+        }
+
+        let exact = ExternalKdfParameters::decode_kdbx4(&argon_dict(
+            KDF_ARGON2ID_UUID,
+            u64::from(u32::MAX),
+            u64::from(u32::MAX) * 1024,
+        ))
+        .expect("largest exactly representable Argon2 values");
+        assert_eq!(exact.request().observed, u64::from(u32::MAX) * 1024);
+        assert_eq!(
+            ExternalKdfParameters::decode_kdbx4(&argon_dict(KDF_ARGON2ID_UUID, 1, 1024))
+                .expect("one KiB is represented exactly")
+                .request()
+                .observed,
+            1024
+        );
+    }
+
+    #[test]
+    fn memory_conversion_error_reports_the_raw_header_bytes() {
+        let memory_bytes = (u64::from(u32::MAX) + 1) * 1024;
+        let error =
+            ExternalKdfParameters::decode_kdbx4(&argon_dict(KDF_ARGON2ID_UUID, 1, memory_bytes))
+                .expect_err("memory above the representable KiB range must fail closed");
+
+        assert!(matches!(
+            error,
+            KdbxError::InvalidKdfParameters {
+                algorithm: ExternalKdfAlgorithm::Argon2id,
+                parameter: ExternalKdfParameter::MemoryBytes,
+                value,
+            } if value == memory_bytes
+        ));
+    }
+
+    fn header_only_kdbx4(kdf_parameters: VariantDictionary) -> Vec<u8> {
+        let mut header =
+            super::KdbxHeader::new(super::KdbxVersion::V4_1, super::KdbxCipher::Aes256);
+        header.encryption_iv = vec![0; 16];
+        header.kdf_parameters = kdf_parameters;
+        let header_bytes = header.encode().expect("encode header");
+        let mut bytes = header_bytes.clone();
+        bytes.extend(sha256_bytes(&header_bytes));
+        bytes.extend([0; 32]);
+        bytes
+    }
+
+    #[test]
+    fn compatibility_load_defaults_to_mobile_resource_limits() {
+        assert!(matches!(
+            load_kdbx(
+                &header_only_kdbx4(aes_dict(600_000_001)),
+                &CompositeKey::default(),
+            ),
+            Err(KdbxError::ExternalKdfPolicy {
+                algorithm: ExternalKdfAlgorithm::AesKdbx4,
+                observed: 600_000_001,
+                decision: ExternalKdfDecision::Refuse(600_000_000),
+            })
+        ));
+
+        let mut argon = argon_dict(KDF_ARGON2ID_UUID, 1, 128 * MIB + 1024);
+        argon.insert("S", VariantValue::Bytes(Vec::new()));
+        assert!(matches!(
+            load_kdbx(
+                &header_only_kdbx4(argon),
+                &CompositeKey::default(),
+            ),
+            Err(KdbxError::ExternalKdfPolicy {
+                algorithm: ExternalKdfAlgorithm::Argon2id,
+                observed,
+                decision: ExternalKdfDecision::Refuse(limit),
+            }) if observed == 128 * MIB + 1024 && limit == 128 * MIB
+        ));
+    }
+
+    #[test]
+    fn extreme_kdbx4_headers_return_policy_error_before_header_hmac_or_kdf() {
+        let cases = [
+            (
+                argon_dict(KDF_ARGON2D_UUID, 2, 1024 * MIB + 1024),
+                ExternalKdfAlgorithm::Argon2d,
+                1024 * MIB + 1024,
+            ),
+            (
+                argon_dict(KDF_ARGON2ID_UUID, 2, 1024 * MIB + 1024),
+                ExternalKdfAlgorithm::Argon2id,
+                1024 * MIB + 1024,
+            ),
+            (
+                aes_dict(6_000_000_001),
+                ExternalKdfAlgorithm::AesKdbx4,
+                6_000_000_001,
+            ),
+        ];
+
+        for (parameters, algorithm, observed) in cases {
+            let error = load_kdbx_with_policy(
+                &header_only_kdbx4(parameters),
+                &CompositeKey::default(),
+                &ExternalKdfPolicy::Desktop,
+                ExternalKdfConfirmation::Confirmed,
+            )
+            .expect_err("over-refuse-limit header must not reach header HMAC or KDF");
+            assert!(matches!(
+                error,
+                KdbxError::ExternalKdfPolicy {
+                    algorithm: actual_algorithm,
+                    observed: actual_observed,
+                    decision: ExternalKdfDecision::Refuse(_),
+                } if actual_algorithm == algorithm && actual_observed == observed
+            ));
+        }
+    }
+
+    fn header_only_kdbx3(rounds: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(0x9AA2_D903_u32.to_le_bytes());
+        bytes.extend(0xB54B_FB67_u32.to_le_bytes());
+        bytes.extend(super::version_to_u32(super::KdbxVersion::V3_1).to_le_bytes());
+        bytes.push(5);
+        bytes.extend(32_u16.to_le_bytes());
+        bytes.extend([0; 32]);
+        bytes.push(6);
+        bytes.extend(8_u16.to_le_bytes());
+        bytes.extend(rounds.to_le_bytes());
+        bytes.push(0);
+        bytes.extend(0_u16.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn kdbx3_aes_rounds_use_the_same_policy_and_validation_path() {
+        assert!(matches!(
+            load_kdbx(&header_only_kdbx3(600_000_001), &CompositeKey::default()),
+            Err(KdbxError::ExternalKdfPolicy {
+                algorithm: ExternalKdfAlgorithm::AesKdbx3,
+                observed: 600_000_001,
+                decision: ExternalKdfDecision::Refuse(600_000_000),
+            })
+        ));
+        assert!(matches!(
+            load_kdbx(&header_only_kdbx3(u64::MAX), &CompositeKey::default()),
+            Err(KdbxError::InvalidKdfParameters {
+                algorithm: ExternalKdfAlgorithm::AesKdbx3,
+                parameter: ExternalKdfParameter::Rounds,
+                value: u64::MAX,
+            })
+        ));
+    }
+
+    struct AlwaysConfirm;
+
+    impl KdfPolicyEvaluator for AlwaysConfirm {
+        fn evaluate(&self, _request: super::ExternalKdfRequest) -> ExternalKdfDecision {
+            ExternalKdfDecision::Confirm(0)
+        }
+    }
+
+    #[test]
+    fn load_does_not_derive_until_confirmed_and_then_loads_normally() {
+        let key = CompositeKey::default();
+        let profile = super::SaveProfile {
+            kdf: super::SaveKdf::AesKdbx4 { rounds: 1 },
+            ..super::SaveProfile::recommended()
+        };
+        let bytes = save_kdbx(&Vault::empty("confirm"), &key, &profile).expect("save fixture");
+
+        assert!(matches!(
+            load_kdbx_with_policy(
+                &bytes,
+                &key,
+                &AlwaysConfirm,
+                ExternalKdfConfirmation::Unconfirmed,
+            ),
+            Err(KdbxError::ExternalKdfPolicy {
+                decision: ExternalKdfDecision::Confirm(0),
+                ..
+            })
+        ));
+        let loaded = load_kdbx_with_policy(
+            &bytes,
+            &key,
+            &AlwaysConfirm,
+            ExternalKdfConfirmation::Confirmed,
+        )
+        .expect("explicit confirmation authorizes the KDF");
+        assert_eq!(loaded.name, "confirm");
     }
 }
 

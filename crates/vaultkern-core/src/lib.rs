@@ -4,9 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 pub use vaultkern_crypto::{CompositeKey, CryptoError, KdfProfile, parse_key_file_bytes};
 pub use vaultkern_kdbx::{
-    Compression, KdbxCipher, KdbxError, KdbxHeader, KdbxHeaderSummary, KdbxVersion, SaveKdf,
-    SaveProfile, VariantDictionary, VariantValue, inspect_kdbx_header,
-    load_kdbx as load_kdbx_bytes, required_version, save_kdbx as save_kdbx_bytes,
+    Compression, ExternalKdfAlgorithm, ExternalKdfConfirmation, ExternalKdfDecision,
+    ExternalKdfParameter, ExternalKdfParameters, ExternalKdfPolicy, ExternalKdfRequest,
+    ExternalKdfResource, KdbxCipher, KdbxError, KdbxHeader, KdbxHeaderSummary, KdbxVersion,
+    KdfPolicyEvaluator, SaveKdf, SaveProfile, VariantDictionary, VariantValue, inspect_kdbx_header,
+    load_kdbx as load_kdbx_bytes, load_kdbx_with_policy, required_version,
+    save_kdbx as save_kdbx_bytes,
 };
 pub use vaultkern_model::{
     Attachment, AutoTypeAssociation, AutoTypeConfig, CustomField, CustomIcon, DeletedObject, Entry,
@@ -825,6 +828,16 @@ impl KeepassCore {
         composite_key: &CompositeKey,
     ) -> Result<Vault, vaultkern_kdbx::KdbxError> {
         load_kdbx_bytes(bytes, composite_key)
+    }
+
+    pub fn load_kdbx_with_policy(
+        &self,
+        bytes: &[u8],
+        composite_key: &CompositeKey,
+        policy: &dyn KdfPolicyEvaluator,
+        confirmation: ExternalKdfConfirmation,
+    ) -> Result<Vault, vaultkern_kdbx::KdbxError> {
+        load_kdbx_with_policy(bytes, composite_key, policy, confirmation)
     }
 
     pub fn inspect_kdbx_header(
@@ -2433,8 +2446,23 @@ impl KeepassCore {
         bytes: &[u8],
         composite_key: &CompositeKey,
     ) -> Result<LoadedDatabase, CoreError> {
+        self.load_database_with_policy(
+            bytes,
+            composite_key,
+            &ExternalKdfPolicy::Mobile,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
+    }
+
+    pub fn load_database_with_policy(
+        &self,
+        bytes: &[u8],
+        composite_key: &CompositeKey,
+        policy: &dyn KdfPolicyEvaluator,
+        confirmation: ExternalKdfConfirmation,
+    ) -> Result<LoadedDatabase, CoreError> {
         let header = inspect_kdbx_header(bytes)?;
-        let vault = load_kdbx_bytes(bytes, composite_key)?;
+        let vault = load_kdbx_with_policy(bytes, composite_key, policy, confirmation)?;
         Ok(LoadedDatabase {
             summary: summarize_vault(&vault),
             inspection: build_inspection(header),
@@ -2447,8 +2475,23 @@ impl KeepassCore {
         bytes: &[u8],
         composite_key: &CompositeKey,
     ) -> Result<LoadedDatabaseView, CoreError> {
+        self.load_database_view_with_policy(
+            bytes,
+            composite_key,
+            &ExternalKdfPolicy::Mobile,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
+    }
+
+    pub fn load_database_view_with_policy(
+        &self,
+        bytes: &[u8],
+        composite_key: &CompositeKey,
+        policy: &dyn KdfPolicyEvaluator,
+        confirmation: ExternalKdfConfirmation,
+    ) -> Result<LoadedDatabaseView, CoreError> {
         let header = inspect_kdbx_header(bytes)?;
-        let vault = load_kdbx_bytes(bytes, composite_key)?;
+        let vault = load_kdbx_with_policy(bytes, composite_key, policy, confirmation)?;
         Ok(LoadedDatabaseView {
             database: project_vault(&vault),
             inspection: build_inspection(header),
@@ -3239,11 +3282,108 @@ fn build_inspection(header: KdbxHeaderSummary) -> DatabaseInspection {
 #[cfg(test)]
 mod internal_tests {
     use super::{
-        CustomIcon, DeletedObject, EntryCreate, EntryLineageReportMetadataUpdate, Group,
-        KeepassCore, MutationError,
+        CompositeKey, CustomIcon, DeletedObject, EntryCreate, EntryLineageReportMetadataUpdate,
+        ExternalKdfConfirmation, ExternalKdfDecision, ExternalKdfPolicy, Group, KdbxCipher,
+        KdbxError, KdbxHeader, KdbxVersion, KeepassCore, MutationError, SaveProfile,
+        VariantDictionary, VariantValue,
     };
     use uuid::Uuid;
+    use vaultkern_crypto::sha256_bytes;
     use vaultkern_model::{Entry, Vault};
+
+    #[test]
+    fn core_load_facades_require_an_external_kdf_policy_decision() {
+        let core = KeepassCore::new();
+        let key = CompositeKey::default();
+        let bytes = core
+            .save_kdbx(&Vault::empty("policy"), &key, SaveProfile::recommended())
+            .expect("save test database");
+
+        assert!(matches!(
+            core.load_kdbx_with_policy(
+                &bytes,
+                &key,
+                &ExternalKdfPolicy::Extension,
+                ExternalKdfConfirmation::Confirmed,
+            ),
+            Err(KdbxError::ExternalKdfPolicy {
+                decision: ExternalKdfDecision::Forbid,
+                ..
+            })
+        ));
+
+        for error in [
+            core.load_database_with_policy(
+                &bytes,
+                &key,
+                &ExternalKdfPolicy::Extension,
+                ExternalKdfConfirmation::Confirmed,
+            )
+            .map(|_| ()),
+            core.load_database_view_with_policy(
+                &bytes,
+                &key,
+                &ExternalKdfPolicy::Extension,
+                ExternalKdfConfirmation::Confirmed,
+            )
+            .map(|_| ()),
+        ] {
+            assert!(matches!(
+                error,
+                Err(super::CoreError::Kdbx(KdbxError::ExternalKdfPolicy {
+                    decision: ExternalKdfDecision::Forbid,
+                    ..
+                }))
+            ));
+        }
+    }
+
+    #[test]
+    fn core_compatibility_load_uses_the_conservative_mobile_policy() {
+        let mut parameters = VariantDictionary::default();
+        parameters.insert(
+            "$UUID",
+            VariantValue::Bytes(
+                Uuid::from_bytes([
+                    0x7C, 0x02, 0xBB, 0x82, 0x79, 0xA7, 0x4A, 0xC0, 0x92, 0x7D, 0x11, 0x4A, 0x00,
+                    0x69, 0x2E, 0xB7,
+                ])
+                .into_bytes()
+                .to_vec(),
+            ),
+        );
+        parameters.insert("R", VariantValue::UInt64(600_000_001));
+        parameters.insert("S", VariantValue::Bytes(vec![0; 32]));
+        let mut header = KdbxHeader::new(KdbxVersion::V4_1, KdbxCipher::Aes256);
+        header.encryption_iv = vec![0; 16];
+        header.kdf_parameters = parameters;
+        let header_bytes = header.encode().expect("encode header");
+        let mut bytes = header_bytes.clone();
+        bytes.extend(sha256_bytes(&header_bytes));
+        bytes.extend([0; 32]);
+
+        let core = KeepassCore::new();
+        let key = CompositeKey::default();
+        assert!(matches!(
+            core.load_kdbx(&bytes, &key),
+            Err(KdbxError::ExternalKdfPolicy {
+                decision: ExternalKdfDecision::Refuse(600_000_000),
+                ..
+            })
+        ));
+        for error in [
+            core.load_database(&bytes, &key).map(|_| ()),
+            core.load_database_view(&bytes, &key).map(|_| ()),
+        ] {
+            assert!(matches!(
+                error,
+                Err(super::CoreError::Kdbx(KdbxError::ExternalKdfPolicy {
+                    decision: ExternalKdfDecision::Refuse(600_000_000),
+                    ..
+                }))
+            ));
+        }
+    }
 
     #[test]
     fn entry_lineage_report_metadata_update_clears_quality_check_raw_state() {
