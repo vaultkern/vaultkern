@@ -603,6 +603,24 @@ impl TokenSecurityContext {
 }
 
 #[cfg(any(windows, test))]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PrivateAclEntry {
+    ace_type: u8,
+    flags: u8,
+    mask: u32,
+    sid: String,
+}
+
+#[cfg(any(windows, test))]
+fn private_acl_entries_match(expected: &[PrivateAclEntry], actual: &[PrivateAclEntry]) -> bool {
+    let mut expected = expected.to_vec();
+    let mut actual = actual.to_vec();
+    expected.sort_unstable();
+    actual.sort_unstable();
+    expected == actual
+}
+
+#[cfg(any(windows, test))]
 fn validate_single_link_count(link_count: u32, path: &std::path::Path) -> Result<()> {
     if link_count != 1 {
         anyhow::bail!(
@@ -617,9 +635,6 @@ fn validate_single_link_count(link_count: u32, path: &std::path::Path) -> Result
 fn enforce_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::MetadataExt;
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    };
     use windows_sys::Win32::Security::{
         DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
     };
@@ -659,25 +674,7 @@ fn enforce_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<_>>();
-    let expected_sddl = security.private_sddl(directory);
-    let sddl_wide = expected_sddl
-        .encode_utf16()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let mut descriptor = std::ptr::null_mut();
-    let result = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl_wide.as_ptr(),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        )
-    };
-    let descriptor = LocalPointer(descriptor);
-    if result == 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("failed to build private OneDrive refresh-token ACL");
-    }
+    let descriptor = security_descriptor_from_sddl(&security.private_sddl(directory))?;
     let result = unsafe {
         SetFileSecurityW(
             path_wide.as_ptr(),
@@ -699,9 +696,6 @@ fn enforce_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
 #[cfg(windows)]
 fn verify_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
-    };
     use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, GetFileSecurityW};
 
     let security = current_token_security_context()?;
@@ -754,37 +748,116 @@ fn verify_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
         });
     }
 
-    let mut sddl = std::ptr::null_mut();
-    let mut sddl_len = 0_u32;
-    let result = unsafe {
-        ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            descriptor.as_mut_ptr().cast(),
-            SDDL_REVISION_1,
-            DACL_SECURITY_INFORMATION,
-            &mut sddl,
-            &mut sddl_len,
-        )
-    };
-    let sddl = LocalPointer(sddl.cast());
-    if result == 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("failed to inspect private OneDrive refresh-token ACL");
-    }
-    let mut actual_units =
-        unsafe { std::slice::from_raw_parts(sddl.0.cast::<u16>(), sddl_len as usize) };
-    if actual_units.last() == Some(&0) {
-        actual_units = &actual_units[..actual_units.len() - 1];
-    }
-    let actual = String::from_utf16(actual_units)
-        .context("OneDrive refresh-token ACL uses invalid UTF-16")?;
-    let expected = security.private_sddl(directory);
-    if actual != expected {
+    let expected = security_descriptor_from_sddl(&security.private_sddl(directory))?;
+    let (actual_protected, actual_entries) =
+        private_acl_from_descriptor(descriptor.as_mut_ptr().cast())?;
+    let (expected_protected, expected_entries) = private_acl_from_descriptor(expected.0)?;
+    if !actual_protected
+        || !expected_protected
+        || !private_acl_entries_match(&expected_entries, &actual_entries)
+    {
         anyhow::bail!(
             "OneDrive refresh-token ACL is not private: {}",
             path.display()
         );
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn security_descriptor_from_sddl(sddl: &str) -> Result<LocalPointer> {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+
+    let sddl_wide = sddl.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut descriptor = std::ptr::null_mut();
+    let result = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    let descriptor = LocalPointer(descriptor);
+    if result == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to build private OneDrive refresh-token ACL");
+    }
+    Ok(descriptor)
+}
+
+#[cfg(windows)]
+fn private_acl_from_descriptor(
+    descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
+) -> Result<(bool, Vec<PrivateAclEntry>)> {
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation, GetAce,
+        GetAclInformation, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+        SE_DACL_PROTECTED,
+    };
+
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+    let mut control = 0_u16;
+    let mut revision = 0_u32;
+    if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to inspect OneDrive refresh-token ACL control flags");
+    }
+
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl = std::ptr::null_mut();
+    if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) }
+        == 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to inspect OneDrive refresh-token DACL");
+    }
+    if present == 0 || dacl.is_null() {
+        anyhow::bail!("OneDrive refresh-token ACL has no private DACL");
+    }
+
+    let mut information = ACL_SIZE_INFORMATION::default();
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            (&mut information as *mut ACL_SIZE_INFORMATION).cast(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to size OneDrive refresh-token DACL");
+    }
+
+    let mut entries = Vec::with_capacity(information.AceCount as usize);
+    for index in 0..information.AceCount {
+        let mut raw_ace = std::ptr::null_mut();
+        if unsafe { GetAce(dacl, index, &mut raw_ace) } == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to inspect OneDrive refresh-token DACL entry");
+        }
+        let header = unsafe { &*raw_ace.cast::<ACE_HEADER>() };
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE
+            || usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+        {
+            anyhow::bail!("OneDrive refresh-token ACL contains an unexpected entry");
+        }
+        let ace = unsafe { &*raw_ace.cast::<ACCESS_ALLOWED_ACE>() };
+        let sid = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
+        entries.push(PrivateAclEntry {
+            ace_type: header.AceType,
+            flags: header.AceFlags,
+            mask: ace.Mask,
+            sid: sid_to_string(sid)?,
+        });
+    }
+
+    Ok((control & SE_DACL_PROTECTED != 0, entries))
 }
 
 #[cfg(windows)]
@@ -1245,10 +1318,11 @@ mod tests {
     #[cfg(windows)]
     use super::OneDriveRefreshTokenStore;
     use super::{
-        MAX_PROTECTED_REFRESH_TOKEN_BYTES, TokenSecurityContext, acquire_token_store_lock,
-        enforce_temp_metadata_or_discard, production_for_extension_id, production_store,
-        read_bounded_protected_payload, token_backup_path, token_lock_path,
-        validate_protected_payload_size, validate_single_link_count, zeroize_plaintext_bytes,
+        MAX_PROTECTED_REFRESH_TOKEN_BYTES, PrivateAclEntry, TokenSecurityContext,
+        acquire_token_store_lock, enforce_temp_metadata_or_discard, private_acl_entries_match,
+        production_for_extension_id, production_store, read_bounded_protected_payload,
+        token_backup_path, token_lock_path, validate_protected_payload_size,
+        validate_single_link_count, zeroize_plaintext_bytes,
     };
     #[cfg(unix)]
     use super::{token_target_exists, validate_existing_directory_identity};
@@ -1349,6 +1423,31 @@ mod tests {
             .expect_err("foreign-owned token paths must be rejected");
 
         assert!(format!("{error:#}").contains("owned by another user"));
+    }
+
+    #[test]
+    fn private_acl_comparison_ignores_ace_order_but_not_permissions() {
+        let entry = |sid: &str, mask| PrivateAclEntry {
+            ace_type: 0,
+            flags: 3,
+            mask,
+            sid: sid.to_owned(),
+        };
+        let expected = vec![
+            entry("S-1-5-21-user", 0x001f_01ff),
+            entry("S-1-5-18", 0x001f_01ff),
+            entry("S-1-5-32-544", 0x001f_01ff),
+        ];
+        let reordered = vec![
+            expected[2].clone(),
+            expected[0].clone(),
+            expected[1].clone(),
+        ];
+        let mut weakened = reordered.clone();
+        weakened[0].mask = 0x0012_0089;
+
+        assert!(private_acl_entries_match(&expected, &reordered));
+        assert!(!private_acl_entries_match(&expected, &weakened));
     }
 
     #[test]
