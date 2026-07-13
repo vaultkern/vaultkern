@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 #[cfg(any(windows, test))]
 use std::fs;
 #[cfg(any(windows, test))]
+use std::io;
+#[cfg(any(windows, test))]
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(any(windows, test))]
@@ -26,9 +28,10 @@ use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
 #[cfg(any(windows, test))]
 use crate::providers::durable_file::{
-    DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, TargetExpectation,
-    TempWriteFaultPoints, create_dir_all_durable, path_file_identity, publish_temp,
-    remove_if_exists, sync_parent, unique_sibling_path, write_verified_temp,
+    DurableFaultInjector, DurableFaultPoint, DurableFileIdentity, ExclusiveFileLock,
+    TargetExpectation, TempWriteFaultPoints, create_dir_all_durable, opened_file_identity,
+    path_file_identity, publish_temp, remove_if_exists, sync_parent, unique_sibling_path,
+    write_verified_temp,
 };
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
@@ -42,6 +45,8 @@ const QUICK_UNLOCK_KEY_STORAGE_PROVIDER: &str = "Microsoft Platform Crypto Provi
 const QUICK_UNLOCK_KEY_UI_POLICY_FLAG: u32 = 4;
 #[cfg(any(windows, test))]
 const QUICK_UNLOCK_RECORD_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(any(windows, test))]
+const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 #[derive(Deserialize, Serialize)]
@@ -99,6 +104,12 @@ fn publish_quick_unlock_record_with(
             parent.display()
         )
     })?;
+    let parent_guard = QuickUnlockParentGuard::acquire(parent).with_context(|| {
+        format!(
+            "failed to bind quick unlock record parent directory: {}",
+            parent.display()
+        )
+    })?;
 
     let lock_path = quick_unlock_record_lock_path(path)?;
     let _lock =
@@ -108,8 +119,8 @@ fn publish_quick_unlock_record_with(
                 lock_path.display()
             )
         })?;
+    parent_guard.validate(parent)?;
     let expectation = quick_unlock_target_expectation(path)?;
-    cleanup_quick_unlock_sidecars(path)?;
     let replacing = matches!(expectation, TargetExpectation::Identity(_));
     let backup = replacing
         .then(|| unique_sibling_path(path, "bak"))
@@ -126,6 +137,16 @@ fn publish_quick_unlock_record_with(
         },
     )
     .with_context(|| format!("failed to prepare quick unlock record: {}", path.display()))?;
+    if let Err(source) = faults
+        .check(DurableFaultPoint::BeforeTargetReplace)
+        .and_then(|_| parent_guard.validate(parent))
+    {
+        let _ = temp.discard();
+        return Err(anyhow::Error::new(source).context(format!(
+            "quick unlock record was not published: {}",
+            path.display()
+        )));
+    }
     if let Err(error) = publish_temp(
         temp,
         path,
@@ -136,12 +157,10 @@ fn publish_quick_unlock_record_with(
         DurableFaultPoint::TargetReplaced,
         DurableFaultPoint::ParentSynced,
     ) {
-        if !error.published
-            && let Some(backup) = backup.as_deref()
+        let state = if error.published && quick_unlock_replacement_outcome_is_unknown(&error.source)
         {
-            let _ = remove_if_exists(backup);
-        }
-        let state = if error.published {
+            "quick unlock record publication outcome is unknown; recovery artifacts were preserved"
+        } else if error.published {
             "quick unlock record was published, but durability or cleanup was not fully confirmed"
         } else if error.target_conflict {
             "quick unlock record target changed before atomic publication"
@@ -153,27 +172,119 @@ fn publish_quick_unlock_record_with(
         );
     }
 
+    parent_guard.validate(parent).with_context(|| {
+        format!(
+            "quick unlock record was published, but parent directory identity changed: {}",
+            parent.display()
+        )
+    })?;
     faults.check(DurableFaultPoint::Cleanup).with_context(|| {
         format!(
             "quick unlock record was published, but cleanup was not confirmed: {}",
             path.display()
         )
     })?;
-    if let Some(backup) = backup {
-        remove_if_exists(&backup).with_context(|| {
-            format!(
-                "quick unlock record was published, but backup cleanup was not confirmed: {}",
-                backup.display()
-            )
-        })?;
-        sync_parent(path).with_context(|| {
-            format!(
-                "quick unlock record was published, but cleanup durability was not confirmed: {}",
-                path.display()
-            )
-        })?;
+    cleanup_quick_unlock_sidecars(path).with_context(|| {
+        format!(
+            "quick unlock record was published, but recovery cleanup was not confirmed: {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+struct QuickUnlockParentGuard {
+    identity: DurableFileIdentity,
+    #[cfg(windows)]
+    _handle: fs::File,
+}
+
+#[cfg(any(windows, test))]
+impl QuickUnlockParentGuard {
+    fn acquire(parent: &Path) -> io::Result<Self> {
+        let handle = open_quick_unlock_parent(parent)?;
+        let identity = opened_file_identity(&handle, &handle.metadata()?)?;
+        let guard = Self {
+            identity,
+            #[cfg(windows)]
+            _handle: handle,
+        };
+        guard.validate(parent)?;
+        Ok(guard)
+    }
+
+    fn validate(&self, parent: &Path) -> io::Result<()> {
+        let current = open_quick_unlock_parent(parent)?;
+        let current_identity = opened_file_identity(&current, &current.metadata()?)?;
+        if current_identity != self.identity {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "quick unlock record parent directory changed during publication",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(windows, test))]
+fn open_quick_unlock_parent(parent: &Path) -> io::Result<fs::File> {
+    let path_metadata = fs::symlink_metadata(parent)?;
+    validate_quick_unlock_parent_metadata(&path_metadata)?;
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        options
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let handle = options.open(parent)?;
+    let opened_metadata = handle.metadata()?;
+    validate_quick_unlock_parent_metadata(&opened_metadata)?;
+    #[cfg(not(windows))]
+    if opened_file_identity(&handle, &opened_metadata)?
+        != path_file_identity(parent, &path_metadata)?
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "quick unlock record parent directory changed while it was opened",
+        ));
+    }
+    Ok(handle)
+}
+
+#[cfg(any(windows, test))]
+fn validate_quick_unlock_parent_metadata(metadata: &fs::Metadata) -> io::Result<()> {
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "quick unlock record parent is not a real directory",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "quick unlock record parent is a reparse point",
+            ));
+        }
     }
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn quick_unlock_replacement_outcome_is_unknown(error: &io::Error) -> bool {
+    cfg!(windows) && error.raw_os_error() == Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2)
 }
 
 #[cfg(any(windows, test))]
@@ -997,6 +1108,104 @@ mod tests {
             std::fs::read(&record).unwrap(),
             b"intruding complete envelope"
         );
+    }
+
+    #[test]
+    fn quick_unlock_record_preserves_recovery_sidecars_until_a_publish_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("record.bin");
+        let recovery_temp = dir.path().join(".record.bin.vaultkern.tmp.recovery");
+        let recovery_backup = dir.path().join(".record.bin.vaultkern.bak.recovery");
+        std::fs::write(&recovery_temp, b"complete pending envelope").unwrap();
+        std::fs::write(&recovery_backup, b"complete previous envelope").unwrap();
+
+        let error = publish_quick_unlock_record_with(
+            &record,
+            b"complete retry envelope",
+            &DurableFaultInjector::fail_once(DurableFaultPoint::BeforeTargetReplace),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("was not published"));
+        assert!(!record.exists());
+        assert_eq!(
+            std::fs::read(&recovery_temp).unwrap(),
+            b"complete pending envelope"
+        );
+        assert_eq!(
+            std::fs::read(&recovery_backup).unwrap(),
+            b"complete previous envelope"
+        );
+
+        publish_quick_unlock_record(&record, b"complete retry envelope").unwrap();
+        assert_eq!(std::fs::read(&record).unwrap(), b"complete retry envelope");
+        assert!(!recovery_temp.exists());
+        assert!(!recovery_backup.exists());
+    }
+
+    #[test]
+    fn quick_unlock_record_never_publishes_through_a_rebound_parent() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("records");
+        let displaced_parent = dir.path().join("displaced-records");
+        std::fs::create_dir(&parent).unwrap();
+        let record = parent.join("record.bin");
+        std::fs::write(&record, b"complete old envelope").unwrap();
+
+        let callback_parent = parent.clone();
+        let callback_displaced_parent = displaced_parent.clone();
+        let parent_rebound = Arc::new(AtomicBool::new(false));
+        let callback_parent_rebound = Arc::clone(&parent_rebound);
+        let faults =
+            DurableFaultInjector::run_once(DurableFaultPoint::BeforeTargetReplace, move || {
+                if std::fs::rename(&callback_parent, &callback_displaced_parent).is_err() {
+                    return;
+                }
+                callback_parent_rebound.store(true, Ordering::Release);
+                std::fs::create_dir(&callback_parent).unwrap();
+                let _ = std::fs::rename(
+                    callback_displaced_parent.join("record.bin"),
+                    callback_parent.join("record.bin"),
+                );
+                let temp_name = std::fs::read_dir(&callback_displaced_parent)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name())
+                    .find(|name| {
+                        name.to_string_lossy()
+                            .starts_with(".record.bin.vaultkern.tmp.")
+                    });
+                if let Some(temp_name) = temp_name {
+                    let _ = std::fs::rename(
+                        callback_displaced_parent.join(&temp_name),
+                        callback_parent.join(temp_name),
+                    );
+                }
+            });
+
+        let result = publish_quick_unlock_record_with(
+            &record,
+            b"complete new envelope",
+            &faults,
+            Duration::from_secs(1),
+        );
+
+        if parent_rebound.load(Ordering::Acquire) {
+            let error = result.expect_err("publication followed the rebound parent");
+            assert!(format!("{error:#}").contains("parent directory changed"));
+            assert_ne!(
+                std::fs::read(&record).ok().as_deref(),
+                Some(b"complete new envelope".as_slice())
+            );
+        } else {
+            result.unwrap();
+            assert_eq!(std::fs::read(&record).unwrap(), b"complete new envelope");
+            assert!(!displaced_parent.exists());
+        }
     }
 
     #[test]
