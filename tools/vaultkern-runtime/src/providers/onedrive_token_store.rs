@@ -65,10 +65,20 @@ pub(crate) fn production_default() -> Box<dyn OneDriveRefreshTokenStore> {
 pub(crate) fn production_for_extension_id(
     extension_id: &str,
 ) -> Box<dyn OneDriveRefreshTokenStore> {
+    if !is_safe_extension_id_path_component(extension_id) {
+        return Box::new(InvalidExtensionIdOneDriveRefreshTokenStore);
+    }
     production_store(
         extension_state_dir(extension_id).join(TOKEN_FILE_NAME),
         &format!("vaultkern-runtime/extension/{extension_id}"),
     )
+}
+
+fn is_safe_extension_id_path_component(extension_id: &str) -> bool {
+    !extension_id.is_empty()
+        && extension_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
 fn production_store(path: PathBuf, scope: &str) -> Box<dyn OneDriveRefreshTokenStore> {
@@ -92,6 +102,26 @@ fn remove_legacy_plaintext_token(protected_path: &std::path::Path) {
 
 pub(crate) struct EphemeralOneDriveRefreshTokenStore {
     token: RefCell<Option<Zeroizing<String>>>,
+}
+
+struct InvalidExtensionIdOneDriveRefreshTokenStore;
+
+impl OneDriveRefreshTokenStore for InvalidExtensionIdOneDriveRefreshTokenStore {
+    fn load(&self) -> Result<Option<Zeroizing<String>>> {
+        invalid_extension_id()
+    }
+
+    fn store(&self, _token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
+        invalid_extension_id()
+    }
+
+    fn delete(&self) -> Result<()> {
+        invalid_extension_id()
+    }
+}
+
+fn invalid_extension_id<T>() -> Result<T> {
+    anyhow::bail!("invalid OneDrive token-store extension id")
 }
 
 impl Default for EphemeralOneDriveRefreshTokenStore {
@@ -221,6 +251,7 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
         }
         let protected = protect_refresh_token(token, &self.entropy)
             .context("failed to protect OneDrive refresh token")?;
+        validate_protected_payload_size(protected.len() as u64)?;
         let expectation = target_expectation(&self.path)?;
         let temp = write_verified_temp(
             &self.path,
@@ -540,16 +571,20 @@ fn read_bounded_protected_payload(
 ) -> Result<Vec<u8>> {
     use std::io::Read as _;
 
-    if declared_len > MAX_PROTECTED_REFRESH_TOKEN_BYTES as u64 {
-        anyhow::bail!("protected OneDrive refresh-token payload is too large");
-    }
+    validate_protected_payload_size(declared_len)?;
     let mut bytes = Vec::new();
     std::io::Read::take(reader, (MAX_PROTECTED_REFRESH_TOKEN_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_PROTECTED_REFRESH_TOKEN_BYTES {
+    validate_protected_payload_size(bytes.len() as u64)?;
+    Ok(bytes)
+}
+
+#[cfg(any(windows, test))]
+fn validate_protected_payload_size(len: u64) -> Result<()> {
+    if len > MAX_PROTECTED_REFRESH_TOKEN_BYTES as u64 {
         anyhow::bail!("protected OneDrive refresh-token payload is too large");
     }
-    Ok(bytes)
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -712,8 +747,9 @@ mod tests {
     #[cfg(windows)]
     use super::OneDriveRefreshTokenStore;
     use super::{
-        MAX_PROTECTED_REFRESH_TOKEN_BYTES, enforce_temp_metadata_or_discard, production_store,
-        read_bounded_protected_payload,
+        MAX_PROTECTED_REFRESH_TOKEN_BYTES, enforce_temp_metadata_or_discard,
+        production_for_extension_id, production_store, read_bounded_protected_payload,
+        validate_protected_payload_size,
     };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, TempWriteFaultPoints, write_verified_temp,
@@ -772,6 +808,32 @@ mod tests {
             bytes.position(),
             (MAX_PROTECTED_REFRESH_TOKEN_BYTES + 1) as u64
         );
+    }
+
+    #[test]
+    fn protected_payload_writer_rejects_size_above_reader_limit() {
+        validate_protected_payload_size(MAX_PROTECTED_REFRESH_TOKEN_BYTES as u64).unwrap();
+
+        let error = validate_protected_payload_size((MAX_PROTECTED_REFRESH_TOKEN_BYTES + 1) as u64)
+            .expect_err("the writer must not publish a payload the reader will reject");
+
+        assert!(format!("{error:#}").contains("too large"));
+    }
+
+    #[test]
+    fn invalid_extension_id_cannot_select_legacy_cleanup_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("onedrive-refresh-token");
+        std::fs::write(&legacy_path, b"must-not-be-deleted").unwrap();
+        let invalid_extension_id = dir.path().to_str().unwrap();
+
+        let store = production_for_extension_id(invalid_extension_id);
+        let error = store
+            .load()
+            .expect_err("an invalid extension id must produce an unusable store");
+
+        assert!(format!("{error:#}").contains("invalid OneDrive token-store extension id"));
+        assert!(legacy_path.exists());
     }
 
     #[test]
