@@ -1,6 +1,6 @@
 use crate::quick_unlock_ledger::{LedgerStoreError, QuickUnlockLedgerStore};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use vaultkern_runtime_protocol::contracts::{
     NeedsReenrollReason, PlatformRecordKey, QuickUnlockLedgerEntry, QuickUnlockState,
 };
@@ -221,6 +221,7 @@ pub(crate) struct DisableOutcome {
 pub(crate) enum CoordinatorError {
     Ledger(LedgerStoreError),
     GenerationOverflow,
+    InvalidIdentifierScope,
 }
 
 impl fmt::Display for CoordinatorError {
@@ -230,6 +231,9 @@ impl fmt::Display for CoordinatorError {
             Self::GenerationOverflow => {
                 formatter.write_str("quick unlock record generation overflowed")
             }
+            Self::InvalidIdentifierScope => {
+                formatter.write_str("quick unlock identifier_scope must not be empty")
+            }
         }
     }
 }
@@ -238,7 +242,7 @@ impl std::error::Error for CoordinatorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Ledger(error) => Some(error),
-            Self::GenerationOverflow => None,
+            Self::GenerationOverflow | Self::InvalidIdentifierScope => None,
         }
     }
 }
@@ -259,6 +263,7 @@ pub(crate) struct QuickUnlockCoordinator {
     ledger: QuickUnlockLedgerStore,
     records: Arc<dyn QuickUnlockRecordStore>,
     classifier: Arc<dyn PlatformErrorClassifier>,
+    transition_lock: Mutex<()>,
 }
 
 impl QuickUnlockCoordinator {
@@ -271,6 +276,7 @@ impl QuickUnlockCoordinator {
             ledger,
             records,
             classifier,
+            transition_lock: Mutex::new(()),
         }
     }
 
@@ -281,6 +287,8 @@ impl QuickUnlockCoordinator {
         session: SessionUnlockKind,
         opaque_envelope: &[u8],
     ) -> Result<EnableOutcome, CoordinatorError> {
+        validate_identifier_scope(identifier_scope)?;
+        let _transition_guard = self.lock_transitions();
         if session != SessionUnlockKind::PasswordUnlocked {
             return Ok(EnableOutcome::PasswordUnlockRequired);
         }
@@ -316,6 +324,8 @@ impl QuickUnlockCoordinator {
         vault_ref_id: &str,
         opaque_envelope: &[u8],
     ) -> Result<FullCredentialOutcome, CoordinatorError> {
+        validate_identifier_scope(identifier_scope)?;
+        let _transition_guard = self.lock_transitions();
         let (stored, current) = self.current_entry(vault_ref_id)?;
         let reduction = reduce(
             &current,
@@ -347,6 +357,7 @@ impl QuickUnlockCoordinator {
     where
         F: FnOnce(&[u8]) -> EnvelopeInspection,
     {
+        validate_identifier_scope(identifier_scope)?;
         let (stored, current) = self.current_entry(vault_ref_id)?;
         if !matches!(current.state, QuickUnlockState::Enrolled) {
             return Ok(UnlockOutcome::Refused);
@@ -379,8 +390,7 @@ impl QuickUnlockCoordinator {
         match inspect(&opaque_envelope) {
             EnvelopeInspection::Valid => {
                 // Linearize release of the envelope against concurrent disable or rotation.
-                self.ledger
-                    .compare_and_swap(vault_ref_id, stored.as_ref(), current)?;
+                self.ledger.assert_current(vault_ref_id, &current)?;
                 Ok(UnlockOutcome::Unlocked(opaque_envelope))
             }
             EnvelopeInspection::KdfGenerationMismatch => {
@@ -406,6 +416,8 @@ impl QuickUnlockCoordinator {
         identifier_scope: &str,
         vault_ref_id: &str,
     ) -> Result<DisableOutcome, CoordinatorError> {
+        validate_identifier_scope(identifier_scope)?;
+        let _transition_guard = self.lock_transitions();
         let (stored, current) = self.current_entry(vault_ref_id)?;
         let reduction = reduce(
             &current,
@@ -429,6 +441,20 @@ impl QuickUnlockCoordinator {
         let stored = self.ledger.get(vault_ref_id)?;
         let current = stored.clone().unwrap_or_else(initial_entry);
         Ok((stored, current))
+    }
+
+    fn lock_transitions(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.transition_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+fn validate_identifier_scope(identifier_scope: &str) -> Result<(), CoordinatorError> {
+    if identifier_scope.is_empty() {
+        Err(CoordinatorError::InvalidIdentifierScope)
+    } else {
+        Ok(())
     }
 }
 
@@ -470,9 +496,11 @@ mod tests {
         QuickUnlockError, QuickUnlockOperation, QuickUnlockOperationResult, QuickUnlockRecordStore,
         ReduceError, ReductionDisposition, SessionUnlockKind, UnlockOutcome, reduce,
     };
+    use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
     use crate::quick_unlock_ledger::{LedgerStoreError, QuickUnlockLedgerStore};
-    use std::sync::{Arc, Barrier, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
+    use std::time::Duration;
     use vaultkern_runtime_protocol::contracts::{
         NeedsReenrollReason, PlatformRecordKey, QuickUnlockLedgerEntry, QuickUnlockState,
     };
@@ -686,8 +714,13 @@ mod tests {
         delete_error: Mutex<Option<PlatformError>>,
         after_seal_cas: Mutex<Option<ForcedCas>>,
         after_unseal_cas: Mutex<Option<ForcedCas>>,
-        seal_barrier: Option<Arc<Barrier>>,
+        seal_gate: Option<SealGate>,
         delete_observer: Mutex<Option<DeleteObserver>>,
+    }
+
+    struct SealGate {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
     }
 
     struct ForcedCas {
@@ -713,14 +746,17 @@ mod tests {
                 delete_error: Mutex::new(None),
                 after_seal_cas: Mutex::new(None),
                 after_unseal_cas: Mutex::new(None),
-                seal_barrier: None,
+                seal_gate: None,
                 delete_observer: Mutex::new(None),
             }
         }
 
-        fn with_barrier(barrier: Arc<Barrier>) -> Self {
+        fn with_seal_gate(entered: mpsc::Sender<()>, release: mpsc::Receiver<()>) -> Self {
             Self {
-                seal_barrier: Some(barrier),
+                seal_gate: Some(SealGate {
+                    entered,
+                    release: Mutex::new(release),
+                }),
                 ..Self::new()
             }
         }
@@ -762,8 +798,9 @@ mod tests {
                     .compare_and_swap(&forced.vault_ref_id, Some(&forced.expected), forced.next)
                     .unwrap();
             }
-            if let Some(barrier) = &self.seal_barrier {
-                barrier.wait();
+            if let Some(gate) = &self.seal_gate {
+                gate.entered.send(()).unwrap();
+                gate.release.lock().unwrap().recv().unwrap();
             }
             Ok(())
         }
@@ -874,6 +911,24 @@ mod tests {
             EnableOutcome::Refused(QuickUnlockError::NotEnrolled)
         );
         assert_eq!(ledger.get("vault").unwrap(), None);
+    }
+
+    #[test]
+    fn empty_identifier_scope_is_rejected_before_either_store_is_touched() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        let enrolled = entry(QuickUnlockState::Enrolled, 7);
+        ledger
+            .compare_and_swap("vault", None, enrolled.clone())
+            .unwrap();
+        let records = Arc::new(FakeRecordStore::new());
+        let coordinator = coordinator(ledger.clone(), Arc::clone(&records));
+
+        assert!(matches!(
+            coordinator.disable("", "vault"),
+            Err(CoordinatorError::InvalidIdentifierScope)
+        ));
+        assert_eq!(ledger.get("vault").unwrap(), Some(enrolled));
+        assert!(records.calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1134,11 +1189,42 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_enables_surface_one_exact_row_cas_conflict_without_retry() {
+    fn successful_unlock_does_not_publish_an_unchanged_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quick-unlock.json");
+        let initial = QuickUnlockLedgerStore::persistent(path.clone(), Duration::from_secs(1));
+        initial
+            .compare_and_swap("vault", None, entry(QuickUnlockState::Enrolled, 7))
+            .unwrap();
+        let ledger = QuickUnlockLedgerStore::persistent_with_faults(
+            path,
+            Duration::from_secs(1),
+            DurableFaultInjector::fail_once(DurableFaultPoint::BeforeTargetReplace),
+        );
+        let records = Arc::new(FakeRecordStore::new());
+        records.insert(key("scope", "vault", 7), b"opaque-envelope");
+
+        let outcome = coordinator(ledger.clone(), records)
+            .unlock("scope", "vault", |_| EnvelopeInspection::Valid)
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            UnlockOutcome::Unlocked(b"opaque-envelope".to_vec())
+        );
+        assert_eq!(
+            ledger.get("vault").unwrap(),
+            Some(entry(QuickUnlockState::Enrolled, 7))
+        );
+    }
+
+    #[test]
+    fn concurrent_enables_do_not_seal_two_envelopes_to_the_same_generation() {
         let ledger = QuickUnlockLedgerStore::in_memory();
-        let barrier = Arc::new(Barrier::new(2));
-        let records = Arc::new(FakeRecordStore::with_barrier(barrier));
-        let coordinator = Arc::new(coordinator(ledger.clone(), records));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let records = Arc::new(FakeRecordStore::with_seal_gate(entered_tx, release_rx));
+        let coordinator = Arc::new(coordinator(ledger.clone(), Arc::clone(&records)));
 
         let spawn = |payload: &'static [u8]| {
             let coordinator = Arc::clone(&coordinator);
@@ -1152,9 +1238,30 @@ mod tests {
             })
         };
         let first = spawn(b"first");
-        let second = spawn(b"second");
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let second_coordinator = Arc::clone(&coordinator);
+        let second = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            second_coordinator.enable(
+                "scope",
+                "vault",
+                SessionUnlockKind::PasswordUnlocked,
+                b"second",
+            )
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let second_entered = entered_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        release_tx.send(()).unwrap();
+        if second_entered {
+            release_tx.send(()).unwrap();
+        }
         let results = [first.join().unwrap(), second.join().unwrap()];
 
+        assert!(
+            !second_entered,
+            "both operations reached seal for generation 1"
+        );
         assert_eq!(
             results
                 .iter()
@@ -1165,10 +1272,17 @@ mod tests {
         assert_eq!(
             results
                 .iter()
-                .filter(|result| matches!(
-                    result,
-                    Err(CoordinatorError::Ledger(LedgerStoreError::Conflict { .. }))
-                ))
+                .filter(|result| matches!(result, Ok(EnableOutcome::NoChange)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| matches!(call, RecordCall::Seal(_, _)))
                 .count(),
             1
         );
