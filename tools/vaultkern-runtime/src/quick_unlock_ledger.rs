@@ -1,11 +1,15 @@
-use crate::providers::durable_file::DurableFaultInjector;
+use crate::providers::durable_file::{
+    DurableFaultInjector, DurableFaultPoint, DurableFileIdentity, ExclusiveFileLock,
+    TargetExpectation, TempWriteFaultPoints, create_dir_all_durable, opened_file_identity,
+    path_file_identity, publish_temp, write_verified_temp,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
-use std::io;
-use std::path::PathBuf;
+use std::fs::{self, Metadata, OpenOptions};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use vaultkern_runtime_protocol::contracts::{QuickUnlockLedgerEntry, QuickUnlockState};
@@ -17,6 +21,10 @@ const KNOWN_ROW_KEYS: [&str; 4] = ["schema_version", "state", "generation", "pol
 pub(crate) enum LedgerStoreError {
     Io(io::Error),
     InvalidData { message: String },
+    Busy { message: String },
+    Conflict { message: String },
+    BeforePublish { source: io::Error },
+    OutcomeUnknown { source: io::Error },
 }
 
 impl fmt::Display for LedgerStoreError {
@@ -26,6 +34,20 @@ impl fmt::Display for LedgerStoreError {
             Self::InvalidData { message } => {
                 write!(formatter, "quick unlock ledger is invalid: {message}")
             }
+            Self::Busy { message } => write!(formatter, "quick unlock ledger is busy: {message}"),
+            Self::Conflict { message } => {
+                write!(formatter, "quick unlock ledger write conflict: {message}")
+            }
+            Self::BeforePublish { source } => {
+                write!(
+                    formatter,
+                    "quick unlock ledger write failed before publish: {source}"
+                )
+            }
+            Self::OutcomeUnknown { source } => write!(
+                formatter,
+                "quick unlock ledger may have published but durability is unknown: {source}"
+            ),
         }
     }
 }
@@ -34,7 +56,8 @@ impl std::error::Error for LedgerStoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(source) => Some(source),
-            Self::InvalidData { .. } => None,
+            Self::BeforePublish { source } | Self::OutcomeUnknown { source } => Some(source),
+            Self::InvalidData { .. } | Self::Busy { .. } | Self::Conflict { .. } => None,
         }
     }
 }
@@ -237,26 +260,303 @@ impl QuickUnlockLedgerStore {
                     .get(vault_ref_id)
                     .map(|row| row.value.clone()));
             }
-            LedgerBacking::Persistent { path, .. } => match fs::read(path) {
-                Ok(bytes) => LedgerDocument::decode(&bytes)?,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => LedgerDocument::empty(),
-                Err(error) => return Err(error.into()),
-            },
+            LedgerBacking::Persistent { path, .. } => read_persistent_document(path)?.0,
         };
         Ok(document
             .entries
             .get(vault_ref_id)
             .map(|row| row.value.clone()))
     }
+
+    pub(crate) fn compare_and_swap(
+        &self,
+        vault_ref_id: &str,
+        expected: Option<&QuickUnlockLedgerEntry>,
+        next: QuickUnlockLedgerEntry,
+    ) -> Result<(), LedgerStoreError> {
+        if vault_ref_id.is_empty() {
+            return Err(invalid_data("vault_ref_id must not be empty"));
+        }
+        validate_entry(&next)?;
+        match &self.backing {
+            LedgerBacking::Memory(document) => {
+                let mut document = document
+                    .lock()
+                    .map_err(|_| invalid_data("in-memory ledger lock is poisoned"))?;
+                apply_compare_and_swap(&mut document, vault_ref_id, expected, next)
+            }
+            LedgerBacking::Persistent {
+                path,
+                lock_timeout,
+                faults,
+            } => self.compare_and_swap_persistent(
+                path,
+                *lock_timeout,
+                faults,
+                vault_ref_id,
+                expected,
+                next,
+            ),
+        }
+    }
+
+    fn compare_and_swap_persistent(
+        &self,
+        path: &Path,
+        lock_timeout: Duration,
+        faults: &DurableFaultInjector,
+        vault_ref_id: &str,
+        expected: Option<&QuickUnlockLedgerEntry>,
+        next: QuickUnlockLedgerEntry,
+    ) -> Result<(), LedgerStoreError> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or_else(|| invalid_data("persistent ledger path has no parent directory"))?;
+        create_dir_all_durable(parent)
+            .map_err(|source| LedgerStoreError::BeforePublish { source })?;
+        let lock_path = ledger_lock_path(path);
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, lock_timeout).map_err(
+            |source| {
+                if source.kind() == io::ErrorKind::WouldBlock {
+                    LedgerStoreError::Busy {
+                        message: source.to_string(),
+                    }
+                } else {
+                    LedgerStoreError::BeforePublish { source }
+                }
+            },
+        )?;
+        let (mut document, target_expectation) =
+            read_persistent_document(path).map_err(|error| match error {
+                LedgerStoreError::Io(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                    LedgerStoreError::Conflict {
+                        message: source.to_string(),
+                    }
+                }
+                LedgerStoreError::Io(source) => LedgerStoreError::BeforePublish { source },
+                error => error,
+            })?;
+        apply_compare_and_swap(&mut document, vault_ref_id, expected, next)?;
+        let bytes = document.encode_pretty()?;
+        let temp = write_verified_temp(
+            path,
+            &bytes,
+            faults,
+            TempWriteFaultPoints {
+                created: DurableFaultPoint::TempCreated,
+                written: DurableFaultPoint::TempWritten,
+                synced: DurableFaultPoint::TempSynced,
+                verified: DurableFaultPoint::TempReadbackVerified,
+            },
+        )
+        .map_err(|source| LedgerStoreError::BeforePublish { source })?;
+        publish_temp(
+            temp,
+            path,
+            target_expectation,
+            None,
+            faults,
+            DurableFaultPoint::BeforeTargetReplace,
+            DurableFaultPoint::TargetReplaced,
+            DurableFaultPoint::ParentSynced,
+        )
+        .map_err(|error| {
+            if error.target_conflict {
+                LedgerStoreError::Conflict {
+                    message: error.source.to_string(),
+                }
+            } else if error.published {
+                LedgerStoreError::OutcomeUnknown {
+                    source: error.source,
+                }
+            } else {
+                LedgerStoreError::BeforePublish {
+                    source: error.source,
+                }
+            }
+        })
+    }
+}
+
+fn apply_compare_and_swap(
+    document: &mut LedgerDocument,
+    vault_ref_id: &str,
+    expected: Option<&QuickUnlockLedgerEntry>,
+    next: QuickUnlockLedgerEntry,
+) -> Result<(), LedgerStoreError> {
+    match document.entries.get_mut(vault_ref_id) {
+        Some(current) => {
+            if expected != Some(&current.value) {
+                return Err(LedgerStoreError::Conflict {
+                    message: format!("row {vault_ref_id:?} no longer matches the expected value"),
+                });
+            }
+            if next.generation < current.value.generation {
+                return Err(LedgerStoreError::Conflict {
+                    message: format!(
+                        "row {vault_ref_id:?} generation cannot decrease from {} to {}",
+                        current.value.generation, next.generation
+                    ),
+                });
+            }
+            current.value = next;
+        }
+        None => {
+            if expected.is_some() {
+                return Err(LedgerStoreError::Conflict {
+                    message: format!("row {vault_ref_id:?} does not exist"),
+                });
+            }
+            document.entries.insert(
+                vault_ref_id.to_owned(),
+                StoredLedgerRow {
+                    value: next,
+                    unknown: BTreeMap::new(),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ledger_lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+fn read_persistent_document(
+    path: &Path,
+) -> Result<(LedgerDocument, TargetExpectation), LedgerStoreError> {
+    match read_regular_file(path) {
+        Ok((bytes, identity)) => Ok((
+            LedgerDocument::decode(&bytes)?,
+            TargetExpectation::Identity(identity),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok((LedgerDocument::empty(), TargetExpectation::Missing))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_regular_file(path: &Path) -> io::Result<(Vec<u8>, DurableFileIdentity)> {
+    let path_metadata = fs::symlink_metadata(path)?;
+    validate_regular_file_metadata(&path_metadata)?;
+    let expected_identity = path_file_identity(path, &path_metadata)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options.open(path)?;
+    let before = file.metadata()?;
+    validate_regular_file_metadata(&before)?;
+    let opened_identity = opened_file_identity(&file, &before)?;
+    if opened_identity != expected_identity {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "ledger target changed while opening",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let after = file.metadata()?;
+    let final_path_metadata = fs::symlink_metadata(path)?;
+    validate_regular_file_metadata(&after)?;
+    validate_regular_file_metadata(&final_path_metadata)?;
+    if opened_file_identity(&file, &after)? != opened_identity
+        || path_file_identity(path, &final_path_metadata)? != opened_identity
+        || before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "ledger target changed while reading",
+        ));
+    }
+    Ok((bytes, opened_identity))
+}
+
+fn validate_regular_file_metadata(metadata: &Metadata) -> io::Result<()> {
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "quick unlock ledger target is not a regular file",
+        ));
+    }
+    reject_reparse_point(metadata)
+}
+
+#[cfg(windows)]
+fn reject_reparse_point(metadata: &Metadata) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "quick unlock ledger target is a reparse point",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn reject_reparse_point(_metadata: &Metadata) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LedgerDocument, QuickUnlockLedgerStore};
+    use super::{LedgerDocument, LedgerStoreError, QuickUnlockLedgerStore};
+    use crate::providers::durable_file::ExclusiveFileLock;
     use serde_json::{Value, json};
     use std::fs;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use std::time::Duration;
-    use vaultkern_runtime_protocol::contracts::{QuickUnlockLedgerEntry, QuickUnlockState};
+    use vaultkern_runtime_protocol::contracts::{
+        NeedsReenrollReason, QuickUnlockLedgerEntry, QuickUnlockState,
+    };
+
+    fn disabled(generation: u64) -> QuickUnlockLedgerEntry {
+        QuickUnlockLedgerEntry {
+            schema_version: QuickUnlockLedgerEntry::SCHEMA_VERSION,
+            state: QuickUnlockState::Disabled,
+            generation,
+            policy: false,
+        }
+    }
+
+    fn enrolled(generation: u64) -> QuickUnlockLedgerEntry {
+        QuickUnlockLedgerEntry {
+            schema_version: QuickUnlockLedgerEntry::SCHEMA_VERSION,
+            state: QuickUnlockState::Enrolled,
+            generation,
+            policy: true,
+        }
+    }
+
+    fn needs_reenroll(generation: u64) -> QuickUnlockLedgerEntry {
+        QuickUnlockLedgerEntry {
+            schema_version: QuickUnlockLedgerEntry::SCHEMA_VERSION,
+            state: QuickUnlockState::NeedsReenroll {
+                reason: NeedsReenrollReason::BiometryChanged,
+            },
+            generation,
+            policy: true,
+        }
+    }
 
     fn valid_document() -> Value {
         json!({
@@ -394,5 +694,137 @@ mod tests {
 
         assert_eq!(store.get("vault-1").unwrap(), None);
         assert_eq!(clone.get("vault-1").unwrap(), None);
+    }
+
+    #[test]
+    fn compare_and_swap_creates_disabled_and_enrolled_rows() {
+        let store = QuickUnlockLedgerStore::in_memory();
+        let clone = store.clone();
+
+        store
+            .compare_and_swap("vault-disabled", None, disabled(0))
+            .unwrap();
+        store
+            .compare_and_swap("vault-enrolled", None, enrolled(1))
+            .unwrap();
+
+        assert_eq!(clone.get("vault-disabled").unwrap(), Some(disabled(0)));
+        assert_eq!(clone.get("vault-enrolled").unwrap(), Some(enrolled(1)));
+    }
+
+    #[test]
+    fn compare_and_swap_persists_increment_and_same_generation_reenroll() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger").join("quick-unlock.json");
+        let store = QuickUnlockLedgerStore::persistent(path.clone(), Duration::from_secs(1));
+        store
+            .compare_and_swap("vault-1", None, enrolled(7))
+            .unwrap();
+
+        store
+            .compare_and_swap("vault-1", Some(&enrolled(7)), enrolled(8))
+            .unwrap();
+        store
+            .compare_and_swap("vault-1", Some(&enrolled(8)), needs_reenroll(8))
+            .unwrap();
+
+        let reopened = QuickUnlockLedgerStore::persistent(path, Duration::from_secs(1));
+        assert_eq!(reopened.get("vault-1").unwrap(), Some(needs_reenroll(8)));
+    }
+
+    #[test]
+    fn compare_and_swap_rejects_stale_expected_rows_and_generation_rollback() {
+        let store = QuickUnlockLedgerStore::in_memory();
+        store
+            .compare_and_swap("vault-1", None, enrolled(7))
+            .unwrap();
+
+        let stale = store
+            .compare_and_swap("vault-1", Some(&enrolled(6)), enrolled(8))
+            .unwrap_err();
+        let rollback = store
+            .compare_and_swap("vault-1", Some(&enrolled(7)), disabled(6))
+            .unwrap_err();
+
+        assert!(matches!(stale, LedgerStoreError::Conflict { .. }));
+        assert!(matches!(rollback, LedgerStoreError::Conflict { .. }));
+        assert_eq!(store.get("vault-1").unwrap(), Some(enrolled(7)));
+    }
+
+    #[test]
+    fn compare_and_swap_allows_exactly_one_of_two_persistent_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger").join("quick-unlock.json");
+        let store = QuickUnlockLedgerStore::persistent(path, Duration::from_secs(1));
+        store
+            .compare_and_swap("vault-1", None, enrolled(7))
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+
+        let spawn = |candidate: QuickUnlockLedgerEntry| {
+            let store = store.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                store.compare_and_swap("vault-1", Some(&enrolled(7)), candidate)
+            })
+        };
+        let first = spawn(enrolled(8));
+        let second = spawn(needs_reenroll(7));
+        barrier.wait();
+        let results = [first.join().unwrap(), second.join().unwrap()];
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(LedgerStoreError::Conflict { .. })))
+                .count(),
+            1
+        );
+        let visible = store.get("vault-1").unwrap().unwrap();
+        assert!(visible == enrolled(8) || visible == needs_reenroll(7));
+    }
+
+    #[test]
+    fn compare_and_swap_preserves_unknown_document_and_row_fields() {
+        let mut document = valid_document();
+        document["future_metadata"] = json!({ "source": "newer-reader" });
+        document["entries"]["vault-1"]["future_row_field"] = json!([1, 2, 3]);
+        let (dir, store) = persistent_store(&document);
+
+        store
+            .compare_and_swap("vault-1", Some(&enrolled(7)), enrolled(8))
+            .unwrap();
+
+        let published: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("quick-unlock-ledger.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            published["future_metadata"],
+            json!({ "source": "newer-reader" })
+        );
+        assert_eq!(
+            published["entries"]["vault-1"]["future_row_field"],
+            json!([1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn compare_and_swap_reports_busy_when_persistent_lock_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("ledger");
+        fs::create_dir(&parent).unwrap();
+        let path = parent.join("quick-unlock.json");
+        let lock_path = parent.join("quick-unlock.json.lock");
+        let held = ExclusiveFileLock::acquire(&lock_path).unwrap();
+        let store = QuickUnlockLedgerStore::persistent(path, Duration::from_millis(20));
+
+        let error = store
+            .compare_and_swap("vault-1", None, disabled(0))
+            .unwrap_err();
+
+        assert!(matches!(error, LedgerStoreError::Busy { .. }));
+        drop(held);
     }
 }
