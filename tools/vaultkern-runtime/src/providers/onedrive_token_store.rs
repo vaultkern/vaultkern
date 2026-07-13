@@ -2,7 +2,9 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+#[cfg(windows)]
+use anyhow::Context;
+use anyhow::Result;
 use zeroize::Zeroizing;
 
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
@@ -21,6 +23,25 @@ pub(crate) trait OneDriveRefreshTokenStore {
     fn store(&self, token: &str) -> Result<()>;
     #[allow(dead_code)]
     fn delete(&self) -> Result<()>;
+}
+
+#[derive(Debug)]
+struct OneDriveRefreshTokenStoreUnavailable;
+
+impl std::fmt::Display for OneDriveRefreshTokenStoreUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "persistent OneDrive refresh-token storage is unavailable on this platform; reauthenticate to reconnect OneDrive",
+        )
+    }
+}
+
+impl std::error::Error for OneDriveRefreshTokenStoreUnavailable {}
+
+pub(crate) fn is_unavailable_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<OneDriveRefreshTokenStoreUnavailable>()
+        .is_some()
 }
 
 pub(crate) fn production_default() -> Box<dyn OneDriveRefreshTokenStore> {
@@ -87,7 +108,7 @@ impl OneDriveRefreshTokenStore for EphemeralOneDriveRefreshTokenStore {
 }
 
 #[cfg(not(windows))]
-struct UnavailableOneDriveRefreshTokenStore;
+pub(crate) struct UnavailableOneDriveRefreshTokenStore;
 
 #[cfg(not(windows))]
 impl OneDriveRefreshTokenStore for UnavailableOneDriveRefreshTokenStore {
@@ -96,9 +117,7 @@ impl OneDriveRefreshTokenStore for UnavailableOneDriveRefreshTokenStore {
     }
 
     fn store(&self, _token: &str) -> Result<()> {
-        anyhow::bail!(
-            "persistent OneDrive refresh-token storage is unavailable on this platform; reauthenticate when the process restarts"
-        )
+        unavailable()
     }
 
     fn delete(&self) -> Result<()> {
@@ -108,9 +127,7 @@ impl OneDriveRefreshTokenStore for UnavailableOneDriveRefreshTokenStore {
 
 #[cfg(not(windows))]
 fn unavailable<T>() -> Result<T> {
-    anyhow::bail!(
-        "persistent OneDrive refresh-token storage is unavailable on this platform; reauthenticate to reconnect OneDrive"
-    )
+    Err(OneDriveRefreshTokenStoreUnavailable.into())
 }
 
 #[cfg(windows)]
@@ -137,6 +154,12 @@ impl WindowsOneDriveRefreshTokenStore {
 #[cfg(windows)]
 impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
     fn load(&self) -> Result<Option<Zeroizing<String>>> {
+        if self.path.exists() {
+            if let Some(parent) = self.path.parent() {
+                enforce_private_acl(parent, true)?;
+            }
+            enforce_private_acl(&self.path, false)?;
+        }
         let Some(ciphertext) = read_regular_file(&self.path)? else {
             return Ok(None);
         };
@@ -156,6 +179,10 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
                 parent.display()
             )
         })?;
+        enforce_private_acl(parent, true)?;
+        if self.path.exists() {
+            enforce_private_acl(&self.path, false)?;
+        }
         let protected = protect_refresh_token(token, &self.entropy)
             .context("failed to protect OneDrive refresh token")?;
         let expectation = target_expectation(&self.path)?;
@@ -177,6 +204,7 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
                 self.path.display()
             )
         })?;
+        enforce_private_acl(temp.path(), false)?;
         publish_temp(
             temp,
             &self.path,
@@ -193,7 +221,8 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
                 "failed to publish protected OneDrive refresh token: {}",
                 self.path.display()
             )
-        })
+        })?;
+        enforce_private_acl(&self.path, false)
     }
 
     fn delete(&self) -> Result<()> {
@@ -214,6 +243,179 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
         }
         Ok(())
     }
+}
+
+#[cfg(windows)]
+const PRIVATE_DIRECTORY_SDDL: &str = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+#[cfg(windows)]
+const PRIVATE_FILE_SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)";
+
+#[cfg(windows)]
+fn enforce_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "failed to inspect OneDrive refresh-token ACL target: {}",
+            path.display()
+        )
+    })?;
+    let expected_type = if directory {
+        metadata.file_type().is_dir()
+    } else {
+        metadata.file_type().is_file()
+    };
+    if metadata.file_type().is_symlink()
+        || !expected_type
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        anyhow::bail!(
+            "OneDrive refresh-token ACL target is not a real {}: {}",
+            if directory { "directory" } else { "file" },
+            path.display()
+        );
+    }
+
+    let path_wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let expected_sddl = if directory {
+        PRIVATE_DIRECTORY_SDDL
+    } else {
+        PRIVATE_FILE_SDDL
+    };
+    let sddl_wide = expected_sddl
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut descriptor = std::ptr::null_mut();
+    let result = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    let descriptor = LocalPointer(descriptor);
+    if result == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to build private OneDrive refresh-token ACL");
+    }
+    let result = unsafe {
+        SetFileSecurityW(
+            path_wide.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor.0,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to apply private OneDrive refresh-token ACL: {}",
+                path.display()
+            )
+        });
+    }
+    verify_private_acl(path, directory)
+}
+
+#[cfg(windows)]
+fn verify_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, GetFileSecurityW};
+
+    let path_wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut required = 0_u32;
+    unsafe {
+        GetFileSecurityW(
+            path_wide.as_ptr(),
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            0,
+            &mut required,
+        );
+    }
+    if required == 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to size OneDrive refresh-token security descriptor: {}",
+                path.display()
+            )
+        });
+    }
+    let word_size = std::mem::size_of::<usize>();
+    let mut descriptor = vec![0_usize; (required as usize).div_ceil(word_size)];
+    let result = unsafe {
+        GetFileSecurityW(
+            path_wide.as_ptr(),
+            DACL_SECURITY_INFORMATION,
+            descriptor.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to read OneDrive refresh-token security descriptor: {}",
+                path.display()
+            )
+        });
+    }
+
+    let mut sddl = std::ptr::null_mut();
+    let mut sddl_len = 0_u32;
+    let result = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor.as_mut_ptr().cast(),
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut sddl,
+            &mut sddl_len,
+        )
+    };
+    let sddl = LocalPointer(sddl.cast());
+    if result == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to inspect private OneDrive refresh-token ACL");
+    }
+    let mut actual_units =
+        unsafe { std::slice::from_raw_parts(sddl.0.cast::<u16>(), sddl_len as usize) };
+    if actual_units.last() == Some(&0) {
+        actual_units = &actual_units[..actual_units.len() - 1];
+    }
+    let actual = String::from_utf16(actual_units)
+        .context("OneDrive refresh-token ACL uses invalid UTF-16")?;
+    let expected = if directory {
+        PRIVATE_DIRECTORY_SDDL
+    } else {
+        PRIVATE_FILE_SDDL
+    };
+    if actual != expected {
+        anyhow::bail!(
+            "OneDrive refresh-token ACL is not private: {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -444,7 +646,9 @@ impl OneDriveRefreshTokenStore for MemoryOneDriveRefreshTokenStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{OneDriveRefreshTokenStore, production_store};
+    #[cfg(windows)]
+    use super::OneDriveRefreshTokenStore;
+    use super::production_store;
 
     #[test]
     fn production_store_removes_the_selected_legacy_plaintext_file() {
@@ -483,7 +687,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_store_round_trips_without_persisting_plaintext() {
-        use super::WindowsOneDriveRefreshTokenStore;
+        use super::{WindowsOneDriveRefreshTokenStore, verify_private_acl};
 
         const TOKEN: &str = "fixture-refresh-token-never-plaintext";
         let dir = tempfile::tempdir().unwrap();
@@ -492,6 +696,8 @@ mod tests {
 
         store.store(TOKEN).unwrap();
 
+        verify_private_acl(dir.path(), true).unwrap();
+        verify_private_acl(&path, false).unwrap();
         let persisted = std::fs::read(&path).unwrap();
         assert_ne!(persisted, TOKEN.as_bytes());
         assert!(

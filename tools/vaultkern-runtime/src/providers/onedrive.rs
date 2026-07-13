@@ -17,8 +17,8 @@ use vaultkern_runtime_protocol::{
 
 use crate::providers::local_file::VaultSourceFingerprint;
 use crate::providers::onedrive_token_store::{
-    EphemeralOneDriveRefreshTokenStore, OneDriveRefreshTokenStore, production_default,
-    production_for_extension_id,
+    EphemeralOneDriveRefreshTokenStore, OneDriveRefreshTokenStore, is_unavailable_error,
+    production_default, production_for_extension_id,
 };
 use zeroize::Zeroizing;
 
@@ -154,6 +154,7 @@ pub struct OneDriveVaultSourceProvider {
     graph_root: String,
     callback_addr: String,
     refresh_token_store: Box<dyn OneDriveRefreshTokenStore>,
+    refresh_token_load_error: Option<String>,
     token_state: RefCell<Option<OneDriveTokenState>>,
     pending_login: Option<PendingOneDriveLogin>,
     test_code_verifier: Option<String>,
@@ -171,14 +172,20 @@ struct PendingOneDriveLogin {
     code_receiver: Receiver<Result<String, String>>,
 }
 
-#[derive(Debug)]
 struct OneDriveTokenState {
     access_token: Option<String>,
     access_expires_at: Option<Instant>,
     refresh_token: Zeroizing<String>,
+    refresh_token_origin: RefreshTokenOrigin,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefreshTokenOrigin {
+    Environment,
+    Store,
+}
+
+#[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
     #[serde(default, deserialize_with = "deserialize_optional_refresh_token")]
@@ -246,15 +253,21 @@ impl OneDriveVaultSourceProvider {
     fn new_from_env_with_refresh_token_store(
         refresh_token_store: Box<dyn OneDriveRefreshTokenStore>,
     ) -> Self {
-        let refresh_token = std::env::var("VAULTKERN_ONEDRIVE_REFRESH_TOKEN")
+        let environment_refresh_token = std::env::var("VAULTKERN_ONEDRIVE_REFRESH_TOKEN")
             .ok()
-            .map(Zeroizing::new)
-            .or_else(|| refresh_token_store.load().ok().flatten());
-        let token_state = refresh_token.map(|refresh_token| OneDriveTokenState {
-            access_token: None,
-            access_expires_at: None,
-            refresh_token,
-        });
+            .map(Zeroizing::new);
+        let (token_state, refresh_token_load_error) = match environment_refresh_token {
+            Some(refresh_token) => (
+                Some(OneDriveTokenState {
+                    access_token: None,
+                    access_expires_at: None,
+                    refresh_token,
+                    refresh_token_origin: RefreshTokenOrigin::Environment,
+                }),
+                None,
+            ),
+            None => load_refresh_token_state(refresh_token_store.as_ref()),
+        };
         Self {
             client_id: option_env!("VAULTKERN_ONEDRIVE_CLIENT_ID").map(str::to_owned),
             auth_url: std::env::var("VAULTKERN_ONEDRIVE_AUTH_URL")
@@ -265,6 +278,7 @@ impl OneDriveVaultSourceProvider {
                 .unwrap_or_else(|_| MICROSOFT_GRAPH_ROOT.into()),
             callback_addr: LOOPBACK_CALLBACK_ADDR.into(),
             refresh_token_store,
+            refresh_token_load_error,
             token_state: RefCell::new(token_state),
             pending_login: None,
             test_code_verifier: None,
@@ -285,6 +299,7 @@ impl OneDriveVaultSourceProvider {
             graph_root: MICROSOFT_GRAPH_ROOT.into(),
             callback_addr: LOOPBACK_CALLBACK_ADDR.into(),
             refresh_token_store: Box::new(EphemeralOneDriveRefreshTokenStore::default()),
+            refresh_token_load_error: None,
             token_state: RefCell::new(None),
             pending_login: None,
             test_code_verifier: None,
@@ -323,7 +338,55 @@ impl OneDriveVaultSourceProvider {
         graph_root: &str,
         refresh_token_store: Box<dyn OneDriveRefreshTokenStore>,
     ) -> Self {
-        let refresh_token = refresh_token_store.load().ok().flatten();
+        let (token_state, refresh_token_load_error) =
+            load_refresh_token_state(refresh_token_store.as_ref());
+        Self::new_for_graph_tests_with_refresh_token_state(
+            client_id,
+            auth_url,
+            token_url,
+            graph_root,
+            refresh_token_store,
+            token_state,
+            refresh_token_load_error,
+        )
+    }
+
+    #[cfg(all(test, not(windows)))]
+    fn new_for_graph_tests_with_environment_refresh_token(
+        client_id: &str,
+        auth_url: &str,
+        token_url: &str,
+        graph_root: &str,
+        refresh_token_store: Box<dyn OneDriveRefreshTokenStore>,
+        refresh_token: &str,
+    ) -> Self {
+        Self::new_for_graph_tests_with_refresh_token_state(
+            client_id,
+            auth_url,
+            token_url,
+            graph_root,
+            refresh_token_store,
+            Some(OneDriveTokenState {
+                access_token: None,
+                access_expires_at: None,
+                refresh_token: Zeroizing::new(refresh_token.to_owned()),
+                refresh_token_origin: RefreshTokenOrigin::Environment,
+            }),
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn new_for_graph_tests_with_refresh_token_state(
+        client_id: &str,
+        auth_url: &str,
+        token_url: &str,
+        graph_root: &str,
+        refresh_token_store: Box<dyn OneDriveRefreshTokenStore>,
+        token_state: Option<OneDriveTokenState>,
+        refresh_token_load_error: Option<String>,
+    ) -> Self {
         Self {
             client_id: Some(client_id.into()),
             auth_url: auth_url.into(),
@@ -331,11 +394,8 @@ impl OneDriveVaultSourceProvider {
             graph_root: graph_root.trim_end_matches('/').into(),
             callback_addr: "127.0.0.1:0".into(),
             refresh_token_store,
-            token_state: RefCell::new(refresh_token.map(|refresh_token| OneDriveTokenState {
-                access_token: None,
-                access_expires_at: None,
-                refresh_token,
-            })),
+            refresh_token_load_error,
+            token_state: RefCell::new(token_state),
             pending_login: None,
             test_code_verifier: None,
             memory_items: BTreeMap::new(),
@@ -353,6 +413,7 @@ impl OneDriveVaultSourceProvider {
             access_token: Some(access_token.into()),
             access_expires_at: Some(Instant::now() + Duration::from_secs(3600)),
             refresh_token: Zeroizing::new(refresh_token.into()),
+            refresh_token_origin: RefreshTokenOrigin::Store,
         }));
     }
 
@@ -362,6 +423,7 @@ impl OneDriveVaultSourceProvider {
             access_token: Some(access_token.into()),
             access_expires_at: Some(Instant::now() - Duration::from_secs(1)),
             refresh_token: Zeroizing::new(refresh_token.into()),
+            refresh_token_origin: RefreshTokenOrigin::Store,
         }));
     }
 
@@ -534,10 +596,12 @@ impl OneDriveVaultSourceProvider {
             .refresh_token
             .context("OneDrive token response did not include refresh_token")?;
         self.store_refresh_token(&refresh_token)?;
+        self.refresh_token_load_error = None;
         self.token_state.replace(Some(OneDriveTokenState {
             access_token: Some(token.access_token),
             access_expires_at: expires_at,
             refresh_token,
+            refresh_token_origin: RefreshTokenOrigin::Store,
         }));
 
         Ok(OneDriveAuthStatusDto {
@@ -944,17 +1008,22 @@ impl OneDriveVaultSourceProvider {
             .client_id
             .as_deref()
             .context("VAULTKERN_ONEDRIVE_CLIENT_ID is not configured")?;
-        let refresh_token = self
+        let current_token = self
             .token_state
             .borrow()
             .as_ref()
-            .map(|state| state.refresh_token.clone())
+            .map(|state| (state.refresh_token.clone(), state.refresh_token_origin))
             .or_else(|| {
                 std::env::var("VAULTKERN_ONEDRIVE_REFRESH_TOKEN")
                     .ok()
-                    .map(Zeroizing::new)
-            })
-            .context("OneDrive account is not connected")?;
+                    .map(|token| (Zeroizing::new(token), RefreshTokenOrigin::Environment))
+            });
+        let Some((refresh_token, refresh_token_origin)) = current_token else {
+            if let Some(error) = &self.refresh_token_load_error {
+                anyhow::bail!("failed to load persisted OneDrive refresh token: {error}");
+            }
+            anyhow::bail!("OneDrive account is not connected");
+        };
         let token = ureq::post(&self.token_url)
             .send_form(&[
                 ("client_id", client_id),
@@ -967,17 +1036,45 @@ impl OneDriveVaultSourceProvider {
             .context("failed to decode OneDrive refresh response")?;
         let expires_at = access_expires_at(&token);
         let next_refresh = token.refresh_token.unwrap_or(refresh_token);
-        self.store_refresh_token(&next_refresh)?;
+        let next_origin = match self.store_refresh_token(&next_refresh) {
+            Ok(()) => RefreshTokenOrigin::Store,
+            Err(error)
+                if refresh_token_origin == RefreshTokenOrigin::Environment
+                    && is_unavailable_error(&error) =>
+            {
+                RefreshTokenOrigin::Environment
+            }
+            Err(error) => return Err(error),
+        };
         self.token_state.replace(Some(OneDriveTokenState {
             access_token: Some(token.access_token.clone()),
             access_expires_at: expires_at,
             refresh_token: next_refresh,
+            refresh_token_origin: next_origin,
         }));
         Ok(token.access_token)
     }
 
     fn store_refresh_token(&self, refresh_token: &str) -> Result<()> {
         self.refresh_token_store.store(refresh_token)
+    }
+}
+
+fn load_refresh_token_state(
+    refresh_token_store: &dyn OneDriveRefreshTokenStore,
+) -> (Option<OneDriveTokenState>, Option<String>) {
+    match refresh_token_store.load() {
+        Ok(Some(refresh_token)) => (
+            Some(OneDriveTokenState {
+                access_token: None,
+                access_expires_at: None,
+                refresh_token,
+                refresh_token_origin: RefreshTokenOrigin::Store,
+            }),
+            None,
+        ),
+        Ok(None) => (None, None),
+        Err(error) => (None, Some(format!("{error:#}"))),
     }
 }
 
@@ -1170,6 +1267,8 @@ mod tests {
 
     struct FailingRefreshTokenStore;
 
+    struct LoadFailingRefreshTokenStore;
+
     impl OneDriveRefreshTokenStore for FailingRefreshTokenStore {
         fn load(&self) -> Result<Option<Zeroizing<String>>> {
             Ok(None)
@@ -1177,6 +1276,20 @@ mod tests {
 
         fn store(&self, _token: &str) -> Result<()> {
             anyhow::bail!("simulated secure store failure")
+        }
+
+        fn delete(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl OneDriveRefreshTokenStore for LoadFailingRefreshTokenStore {
+        fn load(&self) -> Result<Option<Zeroizing<String>>> {
+            anyhow::bail!("simulated secure store load failure")
+        }
+
+        fn store(&self, _token: &str) -> Result<()> {
+            Ok(())
         }
 
         fn delete(&self) -> Result<()> {
@@ -1945,6 +2058,68 @@ mod tests {
 
         assert!(!format!("{error:#}").contains(TOKEN));
         token.assert();
+    }
+
+    #[test]
+    fn refresh_token_store_load_failure_remains_observable() {
+        let mut server = mockito::Server::new();
+        let token = server.mock("POST", "/token").expect(0).create();
+        let provider = OneDriveVaultSourceProvider::new_for_graph_tests_with_refresh_token_store(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+            Box::new(LoadFailingRefreshTokenStore),
+        );
+
+        let error = provider
+            .list_children(None)
+            .expect_err("secure-store load failure must not look like a disconnected account");
+
+        assert!(format!("{error:#}").contains("simulated secure store load failure"));
+        token.assert();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn refresh_token_store_keeps_environment_token_ephemeral_when_backend_is_unavailable() {
+        use crate::providers::onedrive_token_store::UnavailableOneDriveRefreshTokenStore;
+
+        let mut server = mockito::Server::new();
+        let refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "refresh_token".into(),
+                "refresh-from-environment".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"access-2","refresh_token":"rotated-refresh","expires_in":3600}"#,
+            )
+            .create();
+        let children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-2")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"value":[]}"#)
+            .create();
+        let provider =
+            OneDriveVaultSourceProvider::new_for_graph_tests_with_environment_refresh_token(
+                "client-1",
+                &format!("{}/authorize", server.url()),
+                &format!("{}/token", server.url()),
+                &format!("{}/v1.0", server.url()),
+                Box::new(UnavailableOneDriveRefreshTokenStore),
+                "refresh-from-environment",
+            );
+
+        provider.list_children(None).unwrap();
+
+        refresh.assert();
+        children.assert();
     }
 
     #[cfg(windows)]
