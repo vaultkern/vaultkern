@@ -27,7 +27,8 @@
 //! oversized frame and [`decode_frame`] treats an oversized `len` as
 //! corruption.
 //!
-//! The dead-letter file uses this exact framing; its frame bodies are
+//! The dead-letter file uses this framing with the independent
+//! [`MAX_DEAD_LETTER_RECORD_LEN`] body limit; its frame bodies are
 //! `DeadLetterRecord` documents ([`crate::contracts::DeadLetterRecord`]).
 //!
 //! Pure functions only — no I/O, no policy, no replay logic. The
@@ -46,6 +47,9 @@ pub const SEGMENT_FORMAT_VERSION: u16 = 1;
 pub const SEGMENT_HEADER_LEN: usize = 6;
 /// Maximum frame body length: 1 MiB, rejected on append and on parse.
 pub const MAX_RECORD_LEN: u32 = 1024 * 1024;
+/// Maximum dead-letter frame body length: enough for one maximum-size journal
+/// frame after base64 encoding and JSON wrapping.
+pub const MAX_DEAD_LETTER_RECORD_LEN: u32 = 2 * 1024 * 1024;
 /// Bytes of frame overhead around the body (`len` + `record_version` +
 /// `crc`).
 pub const FRAME_OVERHEAD: usize = 4 + 2 + 4;
@@ -125,7 +129,16 @@ pub fn decode_segment_header(input: &[u8]) -> Result<(u16, usize), FramingError>
 /// Encodes one frame around `body`. Refuses bodies over [`MAX_RECORD_LEN`]
 /// (the append-side half of the 1 MiB cap).
 pub fn encode_frame(record_version: u16, body: &[u8]) -> Result<Vec<u8>, FramingError> {
-    if body.len() > MAX_RECORD_LEN as usize {
+    encode_frame_with_limit(record_version, body, MAX_RECORD_LEN)
+}
+
+/// Encodes a frame with an explicit body-length limit.
+pub fn encode_frame_with_limit(
+    record_version: u16,
+    body: &[u8],
+    max_record_len: u32,
+) -> Result<Vec<u8>, FramingError> {
+    if body.len() > max_record_len as usize {
         return Err(FramingError::RecordTooLong(body.len() as u32));
     }
     let len = body.len() as u32;
@@ -145,11 +158,19 @@ pub fn encode_frame(record_version: u16, body: &[u8]) -> Result<Vec<u8>, Framing
 /// - [`FramingError::RecordTooLong`] / [`FramingError::CrcMismatch`]:
 ///   definitive framing failure (003 cases 1/3, per segment state).
 pub fn decode_frame(input: &[u8]) -> Result<DecodedFrame, FramingError> {
+    decode_frame_with_limit(input, MAX_RECORD_LEN)
+}
+
+/// Decodes a frame with an explicit body-length limit.
+pub fn decode_frame_with_limit(
+    input: &[u8],
+    max_record_len: u32,
+) -> Result<DecodedFrame, FramingError> {
     if input.len() < 4 {
         return Err(FramingError::Truncated);
     }
     let len = u32::from_le_bytes([input[0], input[1], input[2], input[3]]);
-    if len > MAX_RECORD_LEN {
+    if len > max_record_len {
         return Err(FramingError::RecordTooLong(len));
     }
     let body_len = len as usize;

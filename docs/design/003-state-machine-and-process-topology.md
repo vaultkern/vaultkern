@@ -12,6 +12,7 @@ durable atomic write + exclusive lock pattern), one row per vault:
 
 ```
 QuickUnlockLedgerEntry {
+    schema_version: u32,      // on-disk schema version; missing => fail closed
     state:      Disabled | Enrolled | NeedsReenroll(reason),
     generation: u64,          // monotonically increasing, baked into the envelope AAD
     policy:     bool,         // user intent (quick unlock enabled or not)
@@ -330,9 +331,11 @@ JournalRecord {
 - **Two correctness layers** (both required):
   1. **Semantic idempotence of every op kind**: applying an op to a vault that
      already contains its effect is a no-op. Passkey registration inserts by
-     credential UUID under a **three-branch law**: (a) a credential with the
-     same UUID exists and its stored data equals the record's full canonical
-     payload ⇒ no-op; (b) same UUID but a differing payload ⇒ the record is
+     credential UUID under a **three-branch law**: the ceremony generates and
+     carries an `entry_id` UUID for the target (or to-be-created) entry, and
+     replay preserves that UUID. (a) an entry with the same UUID exists and
+     its stored data, including `entry_id`, equals the record's full canonical
+     payload ⇒ no-op; (b) same UUID but a differing payload or `entry_id` ⇒ the record is
      dead-lettered (by copy) with reason `payload_conflict` — **silent
      overwrite and silent keep are both forbidden**; (c) no such UUID ⇒
      insert. No passkey update semantics exist (a WebAuthn private key has
@@ -434,10 +437,12 @@ JournalRecord {
   verbatim — and counted in the diagnostics surfaced to the UI. The bytes
   remain available for manual forensics: "never silently lost" is made
   literal.
-  **Archive size cap (r12)**: a single dead-letter entry archives at most
-  **1 MiB** of raw bytes — deliberately equal to the record cap, so a
-  dead-letter entry is never larger than the largest legal record. A
-  longer unreachable region stores its first 1 MiB as the prefix, records
+  **Archive size cap (r13)**: a single dead-letter entry archives at most
+  `MAX_RECORD_LEN + FRAME_OVERHEAD` raw bytes: one complete maximum-size
+  journal frame, including its framing overhead. The dead-letter file uses
+  an independent **2 MiB frame-body limit**, just enough for that frame's
+  base64 representation plus JSON wrapping. A longer unreachable region stores
+  its prefix, records
   the full length in `region_len`, and the corrupt segment file itself is
   renamed to `*.corrupt` and kept whole in the container (named by
   `archived_segment`; never parsed again, read directly by the support
@@ -484,7 +489,7 @@ meets a higher one:
 |---|---|---|---|
 | segment `format_version` | file (segment header) | the frame byte layout itself changes | reject the **entire file**, fail closed, surface a diagnostic (an unreadable layout cannot be partially trusted) |
 | `record_version` | frame | the JournalRecord body shape changes incompatibly | dead-letter that record (raw bytes preserved, `unknown_kind`-family semantics); the segment is not blocked |
-| contract `SCHEMA_VERSION`s | JSON document (CacheManifest / JournalRecord / DeadLetterRecord / ledger) | an incompatible document change (additive changes do **not** increment) | as above per domain: cache manifest ⇒ treated as no cache (fail closed); ledger ⇒ quick unlock gated; journal ⇒ dead-letter with bytes preserved |
+| contract `SCHEMA_VERSION`s | JSON document (CacheManifest / JournalRecord / DeadLetterRecord / ledger) | an incompatible document change (additive changes do **not** increment); ledger persistence includes `schema_version` | as above per domain: cache manifest ⇒ treated as no cache (fail closed); ledger ⇒ quick unlock gated and missing `schema_version` fails closed; journal ⇒ dead-letter with bytes preserved |
 | `protocol_version` | handshake | protocol majors | below the core's minimum ⇒ refused with a self-describing error DTO (rule 4) |
 
 **Additive-field iron law (r12)**: an additive field on `JournalRecord`

@@ -125,7 +125,7 @@ pub struct JournalRecord {
     /// contract. Minimum length 24 characters (the 16-byte GCM tag alone).
     #[cfg_attr(
         feature = "json-schema",
-        schemars(length(min = 24), regex(pattern = r"^[A-Za-z0-9+/]+={0,2}$"))
+        schemars(length(min = 24), regex(pattern = r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"))
     )]
     pub payload_sealed: String,
     /// The record's fresh random 12-byte GCM nonce, encoded as **standard
@@ -188,13 +188,14 @@ pub struct DeadLetterRecord {
     ///   and can be as short as **one byte** (e.g. a tail torn inside the
     ///   length prefix itself).
     ///
-    /// Hence the only floor is non-emptiness. At most
+    /// Hence a one-byte corruption region encodes to the four-character
+    /// `AA==` minimum. At most
     /// [`DeadLetterRecord::MAX_ARCHIVED_BYTES`] raw bytes are stored
     /// here; a longer region keeps its prefix, with `region_len` and
     /// `archived_segment` recording the rest (r12).
     #[cfg_attr(
         feature = "json-schema",
-        schemars(length(min = 1), regex(pattern = r"^[A-Za-z0-9+/]+={0,2}$"))
+        schemars(length(min = 4), regex(pattern = r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"))
     )]
     pub frame_b64: String,
     /// Total byte length of the full original region, whether or not it
@@ -214,12 +215,11 @@ pub struct DeadLetterRecord {
 impl DeadLetterRecord {
     pub const SCHEMA_VERSION: u32 = 1;
 
-    /// Cap on raw bytes archived in `frame_b64`: 1 MiB, deliberately
-    /// equal to the frame-body cap ([`crate::framing::MAX_RECORD_LEN`]) —
-    /// a dead-letter entry is never larger than the largest legal record
-    /// (003 r12). Diagnostics DTOs carry only counts and sizes, never
-    /// bytes.
-    pub const MAX_ARCHIVED_BYTES: usize = crate::framing::MAX_RECORD_LEN as usize;
+    /// Cap on raw bytes archived in `frame_b64`: one maximum-size journal
+    /// frame, including its framing overhead. This guarantees that every
+    /// legal journal frame can be archived verbatim.
+    pub const MAX_ARCHIVED_BYTES: usize =
+        crate::framing::MAX_RECORD_LEN as usize + crate::framing::FRAME_OVERHEAD;
 
     /// Assembles a dead-letter entry from a raw byte region under the
     /// production cap ([`Self::MAX_ARCHIVED_BYTES`]). Pure assembly — no
@@ -317,8 +317,8 @@ pub enum JournalOpKind {
     ///
     /// - **Idempotence law (three-branch, 003 r10)** — frozen executably as
     ///   [`PasskeyRegistrationPayload::registration_outcome`]:
-    ///   (a) a credential with the same UUID exists and its stored data
-    ///   equals this record's full canonical payload ⇒ **no-op**;
+    ///   (a) an entry with the same UUID exists and its stored data, including
+    ///   `entry_id`, equals this record's full canonical payload ⇒ **no-op**;
     ///   (b) same UUID but a differing payload ⇒ the record is
     ///   dead-lettered with reason `payload_conflict` — **silent overwrite
     ///   and silent keep are both forbidden**; (c) no such UUID ⇒ insert.
@@ -376,8 +376,18 @@ pub enum JournalOpKind {
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct PasskeyRegistrationPayload {
+    /// UUID of the target (or to-be-created) vault entry. The extension
+    /// generates it during the ceremony and replay must preserve it.
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(regex(
+            pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        ))
+    )]
+    pub entry_id: String,
     /// The registered credential as it is to exist in the vault. Its
-    /// `credential_id` is this op's idempotence key.
+    /// `credential_id` identifies the credential, while `entry_id` identifies
+    /// the entry and is part of the idempotent payload.
     pub passkey: EntryPasskeyDto,
 }
 
@@ -426,16 +436,20 @@ pub enum PasskeyRegistrationOutcome {
 impl PasskeyRegistrationPayload {
     /// The three-branch idempotence law of 003 r10, frozen as a pure
     /// function so the Phase 1 replay implementation and its tests share
-    /// one source of truth. `existing` is whatever credential the vault
-    /// currently holds under this payload's credential UUID (the caller
-    /// performs the UUID lookup); equality is full-payload equality.
+    /// one source of truth. `existing` carries the entry UUID and credential
+    /// currently held under this payload's credential UUID; equality includes
+    /// both the entry UUID and full passkey payload.
     pub fn registration_outcome(
         &self,
-        existing: Option<&EntryPasskeyDto>,
+        existing: Option<(&str, &EntryPasskeyDto)>,
     ) -> PasskeyRegistrationOutcome {
         match existing {
             None => PasskeyRegistrationOutcome::Insert,
-            Some(current) if *current == self.passkey => PasskeyRegistrationOutcome::NoOp,
+            Some((entry_id, current))
+                if entry_id == self.entry_id && *current == self.passkey =>
+            {
+                PasskeyRegistrationOutcome::NoOp
+            }
             Some(_) => PasskeyRegistrationOutcome::Conflict,
         }
     }
@@ -461,6 +475,13 @@ pub struct UsageCountPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct QuickUnlockLedgerEntry {
+    /// On-disk ledger schema version. Missing values fail closed during
+    /// deserialization; this is app-owned persistent storage.
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "schema_version_const_one")
+    )]
+    pub schema_version: u32,
     /// Current state; errors drive state transitions, never record
     /// destruction (003 axiom).
     pub state: QuickUnlockState,

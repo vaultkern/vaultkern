@@ -19,7 +19,7 @@ use vaultkern_runtime_protocol::contracts::{
     DeadLetterRecord, JournalRecord, dead_letter_reason,
 };
 use vaultkern_runtime_protocol::framing::{
-    self, FramingError, MAX_RECORD_LEN, SEGMENT_HEADER_LEN,
+    self, FramingError, MAX_DEAD_LETTER_RECORD_LEN, MAX_RECORD_LEN, SEGMENT_HEADER_LEN,
 };
 
 fn fixture_path() -> PathBuf {
@@ -131,6 +131,19 @@ fn oversized_length_prefix_is_corruption_not_allocation() {
         framing::decode_frame(&forged),
         Err(FramingError::RecordTooLong(MAX_RECORD_LEN + 1))
     );
+}
+
+#[test]
+fn dead_letter_frame_limit_is_independent_from_journal_limit() {
+    let body = vec![0_u8; MAX_RECORD_LEN as usize + 1];
+    assert_eq!(
+        framing::encode_frame(1, &body),
+        Err(FramingError::RecordTooLong(MAX_RECORD_LEN + 1))
+    );
+    let frame = framing::encode_frame_with_limit(1, &body, MAX_DEAD_LETTER_RECORD_LEN)
+        .expect("dead-letter framing accepts bodies above journal limit");
+    let decoded = framing::decode_frame_with_limit(&frame, MAX_DEAD_LETTER_RECORD_LEN).unwrap();
+    assert_eq!(decoded.body, body);
 }
 
 #[test]

@@ -179,6 +179,7 @@ fn fixture_passkey() -> EntryPasskeyDto {
 
 fn passkey_registration_op() -> JournalOpKind {
     JournalOpKind::PasskeyRegistration(PasskeyRegistrationPayload {
+        entry_id: "31e2f3b4-9a76-4c1d-8e0f-6a5b4c3d2e1f".into(),
         passkey: fixture_passkey(),
     })
 }
@@ -192,6 +193,7 @@ fn usage_count_op() -> JournalOpKind {
 
 fn enrolled_ledger_entry() -> QuickUnlockLedgerEntry {
     QuickUnlockLedgerEntry {
+        schema_version: QuickUnlockLedgerEntry::SCHEMA_VERSION,
         state: QuickUnlockState::Enrolled,
         generation: 3,
         policy: true,
@@ -200,6 +202,7 @@ fn enrolled_ledger_entry() -> QuickUnlockLedgerEntry {
 
 fn needs_reenroll_ledger_entry() -> QuickUnlockLedgerEntry {
     QuickUnlockLedgerEntry {
+        schema_version: QuickUnlockLedgerEntry::SCHEMA_VERSION,
         state: QuickUnlockState::NeedsReenroll {
             reason: NeedsReenrollReason::KdfRotated,
         },
@@ -262,14 +265,42 @@ fn dead_letter_frame_bytes_roundtrip_to_the_original_record() {
 }
 
 #[test]
+fn maximum_size_journal_frame_can_be_archived_and_framed_as_dead_letter() {
+    let body = vec![b'X'; framing::MAX_RECORD_LEN as usize];
+    let frame = framing::encode_frame(JournalRecord::SCHEMA_VERSION as u16, &body).unwrap();
+    assert_eq!(frame.len(), DeadLetterRecord::MAX_ARCHIVED_BYTES);
+    let archived = DeadLetterRecord::archive(
+        dead_letter_reason::PAYLOAD_CONFLICT,
+        1_783_900_806,
+        &frame,
+        None,
+    );
+    assert_eq!(archived.region_len, frame.len() as u64);
+    let dead_letter_body = serde_json::to_vec(&archived).unwrap();
+    let dead_letter_frame = framing::encode_frame_with_limit(
+        DeadLetterRecord::SCHEMA_VERSION as u16,
+        &dead_letter_body,
+        framing::MAX_DEAD_LETTER_RECORD_LEN,
+    )
+    .expect("maximum legal journal frame fits in a dead-letter frame");
+    let decoded = framing::decode_frame_with_limit(
+        &dead_letter_frame,
+        framing::MAX_DEAD_LETTER_RECORD_LEN,
+    )
+    .unwrap();
+    assert_eq!(decoded.body, dead_letter_body);
+}
+
+#[test]
 fn dead_letter_archive_truncates_over_limit_regions_to_the_prefix() {
     // M2 (r12), via the injectable-limit test seam: an over-limit region
     // stores its prefix, records the full length, and names the renamed
-    // *.corrupt segment. Production uses MAX_ARCHIVED_BYTES (= 1 MiB,
-    // the record cap).
+    // *.corrupt segment. Production uses MAX_ARCHIVED_BYTES (= one
+    // max-size legal journal frame: MAX_RECORD_LEN + FRAME_OVERHEAD),
+    // so any single legal frame archives verbatim (PR review P1).
     assert_eq!(
         DeadLetterRecord::MAX_ARCHIVED_BYTES,
-        framing::MAX_RECORD_LEN as usize
+        framing::MAX_RECORD_LEN as usize + framing::FRAME_OVERHEAD
     );
     let region: Vec<u8> = (0..100u8).collect();
     let entry = DeadLetterRecord::archive_with_limit(
@@ -431,6 +462,7 @@ fn contracts_tolerate_unknown_fields() {
 
     let entry: QuickUnlockLedgerEntry = serde_json::from_str(
         r#"{
+            "schema_version": 1,
             "state": { "kind": "needs_reenroll", "reason": "biometry_changed", "extra": 1 },
             "generation": 9,
             "policy": false,
@@ -468,6 +500,16 @@ fn journal_op_wire_shape_is_kind_plus_payload() {
 }
 
 #[test]
+fn ledger_missing_schema_version_fails_closed() {
+    let missing = r#"{
+        "state": { "kind": "disabled" },
+        "generation": 1,
+        "policy": false
+    }"#;
+    assert!(serde_json::from_str::<QuickUnlockLedgerEntry>(missing).is_err());
+}
+
+#[test]
 fn journal_record_frame_keeps_the_op_sealed() {
     // 003 r9: the record frame carries only plaintext routing fields plus
     // the sealed payload — no `kind`/`payload` in the clear.
@@ -498,6 +540,7 @@ fn cache_manifest_source_etag_is_none_for_local_vaults() {
 #[test]
 fn passkey_registration_replay_over_identical_payload_is_a_noop() {
     let payload = PasskeyRegistrationPayload {
+        entry_id: "31e2f3b4-9a76-4c1d-8e0f-6a5b4c3d2e1f".into(),
         passkey: fixture_passkey(),
     };
     // First application: nothing exists under the credential UUID.
@@ -510,7 +553,7 @@ fn passkey_registration_replay_over_identical_payload_is_a_noop() {
     let stored = fixture_passkey();
     for _ in 0..3 {
         assert_eq!(
-            payload.registration_outcome(Some(&stored)),
+            payload.registration_outcome(Some((&payload.entry_id, &stored))),
             PasskeyRegistrationOutcome::NoOp
         );
     }
@@ -519,6 +562,7 @@ fn passkey_registration_replay_over_identical_payload_is_a_noop() {
 #[test]
 fn passkey_registration_conflicting_payload_dead_letters() {
     let payload = PasskeyRegistrationPayload {
+        entry_id: "31e2f3b4-9a76-4c1d-8e0f-6a5b4c3d2e1f".into(),
         passkey: fixture_passkey(),
     };
     // Same credential UUID, different stored data — any field difference
@@ -526,7 +570,7 @@ fn passkey_registration_conflicting_payload_dead_letters() {
     let mut divergent = fixture_passkey();
     divergent.user_handle = Some("ZGlmZmVyZW50".into());
     assert_eq!(
-        payload.registration_outcome(Some(&divergent)),
+        payload.registration_outcome(Some((&payload.entry_id, &divergent))),
         PasskeyRegistrationOutcome::Conflict
     );
     // The frozen dead-letter reason string for this branch.
@@ -540,6 +584,7 @@ fn passkey_registration_conflicting_payload_dead_letters() {
 #[test]
 fn passkey_payload_debug_redacts_the_private_key() {
     let payload = PasskeyRegistrationPayload {
+        entry_id: "31e2f3b4-9a76-4c1d-8e0f-6a5b4c3d2e1f".into(),
         passkey: fixture_passkey(),
     };
     let debug = format!("{payload:?}");
@@ -651,14 +696,19 @@ fn schema_constrains_op_id_to_uuidv7_and_payload_sealed_to_base64() {
     let sealed_pattern = regex::Regex::new(sealed["pattern"].as_str().unwrap()).unwrap();
     assert!(sealed_pattern.is_match(FAKE_PAYLOAD_SEALED_B64));
     assert!(!sealed_pattern.is_match("not base64!!"));
+    assert!(!sealed_pattern.is_match(&"A".repeat(25)));
+    assert!(!sealed_pattern.is_match("A"));
+    assert!(!sealed_pattern.is_match("AAAA="));
 
-    // The dead-letter's archived bytes carry the same base64 constraint;
-    // the only floor is non-emptiness (r12): a corruption_unreachable
-    // region can be a single raw byte, so no frame-size floor applies.
+    // The dead-letter's archived bytes carry the same standard-base64
+    // constraint; a corruption_unreachable region can be a single raw byte,
+    // whose encoding is four characters.
     let frame = schema_property("dead_letter_record.schema.json", "frame_b64");
-    assert_eq!(frame["minLength"].as_u64().unwrap(), 1);
+    assert_eq!(frame["minLength"].as_u64().unwrap(), 4);
     let frame_pattern = regex::Regex::new(frame["pattern"].as_str().unwrap()).unwrap();
     assert!(frame_pattern.is_match("AA=="), "1 raw byte is archivable");
+    assert!(!frame_pattern.is_match("A"));
+    assert!(!frame_pattern.is_match("AAAA="));
     assert!(!frame_pattern.is_match("not base64!!"));
 }
 

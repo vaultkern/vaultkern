@@ -6,6 +6,7 @@
   "required": [
     "generation",
     "policy",
+    "schema_version",
     "state"
   ],
   "properties": {
@@ -18,6 +19,12 @@
     "policy": {
       "description": "User intent: quick unlock enabled or not.",
       "type": "boolean"
+    },
+    "schema_version": {
+      "description": "On-disk ledger schema version. Missing values fail closed during deserialization; this is app-owned persistent storage.",
+      "type": "integer",
+      "format": "uint32",
+      "const": 1
     },
     "state": {
       "description": "Current state; errors drive state transitions, never record destruction (003 axiom).",
