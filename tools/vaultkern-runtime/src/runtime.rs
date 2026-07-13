@@ -16,7 +16,9 @@ use uuid::Uuid;
 use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError, Entry,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    KdbxCipher, KdbxError, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, TotpSpec, Vault,
+    ExternalKdfConfirmation, ExternalKdfDecision, ExternalKdfPolicy, ExternalKdfRequest,
+    KdbxCipher, KdbxError, KdfPolicyEvaluator, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile,
+    TotpSpec, Vault,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
@@ -332,7 +334,59 @@ pub struct Runtime {
     local_save_warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TrustedInternalKdfPolicy;
+
+impl KdfPolicyEvaluator for TrustedInternalKdfPolicy {
+    fn evaluate(&self, _request: ExternalKdfRequest) -> ExternalKdfDecision {
+        ExternalKdfDecision::Allow
+    }
+}
+
 impl Runtime {
+    fn external_open_kdf_policy() -> (ExternalKdfPolicy, ExternalKdfConfirmation) {
+        (
+            ExternalKdfPolicy::Desktop,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
+    }
+
+    fn load_external_database(
+        core: &KeepassCore,
+        bytes: &[u8],
+        key: &CompositeKey,
+    ) -> std::result::Result<vaultkern_core::LoadedDatabase, CoreError> {
+        let (policy, confirmation) = Self::external_open_kdf_policy();
+        core.load_database_with_policy(bytes, key, &policy, confirmation)
+    }
+
+    fn merge_external_database(
+        core: &KeepassCore,
+        target: &mut Vault,
+        bytes: &[u8],
+        key: &CompositeKey,
+    ) -> std::result::Result<vaultkern_core::MergeSummaryView, CoreError> {
+        let source = Self::load_external_database(core, bytes, key)?;
+        Ok(core.merge_vaults(target, &source.vault))
+    }
+
+    fn trusted_internal_kdf_policy() -> TrustedInternalKdfPolicy {
+        TrustedInternalKdfPolicy
+    }
+
+    fn load_internal_database(
+        core: &KeepassCore,
+        bytes: &[u8],
+        key: &CompositeKey,
+    ) -> std::result::Result<vaultkern_core::LoadedDatabase, CoreError> {
+        core.load_database_with_policy(
+            bytes,
+            key,
+            &Self::trusted_internal_kdf_policy(),
+            ExternalKdfConfirmation::Unconfirmed,
+        )
+    }
+
     pub fn new() -> Self {
         Self::new_with_state(
             VaultReferenceStore::new_default(),
@@ -936,9 +990,7 @@ impl Runtime {
 
         let key = composite_key_from_credentials(&credentials)?;
 
-        let database = self
-            .core
-            .load_database(&loaded.bytes, &key)
+        let database = Self::load_external_database(&self.core, &loaded.bytes, &key)
             .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
         loaded.name = database.vault.name.clone();
         loaded.password = credentials.password;
@@ -3569,7 +3621,8 @@ impl Runtime {
                 error,
             ));
         }
-        let baseline_source = match self.core.load_database(&baseline_bytes, &key) {
+        let baseline_source = match Self::load_external_database(&self.core, &baseline_bytes, &key)
+        {
             Ok(database) => database.vault,
             Err(error) => {
                 return Ok(autofill_persist_error(
@@ -3594,7 +3647,7 @@ impl Runtime {
                     ));
                 }
             };
-            match self.core.load_database(&bytes, &key) {
+            match Self::load_internal_database(&self.core, &bytes, &key) {
                 Ok(database) => database.vault,
                 Err(error) => {
                     return Ok(autofill_persist_error(
@@ -3695,31 +3748,32 @@ impl Runtime {
                 "another autofill operation is awaiting remote synchronization",
             ));
         }
-        let pending_vault = match self.core.load_database(&chain.pending.bytes, key) {
-            Ok(database) => database.vault,
-            Err(error) => {
-                return Ok(autofill_persist_error(
-                    "source_corrupt",
-                    format!("failed to parse pending remote autofill generation: {error}"),
-                ));
-            }
-        };
+        let pending_vault =
+            match Self::load_external_database(&self.core, &chain.pending.bytes, key) {
+                Ok(database) => database.vault,
+                Err(error) => {
+                    return Ok(autofill_persist_error(
+                        "source_corrupt",
+                        format!("failed to parse pending remote autofill generation: {error}"),
+                    ));
+                }
+            };
         let loaded_pending =
             same_content_fingerprint(baseline_fingerprint, &chain.pending.fingerprint)
                 && baseline_source == &pending_vault;
         let plan_baseline_vault = if loaded_pending {
             None
         } else {
-            let plan_baseline_vault = match self.core.load_database(&chain.plan_baseline.bytes, key)
-            {
-                Ok(database) => database.vault,
-                Err(error) => {
-                    return Ok(autofill_persist_error(
-                        "source_corrupt",
-                        format!("failed to parse the pending plan baseline: {error}"),
-                    ));
-                }
-            };
+            let plan_baseline_vault =
+                match Self::load_external_database(&self.core, &chain.plan_baseline.bytes, key) {
+                    Ok(database) => database.vault,
+                    Err(error) => {
+                        return Ok(autofill_persist_error(
+                            "source_corrupt",
+                            format!("failed to parse the pending plan baseline: {error}"),
+                        ));
+                    }
+                };
             if !same_content_fingerprint(baseline_fingerprint, &chain.plan_baseline.fingerprint)
                 || baseline_source != &plan_baseline_vault
             {
@@ -3821,15 +3875,16 @@ impl Runtime {
                     ));
                 }
             };
-            let current_source = match self.core.load_database(&snapshot.bytes, key) {
-                Ok(database) => database.vault,
-                Err(error) => {
-                    return Ok(autofill_persist_error(
-                        "source_corrupt",
-                        format!("failed to parse the current vault generation: {error}"),
-                    ));
-                }
-            };
+            let current_source =
+                match Self::load_external_database(&self.core, &snapshot.bytes, key) {
+                    Ok(database) => database.vault,
+                    Err(error) => {
+                        return Ok(autofill_persist_error(
+                            "source_corrupt",
+                            format!("failed to parse the current vault generation: {error}"),
+                        ));
+                    }
+                };
             let prepared = match prepare_autofill_persist(AutofillPersistEngineInput {
                 baseline_source,
                 base_loaded,
@@ -3997,15 +4052,16 @@ impl Runtime {
                     ));
                 }
             };
-            let current_source = match self.core.load_database(&snapshot.bytes, key) {
-                Ok(database) => database.vault,
-                Err(error) => {
-                    return Ok(autofill_persist_error(
-                        "source_corrupt",
-                        format!("failed to parse the current OneDrive generation: {error}"),
-                    ));
-                }
-            };
+            let current_source =
+                match Self::load_external_database(&self.core, &snapshot.bytes, key) {
+                    Ok(database) => database.vault,
+                    Err(error) => {
+                        return Ok(autofill_persist_error(
+                            "source_corrupt",
+                            format!("failed to parse the current OneDrive generation: {error}"),
+                        ));
+                    }
+                };
             let prepared = match prepare_autofill_persist(AutofillPersistEngineInput {
                 baseline_source,
                 base_loaded,
@@ -4261,9 +4317,7 @@ impl Runtime {
             };
         let bytes = save_kdbx_with_history_limits(&self.core, &mut candidate, key, save_profile)
             .context("failed to serialize the autofill candidate")?;
-        let verified = self
-            .core
-            .load_database(&bytes, key)
+        let verified = Self::load_internal_database(&self.core, &bytes, key)
             .context("failed to reload the serialized autofill candidate")?
             .vault;
         let replay_check = prepare_autofill_persist(AutofillPersistEngineInput {
@@ -4415,9 +4469,7 @@ impl Runtime {
                 let current_bytes = current.bytes.as_deref().with_context(|| {
                     format!("changed vault source did not include bytes: {vault_id}")
                 })?;
-                let summary = self
-                    .core
-                    .load_and_merge_kdbx(vault, current_bytes, &key)
+                let summary = Self::merge_external_database(&self.core, vault, current_bytes, &key)
                     .with_context(|| format!("failed to merge current vault source: {vault_id}"))?;
                 Some(MergeSummaryDto {
                     merged_entries: summary.merged_entries,
@@ -4704,7 +4756,7 @@ impl Runtime {
                     .with_context(|| format!("vault not opened: {vault_id}"))?;
                 if let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key.as_ref()) {
                     if snapshot.fingerprint != baseline_fingerprint {
-                        self.core.load_and_merge_kdbx(vault, &snapshot.bytes, key)?;
+                        Self::merge_external_database(&self.core, vault, &snapshot.bytes, key)?;
                     }
                 }
                 loaded.name = display_name;
@@ -4793,21 +4845,17 @@ impl Runtime {
     ) -> Result<VaultSourceStatusDto> {
         const MAX_SOURCE_ATTEMPTS: usize = 3;
         let key = key.context("pending autofill cache requires an unlocked vault")?;
-        let pending_vault = self
-            .core
-            .load_database(&chain.pending.bytes, key)
+        let pending_vault = Self::load_external_database(&self.core, &chain.pending.bytes, key)
             .context("failed to parse authenticated pending autofill generation")?
             .vault;
-        let plan_baseline_vault = self
-            .core
-            .load_database(&chain.plan_baseline.bytes, key)
-            .context("failed to parse authenticated autofill plan baseline generation")?
-            .vault;
-        let observed_source_vault = self
-            .core
-            .load_database(&chain.observed_source.bytes, key)
-            .context("failed to parse authenticated autofill observed source generation")?
-            .vault;
+        let plan_baseline_vault =
+            Self::load_external_database(&self.core, &chain.plan_baseline.bytes, key)
+                .context("failed to parse authenticated autofill plan baseline generation")?
+                .vault;
+        let observed_source_vault =
+            Self::load_external_database(&self.core, &chain.observed_source.bytes, key)
+                .context("failed to parse authenticated autofill observed source generation")?
+                .vault;
         let binding =
             required_pending_autofill_receipt_binding(&pending_vault, &chain.operation_id)?;
         let source = VaultSource::OneDriveItem {
@@ -4896,9 +4944,7 @@ impl Runtime {
             let remote = self
                 .one_drive
                 .read_snapshot_from_state(drive_id, item_id, &state)?;
-            let remote_vault = self
-                .core
-                .load_database(&remote.bytes, key)
+            let remote_vault = Self::load_external_database(&self.core, &remote.bytes, key)
                 .context("failed to parse current OneDrive generation during pending sync")?
                 .vault;
             let remote_binding =
@@ -5027,9 +5073,7 @@ impl Runtime {
     ) -> Result<Vault> {
         let bytes = save_kdbx_with_history_limits(&self.core, &mut vault, key, save_profile)
             .context("failed to serialize autofill vault snapshot")?;
-        Ok(self
-            .core
-            .load_database(&bytes, key)
+        Ok(Self::load_internal_database(&self.core, &bytes, key)
             .context("failed to reload autofill vault snapshot")?
             .vault)
     }
@@ -5120,7 +5164,7 @@ impl Runtime {
                 let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key) else {
                     anyhow::bail!("pending remote vault requires unlock credentials to merge");
                 };
-                self.core.load_and_merge_kdbx(vault, &snapshot.bytes, key)?;
+                Self::merge_external_database(&self.core, vault, &snapshot.bytes, key)?;
             }
             let bytes = if let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key) {
                 save_kdbx_with_history_limits(&self.core, vault, key, loaded.save_profile.clone())
@@ -7491,6 +7535,152 @@ mod tests {
         AutofillPersistOutcomeDto, AutofillPersistPlanDto, AutofillPersistResultDto,
         DatabaseCredentialsUpdateDto,
     };
+
+    #[test]
+    fn external_open_uses_desktop_unconfirmed_kdf_policy() {
+        assert_eq!(
+            Runtime::external_open_kdf_policy(),
+            (
+                vaultkern_core::ExternalKdfPolicy::Desktop,
+                vaultkern_core::ExternalKdfConfirmation::Unconfirmed,
+            )
+        );
+    }
+
+    #[test]
+    fn external_merge_uses_desktop_policy_instead_of_compatibility_default() {
+        let mut parameters = vaultkern_core::VariantDictionary::default();
+        parameters.insert(
+            "$UUID",
+            vaultkern_core::VariantValue::Bytes(
+                uuid::Uuid::from_bytes([
+                    0x9E, 0x29, 0x8B, 0x19, 0x56, 0xDB, 0x47, 0x73, 0xB2, 0x3D, 0xFC, 0x3E, 0xC6,
+                    0xF0, 0xA1, 0xE6,
+                ])
+                .into_bytes()
+                .to_vec(),
+            ),
+        );
+        parameters.insert("I", vaultkern_core::VariantValue::UInt64(1));
+        parameters.insert(
+            "M",
+            vaultkern_core::VariantValue::UInt64(128 * 1024 * 1024 + 1024),
+        );
+        parameters.insert("P", vaultkern_core::VariantValue::UInt32(1));
+        parameters.insert("S", vaultkern_core::VariantValue::Bytes(Vec::new()));
+        let mut header = vaultkern_core::KdbxHeader::new(
+            vaultkern_core::KdbxVersion::V4_1,
+            vaultkern_core::KdbxCipher::Aes256,
+        );
+        header.encryption_iv = vec![0; 16];
+        header.kdf_parameters = parameters;
+        let header_bytes = header.encode().expect("encode header");
+        let mut bytes = header_bytes.clone();
+        bytes.extend(Sha256::digest(&header_bytes));
+        bytes.extend([0; 32]);
+        let core = KeepassCore::new();
+        let key = CompositeKey::default();
+        let mut target = Vault::empty("target");
+        let original = target.clone();
+
+        assert!(matches!(
+            Runtime::merge_external_database(&core, &mut target, &bytes, &key),
+            Err(CoreError::Kdbx(KdbxError::Crypto(_)))
+        ));
+        assert_eq!(target, original);
+    }
+
+    #[test]
+    fn internally_serialized_vaults_bypass_only_the_external_policy() {
+        let mut parameters = vaultkern_core::VariantDictionary::default();
+        parameters.insert(
+            "$UUID",
+            vaultkern_core::VariantValue::Bytes(
+                uuid::Uuid::from_bytes([
+                    0x9E, 0x29, 0x8B, 0x19, 0x56, 0xDB, 0x47, 0x73, 0xB2, 0x3D, 0xFC, 0x3E, 0xC6,
+                    0xF0, 0xA1, 0xE6,
+                ])
+                .into_bytes()
+                .to_vec(),
+            ),
+        );
+        parameters.insert("I", vaultkern_core::VariantValue::UInt64(1));
+        parameters.insert(
+            "M",
+            vaultkern_core::VariantValue::UInt64(256 * 1024 * 1024 + 1024),
+        );
+        parameters.insert("P", vaultkern_core::VariantValue::UInt32(1));
+        parameters.insert("S", vaultkern_core::VariantValue::Bytes(Vec::new()));
+        let mut header = vaultkern_core::KdbxHeader::new(
+            vaultkern_core::KdbxVersion::V4_1,
+            vaultkern_core::KdbxCipher::Aes256,
+        );
+        header.encryption_iv = vec![0; 16];
+        header.kdf_parameters = parameters;
+        let header_bytes = header.encode().expect("encode header");
+        let mut bytes = header_bytes.clone();
+        bytes.extend(Sha256::digest(&header_bytes));
+        bytes.extend([0; 32]);
+        let core = KeepassCore::new();
+        let key = CompositeKey::default();
+
+        assert!(matches!(
+            Runtime::load_external_database(&core, &bytes, &key),
+            Err(CoreError::Kdbx(KdbxError::ExternalKdfPolicy {
+                decision: vaultkern_core::ExternalKdfDecision::Confirm(268_435_456),
+                ..
+            }))
+        ));
+        assert!(matches!(
+            Runtime::load_internal_database(&core, &bytes, &key),
+            Err(CoreError::Kdbx(KdbxError::Crypto(_)))
+        ));
+    }
+
+    #[test]
+    fn external_open_reports_confirmation_before_running_a_high_cost_kdf() {
+        let mut parameters = vaultkern_core::VariantDictionary::default();
+        parameters.insert(
+            "$UUID",
+            vaultkern_core::VariantValue::Bytes(
+                uuid::Uuid::from_bytes([
+                    0x7C, 0x02, 0xBB, 0x82, 0x79, 0xA7, 0x4A, 0xC0, 0x92, 0x7D, 0x11, 0x4A, 0x00,
+                    0x69, 0x2E, 0xB7,
+                ])
+                .into_bytes()
+                .to_vec(),
+            ),
+        );
+        parameters.insert("R", vaultkern_core::VariantValue::UInt64(600_000_001));
+        parameters.insert("S", vaultkern_core::VariantValue::Bytes(vec![0; 32]));
+        let mut header = vaultkern_core::KdbxHeader::new(
+            vaultkern_core::KdbxVersion::V4_1,
+            vaultkern_core::KdbxCipher::Aes256,
+        );
+        header.encryption_iv = vec![0; 16];
+        header.kdf_parameters = parameters;
+        let header_bytes = header.encode().expect("encode header");
+        let mut bytes = header_bytes.clone();
+        bytes.extend(Sha256::digest(&header_bytes));
+        bytes.extend([0; 32]);
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("high-cost.kdbx");
+        std::fs::write(&path, bytes).expect("write external database");
+        let mut runtime = Runtime::for_tests();
+        let opened = runtime
+            .open_local_vault(path.to_str().expect("UTF-8 path"))
+            .expect("open file handle");
+        let error = runtime
+            .unlock_vault(&opened.vault_id, Some("password"), None)
+            .expect_err("unconfirmed desktop policy must stop before the KDF");
+
+        assert!(
+            format_error_chain(&error).contains("external KDF policy Confirm(600000000)"),
+            "unexpected error: {}",
+            format_error_chain(&error)
+        );
+    }
 
     #[test]
     fn onedrive_component_boundaries_do_not_alias_vault_or_cache_ids() {
