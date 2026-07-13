@@ -231,6 +231,13 @@ pub(crate) enum CleanupStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CleanupInspection {
+    Complete,
+    Pending,
+    Unavailable(PlatformError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DisableOutcome {
     pub(crate) cleanup: CleanupStatus,
 }
@@ -240,6 +247,7 @@ pub(crate) enum CoordinatorError {
     Ledger(LedgerStoreError),
     GenerationOverflow,
     InvalidIdentifierScope,
+    InvalidVaultRefId,
     RecordConflict,
 }
 
@@ -253,6 +261,9 @@ impl fmt::Display for CoordinatorError {
             Self::InvalidIdentifierScope => {
                 formatter.write_str("quick unlock identifier_scope must not be empty")
             }
+            Self::InvalidVaultRefId => {
+                formatter.write_str("quick unlock vault_ref_id must not be empty")
+            }
             Self::RecordConflict => {
                 formatter.write_str("quick unlock platform record already exists")
             }
@@ -264,7 +275,10 @@ impl std::error::Error for CoordinatorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Ledger(error) => Some(error),
-            Self::GenerationOverflow | Self::InvalidIdentifierScope | Self::RecordConflict => None,
+            Self::GenerationOverflow
+            | Self::InvalidIdentifierScope
+            | Self::InvalidVaultRefId
+            | Self::RecordConflict => None,
         }
     }
 }
@@ -293,6 +307,20 @@ enum NextGenerationError {
     Overflow,
 }
 
+enum CleanupRange {
+    Before(u64),
+    Through(u64),
+}
+
+impl CleanupRange {
+    fn contains(&self, generation: u64) -> bool {
+        match self {
+            Self::Before(boundary) => generation < *boundary,
+            Self::Through(boundary) => generation <= *boundary,
+        }
+    }
+}
+
 impl QuickUnlockCoordinator {
     pub(crate) fn new(
         ledger: QuickUnlockLedgerStore,
@@ -314,7 +342,7 @@ impl QuickUnlockCoordinator {
         session: SessionUnlockKind,
         opaque_envelope: &[u8],
     ) -> Result<EnableOutcome, CoordinatorError> {
-        validate_identifier_scope(identifier_scope)?;
+        validate_record_identity(identifier_scope, vault_ref_id)?;
         let _transition_guard = self.lock_transitions();
         if session != SessionUnlockKind::PasswordUnlocked {
             return Ok(EnableOutcome::PasswordUnlockRequired);
@@ -367,7 +395,11 @@ impl QuickUnlockCoordinator {
         let active_generation = reduction.next.generation;
         self.ledger
             .compare_and_swap(vault_ref_id, stored.as_ref(), reduction.next)?;
-        let cleanup = self.cleanup_records(identifier_scope, vault_ref_id, Some(active_generation));
+        let cleanup = self.cleanup_records(
+            identifier_scope,
+            vault_ref_id,
+            CleanupRange::Before(active_generation),
+        );
         Ok(EnableOutcome::Enabled { cleanup })
     }
 
@@ -377,7 +409,7 @@ impl QuickUnlockCoordinator {
         vault_ref_id: &str,
         opaque_envelope: &[u8],
     ) -> Result<FullCredentialOutcome, CoordinatorError> {
-        validate_identifier_scope(identifier_scope)?;
+        validate_record_identity(identifier_scope, vault_ref_id)?;
         let _transition_guard = self.lock_transitions();
         let (stored, current) = self.current_entry(vault_ref_id)?;
         let mut reduction = reduce(
@@ -419,7 +451,11 @@ impl QuickUnlockCoordinator {
         let active_generation = reduction.next.generation;
         self.ledger
             .compare_and_swap(vault_ref_id, stored.as_ref(), reduction.next)?;
-        let cleanup = self.cleanup_records(identifier_scope, vault_ref_id, Some(active_generation));
+        let cleanup = self.cleanup_records(
+            identifier_scope,
+            vault_ref_id,
+            CleanupRange::Before(active_generation),
+        );
         Ok(FullCredentialOutcome::Resealed { cleanup })
     }
 
@@ -432,7 +468,7 @@ impl QuickUnlockCoordinator {
     where
         F: FnOnce(&[u8]) -> EnvelopeInspection,
     {
-        validate_identifier_scope(identifier_scope)?;
+        validate_record_identity(identifier_scope, vault_ref_id)?;
         let (stored, current) = self.current_entry(vault_ref_id)?;
         if !matches!(current.state, QuickUnlockState::Enrolled) {
             return Ok(UnlockOutcome::Refused);
@@ -491,7 +527,7 @@ impl QuickUnlockCoordinator {
         identifier_scope: &str,
         vault_ref_id: &str,
     ) -> Result<DisableOutcome, CoordinatorError> {
-        validate_identifier_scope(identifier_scope)?;
+        validate_record_identity(identifier_scope, vault_ref_id)?;
         let _transition_guard = self.lock_transitions();
         let (stored, current) = self.current_entry(vault_ref_id)?;
         let reduction = reduce(
@@ -499,10 +535,55 @@ impl QuickUnlockCoordinator {
             QuickUnlockOperation::Disable,
             QuickUnlockOperationResult::Success,
         )?;
+        let disabled_generation = reduction.next.generation;
         self.ledger
             .compare_and_swap(vault_ref_id, stored.as_ref(), reduction.next)?;
-        let cleanup = self.cleanup_records(identifier_scope, vault_ref_id, None);
+        let cleanup = self.cleanup_records(
+            identifier_scope,
+            vault_ref_id,
+            CleanupRange::Through(disabled_generation),
+        );
         Ok(DisableOutcome { cleanup })
+    }
+
+    pub(crate) fn inspect_cleanup(
+        &self,
+        identifier_scope: &str,
+        vault_ref_id: &str,
+    ) -> Result<CleanupInspection, CoordinatorError> {
+        validate_record_identity(identifier_scope, vault_ref_id)?;
+        let _transition_guard = self.lock_transitions();
+        let (stored, current) = self.current_entry(vault_ref_id)?;
+        let generations = match self
+            .records
+            .record_generations(identifier_scope, vault_ref_id)
+        {
+            Ok(generations) => generations,
+            Err(error) => return Ok(CleanupInspection::Unavailable(error)),
+        };
+        let pending = generations
+            .into_iter()
+            .any(|generation| generation_needs_cleanup(&current, generation));
+        let inspection = if pending {
+            CleanupInspection::Pending
+        } else {
+            CleanupInspection::Complete
+        };
+        self.ledger.assert_snapshot(vault_ref_id, stored.as_ref())?;
+        Ok(inspection)
+    }
+
+    pub(crate) fn recover_pending_cleanup(
+        &self,
+        identifier_scope: &str,
+        vault_ref_id: &str,
+    ) -> Result<CleanupStatus, CoordinatorError> {
+        validate_record_identity(identifier_scope, vault_ref_id)?;
+        let _transition_guard = self.lock_transitions();
+        let (stored, current) = self.current_entry(vault_ref_id)?;
+        let cleanup = self.cleanup_records(identifier_scope, vault_ref_id, cleanup_range(&current));
+        self.ledger.assert_snapshot(vault_ref_id, stored.as_ref())?;
+        Ok(cleanup)
     }
 
     fn current_entry(
@@ -539,7 +620,7 @@ impl QuickUnlockCoordinator {
         &self,
         identifier_scope: &str,
         vault_ref_id: &str,
-        keep_generation: Option<u64>,
+        cleanup_range: CleanupRange,
     ) -> CleanupStatus {
         let generations = match self
             .records
@@ -550,7 +631,7 @@ impl QuickUnlockCoordinator {
         };
         let mut first_error = None;
         for generation in generations.into_iter().collect::<BTreeSet<_>>() {
-            if keep_generation == Some(generation) {
+            if !cleanup_range.contains(generation) {
                 continue;
             }
             let key = platform_record_key(identifier_scope, vault_ref_id, generation);
@@ -568,6 +649,18 @@ impl QuickUnlockCoordinator {
 fn validate_identifier_scope(identifier_scope: &str) -> Result<(), CoordinatorError> {
     if identifier_scope.is_empty() {
         Err(CoordinatorError::InvalidIdentifierScope)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_record_identity(
+    identifier_scope: &str,
+    vault_ref_id: &str,
+) -> Result<(), CoordinatorError> {
+    validate_identifier_scope(identifier_scope)?;
+    if vault_ref_id.is_empty() {
+        Err(CoordinatorError::InvalidVaultRefId)
     } else {
         Ok(())
     }
@@ -603,13 +696,32 @@ fn reenroll_reason(entry: &QuickUnlockLedgerEntry) -> NeedsReenrollReason {
     }
 }
 
+fn cleanup_range(entry: &QuickUnlockLedgerEntry) -> CleanupRange {
+    match entry.state {
+        QuickUnlockState::Disabled => CleanupRange::Through(entry.generation),
+        QuickUnlockState::Enrolled | QuickUnlockState::NeedsReenroll { .. } => {
+            CleanupRange::Before(entry.generation)
+        }
+    }
+}
+
+fn generation_needs_cleanup(entry: &QuickUnlockLedgerEntry, generation: u64) -> bool {
+    match entry.state {
+        QuickUnlockState::Disabled => true,
+        QuickUnlockState::Enrolled | QuickUnlockState::NeedsReenroll { .. } => {
+            generation != entry.generation
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CleanupStatus, CoordinatorError, DisableOutcome, EnableOutcome, EnvelopeInspection,
-        FullCredentialOutcome, PlatformError, PlatformErrorClassifier, QuickUnlockCoordinator,
-        QuickUnlockError, QuickUnlockOperation, QuickUnlockOperationResult, QuickUnlockRecordStore,
-        ReduceError, ReductionDisposition, SealOutcome, SessionUnlockKind, UnlockOutcome, reduce,
+        CleanupInspection, CleanupStatus, CoordinatorError, DisableOutcome, EnableOutcome,
+        EnvelopeInspection, FullCredentialOutcome, PlatformError, PlatformErrorClassifier,
+        QuickUnlockCoordinator, QuickUnlockError, QuickUnlockOperation, QuickUnlockOperationResult,
+        QuickUnlockRecordStore, ReduceError, ReductionDisposition, SealOutcome, SessionUnlockKind,
+        UnlockOutcome, reduce,
     };
     use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
     use crate::quick_unlock_ledger::{LedgerStoreError, QuickUnlockLedgerStore};
@@ -831,6 +943,8 @@ mod tests {
         after_unseal_cas: Mutex<Option<ForcedCas>>,
         seal_gate: Option<SealGate>,
         generation_gate: Option<GenerationGate>,
+        first_generation_pause: Option<GenerationPause>,
+        generation_calls: Mutex<Vec<(String, String)>>,
         delete_observer: Mutex<Option<DeleteObserver>>,
     }
 
@@ -842,6 +956,12 @@ mod tests {
     struct GenerationGate {
         barrier: Arc<Barrier>,
         entered: Mutex<u8>,
+    }
+
+    struct GenerationPause {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        pending: Mutex<bool>,
     }
 
     struct ForcedCas {
@@ -869,6 +989,8 @@ mod tests {
                 after_unseal_cas: Mutex::new(None),
                 seal_gate: None,
                 generation_gate: None,
+                first_generation_pause: None,
+                generation_calls: Mutex::new(Vec::new()),
                 delete_observer: Mutex::new(None),
             }
         }
@@ -888,6 +1010,20 @@ mod tests {
                 generation_gate: Some(GenerationGate {
                     barrier,
                     entered: Mutex::new(0),
+                }),
+                ..Self::new()
+            }
+        }
+
+        fn with_first_generation_pause(
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        ) -> Self {
+            Self {
+                first_generation_pause: Some(GenerationPause {
+                    entered,
+                    release: Mutex::new(release),
+                    pending: Mutex::new(true),
                 }),
                 ..Self::new()
             }
@@ -913,6 +1049,22 @@ mod tests {
             identifier_scope: &str,
             vault_ref_id: &str,
         ) -> Result<Vec<u64>, PlatformError> {
+            self.generation_calls
+                .lock()
+                .unwrap()
+                .push((identifier_scope.to_owned(), vault_ref_id.to_owned()));
+            if let Some(pause) = &self.first_generation_pause {
+                let should_pause = {
+                    let mut pending = pause.pending.lock().unwrap();
+                    let should_pause = *pending;
+                    *pending = false;
+                    should_pause
+                };
+                if should_pause {
+                    pause.entered.send(()).unwrap();
+                    pause.release.lock().unwrap().recv().unwrap();
+                }
+            }
             let generations = self
                 .records
                 .lock()
@@ -1093,6 +1245,41 @@ mod tests {
         ));
         assert_eq!(ledger.get("vault").unwrap(), Some(enrolled));
         assert!(records.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_vault_ref_id_is_rejected_before_either_store_is_touched() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        let records = Arc::new(FakeRecordStore::new());
+        let coordinator = coordinator(ledger.clone(), Arc::clone(&records));
+
+        assert!(matches!(
+            coordinator.enable("scope", "", SessionUnlockKind::PasswordUnlocked, b"opaque"),
+            Err(CoordinatorError::InvalidVaultRefId)
+        ));
+        assert!(matches!(
+            coordinator.full_credential_unlocked("scope", "", b"opaque"),
+            Err(CoordinatorError::InvalidVaultRefId)
+        ));
+        assert!(matches!(
+            coordinator.unlock("scope", "", |_| EnvelopeInspection::Valid),
+            Err(CoordinatorError::InvalidVaultRefId)
+        ));
+        assert!(matches!(
+            coordinator.disable("scope", ""),
+            Err(CoordinatorError::InvalidVaultRefId)
+        ));
+        assert!(matches!(
+            coordinator.inspect_cleanup("scope", ""),
+            Err(CoordinatorError::InvalidVaultRefId)
+        ));
+        assert!(matches!(
+            coordinator.recover_pending_cleanup("scope", ""),
+            Err(CoordinatorError::InvalidVaultRefId)
+        ));
+
+        assert!(records.calls.lock().unwrap().is_empty());
+        assert!(records.generation_calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1610,5 +1797,161 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn delayed_disable_cleanup_does_not_delete_a_newly_enrolled_generation() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        ledger
+            .compare_and_swap("vault", None, entry(QuickUnlockState::Enrolled, 1))
+            .unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let records = Arc::new(FakeRecordStore::with_first_generation_pause(
+            entered_tx, release_rx,
+        ));
+        records.insert(key("scope", "vault", 1), b"old");
+
+        let disabling = coordinator(ledger.clone(), Arc::clone(&records));
+        let disable = thread::spawn(move || disabling.disable("scope", "vault"));
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let enable = coordinator(ledger.clone(), Arc::clone(&records))
+            .enable(
+                "scope",
+                "vault",
+                SessionUnlockKind::PasswordUnlocked,
+                b"new",
+            )
+            .unwrap();
+        assert_eq!(
+            enable,
+            EnableOutcome::Enabled {
+                cleanup: CleanupStatus::Complete
+            }
+        );
+        assert_eq!(
+            ledger.get("vault").unwrap(),
+            Some(entry(QuickUnlockState::Enrolled, 3))
+        );
+
+        release_tx.send(()).unwrap();
+        disable.join().unwrap().unwrap();
+
+        assert_eq!(records.record(3), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn interrupted_reseal_cleanup_can_be_recovered_from_persisted_state() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        ledger
+            .compare_and_swap("vault", None, entry(QuickUnlockState::Enrolled, 9))
+            .unwrap();
+        let records = Arc::new(FakeRecordStore::new());
+        records.insert(key("scope", "vault", 7), b"old");
+        records.insert(key("scope", "vault", 8), b"orphan");
+        records.insert(key("scope", "vault", 9), b"current");
+
+        let coordinator = coordinator(ledger, Arc::clone(&records));
+        assert_eq!(
+            coordinator.inspect_cleanup("scope", "vault").unwrap(),
+            CleanupInspection::Pending
+        );
+
+        let cleanup = coordinator
+            .recover_pending_cleanup("scope", "vault")
+            .unwrap();
+
+        assert_eq!(cleanup, CleanupStatus::Complete);
+        assert_eq!(
+            coordinator.inspect_cleanup("scope", "vault").unwrap(),
+            CleanupInspection::Complete
+        );
+        assert_eq!(records.record(7), None);
+        assert_eq!(records.record(8), None);
+        assert_eq!(records.record(9), Some(b"current".to_vec()));
+    }
+
+    #[test]
+    fn disabled_cleanup_recovery_preserves_future_generations() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        ledger
+            .compare_and_swap("vault", None, entry(QuickUnlockState::Disabled, 8))
+            .unwrap();
+        let records = Arc::new(FakeRecordStore::new());
+        records.insert(key("scope", "vault", 7), b"old");
+        records.insert(key("scope", "vault", 8), b"disabled-orphan");
+        records.insert(key("scope", "vault", 9), b"future");
+
+        let cleanup = coordinator(ledger, Arc::clone(&records))
+            .recover_pending_cleanup("scope", "vault")
+            .unwrap();
+
+        assert_eq!(cleanup, CleanupStatus::Complete);
+        assert_eq!(records.record(7), None);
+        assert_eq!(records.record(8), None);
+        assert_eq!(records.record(9), Some(b"future".to_vec()));
+    }
+
+    #[test]
+    fn cleanup_inspection_rejects_a_concurrently_changed_ledger_snapshot() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        ledger
+            .compare_and_swap("vault", None, entry(QuickUnlockState::Enrolled, 1))
+            .unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let records = Arc::new(FakeRecordStore::with_first_generation_pause(
+            entered_tx, release_rx,
+        ));
+        records.insert(key("scope", "vault", 1), b"current");
+        *records.delete_error.lock().unwrap() = Some(PlatformError::new("fake-delete", 99));
+
+        let inspecting = coordinator(ledger.clone(), Arc::clone(&records));
+        let inspection = thread::spawn(move || inspecting.inspect_cleanup("scope", "vault"));
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        coordinator(ledger.clone(), Arc::clone(&records))
+            .disable("scope", "vault")
+            .unwrap();
+        assert_eq!(
+            ledger.get("vault").unwrap(),
+            Some(entry(QuickUnlockState::Disabled, 2))
+        );
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            inspection.join().unwrap(),
+            Err(CoordinatorError::Ledger(LedgerStoreError::Conflict { .. }))
+        ));
+    }
+
+    #[test]
+    fn cleanup_recovery_rejects_a_concurrently_changed_ledger_snapshot() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        ledger
+            .compare_and_swap("vault", None, entry(QuickUnlockState::Enrolled, 1))
+            .unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let records = Arc::new(FakeRecordStore::with_first_generation_pause(
+            entered_tx, release_rx,
+        ));
+        records.insert(key("scope", "vault", 1), b"current");
+        *records.delete_error.lock().unwrap() = Some(PlatformError::new("fake-delete", 99));
+
+        let recovering = coordinator(ledger.clone(), Arc::clone(&records));
+        let recovery = thread::spawn(move || recovering.recover_pending_cleanup("scope", "vault"));
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        coordinator(ledger.clone(), Arc::clone(&records))
+            .disable("scope", "vault")
+            .unwrap();
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            recovery.join().unwrap(),
+            Err(CoordinatorError::Ledger(LedgerStoreError::Conflict { .. }))
+        ));
     }
 }

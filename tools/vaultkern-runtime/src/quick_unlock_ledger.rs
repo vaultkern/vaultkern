@@ -333,7 +333,15 @@ impl QuickUnlockLedgerStore {
         vault_ref_id: &str,
         expected: &QuickUnlockLedgerEntry,
     ) -> Result<(), LedgerStoreError> {
-        if self.get(vault_ref_id)?.as_ref() == Some(expected) {
+        self.assert_snapshot(vault_ref_id, Some(expected))
+    }
+
+    pub(crate) fn assert_snapshot(
+        &self,
+        vault_ref_id: &str,
+        expected: Option<&QuickUnlockLedgerEntry>,
+    ) -> Result<(), LedgerStoreError> {
+        if self.get(vault_ref_id)?.as_ref() == expected {
             Ok(())
         } else {
             Err(LedgerStoreError::Conflict {
