@@ -876,6 +876,58 @@ mod tests {
     }
 
     #[test]
+    fn publication_faults_recover_absent_or_complete_new_document_on_first_creation() {
+        for point in [
+            DurableFaultPoint::TempCreated,
+            DurableFaultPoint::TempSynced,
+            DurableFaultPoint::BeforeTargetReplace,
+            DurableFaultPoint::TargetReplaced,
+            DurableFaultPoint::ParentSynced,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ledger").join("quick-unlock.json");
+            let new_document = json!({
+                "schema_version": 1,
+                "entries": {
+                    "vault-1": {
+                        "schema_version": 1,
+                        "state": { "kind": "enrolled" },
+                        "generation": 1,
+                        "policy": true
+                    }
+                }
+            });
+
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "quick_unlock_ledger::tests::subprocess_ledger_create_crash_child",
+                    "--ignored",
+                ])
+                .env("VAULTKERN_LEDGER_CRASH_PATH", &path)
+                .env("VAULTKERN_DURABLE_CRASH_POINT", format!("{point:?}"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert_was_abruptly_killed(status, point);
+
+            let reopened = QuickUnlockLedgerStore::persistent(path.clone(), Duration::from_secs(1));
+            match fs::read(&path) {
+                Ok(bytes) => {
+                    let recovered: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(recovered, new_document, "{point:?}");
+                    assert_eq!(reopened.get("vault-1").unwrap(), Some(enrolled(1)));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    assert_eq!(reopened.get("vault-1").unwrap(), None);
+                }
+                Err(error) => panic!("could not reopen ledger after {point:?}: {error}"),
+            }
+        }
+    }
+
+    #[test]
     fn publication_faults_distinguish_pre_publish_and_outcome_unknown() {
         for point in [
             DurableFaultPoint::TempCreated,
@@ -970,6 +1022,25 @@ mod tests {
             DurableFaultInjector::crash_once(point),
         );
         let _ = store.compare_and_swap("vault-1", Some(&enrolled(7)), enrolled(8));
+        panic!("crash point was not reached: {point:?}");
+    }
+
+    #[test]
+    #[ignore]
+    fn subprocess_ledger_create_crash_child() {
+        let Some(path) = std::env::var_os("VAULTKERN_LEDGER_CRASH_PATH") else {
+            return;
+        };
+        let point = DurableFaultPoint::from_test_name(
+            &std::env::var("VAULTKERN_DURABLE_CRASH_POINT").unwrap(),
+        )
+        .unwrap();
+        let store = QuickUnlockLedgerStore::persistent_with_faults(
+            path.into(),
+            Duration::from_secs(1),
+            DurableFaultInjector::crash_once(point),
+        );
+        let _ = store.compare_and_swap("vault-1", None, enrolled(1));
         panic!("crash point was not reached: {point:?}");
     }
 

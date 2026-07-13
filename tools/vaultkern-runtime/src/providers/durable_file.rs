@@ -213,18 +213,20 @@ impl ExclusiveFileLock {
     }
 
     pub(crate) fn acquire_with_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
-        let file = open_validated_lock_file(path)?;
         let started = Instant::now();
+        let file = open_validated_lock_file(path)?;
+        let mut first_attempt = true;
         loop {
+            if (!first_attempt || !timeout.is_zero()) && started.elapsed() >= timeout {
+                return Err(lock_timeout_error(path));
+            }
+            first_attempt = false;
             match file.try_lock() {
                 Ok(()) => return Ok(Self { file }),
                 Err(fs::TryLockError::WouldBlock) => {
                     let elapsed = started.elapsed();
                     if elapsed >= timeout {
-                        return Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            format!("timed out acquiring durable lock {}", path.display()),
-                        ));
+                        return Err(lock_timeout_error(path));
                     }
                     std::thread::sleep(Duration::from_millis(10).min(timeout - elapsed));
                 }
@@ -232,6 +234,13 @@ impl ExclusiveFileLock {
             }
         }
     }
+}
+
+fn lock_timeout_error(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!("timed out acquiring durable lock {}", path.display()),
+    )
 }
 
 fn open_validated_lock_file(path: &Path) -> io::Result<File> {
@@ -1231,6 +1240,33 @@ mod tests {
         ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_secs(1)).unwrap();
     }
 
+    #[test]
+    fn bounded_lock_does_not_acquire_after_deadline_when_released_during_final_sleep() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("ledger.lock");
+        let holder_path = lock_path.clone();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (start_release_tx, start_release_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let held = ExclusiveFileLock::acquire(&holder_path).unwrap();
+            acquired_tx.send(()).unwrap();
+            start_release_rx.recv().unwrap();
+            thread::sleep(Duration::from_millis(95));
+            drop(held);
+        });
+        acquired_rx.recv().unwrap();
+
+        let started = Instant::now();
+        start_release_tx.send(()).unwrap();
+        let error = ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_millis(100))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_millis(300));
+        holder.join().unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn bounded_lock_rejects_symlink_parent_like_blocking_acquisition() {
@@ -1241,6 +1277,33 @@ mod tests {
         let linked_parent = dir.path().join("linked");
         fs::create_dir(&real_parent).unwrap();
         symlink(&real_parent, &linked_parent).unwrap();
+        let lock_path = linked_parent.join("ledger.lock");
+
+        let blocking = ExclusiveFileLock::acquire(&lock_path).unwrap_err();
+        let bounded =
+            ExclusiveFileLock::acquire_with_timeout(&lock_path, Duration::from_millis(40))
+                .unwrap_err();
+
+        assert_eq!(blocking.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(bounded.kind(), blocking.kind());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_lock_rejects_reparse_parent_like_blocking_acquisition() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real");
+        let linked_parent = dir.path().join("linked");
+        fs::create_dir(&real_parent).unwrap();
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&linked_parent)
+            .arg(&real_parent)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "could not create test directory junction");
         let lock_path = linked_parent.join("ledger.lock");
 
         let blocking = ExclusiveFileLock::acquire(&lock_path).unwrap_err();
