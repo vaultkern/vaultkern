@@ -4,6 +4,7 @@ mod match_fill;
 pub mod native_host;
 mod passkey;
 mod providers;
+mod quick_unlock_coordinator;
 mod quick_unlock_ledger;
 mod runtime;
 mod session;

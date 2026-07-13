@@ -328,6 +328,28 @@ impl QuickUnlockLedgerStore {
         read_entry(&document, vault_ref_id)
     }
 
+    pub(crate) fn assert_current(
+        &self,
+        vault_ref_id: &str,
+        expected: &QuickUnlockLedgerEntry,
+    ) -> Result<(), LedgerStoreError> {
+        self.assert_snapshot(vault_ref_id, Some(expected))
+    }
+
+    pub(crate) fn assert_snapshot(
+        &self,
+        vault_ref_id: &str,
+        expected: Option<&QuickUnlockLedgerEntry>,
+    ) -> Result<(), LedgerStoreError> {
+        if self.get(vault_ref_id)?.as_ref() == expected {
+            Ok(())
+        } else {
+            Err(LedgerStoreError::Conflict {
+                message: format!("row {vault_ref_id:?} no longer matches the expected value"),
+            })
+        }
+    }
+
     pub(crate) fn compare_and_swap(
         &self,
         vault_ref_id: &str,
