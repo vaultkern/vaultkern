@@ -537,7 +537,8 @@ mod tests {
         let store = WindowsOneDriveRefreshTokenStore::new(path.clone(), "test/default");
         store.store("fixture-refresh-token").unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
-        bytes[bytes.len() / 2] ^= 0x80;
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0x80;
         std::fs::write(&path, bytes).unwrap();
 
         let error = store

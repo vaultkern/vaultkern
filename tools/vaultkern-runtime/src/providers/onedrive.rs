@@ -1947,6 +1947,111 @@ mod tests {
         token.assert();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn refresh_token_store_state_directory_never_contains_plaintext() {
+        use crate::providers::onedrive_token_store::WindowsOneDriveRefreshTokenStore;
+
+        const INITIAL_TOKEN: &str = "initial-refresh-token-filesystem-regression";
+        const ROTATED_TOKEN: &str = "rotated-refresh-token-filesystem-regression";
+        let state_dir = tempfile::tempdir().unwrap();
+        let token_path = state_dir.path().join("onedrive-refresh-token.dpapi");
+        let mut server = mockito::Server::new();
+        let login_token = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "grant_type".into(),
+                "authorization_code".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"access_token":"access-1","refresh_token":"{INITIAL_TOKEN}","expires_in":3600}}"#
+            ))
+            .create();
+        let me = server
+            .mock("GET", "/v1.0/me")
+            .match_header("authorization", "Bearer access-1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"userPrincipalName":"alice@example.com"}"#)
+            .create();
+        let refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "refresh_token".into(),
+                INITIAL_TOKEN.into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"access_token":"access-2","refresh_token":"{ROTATED_TOKEN}","expires_in":3600}}"#
+            ))
+            .create();
+        let children = server
+            .mock("GET", "/v1.0/me/drive/root/children")
+            .match_header("authorization", "Bearer access-2")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"value":[]}"#)
+            .create();
+
+        let mut first = OneDriveVaultSourceProvider::new_for_graph_tests_with_refresh_token_store(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+            Box::new(WindowsOneDriveRefreshTokenStore::new(
+                token_path.clone(),
+                "test/default",
+            )),
+        );
+        first
+            .complete_login("auth-code", "http://127.0.0.1:53121/callback", "verifier")
+            .unwrap();
+        drop(first);
+
+        let second = OneDriveVaultSourceProvider::new_for_graph_tests_with_refresh_token_store(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+            Box::new(WindowsOneDriveRefreshTokenStore::new(
+                token_path,
+                "test/default",
+            )),
+        );
+        second.list_children(None).unwrap();
+
+        let mut pending = vec![state_dir.path().to_owned()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let file_type = entry.file_type().unwrap();
+                if file_type.is_dir() {
+                    pending.push(entry.path());
+                } else if file_type.is_file() {
+                    let bytes = std::fs::read(entry.path()).unwrap();
+                    assert!(
+                        !bytes
+                            .windows(INITIAL_TOKEN.len())
+                            .any(|window| { window == INITIAL_TOKEN.as_bytes() })
+                    );
+                    assert!(
+                        !bytes
+                            .windows(ROTATED_TOKEN.len())
+                            .any(|window| { window == ROTATED_TOKEN.as_bytes() })
+                    );
+                }
+            }
+        }
+        login_token.assert();
+        me.assert();
+        refresh.assert();
+        children.assert();
+    }
+
     fn callback_port(redirect_uri: &str) -> u16 {
         url::Url::parse(redirect_uri)
             .unwrap()
