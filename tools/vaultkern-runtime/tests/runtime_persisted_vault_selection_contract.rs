@@ -31,10 +31,8 @@ fn runtime_restores_current_vault_selection_from_persisted_store() {
     .unwrap();
 
     let previous_state_home = std::env::var_os("XDG_STATE_HOME");
-    let previous_local_app_data = std::env::var_os("LOCALAPPDATA");
     unsafe {
         std::env::set_var("XDG_STATE_HOME", &state_home);
-        std::env::set_var("LOCALAPPDATA", &state_home);
     }
 
     let runtime = Runtime::new();
@@ -45,14 +43,6 @@ fn runtime_restores_current_vault_selection_from_persisted_store() {
         },
         None => unsafe {
             std::env::remove_var("XDG_STATE_HOME");
-        },
-    }
-    match previous_local_app_data {
-        Some(value) => unsafe {
-            std::env::set_var("LOCALAPPDATA", value);
-        },
-        None => unsafe {
-            std::env::remove_var("LOCALAPPDATA");
         },
     }
 

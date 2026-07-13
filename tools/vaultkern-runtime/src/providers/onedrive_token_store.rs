@@ -5,18 +5,20 @@ use std::path::PathBuf;
 #[cfg(any(windows, test))]
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(any(windows, test))]
+use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
-#[cfg(any(windows, test))]
-use crate::providers::durable_file::VerifiedTemp;
 #[cfg(windows)]
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, TargetExpectation, TempWriteFaultPoints,
     create_dir_all_durable, opened_file_identity, path_file_identity, publish_temp,
     remove_if_exists, sync_parent, write_verified_temp,
 };
+#[cfg(any(windows, test))]
+use crate::providers::durable_file::{ExclusiveFileLock, VerifiedTemp};
 
 const TOKEN_FILE_NAME: &str = "onedrive-refresh-token.dpapi";
 #[cfg(any(windows, test))]
@@ -24,16 +26,9 @@ const MAX_PROTECTED_REFRESH_TOKEN_BYTES: usize = 64 * 1024;
 
 pub(crate) trait OneDriveRefreshTokenStore {
     fn load(&self) -> Result<Option<Zeroizing<String>>>;
-    fn store(&self, token: &str) -> Result<OneDriveRefreshTokenStoreOutcome>;
+    fn store(&self, token: &str) -> Result<()>;
     #[allow(dead_code)]
     fn delete(&self) -> Result<()>;
-}
-
-#[derive(Debug)]
-pub(crate) enum OneDriveRefreshTokenStoreOutcome {
-    Durable,
-    #[allow(dead_code)]
-    PublishedDurabilityUnknown(anyhow::Error),
 }
 
 #[derive(Debug)]
@@ -96,8 +91,74 @@ fn production_store(path: PathBuf, scope: &str) -> Box<dyn OneDriveRefreshTokenS
 
 fn remove_legacy_plaintext_token(protected_path: &std::path::Path) {
     if let Some(parent) = protected_path.parent() {
+        if validate_existing_directory_ancestry(parent).is_err() {
+            return;
+        }
         let _ = fs::remove_file(parent.join("onedrive-refresh-token"));
     }
+}
+
+fn validate_existing_directory_ancestry(path: &std::path::Path) -> Result<()> {
+    use std::path::Component;
+
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                anyhow::bail!("OneDrive refresh-token path contains parent traversal")
+            }
+        }
+
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            anyhow::bail!(
+                "OneDrive refresh-token path contains a link or non-directory component: {}",
+                current.display()
+            );
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                anyhow::bail!(
+                    "OneDrive refresh-token path contains a reparse-point component: {}",
+                    current.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn token_lock_path(path: &std::path::Path) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .context("OneDrive refresh-token path has no file name")?;
+    let mut lock_name = file_name.to_os_string();
+    lock_name.push(".lock");
+    Ok(path.with_file_name(lock_name))
+}
+
+#[cfg(any(windows, test))]
+fn acquire_token_store_lock(path: &std::path::Path) -> Result<ExclusiveFileLock> {
+    let lock_path = token_lock_path(path)?;
+    ExclusiveFileLock::acquire(&lock_path).with_context(|| {
+        format!(
+            "failed to acquire OneDrive refresh-token store lock: {}",
+            lock_path.display()
+        )
+    })
 }
 
 pub(crate) struct EphemeralOneDriveRefreshTokenStore {
@@ -111,7 +172,7 @@ impl OneDriveRefreshTokenStore for InvalidExtensionIdOneDriveRefreshTokenStore {
         invalid_extension_id()
     }
 
-    fn store(&self, _token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
+    fn store(&self, _token: &str) -> Result<()> {
         invalid_extension_id()
     }
 
@@ -137,9 +198,9 @@ impl OneDriveRefreshTokenStore for EphemeralOneDriveRefreshTokenStore {
         Ok(self.token.borrow().as_ref().cloned())
     }
 
-    fn store(&self, token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
+    fn store(&self, token: &str) -> Result<()> {
         self.token.replace(Some(Zeroizing::new(token.to_owned())));
-        Ok(OneDriveRefreshTokenStoreOutcome::Durable)
+        Ok(())
     }
 
     fn delete(&self) -> Result<()> {
@@ -157,7 +218,7 @@ impl OneDriveRefreshTokenStore for UnavailableOneDriveRefreshTokenStore {
         unavailable()
     }
 
-    fn store(&self, _token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
+    fn store(&self, _token: &str) -> Result<()> {
         unavailable()
     }
 
@@ -220,12 +281,17 @@ impl WindowsOneDriveRefreshTokenStore {
 #[cfg(windows)]
 impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
     fn load(&self) -> Result<Option<Zeroizing<String>>> {
-        if self.path.exists() {
-            if let Some(parent) = self.path.parent() {
-                enforce_private_acl(parent, true)?;
-            }
-            enforce_private_acl(&self.path, false)?;
+        let Some(parent) = self.path.parent() else {
+            anyhow::bail!("OneDrive refresh-token path has no parent directory");
+        };
+        validate_existing_directory_ancestry(parent)?;
+        if !self.path.exists() {
+            return Ok(None);
         }
+        enforce_private_acl(parent, true)?;
+        let _lock = acquire_token_store_lock(&self.path)?;
+        enforce_private_acl(&token_lock_path(&self.path)?, false)?;
+        enforce_private_acl(&self.path, false)?;
         let Some(ciphertext) = read_regular_file(&self.path)? else {
             return Ok(None);
         };
@@ -234,11 +300,12 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
             .map(Some)
     }
 
-    fn store(&self, token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
+    fn store(&self, token: &str) -> Result<()> {
         let parent = self
             .path
             .parent()
             .context("OneDrive refresh-token path has no parent directory")?;
+        validate_existing_directory_ancestry(parent)?;
         create_dir_all_durable(parent).with_context(|| {
             format!(
                 "failed to create private OneDrive refresh-token directory: {}",
@@ -246,6 +313,8 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
             )
         })?;
         enforce_private_acl(parent, true)?;
+        let _lock = acquire_token_store_lock(&self.path)?;
+        enforce_private_acl(&token_lock_path(&self.path)?, false)?;
         if self.path.exists() {
             enforce_private_acl(&self.path, false)?;
         }
@@ -271,7 +340,7 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
             )
         })?;
         let temp = enforce_temp_metadata_or_discard(temp, |path| enforce_private_acl(path, false))?;
-        let publish_result = publish_temp(
+        publish_temp(
             temp,
             &self.path,
             expectation,
@@ -280,29 +349,30 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
             DurableFaultPoint::BeforeTargetReplace,
             DurableFaultPoint::TargetReplaced,
             DurableFaultPoint::ParentSynced,
-        );
-        if let Err(error) = publish_result {
-            let published = error.published;
-            let error = anyhow::Error::new(error.source).context(format!(
+        )
+        .map_err(|error| anyhow::Error::new(error.source))
+        .with_context(|| {
+            format!(
                 "failed to publish protected OneDrive refresh token: {}",
                 self.path.display()
-            ));
-            if published {
-                return Ok(OneDriveRefreshTokenStoreOutcome::PublishedDurabilityUnknown(error));
-            }
-            return Err(error);
-        }
-        match enforce_private_acl(&self.path, false) {
-            Ok(()) => Ok(OneDriveRefreshTokenStoreOutcome::Durable),
-            Err(error) => Ok(
-                OneDriveRefreshTokenStoreOutcome::PublishedDurabilityUnknown(error.context(
-                    "protected OneDrive refresh token was published but final ACL verification failed",
-                )),
-            ),
-        }
+            )
+        })?;
+        enforce_private_acl(&self.path, false).context(
+            "protected OneDrive refresh token was published but final ACL verification failed",
+        )
     }
 
     fn delete(&self) -> Result<()> {
+        let Some(parent) = self.path.parent() else {
+            anyhow::bail!("OneDrive refresh-token path has no parent directory");
+        };
+        validate_existing_directory_ancestry(parent)?;
+        if !parent.exists() {
+            return Ok(());
+        }
+        enforce_private_acl(parent, true)?;
+        let _lock = acquire_token_store_lock(&self.path)?;
+        enforce_private_acl(&token_lock_path(&self.path)?, false)?;
         let existed = self.path.exists();
         remove_if_exists(&self.path).with_context(|| {
             format!(
@@ -322,10 +392,29 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
     }
 }
 
-#[cfg(windows)]
-const PRIVATE_DIRECTORY_SDDL: &str = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
-#[cfg(windows)]
-const PRIVATE_FILE_SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)";
+#[cfg(any(windows, test))]
+fn private_sddl(user_sid: &str, directory: bool) -> String {
+    if directory {
+        format!("D:P(A;OICI;FA;;;{user_sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+    } else {
+        format!("D:P(A;;FA;;;{user_sid})(A;;FA;;;SY)(A;;FA;;;BA)")
+    }
+}
+
+#[cfg(any(windows, test))]
+fn validate_owner_sid(
+    current_user_sid: &str,
+    owner_sid: &str,
+    path: &std::path::Path,
+) -> Result<()> {
+    if owner_sid != current_user_sid {
+        anyhow::bail!(
+            "OneDrive refresh-token ACL target is owned by another user: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
 
 #[cfg(windows)]
 fn enforce_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
@@ -361,16 +450,16 @@ fn enforce_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
         );
     }
 
+    let current_user_sid = current_user_sid_string()?;
+    let owner_sid = file_owner_sid_string(path)?;
+    validate_owner_sid(&current_user_sid, &owner_sid, path)?;
+
     let path_wide = path
         .as_os_str()
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<_>>();
-    let expected_sddl = if directory {
-        PRIVATE_DIRECTORY_SDDL
-    } else {
-        PRIVATE_FILE_SDDL
-    };
+    let expected_sddl = private_sddl(&current_user_sid, directory);
     let sddl_wide = expected_sddl
         .encode_utf16()
         .chain(Some(0))
@@ -414,6 +503,10 @@ fn verify_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
         ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, GetFileSecurityW};
+
+    let current_user_sid = current_user_sid_string()?;
+    let owner_sid = file_owner_sid_string(path)?;
+    validate_owner_sid(&current_user_sid, &owner_sid, path)?;
 
     let path_wide = path
         .as_os_str()
@@ -481,11 +574,7 @@ fn verify_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
     }
     let actual = String::from_utf16(actual_units)
         .context("OneDrive refresh-token ACL uses invalid UTF-16")?;
-    let expected = if directory {
-        PRIVATE_DIRECTORY_SDDL
-    } else {
-        PRIVATE_FILE_SDDL
-    };
+    let expected = private_sddl(&current_user_sid, directory);
     if actual != expected {
         anyhow::bail!(
             "OneDrive refresh-token ACL is not private: {}",
@@ -493,6 +582,128 @@ fn verify_private_acl(path: &std::path::Path, directory: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn current_user_sid_string() -> Result<String> {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to open the current process token");
+    }
+    let token = OwnedHandle(token);
+    let mut required = 0_u32;
+    unsafe {
+        GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut required);
+    }
+    if required == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to size the current process token user");
+    }
+    let word_size = std::mem::size_of::<usize>();
+    let mut buffer = vec![0_usize; (required as usize).div_ceil(word_size)];
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to read the current process token user");
+    }
+    let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    sid_to_string(token_user.User.Sid)
+}
+
+#[cfg(windows)]
+fn file_owner_sid_string(path: &std::path::Path) -> Result<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::{
+        GetFileSecurityW, GetSecurityDescriptorOwner, OWNER_SECURITY_INFORMATION,
+    };
+
+    let path_wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut required = 0_u32;
+    unsafe {
+        GetFileSecurityW(
+            path_wide.as_ptr(),
+            OWNER_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            0,
+            &mut required,
+        );
+    }
+    if required == 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to size OneDrive refresh-token owner descriptor: {}",
+                path.display()
+            )
+        });
+    }
+    let word_size = std::mem::size_of::<usize>();
+    let mut descriptor = vec![0_usize; (required as usize).div_ceil(word_size)];
+    if unsafe {
+        GetFileSecurityW(
+            path_wide.as_ptr(),
+            OWNER_SECURITY_INFORMATION,
+            descriptor.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to read OneDrive refresh-token owner descriptor: {}",
+                path.display()
+            )
+        });
+    }
+    let mut owner = std::ptr::null_mut();
+    let mut defaulted = 0;
+    if unsafe {
+        GetSecurityDescriptorOwner(descriptor.as_mut_ptr().cast(), &mut owner, &mut defaulted)
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to inspect OneDrive refresh-token owner SID");
+    }
+    sid_to_string(owner)
+}
+
+#[cfg(windows)]
+fn sid_to_string(sid: windows_sys::Win32::Security::PSID) -> Result<String> {
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+
+    if sid.is_null() {
+        anyhow::bail!("Windows user SID is missing");
+    }
+    let mut sid_string = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut sid_string) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to format a Windows user SID");
+    }
+    let sid_string = LocalPointer(sid_string.cast());
+    let mut len = 0;
+    unsafe {
+        while *sid_string.0.cast::<u16>().add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16(std::slice::from_raw_parts(sid_string.0.cast::<u16>(), len))
+            .context("Windows user SID uses invalid UTF-16")
+    }
 }
 
 #[cfg(windows)]
@@ -697,11 +908,19 @@ impl Drop for LocalBlob {
         }
         unsafe {
             if self.wipe {
-                std::ptr::write_bytes(self.blob.pbData, 0, self.blob.cbData as usize);
+                zeroize_plaintext_bytes(std::slice::from_raw_parts_mut(
+                    self.blob.pbData,
+                    self.blob.cbData as usize,
+                ));
             }
             windows_sys::Win32::Foundation::LocalFree(self.blob.pbData.cast());
         }
     }
+}
+
+#[cfg(any(windows, test))]
+fn zeroize_plaintext_bytes(bytes: &mut [u8]) {
+    bytes.zeroize();
 }
 
 #[cfg(windows)]
@@ -713,6 +932,20 @@ impl Drop for LocalPointer {
         if !self.0.is_null() {
             unsafe {
                 windows_sys::Win32::Foundation::LocalFree(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.0);
             }
         }
     }
@@ -730,10 +963,10 @@ impl OneDriveRefreshTokenStore for MemoryOneDriveRefreshTokenStore {
         Ok(self.token.lock().expect("memory token store lock").clone())
     }
 
-    fn store(&self, token: &str) -> Result<OneDriveRefreshTokenStoreOutcome> {
+    fn store(&self, token: &str) -> Result<()> {
         *self.token.lock().expect("memory token store lock") =
             Some(Zeroizing::new(token.to_owned()));
-        Ok(OneDriveRefreshTokenStoreOutcome::Durable)
+        Ok(())
     }
 
     fn delete(&self) -> Result<()> {
@@ -747,9 +980,10 @@ mod tests {
     #[cfg(windows)]
     use super::OneDriveRefreshTokenStore;
     use super::{
-        MAX_PROTECTED_REFRESH_TOKEN_BYTES, enforce_temp_metadata_or_discard,
-        production_for_extension_id, production_store, read_bounded_protected_payload,
-        validate_protected_payload_size,
+        MAX_PROTECTED_REFRESH_TOKEN_BYTES, acquire_token_store_lock,
+        enforce_temp_metadata_or_discard, private_sddl, production_for_extension_id,
+        production_store, read_bounded_protected_payload, token_lock_path, validate_owner_sid,
+        validate_protected_payload_size, zeroize_plaintext_bytes,
     };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, TempWriteFaultPoints, write_verified_temp,
@@ -821,6 +1055,76 @@ mod tests {
     }
 
     #[test]
+    fn private_acl_binds_the_current_user_sid_instead_of_owner_rights() {
+        let directory = private_sddl("S-1-5-21-1000", true);
+        let file = private_sddl("S-1-5-21-1000", false);
+
+        assert_eq!(
+            directory,
+            "D:P(A;OICI;FA;;;S-1-5-21-1000)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+        );
+        assert_eq!(file, "D:P(A;;FA;;;S-1-5-21-1000)(A;;FA;;;SY)(A;;FA;;;BA)");
+        assert!(!directory.contains(";;;OW"));
+        assert!(!file.contains(";;;OW"));
+    }
+
+    #[test]
+    fn private_acl_rejects_an_owner_other_than_the_current_user() {
+        let error = validate_owner_sid(
+            "S-1-5-21-current",
+            "S-1-5-21-other",
+            std::path::Path::new("token.dpapi"),
+        )
+        .expect_err("foreign-owned token paths must be rejected");
+
+        assert!(format!("{error:#}").contains("owned by another user"));
+        validate_owner_sid(
+            "S-1-5-21-current",
+            "S-1-5-21-current",
+            std::path::Path::new("token.dpapi"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dpapi_plaintext_wipe_zeroizes_the_entire_buffer() {
+        let mut plaintext = *b"fixture-refresh-token";
+
+        zeroize_plaintext_bytes(&mut plaintext);
+
+        assert!(plaintext.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn token_store_lock_serializes_mutations_on_a_sibling_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("onedrive-refresh-token.dpapi");
+        let first = acquire_token_store_lock(&target).unwrap();
+        let lock_path = token_lock_path(&target).unwrap();
+        assert_eq!(
+            lock_path.file_name().unwrap(),
+            "onedrive-refresh-token.dpapi.lock"
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let second = acquire_token_store_lock(&target).unwrap();
+            sender.send(second).unwrap();
+        });
+
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        drop(first);
+        let second = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        drop(second);
+        thread.join().unwrap();
+    }
+
+    #[test]
     fn invalid_extension_id_cannot_select_legacy_cleanup_path() {
         let dir = tempfile::tempdir().unwrap();
         let legacy_path = dir.path().join("onedrive-refresh-token");
@@ -848,6 +1152,26 @@ mod tests {
         );
 
         assert!(!legacy_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_store_does_not_follow_legacy_cleanup_symlink_ancestry() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let legacy_path = external.path().join("onedrive-refresh-token");
+        std::fs::write(&legacy_path, b"must-not-be-deleted").unwrap();
+        let linked_parent = root.path().join("linked-parent");
+        symlink(external.path(), &linked_parent).unwrap();
+
+        let _store = production_store(
+            linked_parent.join("onedrive-refresh-token.dpapi"),
+            "test/default",
+        );
+
+        assert!(legacy_path.exists());
     }
 
     #[cfg(not(windows))]
@@ -903,8 +1227,8 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_store_preserves_published_token_when_durability_is_unknown() {
-        use super::{OneDriveRefreshTokenStoreOutcome, WindowsOneDriveRefreshTokenStore};
+    fn windows_store_reports_post_publish_failure() {
+        use super::WindowsOneDriveRefreshTokenStore;
 
         const TOKEN: &str = "fixture-refresh-token-published-before-failure";
         let dir = tempfile::tempdir().unwrap();
@@ -915,11 +1239,9 @@ mod tests {
             DurableFaultInjector::fail_once(DurableFaultPoint::TargetReplaced),
         );
 
-        let outcome = store.store(TOKEN).unwrap();
-
-        let OneDriveRefreshTokenStoreOutcome::PublishedDurabilityUnknown(error) = outcome else {
-            panic!("post-publish failure must report unknown durability")
-        };
+        let error = store
+            .store(TOKEN)
+            .expect_err("post-publish durability failure must fail the store operation");
         assert!(format!("{error:#}").contains("TargetReplaced"));
         assert_eq!(
             store.load().unwrap().as_deref().map(String::as_str),
@@ -942,6 +1264,24 @@ mod tests {
             .expect_err("oversized protected payload must fail before DPAPI processing");
 
         assert!(format!("{error:#}").contains("too large"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_store_does_not_publish_a_payload_above_the_reader_limit() {
+        use super::WindowsOneDriveRefreshTokenStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("onedrive-refresh-token.dpapi");
+        let store = WindowsOneDriveRefreshTokenStore::new(path.clone(), "test/default");
+        let token = "x".repeat(MAX_PROTECTED_REFRESH_TOKEN_BYTES);
+
+        let error = store
+            .store(&token)
+            .expect_err("oversized protected output must not be published");
+
+        assert!(format!("{error:#}").contains("too large"));
+        assert!(!path.exists());
     }
 
     #[cfg(windows)]
