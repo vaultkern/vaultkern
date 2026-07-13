@@ -169,12 +169,11 @@ impl LocalFileVaultSourceProvider {
 }
 
 fn classify_begin_write_error(source: io::Error) -> LocalFileCommitError {
-    if source.kind() == io::ErrorKind::WouldBlock {
-        LocalFileCommitError::Conflict {
+    match source.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::NotFound => LocalFileCommitError::Conflict {
             message: source.to_string(),
-        }
-    } else {
-        LocalFileCommitError::BeforePublish { source }
+        },
+        _ => LocalFileCommitError::BeforePublish { source },
     }
 }
 
@@ -933,6 +932,32 @@ mod tests {
                 .to_string()
                 .contains("changed while it was being read")
         );
+    }
+
+    #[test]
+    fn write_if_unchanged_classifies_source_deletion_as_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        fs::write(&path, b"generation-a").unwrap();
+        let baseline = LocalFileVaultSourceProvider::default()
+            .read_snapshot(path.to_str().unwrap())
+            .unwrap();
+        let target = path.clone();
+        let provider =
+            LocalFileVaultSourceProvider::with_before_write_hook(std::sync::Arc::new(move || {
+                fs::remove_file(&target).unwrap()
+            }));
+
+        let error = provider
+            .write_if_unchanged(
+                path.to_str().unwrap(),
+                &baseline.fingerprint,
+                b"generation-c",
+            )
+            .expect_err("a deleted merge source must conflict");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert!(!path.exists());
     }
 
     #[test]

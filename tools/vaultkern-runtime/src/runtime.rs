@@ -7655,6 +7655,14 @@ mod tests {
         generation_b
     }
 
+    fn arm_source_deletion_after_merge_snapshot(runtime: &mut Runtime, opened: &VaultHandleDto) {
+        let path = opened.path.clone();
+        runtime.local_files =
+            LocalFileVaultSourceProvider::with_before_write_hook(std::sync::Arc::new(move || {
+                std::fs::remove_file(&path).unwrap()
+            }));
+    }
+
     #[test]
     fn save_rejects_source_change_after_merge_snapshot() {
         let mut runtime = Runtime::for_tests();
@@ -7692,6 +7700,27 @@ mod tests {
         assert_eq!(error.code, "conflict");
         assert!(error.message.contains("local vault write conflict"));
         assert_eq!(std::fs::read(&opened.path).unwrap(), generation_b);
+    }
+
+    #[test]
+    fn save_command_reports_source_deletion_as_conflict() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        arm_source_deletion_after_merge_snapshot(&mut runtime, &opened);
+
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: opened.vault_id.clone(),
+            })
+            .expect("source deletion must be a command response");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected source conflict response, got {response:?}");
+        };
+        assert_eq!(error.code, "conflict");
+        assert!(error.message.contains("local vault write conflict"));
+        assert!(!std::path::Path::new(&opened.path).exists());
     }
 
     fn open_unlocked_demo_onedrive(runtime: &mut Runtime) -> String {
