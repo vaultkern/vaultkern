@@ -1,10 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -22,7 +20,6 @@ use crate::providers::onedrive_token_store::{
     EphemeralOneDriveRefreshTokenStore, OneDriveRefreshTokenStore, production_default,
     production_for_extension_id,
 };
-use crate::state_paths::runtime_state_dir;
 use zeroize::Zeroizing;
 
 const MICROSOFT_AUTH_URL: &str =
@@ -1120,43 +1117,6 @@ fn callback_response(status: &str, body: &str) -> String {
         "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
         html.len()
     )
-}
-
-fn token_cache_path_from_env() -> Option<PathBuf> {
-    explicit_token_cache_path_from_env()
-        .or_else(|| Some(runtime_state_dir().join("onedrive-refresh-token")))
-}
-
-fn explicit_token_cache_path_from_env() -> Option<PathBuf> {
-    std::env::var("VAULTKERN_ONEDRIVE_TOKEN_CACHE")
-        .ok()
-        .map(PathBuf::from)
-}
-
-fn load_cached_refresh_token(path: &Path) -> Result<Option<String>> {
-    let Ok(bytes) = fs::read(path) else {
-        return Ok(None);
-    };
-    let token = String::from_utf8(bytes)
-        .with_context(|| format!("failed to decode OneDrive token cache: {}", path.display()))?;
-    let trimmed = token.trim().to_owned();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(trimmed))
-}
-
-fn store_cached_refresh_token(path: &Path, refresh_token: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create OneDrive token cache dir: {}",
-                parent.display()
-            )
-        })?;
-    }
-    fs::write(path, refresh_token.as_bytes())
-        .with_context(|| format!("failed to write OneDrive token cache: {}", path.display()))
 }
 
 fn fingerprint_for_graph_item(bytes: &[u8], etag: Option<&str>) -> VaultSourceFingerprint {
