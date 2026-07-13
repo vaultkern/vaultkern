@@ -368,7 +368,7 @@ impl Runtime {
             core: KeepassCore::new(),
             session,
             references,
-            local_files: LocalFileVaultSourceProvider,
+            local_files: LocalFileVaultSourceProvider::default(),
             one_drive,
             remote_cache,
             biometric: default_biometric_provider(),
@@ -387,7 +387,7 @@ impl Runtime {
             core: KeepassCore::new(),
             session: SessionState::default(),
             references: VaultReferenceStore::new_in_memory(),
-            local_files: LocalFileVaultSourceProvider,
+            local_files: LocalFileVaultSourceProvider::default(),
             one_drive: OneDriveVaultSourceProvider::new_in_memory(),
             remote_cache: RemoteVaultCache::new_at(std::env::temp_dir().join(format!(
                 "vaultkern-runtime-test-remote-cache-{}",
@@ -4429,26 +4429,29 @@ impl Runtime {
             (bytes, merge_summary)
         };
 
-        let write_fingerprint =
-            match self.write_source(vault_id, &bytes, current.one_drive_etag.as_deref()) {
-                Ok(fingerprint) => fingerprint,
-                Err(error) => {
-                    if remote_cache_key_for_source(&source).is_some() {
-                        let remote_error = format_error_chain(&error);
-                        return self.save_remote_vault_to_pending_cache(
-                            vault_id,
-                            source,
-                            bytes,
-                            &baseline_fingerprint,
-                            display_name,
-                            account_label,
-                            remote_error,
-                        );
-                    }
-                    return Err(error)
-                        .with_context(|| format!("failed to write vault: {vault_id}"));
+        let write_fingerprint = match self.write_source(
+            vault_id,
+            &bytes,
+            &current.fingerprint,
+            current.one_drive_etag.as_deref(),
+        ) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                if remote_cache_key_for_source(&source).is_some() {
+                    let remote_error = format_error_chain(&error);
+                    return self.save_remote_vault_to_pending_cache(
+                        vault_id,
+                        source,
+                        bytes,
+                        &baseline_fingerprint,
+                        display_name,
+                        account_label,
+                        remote_error,
+                    );
                 }
-            };
+                return Err(error).with_context(|| format!("failed to write vault: {vault_id}"));
+            }
+        };
         let (next_bytes, next_fingerprint) = if let Some(fingerprint) = write_fingerprint {
             (bytes, fingerprint)
         } else {
@@ -5234,6 +5237,7 @@ impl Runtime {
         &mut self,
         vault_id: &str,
         bytes: &[u8],
+        expected: &VaultSourceFingerprint,
         one_drive_etag: Option<&str>,
     ) -> Result<Option<VaultSourceFingerprint>> {
         let source = self
@@ -5244,8 +5248,10 @@ impl Runtime {
             .clone();
         match source {
             VaultSource::LocalPath(path) => {
-                self.local_files.write(&path, bytes)?;
-                Ok(None)
+                let commit = self
+                    .local_files
+                    .write_if_unchanged(&path, expected, bytes)?;
+                Ok(Some(commit.fingerprint))
             }
             VaultSource::OneDriveItem { drive_id, item_id } => Ok(Some(
                 self.one_drive
@@ -7614,6 +7620,39 @@ mod tests {
             .unlock_vault(&opened.vault_id, Some("demo-password"), None)
             .unwrap();
         (dir, opened)
+    }
+
+    #[test]
+    fn save_rejects_source_change_after_merge_snapshot() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let generation_b = KeepassCore::new()
+            .save_kdbx(
+                &Vault::empty("external-generation"),
+                &key,
+                SaveProfile::recommended(),
+            )
+            .unwrap();
+        let path = opened.path.clone();
+        let replacement = generation_b.clone();
+        runtime.local_files =
+            LocalFileVaultSourceProvider::with_before_write_hook(std::sync::Arc::new(move || {
+                std::fs::write(&path, &replacement).unwrap()
+            }));
+
+        let error = runtime
+            .save_vault(&opened.vault_id)
+            .expect_err("source change after the merge snapshot must conflict");
+
+        assert!(matches!(
+            error.downcast_ref::<LocalFileCommitError>(),
+            Some(LocalFileCommitError::Conflict { .. })
+        ));
+        assert_eq!(std::fs::read(&opened.path).unwrap(), generation_b);
     }
 
     fn open_unlocked_demo_onedrive(runtime: &mut Runtime) -> String {
