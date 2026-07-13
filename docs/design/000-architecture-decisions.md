@@ -1,6 +1,6 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Frozen — r12** (seven external review rounds + four freeze-hardening rounds). 2026-07-13. Amendments only via the 000 revision process; contracts evolve additively per the 003 version matrix.
+Status: **Frozen — r13** (seven external review rounds + four freeze-hardening rounds + PR-review fixes). 2026-07-13. Amendments only via the 000 revision process; contracts evolve additively per the 003 version matrix.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -259,3 +259,15 @@ KDF caps.
   pretty-printing) prove "any schema-conforming JSON" in tests. The
   dead-letter file needs no extra encryption layer (archived payloads
   are already sealed; only routing headers are plaintext).
+- r13 (2026-07-13): PR #17 review fixes (two P1 + two P2, commit
+  fc984ad). Dead-letter frames gain their own 2 MiB cap so
+  MAX_ARCHIVED_BYTES rises to one max-size legal journal frame
+  (MAX_RECORD_LEN + FRAME_OVERHEAD) and any single legal frame archives
+  verbatim — the r12 1 MiB raw cap made its own base64 exceed the
+  dead-letter frame limit. PasskeyRegistrationPayload gains `entry_id`
+  (extension-generated UUID the replayer honors for create-or-update,
+  part of the idempotence comparison). The frozen base64 schema
+  patterns enforce 4-character grouping with padding (`frame_b64`
+  minLength 4). QuickUnlockLedgerEntry persists `schema_version` with
+  no serde default — missing or unknown versions fail closed per the
+  version matrix.

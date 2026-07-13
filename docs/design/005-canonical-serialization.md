@@ -1,6 +1,6 @@
 # 005 — Canonical Serialization Byte Layout (v1)
 
-Status: **Frozen — r12** (frozen with the Phase 0 contract freeze; four
+Status: **Frozen — r13** (frozen with the Phase 0 contract freeze; four
 freeze-hardening rounds). 2026-07-13.
 Upstream: 001 (same-second tie rule, history dedupe key, Meta content-hash
 fallback), 000 Execution discipline #1, 004 (contract-freeze root node).
