@@ -204,7 +204,7 @@ impl LocalFileWriteTxn {
         bytes: &[u8],
         faults: &DurableFaultInjector,
     ) -> Result<DurableCommit, LocalFileCommitError> {
-        if !same_content(expected, &self.initial_fingerprint) {
+        if expected != &self.initial_fingerprint {
             return Err(LocalFileCommitError::Conflict {
                 message: "expected fingerprint does not match the opened generation".to_owned(),
             });
@@ -922,6 +922,27 @@ mod tests {
     }
 
     #[test]
+    fn write_if_unchanged_rejects_a_non_exact_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        fs::write(&path, b"generation-a").unwrap();
+        let provider = LocalFileVaultSourceProvider::default();
+        let mut expected = provider
+            .read_snapshot(path.to_str().unwrap())
+            .unwrap()
+            .fingerprint;
+        expected.modified_at = Some(expected.modified_at.unwrap_or_default().saturating_add(1));
+
+        let error = provider
+            .write_if_unchanged(path.to_str().unwrap(), &expected, b"generation-c")
+            .expect_err("every fingerprint field must match the locked generation");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert_eq!(fs::read(&path).unwrap(), b"generation-a");
+        assert!(sidecar_artifacts(dir.path()).is_empty());
+    }
+
+    #[test]
     fn write_if_unchanged_classifies_locked_read_races_as_conflicts() {
         let error = super::classify_begin_write_error(std::io::Error::new(
             std::io::ErrorKind::WouldBlock,
@@ -1439,6 +1460,13 @@ mod tests {
                     "VAULTKERN_LOCAL_EXPECTED_SIZE",
                     expected.size_bytes.to_string(),
                 )
+                .env(
+                    "VAULTKERN_LOCAL_EXPECTED_MODIFIED_AT",
+                    expected
+                        .modified_at
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                )
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -1490,7 +1518,10 @@ mod tests {
                 .unwrap()
                 .parse()
                 .unwrap(),
-            modified_at: None,
+            modified_at: std::env::var("VAULTKERN_LOCAL_EXPECTED_MODIFIED_AT")
+                .unwrap()
+                .parse()
+                .ok(),
         };
         let (transaction, _) = LocalFileVaultSourceProvider::default()
             .begin_write(&path)

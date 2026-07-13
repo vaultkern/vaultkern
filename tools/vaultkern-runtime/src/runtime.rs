@@ -5266,8 +5266,10 @@ impl Runtime {
     }
 
     fn record_local_save_warnings(&mut self, warnings: Vec<String>) {
+        let stderr = std::io::stderr();
+        let mut stderr = stderr.lock();
         for warning in warnings {
-            eprintln!("vaultkern local save warning: {warning}");
+            write_local_save_warning(&mut stderr, &warning);
             #[cfg(test)]
             self.local_save_warnings.push(warning);
         }
@@ -6962,6 +6964,10 @@ fn is_unlock_credentials_error(error: &anyhow::Error) -> bool {
     })
 }
 
+fn write_local_save_warning(destination: &mut impl std::io::Write, warning: &str) {
+    let _ = writeln!(destination, "vaultkern local save warning: {warning}");
+}
+
 fn classified_runtime_error_response(error: &anyhow::Error) -> Option<RuntimeResponse> {
     let code = match error.downcast_ref::<LocalFileCommitError>() {
         Some(LocalFileCommitError::Conflict { .. }) => "conflict",
@@ -7706,6 +7712,56 @@ mod tests {
     }
 
     #[test]
+    fn save_after_merge_uses_the_current_source_fingerprint() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let external = KeepassCore::new()
+            .save_kdbx(
+                &Vault::empty("external-generation"),
+                &key,
+                SaveProfile::recommended(),
+            )
+            .unwrap();
+        std::fs::write(&opened.path, external).unwrap();
+
+        let response = runtime
+            .save_vault(&opened.vault_id)
+            .expect("the generation used for merge must be the write baseline");
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn local_write_source_returns_the_commit_fingerprint() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let expected = runtime
+            .local_files
+            .read_snapshot(&opened.path)
+            .unwrap()
+            .fingerprint;
+
+        let committed = runtime
+            .write_source(&opened.vault_id, b"candidate-generation", &expected, None)
+            .unwrap()
+            .expect("local writes must return the conditional commit fingerprint");
+        let visible = runtime.local_files.read_snapshot(&opened.path).unwrap();
+
+        assert_eq!(committed, visible.fingerprint);
+        assert_eq!(visible.bytes, b"candidate-generation");
+    }
+
+    #[test]
     fn save_command_reports_source_change_as_conflict() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
@@ -7809,6 +7865,26 @@ mod tests {
         ));
         assert_eq!(runtime.local_save_warnings.len(), 1);
         assert!(runtime.local_save_warnings[0].contains("retained durable backup"));
+    }
+
+    struct RejectingWarningWriter;
+
+    impl std::io::Write for RejectingWarningWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "warning sink is unavailable",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn local_save_warning_output_failure_is_ignored() {
+        write_local_save_warning(&mut RejectingWarningWriter, "retained durable backup");
     }
 
     #[test]
