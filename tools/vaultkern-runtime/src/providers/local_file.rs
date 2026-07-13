@@ -26,7 +26,12 @@ pub struct VaultSourceFingerprint {
     pub modified_at: Option<u64>,
 }
 
-pub struct LocalFileVaultSourceProvider;
+#[derive(Default)]
+pub struct LocalFileVaultSourceProvider {
+    write_faults: DurableFaultInjector,
+    #[cfg(test)]
+    before_write: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
 
 #[derive(Debug)]
 pub struct LocalFileWriteTxn {
@@ -91,6 +96,24 @@ impl LocalFileCommitError {
 }
 
 impl LocalFileVaultSourceProvider {
+    #[cfg(test)]
+    pub(crate) fn with_before_write_hook(
+        before_write: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        Self {
+            write_faults: DurableFaultInjector::default(),
+            before_write: Some(before_write),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_write_faults(write_faults: DurableFaultInjector) -> Self {
+        Self {
+            write_faults,
+            before_write: None,
+        }
+    }
+
     pub fn pick(&self) -> anyhow::Result<Option<String>> {
         pick_local_vault_path()
     }
@@ -131,6 +154,29 @@ impl LocalFileVaultSourceProvider {
             .map(|_| ())
             .map_err(LocalFileCommitError::into_io_error)
     }
+
+    pub fn write_if_unchanged(
+        &self,
+        path: &str,
+        expected: &VaultSourceFingerprint,
+        bytes: &[u8],
+    ) -> Result<DurableCommit, LocalFileCommitError> {
+        #[cfg(test)]
+        if let Some(before_write) = &self.before_write {
+            before_write();
+        }
+        let (transaction, _) = self.begin_write(path).map_err(classify_begin_write_error)?;
+        transaction.commit_inner(expected, bytes, &self.write_faults)
+    }
+}
+
+fn classify_begin_write_error(source: io::Error) -> LocalFileCommitError {
+    match source.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::NotFound => LocalFileCommitError::Conflict {
+            message: source.to_string(),
+        },
+        _ => LocalFileCommitError::BeforePublish { source },
+    }
 }
 
 impl LocalFileWriteTxn {
@@ -158,7 +204,7 @@ impl LocalFileWriteTxn {
         bytes: &[u8],
         faults: &DurableFaultInjector,
     ) -> Result<DurableCommit, LocalFileCommitError> {
-        if !same_content(expected, &self.initial_fingerprint) {
+        if expected != &self.initial_fingerprint {
             return Err(LocalFileCommitError::Conflict {
                 message: "expected fingerprint does not match the opened generation".to_owned(),
             });
@@ -840,7 +886,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault.kdbx");
         fs::write(&path, b"old-generation").unwrap();
-        let provider = LocalFileVaultSourceProvider;
+        let provider = LocalFileVaultSourceProvider::default();
         let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
 
         fs::write(&path, b"external-generation").unwrap();
@@ -851,6 +897,90 @@ mod tests {
         assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
         assert_eq!(fs::read(&path).unwrap(), b"external-generation");
         assert!(sidecar_artifacts(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn write_if_unchanged_rejects_stale_baseline_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        fs::write(&path, b"generation-a").unwrap();
+        let provider = LocalFileVaultSourceProvider::default();
+        let baseline = provider.read_snapshot(path.to_str().unwrap()).unwrap();
+
+        fs::write(&path, b"generation-b").unwrap();
+        let error = provider
+            .write_if_unchanged(
+                path.to_str().unwrap(),
+                &baseline.fingerprint,
+                b"generation-c",
+            )
+            .expect_err("stale merge baseline must conflict");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert_eq!(fs::read(&path).unwrap(), b"generation-b");
+        assert!(sidecar_artifacts(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn write_if_unchanged_rejects_a_non_exact_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        fs::write(&path, b"generation-a").unwrap();
+        let provider = LocalFileVaultSourceProvider::default();
+        let mut expected = provider
+            .read_snapshot(path.to_str().unwrap())
+            .unwrap()
+            .fingerprint;
+        expected.modified_at = Some(expected.modified_at.unwrap_or_default().saturating_add(1));
+
+        let error = provider
+            .write_if_unchanged(path.to_str().unwrap(), &expected, b"generation-c")
+            .expect_err("every fingerprint field must match the locked generation");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert_eq!(fs::read(&path).unwrap(), b"generation-a");
+        assert!(sidecar_artifacts(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn write_if_unchanged_classifies_locked_read_races_as_conflicts() {
+        let error = super::classify_begin_write_error(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "local vault changed while it was being read",
+        ));
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("changed while it was being read")
+        );
+    }
+
+    #[test]
+    fn write_if_unchanged_classifies_source_deletion_as_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        fs::write(&path, b"generation-a").unwrap();
+        let baseline = LocalFileVaultSourceProvider::default()
+            .read_snapshot(path.to_str().unwrap())
+            .unwrap();
+        let target = path.clone();
+        let provider =
+            LocalFileVaultSourceProvider::with_before_write_hook(std::sync::Arc::new(move || {
+                fs::remove_file(&target).unwrap()
+            }));
+
+        let error = provider
+            .write_if_unchanged(
+                path.to_str().unwrap(),
+                &baseline.fingerprint,
+                b"generation-c",
+            )
+            .expect_err("a deleted merge source must conflict");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert!(!path.exists());
     }
 
     #[test]
@@ -868,7 +998,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("vault.kdbx");
             fs::write(&path, b"old-generation").unwrap();
-            let provider = LocalFileVaultSourceProvider;
+            let provider = LocalFileVaultSourceProvider::default();
             let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
 
             let error = transaction
@@ -894,7 +1024,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("vault.kdbx");
             fs::write(&path, b"old-generation").unwrap();
-            let provider = LocalFileVaultSourceProvider;
+            let provider = LocalFileVaultSourceProvider::default();
             let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
 
             let error = transaction
@@ -943,7 +1073,7 @@ mod tests {
             assert_was_abruptly_killed(status, point);
             assert_eq!(fs::metadata(&path).unwrap().nlink(), 2, "{point:?}");
 
-            LocalFileVaultSourceProvider
+            LocalFileVaultSourceProvider::default()
                 .write(path.to_str().unwrap(), b"retry-generation")
                 .expect("retry must clean only the pre-publish hard-link backup");
 
@@ -957,7 +1087,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault.kdbx");
         fs::write(&path, b"old-generation").unwrap();
-        let provider = LocalFileVaultSourceProvider;
+        let provider = LocalFileVaultSourceProvider::default();
         let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
         let target = path.clone();
 
@@ -986,7 +1116,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         let path = root.join("vault.kdbx");
         fs::write(&path, b"old-generation").unwrap();
-        let provider = LocalFileVaultSourceProvider;
+        let provider = LocalFileVaultSourceProvider::default();
         let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
 
         let error = transaction
@@ -1020,7 +1150,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault.kdbx");
         fs::write(&path, b"old-generation").unwrap();
-        let provider = LocalFileVaultSourceProvider;
+        let provider = LocalFileVaultSourceProvider::default();
         let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
 
         let committed = transaction
@@ -1042,7 +1172,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         let path = root.join("vault.kdbx");
         fs::write(&path, b"old-generation").unwrap();
-        let provider = LocalFileVaultSourceProvider;
+        let provider = LocalFileVaultSourceProvider::default();
         let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
 
         let error = transaction
@@ -1072,7 +1202,7 @@ mod tests {
         fs::write(&path, b"old-generation").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
         fs::hard_link(&path, &alias).unwrap();
-        let provider = LocalFileVaultSourceProvider;
+        let provider = LocalFileVaultSourceProvider::default();
 
         let error = provider
             .begin_write(path.to_str().unwrap())
@@ -1161,7 +1291,7 @@ mod tests {
             0o640
         );
 
-        LocalFileVaultSourceProvider
+        LocalFileVaultSourceProvider::default()
             .write(path.to_str().unwrap(), b"new-generation")
             .unwrap();
 
@@ -1183,7 +1313,7 @@ mod tests {
         let lock_path = dir.path().join("vault.kdbx.vaultkern.lock");
         let lock_alias = dir.path().join("lock-alias");
         fs::write(&path, b"old-generation").unwrap();
-        let provider = LocalFileVaultSourceProvider;
+        let provider = LocalFileVaultSourceProvider::default();
         drop(provider.begin_write(path.to_str().unwrap()).unwrap());
         fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o640)).unwrap();
         fs::hard_link(&lock_path, &lock_alias).unwrap();
@@ -1209,7 +1339,7 @@ mod tests {
         let decoy = dir.path().join("decoy.kdbx");
         fs::write(&target, b"old-generation").unwrap();
         fs::write(&decoy, b"decoy-generation").unwrap();
-        let provider = LocalFileVaultSourceProvider;
+        let provider = LocalFileVaultSourceProvider::default();
         let (transaction, snapshot) = provider.begin_write(target.to_str().unwrap()).unwrap();
         fs::remove_file(&target).unwrap();
         symlink(&decoy, &target).unwrap();
@@ -1239,7 +1369,7 @@ mod tests {
         fs::write(&target, b"old-generation").unwrap();
         symlink(&target, &link).unwrap();
 
-        LocalFileVaultSourceProvider
+        LocalFileVaultSourceProvider::default()
             .write(link.to_str().unwrap(), b"new-generation")
             .unwrap();
 
@@ -1283,7 +1413,7 @@ mod tests {
                 .unwrap();
             assert_was_abruptly_killed(status, point);
 
-            let visible = LocalFileVaultSourceProvider
+            let visible = LocalFileVaultSourceProvider::default()
                 .read_snapshot(path.to_str().unwrap())
                 .unwrap();
             assert!(
@@ -1312,7 +1442,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault.kdbx");
         fs::write(&path, b"old-generation").unwrap();
-        let expected = LocalFileVaultSourceProvider
+        let expected = LocalFileVaultSourceProvider::default()
             .read_snapshot(path.to_str().unwrap())
             .unwrap()
             .fingerprint;
@@ -1329,6 +1459,13 @@ mod tests {
                 .env(
                     "VAULTKERN_LOCAL_EXPECTED_SIZE",
                     expected.size_bytes.to_string(),
+                )
+                .env(
+                    "VAULTKERN_LOCAL_EXPECTED_MODIFIED_AT",
+                    expected
+                        .modified_at
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
                 )
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -1358,7 +1495,7 @@ mod tests {
             &std::env::var("VAULTKERN_DURABLE_CRASH_POINT").unwrap(),
         )
         .unwrap();
-        let provider = LocalFileVaultSourceProvider;
+        let provider = LocalFileVaultSourceProvider::default();
         let (transaction, snapshot) = provider.begin_write(&path).unwrap();
         let _ = transaction.commit_with_faults(
             &snapshot.fingerprint,
@@ -1381,9 +1518,14 @@ mod tests {
                 .unwrap()
                 .parse()
                 .unwrap(),
-            modified_at: None,
+            modified_at: std::env::var("VAULTKERN_LOCAL_EXPECTED_MODIFIED_AT")
+                .unwrap()
+                .parse()
+                .ok(),
         };
-        let (transaction, _) = LocalFileVaultSourceProvider.begin_write(&path).unwrap();
+        let (transaction, _) = LocalFileVaultSourceProvider::default()
+            .begin_write(&path)
+            .unwrap();
         match transaction.commit(&expected, candidate.as_bytes()) {
             Ok(_) => {}
             Err(LocalFileCommitError::Conflict { .. }) => std::process::exit(42),
