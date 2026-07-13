@@ -284,7 +284,7 @@ fn validate_quick_unlock_parent_metadata(metadata: &fs::Metadata) -> io::Result<
 
 #[cfg(any(windows, test))]
 fn quick_unlock_replacement_outcome_is_unknown(error: &io::Error) -> bool {
-    cfg!(windows) && error.raw_os_error() == Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2)
+    error.raw_os_error() == Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2)
 }
 
 #[cfg(any(windows, test))]
@@ -950,7 +950,8 @@ mod tests {
     use super::{
         is_quick_unlock_envelope, publish_quick_unlock_record, publish_quick_unlock_record_with,
         quick_unlock_key_storage_provider_name, quick_unlock_key_ui_policy_flag,
-        quick_unlock_record_lock_path, quick_unlock_storage_dir,
+        quick_unlock_record_lock_path, quick_unlock_replacement_outcome_is_unknown,
+        quick_unlock_storage_dir,
     };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock,
@@ -1142,6 +1143,19 @@ mod tests {
         assert_eq!(std::fs::read(&record).unwrap(), b"complete retry envelope");
         assert!(!recovery_temp.exists());
         assert!(!recovery_backup.exists());
+    }
+
+    #[test]
+    fn windows_error_1177_is_classified_as_outcome_unknown() {
+        assert!(quick_unlock_replacement_outcome_is_unknown(
+            &std::io::Error::from_raw_os_error(1177)
+        ));
+        assert!(!quick_unlock_replacement_outcome_is_unknown(
+            &std::io::Error::from_raw_os_error(1176)
+        ));
+        assert!(!quick_unlock_replacement_outcome_is_unknown(
+            &std::io::Error::other("post-publish cleanup failed")
+        ));
     }
 
     #[test]
