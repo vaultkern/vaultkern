@@ -20,6 +20,7 @@ const WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 const ACTIVE_SNAPSHOT_ATTEMPTS: usize = 3;
 const MAX_CORRUPTION_CAPTURE_LEN: usize =
     framing::MAX_RECORD_LEN as usize + framing::FRAME_OVERHEAD;
+const REMOVE_LOCK_AFTER_SEGMENT_SYNC: bool = !cfg!(windows);
 
 #[derive(Debug)]
 pub(crate) struct JournalSegmentStore {
@@ -199,6 +200,63 @@ pub(crate) struct AllRecordsResolved {
     content_sha256: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct CorruptTailPreserved {
+    writer_id: Uuid,
+    identity: DurableFileIdentity,
+    snapshot_len: u64,
+    snapshot_sha256: String,
+    offset: u64,
+    region_len: u64,
+}
+
+impl CorruptTailPreserved {
+    /// Call only after the exact capped tail bytes have been durably copied to
+    /// dead-letter storage. The token binds that assertion to one read.
+    pub(crate) fn after_durable_preservation(
+        segment: &DiscoveredSegment,
+        read: &SegmentRead,
+    ) -> io::Result<Self> {
+        if segment.state != SegmentState::Sealed
+            || segment.writer_id != read.writer_id
+            || segment.identity != read.identity
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "corrupt tail preservation requires an exact sealed read",
+            ));
+        }
+        let (offset, region_len, raw_len) = match &read.tail {
+            SegmentTail::DefinitiveCorruption {
+                offset,
+                region_len,
+                raw_bytes,
+                ..
+            } => (*offset, *region_len, raw_bytes.len() as u64),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "corrupt tail preservation requires definitive corruption",
+                ));
+            }
+        };
+        if region_len > MAX_CORRUPTION_CAPTURE_LEN as u64 || raw_len != region_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "corrupt tail preservation requires the complete capped region",
+            ));
+        }
+        Ok(Self {
+            writer_id: read.writer_id,
+            identity: read.identity,
+            snapshot_len: read.snapshot_len,
+            snapshot_sha256: read.snapshot_sha256.clone(),
+            offset,
+            region_len,
+        })
+    }
+}
+
 impl AllRecordsResolved {
     #[cfg(test)]
     pub(crate) fn for_segment(_segment: &DiscoveredSegment) -> io::Result<Self> {
@@ -217,6 +275,50 @@ impl AllRecordsResolved {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "record resolution requires a complete sealed segment snapshot",
+            ));
+        }
+        Ok(Self {
+            writer_id: read.writer_id,
+            identity: read.identity,
+            size_bytes: read.snapshot_len,
+            content_sha256: read.snapshot_sha256.clone(),
+        })
+    }
+
+    pub(crate) fn for_read_with_preserved_corrupt_tail(
+        segment: &DiscoveredSegment,
+        read: &SegmentRead,
+        preserved: CorruptTailPreserved,
+    ) -> io::Result<Self> {
+        let (offset, region_len, raw_len) = match &read.tail {
+            SegmentTail::DefinitiveCorruption {
+                offset,
+                region_len,
+                raw_bytes,
+                ..
+            } => (*offset, *region_len, raw_bytes.len() as u64),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "preserved tail resolution requires definitive corruption",
+                ));
+            }
+        };
+        if segment.state != SegmentState::Sealed
+            || segment.writer_id != read.writer_id
+            || segment.identity != read.identity
+            || region_len > MAX_CORRUPTION_CAPTURE_LEN as u64
+            || raw_len != region_len
+            || preserved.writer_id != read.writer_id
+            || preserved.identity != read.identity
+            || preserved.snapshot_len != read.snapshot_len
+            || preserved.snapshot_sha256 != read.snapshot_sha256
+            || preserved.offset != offset
+            || preserved.region_len != region_len
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "preserved corrupt tail does not match sealed read snapshot",
             ));
         }
         Ok(Self {
@@ -781,7 +883,13 @@ impl JournalSegmentStore {
         segment: &DiscoveredSegment,
         resolved: AllRecordsResolved,
     ) -> Result<(), SegmentMutationError> {
-        self.delete_resolved_segment_inner(segment, resolved, None, &mut sync_parent)
+        self.delete_resolved_segment_inner(
+            segment,
+            resolved,
+            None,
+            &mut sync_parent,
+            REMOVE_LOCK_AFTER_SEGMENT_SYNC,
+        )
     }
 
     #[cfg(test)]
@@ -796,6 +904,7 @@ impl JournalSegmentStore {
             resolved,
             Some(after_segment_sync),
             &mut sync_parent,
+            true,
         )
     }
 
@@ -806,7 +915,16 @@ impl JournalSegmentStore {
         resolved: AllRecordsResolved,
         sync_parent: &mut dyn FnMut(&Path) -> io::Result<()>,
     ) -> Result<(), SegmentMutationError> {
-        self.delete_resolved_segment_inner(segment, resolved, None, sync_parent)
+        self.delete_resolved_segment_inner(segment, resolved, None, sync_parent, true)
+    }
+
+    #[cfg(test)]
+    fn delete_resolved_segment_without_durable_directory_sync(
+        &self,
+        segment: &DiscoveredSegment,
+        resolved: AllRecordsResolved,
+    ) -> Result<(), SegmentMutationError> {
+        self.delete_resolved_segment_inner(segment, resolved, None, &mut sync_parent, false)
     }
 
     fn delete_resolved_segment_inner(
@@ -815,6 +933,7 @@ impl JournalSegmentStore {
         resolved: AllRecordsResolved,
         mut after_segment_sync: Option<&mut dyn FnMut()>,
         sync_parent: &mut dyn FnMut(&Path) -> io::Result<()>,
+        remove_lock_after_segment_sync: bool,
     ) -> Result<(), SegmentMutationError> {
         self.ensure_directory()?;
         if segment.state != SegmentState::Sealed
@@ -845,6 +964,11 @@ impl JournalSegmentStore {
         })?;
         if let Some(hook) = after_segment_sync.as_mut() {
             hook();
+        }
+        if !remove_lock_after_segment_sync {
+            // Windows cannot durably order directory entry deletion. Keeping
+            // the ignored lock sidecar makes a resurrected segment replayable.
+            return Ok(());
         }
         fs::remove_file(&segment.lock_path).map_err(|source| SegmentMutationError {
             published: true,
@@ -1480,7 +1604,7 @@ mod tests {
         AllRecordsResolved, AppendTestFault, JournalSegmentStore, SealOutcome, SegmentState,
         SegmentTail, create_lock_reservation_inner,
     };
-    use crate::providers::durable_file::ExclusiveFileLock;
+    use crate::providers::durable_file::{ExclusiveFileLock, sync_parent};
     use std::fs::{self, File};
     use std::io::{self, Write};
     use std::path::Path;
@@ -2015,6 +2139,9 @@ mod tests {
         let capability = AllRecordsResolved::for_read(&first, &first_read).unwrap();
         store.delete_resolved_segment(&first, capability).unwrap();
         assert!(!first.path.exists());
+        #[cfg(windows)]
+        assert!(temp.path().join(format!("{first_id}.lock")).exists());
+        #[cfg(not(windows))]
         assert!(!temp.path().join(format!("{first_id}.lock")).exists());
         assert!(second.path.exists());
     }
@@ -2111,6 +2238,31 @@ mod tests {
     }
 
     #[test]
+    fn whole_delete_preserves_lock_when_directory_sync_is_not_durable() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000049").unwrap();
+        let writer = store.create_writer_with_id(writer_id).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let read = store.read(&sealed).unwrap();
+        let capability = AllRecordsResolved::for_read(&sealed, &read).unwrap();
+        let lock_path = sealed.lock_path.clone();
+
+        store
+            .delete_resolved_segment_without_durable_directory_sync(&sealed, capability)
+            .unwrap();
+
+        assert!(!sealed.path.exists());
+        assert!(lock_path.exists());
+        assert!(store.discover().unwrap().is_empty());
+    }
+
+    #[test]
     fn resolution_capability_cannot_be_minted_without_a_read_snapshot() {
         let temp = tempfile::tempdir().unwrap();
         let store = JournalSegmentStore::open(temp.path()).unwrap();
@@ -2154,6 +2306,51 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(sealed.path.exists());
+    }
+
+    #[test]
+    fn preserved_capped_corrupt_tail_can_be_resolved_and_pruned() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-00000000004a").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let mut bytes = fs::read(&sealed.path).unwrap();
+        bytes[SEGMENT_HEADER_LEN + 8] ^= 0x40;
+        fs::write(&sealed.path, bytes).unwrap();
+        let read = store.read(&sealed).unwrap();
+        let raw_tail = match &read.tail {
+            SegmentTail::DefinitiveCorruption {
+                region_len,
+                raw_bytes,
+                ..
+            } => {
+                assert_eq!(*region_len as usize, raw_bytes.len());
+                raw_bytes.clone()
+            }
+            other => panic!("expected definitive corruption, got {other:?}"),
+        };
+        let preserved_path = temp.path().join("dead-letter-copy");
+        let preserved_file = File::create(&preserved_path).unwrap();
+        (&preserved_file).write_all(&raw_tail).unwrap();
+        preserved_file.sync_all().unwrap();
+        sync_parent(&preserved_path).unwrap();
+        let preserved =
+            super::CorruptTailPreserved::after_durable_preservation(&sealed, &read).unwrap();
+        let capability =
+            AllRecordsResolved::for_read_with_preserved_corrupt_tail(&sealed, &read, preserved)
+                .unwrap();
+
+        store.delete_resolved_segment(&sealed, capability).unwrap();
+
+        assert!(!sealed.path.exists());
+        assert_eq!(fs::read(preserved_path).unwrap(), raw_tail);
     }
 
     #[test]
