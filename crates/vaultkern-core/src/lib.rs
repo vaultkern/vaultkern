@@ -11,11 +11,41 @@ pub use vaultkern_kdbx::{
     load_kdbx as load_kdbx_bytes, load_kdbx_with_policy, required_version,
     save_kdbx as save_kdbx_bytes,
 };
+use vaultkern_model::Attachment as ModelAttachment;
 pub use vaultkern_model::{
-    Attachment, AutoTypeAssociation, AutoTypeConfig, CustomField, CustomIcon, DeletedObject, Entry,
-    EntryFieldProtection, Group, GroupFlags, GroupTimes, MemoryProtection, MergeReport, ModelError,
-    PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
+    AttachmentContent, AttachmentContentId, AttachmentMap, AutoTypeAssociation, AutoTypeConfig,
+    CustomField, CustomIcon, DeletedObject, Entry, EntryFieldProtection, Group, GroupFlags,
+    GroupTimes, MemoryProtection, MergeReport, ModelError, PasskeyRecord, TotpAlgorithm, TotpSpec,
+    Vault,
 };
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct Attachment {
+    pub name: String,
+    pub data: Vec<u8>,
+    pub protect_in_memory: bool,
+}
+
+impl fmt::Debug for Attachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Attachment")
+            .field("name", &self.name)
+            .field("data_len", &self.data.len())
+            .field("protect_in_memory", &self.protect_in_memory)
+            .finish()
+    }
+}
+
+impl From<Attachment> for ModelAttachment {
+    fn from(attachment: Attachment) -> Self {
+        ModelAttachment::new(
+            attachment.name,
+            attachment.data,
+            attachment.protect_in_memory,
+        )
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultSummary {
@@ -699,6 +729,7 @@ pub enum MutationError {
     CustomFieldNotFound(String),
     AttachmentNotFound(String),
     AttachmentAlreadyExists(String),
+    AttachmentContentHashCollision,
     CustomDataNotFound(String),
     CustomIconNotFound(String),
     InvalidUuid(String),
@@ -719,6 +750,9 @@ impl fmt::Display for MutationError {
             Self::CustomFieldNotFound(key) => write!(f, "custom field not found: {key}"),
             Self::AttachmentNotFound(name) => write!(f, "attachment not found: {name}"),
             Self::AttachmentAlreadyExists(name) => write!(f, "attachment already exists: {name}"),
+            Self::AttachmentContentHashCollision => {
+                write!(f, "attachment content hash collision")
+            }
             Self::CustomDataNotFound(key) => write!(f, "custom data not found: {key}"),
             Self::CustomIconNotFound(id) => write!(f, "custom icon not found: {id}"),
             Self::InvalidUuid(value) => write!(f, "invalid uuid: {value}"),
@@ -1180,7 +1214,7 @@ impl KeepassCore {
             .ok_or_else(|| MutationError::AttachmentNotFound(name.into()))?;
         Ok(AttachmentContentView {
             name: attachment.name.clone(),
-            data: attachment.data.clone(),
+            data: attachment.data.as_bytes().to_vec(),
         })
     }
 
@@ -1218,7 +1252,7 @@ impl KeepassCore {
             .ok_or_else(|| MutationError::AttachmentNotFound(name.into()))?;
         Ok(AttachmentContentView {
             name: attachment.name.clone(),
-            data: attachment.data.clone(),
+            data: attachment.data.as_bytes().to_vec(),
         })
     }
 
@@ -2149,16 +2183,13 @@ impl KeepassCore {
         entry_id: &str,
         attachment: EntryAttachmentInput,
     ) -> Result<EntryView, MutationError> {
+        let content = shared_attachment_content(&vault.root, &attachment.data)?;
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
         let name = attachment.name.clone();
         entry.attachments.insert(
             name,
-            Attachment {
-                name: attachment.name,
-                data: attachment.data,
-                protect_in_memory: attachment.protect_in_memory,
-            },
+            ModelAttachment::with_content(attachment.name, content, attachment.protect_in_memory),
         );
         Ok(project_entry(entry))
     }
@@ -2212,13 +2243,14 @@ impl KeepassCore {
         name: &str,
         update: AttachmentContentUpdate,
     ) -> Result<Vec<AttachmentView>, MutationError> {
+        let content = shared_attachment_content(&vault.root, &update.data)?;
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
         let attachment = entry
             .attachments
             .get_mut(name)
             .ok_or_else(|| MutationError::AttachmentNotFound(name.into()))?;
-        attachment.data = update.data;
+        attachment.data = content;
         Ok(project_attachment_items(&entry.attachments))
     }
 
@@ -2906,7 +2938,7 @@ fn append_custom_data_block_item(
 }
 
 fn project_attachment_items(
-    attachments: &std::collections::BTreeMap<String, Attachment>,
+    attachments: &std::collections::BTreeMap<String, ModelAttachment>,
 ) -> Vec<AttachmentView> {
     attachments
         .values()
@@ -3080,6 +3112,64 @@ fn find_entry_by_id<'a>(group: &'a Group, id: &str) -> Option<&'a Entry> {
         }
     }
     None
+}
+
+fn shared_attachment_content(
+    group: &Group,
+    bytes: &[u8],
+) -> Result<AttachmentContent, MutationError> {
+    let id = AttachmentContentId::from_bytes(bytes);
+    Ok(find_shared_attachment_content(group, id, bytes)?
+        .unwrap_or_else(|| AttachmentContent::from_bytes(bytes.to_vec())))
+}
+
+fn find_shared_attachment_content(
+    group: &Group,
+    id: AttachmentContentId,
+    bytes: &[u8],
+) -> Result<Option<AttachmentContent>, MutationError> {
+    for entry in &group.entries {
+        for attachment in entry.attachments.values() {
+            if attachment.data.id() == id {
+                if attachment.data.as_bytes() != bytes {
+                    return Err(MutationError::AttachmentContentHashCollision);
+                }
+                return Ok(Some(attachment.data.clone()));
+            }
+        }
+        for history in &entry.history {
+            if let Some(content) = find_shared_attachment_content_in_entry(history, id, bytes)? {
+                return Ok(Some(content));
+            }
+        }
+    }
+    for child in &group.children {
+        if let Some(content) = find_shared_attachment_content(child, id, bytes)? {
+            return Ok(Some(content));
+        }
+    }
+    Ok(None)
+}
+
+fn find_shared_attachment_content_in_entry(
+    entry: &Entry,
+    id: AttachmentContentId,
+    bytes: &[u8],
+) -> Result<Option<AttachmentContent>, MutationError> {
+    for attachment in entry.attachments.values() {
+        if attachment.data.id() == id {
+            if attachment.data.as_bytes() != bytes {
+                return Err(MutationError::AttachmentContentHashCollision);
+            }
+            return Ok(Some(attachment.data.clone()));
+        }
+    }
+    for history in &entry.history {
+        if let Some(content) = find_shared_attachment_content_in_entry(history, id, bytes)? {
+            return Ok(Some(content));
+        }
+    }
+    Ok(None)
 }
 
 fn find_group_by_id_mut<'a>(group: &'a mut Group, id: &str) -> Option<&'a mut Group> {
@@ -3282,10 +3372,10 @@ fn build_inspection(header: KdbxHeaderSummary) -> DatabaseInspection {
 #[cfg(test)]
 mod internal_tests {
     use super::{
-        CompositeKey, CustomIcon, DeletedObject, EntryCreate, EntryLineageReportMetadataUpdate,
-        ExternalKdfConfirmation, ExternalKdfDecision, ExternalKdfPolicy, Group, KdbxCipher,
-        KdbxError, KdbxHeader, KdbxVersion, KeepassCore, MutationError, SaveProfile,
-        VariantDictionary, VariantValue,
+        CompositeKey, CustomIcon, DeletedObject, EntryAttachmentInput, EntryCreate,
+        EntryLineageReportMetadataUpdate, ExternalKdfConfirmation, ExternalKdfDecision,
+        ExternalKdfPolicy, Group, KdbxCipher, KdbxError, KdbxHeader, KdbxVersion, KeepassCore,
+        MutationError, SaveProfile, VariantDictionary, VariantValue,
     };
     use uuid::Uuid;
     use vaultkern_crypto::sha256_bytes;
@@ -3547,6 +3637,38 @@ mod internal_tests {
         assert_eq!(planned.id, planned_id);
         assert_ne!(random.id, planned_id);
         assert_ne!(random.id, Uuid::nil().to_string());
+    }
+
+    #[test]
+    fn attachment_facade_reuses_content_across_entries_and_history_clones() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("shared attachments");
+        let first = Entry::new("first");
+        let first_id = first.id.to_string();
+        let second = Entry::new("second");
+        let second_id = second.id.to_string();
+        vault.root.entries.extend([first, second]);
+
+        for (entry_id, name) in [(&first_id, "first.bin"), (&second_id, "second.bin")] {
+            core.add_entry_attachment(
+                &mut vault,
+                entry_id,
+                EntryAttachmentInput {
+                    name: name.into(),
+                    data: vec![0x4d; 1024 * 1024],
+                    protect_in_memory: false,
+                },
+            )
+            .expect("add shared attachment");
+        }
+        let history = vault.root.entries[0].clone();
+        vault.root.entries[0].history.push(history);
+
+        let first = &vault.root.entries[0].attachments["first.bin"].data;
+        let second = &vault.root.entries[1].attachments["second.bin"].data;
+        let history = &vault.root.entries[0].history[0].attachments["first.bin"].data;
+        assert!(first.ptr_eq(second));
+        assert!(first.ptr_eq(history));
     }
 
     fn stable_entry_create() -> EntryCreate {
@@ -7751,11 +7873,7 @@ mod tests {
         entry.modified_at = 1710000100;
         entry.attachments.insert(
             "hello.txt".into(),
-            vaultkern_model::Attachment {
-                name: "hello.txt".into(),
-                data: b"hello attachment".to_vec(),
-                protect_in_memory: true,
-            },
+            vaultkern_model::Attachment::new("hello.txt", b"hello attachment".to_vec(), true),
         );
         entry.totp = Some(
             TotpSpec::parse_otpauth("otpauth://totp/ACME:alice@example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=ACME&algorithm=SHA1&digits=6&period=30")
@@ -8024,10 +8142,10 @@ mod tests {
             Some(("Format400", true))
         );
         assert_eq!(
-            entry
-                .attachments
-                .get("Format400")
-                .map(|attachment| (attachment.data.clone(), attachment.protect_in_memory)),
+            entry.attachments.get("Format400").map(|attachment| (
+                attachment.data.as_bytes().to_vec(),
+                attachment.protect_in_memory
+            )),
             Some((b"Format400\n".to_vec(), false))
         );
 
@@ -8064,7 +8182,10 @@ mod tests {
             rewritten_entry
                 .attachments
                 .get("Format400")
-                .map(|attachment| (attachment.data.clone(), attachment.protect_in_memory)),
+                .map(|attachment| (
+                    attachment.data.as_bytes().to_vec(),
+                    attachment.protect_in_memory
+                )),
             Some((b"Format400\n".to_vec(), false))
         );
     }
@@ -8163,14 +8284,14 @@ mod tests {
             entry
                 .attachments
                 .get("myattach.txt")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(b"abcdefghijk".to_vec())
         );
         assert_eq!(
             entry
                 .attachments
                 .get("test.txt")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(b"this is a test".to_vec())
         );
 
@@ -8180,8 +8301,13 @@ mod tests {
             entry.history[1]
                 .attachments
                 .get("myattach.txt")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(b"abcdefghijk".to_vec())
+        );
+        assert!(
+            entry.attachments["myattach.txt"]
+                .data
+                .ptr_eq(&entry.history[1].attachments["myattach.txt"].data)
         );
     }
 
@@ -8225,14 +8351,14 @@ mod tests {
             entry
                 .attachments
                 .get("myattach.txt")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(b"abcdefghijk".to_vec())
         );
         assert_eq!(
             entry
                 .attachments
                 .get("test.txt")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(b"this is a test".to_vec())
         );
         assert_eq!(entry.history.len(), 2);
@@ -8241,7 +8367,7 @@ mod tests {
             entry.history[1]
                 .attachments
                 .get("myattach.txt")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(b"abcdefghijk".to_vec())
         );
     }
@@ -9400,7 +9526,7 @@ mod tests {
                 root_entry
                     .attachments
                     .get("Sample attachment.txt")
-                    .map(|attachment| attachment.data.clone()),
+                    .map(|attachment| attachment.data.as_bytes().to_vec()),
                 Some(b"Sample content\n".to_vec())
             );
             assert_eq!(
@@ -9408,7 +9534,7 @@ mod tests {
                     entry
                         .attachments
                         .get("Sample attachment.txt")
-                        .map(|attachment| attachment.data.clone())
+                        .map(|attachment| attachment.data.as_bytes().to_vec())
                 }),
                 Some(b"Sample content \n".to_vec())
             );
@@ -9589,7 +9715,7 @@ mod tests {
             entry.history[0]
                 .attachments
                 .get("archive.txt")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(b"archive-a".to_vec())
         );
         assert_eq!(entry.history[1].title, "Middle");
@@ -9599,7 +9725,7 @@ mod tests {
             entry.history[1]
                 .attachments
                 .get("archive.txt")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(b"archive-b".to_vec())
         );
     }
@@ -9767,7 +9893,7 @@ mod tests {
             loaded.root.entries[0]
                 .attachments
                 .get("a")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(attachment_a.clone())
         );
 
@@ -9775,14 +9901,14 @@ mod tests {
             loaded.root.entries[1]
                 .attachments
                 .get("a")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(attachment_a.clone())
         );
         assert_eq!(
             loaded.root.entries[1]
                 .attachments
                 .get("b")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(attachment_b.clone())
         );
 
@@ -9790,28 +9916,28 @@ mod tests {
             loaded.root.entries[2]
                 .attachments
                 .get("a")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(attachment_a)
         );
         assert_eq!(
             loaded.root.entries[2]
                 .attachments
                 .get("b")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(attachment_b.clone())
         );
         assert_eq!(
             loaded.root.entries[2]
                 .attachments
                 .get("x")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(attachment_c.clone())
         );
         assert_eq!(
             loaded.root.entries[2]
                 .attachments
                 .get("y")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(attachment_c.clone())
         );
 
@@ -9820,14 +9946,14 @@ mod tests {
             loaded.root.entries[2].history[0]
                 .attachments
                 .get("x")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(attachment_c)
         );
         assert_eq!(
             loaded.root.entries[2].history[0]
                 .attachments
                 .get("y")
-                .map(|attachment| attachment.data.clone()),
+                .map(|attachment| attachment.data.as_bytes().to_vec()),
             Some(attachment_b)
         );
     }
@@ -10528,10 +10654,10 @@ mod tests {
             }
         );
         assert_eq!(
-            entry
-                .attachments
-                .get("test")
-                .map(|attachment| (attachment.data.clone(), attachment.protect_in_memory)),
+            entry.attachments.get("test").map(|attachment| (
+                attachment.data.as_bytes().to_vec(),
+                attachment.protect_in_memory
+            )),
             Some((b"test".to_vec(), expected_attachment_protection))
         );
         assert_eq!(

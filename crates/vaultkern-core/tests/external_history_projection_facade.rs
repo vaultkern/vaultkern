@@ -895,7 +895,7 @@ fn collect_raw_history_semantic_digest(
             .map(|attachment| {
                 (
                     attachment.name.clone(),
-                    attachment.data.clone(),
+                    attachment.data.as_bytes().to_vec(),
                     attachment.protect_in_memory,
                 )
             })

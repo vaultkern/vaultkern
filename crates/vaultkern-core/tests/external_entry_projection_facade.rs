@@ -326,7 +326,7 @@ fn collect_raw_entry_projection_digest(entry: &vaultkern_core::Entry) -> EntryPr
             .map(|attachment| {
                 (
                     attachment.name.clone(),
-                    attachment.data.clone(),
+                    attachment.data.as_bytes().to_vec(),
                     attachment.protect_in_memory,
                 )
             })
