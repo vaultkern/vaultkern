@@ -1,16 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::sync::{Arc, Weak};
+
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 
 use data_encoding::BASE32_NOPAD;
 use thiserror::Error;
 use uuid::Uuid;
 use vaultkern_crypto::{OtpAlgorithm, generate_totp};
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum ModelError {
     #[error("feature not implemented yet")]
     Unimplemented,
     #[error("entry not found")]
     EntryNotFound,
+    #[error("attachment content hash collision")]
+    AttachmentContentHashCollision,
 }
 
 pub type Result<T> = std::result::Result<T, ModelError>;
@@ -21,11 +28,271 @@ pub struct CustomField {
     pub protected: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AttachmentContentId([u8; 32]);
+
+impl AttachmentContentId {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(vaultkern_crypto::sha256_bytes(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for AttachmentContentId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("AttachmentContentId")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+struct AttachmentContentInner {
+    id: AttachmentContentId,
+    bytes: Vec<u8>,
+    #[cfg(test)]
+    drop_probe: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for AttachmentContentInner {
+    fn drop(&mut self) {
+        for byte in &mut self.bytes {
+            // Volatile stores keep the final-owner wipe observable to the allocator.
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+
+        #[cfg(test)]
+        if let Some(probe) = &self.drop_probe {
+            probe.store(
+                self.bytes.iter().all(|byte| *byte == 0),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AttachmentContent(Arc<AttachmentContentInner>);
+
+impl AttachmentContent {
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        let bytes = bytes.into();
+        let id = AttachmentContentId::from_bytes(&bytes);
+        Self::from_parts(id, bytes)
+    }
+
+    fn from_parts(id: AttachmentContentId, bytes: Vec<u8>) -> Self {
+        Self(Arc::new(AttachmentContentInner {
+            id,
+            bytes,
+            #[cfg(test)]
+            drop_probe: None,
+        }))
+    }
+
+    pub fn id(&self) -> AttachmentContentId {
+        self.0.id
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.bytes.is_empty()
+    }
+
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    #[cfg(test)]
+    fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
+    #[cfg(test)]
+    fn new_with_drop_probe_for_test(bytes: &[u8], probe: Arc<AtomicBool>) -> Self {
+        Self(Arc::new(AttachmentContentInner {
+            id: AttachmentContentId::from_bytes(bytes),
+            bytes: bytes.to_vec(),
+            drop_probe: Some(probe),
+        }))
+    }
+}
+
+impl fmt::Debug for AttachmentContent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AttachmentContent")
+            .field("id", &self.id())
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl PartialEq for AttachmentContent {
+    fn eq(&self, other: &Self) -> bool {
+        self.id() == other.id() && self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl Eq for AttachmentContent {}
+
+impl std::ops::Deref for AttachmentContent {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_bytes()
+    }
+}
+
+impl AsRef<[u8]> for AttachmentContent {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl PartialEq<Vec<u8>> for AttachmentContent {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.as_bytes() == other.as_slice()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AttachmentContentPool {
+    contents: BTreeMap<AttachmentContentId, Weak<AttachmentContentInner>>,
+}
+
+impl AttachmentContentPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn intern(&mut self, bytes: &[u8]) -> Result<AttachmentContent> {
+        let id = AttachmentContentId::from_bytes(bytes);
+        self.intern_with_id(id, bytes)
+    }
+
+    pub fn intern_vec(&mut self, bytes: Vec<u8>) -> Result<AttachmentContent> {
+        let id = AttachmentContentId::from_bytes(&bytes);
+        if let Some(existing) = self.contents.get(&id).and_then(Weak::upgrade) {
+            if existing.bytes != bytes {
+                return Err(ModelError::AttachmentContentHashCollision);
+            }
+            return Ok(AttachmentContent(existing));
+        }
+
+        let content = AttachmentContent::from_parts(id, bytes);
+        self.contents.insert(id, Arc::downgrade(&content.0));
+        Ok(content)
+    }
+
+    pub fn intern_content(&mut self, content: &AttachmentContent) -> Result<AttachmentContent> {
+        let id = content.id();
+        if let Some(existing) = self.contents.get(&id).and_then(Weak::upgrade) {
+            if existing.bytes.as_slice() != content.as_bytes() {
+                return Err(ModelError::AttachmentContentHashCollision);
+            }
+            return Ok(AttachmentContent(existing));
+        }
+
+        self.contents.insert(id, Arc::downgrade(&content.0));
+        Ok(content.clone())
+    }
+
+    fn intern_with_id(
+        &mut self,
+        id: AttachmentContentId,
+        bytes: &[u8],
+    ) -> Result<AttachmentContent> {
+        if let Some(existing) = self.contents.get(&id).and_then(Weak::upgrade) {
+            if existing.bytes.as_slice() != bytes {
+                return Err(ModelError::AttachmentContentHashCollision);
+            }
+            return Ok(AttachmentContent(existing));
+        }
+
+        let content = AttachmentContent::from_parts(id, bytes.to_vec());
+        self.contents.insert(id, Arc::downgrade(&content.0));
+        Ok(content)
+    }
+
+    #[cfg(test)]
+    fn intern_with_id_for_test(
+        &mut self,
+        id: AttachmentContentId,
+        bytes: &[u8],
+    ) -> Result<AttachmentContent> {
+        self.intern_with_id(id, bytes)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
     pub name: String,
-    pub data: Vec<u8>,
+    pub data: AttachmentContent,
     pub protect_in_memory: bool,
+}
+
+impl Attachment {
+    pub fn new(
+        name: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+        protect_in_memory: bool,
+    ) -> Self {
+        Self::with_content(
+            name,
+            AttachmentContent::from_bytes(bytes),
+            protect_in_memory,
+        )
+    }
+
+    pub fn with_content(
+        name: impl Into<String>,
+        content: AttachmentContent,
+        protect_in_memory: bool,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            data: content,
+            protect_in_memory,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttachmentMap(BTreeMap<String, Attachment>);
+
+impl AttachmentMap {
+    pub fn insert<V>(&mut self, key: String, value: V) -> Option<Attachment>
+    where
+        V: Into<Attachment>,
+    {
+        self.0.insert(key, value.into())
+    }
+}
+
+impl std::ops::Deref for AttachmentMap {
+    type Target = BTreeMap<String, Attachment>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for AttachmentMap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -383,7 +650,7 @@ pub struct Entry {
     pub field_protection: EntryFieldProtection,
     pub tags: BTreeSet<String>,
     pub attributes: BTreeMap<String, CustomField>,
-    pub attachments: BTreeMap<String, Attachment>,
+    pub attachments: AttachmentMap,
     pub history: Vec<Entry>,
     pub totp: Option<TotpSpec>,
     pub passkey: Option<PasskeyRecord>,
@@ -420,7 +687,7 @@ impl Entry {
             field_protection: EntryFieldProtection::default(),
             tags: BTreeSet::new(),
             attributes: BTreeMap::new(),
-            attachments: BTreeMap::new(),
+            attachments: AttachmentMap::default(),
             history: Vec::new(),
             totp: None,
             passkey: None,
@@ -688,8 +955,81 @@ fn percent_decode(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CustomField, Entry, Group, PasskeyRecord, TotpAlgorithm, TotpSpec, Vault};
+    use super::{
+        Attachment, AttachmentContent, AttachmentContentId, AttachmentContentPool, CustomField,
+        Entry, Group, ModelError, PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
+    };
     use std::collections::BTreeMap;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[test]
+    fn attachment_content_is_shared_across_entry_and_history_clones() {
+        let bytes = vec![0x5a; 1024 * 1024];
+        let mut pool = AttachmentContentPool::new();
+        let content = pool.intern(&bytes).expect("intern content");
+        let mut entry = Entry::new("large attachment");
+        entry.attachments.insert(
+            "large.bin".into(),
+            Attachment::with_content("large.bin", content.clone(), true),
+        );
+        entry.history.push(entry.clone());
+
+        let clone = entry.clone();
+        let original_content = &entry.attachments["large.bin"].data;
+        let cloned_content = &clone.attachments["large.bin"].data;
+        let history_content = &entry.history[0].attachments["large.bin"].data;
+
+        assert!(original_content.ptr_eq(cloned_content));
+        assert!(original_content.ptr_eq(history_content));
+        assert_eq!(original_content.as_bytes(), bytes.as_slice());
+        assert!(original_content.strong_count() >= 4);
+    }
+
+    #[test]
+    fn attachment_pool_deduplicates_bytes_and_rejects_hash_collisions() {
+        let mut pool = AttachmentContentPool::new();
+        let first = pool.intern(b"same bytes").expect("first content");
+        let same = pool.intern(b"same bytes").expect("same content");
+        let different = pool.intern(b"different bytes").expect("different content");
+
+        assert!(first.ptr_eq(&same));
+        assert!(!first.ptr_eq(&different));
+        assert_eq!(
+            data_encoding::HEXLOWER.encode(first.id().as_bytes()),
+            "58100dc8fc06562ce3e578231dc948e083520ee49c4b4ee5a5a28bb4b4003feb"
+        );
+
+        let forced_id = AttachmentContentId::from_bytes(b"forced id source");
+        let _forced = pool
+            .intern_with_id_for_test(forced_id, b"first collision value")
+            .expect("seed forced id");
+        assert_eq!(
+            pool.intern_with_id_for_test(forced_id, b"second collision value"),
+            Err(ModelError::AttachmentContentHashCollision)
+        );
+    }
+
+    #[test]
+    fn attachment_content_debug_is_redacted_and_last_owner_zeroizes() {
+        let secret = b"attachment-secret-that-must-not-leak";
+        let zeroized = Arc::new(AtomicBool::new(false));
+        let content = AttachmentContent::new_with_drop_probe_for_test(secret, zeroized.clone());
+        let clone = content.clone();
+
+        let debug = format!("{content:?}");
+        assert!(!debug.contains("attachment-secret"));
+        assert!(debug.contains("len"));
+        let error = ModelError::AttachmentContentHashCollision.to_string();
+        assert!(!error.contains("attachment-secret"));
+
+        drop(content);
+        assert!(!zeroized.load(Ordering::SeqCst));
+        drop(clone);
+        assert!(zeroized.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn otpauth_parser_and_generator_match_rfc_vector() {
@@ -786,6 +1126,10 @@ mod tests {
         base.id = uuid::Uuid::nil();
         base.password = "old-secret".into();
         base.modified_at = 10;
+        base.attachments.insert(
+            "large.bin".into(),
+            Attachment::new("large.bin", vec![0x3c; 1024 * 1024], false),
+        );
         local.root.entries.push(base.clone());
 
         let mut incoming = Vault::empty("Incoming");
@@ -800,6 +1144,11 @@ mod tests {
         assert_eq!(merged.password, "new-secret");
         assert_eq!(merged.history.len(), 1);
         assert_eq!(merged.history[0].password, "old-secret");
+        assert!(
+            merged.attachments["large.bin"]
+                .data
+                .ptr_eq(&merged.history[0].attachments["large.bin"].data)
+        );
         assert_eq!(report.merged_entries, 1);
         assert_eq!(report.history_snapshots_added, 1);
     }
