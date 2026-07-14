@@ -398,7 +398,7 @@ pub fn save_kdbx(
     let mac_seed = mac_seed(&header.master_seed, &transformed);
 
     let mut binaries = Vec::new();
-    let attachment_refs = collect_attachment_refs(vault, &mut binaries);
+    let attachment_refs = collect_attachment_refs(vault, &mut binaries)?;
     let inner_key = random_bytes(64);
     let inner_header = build_inner_header(&inner_key, &binaries);
     let xml = build_xml(vault, &attachment_refs, &inner_key, profile.version)?;
@@ -3342,7 +3342,7 @@ fn parse_string_field(
 fn collect_attachment_refs(
     vault: &Vault,
     binaries: &mut Vec<InnerBinary>,
-) -> HashMap<(usize, String), usize> {
+) -> Result<HashMap<(usize, String), usize>> {
     let mut refs = HashMap::new();
     let mut dedup = BTreeMap::<(bool, AttachmentContentId), usize>::new();
 
@@ -3351,48 +3351,70 @@ fn collect_attachment_refs(
         refs: &mut HashMap<(usize, String), usize>,
         dedup: &mut BTreeMap<(bool, AttachmentContentId), usize>,
         binaries: &mut Vec<InnerBinary>,
-    ) {
+    ) -> Result<()> {
         for entry in &group.entries {
             for attachment in entry.attachments.values() {
-                let dedup_key = (attachment.protect_in_memory, attachment.data.id());
-                let index = if let Some(index) = dedup.get(&dedup_key) {
-                    *index
-                } else {
-                    let index = binaries.len();
-                    binaries.push(InnerBinary {
-                        protect_in_memory: attachment.protect_in_memory,
-                        data: attachment.data.clone(),
-                    });
-                    dedup.insert(dedup_key, index);
-                    index
-                };
+                let index = binary_index_for_content_id(
+                    attachment.data.id(),
+                    attachment.protect_in_memory,
+                    &attachment.data,
+                    dedup,
+                    binaries,
+                )?;
                 refs.insert((entry_ref_key(entry), attachment.name.clone()), index);
             }
             for history in &entry.history {
                 for attachment in history.attachments.values() {
-                    let dedup_key = (attachment.protect_in_memory, attachment.data.id());
-                    let index = if let Some(index) = dedup.get(&dedup_key) {
-                        *index
-                    } else {
-                        let index = binaries.len();
-                        binaries.push(InnerBinary {
-                            protect_in_memory: attachment.protect_in_memory,
-                            data: attachment.data.clone(),
-                        });
-                        dedup.insert(dedup_key, index);
-                        index
-                    };
+                    let index = binary_index_for_content_id(
+                        attachment.data.id(),
+                        attachment.protect_in_memory,
+                        &attachment.data,
+                        dedup,
+                        binaries,
+                    )?;
                     refs.insert((entry_ref_key(history), attachment.name.clone()), index);
                 }
             }
         }
         for child in &group.children {
-            walk(child, refs, dedup, binaries);
+            walk(child, refs, dedup, binaries)?;
+        }
+        Ok(())
+    }
+
+    walk(&vault.root, &mut refs, &mut dedup, binaries)?;
+    Ok(refs)
+}
+
+fn binary_index_for_content_id(
+    content_id: AttachmentContentId,
+    protect_in_memory: bool,
+    content: &AttachmentContent,
+    dedup: &mut BTreeMap<(bool, AttachmentContentId), usize>,
+    binaries: &mut Vec<InnerBinary>,
+) -> Result<usize> {
+    let mut canonical_content = None;
+    for existing_protection in [false, true] {
+        if let Some(index) = dedup.get(&(existing_protection, content_id)).copied() {
+            if binaries[index].data.as_bytes() != content.as_bytes() {
+                return Err(ModelError::AttachmentContentHashCollision.into());
+            }
+            canonical_content.get_or_insert_with(|| binaries[index].data.clone());
         }
     }
 
-    walk(&vault.root, &mut refs, &mut dedup, binaries);
-    refs
+    let key = (protect_in_memory, content_id);
+    if let Some(index) = dedup.get(&key).copied() {
+        return Ok(index);
+    }
+
+    let index = binaries.len();
+    binaries.push(InnerBinary {
+        protect_in_memory,
+        data: canonical_content.unwrap_or_else(|| content.clone()),
+    });
+    dedup.insert(key, index);
+    Ok(index)
 }
 
 fn entry_ref_key(entry: &Entry) -> usize {
@@ -4413,15 +4435,16 @@ mod external_kdf_policy_tests {
 #[cfg(test)]
 mod compatibility_tests {
     use super::{
-        Compression, KdbxCipher, KdbxHeader, KdbxVersion, SaveKdf, SaveProfile, child_text,
-        collect_attachment_refs, decode_block_stream, decrypt_payload, encode_block_stream,
-        entry_ref_key, gzip_compress, gzip_decompress, header_hmac, kdf_from_variant_dict,
-        load_kdbx, mac_seed, parse_inner_header, save_kdbx, sha256_seeded, text_element,
+        Compression, KdbxCipher, KdbxError, KdbxHeader, KdbxVersion, SaveKdf, SaveProfile,
+        binary_index_for_content_id, child_text, collect_attachment_refs, decode_block_stream,
+        decrypt_payload, encode_block_stream, entry_ref_key, gzip_compress, gzip_decompress,
+        header_hmac, kdf_from_variant_dict, load_kdbx, mac_seed, parse_inner_header, save_kdbx,
+        sha256_seeded, text_element,
     };
     use vaultkern_crypto::{CompositeKey, sha256_bytes};
     use vaultkern_model::{
-        Attachment, AttachmentContent, CustomField, Entry, Group, PasskeyRecord, TotpAlgorithm,
-        TotpSpec, Vault,
+        Attachment, AttachmentContent, AttachmentContentId, CustomField, Entry, Group, ModelError,
+        PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
     };
     use xmltree::{Element, XMLNode};
 
@@ -4464,7 +4487,7 @@ mod compatibility_tests {
         vault.root.entries.extend([first, second]);
 
         let mut binaries = Vec::new();
-        let refs = collect_attachment_refs(&vault, &mut binaries);
+        let refs = collect_attachment_refs(&vault, &mut binaries).expect("collect binaries");
 
         assert_eq!(binaries.len(), 2);
         let first = &vault.root.entries[0];
@@ -4479,6 +4502,34 @@ mod compatibility_tests {
             refs[&(entry_ref_key(history), "protected.bin".into())]
         );
         assert!(binaries.iter().all(|binary| binary.data.ptr_eq(&shared)));
+    }
+
+    #[test]
+    fn attachment_binary_pool_rejects_same_id_with_different_bytes() {
+        let forced_id = AttachmentContentId::from_bytes(b"forced binary id");
+        let first = AttachmentContent::from_bytes(b"first binary".to_vec());
+        let same_bytes = AttachmentContent::from_bytes(b"first binary".to_vec());
+        let collision = AttachmentContent::from_bytes(b"different binary".to_vec());
+        let mut dedup = std::collections::BTreeMap::new();
+        let mut binaries = Vec::new();
+
+        assert_eq!(
+            binary_index_for_content_id(forced_id, false, &first, &mut dedup, &mut binaries)
+                .expect("insert first binary"),
+            0
+        );
+        assert_eq!(
+            binary_index_for_content_id(forced_id, true, &same_bytes, &mut dedup, &mut binaries)
+                .expect("insert protected reference"),
+            1
+        );
+        assert!(binaries[0].data.ptr_eq(&binaries[1].data));
+        assert!(matches!(
+            binary_index_for_content_id(forced_id, true, &collision, &mut dedup, &mut binaries),
+            Err(KdbxError::Model(ModelError::AttachmentContentHashCollision))
+        ));
+        assert_eq!(binaries.len(), 2);
+        assert_eq!(binaries[0].data.as_bytes(), b"first binary");
     }
 
     #[test]
