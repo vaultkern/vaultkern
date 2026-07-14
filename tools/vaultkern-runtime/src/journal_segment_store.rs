@@ -1,0 +1,1880 @@
+//! Storage-only implementation of the frozen 003 journal segment lifecycle.
+//! Payload sealing, record applicability, dead-letter publication, and replay
+//! accounting intentionally remain outside this module.
+
+use crate::providers::durable_file::{
+    DurableFileIdentity, ExclusiveFileLock, create_dir_all_durable, opened_file_identity,
+    path_file_identity, sync_parent,
+};
+use sha2::{Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+use vaultkern_runtime_protocol::contracts::JournalRecord;
+use vaultkern_runtime_protocol::framing::{self, SEGMENT_HEADER_LEN};
+
+const WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_CORRUPTION_CAPTURE_LEN: usize =
+    framing::MAX_RECORD_LEN as usize + framing::FRAME_OVERHEAD;
+
+#[derive(Debug)]
+pub(crate) struct JournalSegmentStore {
+    directory: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct JournalSegmentWriter {
+    writer_id: Uuid,
+    path: PathBuf,
+    file: File,
+    identity: DurableFileIdentity,
+    append_failed: bool,
+    _segment_lock: ExclusiveFileLock,
+    _reservation_lock: ExclusiveFileLock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegmentState {
+    Active,
+    Sealed,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DiscoveredSegment {
+    pub(crate) writer_id: Uuid,
+    pub(crate) state: SegmentState,
+    path: PathBuf,
+    identity: DurableFileIdentity,
+    anchor: Arc<File>,
+    lock_path: PathBuf,
+    lock_identity: DurableFileIdentity,
+    lock_anchor: Arc<File>,
+}
+
+impl PartialEq for DiscoveredSegment {
+    fn eq(&self, other: &Self) -> bool {
+        self.writer_id == other.writer_id
+            && self.state == other.state
+            && self.path == other.path
+            && self.identity == other.identity
+            && self.lock_path == other.lock_path
+            && self.lock_identity == other.lock_identity
+    }
+}
+
+impl Eq for DiscoveredSegment {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawJournalFrame {
+    pub(crate) offset: u64,
+    pub(crate) record_version: u16,
+    pub(crate) body: Vec<u8>,
+    pub(crate) raw_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SegmentTail {
+    Complete,
+    Provisional {
+        offset: u64,
+        raw_bytes: Vec<u8>,
+    },
+    DefinitiveCorruption {
+        offset: u64,
+        region_len: u64,
+        raw_bytes: Vec<u8>,
+        error: framing::FramingError,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SegmentRead {
+    pub(crate) frames: Vec<RawJournalFrame>,
+    pub(crate) tail: SegmentTail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AppendAcknowledged {
+    pub(crate) offset: u64,
+    pub(crate) frame_len: u64,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppendTestFault {
+    AfterPartialWrite,
+    BeforeFlush,
+    BeforeSync,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SealOutcome {
+    WriterAlive,
+    Sealed(DiscoveredSegment),
+}
+
+#[derive(Debug)]
+pub(crate) struct AllRecordsResolved {
+    writer_id: Uuid,
+    identity: DurableFileIdentity,
+    size_bytes: u64,
+    content_sha256: String,
+}
+
+impl AllRecordsResolved {
+    pub(crate) fn for_segment(segment: &DiscoveredSegment) -> io::Result<Self> {
+        if segment.state != SegmentState::Sealed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "record resolution can only authorize a sealed segment",
+            ));
+        }
+        let (size_bytes, content_sha256) = sealed_content_fingerprint(segment)?;
+        Ok(Self {
+            writer_id: segment.writer_id,
+            identity: segment.identity,
+            size_bytes,
+            content_sha256,
+        })
+    }
+}
+
+impl JournalSegmentStore {
+    pub(crate) fn open(directory: impl AsRef<Path>) -> io::Result<Self> {
+        let requested = directory.as_ref();
+        let directory = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(requested)
+        };
+        create_dir_all_durable(&directory)?;
+        Ok(Self { directory })
+    }
+
+    pub(crate) fn create_writer(&self) -> io::Result<JournalSegmentWriter> {
+        self.create_writer_with_id(Uuid::new_v4())
+    }
+
+    pub(crate) fn create_writer_with_id(
+        &self,
+        writer_id: Uuid,
+    ) -> io::Result<JournalSegmentWriter> {
+        self.create_writer_inner(writer_id, WRITER_LOCK_TIMEOUT, None)
+    }
+
+    #[cfg(test)]
+    fn create_writer_with_test_hook(
+        &self,
+        writer_id: Uuid,
+        lock_timeout: Duration,
+        after_reservation: &mut dyn FnMut(&Path),
+    ) -> io::Result<JournalSegmentWriter> {
+        self.create_writer_inner(writer_id, lock_timeout, Some(after_reservation))
+    }
+
+    fn create_writer_inner(
+        &self,
+        writer_id: Uuid,
+        lock_timeout: Duration,
+        mut after_reservation: Option<&mut dyn FnMut(&Path)>,
+    ) -> io::Result<JournalSegmentWriter> {
+        if writer_id.is_nil() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "journal writer id must be a fresh non-nil UUID",
+            ));
+        }
+        self.ensure_directory()?;
+        let stem = writer_id.hyphenated().to_string();
+        let path = self.directory.join(&stem);
+        let sealed_path = self.directory.join(format!("{stem}.sealed"));
+        let corrupt_path = self.directory.join(format!("{stem}.corrupt"));
+        let lock_path = self.directory.join(format!("{stem}.lock"));
+        create_lock_reservation(&lock_path)?;
+        if let Some(hook) = after_reservation.as_mut() {
+            hook(&lock_path);
+        }
+        let started = Instant::now();
+        let lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, lock_timeout)?;
+        for existing_path in [&sealed_path, &corrupt_path] {
+            match fs::symlink_metadata(existing_path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "journal writer id already has a sealed or archived segment",
+                    ));
+                }
+            }
+        }
+
+        let mut options = OpenOptions::new();
+        options.create_new(true).read(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
+        let remaining = lock_timeout.saturating_sub(started.elapsed());
+        let segment_lock = ExclusiveFileLock::acquire_with_timeout(&path, remaining)?;
+        file.write_all(&framing::encode_segment_header())?;
+        file.flush()?;
+        file.sync_all()?;
+        sync_parent(&path)?;
+        let identity = opened_file_identity(&file, &file.metadata()?)?;
+        verify_path_identity(&path, identity)?;
+        Ok(JournalSegmentWriter {
+            writer_id,
+            path,
+            file,
+            identity,
+            append_failed: false,
+            _segment_lock: segment_lock,
+            _reservation_lock: lock,
+        })
+    }
+
+    pub(crate) fn discover(&self) -> io::Result<Vec<DiscoveredSegment>> {
+        self.ensure_directory()?;
+        let mut segments = Vec::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let name = file_name.to_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 journal file name")
+            })?;
+            if let Some(writer_name) = name.strip_suffix(".corrupt") {
+                parse_canonical_writer_id(writer_name)?;
+                validate_regular_path(&entry.path())?;
+                continue;
+            }
+            if let Some(writer_name) = name.strip_suffix(".lock") {
+                parse_canonical_writer_id(writer_name)?;
+                validate_regular_path(&entry.path())?;
+                continue;
+            }
+            let (writer_name, state) = match name.strip_suffix(".sealed") {
+                Some(writer_name) => (writer_name, SegmentState::Sealed),
+                None => (name, SegmentState::Active),
+            };
+            let writer_id = parse_canonical_writer_id(writer_name)?;
+            let corrupt_path = self
+                .directory
+                .join(format!("{}.corrupt", writer_id.hyphenated()));
+            match fs::symlink_metadata(&corrupt_path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "active or sealed segment duplicates archived writer identity",
+                    ));
+                }
+            }
+            let path = entry.path();
+            let metadata = validate_regular_path(&path)?;
+            let anchor = open_segment_for_read(&path)?;
+            let identity = opened_file_identity(&anchor, &anchor.metadata()?)?;
+            if path_file_identity(&path, &metadata)? != identity {
+                return Err(identity_changed_error());
+            }
+            let lock_path = self
+                .directory
+                .join(format!("{}.lock", writer_id.hyphenated()));
+            let lock_metadata = validate_regular_path(&lock_path).map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "journal segment has no corresponding writer lock",
+                    )
+                } else {
+                    error
+                }
+            })?;
+            let lock_anchor = open_segment_for_read(&lock_path)?;
+            let lock_identity = opened_file_identity(&lock_anchor, &lock_anchor.metadata()?)?;
+            if path_file_identity(&lock_path, &lock_metadata)? != lock_identity {
+                return Err(identity_changed_error());
+            }
+            if segments.iter().any(|segment: &DiscoveredSegment| {
+                segment.writer_id == writer_id
+                    || segment.identity == identity
+                    || segment.lock_identity == lock_identity
+            }) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "duplicate journal segment logical or physical identity",
+                ));
+            }
+            segments.push(DiscoveredSegment {
+                writer_id,
+                state,
+                path,
+                identity,
+                anchor: Arc::new(anchor),
+                lock_path,
+                lock_identity,
+                lock_anchor: Arc::new(lock_anchor),
+            });
+        }
+        Ok(segments)
+    }
+
+    pub(crate) fn read(&self, segment: &DiscoveredSegment) -> io::Result<SegmentRead> {
+        self.read_inner(segment, None)
+    }
+
+    #[cfg(test)]
+    fn read_with_test_hook(
+        &self,
+        segment: &DiscoveredSegment,
+        after_snapshot: &mut dyn FnMut(),
+    ) -> io::Result<SegmentRead> {
+        self.read_inner(segment, Some(after_snapshot))
+    }
+
+    fn read_inner(
+        &self,
+        segment: &DiscoveredSegment,
+        mut after_snapshot: Option<&mut dyn FnMut()>,
+    ) -> io::Result<SegmentRead> {
+        self.ensure_directory()?;
+        let mut file = open_segment_for_read(&segment.path)?;
+        let before = file.metadata()?;
+        let snapshot_len = before.len();
+        if opened_file_identity(&file, &before)? != segment.identity {
+            return Err(identity_changed_error());
+        }
+        verify_path_identity(&segment.path, segment.identity)?;
+        if let Some(hook) = after_snapshot.as_mut() {
+            hook();
+        }
+        let mut header = read_up_to(
+            &mut file,
+            snapshot_len.min(SEGMENT_HEADER_LEN as u64) as usize,
+        )?;
+        let mut frames = Vec::new();
+        let tail = if let Err(error) = framing::decode_segment_header(&header) {
+            extend_corruption_capture(&mut file, &mut header, snapshot_len)?;
+            classify_framing_failure(segment.state, 0, snapshot_len, header, error)
+        } else {
+            let mut offset = SEGMENT_HEADER_LEN as u64;
+            loop {
+                if offset == snapshot_len {
+                    break SegmentTail::Complete;
+                }
+                let region_len = snapshot_len - offset;
+                let mut raw_bytes = read_up_to(&mut file, region_len.min(4) as usize)?;
+                if raw_bytes.len() < 4 {
+                    break classify_framing_failure(
+                        segment.state,
+                        offset,
+                        region_len,
+                        raw_bytes,
+                        framing::FramingError::Truncated,
+                    );
+                }
+                let body_len =
+                    u32::from_le_bytes([raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3]]);
+                if body_len > framing::MAX_RECORD_LEN {
+                    extend_corruption_capture(&mut file, &mut raw_bytes, region_len)?;
+                    break SegmentTail::DefinitiveCorruption {
+                        offset,
+                        region_len,
+                        raw_bytes,
+                        error: framing::FramingError::RecordTooLong(body_len),
+                    };
+                }
+                let frame_len = framing::FRAME_OVERHEAD + body_len as usize;
+                let available = region_len.min(frame_len as u64) as usize;
+                raw_bytes.extend_from_slice(&read_up_to(
+                    &mut file,
+                    available.saturating_sub(raw_bytes.len()),
+                )?);
+                if raw_bytes.len() < frame_len {
+                    break classify_framing_failure(
+                        segment.state,
+                        offset,
+                        region_len,
+                        raw_bytes,
+                        framing::FramingError::Truncated,
+                    );
+                }
+                match framing::decode_frame(&raw_bytes) {
+                    Ok(decoded) => {
+                        frames.push(RawJournalFrame {
+                            offset,
+                            record_version: decoded.record_version,
+                            body: decoded.body,
+                            raw_bytes,
+                        });
+                        offset += frame_len as u64;
+                    }
+                    Err(error) => {
+                        extend_corruption_capture(&mut file, &mut raw_bytes, region_len)?;
+                        break classify_framing_failure(
+                            segment.state,
+                            offset,
+                            region_len,
+                            raw_bytes,
+                            error,
+                        );
+                    }
+                }
+            }
+        };
+        verify_read_stability(segment, &file, &before, snapshot_len)?;
+        Ok(SegmentRead { frames, tail })
+    }
+
+    pub(crate) fn seal(
+        &self,
+        segment: &DiscoveredSegment,
+        timeout: Duration,
+    ) -> io::Result<SealOutcome> {
+        self.ensure_directory()?;
+        if segment.state != SegmentState::Active {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "only an active journal segment can be sealed",
+            ));
+        }
+        let stem = segment.writer_id.hyphenated().to_string();
+        let lock_path = self.directory.join(format!("{stem}.lock"));
+        if lock_path != segment.lock_path {
+            return Err(identity_changed_error());
+        }
+        verify_path_identity(&lock_path, segment.lock_identity)?;
+        let started = Instant::now();
+        let lock = match ExclusiveFileLock::acquire_with_timeout(&lock_path, timeout) {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(SealOutcome::WriterAlive);
+            }
+            Err(error) => return Err(error),
+        };
+        verify_path_identity(&lock_path, segment.lock_identity)?;
+        verify_path_identity(&segment.path, segment.identity)?;
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let segment_lock = match ExclusiveFileLock::acquire_with_timeout(&segment.path, remaining) {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(SealOutcome::WriterAlive);
+            }
+            Err(error) => return Err(error),
+        };
+        verify_path_identity(&segment.path, segment.identity)?;
+        let sealed_path = self.directory.join(format!("{stem}.sealed"));
+        match fs::symlink_metadata(&sealed_path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "sealed journal segment already exists",
+                ));
+            }
+        }
+        fs::rename(&segment.path, &sealed_path)?;
+        sync_parent(&sealed_path)?;
+        verify_path_identity(&sealed_path, segment.identity)?;
+        drop(segment_lock);
+        drop(lock);
+        Ok(SealOutcome::Sealed(DiscoveredSegment {
+            writer_id: segment.writer_id,
+            state: SegmentState::Sealed,
+            path: sealed_path,
+            identity: segment.identity,
+            anchor: Arc::clone(&segment.anchor),
+            lock_path: segment.lock_path.clone(),
+            lock_identity: segment.lock_identity,
+            lock_anchor: Arc::clone(&segment.lock_anchor),
+        }))
+    }
+
+    pub(crate) fn delete_resolved_segment(
+        &self,
+        segment: &DiscoveredSegment,
+        resolved: AllRecordsResolved,
+    ) -> io::Result<()> {
+        self.ensure_directory()?;
+        if segment.state != SegmentState::Sealed
+            || segment.writer_id != resolved.writer_id
+            || segment.identity != resolved.identity
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "resolution capability does not match sealed segment identity",
+            ));
+        }
+        verify_path_identity(&segment.path, segment.identity)?;
+        verify_path_identity(&segment.lock_path, segment.lock_identity)?;
+        let (size_bytes, content_sha256) = sealed_content_fingerprint(segment)?;
+        if size_bytes != resolved.size_bytes || content_sha256 != resolved.content_sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "sealed journal segment changed after records were resolved",
+            ));
+        }
+        fs::remove_file(&segment.path)?;
+        fs::remove_file(&segment.lock_path)?;
+        sync_parent(&segment.path)
+    }
+
+    fn ensure_directory(&self) -> io::Result<()> {
+        create_dir_all_durable(&self.directory)
+    }
+}
+
+impl JournalSegmentWriter {
+    pub(crate) fn append(&mut self, record: &JournalRecord) -> io::Result<AppendAcknowledged> {
+        self.ensure_appendable()?;
+        let body = encode_record_body(record)?;
+        let frame = framing::encode_frame(JournalRecord::SCHEMA_VERSION as u16, &body)
+            .map_err(framing_error)?;
+        let result = (|| {
+            verify_path_identity(&self.path, self.identity)?;
+            let offset = self.file.seek(SeekFrom::End(0))?;
+            self.file.write_all(&frame)?;
+            self.file.flush()?;
+            self.file.sync_all()?;
+            verify_path_identity(&self.path, self.identity)?;
+            Ok(AppendAcknowledged {
+                offset,
+                frame_len: frame.len() as u64,
+            })
+        })();
+        self.finish_append(result)
+    }
+
+    #[cfg(test)]
+    fn append_with_test_fault(
+        &mut self,
+        record: &JournalRecord,
+        fault: AppendTestFault,
+    ) -> io::Result<AppendAcknowledged> {
+        self.ensure_appendable()?;
+        verify_path_identity(&self.path, self.identity)?;
+        let body = encode_record_body(record)?;
+        let frame = framing::encode_frame(JournalRecord::SCHEMA_VERSION as u16, &body)
+            .map_err(framing_error)?;
+        let _offset = self.file.seek(SeekFrom::End(0))?;
+        match fault {
+            AppendTestFault::AfterPartialWrite => {
+                let partial_len = (frame.len() / 2).max(1);
+                self.file.write_all(&frame[..partial_len])?;
+                self.append_failed = true;
+                Err(io::Error::other(
+                    "injected journal append failure after partial write",
+                ))
+            }
+            AppendTestFault::BeforeFlush => {
+                self.file.write_all(&frame)?;
+                self.append_failed = true;
+                Err(io::Error::other(
+                    "injected journal append failure before flush",
+                ))
+            }
+            AppendTestFault::BeforeSync => {
+                self.file.write_all(&frame)?;
+                self.file.flush()?;
+                self.append_failed = true;
+                Err(io::Error::other(
+                    "injected journal append failure before sync",
+                ))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn append_with_test_pause(
+        &mut self,
+        record: &JournalRecord,
+        partial_written: std::sync::mpsc::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    ) -> io::Result<AppendAcknowledged> {
+        self.ensure_appendable()?;
+        verify_path_identity(&self.path, self.identity)?;
+        let body = encode_record_body(record)?;
+        let frame = framing::encode_frame(JournalRecord::SCHEMA_VERSION as u16, &body)
+            .map_err(framing_error)?;
+        let offset = self.file.seek(SeekFrom::End(0))?;
+        let partial_len = (frame.len() / 2).max(1);
+        self.file.write_all(&frame[..partial_len])?;
+        self.file.flush()?;
+        partial_written
+            .send(())
+            .map_err(|_| io::Error::other("append pause receiver closed"))?;
+        resume
+            .recv()
+            .map_err(|_| io::Error::other("append pause sender closed"))?;
+        self.file.write_all(&frame[partial_len..])?;
+        self.file.flush()?;
+        self.file.sync_all()?;
+        verify_path_identity(&self.path, self.identity)?;
+        Ok(AppendAcknowledged {
+            offset,
+            frame_len: frame.len() as u64,
+        })
+    }
+
+    fn ensure_appendable(&self) -> io::Result<()> {
+        if self.append_failed {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "journal writer is poisoned after an unacknowledged append",
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish_append(
+        &mut self,
+        result: io::Result<AppendAcknowledged>,
+    ) -> io::Result<AppendAcknowledged> {
+        if result.is_err() {
+            self.append_failed = true;
+        }
+        result
+    }
+
+    #[cfg(test)]
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn create_lock_reservation(path: &Path) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    file.sync_all()?;
+    sync_parent(path)
+}
+
+fn encode_record_body(record: &JournalRecord) -> io::Result<Vec<u8>> {
+    let mut buffer = LimitedJsonBuffer {
+        bytes: Vec::new(),
+        limit: framing::MAX_RECORD_LEN as usize,
+        exceeded: false,
+    };
+    match serde_json::to_writer(&mut buffer, record) {
+        Ok(()) => Ok(buffer.bytes),
+        Err(_) if buffer.exceeded => Err(framing_error(framing::FramingError::RecordTooLong(
+            framing::MAX_RECORD_LEN + 1,
+        ))),
+        Err(error) => Err(io::Error::other(error)),
+    }
+}
+
+struct LimitedJsonBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for LimitedJsonBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "journal record JSON exceeds framing limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn parse_canonical_writer_id(value: &str) -> io::Result<Uuid> {
+    let writer_id = Uuid::parse_str(value)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid journal writer id"))?;
+    if writer_id.is_nil() || writer_id.hyphenated().to_string() != value {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "journal writer id is not a canonical non-nil lowercase UUID",
+        ));
+    }
+    Ok(writer_id)
+}
+
+fn verify_path_identity(path: &Path, expected: DurableFileIdentity) -> io::Result<()> {
+    let metadata = validate_regular_path(path)?;
+    if path_file_identity(path, &metadata)? != expected {
+        return Err(identity_changed_error());
+    }
+    Ok(())
+}
+
+fn validate_regular_path(path: &Path) -> io::Result<fs::Metadata> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "journal path is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "journal path is a hardlink alias",
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
+        let file = open_windows_reparse_aware(path)?;
+        reject_windows_hardlinks(&file)?;
+    }
+    reject_reparse_point(&metadata)?;
+    Ok(metadata)
+}
+
+fn open_segment_for_read(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "opened journal segment is not a regular file",
+        ));
+    }
+    reject_reparse_point(&metadata)?;
+    #[cfg(windows)]
+    reject_windows_hardlinks(&file)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_windows_reparse_aware(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    options.open(path)
+}
+
+#[cfg(windows)]
+fn reject_windows_hardlinks(file: &File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if information.nNumberOfLinks != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "journal path is a hardlink alias",
+        ));
+    }
+    Ok(())
+}
+
+fn read_up_to(file: &mut File, len: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(len);
+    Read::by_ref(file)
+        .take(len as u64)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn extend_corruption_capture(
+    file: &mut File,
+    raw_bytes: &mut Vec<u8>,
+    region_len: u64,
+) -> io::Result<()> {
+    let capture_len = region_len.min(MAX_CORRUPTION_CAPTURE_LEN as u64) as usize;
+    if raw_bytes.len() < capture_len {
+        raw_bytes.extend_from_slice(&read_up_to(file, capture_len - raw_bytes.len())?);
+    }
+    Ok(())
+}
+
+fn classify_framing_failure(
+    state: SegmentState,
+    offset: u64,
+    region_len: u64,
+    raw_bytes: Vec<u8>,
+    error: framing::FramingError,
+) -> SegmentTail {
+    if error == framing::FramingError::Truncated && state == SegmentState::Active {
+        SegmentTail::Provisional { offset, raw_bytes }
+    } else {
+        SegmentTail::DefinitiveCorruption {
+            offset,
+            region_len,
+            raw_bytes,
+            error,
+        }
+    }
+}
+
+fn verify_read_stability(
+    segment: &DiscoveredSegment,
+    file: &File,
+    before: &fs::Metadata,
+    snapshot_len: u64,
+) -> io::Result<()> {
+    let after = file.metadata()?;
+    if opened_file_identity(file, &after)? != segment.identity {
+        return Err(identity_changed_error());
+    }
+    if segment.state == SegmentState::Sealed
+        && (after.len() != snapshot_len || after.modified().ok() != before.modified().ok())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "sealed journal segment changed while reading",
+        ));
+    }
+    verify_path_identity(&segment.path, segment.identity)
+}
+
+fn sealed_content_fingerprint(segment: &DiscoveredSegment) -> io::Result<(u64, String)> {
+    let mut file = open_segment_for_read(&segment.path)?;
+    let before = file.metadata()?;
+    if opened_file_identity(&file, &before)? != segment.identity {
+        return Err(identity_changed_error());
+    }
+    let mut hasher = Sha256::new();
+    let mut size_bytes = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size_bytes = size_bytes.saturating_add(read as u64);
+    }
+    let after = file.metadata()?;
+    verify_path_identity(&segment.path, segment.identity)?;
+    if before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+        || size_bytes != after.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "sealed journal segment changed while fingerprinting",
+        ));
+    }
+    let content_sha256 = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok((size_bytes, content_sha256))
+}
+
+#[cfg(windows)]
+fn reject_reparse_point(metadata: &fs::Metadata) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "journal path is a reparse point",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn reject_reparse_point(_metadata: &fs::Metadata) -> io::Result<()> {
+    Ok(())
+}
+
+fn identity_changed_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "journal segment identity changed",
+    )
+}
+
+fn framing_error(error: framing::FramingError) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("invalid journal framing: {error:?}"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AllRecordsResolved, AppendTestFault, JournalSegmentStore, SealOutcome, SegmentState,
+        SegmentTail,
+    };
+    use crate::providers::durable_file::ExclusiveFileLock;
+    use std::fs;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+    use vaultkern_runtime_protocol::contracts::JournalRecord;
+    use vaultkern_runtime_protocol::framing::{
+        self, SEGMENT_FORMAT_VERSION, SEGMENT_HEADER_LEN, SEGMENT_MAGIC,
+    };
+
+    fn record(seq: u64) -> JournalRecord {
+        JournalRecord {
+            seq,
+            op_id: format!("01890f3e-7b00-7000-8000-{seq:012x}"),
+            vault_ref_id: "vault-alpha".to_owned(),
+            payload_sealed: "AAAAAAAAAAAAAAAAAAAAAA==".to_owned(),
+            nonce: "AAAAAAAAAAAAAAAA".to_owned(),
+            base_fingerprint: "00".repeat(32),
+            created_at: 1_700_000_000 + seq,
+        }
+    }
+
+    #[test]
+    fn writer_pins_header_and_preserves_multiple_raw_frames() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000001").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        let first = record(1);
+        let second = record(2);
+
+        writer.append(&first).unwrap();
+        writer.append(&second).unwrap();
+
+        let bytes = fs::read(writer.path()).unwrap();
+        assert_eq!(&bytes[..4], &SEGMENT_MAGIC);
+        assert_eq!(
+            &bytes[4..SEGMENT_HEADER_LEN],
+            &SEGMENT_FORMAT_VERSION.to_le_bytes()
+        );
+        let expected_first = framing::encode_frame(
+            JournalRecord::SCHEMA_VERSION as u16,
+            &serde_json::to_vec(&first).unwrap(),
+        )
+        .unwrap();
+        let expected_second = framing::encode_frame(
+            JournalRecord::SCHEMA_VERSION as u16,
+            &serde_json::to_vec(&second).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            &bytes[SEGMENT_HEADER_LEN..],
+            [expected_first.as_slice(), expected_second.as_slice()].concat()
+        );
+
+        let segments = store.discover().unwrap();
+        assert_eq!(segments.len(), 1);
+        let read = store.read(&segments[0]).unwrap();
+        assert_eq!(read.tail, SegmentTail::Complete);
+        assert_eq!(read.frames.len(), 2);
+        assert_eq!(read.frames[0].raw_bytes, expected_first);
+        assert_eq!(read.frames[1].raw_bytes, expected_second);
+        assert!(writer.path().exists());
+        assert!(!temp.path().join(format!("{writer_id}.sealed")).exists());
+    }
+
+    #[test]
+    fn writer_ids_are_single_use_and_independent_writers_do_not_share_a_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let first_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000011").unwrap();
+        let second_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000012").unwrap();
+        let mut first = store.create_writer_with_id(first_id).unwrap();
+        let mut second = store.create_writer_with_id(second_id).unwrap();
+
+        first.append(&record(1)).unwrap();
+        second.append(&record(2)).unwrap();
+
+        assert_ne!(first.path(), second.path());
+        assert_eq!(store.discover().unwrap().len(), 2);
+        drop(first);
+        let error = store.create_writer_with_id(first_id).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        second.append(&record(3)).unwrap();
+    }
+
+    #[test]
+    fn writer_creation_uses_a_bounded_lock_acquisition() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000013").unwrap();
+        let (path_tx, path_rx) = mpsc::channel::<std::path::PathBuf>();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let contender = thread::spawn(move || {
+            let lock_path = path_rx.recv().unwrap();
+            let lock = ExclusiveFileLock::acquire(&lock_path).unwrap();
+            acquired_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(lock);
+        });
+        let mut after_reservation = |lock_path: &std::path::Path| {
+            path_tx.send(lock_path.to_owned()).unwrap();
+            acquired_rx.recv().unwrap();
+        };
+        let started = std::time::Instant::now();
+
+        let error = store
+            .create_writer_with_test_hook(
+                writer_id,
+                Duration::from_millis(30),
+                &mut after_reservation,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        release_tx.send(()).unwrap();
+        contender.join().unwrap();
+    }
+
+    #[test]
+    fn production_writer_generation_uses_fresh_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+
+        let first = store.create_writer().unwrap();
+        let second = store.create_writer().unwrap();
+
+        assert_ne!(first.writer_id, second.writer_id);
+    }
+
+    #[test]
+    fn caller_supplied_writer_id_must_be_non_nil() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+
+        let error = store.create_writer_with_id(uuid::Uuid::nil()).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(store.discover().unwrap().is_empty());
+        let nil_name = uuid::Uuid::nil().to_string();
+        fs::write(
+            temp.path().join(&nil_name),
+            framing::encode_segment_header(),
+        )
+        .unwrap();
+        fs::write(temp.path().join(format!("{nil_name}.lock")), b"").unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn active_eof_truncation_is_provisional_and_keeps_complete_frames() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000021").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        writer.append(&record(2)).unwrap();
+        let path = writer.path().to_owned();
+        drop(writer);
+        let complete = fs::read(&path).unwrap();
+        fs::write(&path, &complete[..complete.len() - 3]).unwrap();
+
+        let segments = store.discover().unwrap();
+        let read = store.read(&segments[0]).unwrap();
+
+        assert_eq!(read.frames.len(), 1);
+        match read.tail {
+            SegmentTail::Provisional { offset, raw_bytes } => {
+                assert_eq!(
+                    offset,
+                    (SEGMENT_HEADER_LEN + read.frames[0].raw_bytes.len()) as u64
+                );
+                assert_eq!(raw_bytes, complete[offset as usize..complete.len() - 3]);
+            }
+            other => panic!("expected provisional tail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn active_crc_failure_is_definitive_from_failure_offset_to_eof() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000022").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        writer.append(&record(2)).unwrap();
+        writer.append(&record(3)).unwrap();
+        let path = writer.path().to_owned();
+        drop(writer);
+        let mut bytes = fs::read(&path).unwrap();
+        let first = framing::decode_frame(&bytes[SEGMENT_HEADER_LEN..]).unwrap();
+        let failure_offset = SEGMENT_HEADER_LEN + first.consumed;
+        let second = framing::decode_frame(&bytes[failure_offset..]).unwrap();
+        let third_offset = failure_offset + second.consumed;
+        bytes[failure_offset + 7] ^= 0x40;
+        fs::write(&path, &bytes).unwrap();
+
+        let segment = store.discover().unwrap().pop().unwrap();
+        let read = store.read(&segment).unwrap();
+
+        assert_eq!(read.frames.len(), 1);
+        match read.tail {
+            SegmentTail::DefinitiveCorruption {
+                offset,
+                raw_bytes,
+                error,
+                ..
+            } => {
+                assert_eq!(offset, failure_offset as u64);
+                assert_eq!(raw_bytes, bytes[failure_offset..]);
+                assert!(framing::decode_frame(&raw_bytes[third_offset - failure_offset..]).is_ok());
+                assert_eq!(error, framing::FramingError::CrcMismatch);
+            }
+            other => panic!("expected definitive corruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn active_oversize_length_is_definitive_without_allocating_the_claimed_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000023").unwrap();
+        let writer = store.create_writer_with_id(writer_id).unwrap();
+        let path = writer.path().to_owned();
+        drop(writer);
+        let mut bytes = framing::encode_segment_header().to_vec();
+        bytes.extend_from_slice(&(framing::MAX_RECORD_LEN + 1).to_le_bytes());
+        bytes.extend_from_slice(b"later bytes do not make an oversize frame provisional");
+        fs::write(&path, &bytes).unwrap();
+
+        let segment = store.discover().unwrap().pop().unwrap();
+        let read = store.read(&segment).unwrap();
+
+        assert!(read.frames.is_empty());
+        assert!(matches!(
+            read.tail,
+            SegmentTail::DefinitiveCorruption {
+                offset,
+                error: framing::FramingError::RecordTooLong(_),
+                ..
+            } if offset == SEGMENT_HEADER_LEN as u64
+        ));
+    }
+
+    #[test]
+    fn oversized_append_is_rejected_before_write_without_poisoning_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000024").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        let before = fs::metadata(writer.path()).unwrap().len();
+        let mut oversized = record(1);
+        oversized.payload_sealed = "A".repeat(framing::MAX_RECORD_LEN as usize + 1);
+
+        let error = writer.append(&oversized).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::metadata(writer.path()).unwrap().len(), before);
+        writer.append(&record(2)).unwrap();
+    }
+
+    #[test]
+    fn living_writer_blocks_bounded_seal_then_drop_allows_sealing() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000031").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+
+        assert_eq!(
+            ExclusiveFileLock::acquire_with_timeout(&active.path, Duration::from_millis(30))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        assert_eq!(
+            store.seal(&active, Duration::from_millis(30)).unwrap(),
+            SealOutcome::WriterAlive
+        );
+        assert_eq!(active.state, SegmentState::Active);
+        assert!(active.path.exists());
+
+        drop(writer);
+        drop(
+            ExclusiveFileLock::acquire_with_timeout(&active.path, Duration::from_secs(1)).unwrap(),
+        );
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(sealed) => sealed,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        assert_eq!(sealed.state, SegmentState::Sealed);
+        assert!(!active.path.exists());
+        assert!(sealed.path.exists());
+        assert_eq!(store.read(&sealed).unwrap().frames.len(), 1);
+    }
+
+    #[test]
+    fn whole_delete_requires_matching_sealed_identity_and_explicit_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let first_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000041").unwrap();
+        let second_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000042").unwrap();
+        let first_writer = store.create_writer_with_id(first_id).unwrap();
+        let second_writer = store.create_writer_with_id(second_id).unwrap();
+        let mut active = store.discover().unwrap();
+        active.sort_by_key(|segment| segment.writer_id);
+
+        assert!(AllRecordsResolved::for_segment(&active[0]).is_err());
+        drop(first_writer);
+        drop(second_writer);
+        let first = match store.seal(&active[0], Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let second = match store.seal(&active[1], Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let wrong_capability = AllRecordsResolved::for_segment(&first).unwrap();
+
+        let error = store
+            .delete_resolved_segment(&second, wrong_capability)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(first.path.exists());
+        assert!(second.path.exists());
+
+        let capability = AllRecordsResolved::for_segment(&first).unwrap();
+        store.delete_resolved_segment(&first, capability).unwrap();
+        assert!(!first.path.exists());
+        assert!(!temp.path().join(format!("{first_id}.lock")).exists());
+        assert!(second.path.exists());
+    }
+
+    #[test]
+    fn whole_delete_rejects_sealed_content_changed_after_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000043").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let capability = AllRecordsResolved::for_segment(&sealed).unwrap();
+        let mut changed = fs::read(&sealed.path).unwrap();
+        changed[SEGMENT_HEADER_LEN + 8] ^= 0x40;
+        fs::write(&sealed.path, &changed).unwrap();
+        assert_eq!(
+            fs::metadata(&sealed.path).unwrap().len(),
+            changed.len() as u64
+        );
+
+        let error = store
+            .delete_resolved_segment(&sealed, capability)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(sealed.path.exists());
+    }
+
+    #[test]
+    fn discovery_rejects_illegal_names_and_duplicate_logical_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        fs::write(temp.path().join("not-a-writer"), b"VKJS\x01\x00").unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        fs::remove_file(temp.path().join("not-a-writer")).unwrap();
+
+        fs::write(temp.path().join("not-a-writer.lock"), b"").unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        fs::remove_file(temp.path().join("not-a-writer.lock")).unwrap();
+
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000051").unwrap();
+        let writer = store.create_writer_with_id(writer_id).unwrap();
+        let sealed_path = temp.path().join(format!("{writer_id}.sealed"));
+        fs::write(&sealed_path, framing::encode_segment_header()).unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn discovery_ignores_valid_archived_corrupt_segments_but_rejects_invalid_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = "01890f3e-7b00-7000-8000-00000000005b";
+        fs::write(
+            temp.path().join(format!("{writer_id}.corrupt")),
+            b"opaque archived bytes",
+        )
+        .unwrap();
+
+        assert!(store.discover().unwrap().is_empty());
+        assert_eq!(
+            store
+                .create_writer_with_id(uuid::Uuid::parse_str(writer_id).unwrap())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert!(!temp.path().join(writer_id).exists());
+        fs::write(
+            temp.path().join(writer_id),
+            framing::encode_segment_header(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        fs::remove_file(temp.path().join(writer_id)).unwrap();
+
+        fs::write(temp.path().join("not-a-writer.corrupt"), b"opaque").unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_hardlink_path_escape_and_physical_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let escaped_id = "01890f3e-7b00-7000-8000-000000000058";
+        fs::hard_link(outside.path(), temp.path().join(escaped_id)).unwrap();
+        fs::write(temp.path().join(format!("{escaped_id}.lock")), b"").unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+
+        fs::remove_file(temp.path().join(escaped_id)).unwrap();
+        fs::remove_file(temp.path().join(format!("{escaped_id}.lock"))).unwrap();
+        let first_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000059").unwrap();
+        let second_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-00000000005a").unwrap();
+        let writer = store.create_writer_with_id(first_id).unwrap();
+        fs::hard_link(writer.path(), temp.path().join(second_id.to_string())).unwrap();
+        fs::write(temp.path().join(format!("{second_id}.lock")), b"").unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_segment_and_lock_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let writer_id = "01890f3e-7b00-7000-8000-000000000052";
+        symlink(outside.path(), temp.path().join(writer_id)).unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        fs::remove_file(temp.path().join(writer_id)).unwrap();
+        symlink(
+            outside.path(),
+            temp.path().join(format!("{writer_id}.lock")),
+        )
+        .unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_rejects_replaced_directory_before_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let journal = temp.path().join("journal");
+        let outside = temp.path().join("outside");
+        let original = temp.path().join("original");
+        let store = JournalSegmentStore::open(&journal).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::rename(&journal, &original).unwrap();
+        symlink(&outside, &journal).unwrap();
+
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            store.create_writer().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn store_rejects_replaced_directory_reparse_point_before_following_it() {
+        use std::os::windows::fs::symlink_dir;
+
+        let temp = tempfile::tempdir().unwrap();
+        let journal = temp.path().join("journal");
+        let outside = temp.path().join("outside");
+        let original = temp.path().join("original");
+        let store = JournalSegmentStore::open(&journal).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::rename(&journal, &original).unwrap();
+        symlink_dir(&outside, &journal).unwrap();
+
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            store.create_writer().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn discovery_rejects_segment_and_lock_reparse_points() {
+        use std::os::windows::fs::symlink_file;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let writer_id = "01890f3e-7b00-7000-8000-000000000052";
+        symlink_file(outside.path(), temp.path().join(writer_id)).unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        fs::remove_file(temp.path().join(writer_id)).unwrap();
+        symlink_file(
+            outside.path(),
+            temp.path().join(format!("{writer_id}.lock")),
+        )
+        .unwrap();
+        assert_eq!(
+            store.discover().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_rejects_replaced_active_path_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000056").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        let path = writer.path().to_owned();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, framing::encode_segment_header()).unwrap();
+
+        assert_eq!(
+            writer.append(&record(1)).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seal_rejects_replaced_writer_lock_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000057").unwrap();
+        let writer = store.create_writer_with_id(writer_id).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        let lock_path = temp.path().join(format!("{writer_id}.lock"));
+        fs::remove_file(&lock_path).unwrap();
+        fs::write(&lock_path, b"replacement").unwrap();
+
+        assert_eq!(
+            store
+                .seal(&active, Duration::from_millis(30))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(active.path.exists());
+        drop(writer);
+    }
+
+    #[test]
+    fn exact_identity_blocks_read_seal_and_delete_after_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000053").unwrap();
+        let writer = store.create_writer_with_id(writer_id).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        fs::remove_file(&active.path).unwrap();
+        fs::write(&active.path, framing::encode_segment_header()).unwrap();
+
+        assert_eq!(
+            store.read(&active).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            store
+                .seal(&active, Duration::from_secs(1))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        let replacement = store.discover().unwrap().pop().unwrap();
+        let sealed = match store.seal(&replacement, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let capability = AllRecordsResolved::for_segment(&sealed).unwrap();
+        fs::remove_file(&sealed.path).unwrap();
+        fs::write(&sealed.path, framing::encode_segment_header()).unwrap();
+        assert_eq!(
+            store
+                .delete_resolved_segment(&sealed, capability)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn unknown_segment_header_version_fails_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000054").unwrap();
+        let writer = store.create_writer_with_id(writer_id).unwrap();
+        let path = writer.path().to_owned();
+        drop(writer);
+        fs::write(&path, b"VKJS\x02\x00").unwrap();
+        let segment = store.discover().unwrap().pop().unwrap();
+
+        assert!(matches!(
+            store.read(&segment).unwrap().tail,
+            SegmentTail::DefinitiveCorruption {
+                offset: 0,
+                error: framing::FramingError::UnsupportedFormatVersion(2),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn active_truncated_header_is_provisional_during_creation_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000055").unwrap();
+        let writer = store.create_writer_with_id(writer_id).unwrap();
+        let path = writer.path().to_owned();
+        drop(writer);
+        fs::write(&path, b"VKJ").unwrap();
+        let segment = store.discover().unwrap().pop().unwrap();
+
+        assert_eq!(
+            store.read(&segment).unwrap().tail,
+            SegmentTail::Provisional {
+                offset: 0,
+                raw_bytes: b"VKJ".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn sealed_truncation_crc_and_oversize_are_definitive_unreachable_regions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let ids = [
+            "01890f3e-7b00-7000-8000-000000000061",
+            "01890f3e-7b00-7000-8000-000000000062",
+            "01890f3e-7b00-7000-8000-000000000063",
+        ];
+        let mut sealed = Vec::new();
+        for (index, id) in ids.into_iter().enumerate() {
+            let mut writer = store
+                .create_writer_with_id(uuid::Uuid::parse_str(id).unwrap())
+                .unwrap();
+            writer.append(&record(index as u64 + 1)).unwrap();
+            let active = store
+                .discover()
+                .unwrap()
+                .into_iter()
+                .find(|segment| segment.writer_id == writer.writer_id)
+                .unwrap();
+            drop(writer);
+            sealed.push(match store.seal(&active, Duration::from_secs(1)).unwrap() {
+                SealOutcome::Sealed(segment) => segment,
+                other => panic!("expected sealed segment, got {other:?}"),
+            });
+        }
+
+        let truncated_bytes = fs::read(&sealed[0].path).unwrap();
+        fs::write(
+            &sealed[0].path,
+            &truncated_bytes[..truncated_bytes.len() - 1],
+        )
+        .unwrap();
+        assert!(matches!(
+            store.read(&sealed[0]).unwrap().tail,
+            SegmentTail::DefinitiveCorruption {
+                error: framing::FramingError::Truncated,
+                ..
+            }
+        ));
+
+        let mut crc_bytes = fs::read(&sealed[1].path).unwrap();
+        *crc_bytes.last_mut().unwrap() ^= 1;
+        fs::write(&sealed[1].path, &crc_bytes).unwrap();
+        assert!(matches!(
+            store.read(&sealed[1]).unwrap().tail,
+            SegmentTail::DefinitiveCorruption {
+                error: framing::FramingError::CrcMismatch,
+                ..
+            }
+        ));
+
+        let mut oversize_bytes = framing::encode_segment_header().to_vec();
+        oversize_bytes.extend_from_slice(&(framing::MAX_RECORD_LEN + 1).to_le_bytes());
+        fs::write(&sealed[2].path, &oversize_bytes).unwrap();
+        assert!(matches!(
+            store.read(&sealed[2]).unwrap().tail,
+            SegmentTail::DefinitiveCorruption {
+                error: framing::FramingError::RecordTooLong(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn definitive_region_reports_full_length_but_caps_captured_raw_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000064").unwrap();
+        let writer = store.create_writer_with_id(writer_id).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let capture_limit = framing::MAX_RECORD_LEN as usize + framing::FRAME_OVERHEAD;
+        let mut bytes = framing::encode_segment_header().to_vec();
+        bytes.extend_from_slice(&(framing::MAX_RECORD_LEN + 1).to_le_bytes());
+        bytes.resize(SEGMENT_HEADER_LEN + capture_limit + 128, 0x5a);
+        fs::write(&sealed.path, &bytes).unwrap();
+
+        match store.read(&sealed).unwrap().tail {
+            SegmentTail::DefinitiveCorruption {
+                offset,
+                region_len,
+                raw_bytes,
+                error: framing::FramingError::RecordTooLong(_),
+            } => {
+                assert_eq!(offset, SEGMENT_HEADER_LEN as u64);
+                assert_eq!(region_len, (bytes.len() - SEGMENT_HEADER_LEN) as u64);
+                assert_eq!(raw_bytes.len(), capture_limit);
+                assert_eq!(raw_bytes, bytes[SEGMENT_HEADER_LEN..][..capture_limit]);
+            }
+            other => panic!("expected capped definitive region, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_append_is_not_acknowledged_and_remains_a_classifiable_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000071").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+
+        let error = writer
+            .append_with_test_fault(&record(2), AppendTestFault::AfterPartialWrite)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            writer.append(&record(3)).unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+
+        let active = store.discover().unwrap().pop().unwrap();
+        let active_read = store.read(&active).unwrap();
+        assert_eq!(active_read.frames.len(), 1);
+        assert!(matches!(active_read.tail, SegmentTail::Provisional { .. }));
+
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        assert!(matches!(
+            store.read(&sealed).unwrap().tail,
+            SegmentTail::DefinitiveCorruption {
+                error: framing::FramingError::Truncated,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn flush_and_sync_faults_never_return_append_acknowledgement() {
+        for (index, fault) in [AppendTestFault::BeforeFlush, AppendTestFault::BeforeSync]
+            .into_iter()
+            .enumerate()
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let store = JournalSegmentStore::open(temp.path()).unwrap();
+            let writer_id =
+                uuid::Uuid::parse_str(&format!("01890f3e-7b00-7000-8000-00000000008{}", index + 1))
+                    .unwrap();
+            let mut writer = store.create_writer_with_id(writer_id).unwrap();
+
+            let error = writer
+                .append_with_test_fault(&record(1), fault)
+                .unwrap_err();
+
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert_eq!(
+                writer.append(&record(2)).unwrap_err().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+            let active = store.discover().unwrap().pop().unwrap();
+            let read = store.read(&active).unwrap();
+            assert!(matches!(
+                read.tail,
+                SegmentTail::Complete | SegmentTail::Provisional { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn concurrent_reader_treats_in_progress_append_eof_as_provisional() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000072").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        let (partial_tx, partial_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            writer
+                .append_with_test_pause(&record(2), partial_tx, resume_rx)
+                .unwrap();
+        });
+        partial_rx.recv().unwrap();
+
+        let during = store.read(&active).unwrap();
+        assert_eq!(during.frames.len(), 1);
+        assert!(matches!(during.tail, SegmentTail::Provisional { .. }));
+
+        resume_tx.send(()).unwrap();
+        handle.join().unwrap();
+        let after = store.read(&active).unwrap();
+        assert_eq!(after.frames.len(), 2);
+        assert_eq!(after.tail, SegmentTail::Complete);
+    }
+
+    #[test]
+    fn active_reader_uses_a_bounded_file_snapshot_when_append_races() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000073").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        let mut append_after_snapshot = || {
+            writer.append(&record(2)).unwrap();
+        };
+
+        let snapshot = store
+            .read_with_test_hook(&active, &mut append_after_snapshot)
+            .unwrap();
+
+        assert_eq!(snapshot.frames.len(), 1);
+        assert_eq!(snapshot.tail, SegmentTail::Complete);
+        let current = store.read(&active).unwrap();
+        assert_eq!(current.frames.len(), 2);
+        assert_eq!(current.tail, SegmentTail::Complete);
+    }
+
+    #[test]
+    fn sealed_reader_rejects_in_place_change_during_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000074").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let sealed_path = sealed.path.clone();
+        let mut mutate_after_snapshot = || {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&sealed_path)
+                .unwrap();
+            file.write_all(b"x").unwrap();
+            file.flush().unwrap();
+        };
+
+        let error = store
+            .read_with_test_hook(&sealed, &mut mutate_after_snapshot)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+}
