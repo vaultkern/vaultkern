@@ -569,6 +569,7 @@ impl QuickUnlockCoordinator {
                 Ok(UnlockOutcome::Unlocked(secret_material))
             }
             EnvelopeInspection::KdfGenerationMismatch => {
+                drop(secret_material);
                 let reduction = reduce(
                     &current,
                     QuickUnlockOperation::Unlock,
@@ -1033,6 +1034,7 @@ mod tests {
         calls: Mutex<Vec<RecordCall>>,
         seal_error: Mutex<Option<PlatformError>>,
         unseal_error: Mutex<Option<PlatformError>>,
+        unseal_drop_probe: Mutex<Option<Arc<AtomicBool>>>,
         delete_error: Mutex<Option<PlatformError>>,
         generation_error: Mutex<Option<PlatformError>>,
         after_seal_cas: Mutex<Option<ForcedCas>>,
@@ -1081,6 +1083,7 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 seal_error: Mutex::new(None),
                 unseal_error: Mutex::new(None),
+                unseal_drop_probe: Mutex::new(None),
                 delete_error: Mutex::new(None),
                 generation_error: Mutex::new(None),
                 after_seal_cas: Mutex::new(None),
@@ -1253,7 +1256,10 @@ mod tests {
                     .compare_and_swap(&forced.vault_ref_id, Some(&forced.expected), forced.next)
                     .unwrap();
             }
-            Ok(SecretBytes::new(envelope))
+            Ok(match self.unseal_drop_probe.lock().unwrap().take() {
+                Some(probe) => SecretBytes::with_drop_probe(envelope, probe),
+                None => SecretBytes::new(envelope),
+            })
         }
 
         fn delete(&self, key: &PlatformRecordKey) -> Result<(), PlatformError> {
@@ -1881,6 +1887,59 @@ mod tests {
     }
 
     #[test]
+    fn orphaned_reseal_builds_material_for_the_generation_the_coordinator_selected() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        ledger
+            .compare_and_swap(
+                "vault",
+                None,
+                entry(
+                    QuickUnlockState::NeedsReenroll {
+                        reason: NeedsReenrollReason::KdfRotated,
+                    },
+                    7,
+                ),
+            )
+            .unwrap();
+        let records = Arc::new(FakeRecordStore::new());
+        records.insert(key("scope", "vault", 8), b"aad-generation=8");
+        let coordinator = coordinator(ledger.clone(), Arc::clone(&records));
+
+        assert_eq!(
+            coordinator
+                .full_credential_unlocked("scope", "vault", |record_key| {
+                    if record_key != &key("scope", "vault", 9) {
+                        return Err(EnvelopeBuildError::Failed);
+                    }
+                    Ok(secret(b"aad-generation=9"))
+                })
+                .unwrap(),
+            FullCredentialOutcome::Resealed {
+                cleanup: CleanupStatus::Complete
+            }
+        );
+        assert_eq!(
+            ledger.get("vault").unwrap(),
+            Some(entry(QuickUnlockState::Enrolled, 9))
+        );
+        assert_eq!(records.record(8), None);
+        assert_eq!(records.record(9), Some(b"aad-generation=9".to_vec()));
+        let unlocked = coordinator
+            .unlock("scope", "vault", |material| {
+                if material == b"aad-generation=9" {
+                    EnvelopeInspection::Valid
+                } else {
+                    EnvelopeInspection::KdfGenerationMismatch
+                }
+            })
+            .unwrap();
+        let UnlockOutcome::Unlocked(material) = unlocked else {
+            panic!("the generation-bound reseal material was not unlockable");
+        };
+        assert_eq!(material.expose(), b"aad-generation=9");
+    }
+
+    #[test]
     fn rejected_generation_binding_never_seals_or_commits_the_retry() {
         let ledger = QuickUnlockLedgerStore::in_memory();
         let disabled = entry(QuickUnlockState::Disabled, 7);
@@ -2061,6 +2120,41 @@ mod tests {
                 .unwrap(),
             UnlockOutcome::NeedsReenroll(NeedsReenrollReason::KdfRotated)
         ));
+    }
+
+    #[test]
+    fn mismatched_unsealed_secret_is_dropped_before_ledger_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quick-unlock.json");
+        let initial = QuickUnlockLedgerStore::persistent(path.clone(), Duration::from_secs(1));
+        initial
+            .compare_and_swap("vault", None, entry(QuickUnlockState::Enrolled, 4))
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&dropped);
+        let ledger = QuickUnlockLedgerStore::persistent_with_faults(
+            path,
+            Duration::from_secs(1),
+            DurableFaultInjector::run_once(DurableFaultPoint::BeforeTargetReplace, move || {
+                assert!(
+                    observed.load(Ordering::SeqCst),
+                    "mismatched unsealed material remained live during ledger publication"
+                );
+            }),
+        );
+        let records = Arc::new(FakeRecordStore::new());
+        records.insert(key("scope", "vault", 4), b"stale-transformed-key");
+        *records.unseal_drop_probe.lock().unwrap() = Some(Arc::clone(&dropped));
+
+        assert!(matches!(
+            coordinator(ledger, records)
+                .unlock("scope", "vault", |_| {
+                    EnvelopeInspection::KdfGenerationMismatch
+                })
+                .unwrap(),
+            UnlockOutcome::NeedsReenroll(NeedsReenrollReason::KdfRotated)
+        ));
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     #[test]
