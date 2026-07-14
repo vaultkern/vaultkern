@@ -782,6 +782,11 @@ pub(crate) fn rename_missing_target_durable(
         target_conflict: false,
         source,
     })?;
+    verify_single_link(source).map_err(|source| PublishError {
+        published: false,
+        target_conflict: false,
+        source,
+    })?;
     verify_target_expectation(target, TargetExpectation::Missing).map_err(|source| {
         PublishError {
             published: false,
@@ -803,11 +808,51 @@ pub(crate) fn rename_missing_target_durable(
         target_conflict: false,
         source,
     })?;
+    verify_single_link(target).map_err(|source| PublishError {
+        published: true,
+        target_conflict: false,
+        source,
+    })?;
     sync_parent(target).map_err(|source| PublishError {
         published: true,
         target_conflict: false,
         source,
     })
+}
+
+#[cfg(unix)]
+fn verify_single_link(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if fs::symlink_metadata(path)?.nlink() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable publish source has a hardlink alias",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_single_link(path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = options.open(path)?;
+    if windows_file_information(&file)?.nNumberOfLinks != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable publish source has a hardlink alias",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn verify_single_link(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1548,6 +1593,27 @@ mod tests {
             0o600
         );
         temp.discard().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_replace_publish_rejects_hardlinked_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("segment");
+        let alias = dir.path().join("alias");
+        let target = dir.path().join("segment.sealed");
+        fs::write(&source, b"journal bytes").unwrap();
+        let metadata = fs::symlink_metadata(&source).unwrap();
+        let identity = super::path_file_identity(&source, &metadata).unwrap();
+        fs::hard_link(&source, &alias).unwrap();
+
+        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
+
+        assert!(!error.published);
+        assert_eq!(error.source.kind(), io::ErrorKind::Unsupported);
+        assert!(source.exists());
+        assert!(!target.exists());
+        assert_eq!(fs::read(&alias).unwrap(), b"journal bytes");
     }
 
     #[cfg(windows)]
