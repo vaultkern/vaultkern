@@ -758,6 +758,129 @@ pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
     sync_directory(parent)
 }
 
+pub(crate) fn rename_missing_target_durable(
+    source: &Path,
+    target: &Path,
+    expected_source_identity: DurableFileIdentity,
+) -> Result<(), PublishError> {
+    if source.parent() != target.parent() {
+        return Err(PublishError {
+            published: false,
+            target_conflict: false,
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "durable rename requires source and target in the same directory",
+            ),
+        });
+    }
+    verify_target_expectation(
+        source,
+        TargetExpectation::Identity(expected_source_identity),
+    )
+    .map_err(|source| PublishError {
+        published: false,
+        target_conflict: false,
+        source,
+    })?;
+    verify_target_expectation(target, TargetExpectation::Missing).map_err(|source| {
+        PublishError {
+            published: false,
+            target_conflict: source.kind() == io::ErrorKind::AlreadyExists,
+            source,
+        }
+    })?;
+    rename_missing_target(source, target).map_err(|source| PublishError {
+        published: false,
+        target_conflict: source.kind() == io::ErrorKind::AlreadyExists,
+        source,
+    })?;
+    verify_target_expectation(
+        target,
+        TargetExpectation::Identity(expected_source_identity),
+    )
+    .map_err(|source| PublishError {
+        published: true,
+        target_conflict: false,
+        source,
+    })?;
+    sync_parent(target).map_err(|source| PublishError {
+        published: true,
+        target_conflict: false,
+        source,
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn rename_missing_target(source: &Path, target: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let target = CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn rename_missing_target(source: &Path, target: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let target = CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
+    let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_missing_target(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    let result = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
+fn rename_missing_target(_source: &Path, _target: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "durable no-replace rename is unavailable on this platform",
+    ))
+}
+
 pub(crate) fn create_dir_all_durable(path: &Path) -> io::Result<()> {
     use std::path::Component;
 
