@@ -212,10 +212,11 @@ impl AllRecordsResolved {
         if segment.state != SegmentState::Sealed
             || segment.writer_id != read.writer_id
             || segment.identity != read.identity
+            || read.tail != SegmentTail::Complete
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "record resolution snapshot does not match sealed segment identity",
+                "record resolution requires a complete sealed segment snapshot",
             ));
         }
         Ok(Self {
@@ -254,7 +255,7 @@ impl JournalSegmentStore {
         &self,
         writer_id: Uuid,
     ) -> io::Result<JournalSegmentWriter> {
-        self.create_writer_inner(writer_id, WRITER_LOCK_TIMEOUT, None, None)
+        self.create_writer_inner(writer_id, WRITER_LOCK_TIMEOUT, None, None, None)
     }
 
     #[cfg(test)]
@@ -264,7 +265,22 @@ impl JournalSegmentStore {
         lock_timeout: Duration,
         after_reservation: &mut dyn FnMut(&Path),
     ) -> io::Result<JournalSegmentWriter> {
-        self.create_writer_inner(writer_id, lock_timeout, Some(after_reservation), None)
+        self.create_writer_inner(writer_id, lock_timeout, None, Some(after_reservation), None)
+    }
+
+    #[cfg(all(test, unix))]
+    fn create_writer_with_pre_reservation_test_hook(
+        &self,
+        writer_id: Uuid,
+        before_reservation: &mut dyn FnMut(),
+    ) -> io::Result<JournalSegmentWriter> {
+        self.create_writer_inner(
+            writer_id,
+            WRITER_LOCK_TIMEOUT,
+            Some(before_reservation),
+            None,
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -277,6 +293,7 @@ impl JournalSegmentStore {
             writer_id,
             WRITER_LOCK_TIMEOUT,
             None,
+            None,
             Some(after_segment_create),
         )
     }
@@ -285,6 +302,7 @@ impl JournalSegmentStore {
         &self,
         writer_id: Uuid,
         lock_timeout: Duration,
+        mut before_reservation: Option<&mut dyn FnMut()>,
         mut after_reservation: Option<&mut dyn FnMut(&Path)>,
         mut after_segment_create: Option<&mut dyn FnMut(&Path) -> io::Result<()>>,
     ) -> io::Result<JournalSegmentWriter> {
@@ -295,6 +313,9 @@ impl JournalSegmentStore {
             ));
         }
         self.ensure_directory()?;
+        if let Some(hook) = before_reservation.as_mut() {
+            hook();
+        }
         let stem = writer_id.hyphenated().to_string();
         let path = self.directory.join(&stem);
         let sealed_path = self.directory.join(format!("{stem}.sealed"));
@@ -305,6 +326,7 @@ impl JournalSegmentStore {
         let mut _segment_anchor = None;
         let mut segment_identity = None;
         let result = (|| {
+            self.ensure_directory()?;
             if let Some(hook) = after_reservation.as_mut() {
                 hook(&lock_path);
             }
@@ -533,15 +555,17 @@ impl JournalSegmentStore {
             hook();
         }
         verify_read_stability(segment, &file, &before, snapshot_len)?;
-        let mut header = read_up_to(
+        let mut parsed_hasher = Sha256::new();
+        let mut header = read_up_to_hashed(
             &mut file,
             snapshot_len.min(SEGMENT_HEADER_LEN as u64) as usize,
+            &mut parsed_hasher,
         )?;
         // Finish parsing and stability validation before exposing any frame to
         // a callback that may have irreversible effects.
-        let mut frame_count = 0;
+        let mut validated_frames = Vec::new();
         let tail = if let Err(error) = framing::decode_segment_header(&header) {
-            extend_corruption_capture(&mut file, &mut header, snapshot_len)?;
+            extend_corruption_capture(&mut file, &mut header, snapshot_len, &mut parsed_hasher)?;
             classify_framing_failure(segment.state, 0, snapshot_len, header, error)
         } else {
             let mut offset = SEGMENT_HEADER_LEN as u64;
@@ -550,7 +574,8 @@ impl JournalSegmentStore {
                     break SegmentTail::Complete;
                 }
                 let region_len = snapshot_len - offset;
-                let mut raw_bytes = read_up_to(&mut file, region_len.min(4) as usize)?;
+                let mut raw_bytes =
+                    read_up_to_hashed(&mut file, region_len.min(4) as usize, &mut parsed_hasher)?;
                 if raw_bytes.len() < 4 {
                     break classify_framing_failure(
                         segment.state,
@@ -563,7 +588,12 @@ impl JournalSegmentStore {
                 let body_len =
                     u32::from_le_bytes([raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3]]);
                 if body_len > framing::MAX_RECORD_LEN {
-                    extend_corruption_capture(&mut file, &mut raw_bytes, region_len)?;
+                    extend_corruption_capture(
+                        &mut file,
+                        &mut raw_bytes,
+                        region_len,
+                        &mut parsed_hasher,
+                    )?;
                     break SegmentTail::DefinitiveCorruption {
                         offset,
                         region_len,
@@ -573,9 +603,10 @@ impl JournalSegmentStore {
                 }
                 let frame_len = framing::FRAME_OVERHEAD + body_len as usize;
                 let available = region_len.min(frame_len as u64) as usize;
-                raw_bytes.extend_from_slice(&read_up_to(
+                raw_bytes.extend_from_slice(&read_up_to_hashed(
                     &mut file,
                     available.saturating_sub(raw_bytes.len()),
+                    &mut parsed_hasher,
                 )?);
                 if raw_bytes.len() < frame_len {
                     break classify_framing_failure(
@@ -587,12 +618,22 @@ impl JournalSegmentStore {
                     );
                 }
                 match framing::decode_frame(&raw_bytes) {
-                    Ok(_) => {
-                        frame_count += 1;
+                    Ok(decoded) => {
+                        validated_frames.push(RawJournalFrame {
+                            offset,
+                            record_version: decoded.record_version,
+                            body: decoded.body,
+                            raw_bytes,
+                        });
                         offset += frame_len as u64;
                     }
                     Err(error) => {
-                        extend_corruption_capture(&mut file, &mut raw_bytes, region_len)?;
+                        extend_corruption_capture(
+                            &mut file,
+                            &mut raw_bytes,
+                            region_len,
+                            &mut parsed_hasher,
+                        )?;
                         break classify_framing_failure(
                             segment.state,
                             offset,
@@ -604,45 +645,36 @@ impl JournalSegmentStore {
                 }
             }
         };
+        let parsed_position = file.stream_position()?;
+        let parsed_snapshot_complete = hash_remaining_snapshot(
+            &mut file,
+            snapshot_len.saturating_sub(parsed_position),
+            &mut parsed_hasher,
+        )?;
+        if parsed_snapshot_complete {
+            let parsed_sha256: String = parsed_hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            if parsed_sha256 != snapshot_sha256 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "journal segment content changed between fingerprint and parse",
+                ));
+            }
+        } else if segment.state == SegmentState::Sealed {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "sealed journal segment shrank while parsing",
+            ));
+        }
         verify_read_stability(segment, &file, &before, snapshot_len)?;
-        file.seek(SeekFrom::Start(SEGMENT_HEADER_LEN as u64))?;
+        let frame_count = validated_frames.len();
         #[cfg(test)]
-        let mut frames = Vec::new();
-        let mut offset = SEGMENT_HEADER_LEN as u64;
-        for _ in 0..frame_count {
-            let mut raw_bytes = read_up_to(&mut file, 4)?;
-            if raw_bytes.len() != 4 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "validated journal frame length disappeared before delivery",
-                ));
-            }
-            let body_len =
-                u32::from_le_bytes([raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3]]);
-            if body_len > framing::MAX_RECORD_LEN {
-                return Err(framing_error(framing::FramingError::RecordTooLong(
-                    body_len,
-                )));
-            }
-            let frame_len = framing::FRAME_OVERHEAD + body_len as usize;
-            raw_bytes.extend_from_slice(&read_up_to(&mut file, frame_len - raw_bytes.len())?);
-            if raw_bytes.len() != frame_len {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "validated journal frame disappeared before delivery",
-                ));
-            }
-            let decoded = framing::decode_frame(&raw_bytes).map_err(framing_error)?;
-            let frame = RawJournalFrame {
-                offset,
-                record_version: decoded.record_version,
-                body: decoded.body,
-                raw_bytes,
-            };
-            #[cfg(test)]
-            frames.push(frame.clone());
+        let frames = validated_frames.clone();
+        for frame in validated_frames {
             visit_frame(frame)?;
-            offset += frame_len as u64;
         }
         Ok(SegmentRead {
             #[cfg(test)]
@@ -1268,6 +1300,30 @@ fn read_up_to(file: &mut File, len: usize) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn read_up_to_hashed(file: &mut File, len: usize, hasher: &mut Sha256) -> io::Result<Vec<u8>> {
+    let bytes = read_up_to(file, len)?;
+    hasher.update(&bytes);
+    Ok(bytes)
+}
+
+fn hash_remaining_snapshot(
+    file: &mut File,
+    mut remaining: u64,
+    hasher: &mut Sha256,
+) -> io::Result<bool> {
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining != 0 {
+        let wanted = remaining.min(buffer.len() as u64) as usize;
+        let read = file.read(&mut buffer[..wanted])?;
+        if read == 0 {
+            return Ok(false);
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(true)
+}
+
 fn fingerprint_open_snapshot(file: &mut File, snapshot_len: u64) -> io::Result<String> {
     file.seek(SeekFrom::Start(0))?;
     let mut remaining = snapshot_len;
@@ -1297,10 +1353,15 @@ fn extend_corruption_capture(
     file: &mut File,
     raw_bytes: &mut Vec<u8>,
     region_len: u64,
+    hasher: &mut Sha256,
 ) -> io::Result<()> {
     let capture_len = region_len.min(MAX_CORRUPTION_CAPTURE_LEN as u64) as usize;
     if raw_bytes.len() < capture_len {
-        raw_bytes.extend_from_slice(&read_up_to(file, capture_len - raw_bytes.len())?);
+        raw_bytes.extend_from_slice(&read_up_to_hashed(
+            file,
+            capture_len - raw_bytes.len(),
+            hasher,
+        )?);
     }
     Ok(())
 }
@@ -2068,6 +2129,34 @@ mod tests {
     }
 
     #[test]
+    fn resolution_capability_requires_a_complete_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000048").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let mut bytes = fs::read(&sealed.path).unwrap();
+        bytes[SEGMENT_HEADER_LEN + 8] ^= 0x40;
+        fs::write(&sealed.path, bytes).unwrap();
+        let read = store.read(&sealed).unwrap();
+        assert!(matches!(
+            read.tail,
+            SegmentTail::DefinitiveCorruption { .. }
+        ));
+
+        let error = AllRecordsResolved::for_read(&sealed, &read).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(sealed.path.exists());
+    }
+
+    #[test]
     fn resolution_capability_is_bound_to_the_exact_read_snapshot() {
         let temp = tempfile::tempdir().unwrap();
         let store = JournalSegmentStore::open(temp.path()).unwrap();
@@ -2253,6 +2342,30 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         assert!(fs::read_dir(&journal).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_creation_rejects_directory_replacement_before_reservation_create() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = temp.path().join("journal");
+        let original = temp.path().join("original");
+        let replacement = temp.path().join("replacement");
+        let store = JournalSegmentStore::open(&journal).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-00000000005b").unwrap();
+        let mut replace_directory = || {
+            fs::rename(&journal, &original).unwrap();
+            fs::rename(&replacement, &journal).unwrap();
+        };
+
+        let error = store
+            .create_writer_with_pre_reservation_test_hook(writer_id, &mut replace_directory)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(fs::read_dir(&journal).unwrap().next().is_none());
+        assert!(fs::read_dir(&original).unwrap().next().is_none());
     }
 
     #[cfg(windows)]
@@ -2705,6 +2818,63 @@ mod tests {
     }
 
     #[test]
+    fn sealed_reader_compares_parsed_bytes_with_the_fingerprinted_snapshot() {
+        use std::fs::FileTimes;
+        use std::io::{Seek as _, SeekFrom};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000077").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        writer.append(&record(2)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let original_bytes = fs::read(&sealed.path).unwrap();
+        let first = framing::decode_frame(&original_bytes[SEGMENT_HEADER_LEN..]).unwrap();
+        let second_offset = (SEGMENT_HEADER_LEN + first.consumed) as u64;
+        let original_second =
+            framing::decode_frame(&original_bytes[second_offset as usize..]).unwrap();
+        let replacement_body = super::encode_record_body(&record(9)).unwrap();
+        let replacement =
+            framing::encode_frame(JournalRecord::SCHEMA_VERSION as u16, &replacement_body).unwrap();
+        assert_eq!(replacement.len(), original_second.consumed);
+        let original_modified = fs::metadata(&sealed.path).unwrap().modified().unwrap();
+        let sealed_path = sealed.path.clone();
+        let mut mutate_without_changing_metadata = || {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .open(&sealed_path)
+                .unwrap();
+            file.seek(SeekFrom::Start(second_offset)).unwrap();
+            file.write_all(&replacement).unwrap();
+            file.sync_all().unwrap();
+            file.set_times(FileTimes::new().set_modified(original_modified))
+                .unwrap();
+        };
+        let mut visited_frames = 0;
+
+        let error = store
+            .read_inner(
+                &sealed,
+                None,
+                Some(&mut mutate_without_changing_metadata),
+                &mut |_| {
+                    visited_frames += 1;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(visited_frames, 0);
+    }
+
+    #[test]
     fn sealed_delete_during_callback_does_not_reject_validated_read() {
         let temp = tempfile::tempdir().unwrap();
         let store = JournalSegmentStore::open(temp.path()).unwrap();
@@ -2748,5 +2918,51 @@ mod tests {
         });
         assert_eq!(visited_frames, 1);
         assert!(!sealed.path.exists());
+    }
+
+    #[test]
+    fn sealed_reader_delivers_frames_from_the_validated_snapshot() {
+        use std::io::{Seek as _, SeekFrom};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000076").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        writer.append(&record(2)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let original_bytes = fs::read(&sealed.path).unwrap();
+        let first = framing::decode_frame(&original_bytes[SEGMENT_HEADER_LEN..]).unwrap();
+        let second_offset = (SEGMENT_HEADER_LEN + first.consumed) as u64;
+        let original_second =
+            framing::decode_frame(&original_bytes[second_offset as usize..]).unwrap();
+        let replacement_body = super::encode_record_body(&record(9)).unwrap();
+        let replacement =
+            framing::encode_frame(JournalRecord::SCHEMA_VERSION as u16, &replacement_body).unwrap();
+        assert_eq!(replacement.len(), original_second.consumed);
+        assert_ne!(replacement_body, original_second.body);
+        let sealed_path = sealed.path.clone();
+        let mut visited = Vec::new();
+
+        store
+            .read_frames(&sealed, |frame| {
+                visited.push(frame.body);
+                if visited.len() == 1 {
+                    let mut file = fs::OpenOptions::new().write(true).open(&sealed_path)?;
+                    file.seek(SeekFrom::Start(second_offset))?;
+                    file.write_all(&replacement)?;
+                    file.sync_all()?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(visited.len(), 2);
+        assert_eq!(visited[1], original_second.body);
     }
 }
