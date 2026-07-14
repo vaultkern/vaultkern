@@ -17,6 +17,7 @@ use vaultkern_runtime_protocol::contracts::JournalRecord;
 use vaultkern_runtime_protocol::framing::{self, SEGMENT_HEADER_LEN};
 
 const WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
+const ACTIVE_SNAPSHOT_ATTEMPTS: usize = 3;
 const MAX_CORRUPTION_CAPTURE_LEN: usize =
     framing::MAX_RECORD_LEN as usize + framing::FRAME_OVERHEAD;
 
@@ -414,12 +415,12 @@ impl JournalSegmentStore {
         segment: &DiscoveredSegment,
         mut visit_frame: impl FnMut(RawJournalFrame) -> io::Result<()>,
     ) -> io::Result<SegmentRead> {
-        self.read_inner(segment, None, &mut visit_frame)
+        self.read_inner(segment, None, None, &mut visit_frame)
     }
 
     #[cfg(test)]
     pub(crate) fn read(&self, segment: &DiscoveredSegment) -> io::Result<SegmentRead> {
-        self.read_inner(segment, None, &mut |_| Ok(()))
+        self.read_inner(segment, None, None, &mut |_| Ok(()))
     }
 
     #[cfg(test)]
@@ -428,24 +429,54 @@ impl JournalSegmentStore {
         segment: &DiscoveredSegment,
         after_snapshot: &mut dyn FnMut(),
     ) -> io::Result<SegmentRead> {
-        self.read_inner(segment, Some(after_snapshot), &mut |_| Ok(()))
+        self.read_inner(segment, None, Some(after_snapshot), &mut |_| Ok(()))
+    }
+
+    #[cfg(test)]
+    fn read_with_pre_fingerprint_hook(
+        &self,
+        segment: &DiscoveredSegment,
+        before_fingerprint: &mut dyn FnMut(),
+    ) -> io::Result<SegmentRead> {
+        self.read_inner(segment, Some(before_fingerprint), None, &mut |_| Ok(()))
     }
 
     fn read_inner(
         &self,
         segment: &DiscoveredSegment,
+        mut before_fingerprint: Option<&mut dyn FnMut()>,
         mut after_snapshot: Option<&mut dyn FnMut()>,
         visit_frame: &mut dyn FnMut(RawJournalFrame) -> io::Result<()>,
     ) -> io::Result<SegmentRead> {
         self.ensure_directory()?;
-        let mut file = open_segment_for_read(&segment.path)?;
-        let before = file.metadata()?;
-        let snapshot_len = before.len();
-        if opened_file_identity(&file, &before)? != segment.identity {
-            return Err(identity_changed_error());
-        }
-        verify_path_identity(&segment.path, segment.identity)?;
-        let snapshot_sha256 = fingerprint_open_snapshot(&mut file, snapshot_len)?;
+        let (mut file, before, snapshot_len, snapshot_sha256) = {
+            let mut attempts = 0;
+            loop {
+                let mut file = open_segment_for_read(&segment.path)?;
+                let before = file.metadata()?;
+                let snapshot_len = before.len();
+                if opened_file_identity(&file, &before)? != segment.identity {
+                    return Err(identity_changed_error());
+                }
+                verify_path_identity(&segment.path, segment.identity)?;
+                if let Some(hook) = before_fingerprint.take() {
+                    hook();
+                }
+                match fingerprint_open_snapshot(&mut file, snapshot_len) {
+                    Ok(snapshot_sha256) => {
+                        break (file, before, snapshot_len, snapshot_sha256);
+                    }
+                    Err(error)
+                        if segment.state == SegmentState::Active
+                            && error.kind() == io::ErrorKind::UnexpectedEof
+                            && attempts + 1 < ACTIVE_SNAPSHOT_ATTEMPTS =>
+                    {
+                        attempts += 1;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        };
         if let Some(hook) = after_snapshot.as_mut() {
             hook();
         }
@@ -635,7 +666,7 @@ impl JournalSegmentStore {
         segment: &DiscoveredSegment,
         resolved: AllRecordsResolved,
     ) -> Result<(), SegmentMutationError> {
-        self.delete_resolved_segment_inner(segment, resolved, None)
+        self.delete_resolved_segment_inner(segment, resolved, None, &mut sync_parent)
     }
 
     #[cfg(test)]
@@ -643,16 +674,32 @@ impl JournalSegmentStore {
         &self,
         segment: &DiscoveredSegment,
         resolved: AllRecordsResolved,
-        after_segment_remove: &mut dyn FnMut(),
+        after_segment_sync: &mut dyn FnMut(),
     ) -> Result<(), SegmentMutationError> {
-        self.delete_resolved_segment_inner(segment, resolved, Some(after_segment_remove))
+        self.delete_resolved_segment_inner(
+            segment,
+            resolved,
+            Some(after_segment_sync),
+            &mut sync_parent,
+        )
+    }
+
+    #[cfg(test)]
+    fn delete_resolved_segment_with_sync_hook(
+        &self,
+        segment: &DiscoveredSegment,
+        resolved: AllRecordsResolved,
+        sync_parent: &mut dyn FnMut(&Path) -> io::Result<()>,
+    ) -> Result<(), SegmentMutationError> {
+        self.delete_resolved_segment_inner(segment, resolved, None, sync_parent)
     }
 
     fn delete_resolved_segment_inner(
         &self,
         segment: &DiscoveredSegment,
         resolved: AllRecordsResolved,
-        mut after_segment_remove: Option<&mut dyn FnMut()>,
+        mut after_segment_sync: Option<&mut dyn FnMut()>,
+        sync_parent: &mut dyn FnMut(&Path) -> io::Result<()>,
     ) -> Result<(), SegmentMutationError> {
         self.ensure_directory()?;
         if segment.state != SegmentState::Sealed
@@ -676,7 +723,12 @@ impl JournalSegmentStore {
             .into());
         }
         fs::remove_file(&segment.path)?;
-        if let Some(hook) = after_segment_remove.as_mut() {
+        sync_parent(&segment.path).map_err(|source| SegmentMutationError {
+            published: true,
+            target_conflict: false,
+            source,
+        })?;
+        if let Some(hook) = after_segment_sync.as_mut() {
             hook();
         }
         fs::remove_file(&segment.lock_path).map_err(|source| SegmentMutationError {
@@ -1231,6 +1283,7 @@ mod tests {
     };
     use crate::providers::durable_file::ExclusiveFileLock;
     use std::fs;
+    use std::io::Write;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -1434,6 +1487,40 @@ mod tests {
             }
             other => panic!("expected provisional tail, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn active_snapshot_retries_when_append_rollback_shrinks_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000020").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        let path = writer.path().to_owned();
+        let committed_len = fs::metadata(&path).unwrap().len();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[0x20, 0, 0])
+            .unwrap();
+        let segment = store.discover().unwrap().pop().unwrap();
+        let mut roll_back = || {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(committed_len)
+                .unwrap();
+        };
+
+        let read = store
+            .read_with_pre_fingerprint_hook(&segment, &mut roll_back)
+            .unwrap();
+
+        assert_eq!(read.frames.len(), 1);
+        assert_eq!(read.tail, SegmentTail::Complete);
+        assert_eq!(read.snapshot_len, committed_len);
     }
 
     #[test]
@@ -1676,6 +1763,37 @@ mod tests {
         assert!(error.published);
         assert!(!sealed.path.exists());
         assert!(lock_path.is_dir());
+    }
+
+    #[test]
+    fn whole_delete_syncs_segment_removal_before_unlinking_the_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000047").unwrap();
+        let writer = store.create_writer_with_id(writer_id).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let read = store.read(&sealed).unwrap();
+        let capability = AllRecordsResolved::for_read(&sealed, &read).unwrap();
+        let lock_path = sealed.lock_path.clone();
+        let mut lock_existed_at_first_sync = false;
+        let mut fail_first_sync = |_: &std::path::Path| {
+            lock_existed_at_first_sync = lock_path.exists();
+            Err(std::io::Error::other("injected parent sync failure"))
+        };
+
+        let error = store
+            .delete_resolved_segment_with_sync_hook(&sealed, capability, &mut fail_first_sync)
+            .unwrap_err();
+
+        assert!(error.published);
+        assert!(lock_existed_at_first_sync);
+        assert!(lock_path.exists());
+        assert!(!sealed.path.exists());
     }
 
     #[test]
