@@ -247,7 +247,7 @@ impl JournalSegmentStore {
         &self,
         writer_id: Uuid,
     ) -> io::Result<JournalSegmentWriter> {
-        self.create_writer_inner(writer_id, WRITER_LOCK_TIMEOUT, None)
+        self.create_writer_inner(writer_id, WRITER_LOCK_TIMEOUT, None, None)
     }
 
     #[cfg(test)]
@@ -257,7 +257,21 @@ impl JournalSegmentStore {
         lock_timeout: Duration,
         after_reservation: &mut dyn FnMut(&Path),
     ) -> io::Result<JournalSegmentWriter> {
-        self.create_writer_inner(writer_id, lock_timeout, Some(after_reservation))
+        self.create_writer_inner(writer_id, lock_timeout, Some(after_reservation), None)
+    }
+
+    #[cfg(test)]
+    fn create_writer_with_post_create_test_hook(
+        &self,
+        writer_id: Uuid,
+        after_segment_create: &mut dyn FnMut(&Path) -> io::Result<()>,
+    ) -> io::Result<JournalSegmentWriter> {
+        self.create_writer_inner(
+            writer_id,
+            WRITER_LOCK_TIMEOUT,
+            None,
+            Some(after_segment_create),
+        )
     }
 
     fn create_writer_inner(
@@ -265,6 +279,7 @@ impl JournalSegmentStore {
         writer_id: Uuid,
         lock_timeout: Duration,
         mut after_reservation: Option<&mut dyn FnMut(&Path)>,
+        mut after_segment_create: Option<&mut dyn FnMut(&Path) -> io::Result<()>>,
     ) -> io::Result<JournalSegmentWriter> {
         if writer_id.is_nil() {
             return Err(io::Error::new(
@@ -279,49 +294,70 @@ impl JournalSegmentStore {
         let corrupt_path = self.directory.join(format!("{stem}.corrupt"));
         let lock_path = self.directory.join(format!("{stem}.lock"));
         create_lock_reservation(&lock_path)?;
-        if let Some(hook) = after_reservation.as_mut() {
-            hook(&lock_path);
-        }
-        let started = Instant::now();
-        let lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, lock_timeout)?;
-        for existing_path in [&sealed_path, &corrupt_path] {
-            match fs::symlink_metadata(existing_path) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-                Ok(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "journal writer id already has a sealed or archived segment",
-                    ));
+        let mut segment_created = false;
+        let result = (|| {
+            if let Some(hook) = after_reservation.as_mut() {
+                hook(&lock_path);
+            }
+            let started = Instant::now();
+            let lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, lock_timeout)?;
+            for existing_path in [&sealed_path, &corrupt_path] {
+                match fs::symlink_metadata(existing_path) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            "journal writer id already has a sealed or archived segment",
+                        ));
+                    }
                 }
             }
-        }
 
-        let mut options = OpenOptions::new();
-        options.create_new(true).read(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            let mut options = OpenOptions::new();
+            options.create_new(true).read(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&path)?;
+            segment_created = true;
+            if let Some(hook) = after_segment_create.as_mut() {
+                hook(&path)?;
+            }
+            let remaining = lock_timeout.saturating_sub(started.elapsed());
+            let segment_lock = ExclusiveFileLock::acquire_with_timeout(&path, remaining)?;
+            file.write_all(&framing::encode_segment_header())?;
+            file.flush()?;
+            file.sync_all()?;
+            sync_parent(&path)?;
+            let identity = opened_file_identity(&file, &file.metadata()?)?;
+            verify_path_identity(&path, identity)?;
+            Ok(JournalSegmentWriter {
+                writer_id,
+                path: path.clone(),
+                file,
+                identity,
+                append_failed: false,
+                _segment_lock: segment_lock,
+                _reservation_lock: lock,
+            })
+        })();
+        match result {
+            Ok(writer) => Ok(writer),
+            Err(source) => {
+                if let Err(cleanup) = rollback_writer_creation(&path, &lock_path, segment_created) {
+                    return Err(io::Error::new(
+                        cleanup.kind(),
+                        format!(
+                            "journal writer creation failed ({source}); rollback failed ({cleanup})"
+                        ),
+                    ));
+                }
+                Err(source)
+            }
         }
-        let mut file = options.open(&path)?;
-        let remaining = lock_timeout.saturating_sub(started.elapsed());
-        let segment_lock = ExclusiveFileLock::acquire_with_timeout(&path, remaining)?;
-        file.write_all(&framing::encode_segment_header())?;
-        file.flush()?;
-        file.sync_all()?;
-        sync_parent(&path)?;
-        let identity = opened_file_identity(&file, &file.metadata()?)?;
-        verify_path_identity(&path, identity)?;
-        Ok(JournalSegmentWriter {
-            writer_id,
-            path,
-            file,
-            identity,
-            append_failed: false,
-            _segment_lock: segment_lock,
-            _reservation_lock: lock,
-        })
     }
 
     pub(crate) fn discover(&self) -> io::Result<Vec<DiscoveredSegment>> {
@@ -480,6 +516,7 @@ impl JournalSegmentStore {
         if let Some(hook) = after_snapshot.as_mut() {
             hook();
         }
+        verify_read_stability(segment, &file, &before, snapshot_len)?;
         let mut header = read_up_to(
             &mut file,
             snapshot_len.min(SEGMENT_HEADER_LEN as u64) as usize,
@@ -939,6 +976,19 @@ impl JournalSegmentWriter {
     fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn rollback_writer_creation(
+    path: &Path,
+    lock_path: &Path,
+    segment_created: bool,
+) -> io::Result<()> {
+    if segment_created {
+        fs::remove_file(path)?;
+        sync_parent(path)?;
+    }
+    fs::remove_file(lock_path)?;
+    sync_parent(lock_path)
 }
 
 fn create_lock_reservation(path: &Path) -> io::Result<()> {
@@ -1425,6 +1475,29 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(250));
         release_tx.send(()).unwrap();
         contender.join().unwrap();
+        assert!(!temp.path().join(format!("{writer_id}.lock")).exists());
+        drop(store.create_writer_with_id(writer_id).unwrap());
+    }
+
+    #[test]
+    fn writer_creation_rolls_back_segment_after_header_setup_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000014").unwrap();
+        let mut fail_after_segment_create = |_: &std::path::Path| {
+            Err(std::io::Error::other(
+                "injected journal header setup failure",
+            ))
+        };
+
+        let error = store
+            .create_writer_with_post_create_test_hook(writer_id, &mut fail_after_segment_create)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(!temp.path().join(writer_id.to_string()).exists());
+        assert!(!temp.path().join(format!("{writer_id}.lock")).exists());
+        drop(store.create_writer_with_id(writer_id).unwrap());
     }
 
     #[test]
@@ -2438,11 +2511,16 @@ mod tests {
             file.write_all(b"x").unwrap();
             file.flush().unwrap();
         };
+        let mut visited_frames = 0;
 
         let error = store
-            .read_with_test_hook(&sealed, &mut mutate_after_snapshot)
+            .read_inner(&sealed, None, Some(&mut mutate_after_snapshot), &mut |_| {
+                visited_frames += 1;
+                Ok(())
+            })
             .unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(visited_frames, 0);
     }
 }
