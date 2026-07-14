@@ -847,7 +847,9 @@ impl Vault {
 
     pub fn merge_from(&mut self, other: &Vault) -> MergeReport {
         let mut report = MergeReport::default();
-        merge_group(&mut self.root, &other.root, &mut report);
+        let mut content_pool = AttachmentContentPool::new();
+        normalize_group_attachment_content(&mut self.root, &mut content_pool);
+        merge_group(&mut self.root, &other.root, &mut content_pool, &mut report);
         report
     }
 }
@@ -887,7 +889,12 @@ fn collect_search<'a>(group: &'a Group, needle: &str, matches: &mut Vec<&'a Entr
     }
 }
 
-fn merge_group(target: &mut Group, source: &Group, report: &mut MergeReport) {
+fn merge_group(
+    target: &mut Group,
+    source: &Group,
+    content_pool: &mut AttachmentContentPool,
+    report: &mut MergeReport,
+) {
     for incoming_entry in &source.entries {
         if let Some(index) = target
             .entries
@@ -900,12 +907,15 @@ fn merge_group(target: &mut Group, source: &Group, report: &mut MergeReport) {
                 snapshot.history.clear();
                 let mut merged = incoming_entry.clone();
                 merged.history.push(snapshot);
+                normalize_entry_attachment_content(&mut merged, content_pool);
                 *existing = merged;
                 report.merged_entries += 1;
                 report.history_snapshots_added += 1;
             }
         } else {
-            target.entries.push(incoming_entry.clone());
+            let mut incoming_entry = incoming_entry.clone();
+            normalize_entry_attachment_content(&mut incoming_entry, content_pool);
+            target.entries.push(incoming_entry);
             report.merged_entries += 1;
         }
     }
@@ -916,10 +926,37 @@ fn merge_group(target: &mut Group, source: &Group, report: &mut MergeReport) {
             .iter()
             .position(|group| group.id == incoming_group.id)
         {
-            merge_group(&mut target.children[index], incoming_group, report);
+            merge_group(
+                &mut target.children[index],
+                incoming_group,
+                content_pool,
+                report,
+            );
         } else {
-            target.children.push(incoming_group.clone());
+            let mut incoming_group = incoming_group.clone();
+            normalize_group_attachment_content(&mut incoming_group, content_pool);
+            target.children.push(incoming_group);
         }
+    }
+}
+
+fn normalize_group_attachment_content(group: &mut Group, content_pool: &mut AttachmentContentPool) {
+    for entry in &mut group.entries {
+        normalize_entry_attachment_content(entry, content_pool);
+    }
+    for child in &mut group.children {
+        normalize_group_attachment_content(child, content_pool);
+    }
+}
+
+fn normalize_entry_attachment_content(entry: &mut Entry, content_pool: &mut AttachmentContentPool) {
+    for attachment in entry.attachments.values_mut() {
+        if let Ok(content) = content_pool.intern_content(&attachment.data) {
+            attachment.data = content;
+        }
+    }
+    for history in &mut entry.history {
+        normalize_entry_attachment_content(history, content_pool);
     }
 }
 
@@ -1151,6 +1188,45 @@ mod tests {
         );
         assert_eq!(report.merged_entries, 1);
         assert_eq!(report.history_snapshots_added, 1);
+    }
+
+    #[test]
+    fn merge_normalizes_independently_owned_attachment_content() {
+        let mut local = Vault::empty("Local");
+        let mut local_entry = Entry::new("Shared");
+        local_entry.id = uuid::Uuid::nil();
+        local_entry.modified_at = 10;
+        local_entry.attachments.insert(
+            "shared.bin".into(),
+            Attachment::new("shared.bin", b"same bytes".to_vec(), false),
+        );
+        local.root.entries.push(local_entry);
+
+        let mut incoming = Vault::empty("Incoming");
+        let mut incoming_entry = Entry::new("Shared");
+        incoming_entry.id = uuid::Uuid::nil();
+        incoming_entry.modified_at = 20;
+        incoming_entry.attachments.insert(
+            "shared.bin".into(),
+            Attachment::new("shared.bin", b"same bytes".to_vec(), true),
+        );
+        incoming.root.entries.push(incoming_entry);
+
+        assert!(
+            !local.root.entries[0].attachments["shared.bin"]
+                .data
+                .ptr_eq(&incoming.root.entries[0].attachments["shared.bin"].data)
+        );
+
+        local.merge_from(&incoming);
+        let merged = &local.root.entries[0];
+        assert!(
+            merged.attachments["shared.bin"]
+                .data
+                .ptr_eq(&merged.history[0].attachments["shared.bin"].data)
+        );
+        assert!(merged.attachments["shared.bin"].protect_in_memory);
+        assert!(!merged.history[0].attachments["shared.bin"].protect_in_memory);
     }
 
     #[test]

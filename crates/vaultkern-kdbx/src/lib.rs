@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Cursor as IoCursor, Read, Write};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -827,6 +827,9 @@ fn parse_inner_header(payload: &[u8]) -> Result<(u32, Vec<u8>, Vec<InnerBinary>,
             2 => inner_key = Some(data),
             3 => {
                 let (flag, bytes) = data.split_first().ok_or(KdbxError::InvalidValue)?;
+                if *flag & !0x01 != 0 {
+                    return Err(KdbxError::InvalidValue);
+                }
                 binaries.push(InnerBinary {
                     protect_in_memory: *flag & 0x01 == 0x01,
                     data: content_pool.intern(bytes)?,
@@ -2148,7 +2151,7 @@ fn parse_kdbx3_xml(
     let mut protected = ProtectedStream::from_stream(inner_random_stream_id, protected_stream_key)?;
     let binaries = parse_kdbx3_binaries(&meta, &mut protected)?;
     let mut content_pool = AttachmentContentPool::new();
-    for binary in &binaries {
+    for binary in binaries.values() {
         content_pool.intern_content(&binary.data)?;
     }
     let group = parse_group(&root_group, &binaries, &mut content_pool, &mut protected)?;
@@ -2545,13 +2548,12 @@ fn element_to_xml_string(element: &Element) -> Result<String> {
 fn parse_kdbx3_binaries(
     meta: &Element,
     protected: &mut ProtectedStream,
-) -> Result<Vec<InnerBinary>> {
+) -> Result<BTreeMap<usize, InnerBinary>> {
     let Some(binaries_element) = child_optional(meta, "Binaries") else {
-        return Ok(Vec::new());
+        return Ok(BTreeMap::new());
     };
 
-    let mut binaries = Vec::new();
-    let mut seen_indexes = BTreeSet::new();
+    let mut binaries = BTreeMap::new();
     let mut content_pool = AttachmentContentPool::new();
     for child in &binaries_element.children {
         let XMLNode::Element(binary) = child else {
@@ -2566,19 +2568,8 @@ fn parse_kdbx3_binaries(
             .get("ID")
             .and_then(|value| value.parse::<usize>().ok())
             .ok_or(KdbxError::InvalidValue)?;
-        if !seen_indexes.insert(index) {
-            return Err(KdbxError::InvalidValue);
-        }
-        let compressed = binary
-            .attributes
-            .get("Compressed")
-            .map(|value| parse_bool_text(value))
-            .unwrap_or(false);
-        let protected_in_memory = binary
-            .attributes
-            .get("Protected")
-            .map(|value| parse_bool_text(value))
-            .unwrap_or(false);
+        let compressed = parse_bool_attribute(binary, "Compressed")?;
+        let protected_in_memory = parse_bool_attribute(binary, "Protected")?;
 
         let encoded = binary
             .get_text()
@@ -2594,25 +2585,21 @@ fn parse_kdbx3_binaries(
             data = gzip_decompress(&data)?;
         }
 
-        if binaries.len() <= index {
-            let empty = content_pool.intern(b"")?;
-            binaries.resize_with(index + 1, || InnerBinary {
-                protect_in_memory: false,
-                data: empty.clone(),
-            });
-        }
-        binaries[index] = InnerBinary {
+        let binary = InnerBinary {
             protect_in_memory: protected_in_memory,
             data: content_pool.intern_vec(data)?,
         };
+        if binaries.insert(index, binary).is_some() {
+            return Err(KdbxError::InvalidValue);
+        }
     }
 
     Ok(binaries)
 }
 
-fn parse_group(
+fn parse_group<B: BinaryLookup + ?Sized>(
     element: &Element,
-    binaries: &[InnerBinary],
+    binaries: &B,
     content_pool: &mut AttachmentContentPool,
     protected: &mut ProtectedStream,
 ) -> Result<Group> {
@@ -2774,9 +2761,9 @@ fn collect_group_known_node_order(group: &Element) -> Vec<String> {
         .collect()
 }
 
-fn parse_entry(
+fn parse_entry<B: BinaryLookup + ?Sized>(
     element: &Element,
-    binaries: &[InnerBinary],
+    binaries: &B,
     content_pool: &mut AttachmentContentPool,
     protected: &mut ProtectedStream,
 ) -> Result<Entry> {
@@ -2895,27 +2882,40 @@ fn parse_entry(
                         child_text(child, "Key").ok_or(KdbxError::InvalidValue)?;
                     let value = child_optional(child, "Value").ok_or(KdbxError::InvalidValue)?;
                     let attachment = if let Some(reference) = value.attributes.get("Ref") {
+                        if parse_bool_attribute(&value, "Protected")?
+                            || parse_bool_attribute(&value, "Compressed")?
+                        {
+                            return Err(KdbxError::InvalidValue);
+                        }
                         let index = reference
                             .parse::<usize>()
                             .map_err(|_| KdbxError::InvalidValue)?;
-                        let binary = binaries.get(index).ok_or(KdbxError::InvalidValue)?;
+                        let binary = binaries.get_binary(index).ok_or(KdbxError::InvalidValue)?;
                         Attachment {
                             name: attachment_name.clone(),
                             data: binary.data.clone(),
                             protect_in_memory: binary.protect_in_memory,
                         }
                     } else {
+                        let compressed = parse_bool_attribute(&value, "Compressed")?;
+                        let protected_in_memory = parse_bool_attribute(&value, "Protected")?;
                         let encoded = value
                             .get_text()
                             .map(|text| text.to_string())
                             .unwrap_or_default();
-                        let data = STANDARD
+                        let mut data = STANDARD
                             .decode(encoded.as_bytes())
                             .map_err(|_| KdbxError::InvalidValue)?;
+                        if protected_in_memory {
+                            protected.apply(&mut data);
+                        }
+                        if compressed {
+                            data = gzip_decompress(&data)?;
+                        }
                         Attachment {
                             name: attachment_name.clone(),
                             data: content_pool.intern_vec(data)?,
-                            protect_in_memory: false,
+                            protect_in_memory: protected_in_memory,
                         }
                     };
                     if entry
@@ -3664,6 +3664,20 @@ fn parse_bool_text(text: &str) -> bool {
     text.eq_ignore_ascii_case("true") || text == "1"
 }
 
+fn parse_bool_attribute(element: &Element, name: &str) -> Result<bool> {
+    let Some(value) = element.attributes.get(name) else {
+        return Ok(false);
+    };
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("true") || value == "1" {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("false") || value == "0" {
+        Ok(false)
+    } else {
+        Err(KdbxError::InvalidValue)
+    }
+}
+
 fn parse_nullable_bool(text: &str) -> Option<bool> {
     if text.trim().is_empty() || text.eq_ignore_ascii_case("null") {
         None
@@ -3920,6 +3934,34 @@ struct InnerBinary {
     data: AttachmentContent,
 }
 
+trait BinaryLookup {
+    fn get_binary(&self, index: usize) -> Option<&InnerBinary>;
+}
+
+impl BinaryLookup for Vec<InnerBinary> {
+    fn get_binary(&self, index: usize) -> Option<&InnerBinary> {
+        self.get(index)
+    }
+}
+
+impl BinaryLookup for [InnerBinary] {
+    fn get_binary(&self, index: usize) -> Option<&InnerBinary> {
+        self.get(index)
+    }
+}
+
+impl<const N: usize> BinaryLookup for [InnerBinary; N] {
+    fn get_binary(&self, index: usize) -> Option<&InnerBinary> {
+        self.get(index)
+    }
+}
+
+impl BinaryLookup for BTreeMap<usize, InnerBinary> {
+    fn get_binary(&self, index: usize) -> Option<&InnerBinary> {
+        self.get(&index)
+    }
+}
+
 struct ProtectedStream {
     cipher: ProtectedStreamCipher,
 }
@@ -3985,11 +4027,15 @@ impl<'a> Cursor<'a> {
     }
 
     fn read_exact(&mut self, len: usize) -> Result<&'a [u8]> {
-        if self.position + len > self.bytes.len() {
+        let end = self
+            .position
+            .checked_add(len)
+            .ok_or(KdbxError::UnexpectedEof)?;
+        if end > self.bytes.len() {
             return Err(KdbxError::UnexpectedEof);
         }
-        let slice = &self.bytes[self.position..self.position + len];
-        self.position += len;
+        let slice = &self.bytes[self.position..end];
+        self.position = end;
         Ok(slice)
     }
 
@@ -4456,6 +4502,7 @@ mod compatibility_tests {
         gzip_decompress, header_hmac, kdf_from_variant_dict, load_kdbx, mac_seed,
         parse_inner_header, parse_kdbx3_binaries, save_kdbx, sha256_seeded, text_element,
     };
+    use base64::Engine as _;
     use vaultkern_crypto::{CompositeKey, sha256_bytes};
     use vaultkern_model::{
         Attachment, AttachmentContent, AttachmentContentId, CustomField, Entry, Group, ModelError,
@@ -4651,6 +4698,211 @@ mod compatibility_tests {
         assert!(matches!(
             parse_kdbx3_binaries(&meta, &mut protected),
             Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn kdbx3_binary_pool_does_not_allocate_through_sparse_indexes() {
+        let mut meta = Element::new("Meta");
+        let mut binaries = Element::new("Binaries");
+        let mut binary = Element::new("Binary");
+        binary
+            .attributes
+            .insert("ID".into(), usize::MAX.to_string());
+        binary.children.push(XMLNode::Text("Y29udGVudA==".into()));
+        binaries.children.push(XMLNode::Element(binary));
+        meta.children.push(XMLNode::Element(binaries));
+        let mut protected = ProtectedStream::from_stream(2, &[0x42; 32]).expect("stream");
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parse_kdbx3_binaries(&meta, &mut protected)
+        }));
+        let parsed = outcome
+            .expect("sparse binary index must not panic")
+            .expect("sparse binary index");
+        assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
+    fn kdbx3_binary_pool_rejects_invalid_boolean_attributes() {
+        let mut meta = Element::new("Meta");
+        let mut binaries = Element::new("Binaries");
+        let mut binary = Element::new("Binary");
+        binary.attributes.insert("ID".into(), "0".into());
+        binary
+            .attributes
+            .insert("Protected".into(), "sometimes".into());
+        binary.children.push(XMLNode::Text("Y29udGVudA==".into()));
+        binaries.children.push(XMLNode::Element(binary));
+        meta.children.push(XMLNode::Element(binaries));
+        let mut protected = ProtectedStream::from_stream(2, &[0x42; 32]).expect("stream");
+
+        assert!(matches!(
+            parse_kdbx3_binaries(&meta, &mut protected),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn kdbx3_attachment_rejects_reference_to_undefined_sparse_index() {
+        let mut meta = Element::new("Meta");
+        let mut binaries = Element::new("Binaries");
+        let mut binary = Element::new("Binary");
+        binary.attributes.insert("ID".into(), "1".into());
+        binary.children.push(XMLNode::Text("Y29udGVudA==".into()));
+        binaries.children.push(XMLNode::Element(binary));
+        meta.children.push(XMLNode::Element(binaries));
+        let mut protected = ProtectedStream::from_stream(2, &[0x42; 32]).expect("stream");
+        let binaries = parse_kdbx3_binaries(&meta, &mut protected).expect("binary pool");
+
+        let mut entry = Element::new("Entry");
+        entry.children.push(XMLNode::Element(text_element(
+            "UUID",
+            &super::encode_uuid(uuid::Uuid::nil()),
+        )));
+        let mut attachment = Element::new("Binary");
+        attachment
+            .children
+            .push(XMLNode::Element(text_element("Key", "missing.bin")));
+        let mut value = Element::new("Value");
+        value.attributes.insert("Ref".into(), "0".into());
+        attachment.children.push(XMLNode::Element(value));
+        entry.children.push(XMLNode::Element(attachment));
+
+        let mut content_pool = vaultkern_model::AttachmentContentPool::new();
+        assert!(matches!(
+            super::parse_entry(&entry, &binaries, &mut content_pool, &mut protected),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn inline_protected_attachment_advances_stream_and_preserves_protection() {
+        let key = [0x24; 32];
+        let mut writer = ProtectedStream::from_stream(2, &key).expect("writer stream");
+        let mut attachment_bytes = b"protected attachment".to_vec();
+        writer.apply(&mut attachment_bytes);
+        let mut password_bytes = b"following password".to_vec();
+        writer.apply(&mut password_bytes);
+
+        let mut entry = Element::new("Entry");
+        entry.children.push(XMLNode::Element(text_element(
+            "UUID",
+            &super::encode_uuid(uuid::Uuid::nil()),
+        )));
+        let mut attachment = Element::new("Binary");
+        attachment
+            .children
+            .push(XMLNode::Element(text_element("Key", "protected.bin")));
+        let mut attachment_value = text_element("Value", &super::STANDARD.encode(attachment_bytes));
+        attachment_value
+            .attributes
+            .insert("Protected".into(), "True".into());
+        attachment.children.push(XMLNode::Element(attachment_value));
+        entry.children.push(XMLNode::Element(attachment));
+
+        let mut password = Element::new("String");
+        password
+            .children
+            .push(XMLNode::Element(text_element("Key", "Password")));
+        let mut password_value = text_element("Value", &super::STANDARD.encode(password_bytes));
+        password_value
+            .attributes
+            .insert("Protected".into(), "True".into());
+        password.children.push(XMLNode::Element(password_value));
+        entry.children.push(XMLNode::Element(password));
+
+        let mut reader = ProtectedStream::from_stream(2, &key).expect("reader stream");
+        let mut content_pool = vaultkern_model::AttachmentContentPool::new();
+        let parsed = super::parse_entry(&entry, &[], &mut content_pool, &mut reader)
+            .expect("parse protected attachment");
+
+        let attachment = &parsed.attachments["protected.bin"];
+        assert_eq!(attachment.data.as_bytes(), b"protected attachment");
+        assert!(attachment.protect_in_memory);
+        assert_eq!(parsed.password, "following password");
+    }
+
+    #[test]
+    fn inline_attachment_rejects_invalid_boolean_attributes() {
+        let mut entry = Element::new("Entry");
+        entry.children.push(XMLNode::Element(text_element(
+            "UUID",
+            &super::encode_uuid(uuid::Uuid::nil()),
+        )));
+        let mut attachment = Element::new("Binary");
+        attachment
+            .children
+            .push(XMLNode::Element(text_element("Key", "attachment.bin")));
+        let mut value = text_element("Value", "Y29udGVudA==");
+        value
+            .attributes
+            .insert("Compressed".into(), "perhaps".into());
+        attachment.children.push(XMLNode::Element(value));
+        entry.children.push(XMLNode::Element(attachment));
+
+        let mut protected = ProtectedStream::from_stream(2, &[0x42; 32]).expect("stream");
+        let mut content_pool = vaultkern_model::AttachmentContentPool::new();
+        assert!(matches!(
+            super::parse_entry(&entry, &[], &mut content_pool, &mut protected),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn referenced_attachment_rejects_conflicting_inline_protection() {
+        let binaries = vec![super::InnerBinary {
+            protect_in_memory: false,
+            data: AttachmentContent::from_bytes(b"pooled content".to_vec()),
+        }];
+        let mut entry = Element::new("Entry");
+        entry.children.push(XMLNode::Element(text_element(
+            "UUID",
+            &super::encode_uuid(uuid::Uuid::nil()),
+        )));
+        let mut attachment = Element::new("Binary");
+        attachment
+            .children
+            .push(XMLNode::Element(text_element("Key", "attachment.bin")));
+        let mut value = Element::new("Value");
+        value.attributes.insert("Ref".into(), "0".into());
+        value.attributes.insert("Protected".into(), "True".into());
+        attachment.children.push(XMLNode::Element(value));
+        entry.children.push(XMLNode::Element(attachment));
+
+        let mut protected = ProtectedStream::from_stream(2, &[0x42; 32]).expect("stream");
+        let mut content_pool = vaultkern_model::AttachmentContentPool::new();
+        assert!(matches!(
+            super::parse_entry(&entry, &binaries, &mut content_pool, &mut protected),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn inner_binary_rejects_unknown_protection_flags() {
+        let mut payload = Vec::new();
+        super::write_field(&mut payload, 1, &3_i32.to_le_bytes());
+        super::write_field(&mut payload, 2, &[0x42; 64]);
+        super::write_field(&mut payload, 3, &[0x02, b'x']);
+        super::write_field(&mut payload, 0, &[]);
+
+        assert!(matches!(
+            parse_inner_header(&payload),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn cursor_rejects_overflowing_read_length_without_panicking() {
+        let mut cursor = super::Cursor::new(&[0]);
+        cursor.read_exact(1).expect("advance cursor");
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cursor.read_exact(usize::MAX)
+        }));
+        assert!(matches!(
+            outcome.expect("overflowing read must not panic"),
+            Err(KdbxError::UnexpectedEof)
         ));
     }
 
