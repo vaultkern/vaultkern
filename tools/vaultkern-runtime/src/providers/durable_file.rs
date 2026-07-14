@@ -763,6 +763,22 @@ pub(crate) fn rename_missing_target_durable(
     target: &Path,
     expected_source_identity: DurableFileIdentity,
 ) -> Result<(), PublishError> {
+    rename_missing_target_durable_inner(
+        source,
+        target,
+        expected_source_identity,
+        &mut || Ok(()),
+        &mut sync_parent,
+    )
+}
+
+fn rename_missing_target_durable_inner(
+    source: &Path,
+    target: &Path,
+    expected_source_identity: DurableFileIdentity,
+    before_rename: &mut dyn FnMut() -> io::Result<()>,
+    sync_parent: &mut dyn FnMut(&Path) -> io::Result<()>,
+) -> Result<(), PublishError> {
     if source.parent() != target.parent() {
         return Err(PublishError {
             published: false,
@@ -793,6 +809,11 @@ pub(crate) fn rename_missing_target_durable(
             target_conflict: source.kind() == io::ErrorKind::AlreadyExists,
             source,
         }
+    })?;
+    before_rename().map_err(|source| PublishError {
+        published: false,
+        target_conflict: false,
+        source,
     })?;
     rename_missing_target(source, target).map_err(|source| PublishError {
         published: false,
@@ -1595,7 +1616,7 @@ mod tests {
         temp.discard().unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn no_replace_publish_rejects_hardlinked_source() {
         let dir = tempfile::tempdir().unwrap();
@@ -1614,6 +1635,119 @@ mod tests {
         assert!(source.exists());
         assert!(!target.exists());
         assert_eq!(fs::read(&alias).unwrap(), b"journal bytes");
+    }
+
+    #[test]
+    fn no_replace_publish_rejects_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("segment");
+        let target = dir.path().join("segment.sealed");
+        fs::write(&source, b"journal bytes").unwrap();
+        fs::write(&target, b"winner").unwrap();
+        let metadata = fs::symlink_metadata(&source).unwrap();
+        let identity = super::path_file_identity(&source, &metadata).unwrap();
+
+        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
+
+        assert!(!error.published);
+        assert!(error.target_conflict);
+        assert_eq!(fs::read(&source).unwrap(), b"journal bytes");
+        assert_eq!(fs::read(&target).unwrap(), b"winner");
+    }
+
+    #[test]
+    fn no_replace_publish_rejects_cross_directory_target() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("segment");
+        let target = target_dir.path().join("segment.sealed");
+        fs::write(&source, b"journal bytes").unwrap();
+        let metadata = fs::symlink_metadata(&source).unwrap();
+        let identity = super::path_file_identity(&source, &metadata).unwrap();
+
+        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
+
+        assert!(!error.published);
+        assert_eq!(error.source.kind(), io::ErrorKind::InvalidInput);
+        assert!(source.exists());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn no_replace_publish_rejects_changed_source_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("segment");
+        let replacement = dir.path().join("replacement");
+        let target = dir.path().join("segment.sealed");
+        fs::write(&source, b"original").unwrap();
+        fs::write(&replacement, b"replacement").unwrap();
+        let metadata = fs::symlink_metadata(&source).unwrap();
+        let identity = super::path_file_identity(&source, &metadata).unwrap();
+        fs::remove_file(&source).unwrap();
+        fs::rename(&replacement, &source).unwrap();
+
+        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
+
+        assert!(!error.published);
+        assert_eq!(error.source.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(fs::read(&source).unwrap(), b"replacement");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn no_replace_publish_never_clobbers_target_appearing_after_precheck() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("segment");
+        let target = dir.path().join("segment.sealed");
+        fs::write(&source, b"journal bytes").unwrap();
+        let metadata = fs::symlink_metadata(&source).unwrap();
+        let identity = super::path_file_identity(&source, &metadata).unwrap();
+        let mut create_target = || {
+            fs::write(&target, b"winner")?;
+            Ok(())
+        };
+        let mut sync_parent = super::sync_parent;
+
+        let error = super::rename_missing_target_durable_inner(
+            &source,
+            &target,
+            identity,
+            &mut create_target,
+            &mut sync_parent,
+        )
+        .unwrap_err();
+
+        assert!(!error.published);
+        assert!(error.target_conflict);
+        assert_eq!(fs::read(&source).unwrap(), b"journal bytes");
+        assert_eq!(fs::read(&target).unwrap(), b"winner");
+    }
+
+    #[test]
+    fn no_replace_publish_reports_parent_sync_failure_after_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("segment");
+        let target = dir.path().join("segment.sealed");
+        fs::write(&source, b"journal bytes").unwrap();
+        let metadata = fs::symlink_metadata(&source).unwrap();
+        let identity = super::path_file_identity(&source, &metadata).unwrap();
+        let mut before_rename = || Ok(());
+        let mut fail_parent_sync =
+            |_: &std::path::Path| Err(io::Error::other("injected parent sync failure"));
+
+        let error = super::rename_missing_target_durable_inner(
+            &source,
+            &target,
+            identity,
+            &mut before_rename,
+            &mut fail_parent_sync,
+        )
+        .unwrap_err();
+
+        assert!(error.published);
+        assert!(!error.target_conflict);
+        assert!(!source.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"journal bytes");
     }
 
     #[cfg(windows)]
