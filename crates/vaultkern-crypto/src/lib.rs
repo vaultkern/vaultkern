@@ -18,6 +18,8 @@ use twofish::Twofish;
 use uuid::Uuid;
 use xmltree::{Element, XMLNode};
 
+pub mod quick_unlock;
+
 #[derive(Debug, Error)]
 pub enum CryptoError {
     #[error("feature not implemented yet")]
