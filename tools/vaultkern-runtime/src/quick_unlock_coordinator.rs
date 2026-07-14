@@ -362,6 +362,13 @@ enum NextGenerationError {
     Overflow,
 }
 
+enum SealThenCommitError {
+    EnvelopeBuild(EnvelopeBuildError),
+    Platform(PlatformError),
+    Ledger(LedgerStoreError),
+    RecordConflict,
+}
+
 enum CleanupRange {
     Before(u64),
     Through(u64),
@@ -434,37 +441,30 @@ impl QuickUnlockCoordinator {
                 });
             }
         };
-        let record_key =
-            platform_record_key(identifier_scope, vault_ref_id, reduction.next.generation);
-        // The final generation is part of the envelope AAD, so construction starts here.
-        let secret_material = match build_envelope(&record_key) {
-            Ok(material) => material,
-            Err(error) => return Err(CoordinatorError::EnvelopeBuild(error)),
-        };
-        match self.records.seal(&record_key, &secret_material) {
-            Ok(SealOutcome::Created) => {}
-            Ok(SealOutcome::AlreadyExists) => return Err(CoordinatorError::RecordConflict),
-            Err(error) => {
+        match self.seal_then_commit(
+            identifier_scope,
+            vault_ref_id,
+            stored.as_ref(),
+            reduction.next,
+            build_envelope,
+        ) {
+            Ok(cleanup) => Ok(EnableOutcome::Enabled { cleanup }),
+            Err(SealThenCommitError::EnvelopeBuild(error)) => {
+                Err(CoordinatorError::EnvelopeBuild(error))
+            }
+            Err(SealThenCommitError::Platform(error)) => {
                 let category = self
                     .classifier
                     .classify(QuickUnlockOperation::Enable, &error);
-                return Ok(if category == QuickUnlockError::NotEnrolled {
+                Ok(if category == QuickUnlockError::NotEnrolled {
                     EnableOutcome::Refused(category)
                 } else {
                     EnableOutcome::Failed(category)
-                });
+                })
             }
+            Err(SealThenCommitError::Ledger(error)) => Err(CoordinatorError::Ledger(error)),
+            Err(SealThenCommitError::RecordConflict) => Err(CoordinatorError::RecordConflict),
         }
-        drop(secret_material);
-        let active_generation = reduction.next.generation;
-        self.ledger
-            .compare_and_swap(vault_ref_id, stored.as_ref(), reduction.next)?;
-        let cleanup = self.cleanup_records(
-            identifier_scope,
-            vault_ref_id,
-            CleanupRange::Before(active_generation),
-        );
-        Ok(EnableOutcome::Enabled { cleanup })
     }
 
     pub(crate) fn full_credential_unlocked<B>(
@@ -503,33 +503,24 @@ impl QuickUnlockCoordinator {
                 ));
             }
         };
-        let record_key =
-            platform_record_key(identifier_scope, vault_ref_id, reduction.next.generation);
-        // The final generation is part of the envelope AAD, so construction starts here.
-        let secret_material = match build_envelope(&record_key) {
-            Ok(material) => material,
-            Err(error) => return Err(CoordinatorError::EnvelopeBuild(error)),
-        };
-        match self.records.seal(&record_key, &secret_material) {
-            Ok(SealOutcome::Created) => {}
-            Ok(SealOutcome::AlreadyExists) => return Err(CoordinatorError::RecordConflict),
-            Err(error) => {
-                return Ok(FullCredentialOutcome::Failed(
-                    self.classifier
-                        .classify(QuickUnlockOperation::FullCredentialUnlock, &error),
-                ));
-            }
-        }
-        drop(secret_material);
-        let active_generation = reduction.next.generation;
-        self.ledger
-            .compare_and_swap(vault_ref_id, stored.as_ref(), reduction.next)?;
-        let cleanup = self.cleanup_records(
+        match self.seal_then_commit(
             identifier_scope,
             vault_ref_id,
-            CleanupRange::Before(active_generation),
-        );
-        Ok(FullCredentialOutcome::Resealed { cleanup })
+            stored.as_ref(),
+            reduction.next,
+            build_envelope,
+        ) {
+            Ok(cleanup) => Ok(FullCredentialOutcome::Resealed { cleanup }),
+            Err(SealThenCommitError::EnvelopeBuild(error)) => {
+                Err(CoordinatorError::EnvelopeBuild(error))
+            }
+            Err(SealThenCommitError::Platform(error)) => Ok(FullCredentialOutcome::Failed(
+                self.classifier
+                    .classify(QuickUnlockOperation::FullCredentialUnlock, &error),
+            )),
+            Err(SealThenCommitError::Ledger(error)) => Err(CoordinatorError::Ledger(error)),
+            Err(SealThenCommitError::RecordConflict) => Err(CoordinatorError::RecordConflict),
+        }
     }
 
     pub(crate) fn unlock<F>(
@@ -691,6 +682,41 @@ impl QuickUnlockCoordinator {
             .into_iter()
             .fold(ledger_generation, u64::max);
         highest.checked_add(1).ok_or(NextGenerationError::Overflow)
+    }
+
+    fn seal_then_commit<B>(
+        &self,
+        identifier_scope: &str,
+        vault_ref_id: &str,
+        stored: Option<&QuickUnlockLedgerEntry>,
+        next: QuickUnlockLedgerEntry,
+        build_envelope: B,
+    ) -> Result<CleanupStatus, SealThenCommitError>
+    where
+        B: FnOnce(&PlatformRecordKey) -> Result<SecretBytes, EnvelopeBuildError>,
+    {
+        let active_generation = next.generation;
+        let record_key = platform_record_key(identifier_scope, vault_ref_id, active_generation);
+        // The final generation is part of the envelope AAD, so construction starts here.
+        let secret_material =
+            build_envelope(&record_key).map_err(SealThenCommitError::EnvelopeBuild)?;
+        let seal = self.records.seal(&record_key, &secret_material);
+        drop(secret_material);
+        match seal {
+            Ok(SealOutcome::Created) => {}
+            Ok(SealOutcome::AlreadyExists) => {
+                return Err(SealThenCommitError::RecordConflict);
+            }
+            Err(error) => return Err(SealThenCommitError::Platform(error)),
+        }
+        self.ledger
+            .compare_and_swap(vault_ref_id, stored, next)
+            .map_err(SealThenCommitError::Ledger)?;
+        Ok(self.cleanup_records(
+            identifier_scope,
+            vault_ref_id,
+            CleanupRange::Before(active_generation),
+        ))
     }
 
     fn cleanup_records(
@@ -1294,6 +1320,17 @@ mod tests {
         move |_| Ok(secret(bytes))
     }
 
+    fn build_probed_secret(
+        dropped: Arc<AtomicBool>,
+    ) -> impl FnOnce(&PlatformRecordKey) -> Result<SecretBytes, EnvelopeBuildError> {
+        move |_| {
+            Ok(SecretBytes::with_drop_probe(
+                b"transformed-key-material".to_vec(),
+                dropped,
+            ))
+        }
+    }
+
     trait AmbiguousIfClone<Marker> {
         fn marker() {}
     }
@@ -1507,42 +1544,87 @@ mod tests {
     }
 
     #[test]
-    fn sealed_secret_is_dropped_before_the_ledger_publish_starts() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("quick-unlock.json");
-        let initial = QuickUnlockLedgerStore::persistent(path.clone(), Duration::from_secs(1));
-        initial
-            .compare_and_swap("vault", None, entry(QuickUnlockState::Disabled, 4))
-            .unwrap();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let observed = Arc::clone(&dropped);
-        let ledger = QuickUnlockLedgerStore::persistent_with_faults(
-            path,
-            Duration::from_secs(1),
-            DurableFaultInjector::run_once(DurableFaultPoint::BeforeTargetReplace, move || {
-                assert!(
-                    observed.load(Ordering::SeqCst),
-                    "secret material remained live when ledger publication began"
-                );
-            }),
+    fn failed_reseal_envelope_build_never_seals_or_commits() {
+        let ledger = QuickUnlockLedgerStore::in_memory();
+        let current = entry(
+            QuickUnlockState::NeedsReenroll {
+                reason: NeedsReenrollReason::KdfRotated,
+            },
+            4,
         );
+        ledger
+            .compare_and_swap("vault", None, current.clone())
+            .unwrap();
         let records = Arc::new(FakeRecordStore::new());
 
-        coordinator(ledger, records)
-            .enable(
+        assert!(matches!(
+            coordinator(ledger.clone(), Arc::clone(&records)).full_credential_unlocked(
                 "scope",
                 "vault",
-                SessionUnlockKind::PasswordUnlocked,
-                |_| {
-                    Ok(SecretBytes::with_drop_probe(
-                        b"transformed-key-material".to_vec(),
-                        Arc::clone(&dropped),
-                    ))
+                |record_key| {
+                    assert_eq!(record_key, &key("scope", "vault", 5));
+                    Err(EnvelopeBuildError::Failed)
                 },
-            )
-            .unwrap();
+            ),
+            Err(CoordinatorError::EnvelopeBuild(EnvelopeBuildError::Failed))
+        ));
+        assert_eq!(ledger.get("vault").unwrap(), Some(current));
+        assert!(records.calls.lock().unwrap().is_empty());
+        assert_eq!(records.record(5), None);
+    }
 
-        assert!(dropped.load(Ordering::SeqCst));
+    #[test]
+    fn sealed_secret_is_dropped_before_ledger_publish_for_enable_and_reseal() {
+        for reseal in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("quick-unlock.json");
+            let initial = QuickUnlockLedgerStore::persistent(path.clone(), Duration::from_secs(1));
+            let state = if reseal {
+                QuickUnlockState::NeedsReenroll {
+                    reason: NeedsReenrollReason::KdfRotated,
+                }
+            } else {
+                QuickUnlockState::Disabled
+            };
+            initial
+                .compare_and_swap("vault", None, entry(state, 4))
+                .unwrap();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&dropped);
+            let ledger = QuickUnlockLedgerStore::persistent_with_faults(
+                path,
+                Duration::from_secs(1),
+                DurableFaultInjector::run_once(DurableFaultPoint::BeforeTargetReplace, move || {
+                    assert!(
+                        observed.load(Ordering::SeqCst),
+                        "secret material remained live when ledger publication began"
+                    );
+                }),
+            );
+            let records = Arc::new(FakeRecordStore::new());
+            let coordinator = coordinator(ledger, records);
+
+            if reseal {
+                coordinator
+                    .full_credential_unlocked(
+                        "scope",
+                        "vault",
+                        build_probed_secret(Arc::clone(&dropped)),
+                    )
+                    .unwrap();
+            } else {
+                coordinator
+                    .enable(
+                        "scope",
+                        "vault",
+                        SessionUnlockKind::PasswordUnlocked,
+                        build_probed_secret(Arc::clone(&dropped)),
+                    )
+                    .unwrap();
+            }
+
+            assert!(dropped.load(Ordering::SeqCst));
+        }
     }
 
     #[test]
@@ -1661,6 +1743,52 @@ mod tests {
         };
         assert_eq!(material.expose(), b"aad-generation=7");
         assert_eq!(records.record(8), Some(b"aad-generation=8".to_vec()));
+    }
+
+    #[test]
+    fn coordinator_reseal_pre_publish_failure_preserves_the_old_row_and_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quick-unlock.json");
+        let current = entry(
+            QuickUnlockState::NeedsReenroll {
+                reason: NeedsReenrollReason::KdfRotated,
+            },
+            7,
+        );
+        let initial = QuickUnlockLedgerStore::persistent(path.clone(), Duration::from_secs(1));
+        initial
+            .compare_and_swap("vault", None, current.clone())
+            .unwrap();
+        let records = Arc::new(FakeRecordStore::new());
+        records.insert(key("scope", "vault", 7), b"aad-generation=7");
+        let failing = QuickUnlockLedgerStore::persistent_with_faults(
+            path.clone(),
+            Duration::from_secs(1),
+            DurableFaultInjector::fail_once(DurableFaultPoint::BeforeTargetReplace),
+        );
+
+        assert!(matches!(
+            coordinator(failing, Arc::clone(&records)).full_credential_unlocked(
+                "scope",
+                "vault",
+                |record_key| {
+                    assert_eq!(record_key, &key("scope", "vault", 8));
+                    Ok(secret(b"aad-generation=8"))
+                },
+            ),
+            Err(CoordinatorError::Ledger(
+                LedgerStoreError::BeforePublish { .. }
+            ))
+        ));
+
+        let reopened = QuickUnlockLedgerStore::persistent(path, Duration::from_secs(1));
+        assert_eq!(reopened.get("vault").unwrap(), Some(current));
+        assert_eq!(records.record(7), Some(b"aad-generation=7".to_vec()));
+        assert_eq!(records.record(8), Some(b"aad-generation=8".to_vec()));
+        assert_eq!(
+            records.unseal(&key("scope", "vault", 7)).unwrap().expose(),
+            b"aad-generation=7"
+        );
     }
 
     #[test]
