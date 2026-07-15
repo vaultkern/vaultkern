@@ -16,7 +16,7 @@ use vaultkern_model::{
     AutoTypeConfig, CustomDataBlock, CustomDataItem, CustomField, CustomIcon, DeletedObject, Entry,
     EntryRawState, Group, GroupRawState, GroupTimes, MemoryProtection, MetaRawState, ModelError,
     OpaqueXmlAnchor, OpaqueXmlFragment, PasskeyRecord, RootRawState, TotpAlgorithm, TotpSpec,
-    Vault,
+    Vault, materialize_entry_persistent_attributes,
 };
 use xmltree::{Element, XMLNode};
 
@@ -1281,7 +1281,7 @@ fn entry_to_xml(
         .children
         .push(XMLNode::Element(entry_times_to_xml(entry, version)));
 
-    let mut fields = entry.attributes.clone();
+    let mut fields = materialize_entry_persistent_attributes(entry);
     fields.insert(
         "Title".into(),
         CustomField {
@@ -1317,52 +1317,6 @@ fn entry_to_xml(
             protected: entry.field_protection.protect_notes,
         },
     );
-    if let Some(totp) = &entry.totp {
-        fields.insert(
-            "otp".into(),
-            CustomField {
-                value: build_otpauth_uri(entry, totp),
-                protected: true,
-            },
-        );
-        fields.insert(
-            "TimeOtp-Secret-Base32".into(),
-            CustomField {
-                value: totp.secret_base32.clone(),
-                protected: true,
-            },
-        );
-        fields.insert(
-            "TimeOtp-Algorithm".into(),
-            CustomField {
-                value: match totp.algorithm {
-                    TotpAlgorithm::Sha1 => "HMAC-SHA-1",
-                    TotpAlgorithm::Sha256 => "HMAC-SHA-256",
-                    TotpAlgorithm::Sha512 => "HMAC-SHA-512",
-                }
-                .into(),
-                protected: false,
-            },
-        );
-        fields.insert(
-            "TimeOtp-Length".into(),
-            CustomField {
-                value: totp.digits.to_string(),
-                protected: false,
-            },
-        );
-        fields.insert(
-            "TimeOtp-Period".into(),
-            CustomField {
-                value: totp.period_seconds.to_string(),
-                protected: false,
-            },
-        );
-    }
-    if let Some(passkey) = &entry.passkey {
-        passkey.write_to_attributes(&mut fields);
-    }
-
     for (key, field) in fields {
         element
             .children
@@ -3881,53 +3835,6 @@ fn build_totp(fields: &BTreeMap<String, CustomField>) -> Option<TotpSpec> {
     })
 }
 
-fn build_otpauth_uri(entry: &Entry, totp: &TotpSpec) -> String {
-    let issuer = totp.issuer.clone().unwrap_or_else(|| entry.title.clone());
-    let account_name = totp
-        .account_name
-        .clone()
-        .unwrap_or_else(|| entry.username.clone());
-    let label = if account_name.is_empty() {
-        percent_encode_component(&issuer)
-    } else {
-        format!(
-            "{}:{}",
-            percent_encode_component(&issuer),
-            percent_encode_component(&account_name)
-        )
-    };
-    let algorithm = match totp.algorithm {
-        TotpAlgorithm::Sha1 => "SHA1",
-        TotpAlgorithm::Sha256 => "SHA256",
-        TotpAlgorithm::Sha512 => "SHA512",
-    };
-    format!(
-        "otpauth://totp/{label}?secret={secret}&issuer={issuer}&algorithm={algorithm}&digits={digits}&period={period}",
-        label = label,
-        secret = percent_encode_component(&totp.secret_base32),
-        issuer = percent_encode_component(&issuer),
-        algorithm = algorithm,
-        digits = totp.digits,
-        period = totp.period_seconds,
-    )
-}
-
-fn percent_encode_component(input: &str) -> String {
-    let mut encoded = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push_str(&format!("{byte:02X}"));
-            }
-        }
-    }
-    encoded
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InnerBinary {
     protect_in_memory: bool,
@@ -4505,8 +4412,9 @@ mod compatibility_tests {
     use base64::Engine as _;
     use vaultkern_crypto::{CompositeKey, sha256_bytes};
     use vaultkern_model::{
-        Attachment, AttachmentContent, AttachmentContentId, CustomField, Entry, Group, ModelError,
-        PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
+        Attachment, AttachmentContent, AttachmentContentId, AutoTypeConfig, CustomField, Entry,
+        Group, ModelError, PasskeyRecord, TotpAlgorithm, TotpSpec, Vault, canonical_entry_bytes_v1,
+        canonical_entry_content_hash_v1,
     };
     use xmltree::{Element, XMLNode};
 
@@ -5046,6 +4954,208 @@ mod compatibility_tests {
             .and_then(|root| root.get_child("Group"))
             .and_then(|group| group.get_child("Entry"))
             .expect("live entry")
+    }
+
+    fn projection_string_fields(
+        entry: &Element,
+    ) -> std::collections::BTreeMap<String, (String, Option<String>)> {
+        let mut fields = std::collections::BTreeMap::new();
+        for child in &entry.children {
+            let XMLNode::Element(field) = child else {
+                continue;
+            };
+            if field.name != "String" {
+                continue;
+            }
+            let Some(key) = child_text(field, "Key") else {
+                continue;
+            };
+            if !matches!(
+                key.as_str(),
+                "otp"
+                    | "TimeOtp-Secret-Base32"
+                    | "TimeOtp-Algorithm"
+                    | "TimeOtp-Length"
+                    | "TimeOtp-Period"
+            ) && !key.starts_with("KPEX_PASSKEY_")
+            {
+                continue;
+            }
+            let value = field.get_child("Value").expect("projection value");
+            let previous = fields.insert(
+                key.clone(),
+                (
+                    value.get_text().unwrap_or_default().into_owned(),
+                    value.attributes.get("Protected").cloned(),
+                ),
+            );
+            assert!(previous.is_none(), "duplicate projection field: {key}");
+        }
+        fields
+    }
+
+    fn credential_entry() -> Entry {
+        let mut entry = Entry::new("Example Login");
+        entry.username = "alice@example.com".into();
+        entry.created_at = 101;
+        entry.modified_at = 202;
+        entry.expires = true;
+        entry.expiry_time = Some(303);
+        entry.last_accessed_at = Some(404);
+        entry.usage_count = Some(5);
+        entry.location_changed_at = Some(606);
+        entry.icon_id = Some(0);
+        entry.auto_type = Some(AutoTypeConfig::default());
+        entry.totp = Some(TotpSpec {
+            secret_base32: "JBSWY3DPEHPK3PXP".into(),
+            algorithm: TotpAlgorithm::Sha256,
+            digits: 8,
+            period_seconds: 45,
+            issuer: Some("Example Inc".into()),
+            account_name: Some("alice+prod@example.com".into()),
+        });
+        entry.passkey = Some(PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "credential-1".into(),
+            generated_user_id: Some("generated-1".into()),
+            private_key_pem: "-----BEGIN PRIVATE KEY-----\nkey-1\n-----END PRIVATE KEY-----".into(),
+            relying_party: "example.com".into(),
+            user_handle: Some("user-handle-1".into()),
+            backup_eligible: true,
+            backup_state: false,
+        });
+        entry
+    }
+
+    #[test]
+    fn credential_projections_roundtrip_with_stable_canonical_content_and_times() {
+        let entry = credential_entry();
+        let expected_times = (
+            entry.created_at,
+            entry.modified_at,
+            entry.expires,
+            entry.expiry_time,
+            entry.last_accessed_at,
+            entry.usage_count,
+            entry.location_changed_at,
+        );
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("CredentialRoundtrip");
+        vault.root.entries.push(entry);
+
+        let key = test_key("credential-roundtrip");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save credentials");
+        let loaded = load_kdbx(&bytes, &key).expect("load credentials");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        for reserved_key in [
+            "otp",
+            "TimeOtp-Secret-Base32",
+            "TimeOtp-Algorithm",
+            "TimeOtp-Length",
+            "TimeOtp-Period",
+            PasskeyRecord::USERNAME_KEY,
+            PasskeyRecord::CREDENTIAL_ID_KEY,
+            PasskeyRecord::GENERATED_USER_ID_KEY,
+            PasskeyRecord::PRIVATE_KEY_PEM_KEY,
+            PasskeyRecord::RELYING_PARTY_KEY,
+            PasskeyRecord::USER_HANDLE_KEY,
+            PasskeyRecord::FLAG_BE_KEY,
+            PasskeyRecord::FLAG_BS_KEY,
+        ] {
+            assert!(
+                !loaded_entry.attributes.contains_key(reserved_key),
+                "reserved projection field leaked into custom attributes: {reserved_key}"
+            );
+        }
+        assert_eq!(
+            (
+                loaded_entry.created_at,
+                loaded_entry.modified_at,
+                loaded_entry.expires,
+                loaded_entry.expiry_time,
+                loaded_entry.last_accessed_at,
+                loaded_entry.usage_count,
+                loaded_entry.location_changed_at,
+            ),
+            expected_times
+        );
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+
+        let mut changed = loaded_entry.clone();
+        changed.totp.as_mut().expect("loaded TOTP").secret_base32 = "KRSXG5DSNFXGOIDB".into();
+        assert_eq!(changed.modified_at, loaded_entry.modified_at);
+        assert_ne!(
+            canonical_entry_bytes_v1(&changed).expect("changed canonical bytes"),
+            expected_bytes
+        );
+        assert_ne!(
+            canonical_entry_content_hash_v1(&changed).expect("changed canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn credential_projection_writer_fields_are_exact() {
+        let entry = credential_entry();
+        let xml = super::entry_to_xml(
+            &entry,
+            &std::collections::HashMap::new(),
+            false,
+            KdbxVersion::V4_1,
+        )
+        .expect("build entry XML");
+        let fields = projection_string_fields(&xml);
+        let expected = [
+            (PasskeyRecord::USERNAME_KEY, "alice@example.com", None),
+            (
+                PasskeyRecord::CREDENTIAL_ID_KEY,
+                "credential-1",
+                Some("True"),
+            ),
+            (PasskeyRecord::GENERATED_USER_ID_KEY, "generated-1", None),
+            (
+                PasskeyRecord::PRIVATE_KEY_PEM_KEY,
+                "-----BEGIN PRIVATE KEY-----\nkey-1\n-----END PRIVATE KEY-----",
+                Some("True"),
+            ),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com", None),
+            (
+                PasskeyRecord::USER_HANDLE_KEY,
+                "user-handle-1",
+                Some("True"),
+            ),
+            (PasskeyRecord::FLAG_BE_KEY, "1", None),
+            (PasskeyRecord::FLAG_BS_KEY, "0", None),
+            (
+                "otp",
+                "otpauth://totp/Example%20Inc:alice%2Bprod%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example%20Inc&algorithm=SHA256&digits=8&period=45",
+                Some("True"),
+            ),
+            ("TimeOtp-Secret-Base32", "JBSWY3DPEHPK3PXP", Some("True")),
+            ("TimeOtp-Algorithm", "HMAC-SHA-256", None),
+            ("TimeOtp-Length", "8", None),
+            ("TimeOtp-Period", "45", None),
+        ];
+
+        assert_eq!(fields.len(), expected.len());
+        for (key, value, protected) in expected {
+            assert_eq!(
+                fields.get(key).map(|(actual_value, actual_protected)| {
+                    (actual_value.as_str(), actual_protected.as_deref())
+                }),
+                Some((value, protected)),
+                "unexpected persistent field: {key}"
+            );
+        }
     }
 
     #[test]

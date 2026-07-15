@@ -721,6 +721,99 @@ impl Entry {
     }
 }
 
+/// Builds the transient persistent-attribute view after overlaying credential projections.
+pub fn materialize_entry_persistent_attributes(entry: &Entry) -> BTreeMap<String, CustomField> {
+    let mut attributes = entry.attributes.clone();
+    if let Some(totp) = &entry.totp {
+        let (attribute_algorithm, uri_algorithm) = match totp.algorithm {
+            TotpAlgorithm::Sha1 => ("HMAC-SHA-1", "SHA1"),
+            TotpAlgorithm::Sha256 => ("HMAC-SHA-256", "SHA256"),
+            TotpAlgorithm::Sha512 => ("HMAC-SHA-512", "SHA512"),
+        };
+        attributes.insert(
+            "otp".into(),
+            CustomField {
+                value: entry_otpauth_uri(entry, totp, uri_algorithm),
+                protected: true,
+            },
+        );
+        attributes.insert(
+            "TimeOtp-Secret-Base32".into(),
+            CustomField {
+                value: totp.secret_base32.clone(),
+                protected: true,
+            },
+        );
+        attributes.insert(
+            "TimeOtp-Algorithm".into(),
+            CustomField {
+                value: attribute_algorithm.into(),
+                protected: false,
+            },
+        );
+        attributes.insert(
+            "TimeOtp-Length".into(),
+            CustomField {
+                value: totp.digits.to_string(),
+                protected: false,
+            },
+        );
+        attributes.insert(
+            "TimeOtp-Period".into(),
+            CustomField {
+                value: totp.period_seconds.to_string(),
+                protected: false,
+            },
+        );
+    }
+    if let Some(passkey) = &entry.passkey {
+        passkey.write_to_attributes(&mut attributes);
+    }
+    attributes
+}
+
+fn entry_otpauth_uri(entry: &Entry, totp: &TotpSpec, algorithm: &str) -> String {
+    let issuer = totp.issuer.clone().unwrap_or_else(|| entry.title.clone());
+    let account_name = totp
+        .account_name
+        .clone()
+        .unwrap_or_else(|| entry.username.clone());
+    let label = if account_name.is_empty() {
+        percent_encode_component(&issuer)
+    } else {
+        format!(
+            "{}:{}",
+            percent_encode_component(&issuer),
+            percent_encode_component(&account_name)
+        )
+    };
+    format!(
+        "otpauth://totp/{label}?secret={secret}&issuer={issuer}&algorithm={algorithm}&digits={digits}&period={period}",
+        label = label,
+        secret = percent_encode_component(&totp.secret_base32),
+        issuer = percent_encode_component(&issuer),
+        algorithm = algorithm,
+        digits = totp.digits,
+        period = totp.period_seconds,
+    )
+}
+
+fn percent_encode_component(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push_str(&format!("{byte:02X}"));
+            }
+        }
+    }
+    encoded
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
     pub id: Uuid,
@@ -1002,6 +1095,7 @@ mod tests {
     use super::{
         Attachment, AttachmentContent, AttachmentContentId, AttachmentContentPool, CustomField,
         Entry, Group, ModelError, PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
+        materialize_entry_persistent_attributes,
     };
     use std::collections::BTreeMap;
     use std::sync::{
@@ -1110,6 +1204,121 @@ mod tests {
         assert!(!attributes.contains_key("Passkey Username"));
         let restored = PasskeyRecord::from_attributes(&attributes).expect("restore passkey");
         assert_eq!(restored, passkey);
+    }
+
+    #[test]
+    fn persistent_attributes_overlay_projections_without_mutating_entry_attributes() {
+        let mut entry = Entry::new("Example Login");
+        entry.username = "alice@example.com".into();
+        entry.attributes.insert(
+            "Custom".into(),
+            CustomField {
+                value: "kept".into(),
+                protected: false,
+            },
+        );
+        for key in [
+            "otp",
+            PasskeyRecord::CREDENTIAL_ID_KEY,
+            PasskeyRecord::GENERATED_USER_ID_KEY,
+            PasskeyRecord::USER_HANDLE_KEY,
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: "stale".into(),
+                    protected: false,
+                },
+            );
+        }
+        entry.totp = Some(TotpSpec {
+            secret_base32: "JBSWY3DPEHPK3PXP".into(),
+            algorithm: TotpAlgorithm::Sha512,
+            digits: 8,
+            period_seconds: 45,
+            issuer: None,
+            account_name: None,
+        });
+        entry.passkey = Some(PasskeyRecord {
+            username: "alice".into(),
+            credential_id: "credential".into(),
+            generated_user_id: None,
+            private_key_pem: "private-key".into(),
+            relying_party: "example.com".into(),
+            user_handle: None,
+            backup_eligible: true,
+            backup_state: false,
+        });
+
+        let attributes = materialize_entry_persistent_attributes(&entry);
+
+        assert_eq!(entry.attributes["otp"].value, "stale");
+        assert_eq!(attributes.len(), 12);
+        assert_eq!(
+            attributes.get("Custom"),
+            Some(&CustomField {
+                value: "kept".into(),
+                protected: false,
+            })
+        );
+        assert_eq!(
+            attributes.get("otp"),
+            Some(&CustomField {
+                value: "otpauth://totp/Example%20Login:alice%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example%20Login&algorithm=SHA512&digits=8&period=45".into(),
+                protected: true,
+            })
+        );
+        assert_eq!(
+            attributes.get("TimeOtp-Secret-Base32"),
+            Some(&CustomField {
+                value: "JBSWY3DPEHPK3PXP".into(),
+                protected: true,
+            })
+        );
+        assert_eq!(attributes["TimeOtp-Algorithm"].value, "HMAC-SHA-512");
+        assert_eq!(attributes["TimeOtp-Length"].value, "8");
+        assert_eq!(attributes["TimeOtp-Period"].value, "45");
+        assert_eq!(
+            attributes[PasskeyRecord::CREDENTIAL_ID_KEY].value,
+            "credential"
+        );
+        assert!(attributes[PasskeyRecord::CREDENTIAL_ID_KEY].protected);
+        assert_eq!(
+            attributes[PasskeyRecord::PRIVATE_KEY_PEM_KEY].value,
+            "private-key"
+        );
+        assert!(attributes[PasskeyRecord::PRIVATE_KEY_PEM_KEY].protected);
+        assert!(!attributes.contains_key(PasskeyRecord::GENERATED_USER_ID_KEY));
+        assert!(!attributes.contains_key(PasskeyRecord::USER_HANDLE_KEY));
+    }
+
+    #[test]
+    fn persistent_totp_algorithm_spellings_match_kdbx_output() {
+        for (algorithm, attribute_algorithm, uri_algorithm) in [
+            (TotpAlgorithm::Sha1, "HMAC-SHA-1", "SHA1"),
+            (TotpAlgorithm::Sha256, "HMAC-SHA-256", "SHA256"),
+            (TotpAlgorithm::Sha512, "HMAC-SHA-512", "SHA512"),
+        ] {
+            let mut entry = Entry::new("Example");
+            entry.totp = Some(TotpSpec {
+                secret_base32: "SECRET".into(),
+                algorithm,
+                digits: 6,
+                period_seconds: 30,
+                issuer: Some("Issuer".into()),
+                account_name: Some("account".into()),
+            });
+
+            let attributes = materialize_entry_persistent_attributes(&entry);
+
+            assert_eq!(attributes["TimeOtp-Algorithm"].value, attribute_algorithm);
+            assert_eq!(
+                attributes["otp"].value,
+                format!(
+                    "otpauth://totp/Issuer:account?secret=SECRET&issuer=Issuer&algorithm={uri_algorithm}&digits=6&period=30"
+                )
+            );
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     AttachmentContentId, AutoTypeConfig, CustomDataBlock, CustomDataItem, CustomField, Entry,
-    EntryFieldProtection,
+    EntryFieldProtection, materialize_entry_persistent_attributes,
 };
 
 pub const CANONICAL_SERIALIZATION_MAGIC: [u8; 4] = *b"VKCS";
@@ -87,7 +87,7 @@ struct CanonicalEntryReference<'a> {
     notes: &'a str,
     field_protection: &'a EntryFieldProtection,
     tags: &'a BTreeSet<String>,
-    attributes: &'a BTreeMap<String, CustomField>,
+    attributes: BTreeMap<String, CustomField>,
     attachments: Vec<(&'a str, AttachmentReference)>,
     icon_id: &'a Option<u32>,
     custom_icon_id: &'a Option<Uuid>,
@@ -113,6 +113,7 @@ impl<'a> TryFrom<&'a Entry> for CanonicalEntryReference<'a> {
     type Error = CanonicalSerializationError;
 
     fn try_from(entry: &'a Entry) -> Result<Self, Self::Error> {
+        let attributes = materialize_entry_persistent_attributes(entry);
         let Entry {
             id,
             title,
@@ -122,7 +123,7 @@ impl<'a> TryFrom<&'a Entry> for CanonicalEntryReference<'a> {
             notes,
             field_protection,
             tags,
-            attributes,
+            attributes: _,
             attachments,
             history: _,
             totp: _,
@@ -483,6 +484,7 @@ mod tests {
         Attachment, AttachmentContent, AttachmentContentId, AutoTypeAssociation, AutoTypeConfig,
         CustomDataBlock, CustomDataItem, CustomField, Entry, EntryFieldProtection, EntryRawState,
         OpaqueXmlAnchor, OpaqueXmlFragment, PasskeyRecord, TotpAlgorithm, TotpSpec,
+        materialize_entry_persistent_attributes,
     };
 
     const MINIMAL_ENTRY_V1_HEX: &str = concat!(
@@ -498,7 +500,26 @@ mod tests {
         "a906000000e794a8e688b7090000007040737377c3b672641a00000068747470",
         "733a2f2fe4be8b2e6578616d706c652fe799bbe5bd95110000006c696e65206f",
         "6e650a6c696e652074776f010001010003000000010000006202000000616102",
-        "000000c3a902000000010000007a05000000706c61696e0002000000c3a90600",
+        "000000c3a90f0000001a0000004b5045585f504153534b45595f43524544454e",
+        "5449414c5f49440a00000063726564656e7469616c01140000004b5045585f50",
+        "4153534b45595f464c41475f4245010000003100140000004b5045585f504153",
+        "534b45595f464c41475f42530100000030001e0000004b5045585f504153534b",
+        "45595f47454e4552415445445f555345525f49440900000067656e6572617465",
+        "64001c0000004b5045585f504153534b45595f505249564154455f4b45595f50",
+        "454d0b000000707269766174652d6b6579011a0000004b5045585f504153534b",
+        "45595f52454c59494e475f50415254590b0000006578616d706c652e636f6d00",
+        "150000004b5045585f504153534b45595f555345524e414d4505000000616c69",
+        "636500180000004b5045585f504153534b45595f555345525f48414e444c4506",
+        "00000068616e646c65011100000054696d654f74702d416c676f726974686d0c",
+        "000000484d41432d5348412d323536000e00000054696d654f74702d4c656e67",
+        "74680100000038000e00000054696d654f74702d506572696f64020000003435",
+        "001500000054696d654f74702d5365637265742d426173653332100000004a42",
+        "5357593344504548504b3350585001030000006f74708e0000006f7470617574",
+        "683a2f2f746f74702f254534254245253842253230436f72703a616c69636525",
+        "324270726f642534306578616d706c652e636f6d3f7365637265743d4a425357",
+        "593344504548504b33505850266973737565723d254534254245253842253230",
+        "436f727026616c676f726974686d3d534841323536266469676974733d382670",
+        "6572696f643d343501010000007a05000000706c61696e0002000000c3a90600",
         "0000e7a798e5af860102000000050000007a2e62696e00381be1088d25cbd5ac",
         "5a31056329ef74062114bcb70af9ab2df3a3c4707f024506000000c3a92e6269",
         "6e0134e248fa5bfa5ae571d4174848b6e188234a05006a9609ee4617b0688913",
@@ -514,7 +535,7 @@ mod tests {
         "6f6e6c7903000000e4b88001f9ffffffffffffff01",
     );
     const FULL_ENTRY_V1_SHA256_HEX: &str =
-        "b67612dd8309382583d1b1a132b599ae734f6427332a557dd4da07261a7616e6";
+        "55979e79a38604f9dea969536290bdfc92864202db484614ff8c0e25ab4a54e2";
     type EntryMutation = (&'static str, fn(&mut Entry));
     type PositionedEntryMutation = (&'static str, usize, fn(&mut Entry));
     type PositionedFieldProtectionMutation = (&'static str, usize, fn(&mut EntryFieldProtection));
@@ -990,6 +1011,24 @@ mod tests {
             "z.bin".into(),
             Attachment::new("ignored-z-name", b"attachment-z".to_vec(), false),
         );
+        entry.totp = Some(TotpSpec {
+            secret_base32: "JBSWY3DPEHPK3PXP".into(),
+            algorithm: TotpAlgorithm::Sha256,
+            digits: 8,
+            period_seconds: 45,
+            issuer: Some("例 Corp".into()),
+            account_name: Some("alice+prod@example.com".into()),
+        });
+        entry.passkey = Some(PasskeyRecord {
+            username: "alice".into(),
+            credential_id: "credential".into(),
+            generated_user_id: Some("generated".into()),
+            private_key_pem: "private-key".into(),
+            relying_party: "example.com".into(),
+            user_handle: Some("handle".into()),
+            backup_eligible: true,
+            backup_state: false,
+        });
         entry.icon_id = Some(0x0102_0304);
         entry.custom_icon_id = Some(Uuid::from_bytes([
             0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
@@ -1089,7 +1128,7 @@ mod tests {
             .decode(FULL_ENTRY_V1_HEX.as_bytes())
             .expect("decode populated golden bytes");
         assert_eq!(bytes, expected_bytes);
-        assert_eq!(bytes.len(), 565);
+        assert_eq!(bytes.len(), 1173);
         assert_eq!(
             HEXLOWER.encode(&canonical_hash(&entry)),
             FULL_ENTRY_V1_SHA256_HEX
@@ -1355,35 +1394,119 @@ mod tests {
     }
 
     #[test]
+    fn totp_projection_changes_bytes_and_hash_without_timestamp_change() {
+        let mut first = minimal_entry();
+        first.modified_at = 42;
+        first.totp = Some(TotpSpec {
+            secret_base32: "JBSWY3DPEHPK3PXP".into(),
+            algorithm: TotpAlgorithm::Sha256,
+            digits: 8,
+            period_seconds: 60,
+            issuer: Some("Example".into()),
+            account_name: Some("alice@example.com".into()),
+        });
+        let mut second = first.clone();
+        second.totp.as_mut().expect("TOTP projection").secret_base32 = "KRSXG5DSNFXGOIDB".into();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.modified_at, second.modified_at);
+        assert_ne!(canonical_bytes(&first), canonical_bytes(&second));
+        assert_ne!(canonical_hash(&first), canonical_hash(&second));
+    }
+
+    #[test]
+    fn passkey_projection_changes_bytes_and_hash_without_timestamp_change() {
+        let mut first = minimal_entry();
+        first.modified_at = 42;
+        first.passkey = Some(PasskeyRecord {
+            username: "alice".into(),
+            credential_id: "credential-one".into(),
+            generated_user_id: Some("generated".into()),
+            private_key_pem: "private-key-one".into(),
+            relying_party: "example.com".into(),
+            user_handle: Some("handle".into()),
+            backup_eligible: true,
+            backup_state: false,
+        });
+        let mut second = first.clone();
+        let second_passkey = second.passkey.as_mut().expect("passkey projection");
+        second_passkey.credential_id = "credential-two".into();
+        second_passkey.private_key_pem = "private-key-two".into();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.modified_at, second.modified_at);
+        assert_ne!(canonical_bytes(&first), canonical_bytes(&second));
+        assert_ne!(canonical_hash(&first), canonical_hash(&second));
+    }
+
+    #[test]
+    fn projection_and_equivalent_backing_attributes_encode_each_key_once() {
+        const ATTRIBUTE_COUNT_OFFSET: usize = 53;
+        let passkey = PasskeyRecord {
+            username: "alice".into(),
+            credential_id: "credential".into(),
+            generated_user_id: Some("generated".into()),
+            private_key_pem: "private-key".into(),
+            relying_party: "example.com".into(),
+            user_handle: Some("handle".into()),
+            backup_eligible: true,
+            backup_state: false,
+        };
+        let mut projection_only = minimal_entry();
+        projection_only.totp = Some(TotpSpec {
+            secret_base32: "JBSWY3DPEHPK3PXP".into(),
+            algorithm: TotpAlgorithm::Sha256,
+            digits: 8,
+            period_seconds: 45,
+            issuer: Some("Example".into()),
+            account_name: Some("alice".into()),
+        });
+        projection_only.passkey = Some(passkey);
+        let mut explicitly_backed = projection_only.clone();
+        explicitly_backed.attributes = materialize_entry_persistent_attributes(&projection_only);
+
+        let projection_bytes = canonical_bytes(&projection_only);
+        assert_eq!(projection_bytes, canonical_bytes(&explicitly_backed));
+        assert_eq!(
+            canonical_hash(&projection_only),
+            canonical_hash(&explicitly_backed)
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                projection_bytes[ATTRIBUTE_COUNT_OFFSET..ATTRIBUTE_COUNT_OFFSET + 4]
+                    .try_into()
+                    .expect("attribute count bytes")
+            ),
+            13
+        );
+    }
+
+    #[test]
+    fn projections_are_encoded_only_through_the_materialized_attributes_field() {
+        let projected = fully_populated_entry();
+        let mut explicitly_materialized = projected.clone();
+        explicitly_materialized.attributes = materialize_entry_persistent_attributes(&projected);
+        explicitly_materialized.totp = None;
+        explicitly_materialized.passkey = None;
+
+        assert_eq!(
+            canonical_bytes(&projected),
+            canonical_bytes(&explicitly_materialized)
+        );
+        assert_eq!(
+            canonical_hash(&projected),
+            canonical_hash(&explicitly_materialized)
+        );
+    }
+
+    #[test]
     fn excluded_projection_history_and_fidelity_fields_do_not_change_content() {
         let baseline = minimal_entry();
         let expected_bytes = canonical_bytes(&baseline);
         let expected_hash = canonical_hash(&baseline);
-        let cases: [EntryMutation; 6] = [
+        let cases: [EntryMutation; 4] = [
             ("history", |entry| {
                 entry.history.push(fully_populated_entry())
-            }),
-            ("passkey", |entry| {
-                entry.passkey = Some(PasskeyRecord {
-                    username: "alice".into(),
-                    credential_id: "credential".into(),
-                    generated_user_id: Some("generated".into()),
-                    private_key_pem: "secret-key".into(),
-                    relying_party: "example.com".into(),
-                    user_handle: Some("handle".into()),
-                    backup_eligible: true,
-                    backup_state: true,
-                });
-            }),
-            ("totp", |entry| {
-                entry.totp = Some(TotpSpec {
-                    secret_base32: "JBSWY3DPEHPK3PXP".into(),
-                    algorithm: TotpAlgorithm::Sha512,
-                    digits: 8,
-                    period_seconds: 60,
-                    issuer: Some("issuer".into()),
-                    account_name: Some("account".into()),
-                });
             }),
             ("raw_state", |entry| {
                 entry.raw_state = EntryRawState {
