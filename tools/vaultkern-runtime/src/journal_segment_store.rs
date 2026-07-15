@@ -11,7 +11,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(windows))]
+use std::time::Instant;
 use uuid::Uuid;
 use vaultkern_runtime_protocol::contracts::JournalRecord;
 use vaultkern_runtime_protocol::framing::{self, SEGMENT_HEADER_LEN};
@@ -36,7 +38,7 @@ pub(crate) struct JournalSegmentWriter {
     file: File,
     identity: DurableFileIdentity,
     append_failed: bool,
-    _segment_lock: ExclusiveFileLock,
+    _segment_lock: Option<ExclusiveFileLock>,
     _reservation_anchor: File,
     _reservation_lock: ExclusiveFileLock,
 }
@@ -57,6 +59,7 @@ pub(crate) enum SegmentState {
 pub(crate) struct DiscoveredSegment {
     pub(crate) writer_id: Uuid,
     pub(crate) state: SegmentState,
+    directory_identity: DurableFileIdentity,
     path: PathBuf,
     identity: DurableFileIdentity,
     anchor: Arc<File>,
@@ -69,6 +72,7 @@ impl PartialEq for DiscoveredSegment {
     fn eq(&self, other: &Self) -> bool {
         self.writer_id == other.writer_id
             && self.state == other.state
+            && self.directory_identity == other.directory_identity
             && self.path == other.path
             && self.identity == other.identity
             && self.lock_path == other.lock_path
@@ -344,6 +348,31 @@ impl AllRecordsResolved {
         })
     }
 
+    /// Call only after every successfully framed record in this read has
+    /// been applied or durably moved to dead-letter storage. Definitive tail
+    /// preservation is authorized separately.
+    pub(crate) fn for_reachable_read(
+        segment: &DiscoveredSegment,
+        read: &SegmentRead,
+    ) -> io::Result<Self> {
+        if segment.state != SegmentState::Sealed
+            || segment.writer_id != read.writer_id
+            || segment.identity != read.identity
+            || !matches!(read.tail, SegmentTail::DefinitiveCorruption { .. })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reachable record resolution requires an exact corrupt sealed snapshot",
+            ));
+        }
+        Ok(Self {
+            writer_id: read.writer_id,
+            identity: read.identity,
+            size_bytes: read.snapshot_len,
+            content_sha256: read.snapshot_sha256.clone(),
+        })
+    }
+
     pub(crate) fn for_read_with_preserved_corrupt_tail(
         segment: &DiscoveredSegment,
         read: &SegmentRead,
@@ -518,6 +547,7 @@ impl JournalSegmentStore {
                 hook(&lock_path);
             }
             verify_path_identity(&lock_path, lock_identity)?;
+            #[cfg(not(windows))]
             let started = Instant::now();
             let lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, lock_timeout)?;
             verify_path_identity(&lock_path, lock_identity)?;
@@ -538,7 +568,11 @@ impl JournalSegmentStore {
             }
 
             let mut options = OpenOptions::new();
-            options.create_new(true).read(true).append(true);
+            options.create_new(true).read(true);
+            #[cfg(windows)]
+            options.write(true);
+            #[cfg(not(windows))]
+            options.append(true);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
@@ -554,8 +588,16 @@ impl JournalSegmentStore {
             let identity = opened_file_identity(file, &file.metadata()?)?;
             segment_identity = Some(identity);
             verify_path_identity(&path, identity)?;
-            let remaining = lock_timeout.saturating_sub(started.elapsed());
-            let segment_lock = ExclusiveFileLock::acquire_with_timeout(&path, remaining)?;
+            #[cfg(not(windows))]
+            let segment_lock = Some(ExclusiveFileLock::acquire_with_timeout(
+                &path,
+                lock_timeout.saturating_sub(started.elapsed()),
+            )?);
+            // LockFileEx byte-range locks are mandatory. The reservation
+            // sidecar is the Windows liveness lock so active segments remain
+            // readable while their writer is alive.
+            #[cfg(windows)]
+            let segment_lock = None;
             file.write_all(&framing::encode_segment_header())?;
             file.flush()?;
             file.sync_all()?;
@@ -673,6 +715,7 @@ impl JournalSegmentStore {
             segments.push(DiscoveredSegment {
                 writer_id,
                 state,
+                directory_identity: self.directory_identity,
                 path,
                 identity,
                 anchor: Arc::new(anchor),
@@ -723,6 +766,7 @@ impl JournalSegmentStore {
         visit_frame: &mut dyn FnMut(RawJournalFrame) -> io::Result<()>,
     ) -> io::Result<SegmentRead> {
         self.ensure_directory()?;
+        self.ensure_segment_belongs_to_store(segment)?;
         let (mut file, before, snapshot_len, snapshot_sha256) = {
             let mut attempts = 0;
             loop {
@@ -913,6 +957,7 @@ impl JournalSegmentStore {
         mut before_rename: Option<&mut dyn FnMut()>,
     ) -> Result<SealOutcome, SegmentMutationError> {
         self.ensure_directory()?;
+        self.ensure_segment_belongs_to_store(segment)?;
         if segment.state != SegmentState::Active {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -926,6 +971,7 @@ impl JournalSegmentStore {
             return Err(identity_changed_error().into());
         }
         verify_path_identity(&lock_path, segment.lock_identity)?;
+        #[cfg(not(windows))]
         let started = Instant::now();
         let lock = match ExclusiveFileLock::acquire_with_timeout(&lock_path, timeout) {
             Ok(lock) => lock,
@@ -936,14 +982,19 @@ impl JournalSegmentStore {
         };
         verify_path_identity(&lock_path, segment.lock_identity)?;
         verify_path_identity(&segment.path, segment.identity)?;
-        let remaining = timeout.saturating_sub(started.elapsed());
-        let segment_lock = match ExclusiveFileLock::acquire_with_timeout(&segment.path, remaining) {
-            Ok(lock) => lock,
+        #[cfg(not(windows))]
+        let segment_lock = match ExclusiveFileLock::acquire_with_timeout(
+            &segment.path,
+            timeout.saturating_sub(started.elapsed()),
+        ) {
+            Ok(lock) => Some(lock),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 return Ok(SealOutcome::WriterAlive);
             }
             Err(error) => return Err(error.into()),
         };
+        #[cfg(windows)]
+        let segment_lock: Option<ExclusiveFileLock> = None;
         verify_path_identity(&segment.path, segment.identity)?;
         let sealed_path = self.directory.join(format!("{stem}.sealed"));
         match fs::symlink_metadata(&sealed_path) {
@@ -967,6 +1018,7 @@ impl JournalSegmentStore {
         Ok(SealOutcome::Sealed(DiscoveredSegment {
             writer_id: segment.writer_id,
             state: SegmentState::Sealed,
+            directory_identity: self.directory_identity,
             path: sealed_path,
             identity: segment.identity,
             anchor: Arc::clone(&segment.anchor),
@@ -1034,6 +1086,7 @@ impl JournalSegmentStore {
         remove_lock_after_segment_sync: bool,
     ) -> Result<(), SegmentMutationError> {
         self.ensure_directory()?;
+        self.ensure_segment_belongs_to_store(segment)?;
         if segment.state != SegmentState::Sealed
             || segment.writer_id != resolved.writer_id
             || segment.identity != resolved.identity
@@ -1084,9 +1137,11 @@ impl JournalSegmentStore {
         &self,
         segment: &DiscoveredSegment,
         read: &SegmentRead,
+        resolved: AllRecordsResolved,
         preserved: OversizedCorruptTailPreserved,
     ) -> Result<ArchivedCorruptSegment, SegmentMutationError> {
         self.ensure_directory()?;
+        self.ensure_segment_belongs_to_store(segment)?;
         let (offset, region_len, raw_len) = match &read.tail {
             SegmentTail::DefinitiveCorruption {
                 offset,
@@ -1105,6 +1160,10 @@ impl JournalSegmentStore {
         if segment.state != SegmentState::Sealed
             || segment.writer_id != read.writer_id
             || segment.identity != read.identity
+            || resolved.writer_id != read.writer_id
+            || resolved.identity != read.identity
+            || resolved.size_bytes != read.snapshot_len
+            || resolved.content_sha256 != read.snapshot_sha256
             || region_len <= MAX_CORRUPTION_CAPTURE_LEN as u64
             || raw_len != MAX_CORRUPTION_CAPTURE_LEN as u64
             || preserved.writer_id != read.writer_id
@@ -1154,6 +1213,25 @@ impl JournalSegmentStore {
         if current_identity != self.directory_identity || anchor_identity != self.directory_identity
         {
             return Err(identity_changed_error());
+        }
+        Ok(())
+    }
+
+    fn ensure_segment_belongs_to_store(&self, segment: &DiscoveredSegment) -> io::Result<()> {
+        let stem = segment.writer_id.hyphenated().to_string();
+        let expected_name = match segment.state {
+            SegmentState::Active => stem.clone(),
+            SegmentState::Sealed => format!("{stem}.sealed"),
+        };
+        let expected_lock_name = format!("{stem}.lock");
+        if segment.directory_identity != self.directory_identity
+            || segment.path.file_name() != Some(expected_name.as_ref())
+            || segment.lock_path.file_name() != Some(expected_lock_name.as_ref())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "journal segment belongs to a different store",
+            ));
         }
         Ok(())
     }
@@ -2321,9 +2399,14 @@ mod tests {
         let mut writer = store.create_writer_with_id(writer_id).unwrap();
         writer.append(&record(1)).unwrap();
         let active = store.discover().unwrap().pop().unwrap();
+        let writer_lock_path = if cfg!(windows) {
+            &active.lock_path
+        } else {
+            &active.path
+        };
 
         assert_eq!(
-            ExclusiveFileLock::acquire_with_timeout(&active.path, Duration::from_millis(30))
+            ExclusiveFileLock::acquire_with_timeout(writer_lock_path, Duration::from_millis(30))
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::WouldBlock
@@ -2338,7 +2421,8 @@ mod tests {
 
         drop(writer);
         drop(
-            ExclusiveFileLock::acquire_with_timeout(&active.path, Duration::from_secs(1)).unwrap(),
+            ExclusiveFileLock::acquire_with_timeout(writer_lock_path, Duration::from_secs(1))
+                .unwrap(),
         );
         let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
             SealOutcome::Sealed(sealed) => sealed,
@@ -2992,6 +3076,48 @@ mod tests {
     }
 
     #[test]
+    fn reader_rejects_segment_from_another_store() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_store = JournalSegmentStore::open(first.path()).unwrap();
+        let second_store = JournalSegmentStore::open(second.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-00000000005b").unwrap();
+        let writer = first_store.create_writer_with_id(writer_id).unwrap();
+        let segment = first_store.discover().unwrap().pop().unwrap();
+
+        let error = second_store.read(&segment).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(segment.path.exists());
+        drop(writer);
+    }
+
+    #[test]
+    fn whole_delete_rejects_segment_from_another_store() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_store = JournalSegmentStore::open(first.path()).unwrap();
+        let second_store = JournalSegmentStore::open(second.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-00000000005c").unwrap();
+        let writer = first_store.create_writer_with_id(writer_id).unwrap();
+        let active = first_store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match first_store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let read = first_store.read(&sealed).unwrap();
+        let resolved = AllRecordsResolved::for_read(&sealed, &read).unwrap();
+
+        let error = second_store
+            .delete_resolved_segment(&sealed, resolved)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(sealed.path.exists());
+    }
+
+    #[test]
     fn unknown_segment_header_version_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let store = JournalSegmentStore::open(temp.path()).unwrap();
@@ -3162,9 +3288,10 @@ mod tests {
         let preserved =
             super::OversizedCorruptTailPreserved::after_durable_preservation(&sealed, &read)
                 .unwrap();
+        let resolved = AllRecordsResolved::for_reachable_read(&sealed, &read).unwrap();
 
         let archived = store
-            .archive_corrupt_segment(&sealed, &read, preserved)
+            .archive_corrupt_segment(&sealed, &read, resolved, preserved)
             .unwrap();
 
         assert_eq!(archived.writer_id, writer_id);
@@ -3176,6 +3303,53 @@ mod tests {
         );
         assert_eq!(fs::read(preserved_path).unwrap(), raw_prefix);
         assert!(store.discover().unwrap().is_empty());
+    }
+
+    #[test]
+    fn oversized_archive_requires_matching_reachable_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000066").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let capture_limit = framing::MAX_RECORD_LEN as usize + framing::FRAME_OVERHEAD;
+        let mut corrupt_tail = (framing::MAX_RECORD_LEN + 1).to_le_bytes().to_vec();
+        corrupt_tail.resize(capture_limit + 128, 0x5a);
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&sealed.path)
+            .unwrap();
+        file.write_all(&corrupt_tail).unwrap();
+        file.sync_all().unwrap();
+        let read = store.read(&sealed).unwrap();
+        assert_eq!(read.frame_count, 1);
+        let raw_prefix = match &read.tail {
+            SegmentTail::DefinitiveCorruption { raw_bytes, .. } => raw_bytes.clone(),
+            other => panic!("expected definitive corruption, got {other:?}"),
+        };
+        let preserved_path = temp.path().join("dead-letter-prefix");
+        let preserved_file = File::create(&preserved_path).unwrap();
+        (&preserved_file).write_all(&raw_prefix).unwrap();
+        preserved_file.sync_all().unwrap();
+        sync_parent(&preserved_path).unwrap();
+        let preserved =
+            super::OversizedCorruptTailPreserved::after_durable_preservation(&sealed, &read)
+                .unwrap();
+        let mut resolved = AllRecordsResolved::for_reachable_read(&sealed, &read).unwrap();
+        resolved.content_sha256.push('0');
+
+        let error = store
+            .archive_corrupt_segment(&sealed, &read, resolved, preserved)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(sealed.path.exists());
     }
 
     #[test]
