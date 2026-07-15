@@ -51,18 +51,12 @@ pub struct CacheManifest {
     pub vault_ref_id: String,
     /// SHA-256 of the cached vault bytes, lowercase hex. Content-addressed:
     /// this is also the cache file's name.
-    #[cfg_attr(
-        feature = "json-schema",
-        schemars(regex(pattern = r"^[0-9a-f]{64}$"))
-    )]
+    #[cfg_attr(feature = "json-schema", schemars(regex(pattern = r"^[0-9a-f]{64}$")))]
     pub content_fingerprint: String,
     /// `H(canonical(KdfParameters VariantDictionary))`, lowercase hex —
     /// 002's single authoritative formula (see `vaultkern-kdbx`'s
     /// `kdf_generation` module). Equality check, not an ordering.
-    #[cfg_attr(
-        feature = "json-schema",
-        schemars(regex(pattern = r"^[0-9a-f]{64}$"))
-    )]
+    #[cfg_attr(feature = "json-schema", schemars(regex(pattern = r"^[0-9a-f]{64}$")))]
     pub kdf_generation: String,
     /// Remote identity at snapshot time; `None` for local-file vaults (the
     /// fingerprint alone is the identity).
@@ -125,7 +119,10 @@ pub struct JournalRecord {
     /// contract. Minimum length 24 characters (the 16-byte GCM tag alone).
     #[cfg_attr(
         feature = "json-schema",
-        schemars(length(min = 24), regex(pattern = r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"))
+        schemars(
+            length(min = 24),
+            regex(pattern = r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$")
+        )
     )]
     pub payload_sealed: String,
     /// The record's fresh random 12-byte GCM nonce, encoded as **standard
@@ -140,10 +137,7 @@ pub struct JournalRecord {
     /// Fingerprint (lowercase hex SHA-256) of the cached vault the extension
     /// saw when it appended this record. **Diagnostic only**; replay does not
     /// require a match and an implausible value never rejects a record.
-    #[cfg_attr(
-        feature = "json-schema",
-        schemars(regex(pattern = r"^[0-9a-f]{64}$"))
-    )]
+    #[cfg_attr(feature = "json-schema", schemars(regex(pattern = r"^[0-9a-f]{64}$")))]
     pub base_fingerprint: String,
     /// Append time, seconds since the Unix epoch. **Diagnostic field**.
     pub created_at: u64,
@@ -195,7 +189,10 @@ pub struct DeadLetterRecord {
     /// `archived_segment` recording the rest (r12).
     #[cfg_attr(
         feature = "json-schema",
-        schemars(length(min = 4), regex(pattern = r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"))
+        schemars(
+            length(min = 4),
+            regex(pattern = r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$")
+        )
     )]
     pub frame_b64: String,
     /// Total byte length of the full original region, whether or not it
@@ -445,9 +442,7 @@ impl PasskeyRegistrationPayload {
     ) -> PasskeyRegistrationOutcome {
         match existing {
             None => PasskeyRegistrationOutcome::Insert,
-            Some((entry_id, current))
-                if entry_id == self.entry_id && *current == self.passkey =>
-            {
+            Some((entry_id, current)) if entry_id == self.entry_id && *current == self.passkey => {
                 PasskeyRegistrationOutcome::NoOp
             }
             Some(_) => PasskeyRegistrationOutcome::Conflict,
@@ -513,9 +508,7 @@ pub enum QuickUnlockState {
     Enrolled,
     /// The envelope is invalid; re-enrollment happens automatically at the
     /// next successful full-credential unlock (`Enrolled(gen+1)`).
-    NeedsReenroll {
-        reason: NeedsReenrollReason,
-    },
+    NeedsReenroll { reason: NeedsReenrollReason },
 }
 
 /// Why a vault fell into [`QuickUnlockState::NeedsReenroll`] (003 transition
@@ -563,9 +556,7 @@ impl PlatformRecordKey {
 /// is a `const` in the schema, so a document claiming any other version is
 /// rejected by validation rather than silently accepted).
 #[cfg(feature = "json-schema")]
-fn schema_version_const_one(
-    _: &mut schemars::r#gen::SchemaGenerator,
-) -> schemars::schema::Schema {
+fn schema_version_const_one(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
     schemars::schema::Schema::Object(schemars::schema::SchemaObject {
         instance_type: Some(schemars::schema::InstanceType::Integer.into()),
         format: Some("uint32".to_owned()),

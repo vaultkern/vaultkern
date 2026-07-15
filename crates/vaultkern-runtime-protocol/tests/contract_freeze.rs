@@ -283,11 +283,9 @@ fn maximum_size_journal_frame_can_be_archived_and_framed_as_dead_letter() {
         framing::MAX_DEAD_LETTER_RECORD_LEN,
     )
     .expect("maximum legal journal frame fits in a dead-letter frame");
-    let decoded = framing::decode_frame_with_limit(
-        &dead_letter_frame,
-        framing::MAX_DEAD_LETTER_RECORD_LEN,
-    )
-    .unwrap();
+    let decoded =
+        framing::decode_frame_with_limit(&dead_letter_frame, framing::MAX_DEAD_LETTER_RECORD_LEN)
+            .unwrap();
     assert_eq!(decoded.body, dead_letter_body);
 }
 
@@ -337,10 +335,9 @@ fn dead_letter_archive_truncates_over_limit_regions_to_the_prefix() {
 
     // Additive evolution: a pre-r12 document without the two new fields
     // still deserializes (region_len defaults to 0, segment to None).
-    let legacy: DeadLetterRecord = serde_json::from_str(
-        r#"{"reason":"payload_conflict","captured_at":1,"frame_b64":"AA=="}"#,
-    )
-    .unwrap();
+    let legacy: DeadLetterRecord =
+        serde_json::from_str(r#"{"reason":"payload_conflict","captured_at":1,"frame_b64":"AA=="}"#)
+            .unwrap();
     assert_eq!(legacy.region_len, 0);
     assert_eq!(legacy.archived_segment, None);
 }
@@ -648,9 +645,7 @@ fn schema_rejects_fingerprints_of_the_wrong_hex_length() {
     );
     // kdf_generation and base_fingerprint carry the same constraint.
     assert!(!pattern_of("cache_manifest.schema.json", "kdf_generation").is_match("abc123"));
-    assert!(
-        !pattern_of("journal_record.schema.json", "base_fingerprint").is_match(&valid[..63])
-    );
+    assert!(!pattern_of("journal_record.schema.json", "base_fingerprint").is_match(&valid[..63]));
 }
 
 #[test]

@@ -15,9 +15,7 @@
 use std::path::PathBuf;
 
 use base64::Engine as _;
-use vaultkern_runtime_protocol::contracts::{
-    DeadLetterRecord, JournalRecord, dead_letter_reason,
-};
+use vaultkern_runtime_protocol::contracts::{DeadLetterRecord, JournalRecord, dead_letter_reason};
 use vaultkern_runtime_protocol::framing::{
     self, FramingError, MAX_DEAD_LETTER_RECORD_LEN, MAX_RECORD_LEN, SEGMENT_HEADER_LEN,
 };
@@ -34,11 +32,9 @@ fn golden_record() -> JournalRecord {
         seq: 1,
         op_id: "0197f9a0-5c00-7000-8000-3b9e21f04d11".into(),
         vault_ref_id: "vault-ref-0f6c".into(),
-        payload_sealed: "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWl"
-            .into(),
+        payload_sealed: "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWl".into(),
         nonce: "AAECAwQFBgcICQoL".into(),
-        base_fingerprint: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-            .into(),
+        base_fingerprint: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into(),
         created_at: 1_783_900_801,
     }
 }
@@ -47,8 +43,7 @@ fn build_segment() -> Vec<u8> {
     let body = serde_json::to_vec(&golden_record()).expect("serialize record body");
     let mut segment = framing::encode_segment_header().to_vec();
     segment.extend_from_slice(
-        &framing::encode_frame(JournalRecord::SCHEMA_VERSION as u16, &body)
-            .expect("encode frame"),
+        &framing::encode_frame(JournalRecord::SCHEMA_VERSION as u16, &body).expect("encode frame"),
     );
     segment
 }
