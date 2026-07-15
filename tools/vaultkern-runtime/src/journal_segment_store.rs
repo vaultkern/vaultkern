@@ -210,6 +210,16 @@ pub(crate) struct CorruptTailPreserved {
     region_len: u64,
 }
 
+#[derive(Debug)]
+pub(crate) struct OversizedCorruptTailPreserved {
+    writer_id: Uuid,
+    identity: DurableFileIdentity,
+    snapshot_len: u64,
+    snapshot_sha256: String,
+    offset: u64,
+    region_len: u64,
+}
+
 impl CorruptTailPreserved {
     /// Call only after the exact capped tail bytes have been durably copied to
     /// dead-letter storage. The token binds that assertion to one read.
@@ -244,6 +254,55 @@ impl CorruptTailPreserved {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "corrupt tail preservation requires the complete capped region",
+            ));
+        }
+        Ok(Self {
+            writer_id: read.writer_id,
+            identity: read.identity,
+            snapshot_len: read.snapshot_len,
+            snapshot_sha256: read.snapshot_sha256.clone(),
+            offset,
+            region_len,
+        })
+    }
+}
+
+impl OversizedCorruptTailPreserved {
+    /// Call only after the capped prefix and full region length have been
+    /// durably recorded in dead-letter storage.
+    pub(crate) fn after_durable_preservation(
+        segment: &DiscoveredSegment,
+        read: &SegmentRead,
+    ) -> io::Result<Self> {
+        if segment.state != SegmentState::Sealed
+            || segment.writer_id != read.writer_id
+            || segment.identity != read.identity
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "oversized corruption preservation requires an exact sealed read",
+            ));
+        }
+        let (offset, region_len, raw_len) = match &read.tail {
+            SegmentTail::DefinitiveCorruption {
+                offset,
+                region_len,
+                raw_bytes,
+                ..
+            } => (*offset, *region_len, raw_bytes.len() as u64),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "oversized corruption preservation requires definitive corruption",
+                ));
+            }
+        };
+        if region_len <= MAX_CORRUPTION_CAPTURE_LEN as u64
+            || raw_len != MAX_CORRUPTION_CAPTURE_LEN as u64
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "oversized corruption preservation requires the complete capped prefix",
             ));
         }
         Ok(Self {
@@ -357,7 +416,7 @@ impl JournalSegmentStore {
         &self,
         writer_id: Uuid,
     ) -> io::Result<JournalSegmentWriter> {
-        self.create_writer_inner(writer_id, WRITER_LOCK_TIMEOUT, None, None, None)
+        self.create_writer_inner(writer_id, WRITER_LOCK_TIMEOUT, None, None, None, None)
     }
 
     #[cfg(test)]
@@ -367,7 +426,14 @@ impl JournalSegmentStore {
         lock_timeout: Duration,
         after_reservation: &mut dyn FnMut(&Path),
     ) -> io::Result<JournalSegmentWriter> {
-        self.create_writer_inner(writer_id, lock_timeout, None, Some(after_reservation), None)
+        self.create_writer_inner(
+            writer_id,
+            lock_timeout,
+            None,
+            Some(after_reservation),
+            None,
+            None,
+        )
     }
 
     #[cfg(all(test, unix))]
@@ -380,6 +446,7 @@ impl JournalSegmentStore {
             writer_id,
             WRITER_LOCK_TIMEOUT,
             Some(before_reservation),
+            None,
             None,
             None,
         )
@@ -397,6 +464,23 @@ impl JournalSegmentStore {
             None,
             None,
             Some(after_segment_open),
+            None,
+        )
+    }
+
+    #[cfg(all(test, unix))]
+    fn create_writer_with_pre_segment_open_test_hook(
+        &self,
+        writer_id: Uuid,
+        before_segment_open: &mut dyn FnMut(),
+    ) -> io::Result<JournalSegmentWriter> {
+        self.create_writer_inner(
+            writer_id,
+            WRITER_LOCK_TIMEOUT,
+            None,
+            None,
+            None,
+            Some(before_segment_open),
         )
     }
 
@@ -407,6 +491,7 @@ impl JournalSegmentStore {
         mut before_reservation: Option<&mut dyn FnMut()>,
         mut after_reservation: Option<&mut dyn FnMut(&Path)>,
         mut after_segment_open: Option<&mut dyn FnMut(&Path) -> io::Result<()>>,
+        mut before_segment_open: Option<&mut dyn FnMut()>,
     ) -> io::Result<JournalSegmentWriter> {
         if writer_id.is_nil() {
             return Err(io::Error::new(
@@ -448,6 +533,9 @@ impl JournalSegmentStore {
                     }
                 }
             }
+            if let Some(hook) = before_segment_open.as_mut() {
+                hook();
+            }
 
             let mut options = OpenOptions::new();
             options.create_new(true).read(true).append(true);
@@ -473,6 +561,7 @@ impl JournalSegmentStore {
             file.sync_all()?;
             sync_parent(&path)?;
             verify_path_identity(&path, identity)?;
+            self.ensure_directory()?;
             let file = segment_file
                 .take()
                 .expect("created journal segment file must be returned to its writer");
@@ -995,10 +1084,16 @@ impl JournalSegmentStore {
         &self,
         segment: &DiscoveredSegment,
         read: &SegmentRead,
+        preserved: OversizedCorruptTailPreserved,
     ) -> Result<ArchivedCorruptSegment, SegmentMutationError> {
         self.ensure_directory()?;
-        let region_len = match &read.tail {
-            SegmentTail::DefinitiveCorruption { region_len, .. } => *region_len,
+        let (offset, region_len, raw_len) = match &read.tail {
+            SegmentTail::DefinitiveCorruption {
+                offset,
+                region_len,
+                raw_bytes,
+                ..
+            } => (*offset, *region_len, raw_bytes.len() as u64),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -1011,6 +1106,13 @@ impl JournalSegmentStore {
             || segment.writer_id != read.writer_id
             || segment.identity != read.identity
             || region_len <= MAX_CORRUPTION_CAPTURE_LEN as u64
+            || raw_len != MAX_CORRUPTION_CAPTURE_LEN as u64
+            || preserved.writer_id != read.writer_id
+            || preserved.identity != read.identity
+            || preserved.snapshot_len != read.snapshot_len
+            || preserved.snapshot_sha256 != read.snapshot_sha256
+            || preserved.offset != offset
+            || preserved.region_len != region_len
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -2732,6 +2834,31 @@ mod tests {
         assert!(fs::read_dir(&original).unwrap().next().is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn writer_creation_rejects_directory_replacement_before_segment_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = temp.path().join("journal");
+        let original = temp.path().join("original");
+        let replacement = temp.path().join("replacement");
+        let store = JournalSegmentStore::open(&journal).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-00000000005c").unwrap();
+        let mut replace_directory = || {
+            fs::rename(&journal, &original).unwrap();
+            fs::rename(&replacement, &journal).unwrap();
+        };
+
+        let error = store
+            .create_writer_with_pre_segment_open_test_hook(writer_id, &mut replace_directory)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(fs::read_dir(&journal).unwrap().next().is_none());
+        assert!(original.join(format!("{writer_id}.lock")).exists());
+        assert!(!original.join(writer_id.to_string()).exists());
+    }
+
     #[cfg(windows)]
     #[test]
     fn store_rejects_replaced_directory_reparse_point_before_following_it() {
@@ -3005,7 +3132,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_unreachable_region_is_archived_by_whole_segment_rename() {
+    fn oversized_unreachable_region_is_archived_after_prefix_preservation() {
         let temp = tempfile::tempdir().unwrap();
         let store = JournalSegmentStore::open(temp.path()).unwrap();
         let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-000000000065").unwrap();
@@ -3022,8 +3149,23 @@ mod tests {
         bytes.resize(SEGMENT_HEADER_LEN + capture_limit + 128, 0x5a);
         fs::write(&sealed.path, &bytes).unwrap();
         let read = store.read(&sealed).unwrap();
+        let raw_prefix = match &read.tail {
+            SegmentTail::DefinitiveCorruption { raw_bytes, .. } => raw_bytes.clone(),
+            other => panic!("expected definitive corruption, got {other:?}"),
+        };
+        let dead_letter = tempfile::tempdir().unwrap();
+        let preserved_path = dead_letter.path().join("dead-letter-prefix");
+        let preserved_file = File::create(&preserved_path).unwrap();
+        (&preserved_file).write_all(&raw_prefix).unwrap();
+        preserved_file.sync_all().unwrap();
+        sync_parent(&preserved_path).unwrap();
+        let preserved =
+            super::OversizedCorruptTailPreserved::after_durable_preservation(&sealed, &read)
+                .unwrap();
 
-        let archived = store.archive_corrupt_segment(&sealed, &read).unwrap();
+        let archived = store
+            .archive_corrupt_segment(&sealed, &read, preserved)
+            .unwrap();
 
         assert_eq!(archived.writer_id, writer_id);
         assert_eq!(archived.file_name, format!("{writer_id}.corrupt"));
@@ -3032,6 +3174,7 @@ mod tests {
             fs::read(temp.path().join(&archived.file_name)).unwrap(),
             bytes
         );
+        assert_eq!(fs::read(preserved_path).unwrap(), raw_prefix);
         assert!(store.discover().unwrap().is_empty());
     }
 
