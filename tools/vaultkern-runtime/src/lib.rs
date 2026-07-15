@@ -1,5 +1,6 @@
 mod autofill_persist;
 mod command_loop;
+mod journal_segment_store;
 mod match_fill;
 pub mod native_host;
 mod passkey;
