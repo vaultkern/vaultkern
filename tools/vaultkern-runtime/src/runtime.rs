@@ -74,7 +74,9 @@ use crate::providers::secure_storage::{
     UnsupportedSecureStorageProvider, default_secure_storage_provider,
     default_secure_storage_provider_for_extension_id,
 };
-use crate::session::SessionState;
+use crate::session::{
+    LoadedVault, VaultSession, VaultSource, onedrive_remote_id, onedrive_vault_id,
+};
 use crate::state_paths::extension_id_from_browser_origin;
 use crate::vault_reference_store::{StoredVaultSource, VaultReferenceStore};
 
@@ -181,35 +183,6 @@ fn group_tree_contains_non_recycled_id(
         })
 }
 
-struct LoadedVault {
-    source: VaultSource,
-    name: String,
-    bytes: Vec<u8>,
-    baseline_fingerprint: VaultSourceFingerprint,
-    password: Option<String>,
-    key_file_path: Option<String>,
-    save_profile: SaveProfile,
-    autosave_delay_seconds: Option<u32>,
-    vault: Option<Vault>,
-    source_status: Option<VaultSourceStatusDto>,
-    source_account_label: Option<String>,
-    quick_unlock_refresh_pending: bool,
-}
-
-impl LoadedVault {
-    fn clear_unlock_secrets(&mut self) {
-        self.password = None;
-        self.key_file_path = None;
-        self.vault = None;
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VaultSource {
-    LocalPath(String),
-    OneDriveItem { drive_id: String, item_id: String },
-}
-
 struct LoadedSourceSnapshot {
     bytes: Option<Vec<u8>>,
     fingerprint: VaultSourceFingerprint,
@@ -283,15 +256,6 @@ struct PasskeyRegistrationRollbackState {
     rollback_entry: Option<Entry>,
 }
 
-impl VaultSource {
-    fn vault_id(&self) -> String {
-        match self {
-            Self::LocalPath(path) => path.clone(),
-            Self::OneDriveItem { drive_id, item_id } => onedrive_vault_id(drive_id, item_id),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct VaultCredentials {
     password: Option<String>,
@@ -317,14 +281,13 @@ impl VaultCredentials {
 
 pub struct Runtime {
     core: KeepassCore,
-    session: SessionState,
+    vault_session: VaultSession,
     references: VaultReferenceStore,
     local_files: LocalFileVaultSourceProvider,
     one_drive: OneDriveVaultSourceProvider,
     remote_cache: RemoteVaultCache,
     biometric: Box<dyn BiometricProvider>,
     secure_storage: Box<dyn SecureStorageProvider>,
-    loaded: BTreeMap<String, LoadedVault>,
     passkey_ceremonies: BTreeMap<String, PasskeyCeremonyLedgerEntry>,
     recent_unlock_user_verification: Option<PasskeyUserVerificationProof>,
     passkey_credential_id_generator: Box<dyn FnMut() -> String>,
@@ -415,21 +378,20 @@ impl Runtime {
         remote_cache: RemoteVaultCache,
         secure_storage: Box<dyn SecureStorageProvider>,
     ) -> Self {
-        let mut session = SessionState::default();
+        let mut vault_session = VaultSession::default();
         if let Some(vault_ref_id) = references.current_vault_ref_id() {
-            session.set_current_vault(vault_ref_id.to_owned());
+            vault_session.set_current_vault(vault_ref_id.to_owned());
         }
 
         Self {
             core: KeepassCore::new(),
-            session,
+            vault_session,
             references,
             local_files: LocalFileVaultSourceProvider::default(),
             one_drive,
             remote_cache,
             biometric: default_biometric_provider(),
             secure_storage,
-            loaded: BTreeMap::new(),
             passkey_ceremonies: BTreeMap::new(),
             recent_unlock_user_verification: None,
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
@@ -443,7 +405,7 @@ impl Runtime {
     pub fn for_tests() -> Self {
         Self {
             core: KeepassCore::new(),
-            session: SessionState::default(),
+            vault_session: VaultSession::default(),
             references: VaultReferenceStore::new_in_memory(),
             local_files: LocalFileVaultSourceProvider::default(),
             one_drive: OneDriveVaultSourceProvider::new_in_memory(),
@@ -453,7 +415,6 @@ impl Runtime {
             ))),
             biometric: Box::new(UnsupportedBiometricProvider),
             secure_storage: Box::new(UnsupportedSecureStorageProvider),
-            loaded: BTreeMap::new(),
             passkey_ceremonies: BTreeMap::new(),
             recent_unlock_user_verification: None,
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
@@ -653,10 +614,10 @@ impl Runtime {
         let reference = self
             .references
             .upsert_local_path(&path, self.current_unix_time() as i64)?;
-        self.session
+        self.vault_session
             .set_current_vault(reference.vault_ref_id.clone());
 
-        self.loaded.insert(
+        self.vault_session.insert_loaded(
             vault_id.clone(),
             LoadedVault {
                 source: VaultSource::LocalPath(path.to_owned()),
@@ -858,7 +819,7 @@ impl Runtime {
                     }
                 };
 
-                self.loaded.insert(
+                self.vault_session.insert_loaded(
                     vault_id.clone(),
                     LoadedVault {
                         source: vault_source,
@@ -886,14 +847,17 @@ impl Runtime {
     }
 
     pub fn preload_current_vault_snapshot(&mut self) -> Result<()> {
-        let Some(current_vault_ref_id) = self.session.current_vault_ref_id().map(ToOwned::to_owned)
+        let Some(current_vault_ref_id) = self
+            .vault_session
+            .current_vault_ref_id()
+            .map(ToOwned::to_owned)
         else {
             return Ok(());
         };
         let source = self.references.source_for(&current_vault_ref_id)?;
 
         let vault_id = vault_id_for_stored_source(&source);
-        if self.loaded.contains_key(&vault_id) {
+        if self.vault_session.contains_loaded(&vault_id) {
             return Ok(());
         }
 
@@ -906,7 +870,7 @@ impl Runtime {
         let reference = self
             .references
             .upsert_local_path(&path, self.current_unix_time() as i64)?;
-        self.session
+        self.vault_session
             .set_current_vault(reference.vault_ref_id.clone());
         Ok(reference)
     }
@@ -924,7 +888,7 @@ impl Runtime {
             &metadata.account_label,
             self.current_unix_time() as i64,
         )?;
-        self.session
+        self.vault_session
             .set_current_vault(reference.vault_ref_id.clone());
         Ok(reference)
     }
@@ -949,7 +913,8 @@ impl Runtime {
     pub fn set_current_vault(&mut self, vault_ref_id: &str) -> Result<()> {
         self.references
             .mark_current(vault_ref_id, self.current_unix_time() as i64)?;
-        self.session.set_current_vault(vault_ref_id.to_owned());
+        self.vault_session
+            .set_current_vault(vault_ref_id.to_owned());
         Ok(())
     }
 
@@ -963,7 +928,7 @@ impl Runtime {
             .secure_storage
             .delete(&quick_unlock_storage_key(vault_ref_id));
         if deleted_current {
-            self.session.clear_current_vault();
+            self.vault_session.clear_current_vault();
         }
         self.list_recent_vaults()
     }
@@ -979,13 +944,14 @@ impl Runtime {
         key_file_path: Option<&str>,
     ) -> Result<()> {
         let credentials = VaultCredentials::from_parts(password, key_file_path)?;
-        let current_vault_ref_id = self
-            .references
-            .find_ref_id_by_path(vault_id)
-            .or_else(|| self.session.current_vault_ref_id().map(ToOwned::to_owned));
+        let current_vault_ref_id = self.references.find_ref_id_by_path(vault_id).or_else(|| {
+            self.vault_session
+                .current_vault_ref_id()
+                .map(ToOwned::to_owned)
+        });
         let loaded = self
-            .loaded
-            .get_mut(vault_id)
+            .vault_session
+            .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
 
         let key = composite_key_from_credentials(&credentials)?;
@@ -996,7 +962,7 @@ impl Runtime {
         loaded.password = credentials.password;
         loaded.key_file_path = credentials.key_file_path;
         loaded.vault = Some(database.vault);
-        self.session
+        self.vault_session
             .unlock(vault_id.to_owned(), current_vault_ref_id);
         self.recent_unlock_user_verification = None;
         Ok(())
@@ -1004,13 +970,13 @@ impl Runtime {
 
     pub fn unlock_current_vault_with_password(&mut self, password: &str) -> Result<()> {
         let current_vault_ref_id = self
-            .session
+            .vault_session
             .current_vault_ref_id()
             .context("no current vault selected")?
             .to_owned();
         let source = self.references.source_for(&current_vault_ref_id)?;
         let vault_id = vault_id_for_stored_source(&source);
-        if self.loaded.contains_key(&vault_id) {
+        if self.vault_session.contains_loaded(&vault_id) {
             return self.unlock_with_password(&vault_id, password);
         }
 
@@ -1024,13 +990,13 @@ impl Runtime {
         key_file_path: Option<&str>,
     ) -> Result<()> {
         let current_vault_ref_id = self
-            .session
+            .vault_session
             .current_vault_ref_id()
             .context("no current vault selected")?
             .to_owned();
         let source = self.references.source_for(&current_vault_ref_id)?;
         let vault_id = vault_id_for_stored_source(&source);
-        if self.loaded.contains_key(&vault_id) {
+        if self.vault_session.contains_loaded(&vault_id) {
             return self.unlock_vault(&vault_id, password, key_file_path);
         }
 
@@ -1039,11 +1005,8 @@ impl Runtime {
     }
 
     pub fn lock_session(&mut self) {
-        for loaded in self.loaded.values_mut() {
-            loaded.clear_unlock_secrets();
-        }
+        self.vault_session.lock_all();
         self.recent_unlock_user_verification = None;
-        self.session.lock();
     }
 
     pub fn enable_quick_unlock_for_current_vault(&mut self) -> Result<()> {
@@ -1051,18 +1014,18 @@ impl Runtime {
             anyhow::bail!("biometric quick unlock is not implemented on this host");
         }
         let current_vault_ref_id = self
-            .session
+            .vault_session
             .current_vault_ref_id()
             .context("no current vault selected")?
             .to_owned();
         let active_vault_id = self
-            .session
+            .vault_session
             .active_vault_id()
             .context("current vault is locked")?
             .to_owned();
         let loaded = self
-            .loaded
-            .get(&active_vault_id)
+            .vault_session
+            .find_loaded(&active_vault_id)
             .with_context(|| format!("vault not opened: {active_vault_id}"))?;
         let credentials = VaultCredentials {
             password: loaded.password.clone(),
@@ -1085,7 +1048,7 @@ impl Runtime {
             anyhow::bail!("biometric quick unlock is not implemented on this host");
         }
         let current_vault_ref_id = self
-            .session
+            .vault_session
             .current_vault_ref_id()
             .context("no current vault selected")?
             .to_owned();
@@ -1102,7 +1065,7 @@ impl Runtime {
             credentials.key_file_path.as_deref(),
         ) {
             Ok(()) => {
-                let active_vault_id = self.session.active_vault_id().map(ToOwned::to_owned);
+                let active_vault_id = self.vault_session.active_vault_id().map(ToOwned::to_owned);
                 if let Some(active_vault_id) = active_vault_id {
                     self.record_recent_unlock_user_verification(
                         &active_vault_id,
@@ -1122,7 +1085,7 @@ impl Runtime {
 
     pub fn disable_quick_unlock_for_current_vault(&mut self) -> Result<()> {
         let current_vault_ref_id = self
-            .session
+            .vault_session
             .current_vault_ref_id()
             .context("no current vault selected")?
             .to_owned();
@@ -1131,20 +1094,22 @@ impl Runtime {
     }
 
     pub fn session_state(&self) -> vaultkern_runtime_protocol::SessionStateDto {
-        let mut dto = self.session.to_dto(self.biometric.supports_quick_unlock());
+        let mut dto = self
+            .vault_session
+            .to_dto(self.biometric.supports_quick_unlock());
         dto.source_status = self.current_source_status();
         dto
     }
 
     pub fn passkey_user_verification_capability(&self) -> PasskeyUserVerificationCapabilityDto {
         let mut methods = Vec::new();
-        let Some(active_vault_id) = self.session.active_vault_id() else {
+        let Some(active_vault_id) = self.vault_session.active_vault_id() else {
             return PasskeyUserVerificationCapabilityDto {
                 available: false,
                 methods,
             };
         };
-        let Some(loaded) = self.loaded.get(active_vault_id) else {
+        let Some(loaded) = self.vault_session.find_loaded(active_vault_id) else {
             return PasskeyUserVerificationCapabilityDto {
                 available: false,
                 methods,
@@ -1162,7 +1127,7 @@ impl Runtime {
         }
 
         if self.biometric.supports_quick_unlock() {
-            if let Some(vault_ref_id) = self.session.current_vault_ref_id() {
+            if let Some(vault_ref_id) = self.vault_session.current_vault_ref_id() {
                 let storage_key = quick_unlock_storage_key(vault_ref_id);
                 if self.secure_storage.contains(&storage_key).unwrap_or(false) {
                     methods.push(PasskeyUserVerificationMethodDto::QuickUnlock);
@@ -1190,7 +1155,7 @@ impl Runtime {
         ) {
             anyhow::bail!("passkey user verification expected phase must allow user verification");
         }
-        if self.session.active_vault_id() != Some(vault_id) {
+        if self.vault_session.active_vault_id() != Some(vault_id) {
             anyhow::bail!("passkey user verification vault mismatch");
         }
         let validation_epoch_ms = self.current_unix_time_ms();
@@ -1286,8 +1251,8 @@ impl Runtime {
         password: &str,
     ) -> Result<()> {
         let loaded = self
-            .loaded
-            .get(vault_id)
+            .vault_session
+            .find_loaded(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         if loaded.vault.is_none() {
             anyhow::bail!("vault is locked: {vault_id}");
@@ -1306,12 +1271,12 @@ impl Runtime {
             anyhow::bail!("passkey quick unlock verification is unavailable");
         }
         let current_vault_ref_id = self
-            .session
+            .vault_session
             .current_vault_ref_id()
             .context("no current vault selected")?;
         let loaded = self
-            .loaded
-            .get(vault_id)
+            .vault_session
+            .find_loaded(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         if loaded.vault.is_none() {
             anyhow::bail!("vault is locked: {vault_id}");
@@ -1398,8 +1363,8 @@ impl Runtime {
 
     pub fn get_database_settings(&self, vault_id: &str) -> Result<DatabaseSettingsDto> {
         let loaded = self
-            .loaded
-            .get(vault_id)
+            .vault_session
+            .find_loaded(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         let vault = loaded
             .vault
@@ -1421,8 +1386,8 @@ impl Runtime {
     ) -> Result<DatabaseSettingsDto> {
         let settings = {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -1602,8 +1567,8 @@ impl Runtime {
         let modified_at = self.current_unix_time();
         let entry_id = {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -1640,7 +1605,7 @@ impl Runtime {
         fields: &EntryFieldsDto,
     ) -> Result<Vec<String>> {
         anyhow::ensure!(
-            self.session.active_vault_id() == Some(vault_id),
+            self.vault_session.active_vault_id() == Some(vault_id),
             "vault is not active: {vault_id}"
         );
         let mut matching_ids = Vec::new();
@@ -1669,8 +1634,8 @@ impl Runtime {
         let modified_at = self.current_unix_time();
         {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -1744,7 +1709,7 @@ impl Runtime {
         expected_fields: EntryFieldsDto,
         desired_fields: EntryFieldsDto,
     ) -> Result<Option<EntryDetailDto>> {
-        if self.session.active_vault_id() != Some(vault_id) {
+        if self.vault_session.active_vault_id() != Some(vault_id) {
             return Ok(None);
         }
         if parse_totp_uri(desired_fields.totp_uri.clone()).is_err() {
@@ -1778,8 +1743,8 @@ impl Runtime {
         let modified_at = self.current_unix_time();
         {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -1801,8 +1766,8 @@ impl Runtime {
         let modified_at = self.current_unix_time();
         {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -1826,8 +1791,8 @@ impl Runtime {
         let modified_at = self.current_unix_time();
         {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -2504,8 +2469,8 @@ impl Runtime {
 
         let (existing, credential_id_collision_count) = {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -2563,8 +2528,8 @@ impl Runtime {
                 PasskeyCeremonyDurableStateDto::Snapshot,
             )?;
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -2623,8 +2588,8 @@ impl Runtime {
         )?;
         {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -2752,8 +2717,8 @@ impl Runtime {
         rollback: PasskeyRegistrationRollbackState,
     ) -> Result<()> {
         let loaded = self
-            .loaded
-            .get_mut(&rollback.vault_id)
+            .vault_session
+            .find_loaded_mut(&rollback.vault_id)
             .with_context(|| format!("vault not opened: {}", rollback.vault_id))?;
         let vault = loaded
             .vault
@@ -2863,8 +2828,8 @@ impl Runtime {
 
     pub fn delete_entry(&mut self, vault_id: &str, entry_id: &str) -> Result<()> {
         let loaded = self
-            .loaded
-            .get_mut(vault_id)
+            .vault_session
+            .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         let vault = loaded
             .vault
@@ -2911,8 +2876,8 @@ impl Runtime {
         let modified_at = self.current_unix_time();
         {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -2944,8 +2909,8 @@ impl Runtime {
         let modified_at = self.current_unix_time();
         {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -2977,8 +2942,8 @@ impl Runtime {
         let modified_at = self.current_unix_time();
         {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -3005,8 +2970,8 @@ impl Runtime {
         let modified_at = self.current_unix_time();
         {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let vault = loaded
                 .vault
@@ -3556,12 +3521,12 @@ impl Runtime {
         vault_id: String,
         plan: AutofillPersistPlanDto,
     ) -> Result<RuntimeResponse> {
-        let active_vault_id = self.session.active_vault_id();
+        let active_vault_id = self.vault_session.active_vault_id();
         if active_vault_id != Some(vault_id.as_str()) {
             if active_vault_id.is_none()
                 && self
-                    .loaded
-                    .get(&vault_id)
+                    .vault_session
+                    .find_loaded(&vault_id)
                     .is_some_and(|loaded| loaded.vault.is_none())
             {
                 return Ok(autofill_persist_error(
@@ -3588,8 +3553,8 @@ impl Runtime {
             account_label,
         ) = {
             let loaded = self
-                .loaded
-                .get(&vault_id)
+                .vault_session
+                .find_loaded(&vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let Some(vault) = loaded.vault.as_ref() else {
                 return Ok(autofill_persist_error(
@@ -3821,8 +3786,8 @@ impl Runtime {
         };
         if !loaded_pending {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             loaded.vault = Some(prepared.candidate);
             loaded.bytes = chain.pending.bytes.clone();
@@ -4368,8 +4333,8 @@ impl Runtime {
         source_status: Option<VaultSourceStatusDto>,
     ) -> Result<()> {
         let loaded = self
-            .loaded
-            .get_mut(vault_id)
+            .vault_session
+            .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded.vault = Some(vault);
         loaded.bytes = bytes;
@@ -4382,8 +4347,8 @@ impl Runtime {
 
     fn ensure_generic_save_allowed(&self, vault_id: &str) -> Result<()> {
         let remote_cache_key = self
-            .loaded
-            .get(vault_id)
+            .vault_session
+            .find_loaded(vault_id)
             .and_then(|loaded| remote_cache_key_for_source(&loaded.source));
         if let Some(cache_key) = remote_cache_key {
             match self.remote_cache.read_pending_chain(&cache_key) {
@@ -4422,8 +4387,8 @@ impl Runtime {
         self.ensure_generic_save_allowed(vault_id)?;
         let (key, baseline_fingerprint, save_profile, source, display_name, account_label) = {
             let loaded = self
-                .loaded
-                .get(vault_id)
+                .vault_session
+                .find_loaded(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             (
                 composite_key_from_loaded_vault(loaded)?,
@@ -4457,8 +4422,8 @@ impl Runtime {
 
         let (bytes, merge_summary) = {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let Some(vault) = loaded.vault.as_mut() else {
                 anyhow::bail!("vault is locked: {vault_id}");
@@ -4546,8 +4511,8 @@ impl Runtime {
             None
         };
         let loaded = self
-            .loaded
-            .get_mut(vault_id)
+            .vault_session
+            .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         if let Some(status) = next_source_status {
             loaded.source_status = Some(status);
@@ -4572,8 +4537,8 @@ impl Runtime {
         save_profile: SaveProfile,
     ) -> Result<Vec<u8>> {
         let loaded = self
-            .loaded
-            .get_mut(vault_id)
+            .vault_session
+            .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         let Some(vault) = loaded.vault.as_mut() else {
             anyhow::bail!("vault is locked: {vault_id}");
@@ -4616,8 +4581,8 @@ impl Runtime {
             last_error: Some(remote_error),
         };
         let loaded = self
-            .loaded
-            .get_mut(vault_id)
+            .vault_session
+            .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded.bytes = bytes;
         loaded.baseline_fingerprint = fingerprint;
@@ -4632,8 +4597,8 @@ impl Runtime {
     pub fn retry_vault_source_sync(&mut self, vault_id: &str) -> Result<VaultSourceStatusDto> {
         let (source, baseline_fingerprint, key, pending_sync) = {
             let loaded = self
-                .loaded
-                .get(vault_id)
+                .vault_session
+                .find_loaded(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             (
                 loaded.source.clone(),
@@ -4686,7 +4651,7 @@ impl Runtime {
                             .into(),
                     ),
                 };
-                if let Some(loaded) = self.loaded.get_mut(vault_id) {
+                if let Some(loaded) = self.vault_session.find_loaded_mut(vault_id) {
                     loaded.source_status = Some(status.clone());
                 }
                 return Ok(status);
@@ -4702,7 +4667,7 @@ impl Runtime {
                         .map(|entry| entry.cached_at),
                     last_error: Some(error.to_string()),
                 };
-                if let Some(loaded) = self.loaded.get_mut(vault_id) {
+                if let Some(loaded) = self.vault_session.find_loaded_mut(vault_id) {
                     loaded.source_status = Some(status.clone());
                 }
                 return Ok(status);
@@ -4720,7 +4685,7 @@ impl Runtime {
                     cached_at: cached.as_ref().map(|entry| entry.cached_at),
                     last_error: None,
                 };
-                if let Some(loaded) = self.loaded.get_mut(vault_id) {
+                if let Some(loaded) = self.vault_session.find_loaded_mut(vault_id) {
                     loaded.source_status = Some(status.clone());
                 }
                 Ok(status)
@@ -4751,8 +4716,8 @@ impl Runtime {
                 };
 
                 let loaded = self
-                    .loaded
-                    .get_mut(vault_id)
+                    .vault_session
+                    .find_loaded_mut(vault_id)
                     .with_context(|| format!("vault not opened: {vault_id}"))?;
                 if let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key.as_ref()) {
                     if snapshot.fingerprint != baseline_fingerprint {
@@ -4776,7 +4741,7 @@ impl Runtime {
                     cached_at: cached.as_ref().map(|entry| entry.cached_at),
                     last_error: Some(remote_error),
                 };
-                if let Some(loaded) = self.loaded.get_mut(vault_id) {
+                if let Some(loaded) = self.vault_session.find_loaded_mut(vault_id) {
                     loaded.source_status = Some(status.clone());
                 }
                 Ok(status)
@@ -4825,7 +4790,7 @@ impl Runtime {
                     cached_at,
                     last_error: Some(remote_error),
                 };
-                if let Some(loaded) = self.loaded.get_mut(vault_id) {
+                if let Some(loaded) = self.vault_session.find_loaded_mut(vault_id) {
                     loaded.source_status = Some(status.clone());
                 }
                 Ok(status)
@@ -4892,8 +4857,8 @@ impl Runtime {
         }
         let (loaded_bytes, live_vault, save_profile) = {
             let loaded = self
-                .loaded
-                .get(vault_id)
+                .vault_session
+                .find_loaded(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             let live_vault = loaded
                 .vault
@@ -5092,8 +5057,8 @@ impl Runtime {
         let cached_at = self.current_unix_time() as i64;
         let (display_name, account_label) = {
             let loaded = self
-                .loaded
-                .get(vault_id)
+                .vault_session
+                .find_loaded(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             (
                 loaded.name.clone(),
@@ -5157,8 +5122,8 @@ impl Runtime {
         let cached_at = self.current_unix_time() as i64;
         let (bytes, display_name, account_label) = {
             let loaded = self
-                .loaded
-                .get_mut(vault_id)
+                .vault_session
+                .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             if let Some(snapshot) = remote_snapshot.as_ref() {
                 let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key) else {
@@ -5217,8 +5182,8 @@ impl Runtime {
                 .then(|| "remote cache completion is visible but durability is unknown".into()),
         };
         let loaded = self
-            .loaded
-            .get_mut(vault_id)
+            .vault_session
+            .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded.bytes = bytes;
         loaded.baseline_fingerprint = write_fingerprint;
@@ -5228,8 +5193,8 @@ impl Runtime {
 
     fn loaded_vault(&self, vault_id: &str) -> Result<&Vault> {
         let loaded = self
-            .loaded
-            .get(vault_id)
+            .vault_session
+            .find_loaded(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded
             .vault
@@ -5243,8 +5208,8 @@ impl Runtime {
         baseline: Option<&VaultSourceFingerprint>,
     ) -> Result<LoadedSourceSnapshot> {
         let loaded = self
-            .loaded
-            .get(vault_id)
+            .vault_session
+            .find_loaded(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         match &loaded.source {
             VaultSource::LocalPath(path) => {
@@ -5289,8 +5254,8 @@ impl Runtime {
         one_drive_etag: Option<&str>,
     ) -> Result<Option<VaultSourceFingerprint>> {
         let source = self
-            .loaded
-            .get(vault_id)
+            .vault_session
+            .find_loaded(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?
             .source
             .clone();
@@ -5328,24 +5293,24 @@ impl Runtime {
     }
 
     fn current_source_status(&self) -> Option<VaultSourceStatusDto> {
-        if let Some(active_vault_id) = self.session.active_vault_id() {
+        if let Some(active_vault_id) = self.vault_session.active_vault_id() {
             return self
-                .loaded
-                .get(active_vault_id)
+                .vault_session
+                .find_loaded(active_vault_id)
                 .and_then(|loaded| loaded.source_status.clone());
         }
 
-        let current_vault_ref_id = self.session.current_vault_ref_id()?;
+        let current_vault_ref_id = self.vault_session.current_vault_ref_id()?;
         let source = self.references.source_for(current_vault_ref_id).ok()?;
         let vault_id = vault_id_for_stored_source(&source);
-        self.loaded
-            .get(&vault_id)
+        self.vault_session
+            .find_loaded(&vault_id)
             .and_then(|loaded| loaded.source_status.clone())
     }
 
     fn vault_ref_id_for_loaded_vault(&self, vault_id: &str) -> Option<String> {
-        if self.session.active_vault_id() == Some(vault_id) {
-            if let Some(vault_ref_id) = self.session.current_vault_ref_id() {
+        if self.vault_session.active_vault_id() == Some(vault_id) {
+            if let Some(vault_ref_id) = self.vault_session.current_vault_ref_id() {
                 return Some(vault_ref_id.to_owned());
             }
         }
@@ -5358,8 +5323,8 @@ impl Runtime {
         vault_id: &str,
     ) -> Result<()> {
         let refresh_pending = self
-            .loaded
-            .get(vault_id)
+            .vault_session
+            .find_loaded(vault_id)
             .is_some_and(|loaded| loaded.quick_unlock_refresh_pending);
         if !refresh_pending {
             return Ok(());
@@ -5388,8 +5353,8 @@ impl Runtime {
         }
 
         let loaded = self
-            .loaded
-            .get(vault_id)
+            .vault_session
+            .find_loaded(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         let credentials = VaultCredentials {
             password: loaded.password.clone(),
@@ -5413,8 +5378,8 @@ impl Runtime {
 
     fn clear_quick_unlock_refresh_pending(&mut self, vault_id: &str) -> Result<()> {
         let loaded = self
-            .loaded
-            .get_mut(vault_id)
+            .vault_session
+            .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded.quick_unlock_refresh_pending = false;
         Ok(())
@@ -6904,15 +6869,6 @@ fn vault_id_for_stored_source(source: &StoredVaultSource) -> String {
             drive_id, item_id, ..
         } => onedrive_vault_id(drive_id, item_id),
     }
-}
-
-fn onedrive_remote_id(drive_id: &str, item_id: &str) -> String {
-    let encode = |value: &str| byte_serialize(value.as_bytes()).collect::<String>();
-    format!("{}:{}", encode(drive_id), encode(item_id))
-}
-
-fn onedrive_vault_id(drive_id: &str, item_id: &str) -> String {
-    format!("onedrive:{}", onedrive_remote_id(drive_id, item_id))
 }
 
 fn remote_cache_key_for_source(source: &VaultSource) -> Option<RemoteCacheKey> {
@@ -8587,7 +8543,10 @@ mod tests {
             )
             .unwrap();
         {
-            let loaded = runtime.loaded.get_mut(&opened.vault_id).unwrap();
+            let loaded = runtime
+                .vault_session
+                .find_loaded_mut(&opened.vault_id)
+                .unwrap();
             runtime
                 .core
                 .update_entry_field_protection(
@@ -8741,7 +8700,7 @@ mod tests {
         let fields = entry_fields(&entry);
         let (_second_dir, second) = open_unlocked_demo_vault(&mut runtime);
         assert_eq!(
-            runtime.session.active_vault_id(),
+            runtime.vault_session.active_vault_id(),
             Some(second.vault_id.as_str())
         );
 
@@ -8877,7 +8836,10 @@ mod tests {
         let entry = create_demo_entry(&mut runtime, &opened.vault_id);
         let fields = entry_fields(&entry);
         {
-            let loaded = runtime.loaded.get_mut(&opened.vault_id).unwrap();
+            let loaded = runtime
+                .vault_session
+                .find_loaded_mut(&opened.vault_id)
+                .unwrap();
             let vault = loaded.vault.as_mut().unwrap();
             KeepassCore::new()
                 .snapshot_entry_to_history(vault, &entry.id)
@@ -8937,7 +8899,10 @@ mod tests {
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         let entry = create_demo_entry(&mut runtime, &opened.vault_id);
         {
-            let loaded = runtime.loaded.get_mut(&opened.vault_id).unwrap();
+            let loaded = runtime
+                .vault_session
+                .find_loaded_mut(&opened.vault_id)
+                .unwrap();
             let vault = loaded.vault.as_mut().unwrap();
             let core = KeepassCore::new();
             core.snapshot_entry_to_history(vault, &entry.id).unwrap();
@@ -9083,7 +9048,7 @@ mod tests {
         let fields = entry_fields(&entry);
         let (_second_dir, second) = open_unlocked_demo_vault(&mut runtime);
         assert_eq!(
-            runtime.session.active_vault_id(),
+            runtime.vault_session.active_vault_id(),
             Some(second.vault_id.as_str())
         );
         std::fs::remove_file(&first.path).unwrap();
@@ -9241,7 +9206,10 @@ mod tests {
             .unwrap();
         let external_group_id = {
             let core = &external.core;
-            let loaded = external.loaded.get_mut(&opened.vault_id).unwrap();
+            let loaded = external
+                .vault_session
+                .find_loaded_mut(&opened.vault_id)
+                .unwrap();
             let vault = loaded.vault.as_mut().unwrap();
             let root_id = vault.root.id.to_string();
             let group = core.add_group(vault, &root_id, "Externally moved").unwrap();
@@ -9368,8 +9336,8 @@ mod tests {
             "unexpected initial persist response: {committed:?}"
         );
         runtime
-            .loaded
-            .get_mut(&opened.vault_id)
+            .vault_session
+            .find_loaded_mut(&opened.vault_id)
             .unwrap()
             .vault
             .as_mut()
@@ -9713,7 +9681,10 @@ mod tests {
             .core
             .load_database(
                 &remote,
-                &composite_key_from_loaded_vault(runtime.loaded.get(&vault_id).unwrap()).unwrap(),
+                &composite_key_from_loaded_vault(
+                    runtime.vault_session.find_loaded(&vault_id).unwrap(),
+                )
+                .unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -11157,7 +11128,10 @@ mod tests {
             entry_fields(&stale.get_entry_detail(&vault_id, &unrelated.id).unwrap()),
             stale_unrelated
         );
-        assert_eq!(stale.loaded[&vault_id].bytes, chain_before.pending.bytes);
+        assert_eq!(
+            stale.vault_session.find_loaded(&vault_id).unwrap().bytes,
+            chain_before.pending.bytes
+        );
         assert_eq!(
             stale.remote_cache.read_pending_chain(&cache_key).unwrap(),
             chain_before
@@ -11903,7 +11877,7 @@ mod tests {
 
         runtime.lock_session();
 
-        let loaded = runtime.loaded.get(&opened.vault_id).unwrap();
+        let loaded = runtime.vault_session.find_loaded(&opened.vault_id).unwrap();
         assert!(!loaded.bytes.is_empty());
         assert!(loaded.vault.is_none());
         assert!(loaded.password.is_none());
@@ -11921,6 +11895,41 @@ mod tests {
             session.active_vault_id.as_deref(),
             Some(opened.vault_id.as_str())
         );
+    }
+
+    #[test]
+    fn current_source_status_covers_active_selected_locked_and_missing_states() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let expected = VaultSourceStatusDto {
+            source_kind: "test".into(),
+            remote_state: "active".into(),
+            last_sync_at: Some(42),
+            cached_at: Some(41),
+            last_error: None,
+        };
+        runtime
+            .vault_session
+            .find_loaded_mut(&opened.vault_id)
+            .unwrap()
+            .source_status = Some(expected.clone());
+
+        assert_eq!(
+            runtime.session_state().source_status,
+            Some(expected.clone())
+        );
+
+        runtime.lock_session();
+        assert_eq!(runtime.session_state().source_status, Some(expected));
+
+        let missing_dir = tempfile::tempdir().unwrap();
+        let missing_path = missing_dir.path().join("selected-only.kdbx");
+        std::fs::write(&missing_path, b"not loaded").unwrap();
+        runtime
+            .add_local_vault_reference(missing_path.to_str().unwrap())
+            .unwrap();
+
+        assert!(runtime.session_state().source_status.is_none());
     }
 
     #[test]
@@ -12206,7 +12215,11 @@ mod tests {
             })
             .unwrap();
 
-        runtime.loaded.get_mut(&opened.vault_id).unwrap().bytes = b"not a kdbx".to_vec();
+        runtime
+            .vault_session
+            .find_loaded_mut(&opened.vault_id)
+            .unwrap()
+            .bytes = b"not a kdbx".to_vec();
 
         let verified = runtime
             .handle(RuntimeCommand::VerifyPasskeyUser {
