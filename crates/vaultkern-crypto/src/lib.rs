@@ -18,6 +18,7 @@ use twofish::Twofish;
 use uuid::Uuid;
 use xmltree::{Element, XMLNode};
 
+pub mod journal;
 pub mod quick_unlock;
 
 #[derive(Debug, Error)]
