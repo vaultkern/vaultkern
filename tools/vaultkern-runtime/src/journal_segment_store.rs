@@ -205,6 +205,14 @@ pub(crate) struct AllRecordsResolved {
 }
 
 #[derive(Debug)]
+pub(crate) struct ReachableRecordsResolved {
+    writer_id: Uuid,
+    identity: DurableFileIdentity,
+    size_bytes: u64,
+    content_sha256: String,
+}
+
+#[derive(Debug)]
 pub(crate) struct CorruptTailPreserved {
     writer_id: Uuid,
     identity: DurableFileIdentity,
@@ -348,31 +356,6 @@ impl AllRecordsResolved {
         })
     }
 
-    /// Call only after every successfully framed record in this read has
-    /// been applied or durably moved to dead-letter storage. Definitive tail
-    /// preservation is authorized separately.
-    pub(crate) fn for_reachable_read(
-        segment: &DiscoveredSegment,
-        read: &SegmentRead,
-    ) -> io::Result<Self> {
-        if segment.state != SegmentState::Sealed
-            || segment.writer_id != read.writer_id
-            || segment.identity != read.identity
-            || !matches!(read.tail, SegmentTail::DefinitiveCorruption { .. })
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "reachable record resolution requires an exact corrupt sealed snapshot",
-            ));
-        }
-        Ok(Self {
-            writer_id: read.writer_id,
-            identity: read.identity,
-            size_bytes: read.snapshot_len,
-            content_sha256: read.snapshot_sha256.clone(),
-        })
-    }
-
     pub(crate) fn for_read_with_preserved_corrupt_tail(
         segment: &DiscoveredSegment,
         read: &SegmentRead,
@@ -407,6 +390,30 @@ impl AllRecordsResolved {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "preserved corrupt tail does not match sealed read snapshot",
+            ));
+        }
+        Ok(Self {
+            writer_id: read.writer_id,
+            identity: read.identity,
+            size_bytes: read.snapshot_len,
+            content_sha256: read.snapshot_sha256.clone(),
+        })
+    }
+}
+
+impl ReachableRecordsResolved {
+    /// Call only after every successfully framed record in this read has
+    /// been applied or durably moved to dead-letter storage. Definitive tail
+    /// preservation is authorized separately.
+    pub(crate) fn for_read(segment: &DiscoveredSegment, read: &SegmentRead) -> io::Result<Self> {
+        if segment.state != SegmentState::Sealed
+            || segment.writer_id != read.writer_id
+            || segment.identity != read.identity
+            || !matches!(read.tail, SegmentTail::DefinitiveCorruption { .. })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reachable record resolution requires an exact corrupt sealed snapshot",
             ));
         }
         Ok(Self {
@@ -1137,7 +1144,7 @@ impl JournalSegmentStore {
         &self,
         segment: &DiscoveredSegment,
         read: &SegmentRead,
-        resolved: AllRecordsResolved,
+        resolved: ReachableRecordsResolved,
         preserved: OversizedCorruptTailPreserved,
     ) -> Result<ArchivedCorruptSegment, SegmentMutationError> {
         self.ensure_directory()?;
@@ -1862,8 +1869,8 @@ fn framing_error(error: framing::FramingError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        AllRecordsResolved, AppendTestFault, JournalSegmentStore, SealOutcome, SegmentState,
-        SegmentTail, create_lock_reservation_inner,
+        AllRecordsResolved, AppendTestFault, JournalSegmentStore, ReachableRecordsResolved,
+        SealOutcome, SegmentState, SegmentTail, create_lock_reservation_inner,
     };
     use crate::providers::durable_file::{ExclusiveFileLock, sync_parent};
     use std::fs::{self, File};
@@ -2662,6 +2669,31 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_read_requires_distinct_reachable_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JournalSegmentStore::open(temp.path()).unwrap();
+        let writer_id = uuid::Uuid::parse_str("01890f3e-7b00-7000-8000-00000000004b").unwrap();
+        let mut writer = store.create_writer_with_id(writer_id).unwrap();
+        writer.append(&record(1)).unwrap();
+        let active = store.discover().unwrap().pop().unwrap();
+        drop(writer);
+        let sealed = match store.seal(&active, Duration::from_secs(1)).unwrap() {
+            SealOutcome::Sealed(segment) => segment,
+            other => panic!("expected sealed segment, got {other:?}"),
+        };
+        let mut bytes = fs::read(&sealed.path).unwrap();
+        bytes[SEGMENT_HEADER_LEN + 8] ^= 0x40;
+        fs::write(&sealed.path, bytes).unwrap();
+        let read = store.read(&sealed).unwrap();
+        let error = AllRecordsResolved::for_read(&sealed, &read).unwrap_err();
+        let reachable = ReachableRecordsResolved::for_read(&sealed, &read).unwrap();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(reachable.writer_id, writer_id);
+        assert!(sealed.path.exists());
+    }
+
+    #[test]
     fn preserved_capped_corrupt_tail_can_be_resolved_and_pruned() {
         let temp = tempfile::tempdir().unwrap();
         let store = JournalSegmentStore::open(temp.path()).unwrap();
@@ -3288,7 +3320,7 @@ mod tests {
         let preserved =
             super::OversizedCorruptTailPreserved::after_durable_preservation(&sealed, &read)
                 .unwrap();
-        let resolved = AllRecordsResolved::for_reachable_read(&sealed, &read).unwrap();
+        let resolved = ReachableRecordsResolved::for_read(&sealed, &read).unwrap();
 
         let archived = store
             .archive_corrupt_segment(&sealed, &read, resolved, preserved)
@@ -3341,7 +3373,7 @@ mod tests {
         let preserved =
             super::OversizedCorruptTailPreserved::after_durable_preservation(&sealed, &read)
                 .unwrap();
-        let mut resolved = AllRecordsResolved::for_reachable_read(&sealed, &read).unwrap();
+        let mut resolved = ReachableRecordsResolved::for_read(&sealed, &read).unwrap();
         resolved.content_sha256.push('0');
 
         let error = store
