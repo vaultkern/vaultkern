@@ -10,6 +10,13 @@ use thiserror::Error;
 use uuid::Uuid;
 use vaultkern_crypto::{OtpAlgorithm, generate_totp};
 
+mod canonical_serialization;
+
+pub use canonical_serialization::{
+    CANONICAL_ENTRY_SCHEMA_VERSION_V1, CANONICAL_SERIALIZATION_MAGIC, CanonicalSerializationError,
+    canonical_entry_bytes_v1, canonical_entry_content_hash_v1,
+};
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ModelError {
     #[error("feature not implemented yet")]
