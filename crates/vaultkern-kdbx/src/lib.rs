@@ -5104,6 +5104,47 @@ mod compatibility_tests {
     }
 
     #[test]
+    fn totp_label_edge_cases_roundtrip_with_stable_canonical_content() {
+        for (case, issuer, account_name) in [
+            ("empty-account", "Issuer", ""),
+            ("encoded-colons", "Issuer:Prod", "account:west"),
+        ] {
+            let mut entry = credential_entry();
+            let totp = entry.totp.as_mut().expect("credential TOTP");
+            totp.issuer = Some(issuer.into());
+            totp.account_name = Some(account_name.into());
+            let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+            let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+
+            let key = test_key(case);
+            let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save credentials");
+            let loaded = load_kdbx(&bytes, &key).expect("load credentials");
+            let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+            assert_eq!(
+                loaded_entry
+                    .totp
+                    .as_ref()
+                    .and_then(|totp| totp.account_name.as_deref()),
+                Some(account_name),
+                "account name changed for {case}"
+            );
+            assert_eq!(
+                canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+                expected_bytes,
+                "canonical bytes changed for {case}"
+            );
+            assert_eq!(
+                canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+                expected_hash,
+                "canonical hash changed for {case}"
+            );
+        }
+    }
+
+    #[test]
     fn credential_projection_writer_fields_are_exact() {
         let entry = credential_entry();
         let xml = super::entry_to_xml(

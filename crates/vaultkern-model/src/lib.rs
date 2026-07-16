@@ -577,7 +577,9 @@ impl TotpSpec {
 
         let payload = &uri[PREFIX.len()..];
         let (label, query) = payload.split_once('?').ok_or(ModelError::Unimplemented)?;
-        let label = percent_decode(label);
+        let mut account_name = label
+            .split_once(':')
+            .map(|(_, account)| percent_decode(account));
 
         let mut secret = None;
         let mut issuer = None;
@@ -609,9 +611,13 @@ impl TotpSpec {
             }
         }
 
-        let account_name = label
-            .split_once(':')
-            .map(|(_, account)| account.to_string());
+        // The writer omits the separator for an empty account and repeats the issuer in the query.
+        if account_name.is_none() {
+            let decoded_label = percent_decode(label);
+            if issuer.as_deref() == Some(decoded_label.as_str()) {
+                account_name = Some(String::new());
+            }
+        }
 
         Ok(Self {
             secret_base32: secret.ok_or(ModelError::Unimplemented)?,
@@ -1182,6 +1188,33 @@ mod tests {
         assert_eq!(spec.issuer.as_deref(), Some("ACME"));
         assert_eq!(spec.account_name.as_deref(), Some("alice@example.com"));
         assert_eq!(spec.generate_at(59).expect("generate"), "287082");
+    }
+
+    #[test]
+    fn otpauth_parser_treats_only_a_literal_colon_as_the_label_separator() {
+        let spec = TotpSpec::parse_otpauth(
+            "otpauth://totp/Issuer%3AProd:account%3Awest?secret=SECRET&issuer=Issuer%3AProd",
+        )
+        .expect("parse otpauth");
+
+        assert_eq!(spec.issuer.as_deref(), Some("Issuer:Prod"));
+        assert_eq!(spec.account_name.as_deref(), Some("account:west"));
+    }
+
+    #[test]
+    fn otpauth_parser_preserves_an_empty_account_name() {
+        let spec = TotpSpec::parse_otpauth("otpauth://totp/Issuer?secret=SECRET&issuer=Issuer")
+            .expect("parse otpauth");
+
+        assert_eq!(spec.account_name.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn otpauth_parser_does_not_infer_an_empty_account_from_an_unprefixed_label() {
+        let spec =
+            TotpSpec::parse_otpauth("otpauth://totp/alice?secret=SECRET").expect("parse otpauth");
+
+        assert_eq!(spec.account_name, None);
     }
 
     #[test]
