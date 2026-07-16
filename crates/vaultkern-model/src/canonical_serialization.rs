@@ -966,6 +966,8 @@ mod tests {
     fn minimal_entry() -> Entry {
         let mut entry = Entry::new("");
         entry.id = Uuid::nil();
+        entry.icon_id = None;
+        entry.auto_type = None;
         entry
     }
 

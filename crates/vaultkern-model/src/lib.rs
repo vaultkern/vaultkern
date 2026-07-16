@@ -577,10 +577,21 @@ impl TotpSpec {
 
         let payload = &uri[PREFIX.len()..];
         let (label, query) = payload.split_once('?').ok_or(ModelError::Unimplemented)?;
-        let mut account_name = label
-            .split_once(':')
-            .map(|(_, account)| percent_decode(account));
-
+        let (label_issuer, mut account_name) =
+            if let Some((issuer, account)) = label.split_once(':') {
+                (
+                    Some(percent_decode(issuer)),
+                    Some(percent_decode(trim_encoded_label_spaces(account))),
+                )
+            } else if let Some((issuer, account)) = split_once_encoded_label_separator(label) {
+                (
+                    Some(percent_decode(issuer)),
+                    Some(percent_decode(trim_encoded_label_spaces(account))),
+                )
+            } else {
+                let account = percent_decode(label);
+                (None, (!account.is_empty()).then_some(account))
+            };
         let mut secret = None;
         let mut issuer = None;
         let mut algorithm = TotpAlgorithm::Sha1;
@@ -611,8 +622,12 @@ impl TotpSpec {
             }
         }
 
+        if issuer.is_none() {
+            issuer = label_issuer;
+        }
+
         // The writer omits the separator for an empty account and repeats the issuer in the query.
-        if account_name.is_none() {
+        if !label.contains(':') && issuer.is_some() {
             let decoded_label = percent_decode(label);
             if issuer.as_deref() == Some(decoded_label.as_str()) {
                 account_name = Some(String::new());
@@ -704,7 +719,7 @@ impl Entry {
             history: Vec::new(),
             totp: None,
             passkey: None,
-            icon_id: None,
+            icon_id: Some(0),
             custom_icon_id: None,
             foreground_color: None,
             background_color: None,
@@ -716,7 +731,7 @@ impl Entry {
             last_accessed_at: None,
             usage_count: None,
             location_changed_at: None,
-            auto_type: None,
+            auto_type: Some(AutoTypeConfig::default()),
             custom_data: BTreeMap::new(),
             custom_data_blocks: Vec::new(),
             previous_parent: None,
@@ -1066,6 +1081,20 @@ fn normalize_entry_attachment_content(entry: &mut Entry, content_pool: &mut Atta
     }
 }
 
+fn split_once_encoded_label_separator(input: &str) -> Option<(&str, &str)> {
+    let index = input.as_bytes().windows(3).position(|bytes| {
+        bytes[0] == b'%' && bytes[1] == b'3' && matches!(bytes[2], b'A' | b'a')
+    })?;
+    Some((&input[..index], &input[index + 3..]))
+}
+
+fn trim_encoded_label_spaces(mut input: &str) -> &str {
+    while input.as_bytes().starts_with(b"%20") {
+        input = &input[3..];
+    }
+    input
+}
+
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -1133,6 +1162,14 @@ mod tests {
     }
 
     #[test]
+    fn new_entry_uses_kdbx_structural_defaults() {
+        let entry = Entry::new("defaults");
+
+        assert_eq!(entry.icon_id, Some(0));
+        assert_eq!(entry.auto_type, Some(super::AutoTypeConfig::default()));
+    }
+
+    #[test]
     fn attachment_pool_deduplicates_bytes_and_rejects_hash_collisions() {
         let mut pool = AttachmentContentPool::new();
         let first = pool.intern(b"same bytes").expect("first content");
@@ -1191,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn otpauth_parser_treats_only_a_literal_colon_as_the_label_separator() {
+    fn otpauth_parser_prefers_a_literal_separator_over_encoded_component_colons() {
         let spec = TotpSpec::parse_otpauth(
             "otpauth://totp/Issuer%3AProd:account%3Awest?secret=SECRET&issuer=Issuer%3AProd",
         )
@@ -1210,11 +1247,52 @@ mod tests {
     }
 
     #[test]
-    fn otpauth_parser_does_not_infer_an_empty_account_from_an_unprefixed_label() {
+    fn otpauth_parser_preserves_an_empty_account_when_the_issuer_contains_a_colon() {
+        let spec = TotpSpec::parse_otpauth(
+            "otpauth://totp/Issuer%3AProd?secret=SECRET&issuer=Issuer%3AProd",
+        )
+        .expect("parse otpauth");
+
+        assert_eq!(spec.issuer.as_deref(), Some("Issuer:Prod"));
+        assert_eq!(spec.account_name.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn otpauth_parser_does_not_invent_an_empty_account_without_an_issuer() {
+        let spec = TotpSpec::parse_otpauth("otpauth://totp/?secret=SECRET").expect("parse otpauth");
+
+        assert_eq!(spec.account_name, None);
+    }
+
+    #[test]
+    fn otpauth_parser_uses_an_unprefixed_label_as_the_account_name() {
         let spec =
             TotpSpec::parse_otpauth("otpauth://totp/alice?secret=SECRET").expect("parse otpauth");
 
-        assert_eq!(spec.account_name, None);
+        assert_eq!(spec.account_name.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn otpauth_parser_accepts_a_url_encoded_label_separator() {
+        for label in ["Example%3Aalice", "Example%3aalice", "Example%3A%20alice"] {
+            let spec = TotpSpec::parse_otpauth(&format!(
+                "otpauth://totp/{label}?secret=SECRET&issuer=Example"
+            ))
+            .expect("parse otpauth");
+
+            assert_eq!(spec.issuer.as_deref(), Some("Example"));
+            assert_eq!(spec.account_name.as_deref(), Some("alice"));
+        }
+    }
+
+    #[test]
+    fn otpauth_parser_infers_the_issuer_from_the_label_prefix() {
+        let spec =
+            TotpSpec::parse_otpauth("otpauth://totp/Example:alice%40example.com?secret=SECRET")
+                .expect("parse otpauth");
+
+        assert_eq!(spec.issuer.as_deref(), Some("Example"));
+        assert_eq!(spec.account_name.as_deref(), Some("alice@example.com"));
     }
 
     #[test]

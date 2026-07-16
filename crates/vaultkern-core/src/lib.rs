@@ -600,6 +600,22 @@ pub struct EntryCustomFieldInput {
     pub protected: bool,
 }
 
+fn is_reserved_entry_custom_field_key(key: &str) -> bool {
+    matches!(
+        key,
+        "Title"
+            | "UserName"
+            | "Password"
+            | "URL"
+            | "Notes"
+            | "otp"
+            | "TimeOtp-Secret-Base32"
+            | "TimeOtp-Algorithm"
+            | "TimeOtp-Length"
+            | "TimeOtp-Period"
+    ) || key.starts_with("KPEX_PASSKEY_")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryAttachmentInput {
     pub name: String,
@@ -727,6 +743,7 @@ pub enum MutationError {
     EntryNotFound(String),
     HistoryIndexOutOfBounds(usize),
     CustomFieldNotFound(String),
+    ReservedCustomFieldKey(String),
     AttachmentNotFound(String),
     AttachmentAlreadyExists(String),
     AttachmentContentHashCollision,
@@ -748,6 +765,9 @@ impl fmt::Display for MutationError {
                 write!(f, "history index out of bounds: {index}")
             }
             Self::CustomFieldNotFound(key) => write!(f, "custom field not found: {key}"),
+            Self::ReservedCustomFieldKey(key) => {
+                write!(f, "reserved custom field key: {key}")
+            }
             Self::AttachmentNotFound(name) => write!(f, "attachment not found: {name}"),
             Self::AttachmentAlreadyExists(name) => write!(f, "attachment already exists: {name}"),
             Self::AttachmentContentHashCollision => {
@@ -2153,6 +2173,9 @@ impl KeepassCore {
     ) -> Result<EntryView, MutationError> {
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        if is_reserved_entry_custom_field_key(&field.key) {
+            return Err(MutationError::ReservedCustomFieldKey(field.key));
+        }
         entry.attributes.insert(
             field.key,
             CustomField {
@@ -3373,9 +3396,9 @@ fn build_inspection(header: KdbxHeaderSummary) -> DatabaseInspection {
 mod internal_tests {
     use super::{
         CompositeKey, CustomIcon, DeletedObject, EntryAttachmentInput, EntryCreate,
-        EntryLineageReportMetadataUpdate, ExternalKdfConfirmation, ExternalKdfDecision,
-        ExternalKdfPolicy, Group, KdbxCipher, KdbxError, KdbxHeader, KdbxVersion, KeepassCore,
-        MutationError, SaveProfile, VariantDictionary, VariantValue,
+        EntryCustomFieldInput, EntryLineageReportMetadataUpdate, ExternalKdfConfirmation,
+        ExternalKdfDecision, ExternalKdfPolicy, Group, KdbxCipher, KdbxError, KdbxHeader,
+        KdbxVersion, KeepassCore, MutationError, SaveProfile, VariantDictionary, VariantValue,
     };
     use uuid::Uuid;
     use vaultkern_crypto::sha256_bytes;
@@ -3669,6 +3692,49 @@ mod internal_tests {
         let history = &vault.root.entries[0].history[0].attachments["first.bin"].data;
         assert!(first.ptr_eq(second));
         assert!(first.ptr_eq(history));
+    }
+
+    #[test]
+    fn custom_field_facade_rejects_persistence_reserved_keys_without_mutation() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("reserved custom fields");
+        let entry = Entry::new("entry");
+        let entry_id = entry.id.to_string();
+        vault.root.entries.push(entry);
+
+        for key in [
+            "Title",
+            "UserName",
+            "Password",
+            "URL",
+            "Notes",
+            "otp",
+            "TimeOtp-Secret-Base32",
+            "TimeOtp-Algorithm",
+            "TimeOtp-Length",
+            "TimeOtp-Period",
+            "KPEX_PASSKEY_PRIVATE_KEY_PEM",
+            "KPEX_PASSKEY_FUTURE_FIELD",
+        ] {
+            let before = vault.clone();
+            let error = core
+                .upsert_entry_custom_field(
+                    &mut vault,
+                    &entry_id,
+                    EntryCustomFieldInput {
+                        key: key.into(),
+                        value: "must not be inserted".into(),
+                        protected: true,
+                    },
+                )
+                .expect_err("reserved key should be rejected");
+
+            assert_eq!(
+                error.to_string(),
+                format!("reserved custom field key: {key}")
+            );
+            assert_eq!(vault, before);
+        }
     }
 
     fn stable_entry_create() -> EntryCreate {

@@ -1202,10 +1202,12 @@ fn entry_to_xml(
         "UUID",
         &encode_uuid(entry.id),
     )));
-    element.children.push(XMLNode::Element(text_element(
-        "IconID",
-        &entry.icon_id.unwrap_or(0).to_string(),
-    )));
+    if let Some(icon_id) = entry.icon_id {
+        element.children.push(XMLNode::Element(text_element(
+            "IconID",
+            &icon_id.to_string(),
+        )));
+    }
     if let Some(custom_icon_id) = entry.custom_icon_id {
         element.children.push(XMLNode::Element(text_element(
             "CustomIconUUID",
@@ -1337,10 +1339,11 @@ fn entry_to_xml(
         element.children.push(XMLNode::Element(binary));
     }
 
-    let auto_type = entry.auto_type.as_ref().cloned().unwrap_or_default();
-    element
-        .children
-        .push(XMLNode::Element(auto_type_to_xml(&auto_type)));
+    if let Some(auto_type) = &entry.auto_type {
+        element
+            .children
+            .push(XMLNode::Element(auto_type_to_xml(auto_type)));
+    }
     append_custom_data_blocks(
         &mut element,
         &entry.custom_data_blocks,
@@ -2722,6 +2725,7 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
     protected: &mut ProtectedStream,
 ) -> Result<Entry> {
     let mut entry = Entry::new("");
+    entry.auto_type = None;
     entry.id = decode_uuid(&child_text(element, "UUID").ok_or(KdbxError::InvalidValue)?)?;
     entry.icon_id = child_text(element, "IconID").and_then(|value| value.parse::<u32>().ok());
     entry.custom_icon_id = child_text(element, "CustomIconUUID")
@@ -5028,6 +5032,48 @@ mod compatibility_tests {
     }
 
     #[test]
+    fn absent_entry_icon_id_survives_kdbx_roundtrip_in_canonical_v1() {
+        let mut entry = Entry::new("No icon");
+        entry.icon_id = None;
+        entry.auto_type = Some(AutoTypeConfig::default());
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("NoIcon");
+        vault.root.entries.push(entry);
+
+        let key = test_key("no-icon");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.icon_id, None);
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+    }
+
+    #[test]
+    fn absent_entry_auto_type_survives_kdbx_roundtrip_in_canonical_v1() {
+        let mut entry = Entry::new("No auto type");
+        entry.icon_id = Some(0);
+        entry.auto_type = None;
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("NoAutoType");
+        vault.root.entries.push(entry);
+
+        let key = test_key("no-auto-type");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.auto_type, None);
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+    }
+
+    #[test]
     fn credential_projections_roundtrip_with_stable_canonical_content_and_times() {
         let entry = credential_entry();
         let expected_times = (
@@ -5108,6 +5154,7 @@ mod compatibility_tests {
         for (case, issuer, account_name) in [
             ("empty-account", "Issuer", ""),
             ("encoded-colons", "Issuer:Prod", "account:west"),
+            ("empty-account-colon-issuer", "Issuer:Prod", ""),
         ] {
             let mut entry = credential_entry();
             let totp = entry.totp.as_mut().expect("credential TOTP");
@@ -5140,6 +5187,65 @@ mod compatibility_tests {
                 canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
                 expected_hash,
                 "canonical hash changed for {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn imported_standard_otpauth_labels_materialize_stably() {
+        for (case, uri, expected_issuer, expected_account) in [
+            (
+                "unprefixed-account",
+                "otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP",
+                None,
+                "alice",
+            ),
+            (
+                "encoded-separator",
+                "otpauth://totp/Example%3Aalice?secret=JBSWY3DPEHPK3PXP&issuer=Example",
+                Some("Example"),
+                "alice",
+            ),
+            (
+                "label-only-issuer",
+                "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP",
+                Some("Example"),
+                "alice",
+            ),
+        ] {
+            let mut entry = Entry::new("Fallback Issuer");
+            entry.username = "fallback-account".into();
+            entry.attributes.insert(
+                "otp".into(),
+                CustomField {
+                    value: uri.into(),
+                    protected: true,
+                },
+            );
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+            let key = test_key(case);
+
+            let imported_bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save import");
+            let imported = load_kdbx(&imported_bytes, &key).expect("load import");
+            let imported_entry = imported.root.entries.first().expect("imported entry");
+            let imported_totp = imported_entry.totp.as_ref().expect("imported TOTP");
+            assert_eq!(imported_totp.issuer.as_deref(), expected_issuer, "{case}");
+            assert_eq!(
+                imported_totp.account_name.as_deref(),
+                Some(expected_account),
+                "{case}"
+            );
+            let expected_bytes =
+                canonical_entry_bytes_v1(imported_entry).expect("imported canonical bytes");
+
+            let rewritten = save_kdbx(&imported, &key, &fast_profile()).expect("rewrite import");
+            let reloaded = load_kdbx(&rewritten, &key).expect("reload import");
+            let reloaded_entry = reloaded.root.entries.first().expect("reloaded entry");
+            assert_eq!(
+                canonical_entry_bytes_v1(reloaded_entry).expect("reloaded canonical bytes"),
+                expected_bytes,
+                "canonical bytes changed for {case}"
             );
         }
     }
