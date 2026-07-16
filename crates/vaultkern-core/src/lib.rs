@@ -7352,6 +7352,16 @@ mod tests {
             },
         );
         snapshot.custom_data.insert("color".into(), "amber".into());
+        snapshot
+            .custom_data_blocks
+            .push(vaultkern_model::CustomDataBlock {
+                items: vec![vaultkern_model::CustomDataItem {
+                    key: "color".into(),
+                    value: "amber".into(),
+                    last_modified: None,
+                }],
+                after: None,
+            });
         snapshot.totp = Some(TotpSpec {
             secret_base32: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into(),
             algorithm: TotpAlgorithm::Sha1,
@@ -8308,6 +8318,16 @@ mod tests {
             },
         );
         entry.custom_data.insert("color".into(), "blue".into());
+        entry
+            .custom_data_blocks
+            .push(vaultkern_model::CustomDataBlock {
+                items: vec![vaultkern_model::CustomDataItem {
+                    key: "color".into(),
+                    value: "blue".into(),
+                    last_modified: None,
+                }],
+                after: None,
+            });
         entry.totp = Some(TotpSpec {
             secret_base32: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into(),
             algorithm: TotpAlgorithm::Sha1,
@@ -9989,6 +10009,16 @@ mod tests {
         entry
             .custom_data
             .insert("entry-key".into(), "entry-value".into());
+        entry
+            .custom_data_blocks
+            .push(vaultkern_model::CustomDataBlock {
+                items: vec![vaultkern_model::CustomDataItem {
+                    key: "entry-key".into(),
+                    value: "entry-value".into(),
+                    last_modified: None,
+                }],
+                after: None,
+            });
         vault.root.entries.push(entry);
 
         let bytes = core

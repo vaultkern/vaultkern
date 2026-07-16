@@ -462,6 +462,32 @@ impl PasskeyRecord {
     pub const FLAG_BE_KEY: &'static str = "KPEX_PASSKEY_FLAG_BE";
     pub const FLAG_BS_KEY: &'static str = "KPEX_PASSKEY_FLAG_BS";
 
+    /// Returns whether a key belongs to the persistent passkey source representation.
+    pub fn is_persistent_attribute_key(key: &str) -> bool {
+        matches!(
+            key,
+            Self::USERNAME_KEY
+                | Self::CREDENTIAL_ID_KEY
+                | Self::GENERATED_USER_ID_KEY
+                | Self::PRIVATE_KEY_PEM_KEY
+                | Self::RELYING_PARTY_KEY
+                | Self::USER_HANDLE_KEY
+                | Self::FLAG_BE_KEY
+                | Self::FLAG_BS_KEY
+        )
+    }
+
+    /// Returns whether a persistent passkey source attribute must be protected.
+    pub fn is_sensitive_persistent_attribute_key(key: &str) -> bool {
+        matches!(
+            key,
+            Self::CREDENTIAL_ID_KEY
+                | Self::GENERATED_USER_ID_KEY
+                | Self::PRIVATE_KEY_PEM_KEY
+                | Self::USER_HANDLE_KEY
+        )
+    }
+
     pub fn write_to_attributes(&self, attributes: &mut BTreeMap<String, CustomField>) {
         attributes.remove(Self::GENERATED_USER_ID_KEY);
         attributes.remove(Self::USER_HANDLE_KEY);
@@ -737,7 +763,16 @@ impl Entry {
 /// Builds the transient persistent-attribute view after overlaying credential projections.
 pub fn materialize_entry_persistent_attributes(entry: &Entry) -> BTreeMap<String, CustomField> {
     let mut attributes = entry.attributes.clone();
-    if let Some(totp) = &entry.totp {
+    let totp = entry
+        .totp
+        .clone()
+        .or_else(|| totp_from_persistent_attributes(&attributes));
+    let passkey = entry
+        .passkey
+        .clone()
+        .or_else(|| PasskeyRecord::from_attributes(&attributes));
+    attributes.retain(|key, _| !is_totp_persistent_attribute_key(key));
+    if let Some(totp) = &totp {
         let (attribute_algorithm, uri_algorithm) = match totp.algorithm {
             TotpAlgorithm::Sha1 => ("HMAC-SHA-1", "SHA1"),
             TotpAlgorithm::Sha256 => ("HMAC-SHA-256", "SHA256"),
@@ -779,36 +814,94 @@ pub fn materialize_entry_persistent_attributes(entry: &Entry) -> BTreeMap<String
             },
         );
     }
-    if let Some(passkey) = &entry.passkey {
+    if let Some(passkey) = &passkey {
         passkey.write_to_attributes(&mut attributes);
+    } else {
+        for (key, field) in &mut attributes {
+            if PasskeyRecord::is_sensitive_persistent_attribute_key(key) {
+                field.protected = true;
+            }
+        }
     }
     attributes
 }
 
-fn entry_otpauth_uri(entry: &Entry, totp: &TotpSpec, algorithm: &str) -> String {
-    let issuer = totp.issuer.clone().unwrap_or_else(|| entry.title.clone());
-    let account_name = totp
-        .account_name
-        .clone()
-        .unwrap_or_else(|| entry.username.clone());
-    let label = if account_name.is_empty() {
-        format!("{}:", percent_encode_component(&issuer))
-    } else {
-        format!(
-            "{}:{}",
-            percent_encode_component(&issuer),
-            percent_encode_component(&account_name)
-        )
+/// Projects the TOTP represented by persistent source attributes using KDBX precedence rules.
+pub fn totp_from_persistent_attributes(fields: &BTreeMap<String, CustomField>) -> Option<TotpSpec> {
+    if let Some(field) = fields.get("otp")
+        && let Ok(spec) = TotpSpec::parse_otpauth(&field.value)
+    {
+        return Some(spec);
+    }
+
+    let secret_base32 = fields.get("TimeOtp-Secret-Base32")?.value.clone();
+    let algorithm = match fields
+        .get("TimeOtp-Algorithm")
+        .map(|field| field.value.as_str())
+    {
+        Some("HMAC-SHA-256") => TotpAlgorithm::Sha256,
+        Some("HMAC-SHA-512") => TotpAlgorithm::Sha512,
+        _ => TotpAlgorithm::Sha1,
     };
-    format!(
-        "otpauth://totp/{label}?secret={secret}&issuer={issuer}&algorithm={algorithm}&digits={digits}&period={period}",
-        label = label,
+    let digits = fields
+        .get("TimeOtp-Length")
+        .and_then(|field| field.value.parse().ok())
+        .unwrap_or(6);
+    let period_seconds = fields
+        .get("TimeOtp-Period")
+        .and_then(|field| field.value.parse().ok())
+        .unwrap_or(30);
+
+    Some(TotpSpec {
+        secret_base32,
+        algorithm,
+        digits,
+        period_seconds,
+        issuer: None,
+        account_name: None,
+    })
+}
+
+/// Returns whether an attribute key belongs to the persistent TOTP source representation.
+pub fn is_totp_persistent_attribute_key(key: &str) -> bool {
+    matches!(
+        key,
+        "otp" | "TimeOtp-Secret-Base32" | "TimeOtp-Algorithm" | "TimeOtp-Length" | "TimeOtp-Period"
+    )
+}
+
+fn entry_otpauth_uri(entry: &Entry, totp: &TotpSpec, algorithm: &str) -> String {
+    let (label, issuer) = match (&totp.issuer, &totp.account_name) {
+        (None, Some(account_name)) if !account_name.is_empty() => {
+            (percent_encode_component(account_name), None)
+        }
+        (issuer, account_name) => {
+            let issuer = issuer.as_deref().unwrap_or(&entry.title);
+            let account_name = account_name.as_deref().unwrap_or(&entry.username);
+            (
+                format!(
+                    "{}:{}",
+                    percent_encode_component(issuer),
+                    percent_encode_component(account_name)
+                ),
+                Some(issuer),
+            )
+        }
+    };
+    let mut uri = format!(
+        "otpauth://totp/{label}?secret={secret}",
         secret = percent_encode_component(&totp.secret_base32),
-        issuer = percent_encode_component(&issuer),
-        algorithm = algorithm,
+    );
+    if let Some(issuer) = issuer {
+        uri.push_str("&issuer=");
+        uri.push_str(&percent_encode_component(issuer));
+    }
+    uri.push_str(&format!(
+        "&algorithm={algorithm}&digits={digits}&period={period}",
         digits = totp.digits,
         period = totp.period_seconds,
-    )
+    ));
+    uri
 }
 
 fn percent_encode_component(input: &str) -> String {

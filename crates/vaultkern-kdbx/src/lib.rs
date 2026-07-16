@@ -15,8 +15,9 @@ use vaultkern_model::{
     Attachment, AttachmentContent, AttachmentContentId, AttachmentContentPool, AutoTypeAssociation,
     AutoTypeConfig, CustomDataBlock, CustomDataItem, CustomField, CustomIcon, DeletedObject, Entry,
     EntryRawState, Group, GroupRawState, GroupTimes, MemoryProtection, MetaRawState, ModelError,
-    OpaqueXmlAnchor, OpaqueXmlFragment, PasskeyRecord, RootRawState, TotpAlgorithm, TotpSpec,
-    Vault, materialize_entry_persistent_attributes,
+    OpaqueXmlAnchor, OpaqueXmlFragment, PasskeyRecord, RootRawState, Vault,
+    is_totp_persistent_attribute_key, materialize_entry_persistent_attributes,
+    totp_from_persistent_attributes,
 };
 use xmltree::{Element, XMLNode};
 
@@ -1404,6 +1405,7 @@ fn validate_entry_text_values(entry: &Entry) -> Result<()> {
             .iter()
             .flat_map(|block| &block.items)
             .any(|item| item.key.is_empty())
+        || merge_custom_data_blocks(&entry.custom_data_blocks) != entry.custom_data
     {
         return Err(KdbxError::InvalidValue);
     }
@@ -2782,6 +2784,7 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
     entry.icon_id = child_text(element, "IconID").and_then(|value| value.parse::<u32>().ok());
     entry.custom_icon_id = child_text(element, "CustomIconUUID")
         .as_deref()
+        .filter(|value| !value.trim().is_empty())
         .map(decode_uuid)
         .transpose()?;
     entry.foreground_color = child_text_preserve_empty(element, "ForegroundColor");
@@ -3024,54 +3027,24 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
         entry.field_protection.protect_notes = field.protected;
     }
 
-    entry.totp = build_totp(&raw_fields);
+    entry.totp = totp_from_persistent_attributes(&raw_fields);
     entry.passkey = PasskeyRecord::from_attributes(&raw_fields);
     let has_complete_passkey = entry.passkey.is_some();
     entry.attributes = raw_fields
         .into_iter()
         .map(|(key, mut field)| {
-            if !has_complete_passkey && is_sensitive_passkey_attribute_key(&key) {
+            if !has_complete_passkey && PasskeyRecord::is_sensitive_persistent_attribute_key(&key) {
                 field.protected = true;
             }
             (key, field)
         })
         .filter(|(key, _)| {
-            !(is_totp_attribute_key(key) || has_complete_passkey && is_passkey_attribute_key(key))
+            !(is_totp_persistent_attribute_key(key)
+                || has_complete_passkey && PasskeyRecord::is_persistent_attribute_key(key))
         })
         .collect();
 
     Ok(entry)
-}
-
-fn is_totp_attribute_key(key: &str) -> bool {
-    matches!(
-        key,
-        "otp" | "TimeOtp-Secret-Base32" | "TimeOtp-Algorithm" | "TimeOtp-Length" | "TimeOtp-Period"
-    )
-}
-
-fn is_passkey_attribute_key(key: &str) -> bool {
-    matches!(
-        key,
-        PasskeyRecord::USERNAME_KEY
-            | PasskeyRecord::CREDENTIAL_ID_KEY
-            | PasskeyRecord::GENERATED_USER_ID_KEY
-            | PasskeyRecord::PRIVATE_KEY_PEM_KEY
-            | PasskeyRecord::RELYING_PARTY_KEY
-            | PasskeyRecord::USER_HANDLE_KEY
-            | PasskeyRecord::FLAG_BE_KEY
-            | PasskeyRecord::FLAG_BS_KEY
-    )
-}
-
-fn is_sensitive_passkey_attribute_key(key: &str) -> bool {
-    matches!(
-        key,
-        PasskeyRecord::CREDENTIAL_ID_KEY
-            | PasskeyRecord::GENERATED_USER_ID_KEY
-            | PasskeyRecord::PRIVATE_KEY_PEM_KEY
-            | PasskeyRecord::USER_HANDLE_KEY
-    )
 }
 
 fn collect_entry_known_node_order(entry: &Element) -> Vec<String> {
@@ -3889,41 +3862,6 @@ fn group_requires_41(group: &Group) -> bool {
     }
 
     group.children.iter().any(group_requires_41)
-}
-
-fn build_totp(fields: &BTreeMap<String, CustomField>) -> Option<TotpSpec> {
-    if let Some(field) = fields.get("otp")
-        && let Ok(spec) = TotpSpec::parse_otpauth(&field.value)
-    {
-        return Some(spec);
-    }
-
-    let secret = fields.get("TimeOtp-Secret-Base32")?.value.clone();
-    let algorithm = match fields
-        .get("TimeOtp-Algorithm")
-        .map(|field| field.value.as_str())
-    {
-        Some("HMAC-SHA-256") => TotpAlgorithm::Sha256,
-        Some("HMAC-SHA-512") => TotpAlgorithm::Sha512,
-        _ => TotpAlgorithm::Sha1,
-    };
-    let digits = fields
-        .get("TimeOtp-Length")
-        .and_then(|field| field.value.parse().ok())
-        .unwrap_or(6);
-    let period_seconds = fields
-        .get("TimeOtp-Period")
-        .and_then(|field| field.value.parse().ok())
-        .unwrap_or(30);
-
-    Some(TotpSpec {
-        secret_base32: secret,
-        algorithm,
-        digits,
-        period_seconds,
-        issuer: None,
-        account_name: None,
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5223,6 +5161,25 @@ mod compatibility_tests {
     }
 
     #[test]
+    fn blank_entry_custom_icon_id_parses_as_none() {
+        let mut element = Element::new("Entry");
+        element.children.push(XMLNode::Element(text_element(
+            "UUID",
+            &super::encode_uuid(uuid::Uuid::nil()),
+        )));
+        element
+            .children
+            .push(XMLNode::Element(text_element("CustomIconUUID", " \n\t ")));
+        let mut protected = ProtectedStream::from_stream(2, &[0x42; 32]).expect("stream");
+        let mut content_pool = vaultkern_model::AttachmentContentPool::new();
+
+        let entry = super::parse_entry(&element, &[], &mut content_pool, &mut protected)
+            .expect("parse entry with blank custom icon");
+
+        assert_eq!(entry.custom_icon_id, None);
+    }
+
+    #[test]
     fn negative_signed_entry_times_survive_kdbx_roundtrip() {
         let mut entry = Entry::new("negative timestamps");
         entry.expiry_time = Some(-1);
@@ -5720,21 +5677,161 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn model_created_map_only_custom_data_keeps_canonical_content_after_roundtrip() {
+    fn totp_without_issuer_and_with_empty_account_roundtrips_stably() {
+        let mut entry = credential_entry();
+        let totp = entry.totp.as_mut().expect("credential TOTP");
+        totp.issuer = None;
+        totp.account_name = Some(String::new());
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("empty-account-without-issuer");
+        vault.root.entries.push(entry);
+        let key = test_key("empty-account-without-issuer");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save credentials");
+        let loaded = load_kdbx(&bytes, &key).expect("load credentials");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(
+            loaded_entry
+                .totp
+                .as_ref()
+                .and_then(|totp| totp.account_name.as_deref()),
+            Some("")
+        );
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn model_created_map_only_custom_data_is_rejected_as_unpersistable() {
         let mut entry = Entry::new("map-only-custom-data");
         entry
             .custom_data
             .insert("model-key".into(), "model-value".into());
-        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
-        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
         let mut vault = Vault::empty("map-only-custom-data");
         vault.root.entries.push(entry);
         let key = test_key("map-only-custom-data");
 
-        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save map-only custom data");
-        let loaded = load_kdbx(&bytes, &key).expect("load map-only custom data");
+        assert!(matches!(
+            save_kdbx(&vault, &key, &fast_profile()),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn unmodeled_totp_source_attributes_keep_canonical_content_after_roundtrip() {
+        let mut entry = Entry::new("unmodeled-totp-source");
+        entry.attributes.insert(
+            "otp".into(),
+            CustomField {
+                value: "not-an-otpauth-uri".into(),
+                protected: true,
+            },
+        );
+        entry.attributes.insert(
+            "TimeOtp-Period".into(),
+            CustomField {
+                value: "45".into(),
+                protected: false,
+            },
+        );
+        entry.attributes.insert(
+            "ordinary".into(),
+            CustomField {
+                value: "kept".into(),
+                protected: false,
+            },
+        );
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("unmodeled-totp-source");
+        vault.root.entries.push(entry);
+        let key = test_key("unmodeled-totp-source");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
         let loaded_entry = loaded.root.entries.first().expect("loaded entry");
 
+        assert_eq!(loaded_entry.totp, None);
+        assert_eq!(loaded_entry.attributes.len(), 1);
+        assert_eq!(loaded_entry.attributes["ordinary"].value, "kept");
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn complete_unprojected_passkey_attributes_keep_canonical_content_after_roundtrip() {
+        let mut entry = Entry::new("unprojected-passkey-source");
+        for (key, value) in [
+            (PasskeyRecord::USERNAME_KEY, "alice"),
+            (PasskeyRecord::CREDENTIAL_ID_KEY, "credential"),
+            (PasskeyRecord::PRIVATE_KEY_PEM_KEY, "private-key"),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com"),
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected: false,
+                },
+            );
+        }
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("unprojected-passkey-source");
+        vault.root.entries.push(entry);
+        let key = test_key("unprojected-passkey-source");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert!(loaded_entry.passkey.is_some());
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn incomplete_sensitive_passkey_attribute_keeps_canonical_content_after_roundtrip() {
+        let mut entry = Entry::new("incomplete-passkey-source");
+        entry.attributes.insert(
+            PasskeyRecord::CREDENTIAL_ID_KEY.into(),
+            CustomField {
+                value: "credential".into(),
+                protected: false,
+            },
+        );
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("incomplete-passkey-source");
+        vault.root.entries.push(entry);
+        let key = test_key("incomplete-passkey-source");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.passkey, None);
+        assert!(loaded_entry.attributes[PasskeyRecord::CREDENTIAL_ID_KEY].protected);
         assert_eq!(
             canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
             expected_bytes
@@ -6148,6 +6245,14 @@ mod compatibility_tests {
         let mut vault = Vault::empty("KnownBad");
         let mut entry = Entry::new("Legacy");
         entry.custom_data.insert("KnownBad".into(), "True".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "KnownBad".into(),
+                value: "True".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
         vault.root.entries.push(entry);
 
         let key = test_key("known-bad");
@@ -6357,12 +6462,12 @@ mod compatibility_tests {
 #[cfg(all(test, feature = "external-fixtures"))]
 mod tests {
     use super::{
-        Compression, KdbxCipher, KdbxHeader, KdbxVersion, SaveProfile, VariantDictionary,
-        VariantValue, bool_text, child_text, decode_block_stream, decode_kdbx3_header,
-        decode_legacy_block_stream, decrypt_payload, detect_file_version, encode_block_stream,
-        gzip_compress, gzip_decompress, header_hmac, kdf_from_variant_dict, load_kdbx, mac_seed,
-        parse_inner_header, parse_xml_fragment, required_version, save_kdbx, sha256_seeded,
-        text_element,
+        Compression, KdbxCipher, KdbxError, KdbxHeader, KdbxVersion, SaveProfile,
+        VariantDictionary, VariantValue, bool_text, child_text, decode_block_stream,
+        decode_kdbx3_header, decode_legacy_block_stream, decrypt_payload, detect_file_version,
+        encode_block_stream, gzip_compress, gzip_decompress, header_hmac, kdf_from_variant_dict,
+        load_kdbx, mac_seed, parse_inner_header, parse_xml_fragment, required_version, save_kdbx,
+        sha256_seeded, text_element,
     };
     use base64::Engine as _;
     use vaultkern_crypto::{CompositeKey, KdfProfile, sha256_bytes};
@@ -6692,6 +6797,17 @@ mod tests {
         entry
             .custom_data
             .insert("EntryKey".into(), "EntryValue".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "EntryKey".into(),
+                value: "EntryValue".into(),
+                last_modified: None,
+            }],
+            after: Some(vaultkern_model::OpaqueXmlAnchor {
+                element_name: "AutoType".into(),
+                occurrence: 1,
+            }),
+        });
         vault.root.entries.push(entry);
 
         let mut key = CompositeKey::default();
@@ -6981,6 +7097,14 @@ mod tests {
         entry.tags.insert("entry-tag".into());
         entry.previous_parent = Some(uuid::Uuid::new_v4());
         entry.custom_data.insert("entry-a".into(), "1".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "entry-a".into(),
+                value: "1".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
         entry.auto_type = Some(vaultkern_model::AutoTypeConfig {
             default_sequence: Some("{USERNAME}{TAB}{PASSWORD}{ENTER}".into()),
             ..Default::default()
@@ -7295,6 +7419,9 @@ mod tests {
             }],
             after: None,
         });
+        vault
+            .meta_custom_data
+            .insert("meta-key".into(), "meta-value".into());
         vault.root.previous_parent = Some(uuid::Uuid::nil());
         vault.root.custom_data_blocks.push(CustomDataBlock {
             items: vec![CustomDataItem {
@@ -7304,6 +7431,10 @@ mod tests {
             }],
             after: None,
         });
+        vault
+            .root
+            .custom_data
+            .insert("group-key".into(), "group-value".into());
 
         let mut entry = Entry::new("Entry");
         entry.previous_parent = Some(uuid::Uuid::nil());
@@ -7316,6 +7447,9 @@ mod tests {
             }],
             after: None,
         });
+        entry
+            .custom_data
+            .insert("entry-key".into(), "entry-value".into());
         vault.root.entries.push(entry);
 
         let parsed = generated_xml(&vault, KdbxVersion::V4_0);
@@ -7355,6 +7489,14 @@ mod tests {
         entry
             .custom_data
             .insert("entry-key".into(), "entry-value".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "entry-key".into(),
+                value: "entry-value".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
         vault.root.entries.push(entry);
 
         let parsed = generated_xml(&vault, KdbxVersion::V3_1);
@@ -7573,6 +7715,14 @@ mod tests {
 
         let mut entry = Entry::new("Entry");
         entry.custom_data.insert("entry-a".into(), "A".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "entry-a".into(),
+                value: "A".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
         group.entries.push(entry);
         vault.root.children.push(group);
 
@@ -8187,20 +8337,13 @@ mod tests {
     }
 
     #[test]
-    fn mutated_custom_data_maps_fall_back_to_canonical_single_block_output() {
+    fn mutated_meta_custom_data_map_falls_back_to_canonical_single_block_output() {
         let mut key = CompositeKey::default();
         key.add_password("a");
 
         let mutated = rewrite_kdbx4_xml(FIXTURE_NEW_DATABASE_BROWSER, &key, |root| {
             let meta = root.get_mut_child("Meta").expect("meta");
             split_first_custom_data_block(meta);
-
-            let entry = root
-                .get_mut_child("Root")
-                .and_then(|root| root.get_mut_child("Group"))
-                .and_then(|group| group.get_mut_child("Entry"))
-                .expect("root entry");
-            split_first_custom_data_block(entry);
         })
         .expect("rewrite browser fixture");
 
@@ -8208,9 +8351,6 @@ mod tests {
         loaded
             .meta_custom_data
             .insert("KeePassXC-Browser Settings".into(), "mutated-meta".into());
-        loaded.root.entries[0]
-            .custom_data
-            .insert("KPH: {USERNAME}".into(), "mutated-entry".into());
 
         let rewritten =
             save_kdbx(&loaded, &key, &SaveProfile::recommended()).expect("save mutated model");
@@ -8218,11 +8358,6 @@ mod tests {
         let rewritten_parsed =
             Element::parse(rewritten_xml.as_bytes()).expect("parse rewritten xml");
         let rewritten_meta = rewritten_parsed.get_child("Meta").expect("rewritten meta");
-        let rewritten_entry = rewritten_parsed
-            .get_child("Root")
-            .and_then(|root| root.get_child("Group"))
-            .and_then(|group| group.get_child("Entry"))
-            .expect("rewritten root entry");
 
         assert_eq!(custom_data_blocks(rewritten_meta).len(), 1);
         assert_eq!(
@@ -8232,14 +8367,21 @@ mod tests {
                 .map(|(_, value)| value.as_str()),
             Some("mutated-meta")
         );
-        assert_eq!(custom_data_blocks(rewritten_entry).len(), 1);
-        assert_eq!(
-            custom_data_blocks(rewritten_entry)[0]
-                .iter()
-                .find(|(key, _)| key == "KPH: {USERNAME}")
-                .map(|(_, value)| value.as_str()),
-            Some("mutated-entry")
-        );
+    }
+
+    #[test]
+    fn mutated_entry_custom_data_map_is_rejected_as_unpersistable() {
+        let mut key = CompositeKey::default();
+        key.add_password("a");
+        let mut loaded = load_kdbx(FIXTURE_NEW_DATABASE_BROWSER, &key).expect("load fixture");
+        loaded.root.entries[0]
+            .custom_data
+            .insert("KPH: {USERNAME}".into(), "mutated-entry".into());
+
+        assert!(matches!(
+            save_kdbx(&loaded, &key, &SaveProfile::recommended()),
+            Err(KdbxError::InvalidValue)
+        ));
     }
 
     #[test]

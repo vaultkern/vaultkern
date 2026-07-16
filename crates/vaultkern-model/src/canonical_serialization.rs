@@ -75,24 +75,8 @@ struct CanonicalCustomDataItem<'a> {
 }
 
 fn collect_custom_data_items<'a>(
-    custom_data: &'a BTreeMap<String, String>,
     blocks: &'a [CustomDataBlock],
 ) -> BTreeMap<&'a str, CanonicalCustomDataItem<'a>> {
-    if blocks.iter().all(|block| block.items.is_empty()) {
-        return custom_data
-            .iter()
-            .map(|(key, value)| {
-                (
-                    key.as_str(),
-                    CanonicalCustomDataItem {
-                        value,
-                        last_modified: None,
-                    },
-                )
-            })
-            .collect();
-    }
-
     let mut items = BTreeMap::new();
     for block in blocks {
         for item in &block.items {
@@ -187,7 +171,7 @@ impl<'a> TryFrom<&'a Entry> for CanonicalEntryReference<'a> {
                 content_id: attachment.data.id(),
             },
         )?;
-        let custom_data_items = collect_custom_data_items(custom_data, custom_data_blocks);
+        let custom_data_items = collect_custom_data_items(custom_data_blocks);
 
         Ok(Self {
             id,
@@ -1789,7 +1773,7 @@ mod tests {
     }
 
     #[test]
-    fn map_only_custom_data_matches_its_persisted_no_time_item_projection() {
+    fn map_only_custom_data_does_not_synthesize_custom_data_items() {
         let mut map_only = minimal_entry();
         map_only
             .custom_data
@@ -1804,8 +1788,8 @@ mod tests {
             after: None,
         }];
 
-        assert_eq!(canonical_bytes(&map_only), canonical_bytes(&persisted));
-        assert_eq!(canonical_hash(&map_only), canonical_hash(&persisted));
+        assert_ne!(canonical_bytes(&map_only), canonical_bytes(&persisted));
+        assert_ne!(canonical_hash(&map_only), canonical_hash(&persisted));
     }
 
     #[test]
