@@ -2973,30 +2973,84 @@ fn canonicalize_custom_data_blocks(
     merged: &std::collections::BTreeMap<String, String>,
     updated_item: Option<(&str, Option<i64>)>,
 ) {
-    let mut last_modified_by_key = std::collections::BTreeMap::new();
-    for block in blocks.iter() {
-        for item in &block.items {
-            last_modified_by_key.insert(item.key.clone(), item.last_modified);
+    let mut retained_blocks = Vec::with_capacity(blocks.len());
+    // Keep later document-order anchors valid when a deleted key empties a block.
+    let mut replacement_anchors = Vec::with_capacity(blocks.len());
+    for mut block in std::mem::take(blocks) {
+        let was_empty = block.items.is_empty();
+        block.items.retain(|item| merged.contains_key(&item.key));
+        let retargeted_after =
+            retarget_custom_data_anchor(block.after.take(), &replacement_anchors);
+        if was_empty || !block.items.is_empty() {
+            block.after = retargeted_after;
+            retained_blocks.push(block);
+            replacement_anchors.push(Some(vaultkern_model::OpaqueXmlAnchor {
+                element_name: "CustomData".into(),
+                occurrence: retained_blocks.len(),
+            }));
+        } else {
+            replacement_anchors.push(retargeted_after);
         }
     }
-    if let Some((key, last_modified)) = updated_item {
-        last_modified_by_key.insert(key.to_string(), last_modified);
+    *blocks = retained_blocks;
+
+    let mut last_position_by_key = std::collections::BTreeMap::new();
+    for (block_index, block) in blocks.iter().enumerate() {
+        for (item_index, item) in block.items.iter().enumerate() {
+            last_position_by_key.insert(item.key.clone(), (block_index, item_index));
+        }
     }
 
-    if merged.is_empty() {
-        blocks.clear();
+    let mut missing_items = Vec::new();
+    for (key, value) in merged {
+        if let Some(&(block_index, item_index)) = last_position_by_key.get(key) {
+            let item = &mut blocks[block_index].items[item_index];
+            item.value.clone_from(value);
+            if let Some((updated_key, last_modified)) = updated_item
+                && updated_key == key
+            {
+                item.last_modified = last_modified;
+            }
+        } else {
+            let last_modified = updated_item
+                .filter(|(updated_key, _)| *updated_key == key)
+                .and_then(|(_, last_modified)| last_modified);
+            missing_items.push(vaultkern_model::CustomDataItem {
+                key: key.clone(),
+                value: value.clone(),
+                last_modified,
+            });
+        }
+    }
+
+    if missing_items.is_empty() {
         return;
     }
+    if let Some(block) = blocks.last_mut() {
+        block.items.extend(missing_items);
+    } else {
+        blocks.push(vaultkern_model::CustomDataBlock {
+            items: missing_items,
+            after: None,
+        });
+    }
+}
 
-    let items = merged
-        .iter()
-        .map(|(key, value)| vaultkern_model::CustomDataItem {
-            key: key.clone(),
-            value: value.clone(),
-            last_modified: last_modified_by_key.get(key).copied().flatten(),
-        })
-        .collect();
-    *blocks = vec![vaultkern_model::CustomDataBlock { items, after: None }];
+fn retarget_custom_data_anchor(
+    anchor: Option<vaultkern_model::OpaqueXmlAnchor>,
+    replacement_anchors: &[Option<vaultkern_model::OpaqueXmlAnchor>],
+) -> Option<vaultkern_model::OpaqueXmlAnchor> {
+    let anchor = anchor?;
+    if anchor.element_name != "CustomData" {
+        return Some(anchor);
+    }
+    let Some(index) = anchor.occurrence.checked_sub(1) else {
+        return Some(anchor);
+    };
+    replacement_anchors
+        .get(index)
+        .cloned()
+        .unwrap_or(Some(anchor))
 }
 
 fn project_attachment_items(
@@ -3442,6 +3496,51 @@ mod internal_tests {
     use uuid::Uuid;
     use vaultkern_crypto::sha256_bytes;
     use vaultkern_model::{Entry, Vault};
+
+    #[test]
+    fn custom_data_block_removal_retargets_chained_anchors() {
+        let custom_data_anchor = |occurrence| vaultkern_model::OpaqueXmlAnchor {
+            element_name: "CustomData".into(),
+            occurrence,
+        };
+        let times_anchor = vaultkern_model::OpaqueXmlAnchor {
+            element_name: "Times".into(),
+            occurrence: 1,
+        };
+        let item = |key: &str| vaultkern_model::CustomDataItem {
+            key: key.into(),
+            value: key.into(),
+            last_modified: None,
+        };
+        let mut blocks = vec![
+            vaultkern_model::CustomDataBlock {
+                items: vec![item("removed-first")],
+                after: Some(times_anchor.clone()),
+            },
+            vaultkern_model::CustomDataBlock {
+                items: vec![item("kept-first")],
+                after: Some(custom_data_anchor(1)),
+            },
+            vaultkern_model::CustomDataBlock {
+                items: vec![item("removed-middle")],
+                after: Some(custom_data_anchor(2)),
+            },
+            vaultkern_model::CustomDataBlock {
+                items: vec![item("kept-last")],
+                after: Some(custom_data_anchor(3)),
+            },
+        ];
+        let merged = std::collections::BTreeMap::from([
+            ("kept-first".into(), "kept-first".into()),
+            ("kept-last".into(), "kept-last".into()),
+        ]);
+
+        super::canonicalize_custom_data_blocks(&mut blocks, &merged, None);
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].after.as_ref(), Some(&times_anchor));
+        assert_eq!(blocks[1].after.as_ref(), Some(&custom_data_anchor(1)));
+    }
 
     #[test]
     fn core_load_facades_require_an_external_kdf_policy_decision() {
@@ -6674,6 +6773,168 @@ mod tests {
             }]
         );
         assert_eq!(updated.history_count, 0);
+    }
+
+    #[test]
+    fn entry_custom_data_detail_upsert_preserves_block_fidelity_state() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Semantic");
+        let mut entry = Entry::new("CustomData");
+        let entry_id = entry.id.to_string();
+        entry.custom_data.extend([
+            ("kept".into(), "value".into()),
+            ("changed".into(), "old".into()),
+        ]);
+        let kept_block = vaultkern_model::CustomDataBlock {
+            items: vec![vaultkern_model::CustomDataItem {
+                key: "kept".into(),
+                value: "value".into(),
+                last_modified: Some(11),
+            }],
+            after: Some(vaultkern_model::OpaqueXmlAnchor {
+                element_name: "Times".into(),
+                occurrence: 1,
+            }),
+        };
+        let changed_anchor = vaultkern_model::OpaqueXmlAnchor {
+            element_name: "AutoType".into(),
+            occurrence: 1,
+        };
+        entry.custom_data_blocks = vec![
+            kept_block.clone(),
+            vaultkern_model::CustomDataBlock {
+                items: vec![vaultkern_model::CustomDataItem {
+                    key: "changed".into(),
+                    value: "old".into(),
+                    last_modified: Some(22),
+                }],
+                after: Some(changed_anchor.clone()),
+            },
+        ];
+        vault.root.entries.push(entry);
+
+        core.upsert_entry_custom_data_detail(
+            &mut vault,
+            &entry_id,
+            super::EntryCustomDataItemDetailInput {
+                key: "changed".into(),
+                value: "new".into(),
+                last_modified: Some(33),
+            },
+        )
+        .expect("upsert entry custom data detail");
+
+        let blocks = &vault.root.entries[0].custom_data_blocks;
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], kept_block);
+        assert_eq!(blocks[1].after.as_ref(), Some(&changed_anchor));
+        assert_eq!(
+            blocks[1].items,
+            vec![vaultkern_model::CustomDataItem {
+                key: "changed".into(),
+                value: "new".into(),
+                last_modified: Some(33),
+            }]
+        );
+    }
+
+    #[test]
+    fn entry_custom_data_detail_upsert_preserves_earlier_duplicate_items() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Semantic");
+        let mut entry = Entry::new("CustomData");
+        let entry_id = entry.id.to_string();
+        entry
+            .custom_data
+            .insert("duplicate".into(), "second".into());
+        let earlier_block = vaultkern_model::CustomDataBlock {
+            items: vec![vaultkern_model::CustomDataItem {
+                key: "duplicate".into(),
+                value: "first".into(),
+                last_modified: Some(11),
+            }],
+            after: Some(vaultkern_model::OpaqueXmlAnchor {
+                element_name: "Times".into(),
+                occurrence: 1,
+            }),
+        };
+        let later_anchor = vaultkern_model::OpaqueXmlAnchor {
+            element_name: "AutoType".into(),
+            occurrence: 1,
+        };
+        entry.custom_data_blocks = vec![
+            earlier_block.clone(),
+            vaultkern_model::CustomDataBlock {
+                items: vec![vaultkern_model::CustomDataItem {
+                    key: "duplicate".into(),
+                    value: "second".into(),
+                    last_modified: Some(22),
+                }],
+                after: Some(later_anchor.clone()),
+            },
+        ];
+        vault.root.entries.push(entry);
+
+        core.upsert_entry_custom_data_detail(
+            &mut vault,
+            &entry_id,
+            super::EntryCustomDataItemDetailInput {
+                key: "duplicate".into(),
+                value: "updated".into(),
+                last_modified: Some(33),
+            },
+        )
+        .expect("upsert entry custom data detail");
+
+        let blocks = &vault.root.entries[0].custom_data_blocks;
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], earlier_block);
+        assert_eq!(blocks[1].after.as_ref(), Some(&later_anchor));
+        assert_eq!(blocks[1].items[0].value, "updated");
+        assert_eq!(blocks[1].items[0].last_modified, Some(33));
+    }
+
+    #[test]
+    fn entry_custom_data_delete_preserves_unrelated_block_fidelity_state() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Semantic");
+        let mut entry = Entry::new("CustomData");
+        let entry_id = entry.id.to_string();
+        entry.custom_data.extend([
+            ("removed".into(), "old".into()),
+            ("kept".into(), "value".into()),
+        ]);
+        let kept_block = vaultkern_model::CustomDataBlock {
+            items: vec![vaultkern_model::CustomDataItem {
+                key: "kept".into(),
+                value: "value".into(),
+                last_modified: Some(22),
+            }],
+            after: Some(vaultkern_model::OpaqueXmlAnchor {
+                element_name: "AutoType".into(),
+                occurrence: 1,
+            }),
+        };
+        entry.custom_data_blocks = vec![
+            vaultkern_model::CustomDataBlock {
+                items: vec![vaultkern_model::CustomDataItem {
+                    key: "removed".into(),
+                    value: "old".into(),
+                    last_modified: Some(11),
+                }],
+                after: Some(vaultkern_model::OpaqueXmlAnchor {
+                    element_name: "Times".into(),
+                    occurrence: 1,
+                }),
+            },
+            kept_block.clone(),
+        ];
+        vault.root.entries.push(entry);
+
+        core.delete_entry_custom_data(&mut vault, &entry_id, "removed")
+            .expect("delete entry custom data");
+
+        assert_eq!(vault.root.entries[0].custom_data_blocks, vec![kept_block]);
     }
 
     #[test]

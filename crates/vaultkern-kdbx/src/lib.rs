@@ -5680,6 +5680,7 @@ mod compatibility_tests {
     fn totp_label_edge_cases_roundtrip_with_stable_canonical_content() {
         for (case, issuer, account_name) in [
             ("empty-account", "Issuer", ""),
+            ("leading-space-account", "Issuer", " alice"),
             ("encoded-colons", "Issuer:Prod", "account:west"),
             ("empty-account-colon-issuer", "Issuer:Prod", ""),
         ] {

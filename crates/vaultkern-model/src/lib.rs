@@ -581,10 +581,8 @@ impl TotpSpec {
         let payload = &uri[PREFIX.len()..];
         let (label, query) = payload.split_once('?').ok_or(ModelError::Unimplemented)?;
         let (label_issuer, account_name) = if let Some((issuer, account)) = label.split_once(':') {
-            (
-                Some(percent_decode(issuer)),
-                Some(percent_decode(trim_encoded_label_spaces(account))),
-            )
+            // Our writer uses a literal separator, so encoded spaces here are account data.
+            (Some(percent_decode(issuer)), Some(percent_decode(account)))
         } else if let Some((issuer, account)) = split_once_encoded_label_separator(label) {
             (
                 Some(percent_decode(issuer)),
@@ -1247,6 +1245,16 @@ mod tests {
             .expect("parse otpauth");
 
         assert_eq!(spec.account_name.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn otpauth_parser_preserves_encoded_leading_spaces_after_a_literal_separator() {
+        let spec = TotpSpec::parse_otpauth(
+            "otpauth://totp/Issuer:%20%20alice?secret=SECRET&issuer=Issuer",
+        )
+        .expect("parse otpauth");
+
+        assert_eq!(spec.account_name.as_deref(), Some("  alice"));
     }
 
     #[test]

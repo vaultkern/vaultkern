@@ -12,7 +12,7 @@ const FIXTURE_NEW_DATABASE: &[u8] = include_bytes!("../../../fixtures/kdbx/NewDa
 const FIXTURE_SYNC_DATABASE: &[u8] = include_bytes!("../../../fixtures/kdbx/SyncDatabase.kdbx");
 
 #[test]
-fn facade_mutation_canonicalizes_split_custom_data_blocks_on_roundtrip() {
+fn facade_mutation_preserves_split_custom_data_blocks_on_roundtrip() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("custom-data-fallback");
@@ -81,7 +81,7 @@ fn facade_mutation_canonicalizes_split_custom_data_blocks_on_roundtrip() {
         reloaded.meta_custom_data.get("meta-c").map(String::as_str),
         Some("3")
     );
-    assert_eq!(reloaded.meta_custom_data_blocks.len(), 1);
+    assert_eq!(reloaded.meta_custom_data_blocks.len(), 2);
 
     let reloaded_group = &reloaded.root.children[0];
     assert_eq!(
@@ -91,7 +91,7 @@ fn facade_mutation_canonicalizes_split_custom_data_blocks_on_roundtrip() {
             .map(String::as_str),
         Some("3")
     );
-    assert_eq!(reloaded_group.custom_data_blocks.len(), 1);
+    assert_eq!(reloaded_group.custom_data_blocks.len(), 2);
 
     let reloaded_entry = &reloaded_group.entries[0];
     assert_eq!(
@@ -101,7 +101,7 @@ fn facade_mutation_canonicalizes_split_custom_data_blocks_on_roundtrip() {
             .map(String::as_str),
         Some("3")
     );
-    assert_eq!(reloaded_entry.custom_data_blocks.len(), 1);
+    assert_eq!(reloaded_entry.custom_data_blocks.len(), 2);
 
     assert_eq!(
         inspected.public_custom_data.get("public-c"),
@@ -114,7 +114,7 @@ fn facade_mutation_canonicalizes_split_custom_data_blocks_on_roundtrip() {
 }
 
 #[test]
-fn facade_deletion_canonicalizes_split_custom_data_blocks_on_roundtrip() {
+fn facade_deletion_removes_only_affected_split_custom_data_blocks_on_roundtrip() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("custom-data-fallback-delete");
@@ -200,7 +200,7 @@ fn facade_deletion_canonicalizes_split_custom_data_blocks_on_roundtrip() {
 }
 
 #[test]
-fn derived_external_fixture_mutation_canonicalizes_split_custom_data_blocks() {
+fn derived_external_fixture_mutation_preserves_split_custom_data_blocks() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("a");
@@ -248,8 +248,8 @@ fn derived_external_fixture_mutation_canonicalizes_split_custom_data_blocks() {
         .load_kdbx(&rewritten, &key)
         .expect("reload mutated derived browser fixture");
 
-    assert_eq!(reloaded.meta_custom_data_blocks.len(), 1);
-    assert_eq!(reloaded.root.entries[0].custom_data_blocks.len(), 1);
+    assert_eq!(reloaded.meta_custom_data_blocks.len(), 2);
+    assert_eq!(reloaded.root.entries[0].custom_data_blocks.len(), 2);
     assert_eq!(
         reloaded
             .meta_custom_data
@@ -269,7 +269,7 @@ fn derived_external_fixture_mutation_canonicalizes_split_custom_data_blocks() {
 }
 
 #[test]
-fn derived_external_fixture_deletion_canonicalizes_split_custom_data_blocks() {
+fn derived_external_fixture_deletion_removes_only_affected_split_custom_data_blocks() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("a");
@@ -311,7 +311,7 @@ fn derived_external_fixture_deletion_canonicalizes_split_custom_data_blocks() {
 }
 
 #[test]
-fn derived_newdatabase_meta_mutation_canonicalizes_split_custom_data_blocks() {
+fn derived_newdatabase_meta_mutation_preserves_split_custom_data_blocks() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("a");
@@ -345,7 +345,7 @@ fn derived_newdatabase_meta_mutation_canonicalizes_split_custom_data_blocks() {
         .load_kdbx(&rewritten, &key)
         .expect("reload mutated derived newdatabase fixture");
 
-    assert_eq!(reloaded.meta_custom_data_blocks.len(), 1);
+    assert_eq!(reloaded.meta_custom_data_blocks.len(), 2);
     assert_eq!(
         reloaded
             .meta_custom_data
@@ -357,7 +357,7 @@ fn derived_newdatabase_meta_mutation_canonicalizes_split_custom_data_blocks() {
 }
 
 #[test]
-fn derived_browser_group_mutation_canonicalizes_split_custom_data_blocks() {
+fn derived_browser_group_mutation_preserves_split_custom_data_blocks() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("a");
@@ -440,13 +440,13 @@ fn derived_browser_group_mutation_canonicalizes_split_custom_data_blocks() {
             .expect("reloaded general group")
             .custom_data_blocks
             .len(),
-        1
+        2
     );
     assert_eq!(reloaded.root.title, "NewDatabase");
 }
 
 #[test]
-fn derived_sync_group_deletion_canonicalizes_split_custom_data_blocks() {
+fn derived_sync_group_deletion_removes_only_affected_split_custom_data_blocks() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("a");
