@@ -338,7 +338,13 @@ pub struct KdbxHeaderSummary {
 }
 
 pub fn required_version(vault: &Vault) -> KdbxVersion {
-    if group_requires_41(&vault.root) {
+    if custom_data_requires_41(&vault.meta_custom_data_blocks, &vault.meta_custom_data)
+        || vault
+            .custom_icons
+            .iter()
+            .any(|icon| icon.name.is_some() || icon.last_modified.is_some())
+        || group_requires_41(&vault.root)
+    {
         KdbxVersion::V4_1
     } else {
         KdbxVersion::V4_0
@@ -380,6 +386,10 @@ pub fn save_kdbx(
     composite_key: &CompositeKey,
     profile: &SaveProfile,
 ) -> Result<Vec<u8>> {
+    if required_version(vault) == KdbxVersion::V4_1 && profile.version != KdbxVersion::V4_1 {
+        return Err(KdbxError::UnsupportedVersion);
+    }
+
     let mut header = KdbxHeader::new(profile.version, profile.cipher);
     header.compression = profile.compression;
     header.master_seed = random_array_32();
@@ -3847,14 +3857,34 @@ fn write_field(bytes: &mut Vec<u8>, id: u8, data: &[u8]) {
     bytes.extend(data);
 }
 
+fn custom_data_requires_41(blocks: &[CustomDataBlock], merged: &BTreeMap<String, String>) -> bool {
+    merge_custom_data_blocks(blocks) == *merged
+        && blocks
+            .iter()
+            .flat_map(|block| &block.items)
+            .any(|item| item.last_modified.is_some())
+}
+
+fn entry_state_requires_41(entry: &Entry) -> bool {
+    entry.exclude_from_reports
+        || entry.previous_parent.is_some()
+        || entry.passkey.is_some()
+        || custom_data_requires_41(&entry.custom_data_blocks, &entry.custom_data)
+}
+
+fn entry_requires_41(entry: &Entry) -> bool {
+    entry_state_requires_41(entry) || entry.history.iter().any(entry_state_requires_41)
+}
+
 fn group_requires_41(group: &Group) -> bool {
-    if !group.tags.is_empty() || group.previous_parent.is_some() {
+    if !group.tags.is_empty()
+        || group.previous_parent.is_some()
+        || custom_data_requires_41(&group.custom_data_blocks, &group.custom_data)
+    {
         return true;
     }
 
-    if group.entries.iter().any(|entry| {
-        entry.exclude_from_reports || entry.previous_parent.is_some() || entry.passkey.is_some()
-    }) {
+    if group.entries.iter().any(entry_requires_41) {
         return true;
     }
 
@@ -4468,14 +4498,16 @@ mod compatibility_tests {
         SaveProfile, binary_index_for_content_id, child_text, collect_attachment_refs,
         decode_block_stream, decrypt_payload, encode_block_stream, entry_ref_key, gzip_compress,
         gzip_decompress, header_hmac, kdf_from_variant_dict, load_kdbx, mac_seed,
-        parse_inner_header, parse_kdbx3_binaries, save_kdbx, sha256_seeded, text_element,
+        parse_inner_header, parse_kdbx3_binaries, required_version, save_kdbx, sha256_seeded,
+        text_element,
     };
     use base64::Engine as _;
     use vaultkern_crypto::{CompositeKey, sha256_bytes};
     use vaultkern_model::{
         Attachment, AttachmentContent, AttachmentContentId, AutoTypeConfig, CustomDataBlock,
-        CustomDataItem, CustomField, Entry, Group, ModelError, OpaqueXmlAnchor, PasskeyRecord,
-        TotpAlgorithm, TotpSpec, Vault, canonical_entry_bytes_v1, canonical_entry_content_hash_v1,
+        CustomDataItem, CustomField, CustomIcon, Entry, Group, ModelError, OpaqueXmlAnchor,
+        PasskeyRecord, TotpAlgorithm, TotpSpec, Vault, canonical_entry_bytes_v1,
+        canonical_entry_content_hash_v1,
     };
     use xmltree::{Element, XMLNode};
 
@@ -5368,6 +5400,123 @@ mod compatibility_tests {
             canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
             expected
         );
+    }
+
+    #[test]
+    fn required_version_accounts_for_timestamped_custom_data_at_every_level() {
+        fn add_timestamped_item(
+            merged: &mut std::collections::BTreeMap<String, String>,
+            blocks: &mut Vec<CustomDataBlock>,
+        ) {
+            merged.insert("timestamped".into(), "value".into());
+            blocks.push(CustomDataBlock {
+                items: vec![CustomDataItem {
+                    key: "timestamped".into(),
+                    value: "value".into(),
+                    last_modified: Some(7),
+                }],
+                after: None,
+            });
+        }
+
+        let mut meta = Vault::empty("meta custom data");
+        add_timestamped_item(
+            &mut meta.meta_custom_data,
+            &mut meta.meta_custom_data_blocks,
+        );
+
+        let mut group = Vault::empty("group custom data");
+        add_timestamped_item(
+            &mut group.root.custom_data,
+            &mut group.root.custom_data_blocks,
+        );
+
+        let mut current = Vault::empty("entry custom data");
+        let mut current_entry = Entry::new("current");
+        add_timestamped_item(
+            &mut current_entry.custom_data,
+            &mut current_entry.custom_data_blocks,
+        );
+        current.root.entries.push(current_entry);
+
+        let mut history = Vault::empty("history custom data");
+        let mut live_entry = Entry::new("live");
+        let mut history_entry = Entry::new("history");
+        add_timestamped_item(
+            &mut history_entry.custom_data,
+            &mut history_entry.custom_data_blocks,
+        );
+        live_entry.history.push(history_entry);
+        history.root.entries.push(live_entry);
+
+        for (case, vault) in [
+            ("meta", meta),
+            ("group", group),
+            ("current entry", current),
+            ("history entry", history),
+        ] {
+            assert_eq!(required_version(&vault), KdbxVersion::V4_1, "{case}");
+        }
+    }
+
+    #[test]
+    fn required_version_accounts_for_each_custom_icon_4_1_field() {
+        for (case, name, last_modified) in [
+            ("name", Some("icon".to_string()), None),
+            ("last modified", None, Some(11)),
+        ] {
+            let mut vault = Vault::empty(case);
+            vault.custom_icons.push(CustomIcon {
+                id: uuid::Uuid::new_v4(),
+                data: vec![1, 2, 3],
+                name,
+                last_modified,
+            });
+
+            assert_eq!(required_version(&vault), KdbxVersion::V4_1, "{case}");
+        }
+    }
+
+    #[test]
+    fn required_version_recurses_into_history_entry_metadata() {
+        let root = Vault::empty("history metadata").root;
+        for (case, previous_parent, exclude_from_reports) in [
+            ("previous parent", Some(root.id), false),
+            ("exclude from reports", None, true),
+        ] {
+            let mut vault = Vault::empty(case);
+            let mut live_entry = Entry::new("live");
+            let mut history_entry = Entry::new("history");
+            history_entry.previous_parent = previous_parent;
+            history_entry.exclude_from_reports = exclude_from_reports;
+            live_entry.history.push(history_entry);
+            vault.root.entries.push(live_entry);
+
+            assert_eq!(required_version(&vault), KdbxVersion::V4_1, "{case}");
+        }
+    }
+
+    #[test]
+    fn save_rejects_a_profile_below_the_vaults_required_version() {
+        let mut vault = Vault::empty("minimum version");
+        let mut entry = Entry::new("timestamped");
+        entry.custom_data.insert("key".into(), "value".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "key".into(),
+                value: "value".into(),
+                last_modified: Some(13),
+            }],
+            after: None,
+        });
+        vault.root.entries.push(entry);
+        let mut profile = fast_profile();
+        profile.version = KdbxVersion::V4_0;
+
+        assert!(matches!(
+            save_kdbx(&vault, &test_key("minimum-version"), &profile),
+            Err(KdbxError::UnsupportedVersion)
+        ));
     }
 
     #[test]

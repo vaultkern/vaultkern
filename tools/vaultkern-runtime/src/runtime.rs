@@ -17,8 +17,8 @@ use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError, Entry,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
     ExternalKdfConfirmation, ExternalKdfDecision, ExternalKdfPolicy, ExternalKdfRequest,
-    KdbxCipher, KdbxError, KdfPolicyEvaluator, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile,
-    TotpSpec, Vault,
+    KdbxCipher, KdbxError, KdbxVersion, KdfPolicyEvaluator, KeepassCore, PasskeyRecord, SaveKdf,
+    SaveProfile, TotpSpec, Vault, required_version,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
@@ -6439,8 +6439,12 @@ fn save_kdbx_with_history_limits(
     core: &KeepassCore,
     vault: &mut Vault,
     key: &CompositeKey,
-    save_profile: SaveProfile,
+    mut save_profile: SaveProfile,
 ) -> std::result::Result<Vec<u8>, KdbxError> {
+    if required_version(vault) == KdbxVersion::V4_1 {
+        save_profile.version = KdbxVersion::V4_1;
+    }
+
     if vault.history_max_items.is_none() && vault.history_max_size.is_none() {
         return core.save_kdbx(vault, key, save_profile);
     }
@@ -7501,6 +7505,31 @@ mod tests {
                 vaultkern_core::ExternalKdfConfirmation::Unconfirmed,
             )
         );
+    }
+
+    #[test]
+    fn save_helper_promotes_profiles_that_cannot_represent_the_vault() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("minimum version");
+        let mut entry = Entry::new("excluded");
+        entry.exclude_from_reports = true;
+        vault.root.entries.push(entry);
+        let mut key = CompositeKey::default();
+        key.add_password("minimum-version");
+        let profile = SaveProfile {
+            version: vaultkern_core::KdbxVersion::V4_0,
+            cipher: KdbxCipher::Aes256,
+            compression: Compression::None,
+            kdf: SaveKdf::AesKdbx4 { rounds: 1 },
+        };
+
+        let bytes = save_kdbx_with_history_limits(&core, &mut vault, &key, profile)
+            .expect("runtime save should promote the file version");
+        let header = vaultkern_core::inspect_kdbx_header(&bytes).expect("inspect saved header");
+        let loaded = core.load_kdbx(&bytes, &key).expect("reload promoted vault");
+
+        assert_eq!(header.version, vaultkern_core::KdbxVersion::V4_1);
+        assert!(loaded.root.entries[0].exclude_from_reports);
     }
 
     #[test]
