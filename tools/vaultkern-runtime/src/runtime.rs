@@ -8669,9 +8669,8 @@ mod tests {
         existing.username = "alice".into();
         existing.password = "secret".into();
         existing.url = "https://example.com/login".into();
-        existing.totp = Some(
-            TotpSpec::parse_otpauth("otpauth://totp/ignored?secret=JBSWY3DPEHPK3PXP").unwrap(),
-        );
+        existing.totp =
+            Some(TotpSpec::parse_otpauth("otpauth://totp/?secret=JBSWY3DPEHPK3PXP").unwrap());
         let existing_id = existing.id.to_string();
         previous.root.entries.push(existing);
         let mut target = previous.root.entries[0].clone();
@@ -11727,7 +11726,7 @@ mod tests {
         first.save_vault(&vault_id).unwrap();
         let expected_fields = entry_fields(&entry);
         let noncanonical_totp =
-            "otpauth://totp/ignored?period=45&digits=8&algorithm=SHA256&secret=JBSWY3DPEHPK3PXP";
+            "otpauth://totp/?period=45&digits=8&algorithm=SHA256&secret=JBSWY3DPEHPK3PXP";
         first.queue_test_onedrive_ambiguous_write(false);
         let pending = first
             .handle(RuntimeCommand::PersistAutofillMutation {

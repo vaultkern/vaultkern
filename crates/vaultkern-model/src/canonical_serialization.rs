@@ -4,8 +4,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    AttachmentContentId, AutoTypeConfig, CustomDataBlock, CustomDataItem, CustomField, Entry,
-    EntryFieldProtection, materialize_entry_persistent_attributes,
+    AttachmentContentId, AutoTypeConfig, CustomDataBlock, CustomField, Entry, EntryFieldProtection,
+    materialize_entry_persistent_attributes,
 };
 
 pub const CANONICAL_SERIALIZATION_MAGIC: [u8; 4] = *b"VKCS";
@@ -68,11 +68,41 @@ fn collect_attachment_references<'a, V>(
         .collect())
 }
 
-fn collect_custom_data_items(blocks: &[CustomDataBlock]) -> BTreeMap<&str, &CustomDataItem> {
+#[derive(Clone, Copy)]
+struct CanonicalCustomDataItem<'a> {
+    value: &'a str,
+    last_modified: Option<i64>,
+}
+
+fn collect_custom_data_items<'a>(
+    custom_data: &'a BTreeMap<String, String>,
+    blocks: &'a [CustomDataBlock],
+) -> BTreeMap<&'a str, CanonicalCustomDataItem<'a>> {
+    if blocks.is_empty() {
+        return custom_data
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.as_str(),
+                    CanonicalCustomDataItem {
+                        value,
+                        last_modified: None,
+                    },
+                )
+            })
+            .collect();
+    }
+
     let mut items = BTreeMap::new();
     for block in blocks {
         for item in &block.items {
-            items.insert(item.key.as_str(), item);
+            items.insert(
+                item.key.as_str(),
+                CanonicalCustomDataItem {
+                    value: &item.value,
+                    last_modified: item.last_modified,
+                },
+            );
         }
     }
     items
@@ -104,7 +134,7 @@ struct CanonicalEntryReference<'a> {
     previous_parent: &'a Option<Uuid>,
     auto_type: &'a Option<AutoTypeConfig>,
     custom_data: &'a BTreeMap<String, String>,
-    custom_data_items: BTreeMap<&'a str, &'a CustomDataItem>,
+    custom_data_items: BTreeMap<&'a str, CanonicalCustomDataItem<'a>>,
     exclude_from_reports: bool,
 }
 
@@ -157,7 +187,7 @@ impl<'a> TryFrom<&'a Entry> for CanonicalEntryReference<'a> {
                 content_id: attachment.data.id(),
             },
         )?;
-        let custom_data_items = collect_custom_data_items(custom_data_blocks);
+        let custom_data_items = collect_custom_data_items(custom_data, custom_data_blocks);
 
         Ok(Self {
             id,
@@ -437,7 +467,7 @@ fn canonical_entry_reference_bytes_v1(
     )?;
 
     encoder.write_string_map(entry.custom_data_items.into_iter(), |encoder, item| {
-        encoder.write_text(&item.value)?;
+        encoder.write_text(item.value)?;
         encoder.write_option(item.last_modified.as_ref(), |encoder, value| {
             encoder.write_i64(*value);
             Ok(())
@@ -1756,6 +1786,26 @@ mod tests {
             canonical_bytes(&split_blocks),
             canonical_bytes(&reversed_winner)
         );
+    }
+
+    #[test]
+    fn map_only_custom_data_matches_its_persisted_no_time_item_projection() {
+        let mut map_only = minimal_entry();
+        map_only
+            .custom_data
+            .insert("model-key".into(), "model-value".into());
+        let mut persisted = map_only.clone();
+        persisted.custom_data_blocks = vec![CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "model-key".into(),
+                value: "model-value".into(),
+                last_modified: None,
+            }],
+            after: None,
+        }];
+
+        assert_eq!(canonical_bytes(&map_only), canonical_bytes(&persisted));
+        assert_eq!(canonical_hash(&map_only), canonical_hash(&persisted));
     }
 
     #[test]

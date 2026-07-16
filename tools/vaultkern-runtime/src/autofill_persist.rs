@@ -27,6 +27,13 @@ const MAX_CUSTOM_FIELDS: usize = 128;
 const MAX_MATCHING_IDS: usize = 4_096;
 const MAX_PLAN_BYTES: usize = 8 * 1024 * 1024;
 const RESERVED_CUSTOM_FIELD_KEYS: [&str; 5] = ["Title", "UserName", "Password", "URL", "Notes"];
+const TOTP_SOURCE_CUSTOM_FIELD_KEYS: [&str; 5] = [
+    "otp",
+    "TimeOtp-Secret-Base32",
+    "TimeOtp-Algorithm",
+    "TimeOtp-Length",
+    "TimeOtp-Period",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AutofillPersistEngineError {
@@ -1093,6 +1100,8 @@ fn validate_fields(
             || RESERVED_CUSTOM_FIELD_KEYS
                 .iter()
                 .any(|reserved| field.key.eq_ignore_ascii_case(reserved))
+            || TOTP_SOURCE_CUSTOM_FIELD_KEYS.contains(&field.key.as_str())
+            || field.key.starts_with("KPEX_PASSKEY_")
             || field.value.len() > MAX_FIELD_BYTES
         {
             return invalid_plan(format!("invalid {name}.custom_fields"));
@@ -2330,8 +2339,7 @@ mod tests {
         let reordered = create_plan(parent_group_id, Vec::new(), reordered);
         let mut fallback_fields = fields("secret");
         fallback_fields.totp_uri = Some(
-            "otpauth://totp/ignored?secret=JBSWY3DPEHPK3PXP&algorithm=SHA256&digits=8&period=45"
-                .into(),
+            "otpauth://totp/?secret=JBSWY3DPEHPK3PXP&algorithm=SHA256&digits=8&period=45".into(),
         );
         let fallback = create_plan(parent_group_id, Vec::new(), fallback_fields);
         let mut normalized_secret_fields = fields("secret");
@@ -2492,6 +2500,77 @@ mod tests {
                 Err(AutofillPersistEngineError::InvalidPlan(_))
             ));
             assert_eq!(current, before);
+        }
+    }
+
+    #[test]
+    fn credential_source_custom_keys_fail_closed_without_mutation() {
+        let current = vault_with_entry(&fields("old-secret"));
+        let before = current.clone();
+
+        for key in [
+            "otp",
+            "TimeOtp-Secret-Base32",
+            "TimeOtp-Algorithm",
+            "TimeOtp-Length",
+            "TimeOtp-Period",
+            "KPEX_PASSKEY_PRIVATE_KEY_PEM",
+            "KPEX_PASSKEY_FUTURE_FIELD",
+        ] {
+            let mut desired = fields("new-secret");
+            desired.custom_fields.push(EntryCustomFieldDto {
+                key: key.into(),
+                value: "writer-owned".into(),
+                protected: true,
+            });
+
+            assert!(
+                matches!(
+                    execute(
+                        &current,
+                        &current,
+                        &update_plan(fields("old-secret"), desired)
+                    ),
+                    Err(AutofillPersistEngineError::InvalidPlan(_))
+                ),
+                "{key}"
+            );
+            assert_eq!(current, before, "{key}");
+        }
+    }
+
+    #[test]
+    fn differently_cased_credential_names_remain_ordinary_custom_fields() {
+        let current = vault_with_entry(&fields("old-secret"));
+        let mut desired = fields("new-secret");
+        desired.custom_fields = [
+            "OTP",
+            "timeotp-secret-base32",
+            "kpex_passkey_private_key_pem",
+        ]
+        .into_iter()
+        .map(|key| EntryCustomFieldDto {
+            key: key.into(),
+            value: "ordinary".into(),
+            protected: true,
+        })
+        .collect();
+
+        let prepared = execute(
+            &current,
+            &current,
+            &update_plan(fields("old-secret"), desired),
+        )
+        .expect("differently cased names are not KDBX credential source keys");
+        let attributes = &prepared.candidate.root.entries[0].attributes;
+
+        assert_eq!(attributes.len(), 3);
+        for key in [
+            "OTP",
+            "timeotp-secret-base32",
+            "kpex_passkey_private_key_pem",
+        ] {
+            assert_eq!(attributes[key].value, "ordinary");
         }
     }
 

@@ -744,6 +744,7 @@ pub enum MutationError {
     HistoryIndexOutOfBounds(usize),
     CustomFieldNotFound(String),
     ReservedCustomFieldKey(String),
+    InvalidEntryValue(String),
     AttachmentNotFound(String),
     AttachmentAlreadyExists(String),
     AttachmentContentHashCollision,
@@ -768,6 +769,7 @@ impl fmt::Display for MutationError {
             Self::ReservedCustomFieldKey(key) => {
                 write!(f, "reserved custom field key: {key}")
             }
+            Self::InvalidEntryValue(message) => write!(f, "invalid entry value: {message}"),
             Self::AttachmentNotFound(name) => write!(f, "attachment not found: {name}"),
             Self::AttachmentAlreadyExists(name) => write!(f, "attachment already exists: {name}"),
             Self::AttachmentContentHashCollision => {
@@ -1425,12 +1427,15 @@ impl KeepassCore {
         }
         if let Some(foreground_color) = update.foreground_color {
             entry.foreground_color = foreground_color;
+            entry.raw_state.foreground_color_raw = None;
         }
         if let Some(background_color) = update.background_color {
             entry.background_color = background_color;
+            entry.raw_state.background_color_raw = None;
         }
         if let Some(override_url) = update.override_url {
             entry.override_url = override_url;
+            entry.raw_state.override_url_raw = None;
         }
 
         Ok(project_entry_presentation_metadata(entry))
@@ -1918,8 +1923,13 @@ impl KeepassCore {
         vault: &mut Vault,
         item: CustomDataItemInput,
     ) -> Vec<CustomDataItemView> {
-        remove_vault_custom_data_block_items(vault, &item.key);
-        vault.meta_custom_data.insert(item.key, item.value);
+        let key = item.key;
+        vault.meta_custom_data.insert(key.clone(), item.value);
+        canonicalize_custom_data_blocks(
+            &mut vault.meta_custom_data_blocks,
+            &vault.meta_custom_data,
+            Some((&key, None)),
+        );
         project_custom_data_items(&vault.meta_custom_data)
     }
 
@@ -1928,15 +1938,12 @@ impl KeepassCore {
         vault: &mut Vault,
         item: VaultCustomDataItemDetailInput,
     ) -> Vec<VaultCustomDataItemView> {
-        remove_vault_custom_data_block_items(vault, &item.key);
-        vault
-            .meta_custom_data
-            .insert(item.key.clone(), item.value.clone());
-        append_custom_data_block_item(
+        let key = item.key;
+        vault.meta_custom_data.insert(key.clone(), item.value);
+        canonicalize_custom_data_blocks(
             &mut vault.meta_custom_data_blocks,
-            item.key,
-            item.value,
-            item.last_modified,
+            &vault.meta_custom_data,
+            Some((&key, item.last_modified)),
         );
         project_vault_custom_data_items(vault)
     }
@@ -1949,7 +1956,11 @@ impl KeepassCore {
         if vault.meta_custom_data.remove(key).is_none() {
             return Err(MutationError::CustomDataNotFound(key.into()));
         }
-        remove_vault_custom_data_block_items(vault, key);
+        canonicalize_custom_data_blocks(
+            &mut vault.meta_custom_data_blocks,
+            &vault.meta_custom_data,
+            None,
+        );
         Ok(project_custom_data_items(&vault.meta_custom_data))
     }
 
@@ -1981,8 +1992,13 @@ impl KeepassCore {
     ) -> Result<Vec<CustomDataItemView>, MutationError> {
         let group = find_group_by_id_mut(&mut vault.root, group_id)
             .ok_or_else(|| MutationError::GroupNotFound(group_id.into()))?;
-        remove_group_custom_data_block_items(group, &item.key);
-        group.custom_data.insert(item.key, item.value);
+        let key = item.key;
+        group.custom_data.insert(key.clone(), item.value);
+        canonicalize_custom_data_blocks(
+            &mut group.custom_data_blocks,
+            &group.custom_data,
+            Some((&key, None)),
+        );
         Ok(project_custom_data_items(&group.custom_data))
     }
 
@@ -1994,15 +2010,12 @@ impl KeepassCore {
     ) -> Result<Vec<GroupCustomDataItemView>, MutationError> {
         let group = find_group_by_id_mut(&mut vault.root, group_id)
             .ok_or_else(|| MutationError::GroupNotFound(group_id.into()))?;
-        remove_group_custom_data_block_items(group, &item.key);
-        group
-            .custom_data
-            .insert(item.key.clone(), item.value.clone());
-        append_custom_data_block_item(
+        let key = item.key;
+        group.custom_data.insert(key.clone(), item.value);
+        canonicalize_custom_data_blocks(
             &mut group.custom_data_blocks,
-            item.key,
-            item.value,
-            item.last_modified,
+            &group.custom_data,
+            Some((&key, item.last_modified)),
         );
         Ok(project_group_custom_data_items(group))
     }
@@ -2018,7 +2031,7 @@ impl KeepassCore {
         if group.custom_data.remove(key).is_none() {
             return Err(MutationError::CustomDataNotFound(key.into()));
         }
-        remove_group_custom_data_block_items(group, key);
+        canonicalize_custom_data_blocks(&mut group.custom_data_blocks, &group.custom_data, None);
         Ok(project_custom_data_items(&group.custom_data))
     }
 
@@ -2161,7 +2174,13 @@ impl KeepassCore {
     ) -> Result<EntryView, MutationError> {
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        if let Some(tag) = tags.iter().find(|tag| tag.is_empty() || tag.contains(';')) {
+            return Err(MutationError::InvalidEntryValue(format!(
+                "tag cannot be empty or contain ';': {tag:?}"
+            )));
+        }
         entry.tags = tags.into_iter().collect();
+        entry.raw_state.tags_raw = None;
         Ok(project_entry(entry))
     }
 
@@ -2173,6 +2192,11 @@ impl KeepassCore {
     ) -> Result<EntryView, MutationError> {
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        if field.key.is_empty() {
+            return Err(MutationError::InvalidEntryValue(
+                "custom field key cannot be empty".into(),
+            ));
+        }
         if is_reserved_entry_custom_field_key(&field.key) {
             return Err(MutationError::ReservedCustomFieldKey(field.key));
         }
@@ -2209,6 +2233,11 @@ impl KeepassCore {
         let content = shared_attachment_content(&vault.root, &attachment.data)?;
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        if attachment.name.is_empty() {
+            return Err(MutationError::InvalidEntryValue(
+                "attachment name cannot be empty".into(),
+            ));
+        }
         let name = attachment.name.clone();
         entry.attachments.insert(
             name,
@@ -2240,6 +2269,11 @@ impl KeepassCore {
     ) -> Result<Vec<AttachmentView>, MutationError> {
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        if update.new_name.as_deref() == Some("") {
+            return Err(MutationError::InvalidEntryValue(
+                "attachment name cannot be empty".into(),
+            ));
+        }
         let mut attachment = entry
             .attachments
             .remove(name)
@@ -2370,8 +2404,18 @@ impl KeepassCore {
     ) -> Result<EntryView, MutationError> {
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
-        remove_entry_custom_data_block_items(entry, &item.key);
-        entry.custom_data.insert(item.key, item.value);
+        if item.key.is_empty() {
+            return Err(MutationError::InvalidEntryValue(
+                "custom data key cannot be empty".into(),
+            ));
+        }
+        let key = item.key;
+        entry.custom_data.insert(key.clone(), item.value);
+        canonicalize_custom_data_blocks(
+            &mut entry.custom_data_blocks,
+            &entry.custom_data,
+            Some((&key, None)),
+        );
         Ok(project_entry(entry))
     }
 
@@ -2383,15 +2427,17 @@ impl KeepassCore {
     ) -> Result<EntryView, MutationError> {
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
-        remove_entry_custom_data_block_items(entry, &item.key);
-        entry
-            .custom_data
-            .insert(item.key.clone(), item.value.clone());
-        append_custom_data_block_item(
+        if item.key.is_empty() {
+            return Err(MutationError::InvalidEntryValue(
+                "custom data key cannot be empty".into(),
+            ));
+        }
+        let key = item.key;
+        entry.custom_data.insert(key.clone(), item.value);
+        canonicalize_custom_data_blocks(
             &mut entry.custom_data_blocks,
-            item.key,
-            item.value,
-            item.last_modified,
+            &entry.custom_data,
+            Some((&key, item.last_modified)),
         );
         Ok(project_entry(entry))
     }
@@ -2407,7 +2453,7 @@ impl KeepassCore {
         if entry.custom_data.remove(key).is_none() {
             return Err(MutationError::CustomDataNotFound(key.into()));
         }
-        remove_entry_custom_data_block_items(entry, key);
+        canonicalize_custom_data_blocks(&mut entry.custom_data_blocks, &entry.custom_data, None);
         Ok(project_entry(entry))
     }
 
@@ -2922,42 +2968,35 @@ fn project_entry_custom_data_items(entry: &Entry) -> Vec<EntryCustomDataItemView
     projected.into_values().collect()
 }
 
-fn remove_vault_custom_data_block_items(vault: &mut Vault, key: &str) {
-    for block in &mut vault.meta_custom_data_blocks {
-        block.items.retain(|item| item.key != key);
-    }
-}
-
-fn remove_group_custom_data_block_items(group: &mut Group, key: &str) {
-    for block in &mut group.custom_data_blocks {
-        block.items.retain(|item| item.key != key);
-    }
-}
-
-fn remove_entry_custom_data_block_items(entry: &mut Entry, key: &str) {
-    for block in &mut entry.custom_data_blocks {
-        block.items.retain(|item| item.key != key);
-    }
-}
-
-fn append_custom_data_block_item(
+fn canonicalize_custom_data_blocks(
     blocks: &mut Vec<vaultkern_model::CustomDataBlock>,
-    key: String,
-    value: String,
-    last_modified: Option<i64>,
+    merged: &std::collections::BTreeMap<String, String>,
+    updated_item: Option<(&str, Option<i64>)>,
 ) {
-    if last_modified.is_none() {
+    let mut last_modified_by_key = std::collections::BTreeMap::new();
+    for block in blocks.iter() {
+        for item in &block.items {
+            last_modified_by_key.insert(item.key.clone(), item.last_modified);
+        }
+    }
+    if let Some((key, last_modified)) = updated_item {
+        last_modified_by_key.insert(key.to_string(), last_modified);
+    }
+
+    if merged.is_empty() {
+        blocks.clear();
         return;
     }
 
-    blocks.push(vaultkern_model::CustomDataBlock {
-        items: vec![vaultkern_model::CustomDataItem {
-            key,
-            value,
-            last_modified,
-        }],
-        after: None,
-    });
+    let items = merged
+        .iter()
+        .map(|(key, value)| vaultkern_model::CustomDataItem {
+            key: key.clone(),
+            value: value.clone(),
+            last_modified: last_modified_by_key.get(key).copied().flatten(),
+        })
+        .collect();
+    *blocks = vec![vaultkern_model::CustomDataBlock { items, after: None }];
 }
 
 fn project_attachment_items(
@@ -3765,7 +3804,7 @@ mod tests {
         VaultBinTemplateMetadataUpdate, VaultIdentityMetadataUpdate, VaultLifecycleMetadataUpdate,
         VaultMetadataUpdate, VaultSelectionMetadataUpdate,
     };
-    use vaultkern_model::{CustomField, TotpAlgorithm};
+    use vaultkern_model::{CustomField, TotpAlgorithm, canonical_entry_bytes_v1};
 
     const FIXTURE_FORMAT200: &[u8] = include_bytes!("../../../fixtures/kdbx/Format200.kdbx");
     const FIXTURE_FORMAT300: &[u8] = include_bytes!("../../../fixtures/kdbx/Format300.kdbx");
@@ -4343,6 +4382,41 @@ mod tests {
     }
 
     #[test]
+    fn entry_tag_updates_invalidate_raw_fidelity_state() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Mutations");
+        let mut entry = Entry::new("Tagged");
+        let entry_id = entry.id.to_string();
+        entry.tags.insert("old".into());
+        entry.raw_state.tags_raw = Some("old".into());
+        vault.root.entries.push(entry);
+
+        core.replace_entry_tags(&mut vault, &entry_id, vec!["new".into()])
+            .expect("replace tags");
+
+        assert_eq!(vault.root.entries[0].tags.iter().next().unwrap(), "new");
+        assert_eq!(vault.root.entries[0].raw_state.tags_raw, None);
+    }
+
+    #[test]
+    fn facade_rejects_unrepresentable_entry_tags_without_mutation() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Mutations");
+        let entry = Entry::new("Tagged");
+        let entry_id = entry.id.to_string();
+        vault.root.entries.push(entry);
+
+        for tags in [vec![String::new()], vec!["one;two".into()]] {
+            let before = vault.clone();
+            assert!(
+                core.replace_entry_tags(&mut vault, &entry_id, tags)
+                    .is_err()
+            );
+            assert_eq!(vault, before);
+        }
+    }
+
+    #[test]
     fn facade_upserts_and_deletes_entry_custom_fields() {
         let core = KeepassCore::new();
         let mut vault = Vault::empty("Mutations");
@@ -4370,6 +4444,57 @@ mod tests {
             .expect("delete custom field");
         assert_eq!(updated.custom_field_count, 0);
         assert!(!vault.root.entries[0].attributes.contains_key("OtpSeed"));
+    }
+
+    #[test]
+    fn facade_rejects_empty_entry_map_keys_without_mutation() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Mutations");
+        let entry = Entry::new("Custom");
+        let entry_id = entry.id.to_string();
+        vault.root.entries.push(entry);
+
+        let before = vault.clone();
+        assert!(
+            core.upsert_entry_custom_field(
+                &mut vault,
+                &entry_id,
+                EntryCustomFieldInput {
+                    key: String::new(),
+                    value: "value".into(),
+                    protected: false,
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(vault, before);
+
+        assert!(
+            core.upsert_entry_custom_data(
+                &mut vault,
+                &entry_id,
+                EntryCustomDataInput {
+                    key: String::new(),
+                    value: "value".into(),
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(vault, before);
+
+        assert!(
+            core.upsert_entry_custom_data_detail(
+                &mut vault,
+                &entry_id,
+                super::EntryCustomDataItemDetailInput {
+                    key: String::new(),
+                    value: "value".into(),
+                    last_modified: None,
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(vault, before);
     }
 
     #[test]
@@ -4417,6 +4542,55 @@ mod tests {
             .expect("delete attachment");
         assert_eq!(updated.attachment_count, 0);
         assert!(!vault.root.entries[0].attachments.contains_key("a.txt"));
+    }
+
+    #[test]
+    fn facade_rejects_empty_attachment_names_without_mutation() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Attachments");
+        let entry = Entry::new("Attachment");
+        let entry_id = entry.id.to_string();
+        vault.root.entries.push(entry);
+
+        let before = vault.clone();
+        assert!(
+            core.add_entry_attachment(
+                &mut vault,
+                &entry_id,
+                EntryAttachmentInput {
+                    name: String::new(),
+                    data: b"content".to_vec(),
+                    protect_in_memory: false,
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(vault, before);
+
+        core.add_entry_attachment(
+            &mut vault,
+            &entry_id,
+            EntryAttachmentInput {
+                name: "file.bin".into(),
+                data: b"content".to_vec(),
+                protect_in_memory: false,
+            },
+        )
+        .expect("add valid attachment");
+        let before = vault.clone();
+        assert!(
+            core.update_entry_attachment_metadata(
+                &mut vault,
+                &entry_id,
+                "file.bin",
+                AttachmentMetadataUpdate {
+                    new_name: Some(String::new()),
+                    protect_in_memory: None,
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(vault, before);
     }
 
     #[test]
@@ -5674,6 +5848,35 @@ mod tests {
     }
 
     #[test]
+    fn presentation_updates_invalidate_raw_fidelity_state() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Presentation");
+        let mut entry = Entry::new("Styled");
+        let entry_id = entry.id.to_string();
+        entry.raw_state.foreground_color_raw = Some("#111111".into());
+        entry.raw_state.background_color_raw = Some("#222222".into());
+        entry.raw_state.override_url_raw = Some("https://old.example".into());
+        vault.root.entries.push(entry);
+
+        core.update_entry_presentation_metadata(
+            &mut vault,
+            &entry_id,
+            EntryPresentationMetadataUpdate {
+                icon_id: None,
+                foreground_color: Some(None),
+                background_color: Some(Some("#445566".into())),
+                override_url: Some(None),
+            },
+        )
+        .expect("update presentation metadata");
+
+        let raw = &vault.root.entries[0].raw_state;
+        assert_eq!(raw.foreground_color_raw, None);
+        assert_eq!(raw.background_color_raw, None);
+        assert_eq!(raw.override_url_raw, None);
+    }
+
+    #[test]
     fn entry_presentation_metadata_facade_roundtrips_updated_fields() {
         let core = KeepassCore::new();
         let mut vault = Vault::empty("Presentation");
@@ -6184,6 +6387,191 @@ mod tests {
         core.delete_entry_custom_data(&mut vault, &entry_id, "client")
             .expect("delete custom data");
         assert!(!vault.root.entries[0].custom_data.contains_key("client"));
+    }
+
+    #[test]
+    fn entry_custom_data_mutations_keep_canonical_bytes_across_kdbx_roundtrip() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Semantic");
+        let simple = Entry::new("Simple");
+        let simple_id = simple.id.to_string();
+        let detailed = Entry::new("Detailed");
+        let detailed_id = detailed.id.to_string();
+        let mut split = Entry::new("Split");
+        let split_id = split.id.to_string();
+        split.custom_data.extend([
+            ("changed".into(), "old".into()),
+            ("kept".into(), "value".into()),
+        ]);
+        split.custom_data_blocks = vec![
+            vaultkern_model::CustomDataBlock {
+                items: vec![vaultkern_model::CustomDataItem {
+                    key: "changed".into(),
+                    value: "old".into(),
+                    last_modified: Some(1),
+                }],
+                after: None,
+            },
+            vaultkern_model::CustomDataBlock {
+                items: vec![vaultkern_model::CustomDataItem {
+                    key: "kept".into(),
+                    value: "value".into(),
+                    last_modified: Some(2),
+                }],
+                after: None,
+            },
+        ];
+        vault.root.entries.extend([simple, detailed, split]);
+
+        core.upsert_entry_custom_data(
+            &mut vault,
+            &simple_id,
+            EntryCustomDataInput {
+                key: "client".into(),
+                value: "desktop".into(),
+            },
+        )
+        .expect("upsert simple custom data");
+        core.upsert_entry_custom_data_detail(
+            &mut vault,
+            &detailed_id,
+            super::EntryCustomDataItemDetailInput {
+                key: "client".into(),
+                value: "desktop".into(),
+                last_modified: None,
+            },
+        )
+        .expect("upsert detailed custom data");
+        core.upsert_entry_custom_data(
+            &mut vault,
+            &split_id,
+            EntryCustomDataInput {
+                key: "changed".into(),
+                value: "new".into(),
+            },
+        )
+        .expect("upsert split custom data");
+        let expected = vault
+            .root
+            .entries
+            .iter()
+            .map(|entry| canonical_entry_bytes_v1(entry).expect("canonical bytes"))
+            .collect::<Vec<_>>();
+
+        let mut key = CompositeKey::default();
+        key.add_password("custom-data-canonical");
+        let bytes = core
+            .save_kdbx(&vault, &key, super::SaveProfile::recommended())
+            .expect("save custom data");
+        let loaded = core.load_kdbx(&bytes, &key).expect("reload custom data");
+        let actual = loaded
+            .root
+            .entries
+            .iter()
+            .map(|entry| canonical_entry_bytes_v1(entry).expect("loaded canonical bytes"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn custom_data_mutations_canonicalize_blocks_without_losing_unrelated_item_times() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Custom data");
+        vault.meta_custom_data.insert("kept".into(), "meta".into());
+        vault.meta_custom_data_blocks = vec![vaultkern_model::CustomDataBlock {
+            items: vec![vaultkern_model::CustomDataItem {
+                key: "kept".into(),
+                value: "meta".into(),
+                last_modified: Some(11),
+            }],
+            after: None,
+        }];
+
+        vault.root.custom_data.insert("kept".into(), "group".into());
+        vault.root.custom_data_blocks = vec![vaultkern_model::CustomDataBlock {
+            items: vec![vaultkern_model::CustomDataItem {
+                key: "kept".into(),
+                value: "group".into(),
+                last_modified: Some(22),
+            }],
+            after: None,
+        }];
+
+        let mut entry = Entry::new("Entry");
+        let entry_id = entry.id.to_string();
+        entry.custom_data.insert("kept".into(), "entry".into());
+        entry.custom_data_blocks = vec![vaultkern_model::CustomDataBlock {
+            items: vec![vaultkern_model::CustomDataItem {
+                key: "kept".into(),
+                value: "entry".into(),
+                last_modified: Some(33),
+            }],
+            after: None,
+        }];
+        vault.root.entries.push(entry);
+
+        core.upsert_vault_custom_data(
+            &mut vault,
+            CustomDataItemInput {
+                key: "added".into(),
+                value: "meta".into(),
+            },
+        );
+        let root_id = vault.root.id.to_string();
+        core.upsert_group_custom_data(
+            &mut vault,
+            &root_id,
+            CustomDataItemInput {
+                key: "added".into(),
+                value: "group".into(),
+            },
+        )
+        .expect("upsert group custom data");
+        core.upsert_entry_custom_data(
+            &mut vault,
+            &entry_id,
+            EntryCustomDataInput {
+                key: "added".into(),
+                value: "entry".into(),
+            },
+        )
+        .expect("upsert entry custom data");
+
+        let mut key = CompositeKey::default();
+        key.add_password("custom-data-times");
+        let bytes = core
+            .save_kdbx(&vault, &key, super::SaveProfile::recommended())
+            .expect("save custom data");
+        let loaded = core.load_kdbx(&bytes, &key).expect("reload custom data");
+
+        assert_eq!(loaded.meta_custom_data_blocks.len(), 1);
+        assert_eq!(loaded.root.custom_data_blocks.len(), 1);
+        assert_eq!(loaded.root.entries[0].custom_data_blocks.len(), 1);
+        assert_eq!(
+            loaded.meta_custom_data_blocks[0]
+                .items
+                .iter()
+                .find(|item| item.key == "kept")
+                .and_then(|item| item.last_modified),
+            Some(11)
+        );
+        assert_eq!(
+            loaded.root.custom_data_blocks[0]
+                .items
+                .iter()
+                .find(|item| item.key == "kept")
+                .and_then(|item| item.last_modified),
+            Some(22)
+        );
+        assert_eq!(
+            loaded.root.entries[0].custom_data_blocks[0]
+                .items
+                .iter()
+                .find(|item| item.key == "kept")
+                .and_then(|item| item.last_modified),
+            Some(33)
+        );
     }
 
     #[test]
@@ -9027,9 +9415,9 @@ mod tests {
         assert_eq!(entry.title, "Sample Entry");
         assert_eq!(entry.icon_id, Some(0));
         assert_eq!(entry.custom_icon_id, None);
-        assert_eq!(entry.foreground_color, None);
-        assert_eq!(entry.background_color, None);
-        assert_eq!(entry.override_url, None);
+        assert_eq!(entry.foreground_color.as_deref(), Some(""));
+        assert_eq!(entry.background_color.as_deref(), Some(""));
+        assert_eq!(entry.override_url.as_deref(), Some(""));
         assert_eq!(entry.created_at, 1_283_804_904);
         assert_eq!(entry.modified_at, 1_636_321_720);
         assert_eq!(entry.expiry_time, Some(1_283_804_880));
@@ -9041,7 +9429,7 @@ mod tests {
             Some(AutoTypeConfig {
                 enabled: Some(true),
                 obfuscation: Some(0),
-                default_sequence: None,
+                default_sequence: Some(String::new()),
                 associations: vec![AutoTypeAssociation {
                     window: "Target Window".into(),
                     sequence: "{USERNAME}{TAB}{PASSWORD}{TAB}{ENTER}".into(),
@@ -10786,7 +11174,7 @@ mod tests {
             Some(AutoTypeConfig {
                 enabled: Some(true),
                 obfuscation: Some(0),
-                default_sequence: None,
+                default_sequence: Some(String::new()),
                 associations: Vec::new(),
             })
         );
@@ -10821,7 +11209,7 @@ mod tests {
             Some(AutoTypeConfig {
                 enabled: Some(true),
                 obfuscation: Some(0),
-                default_sequence: None,
+                default_sequence: Some(String::new()),
                 associations: Vec::new(),
             })
         );
@@ -11115,7 +11503,7 @@ mod tests {
             Some(AutoTypeConfig {
                 enabled: Some(true),
                 obfuscation: Some(0),
-                default_sequence: None,
+                default_sequence: Some(String::new()),
                 associations: Vec::new(),
             })
         );

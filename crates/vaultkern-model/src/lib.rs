@@ -571,27 +571,29 @@ pub struct TotpSpec {
 impl TotpSpec {
     pub fn parse_otpauth(uri: &str) -> Result<Self> {
         const PREFIX: &str = "otpauth://totp/";
-        if !uri.starts_with(PREFIX) {
+        if !uri
+            .get(..PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
+        {
             return Err(ModelError::Unimplemented);
         }
 
         let payload = &uri[PREFIX.len()..];
         let (label, query) = payload.split_once('?').ok_or(ModelError::Unimplemented)?;
-        let (label_issuer, mut account_name) =
-            if let Some((issuer, account)) = label.split_once(':') {
-                (
-                    Some(percent_decode(issuer)),
-                    Some(percent_decode(trim_encoded_label_spaces(account))),
-                )
-            } else if let Some((issuer, account)) = split_once_encoded_label_separator(label) {
-                (
-                    Some(percent_decode(issuer)),
-                    Some(percent_decode(trim_encoded_label_spaces(account))),
-                )
-            } else {
-                let account = percent_decode(label);
-                (None, (!account.is_empty()).then_some(account))
-            };
+        let (label_issuer, account_name) = if let Some((issuer, account)) = label.split_once(':') {
+            (
+                Some(percent_decode(issuer)),
+                Some(percent_decode(trim_encoded_label_spaces(account))),
+            )
+        } else if let Some((issuer, account)) = split_once_encoded_label_separator(label) {
+            (
+                Some(percent_decode(issuer)),
+                Some(percent_decode(trim_encoded_label_spaces(account))),
+            )
+        } else {
+            let account = percent_decode(label);
+            (None, (!account.is_empty()).then_some(account))
+        };
         let mut secret = None;
         let mut issuer = None;
         let mut algorithm = TotpAlgorithm::Sha1;
@@ -624,14 +626,6 @@ impl TotpSpec {
 
         if issuer.is_none() {
             issuer = label_issuer;
-        }
-
-        // The writer omits the separator for an empty account and repeats the issuer in the query.
-        if !label.contains(':') && issuer.is_some() {
-            let decoded_label = percent_decode(label);
-            if issuer.as_deref() == Some(decoded_label.as_str()) {
-                account_name = Some(String::new());
-            }
         }
 
         Ok(Self {
@@ -800,7 +794,7 @@ fn entry_otpauth_uri(entry: &Entry, totp: &TotpSpec, algorithm: &str) -> String 
         .clone()
         .unwrap_or_else(|| entry.username.clone());
     let label = if account_name.is_empty() {
-        percent_encode_component(&issuer)
+        format!("{}:", percent_encode_component(&issuer))
     } else {
         format!(
             "{}:{}",
@@ -1103,16 +1097,12 @@ fn percent_decode(input: &str) -> String {
     while index < bytes.len() {
         match bytes[index] {
             b'%' if index + 2 < bytes.len() => {
-                if let Ok(value) = u8::from_str_radix(&input[index + 1..index + 3], 16) {
+                if let Some(value) = decode_hex_byte(bytes[index + 1], bytes[index + 2]) {
                     decoded.push(value);
                     index += 3;
                     continue;
                 }
                 decoded.push(bytes[index]);
-                index += 1;
-            }
-            b'+' => {
-                decoded.push(b' ');
                 index += 1;
             }
             byte => {
@@ -1123,6 +1113,19 @@ fn percent_decode(input: &str) -> String {
     }
 
     String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn decode_hex_byte(high: u8, low: u8) -> Option<u8> {
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    Some(nibble(high)? << 4 | nibble(low)?)
 }
 
 #[cfg(test)]
@@ -1240,7 +1243,7 @@ mod tests {
 
     #[test]
     fn otpauth_parser_preserves_an_empty_account_name() {
-        let spec = TotpSpec::parse_otpauth("otpauth://totp/Issuer?secret=SECRET&issuer=Issuer")
+        let spec = TotpSpec::parse_otpauth("otpauth://totp/Issuer:?secret=SECRET&issuer=Issuer")
             .expect("parse otpauth");
 
         assert_eq!(spec.account_name.as_deref(), Some(""));
@@ -1249,7 +1252,7 @@ mod tests {
     #[test]
     fn otpauth_parser_preserves_an_empty_account_when_the_issuer_contains_a_colon() {
         let spec = TotpSpec::parse_otpauth(
-            "otpauth://totp/Issuer%3AProd?secret=SECRET&issuer=Issuer%3AProd",
+            "otpauth://totp/Issuer%3AProd:?secret=SECRET&issuer=Issuer%3AProd",
         )
         .expect("parse otpauth");
 
@@ -1273,6 +1276,15 @@ mod tests {
     }
 
     #[test]
+    fn otpauth_parser_preserves_an_unprefixed_account_matching_the_query_issuer() {
+        let spec = TotpSpec::parse_otpauth("otpauth://totp/GitHub?secret=SECRET&issuer=GitHub")
+            .expect("parse otpauth");
+
+        assert_eq!(spec.issuer.as_deref(), Some("GitHub"));
+        assert_eq!(spec.account_name.as_deref(), Some("GitHub"));
+    }
+
+    #[test]
     fn otpauth_parser_accepts_a_url_encoded_label_separator() {
         for label in ["Example%3Aalice", "Example%3aalice", "Example%3A%20alice"] {
             let spec = TotpSpec::parse_otpauth(&format!(
@@ -1293,6 +1305,30 @@ mod tests {
 
         assert_eq!(spec.issuer.as_deref(), Some("Example"));
         assert_eq!(spec.account_name.as_deref(), Some("alice@example.com"));
+    }
+
+    #[test]
+    fn otpauth_parser_preserves_a_literal_plus_in_the_label() {
+        let spec = TotpSpec::parse_otpauth("otpauth://totp/alice+prod%40example.com?secret=SECRET")
+            .expect("parse otpauth");
+
+        assert_eq!(spec.account_name.as_deref(), Some("alice+prod@example.com"));
+    }
+
+    #[test]
+    fn otpauth_parser_accepts_case_insensitive_uri_scheme_and_host() {
+        let spec = TotpSpec::parse_otpauth("OTPAUTH://TOTP/alice%40example.com?secret=SECRET")
+            .expect("parse otpauth");
+
+        assert_eq!(spec.account_name.as_deref(), Some("alice@example.com"));
+    }
+
+    #[test]
+    fn otpauth_parser_preserves_malformed_percent_escape_before_unicode() {
+        let spec = TotpSpec::parse_otpauth("otpauth://totp/%Aé?secret=SECRET")
+            .expect("malformed escape remains literal");
+
+        assert_eq!(spec.account_name.as_deref(), Some("%Aé"));
     }
 
     #[test]
@@ -1430,6 +1466,26 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn persistent_totp_uses_a_separator_for_an_empty_account() {
+        let mut entry = Entry::new("Example");
+        entry.totp = Some(TotpSpec {
+            secret_base32: "SECRET".into(),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: Some("Issuer".into()),
+            account_name: Some(String::new()),
+        });
+
+        let attributes = materialize_entry_persistent_attributes(&entry);
+
+        assert_eq!(
+            attributes["otp"].value,
+            "otpauth://totp/Issuer:?secret=SECRET&issuer=Issuer&algorithm=SHA1&digits=6&period=30"
+        );
     }
 
     #[test]

@@ -1197,6 +1197,7 @@ fn entry_to_xml(
     include_history: bool,
     version: KdbxVersion,
 ) -> Result<Element> {
+    validate_entry_text_values(entry)?;
     let mut element = Element::new("Entry");
     element.children.push(XMLNode::Element(text_element(
         "UUID",
@@ -1372,6 +1373,36 @@ fn entry_to_xml(
     reorder_known_xml_nodes(&mut element.children, &entry.raw_state.node_order);
     append_opaque_xml(&mut element, &entry.opaque_xml)?;
     Ok(element)
+}
+
+fn validate_entry_text_values(entry: &Entry) -> Result<()> {
+    if entry
+        .tags
+        .iter()
+        .any(|tag| tag.is_empty() || tag.contains(';'))
+        || entry
+            .attributes
+            .keys()
+            .any(|key| key.is_empty() || is_standard_entry_field_name(key))
+        || entry
+            .attachments
+            .iter()
+            .any(|(name, attachment)| name.is_empty() || attachment.name.is_empty())
+        || entry.custom_data.keys().any(String::is_empty)
+        || entry
+            .custom_data_blocks
+            .iter()
+            .flat_map(|block| &block.items)
+            .any(|item| item.key.is_empty())
+    {
+        return Err(KdbxError::InvalidValue);
+    }
+
+    Ok(())
+}
+
+fn is_standard_entry_field_name(name: &str) -> bool {
+    matches!(name, "Title" | "UserName" | "Password" | "URL" | "Notes")
 }
 
 fn group_times_to_xml(times: GroupTimes, version: KdbxVersion) -> Element {
@@ -1552,6 +1583,19 @@ fn merge_custom_data_blocks(blocks: &[CustomDataBlock]) -> BTreeMap<String, Stri
     merged
 }
 
+fn flatten_custom_data_blocks(blocks: &[CustomDataBlock]) -> CustomDataBlock {
+    let mut items = BTreeMap::new();
+    for block in blocks {
+        for item in &block.items {
+            items.insert(item.key.clone(), item.clone());
+        }
+    }
+    CustomDataBlock {
+        items: items.into_values().collect(),
+        after: None,
+    }
+}
+
 fn append_custom_data_blocks(
     target: &mut Element,
     blocks: &[CustomDataBlock],
@@ -1572,17 +1616,6 @@ fn append_custom_data_blocks(
         return Ok(());
     }
 
-    let has_empty_blocks = blocks.iter().any(|block| block.items.is_empty());
-    let has_non_empty_blocks = blocks.iter().any(|block| !block.items.is_empty());
-    if has_empty_blocks && has_non_empty_blocks {
-        if !merged.is_empty() {
-            target
-                .children
-                .push(XMLNode::Element(custom_data_to_xml(merged)));
-        }
-        return Ok(());
-    }
-
     if merge_custom_data_blocks(blocks) != *merged {
         if !merged.is_empty() {
             target
@@ -1592,49 +1625,58 @@ fn append_custom_data_blocks(
         return Ok(());
     }
 
-    let mut rebuilt = Vec::new();
-    let mut anchored = Vec::new();
+    if blocks.iter().any(|block| block.items.is_empty())
+        && blocks.iter().any(|block| !block.items.is_empty())
+    {
+        let block = flatten_custom_data_blocks(blocks);
+        target
+            .children
+            .push(XMLNode::Element(custom_data_block_to_xml(
+                &block,
+                include_item_times,
+                version,
+            )));
+        return Ok(());
+    }
+
+    let mut minimum_insertion_index = 0;
     for block in blocks {
         let node = XMLNode::Element(custom_data_block_to_xml(block, include_item_times, version));
-        if let Some(anchor) = &block.after {
-            anchored.push((anchor.clone(), node));
-        } else {
-            rebuilt.push(node);
-        }
+        let desired_index = block
+            .after
+            .as_ref()
+            .and_then(|anchor| xml_anchor_index(&target.children, anchor))
+            .map_or_else(
+                || {
+                    if block.after.is_some() {
+                        target.children.len()
+                    } else {
+                        0
+                    }
+                },
+                |anchor_index| anchor_index + 1,
+            );
+        let insertion_index = desired_index
+            .max(minimum_insertion_index)
+            .min(target.children.len());
+        target.children.insert(insertion_index, node);
+        minimum_insertion_index = insertion_index + 1;
     }
-
-    let original_children = std::mem::take(&mut target.children);
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for child in original_children {
-        let current_anchor = match &child {
-            XMLNode::Element(element) => {
-                let occurrence = counts.entry(element.name.clone()).or_insert(0);
-                *occurrence += 1;
-                Some(OpaqueXmlAnchor {
-                    element_name: element.name.clone(),
-                    occurrence: *occurrence,
-                })
-            }
-            _ => None,
-        };
-        rebuilt.push(child);
-
-        if let Some(current_anchor) = current_anchor {
-            let mut index = 0;
-            while index < anchored.len() {
-                if anchored[index].0 == current_anchor {
-                    let (_, node) = anchored.remove(index);
-                    rebuilt.push(node);
-                } else {
-                    index += 1;
-                }
-            }
-        }
-    }
-
-    rebuilt.extend(anchored.into_iter().map(|(_, node)| node));
-    target.children = rebuilt;
     Ok(())
+}
+
+fn xml_anchor_index(children: &[XMLNode], anchor: &OpaqueXmlAnchor) -> Option<usize> {
+    let mut occurrence = 0;
+    children.iter().position(|child| {
+        let XMLNode::Element(element) = child else {
+            return false;
+        };
+        if element.name != anchor.element_name {
+            return false;
+        }
+        occurrence += 1;
+        occurrence == anchor.occurrence
+    })
 }
 
 fn reorder_known_xml_nodes(children: &mut Vec<XMLNode>, original_order: &[String]) {
@@ -2174,7 +2216,7 @@ fn parse_deleted_objects(root: &Element) -> Result<Vec<DeletedObject>> {
 
         let id = decode_uuid(&child_text(child, "UUID").ok_or(KdbxError::InvalidValue)?)?;
         let deleted_at = child_text(child, "DeletionTime")
-            .and_then(|value| parse_datetime_value(&value).map(|value| value as i64))
+            .and_then(|value| parse_datetime_i64(&value))
             .ok_or(KdbxError::InvalidValue)?;
         objects.push(DeletedObject { id, deleted_at });
     }
@@ -2730,12 +2772,11 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
     entry.icon_id = child_text(element, "IconID").and_then(|value| value.parse::<u32>().ok());
     entry.custom_icon_id = child_text(element, "CustomIconUUID")
         .as_deref()
-        .map(parse_optional_uuid)
-        .transpose()?
-        .flatten();
-    entry.foreground_color = child_text(element, "ForegroundColor");
-    entry.background_color = child_text(element, "BackgroundColor");
-    entry.override_url = child_text(element, "OverrideURL");
+        .map(decode_uuid)
+        .transpose()?;
+    entry.foreground_color = child_text_preserve_empty(element, "ForegroundColor");
+    entry.background_color = child_text_preserve_empty(element, "BackgroundColor");
+    entry.override_url = child_text_preserve_empty(element, "OverrideURL");
     let (custom_data, custom_data_blocks) = parse_entry_custom_data(element)?;
     entry.custom_data = custom_data;
     entry.custom_data_blocks = custom_data_blocks;
@@ -2810,8 +2851,8 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
         entry.expires = child_text(&times, "Expires")
             .map(|value| parse_bool_text(&value))
             .unwrap_or(false);
-        entry.expiry_time = child_text(&times, "ExpiryTime")
-            .and_then(|value| parse_datetime_value(&value).map(|value| value as i64));
+        entry.expiry_time =
+            child_text(&times, "ExpiryTime").and_then(|value| parse_datetime_i64(&value));
         entry.last_accessed_at =
             child_text(&times, "LastAccessTime").and_then(|value| parse_datetime_value(&value));
         entry.usage_count = child_text(&times, "UsageCount").and_then(|value| value.parse().ok());
@@ -3066,8 +3107,7 @@ fn parse_group_times(element: &Element) -> Result<GroupTimes> {
         expires: child_text(element, "Expires")
             .map(|value| parse_bool_text(&value))
             .unwrap_or(false),
-        expiry_time: child_text(element, "ExpiryTime")
-            .and_then(|value| parse_datetime_value(&value).map(|value| value as i64)),
+        expiry_time: child_text(element, "ExpiryTime").and_then(|value| parse_datetime_i64(&value)),
         last_accessed_at: child_text(element, "LastAccessTime")
             .and_then(|value| parse_datetime_value(&value)),
         usage_count: child_text(element, "UsageCount").and_then(|value| value.parse().ok()),
@@ -3083,7 +3123,7 @@ fn parse_auto_type(element: &Element) -> AutoTypeConfig {
             .and_then(parse_nullable_bool),
         obfuscation: child_text(element, "DataTransferObfuscation")
             .and_then(|value| value.parse::<i32>().ok()),
-        default_sequence: child_text(element, "DefaultSequence"),
+        default_sequence: child_text_preserve_empty(element, "DefaultSequence"),
         ..AutoTypeConfig::default()
     };
 
@@ -3610,6 +3650,15 @@ fn child_text(element: &Element, name: &str) -> Option<String> {
     child_optional(element, name).and_then(|child| child.get_text().map(|text| text.to_string()))
 }
 
+fn child_text_preserve_empty(element: &Element, name: &str) -> Option<String> {
+    child_optional(element, name).map(|child| {
+        child
+            .get_text()
+            .map(|text| text.to_string())
+            .unwrap_or_default()
+    })
+}
+
 fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         &bytes[3..]
@@ -3671,9 +3720,17 @@ where
 }
 
 fn parse_datetime_value(text: &str) -> Option<u64> {
+    if let Ok(value) = text.parse::<u64>() {
+        return Some(value);
+    }
+
+    parse_datetime_i64(text)?.try_into().ok()
+}
+
+fn parse_datetime_i64(text: &str) -> Option<i64> {
     const KDBX4_TIME_OFFSET: i64 = 62_135_596_800;
 
-    if let Ok(value) = text.parse::<u64>() {
+    if let Ok(value) = text.parse::<i64>() {
         return Some(value);
     }
 
@@ -3681,18 +3738,18 @@ fn parse_datetime_value(text: &str) -> Option<u64> {
         && bytes.len() == 8
     {
         let raw = i64::from_le_bytes(bytes.try_into().ok()?);
-        return (raw - KDBX4_TIME_OFFSET).try_into().ok();
+        return raw.checked_sub(KDBX4_TIME_OFFSET);
     }
 
     let parsed = DateTime::parse_from_rfc3339(text).ok()?;
-    parsed.with_timezone(&Utc).timestamp().try_into().ok()
+    Some(parsed.with_timezone(&Utc).timestamp())
 }
 
 fn parse_optional_datetime(text: &str) -> Option<i64> {
     if text.trim().is_empty() {
         None
     } else {
-        parse_datetime_value(text).map(|value| value as i64)
+        parse_datetime_i64(text)
     }
 }
 
@@ -4416,9 +4473,9 @@ mod compatibility_tests {
     use base64::Engine as _;
     use vaultkern_crypto::{CompositeKey, sha256_bytes};
     use vaultkern_model::{
-        Attachment, AttachmentContent, AttachmentContentId, AutoTypeConfig, CustomField, Entry,
-        Group, ModelError, PasskeyRecord, TotpAlgorithm, TotpSpec, Vault, canonical_entry_bytes_v1,
-        canonical_entry_content_hash_v1,
+        Attachment, AttachmentContent, AttachmentContentId, AutoTypeConfig, CustomDataBlock,
+        CustomDataItem, CustomField, Entry, Group, ModelError, OpaqueXmlAnchor, PasskeyRecord,
+        TotpAlgorithm, TotpSpec, Vault, canonical_entry_bytes_v1, canonical_entry_content_hash_v1,
     };
     use xmltree::{Element, XMLNode};
 
@@ -5074,6 +5131,327 @@ mod compatibility_tests {
     }
 
     #[test]
+    fn present_empty_entry_text_options_survive_kdbx_roundtrip() {
+        let mut foreground = Entry::new("empty foreground");
+        foreground.foreground_color = Some(String::new());
+
+        let mut background = Entry::new("empty background");
+        background.background_color = Some(String::new());
+
+        let mut override_url = Entry::new("empty override URL");
+        override_url.override_url = Some(String::new());
+
+        let mut auto_type = Entry::new("empty auto type sequence");
+        auto_type
+            .auto_type
+            .as_mut()
+            .expect("default auto type")
+            .default_sequence = Some(String::new());
+
+        for (case, entry) in [
+            ("foreground", foreground),
+            ("background", background),
+            ("override-url", override_url),
+            ("auto-type-default-sequence", auto_type),
+        ] {
+            let expected = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+            let key = test_key(case);
+            let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+            let loaded = load_kdbx(&bytes, &key).expect("load entry");
+            let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+            assert_eq!(
+                canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn present_nil_custom_icon_id_survives_kdbx_roundtrip() {
+        let mut entry = Entry::new("nil custom icon");
+        entry.custom_icon_id = Some(uuid::Uuid::nil());
+        let expected = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("nil custom icon");
+        vault.root.entries.push(entry);
+        let key = test_key("nil-custom-icon");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.custom_icon_id, Some(uuid::Uuid::nil()));
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected
+        );
+    }
+
+    #[test]
+    fn negative_signed_entry_times_survive_kdbx_roundtrip() {
+        let mut entry = Entry::new("negative timestamps");
+        entry.expiry_time = Some(-1);
+        entry
+            .custom_data
+            .insert("timestamped".into(), "value".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "timestamped".into(),
+                value: "value".into(),
+                last_modified: Some(-2),
+            }],
+            after: None,
+        });
+        let expected = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("negative timestamps");
+        vault.root.entries.push(entry);
+        let key = test_key("negative-timestamps");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.expiry_time, Some(-1));
+        assert_eq!(
+            loaded_entry.custom_data_blocks[0].items[0].last_modified,
+            Some(-2)
+        );
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected
+        );
+    }
+
+    #[test]
+    fn chained_custom_data_anchors_preserve_duplicate_key_order() {
+        let mut entry = Entry::new("chained custom data anchors");
+        entry.custom_data.insert("duplicate".into(), "third".into());
+        entry.custom_data_blocks = [
+            ("first", "Times"),
+            ("second", "CustomData"),
+            ("third", "AutoType"),
+        ]
+        .into_iter()
+        .map(|(value, anchor)| CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "duplicate".into(),
+                value: value.into(),
+                last_modified: None,
+            }],
+            after: Some(OpaqueXmlAnchor {
+                element_name: anchor.into(),
+                occurrence: 1,
+            }),
+        })
+        .collect();
+        entry.raw_state.node_order = [
+            "Times",
+            "CustomData",
+            "CustomData",
+            "AutoType",
+            "CustomData",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let expected = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("chained custom data anchors");
+        vault.root.entries.push(entry);
+        let key = test_key("chained-custom-data-anchors");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+        let values = loaded_entry
+            .custom_data_blocks
+            .iter()
+            .flat_map(|block| &block.items)
+            .map(|item| item.value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, ["first", "second", "third"]);
+        assert_eq!(loaded_entry.custom_data["duplicate"], "third");
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected
+        );
+    }
+
+    #[test]
+    fn missing_custom_data_anchor_does_not_reverse_later_blocks() {
+        let mut entry = Entry::new("missing custom data anchor");
+        entry
+            .custom_data
+            .insert("duplicate".into(), "second".into());
+        entry.custom_data_blocks = [("first", "ForegroundColor"), ("second", "Times")]
+            .into_iter()
+            .map(|(value, anchor)| CustomDataBlock {
+                items: vec![CustomDataItem {
+                    key: "duplicate".into(),
+                    value: value.into(),
+                    last_modified: None,
+                }],
+                after: Some(OpaqueXmlAnchor {
+                    element_name: anchor.into(),
+                    occurrence: 1,
+                }),
+            })
+            .collect();
+        entry.raw_state.node_order = ["Times", "ForegroundColor", "CustomData", "CustomData"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let expected = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("missing custom data anchor");
+        vault.root.entries.push(entry);
+        let key = test_key("missing-custom-data-anchor");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+        let values = loaded_entry
+            .custom_data_blocks
+            .iter()
+            .flat_map(|block| &block.items)
+            .map(|item| item.value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, ["first", "second"]);
+        assert_eq!(loaded_entry.custom_data["duplicate"], "second");
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected
+        );
+    }
+
+    #[test]
+    fn mixed_empty_and_timestamped_custom_data_blocks_collapse_without_losing_item_time() {
+        let mut entry = Entry::new("mixed custom data blocks");
+        entry
+            .custom_data
+            .insert("timestamped".into(), "value".into());
+        entry.custom_data_blocks = vec![
+            CustomDataBlock {
+                items: Vec::new(),
+                after: None,
+            },
+            CustomDataBlock {
+                items: vec![CustomDataItem {
+                    key: "timestamped".into(),
+                    value: "value".into(),
+                    last_modified: Some(456),
+                }],
+                after: Some(OpaqueXmlAnchor {
+                    element_name: "CustomData".into(),
+                    occurrence: 1,
+                }),
+            },
+        ];
+        let expected = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("mixed custom data blocks");
+        vault.root.entries.push(entry);
+        let key = test_key("mixed-custom-data-blocks");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.custom_data_blocks.len(), 1);
+        assert_eq!(
+            loaded_entry.custom_data_blocks[0].items[0].last_modified,
+            Some(456)
+        );
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected
+        );
+    }
+
+    #[test]
+    fn save_rejects_standard_entry_field_names_in_custom_attributes() {
+        for field_name in ["Title", "UserName", "Password", "URL", "Notes"] {
+            let mut entry = Entry::new(format!("reserved {field_name}"));
+            entry.attributes.insert(
+                field_name.into(),
+                CustomField {
+                    value: "shadowed".into(),
+                    protected: false,
+                },
+            );
+            let mut vault = Vault::empty(field_name);
+            vault.root.entries.push(entry);
+
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key(field_name), &fast_profile()),
+                    Err(KdbxError::InvalidValue)
+                ),
+                "{field_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_rejects_entry_text_values_that_cannot_roundtrip() {
+        let mut empty_tag = Entry::new("empty tag");
+        empty_tag.tags.insert(String::new());
+
+        let mut delimited_tag = Entry::new("delimited tag");
+        delimited_tag.tags.insert("one;two".into());
+
+        let mut empty_attribute_key = Entry::new("empty attribute key");
+        empty_attribute_key.attributes.insert(
+            String::new(),
+            CustomField {
+                value: "value".into(),
+                protected: false,
+            },
+        );
+
+        let mut empty_attachment_name = Entry::new("empty attachment name");
+        empty_attachment_name.attachments.insert(
+            String::new(),
+            Attachment::new(String::new(), b"content".to_vec(), false),
+        );
+
+        let mut empty_custom_data_key = Entry::new("empty custom data key");
+        empty_custom_data_key
+            .custom_data
+            .insert(String::new(), "value".into());
+
+        let mut empty_custom_data_item_key = Entry::new("empty custom data item key");
+        empty_custom_data_item_key
+            .custom_data_blocks
+            .push(CustomDataBlock {
+                items: vec![CustomDataItem {
+                    key: String::new(),
+                    value: "value".into(),
+                    last_modified: None,
+                }],
+                after: None,
+            });
+
+        for (case, entry) in [
+            ("empty-tag", empty_tag),
+            ("delimited-tag", delimited_tag),
+            ("empty-attribute-key", empty_attribute_key),
+            ("empty-attachment-name", empty_attachment_name),
+            ("empty-custom-data-key", empty_custom_data_key),
+            ("empty-custom-data-item-key", empty_custom_data_item_key),
+        ] {
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+            assert!(matches!(
+                save_kdbx(&vault, &test_key(case), &fast_profile()),
+                Err(KdbxError::InvalidValue)
+            ));
+        }
+    }
+
+    #[test]
     fn credential_projections_roundtrip_with_stable_canonical_content_and_times() {
         let entry = credential_entry();
         let expected_times = (
@@ -5192,6 +5570,32 @@ mod compatibility_tests {
     }
 
     #[test]
+    fn model_created_map_only_custom_data_keeps_canonical_content_after_roundtrip() {
+        let mut entry = Entry::new("map-only-custom-data");
+        entry
+            .custom_data
+            .insert("model-key".into(), "model-value".into());
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("map-only-custom-data");
+        vault.root.entries.push(entry);
+        let key = test_key("map-only-custom-data");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save map-only custom data");
+        let loaded = load_kdbx(&bytes, &key).expect("load map-only custom data");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
     fn imported_standard_otpauth_labels_materialize_stably() {
         for (case, uri, expected_issuer, expected_account) in [
             (
@@ -5199,6 +5603,12 @@ mod compatibility_tests {
                 "otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP",
                 None,
                 "alice",
+            ),
+            (
+                "unprefixed-account-matching-issuer",
+                "otpauth://totp/GitHub?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
+                Some("GitHub"),
+                "GitHub",
             ),
             (
                 "encoded-separator",
