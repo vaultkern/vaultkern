@@ -565,15 +565,19 @@ impl PasskeyRecord {
             user_handle: attributes
                 .get(Self::USER_HANDLE_KEY)
                 .map(|field| field.value.clone()),
-            backup_eligible: attributes
-                .get(Self::FLAG_BE_KEY)
-                .map(|field| field.value == "1" || field.value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            backup_state: attributes
-                .get(Self::FLAG_BS_KEY)
-                .map(|field| field.value == "1" || field.value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+            backup_eligible: parse_passkey_flag(attributes.get(Self::FLAG_BE_KEY))?,
+            backup_state: parse_passkey_flag(attributes.get(Self::FLAG_BS_KEY))?,
         })
+    }
+}
+
+fn parse_passkey_flag(field: Option<&CustomField>) -> Option<bool> {
+    match field.map(|field| field.value.as_str()) {
+        None | Some("0") => Some(false),
+        Some("1") => Some(true),
+        Some(value) if value.eq_ignore_ascii_case("false") => Some(false),
+        Some(value) if value.eq_ignore_ascii_case("true") => Some(true),
+        Some(_) => None,
     }
 }
 
@@ -608,14 +612,17 @@ impl TotpSpec {
         let (label, query) = payload.split_once('?').ok_or(ModelError::Unimplemented)?;
         let (label_issuer, account_name) = if let Some((issuer, account)) = label.split_once(':') {
             // Our writer uses a literal separator, so encoded spaces here are account data.
-            (Some(percent_decode(issuer)), Some(percent_decode(account)))
+            (
+                Some(percent_decode(issuer)?),
+                Some(percent_decode(account)?),
+            )
         } else if let Some((issuer, account)) = split_once_encoded_label_separator(label) {
             (
-                Some(percent_decode(issuer)),
-                Some(percent_decode(trim_encoded_label_spaces(account))),
+                Some(percent_decode(issuer)?),
+                Some(percent_decode(trim_encoded_label_spaces(account))?),
             )
         } else {
-            let account = percent_decode(label);
+            let account = percent_decode(label)?;
             (None, (!account.is_empty()).then_some(account))
         };
         let mut secret = None;
@@ -623,12 +630,19 @@ impl TotpSpec {
         let mut algorithm = TotpAlgorithm::Sha1;
         let mut digits = 6;
         let mut period_seconds = 30_u64;
+        let mut query_names = BTreeSet::new();
 
         for pair in query.split('&') {
-            let Some((key, value)) = pair.split_once('=') else {
-                continue;
-            };
-            let value = percent_decode(value);
+            if pair.is_empty() {
+                return Err(ModelError::Unimplemented);
+            }
+            let (key, value) = pair.split_once('=').ok_or(ModelError::Unimplemented)?;
+            if !matches!(key, "secret" | "issuer" | "algorithm" | "digits" | "period")
+                || !query_names.insert(key)
+            {
+                return Err(ModelError::Unimplemented);
+            }
+            let value = percent_decode(value)?;
             match key {
                 "secret" => secret = Some(value),
                 "issuer" => issuer = Some(value),
@@ -644,7 +658,7 @@ impl TotpSpec {
                 "period" => {
                     period_seconds = value.parse().map_err(|_| ModelError::Unimplemented)?
                 }
-                _ => {}
+                _ => unreachable!("query names were validated above"),
             }
         }
 
@@ -771,8 +785,8 @@ pub fn materialize_entry_persistent_attributes(entry: &Entry) -> BTreeMap<String
         .passkey
         .clone()
         .or_else(|| PasskeyRecord::from_attributes(&attributes));
-    attributes.retain(|key, _| !is_totp_persistent_attribute_key(key));
     if let Some(totp) = &totp {
+        attributes.retain(|key, _| !is_totp_persistent_attribute_key(key));
         let (attribute_algorithm, uri_algorithm) = match totp.algorithm {
             TotpAlgorithm::Sha1 => ("HMAC-SHA-1", "SHA1"),
             TotpAlgorithm::Sha256 => ("HMAC-SHA-256", "SHA256"),
@@ -813,6 +827,12 @@ pub fn materialize_entry_persistent_attributes(entry: &Entry) -> BTreeMap<String
                 protected: false,
             },
         );
+    } else {
+        for (key, field) in &mut attributes {
+            if is_totp_secret_persistent_attribute_key(key) {
+                field.protected = true;
+            }
+        }
     }
     if let Some(passkey) = &passkey {
         passkey.write_to_attributes(&mut attributes);
@@ -828,29 +848,40 @@ pub fn materialize_entry_persistent_attributes(entry: &Entry) -> BTreeMap<String
 
 /// Projects the TOTP represented by persistent source attributes using KDBX precedence rules.
 pub fn totp_from_persistent_attributes(fields: &BTreeMap<String, CustomField>) -> Option<TotpSpec> {
-    if let Some(field) = fields.get("otp")
-        && let Ok(spec) = TotpSpec::parse_otpauth(&field.value)
+    if fields
+        .keys()
+        .any(|key| is_totp_persistent_attribute_key(key) && !is_projectable_totp_attribute_key(key))
     {
-        return Some(spec);
+        return None;
     }
 
+    if let Some(uri_field) = fields.get("otp") {
+        let uri = TotpSpec::parse_otpauth(&uri_field.value).ok()?;
+        if fields.contains_key("TimeOtp-Secret-Base32") {
+            let discrete = discrete_totp_from_persistent_attributes(fields)?;
+            if discrete.secret_base32 != uri.secret_base32
+                || discrete.algorithm != uri.algorithm
+                || discrete.digits != uri.digits
+                || discrete.period_seconds != uri.period_seconds
+            {
+                return None;
+            }
+        } else if !present_discrete_totp_parameters_match(fields, &uri) {
+            return None;
+        }
+        return Some(uri);
+    }
+
+    discrete_totp_from_persistent_attributes(fields)
+}
+
+fn discrete_totp_from_persistent_attributes(
+    fields: &BTreeMap<String, CustomField>,
+) -> Option<TotpSpec> {
     let secret_base32 = fields.get("TimeOtp-Secret-Base32")?.value.clone();
-    let algorithm = match fields
-        .get("TimeOtp-Algorithm")
-        .map(|field| field.value.as_str())
-    {
-        Some("HMAC-SHA-256") => TotpAlgorithm::Sha256,
-        Some("HMAC-SHA-512") => TotpAlgorithm::Sha512,
-        _ => TotpAlgorithm::Sha1,
-    };
-    let digits = fields
-        .get("TimeOtp-Length")
-        .and_then(|field| field.value.parse().ok())
-        .unwrap_or(6);
-    let period_seconds = fields
-        .get("TimeOtp-Period")
-        .and_then(|field| field.value.parse().ok())
-        .unwrap_or(30);
+    let algorithm = parse_discrete_totp_algorithm(fields.get("TimeOtp-Algorithm"))?;
+    let digits = parse_discrete_totp_number(fields.get("TimeOtp-Length"), 6_u32)?;
+    let period_seconds = parse_discrete_totp_number(fields.get("TimeOtp-Period"), 30_u64)?;
 
     Some(TotpSpec {
         secret_base32,
@@ -862,11 +893,86 @@ pub fn totp_from_persistent_attributes(fields: &BTreeMap<String, CustomField>) -
     })
 }
 
+fn present_discrete_totp_parameters_match(
+    fields: &BTreeMap<String, CustomField>,
+    uri: &TotpSpec,
+) -> bool {
+    fields.get("TimeOtp-Algorithm").is_none_or(|field| {
+        parse_discrete_totp_algorithm(Some(field)).is_some_and(|value| value == uri.algorithm)
+    }) && fields.get("TimeOtp-Length").is_none_or(|field| {
+        field
+            .value
+            .parse::<u32>()
+            .is_ok_and(|value| value == uri.digits)
+    }) && fields.get("TimeOtp-Period").is_none_or(|field| {
+        field
+            .value
+            .parse::<u64>()
+            .is_ok_and(|value| value == uri.period_seconds)
+    })
+}
+
+fn parse_discrete_totp_algorithm(field: Option<&CustomField>) -> Option<TotpAlgorithm> {
+    match field.map(|field| field.value.as_str()) {
+        None => Some(TotpAlgorithm::Sha1),
+        Some(value) if value.eq_ignore_ascii_case("HMAC-SHA-1") => Some(TotpAlgorithm::Sha1),
+        Some(value) if value.eq_ignore_ascii_case("HMAC-SHA-256") => Some(TotpAlgorithm::Sha256),
+        Some(value) if value.eq_ignore_ascii_case("HMAC-SHA-512") => Some(TotpAlgorithm::Sha512),
+        Some(_) => None,
+    }
+}
+
+fn parse_discrete_totp_number<T>(field: Option<&CustomField>, default: T) -> Option<T>
+where
+    T: std::str::FromStr,
+{
+    match field {
+        Some(field) => field.value.parse().ok(),
+        None => Some(default),
+    }
+}
+
+fn is_projectable_totp_attribute_key(key: &str) -> bool {
+    matches!(
+        key,
+        "otp" | "TimeOtp-Secret-Base32" | "TimeOtp-Algorithm" | "TimeOtp-Length" | "TimeOtp-Period"
+    )
+}
+
 /// Returns whether an attribute key belongs to the persistent TOTP source representation.
 pub fn is_totp_persistent_attribute_key(key: &str) -> bool {
     matches!(
         key,
-        "otp" | "TimeOtp-Secret-Base32" | "TimeOtp-Algorithm" | "TimeOtp-Length" | "TimeOtp-Period"
+        "otp"
+            | "TimeOtp-Secret"
+            | "TimeOtp-Secret-Hex"
+            | "TimeOtp-Secret-Base32"
+            | "TimeOtp-Secret-Base64"
+            | "TimeOtp-Algorithm"
+            | "TimeOtp-Length"
+            | "TimeOtp-Period"
+            | "HmacOtp-Secret"
+            | "HmacOtp-Secret-Hex"
+            | "HmacOtp-Secret-Base32"
+            | "HmacOtp-Secret-Base64"
+            | "HmacOtp-Counter"
+    )
+}
+
+/// Returns whether a persistent TOTP/HOTP source attribute must be protected.
+pub fn is_totp_secret_persistent_attribute_key(key: &str) -> bool {
+    matches!(
+        key,
+        "otp"
+            | "TimeOtp-Secret"
+            | "TimeOtp-Secret-Hex"
+            | "TimeOtp-Secret-Base32"
+            | "TimeOtp-Secret-Base64"
+            | "HmacOtp-Secret"
+            | "HmacOtp-Secret-Hex"
+            | "HmacOtp-Secret-Base32"
+            | "HmacOtp-Secret-Base64"
+            | "HmacOtp-Counter"
     )
 }
 
@@ -1180,7 +1286,7 @@ fn trim_encoded_label_spaces(mut input: &str) -> &str {
     input
 }
 
-fn percent_decode(input: &str) -> String {
+fn percent_decode(input: &str) -> Result<String> {
     let bytes = input.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -1203,7 +1309,7 @@ fn percent_decode(input: &str) -> String {
         }
     }
 
-    String::from_utf8_lossy(&decoded).into_owned()
+    String::from_utf8(decoded).map_err(|_| ModelError::Unimplemented)
 }
 
 fn decode_hex_byte(high: u8, low: u8) -> Option<u8> {
@@ -1224,7 +1330,8 @@ mod tests {
     use super::{
         Attachment, AttachmentContent, AttachmentContentId, AttachmentContentPool, CustomField,
         Entry, Group, ModelError, PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
-        materialize_entry_persistent_attributes,
+        is_totp_persistent_attribute_key, materialize_entry_persistent_attributes,
+        totp_from_persistent_attributes,
     };
     use std::collections::BTreeMap;
     use std::sync::{
@@ -1433,6 +1540,37 @@ mod tests {
     }
 
     #[test]
+    fn otpauth_parser_rejects_lossy_query_shapes() {
+        for uri in [
+            "otpauth://totp/alice?secret=SECRET&image=logo.png",
+            "otpauth://totp/alice?secret=SECRET&secret=OTHER",
+            "otpauth://totp/alice?secret=SECRET&issuer",
+            "otpauth://totp/alice?secret=SECRET&&period=30",
+            "otpauth://totp/alice?secret=SECRET&",
+            "otpauth://totp/alice?secret=SECRET&Issuer=Example",
+        ] {
+            assert!(
+                TotpSpec::parse_otpauth(uri).is_err(),
+                "lossy query was projected: {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn otpauth_parser_rejects_invalid_utf8_components() {
+        for uri in [
+            "otpauth://totp/%FF?secret=SECRET",
+            "otpauth://totp/alice?secret=%FF",
+            "otpauth://totp/alice?secret=SECRET&issuer=%C3%28",
+        ] {
+            assert!(
+                TotpSpec::parse_otpauth(uri).is_err(),
+                "invalid UTF-8 was projected: {uri}"
+            );
+        }
+    }
+
+    #[test]
     fn passkey_record_roundtrips_through_attribute_map() {
         let passkey = PasskeyRecord {
             username: "alice".into(),
@@ -1452,6 +1590,301 @@ mod tests {
         assert!(!attributes.contains_key("Passkey Username"));
         let restored = PasskeyRecord::from_attributes(&attributes).expect("restore passkey");
         assert_eq!(restored, passkey);
+    }
+
+    #[test]
+    fn invalid_passkey_flags_keep_the_raw_source_unprojected() {
+        let mut entry = Entry::new("invalid passkey flag");
+        for (key, value) in [
+            (PasskeyRecord::USERNAME_KEY, "alice"),
+            (PasskeyRecord::CREDENTIAL_ID_KEY, "credential"),
+            (PasskeyRecord::PRIVATE_KEY_PEM_KEY, "private-key"),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com"),
+            (PasskeyRecord::FLAG_BE_KEY, "yes"),
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected: false,
+                },
+            );
+        }
+
+        assert!(PasskeyRecord::from_attributes(&entry.attributes).is_none());
+        let materialized = materialize_entry_persistent_attributes(&entry);
+        assert_eq!(materialized[PasskeyRecord::FLAG_BE_KEY].value, "yes");
+        assert!(materialized[PasskeyRecord::CREDENTIAL_ID_KEY].protected);
+        assert!(materialized[PasskeyRecord::PRIVATE_KEY_PEM_KEY].protected);
+    }
+
+    #[test]
+    fn unprojectable_totp_namespace_is_preserved_and_protected() {
+        let mut fields = BTreeMap::new();
+        for (key, value) in [
+            (
+                "otp",
+                "otpauth://totp/alice?secret=URISECRET&algorithm=SHA1&digits=6&period=30",
+            ),
+            ("TimeOtp-Secret-Base32", "DISCRETESECRET"),
+            ("TimeOtp-Algorithm", "HMAC-SHA-1"),
+            ("TimeOtp-Length", "6"),
+            ("TimeOtp-Period", "30"),
+            ("TimeOtp-Secret", "alternate"),
+            ("TimeOtp-Secret-Hex", "616c7465726e617465"),
+            ("TimeOtp-Secret-Base64", "YWx0ZXJuYXRl"),
+            ("HmacOtp-Secret", "hotp"),
+            ("HmacOtp-Secret-Hex", "686f7470"),
+            ("HmacOtp-Secret-Base32", "NBUHI4A"),
+            ("HmacOtp-Secret-Base64", "aG90cA=="),
+            ("HmacOtp-Counter", "7"),
+        ] {
+            fields.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected: false,
+                },
+            );
+            assert!(
+                is_totp_persistent_attribute_key(key),
+                "unreserved key: {key}"
+            );
+        }
+
+        assert!(totp_from_persistent_attributes(&fields).is_none());
+        let mut entry = Entry::new("raw OTP");
+        entry.attributes = fields.clone();
+        let materialized = materialize_entry_persistent_attributes(&entry);
+
+        assert_eq!(materialized.len(), fields.len());
+        for (key, original) in fields {
+            assert_eq!(materialized[&key].value, original.value, "value for {key}");
+            let should_be_protected = !matches!(
+                key.as_str(),
+                "TimeOtp-Algorithm" | "TimeOtp-Length" | "TimeOtp-Period"
+            );
+            assert_eq!(
+                materialized[&key].protected, should_be_protected,
+                "protection for {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_uri_and_discrete_totp_sources_remain_verbatim() {
+        let fields = BTreeMap::from([
+            (
+                "otp".into(),
+                CustomField {
+                    value:
+                        "otpauth://totp/alice?secret=URISECRET&algorithm=SHA256&digits=8&period=45"
+                            .into(),
+                    protected: true,
+                },
+            ),
+            (
+                "TimeOtp-Secret-Base32".into(),
+                CustomField {
+                    value: "DIFFERENT".into(),
+                    protected: true,
+                },
+            ),
+            (
+                "TimeOtp-Algorithm".into(),
+                CustomField {
+                    value: "HMAC-SHA-256".into(),
+                    protected: false,
+                },
+            ),
+            (
+                "TimeOtp-Length".into(),
+                CustomField {
+                    value: "8".into(),
+                    protected: false,
+                },
+            ),
+            (
+                "TimeOtp-Period".into(),
+                CustomField {
+                    value: "45".into(),
+                    protected: false,
+                },
+            ),
+        ]);
+
+        assert!(totp_from_persistent_attributes(&fields).is_none());
+        let mut entry = Entry::new("conflicting OTP");
+        entry.attributes = fields.clone();
+        assert_eq!(materialize_entry_persistent_attributes(&entry), fields);
+    }
+
+    #[test]
+    fn equivalent_uri_and_discrete_totp_sources_project_once() {
+        let fields = BTreeMap::from([
+            (
+                "otp".into(),
+                CustomField {
+                    value:
+                        "otpauth://totp/alice?secret=abcd%3D%3D&algorithm=SHA256&digits=8&period=45"
+                            .into(),
+                    protected: true,
+                },
+            ),
+            (
+                "TimeOtp-Secret-Base32".into(),
+                CustomField {
+                    value: "abcd==".into(),
+                    protected: true,
+                },
+            ),
+            (
+                "TimeOtp-Algorithm".into(),
+                CustomField {
+                    value: "hmac-sha-256".into(),
+                    protected: false,
+                },
+            ),
+            (
+                "TimeOtp-Length".into(),
+                CustomField {
+                    value: "8".into(),
+                    protected: false,
+                },
+            ),
+            (
+                "TimeOtp-Period".into(),
+                CustomField {
+                    value: "45".into(),
+                    protected: false,
+                },
+            ),
+        ]);
+
+        let projected = totp_from_persistent_attributes(&fields).expect("equivalent TOTP");
+        assert_eq!(projected.secret_base32, "abcd==");
+        assert_eq!(projected.algorithm, TotpAlgorithm::Sha256);
+        assert_eq!(projected.digits, 8);
+        assert_eq!(projected.period_seconds, 45);
+    }
+
+    #[test]
+    fn uri_without_discrete_secret_compares_only_present_parameters() {
+        let matching = BTreeMap::from([
+            (
+                "otp".into(),
+                CustomField {
+                    value: "otpauth://totp/alice?secret=SECRET&algorithm=SHA512&digits=8&period=45"
+                        .into(),
+                    protected: true,
+                },
+            ),
+            (
+                "TimeOtp-Algorithm".into(),
+                CustomField {
+                    value: "HMAC-SHA-512".into(),
+                    protected: false,
+                },
+            ),
+        ]);
+        assert!(totp_from_persistent_attributes(&matching).is_some());
+
+        let mut conflicting = matching;
+        conflicting.insert(
+            "TimeOtp-Length".into(),
+            CustomField {
+                value: "6".into(),
+                protected: false,
+            },
+        );
+        assert!(totp_from_persistent_attributes(&conflicting).is_none());
+    }
+
+    #[test]
+    fn malformed_discrete_totp_parameters_remain_verbatim() {
+        for (key, invalid) in [
+            ("TimeOtp-Algorithm", "MD5"),
+            ("TimeOtp-Length", "six"),
+            ("TimeOtp-Period", "thirty"),
+        ] {
+            let mut fields = BTreeMap::from([(
+                "TimeOtp-Secret-Base32".into(),
+                CustomField {
+                    value: "SECRET".into(),
+                    protected: true,
+                },
+            )]);
+            fields.insert(
+                key.into(),
+                CustomField {
+                    value: invalid.into(),
+                    protected: false,
+                },
+            );
+
+            assert!(
+                totp_from_persistent_attributes(&fields).is_none(),
+                "malformed {key} was projected"
+            );
+            let mut entry = Entry::new(format!("malformed {key}"));
+            entry.attributes = fields.clone();
+            assert_eq!(materialize_entry_persistent_attributes(&entry), fields);
+        }
+    }
+
+    #[test]
+    fn structured_totp_projection_removes_the_complete_reserved_namespace() {
+        let mut entry = Entry::new("structured OTP");
+        for key in [
+            "otp",
+            "TimeOtp-Secret",
+            "TimeOtp-Secret-Hex",
+            "TimeOtp-Secret-Base32",
+            "TimeOtp-Secret-Base64",
+            "TimeOtp-Algorithm",
+            "TimeOtp-Length",
+            "TimeOtp-Period",
+            "HmacOtp-Secret",
+            "HmacOtp-Secret-Hex",
+            "HmacOtp-Secret-Base32",
+            "HmacOtp-Secret-Base64",
+            "HmacOtp-Counter",
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: "stale".into(),
+                    protected: false,
+                },
+            );
+        }
+        entry.totp = Some(TotpSpec {
+            secret_base32: "SECRET".into(),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: Some("Example".into()),
+            account_name: Some("alice".into()),
+        });
+
+        let materialized = materialize_entry_persistent_attributes(&entry);
+        assert_eq!(materialized.len(), 5);
+        assert_eq!(materialized["TimeOtp-Secret-Base32"].value, "SECRET");
+        for stale_key in [
+            "TimeOtp-Secret",
+            "TimeOtp-Secret-Hex",
+            "TimeOtp-Secret-Base64",
+            "HmacOtp-Secret",
+            "HmacOtp-Secret-Hex",
+            "HmacOtp-Secret-Base32",
+            "HmacOtp-Secret-Base64",
+            "HmacOtp-Counter",
+        ] {
+            assert!(
+                !materialized.contains_key(stale_key),
+                "stale key: {stale_key}"
+            );
+        }
     }
 
     #[test]

@@ -16,8 +16,8 @@ use vaultkern_model::{
     AutoTypeConfig, CustomDataBlock, CustomDataItem, CustomField, CustomIcon, DeletedObject, Entry,
     EntryRawState, Group, GroupRawState, GroupTimes, MemoryProtection, MetaRawState, ModelError,
     OpaqueXmlAnchor, OpaqueXmlFragment, PasskeyRecord, RootRawState, Vault,
-    is_totp_persistent_attribute_key, materialize_entry_persistent_attributes,
-    totp_from_persistent_attributes,
+    is_totp_persistent_attribute_key, is_totp_secret_persistent_attribute_key,
+    materialize_entry_persistent_attributes, totp_from_persistent_attributes,
 };
 use xmltree::{Element, XMLNode};
 
@@ -387,6 +387,9 @@ pub fn save_kdbx(
     composite_key: &CompositeKey,
     profile: &SaveProfile,
 ) -> Result<Vec<u8>> {
+    if group_contains_nested_history(&vault.root) {
+        return Err(KdbxError::InvalidValue);
+    }
     if required_version(vault) == KdbxVersion::V4_1 && profile.version != KdbxVersion::V4_1 {
         return Err(KdbxError::UnsupportedVersion);
     }
@@ -3029,17 +3032,21 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
 
     entry.totp = totp_from_persistent_attributes(&raw_fields);
     entry.passkey = PasskeyRecord::from_attributes(&raw_fields);
+    let has_projectable_totp = entry.totp.is_some();
     let has_complete_passkey = entry.passkey.is_some();
     entry.attributes = raw_fields
         .into_iter()
         .map(|(key, mut field)| {
+            if !has_projectable_totp && is_totp_secret_persistent_attribute_key(&key) {
+                field.protected = true;
+            }
             if !has_complete_passkey && PasskeyRecord::is_sensitive_persistent_attribute_key(&key) {
                 field.protected = true;
             }
             (key, field)
         })
         .filter(|(key, _)| {
-            !(is_totp_persistent_attribute_key(key)
+            !(has_projectable_totp && is_totp_persistent_attribute_key(key)
                 || has_complete_passkey && PasskeyRecord::is_persistent_attribute_key(key))
         })
         .collect();
@@ -3862,6 +3869,15 @@ fn group_requires_41(group: &Group) -> bool {
     }
 
     group.children.iter().any(group_requires_41)
+}
+
+fn group_contains_nested_history(group: &Group) -> bool {
+    group.entries.iter().any(|entry| {
+        entry
+            .history
+            .iter()
+            .any(|snapshot| !snapshot.history.is_empty())
+    }) || group.children.iter().any(group_contains_nested_history)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5726,13 +5742,13 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn unmodeled_totp_source_attributes_keep_canonical_content_after_roundtrip() {
+    fn unprojectable_totp_source_attributes_keep_canonical_content_after_roundtrip() {
         let mut entry = Entry::new("unmodeled-totp-source");
         entry.attributes.insert(
             "otp".into(),
             CustomField {
                 value: "not-an-otpauth-uri".into(),
-                protected: true,
+                protected: false,
             },
         );
         entry.attributes.insert(
@@ -5760,7 +5776,10 @@ mod compatibility_tests {
         let loaded_entry = loaded.root.entries.first().expect("loaded entry");
 
         assert_eq!(loaded_entry.totp, None);
-        assert_eq!(loaded_entry.attributes.len(), 1);
+        assert_eq!(loaded_entry.attributes.len(), 3);
+        assert_eq!(loaded_entry.attributes["otp"].value, "not-an-otpauth-uri");
+        assert!(loaded_entry.attributes["otp"].protected);
+        assert_eq!(loaded_entry.attributes["TimeOtp-Period"].value, "45");
         assert_eq!(loaded_entry.attributes["ordinary"].value, "kept");
         assert_eq!(
             canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
@@ -5770,6 +5789,257 @@ mod compatibility_tests {
             canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
             expected_hash
         );
+    }
+
+    #[test]
+    fn lossy_otpauth_query_shapes_survive_kdbx_roundtrip_verbatim() {
+        for (case, uri) in [
+            (
+                "unknown-query",
+                "otpauth://totp/alice?secret=SECRET&image=logo.png",
+            ),
+            (
+                "duplicate-query",
+                "otpauth://totp/alice?secret=SECRET&secret=OTHER",
+            ),
+            (
+                "missing-equals",
+                "otpauth://totp/alice?secret=SECRET&issuer",
+            ),
+            (
+                "empty-query-component",
+                "otpauth://totp/alice?secret=SECRET&&period=30",
+            ),
+            ("invalid-query-utf8", "otpauth://totp/alice?secret=%FF"),
+        ] {
+            let mut entry = Entry::new(case);
+            entry.attributes.insert(
+                "otp".into(),
+                CustomField {
+                    value: uri.into(),
+                    protected: false,
+                },
+            );
+            let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+            let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+            let key = test_key(case);
+
+            let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save raw URI");
+            let loaded = load_kdbx(&bytes, &key).expect("load raw URI");
+            let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+            assert_eq!(loaded_entry.totp, None, "projected {case}");
+            assert_eq!(loaded_entry.attributes["otp"].value, uri, "URI for {case}");
+            assert!(
+                loaded_entry.attributes["otp"].protected,
+                "protection for {case}"
+            );
+            assert_eq!(
+                canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+                expected_bytes,
+                "bytes for {case}"
+            );
+            assert_eq!(
+                canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+                expected_hash,
+                "hash for {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_and_malformed_discrete_totp_sources_survive_roundtrip_verbatim() {
+        let cases = [
+            (
+                "conflicting-secret",
+                vec![
+                    (
+                        "otp",
+                        "otpauth://totp/alice?secret=URISECRET&algorithm=SHA256&digits=8&period=45",
+                    ),
+                    ("TimeOtp-Secret-Base32", "DIFFERENT"),
+                    ("TimeOtp-Algorithm", "HMAC-SHA-256"),
+                    ("TimeOtp-Length", "8"),
+                    ("TimeOtp-Period", "45"),
+                ],
+            ),
+            (
+                "malformed-algorithm",
+                vec![
+                    ("TimeOtp-Secret-Base32", "SECRET"),
+                    ("TimeOtp-Algorithm", "MD5"),
+                ],
+            ),
+            (
+                "malformed-length",
+                vec![
+                    ("TimeOtp-Secret-Base32", "SECRET"),
+                    ("TimeOtp-Length", "six"),
+                ],
+            ),
+            (
+                "malformed-period",
+                vec![
+                    ("TimeOtp-Secret-Base32", "SECRET"),
+                    ("TimeOtp-Period", "thirty"),
+                ],
+            ),
+        ];
+
+        for (case, fields) in cases {
+            let mut entry = Entry::new(case);
+            for (key, value) in &fields {
+                entry.attributes.insert(
+                    (*key).into(),
+                    CustomField {
+                        value: (*value).into(),
+                        protected: key == &"otp" || key == &"TimeOtp-Secret-Base32",
+                    },
+                );
+            }
+            let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+            let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+            let key = test_key(case);
+
+            let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save raw TOTP");
+            let loaded = load_kdbx(&bytes, &key).expect("load raw TOTP");
+            let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+            assert_eq!(loaded_entry.totp, None, "projected {case}");
+            for (field_key, value) in fields {
+                assert_eq!(
+                    loaded_entry.attributes[field_key].value, value,
+                    "value for {case}/{field_key}"
+                );
+            }
+            assert_eq!(
+                canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+                expected_bytes,
+                "bytes for {case}"
+            );
+            assert_eq!(
+                canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+                expected_hash,
+                "hash for {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn alternate_and_hotp_sources_survive_kdbx_roundtrip_verbatim() {
+        let mut entry = Entry::new("raw OTP namespace");
+        for (key, value) in [
+            ("TimeOtp-Secret", "alternate-secret"),
+            ("TimeOtp-Secret-Hex", "616c7465726e617465"),
+            ("TimeOtp-Secret-Base64", "YWx0ZXJuYXRl"),
+            ("HmacOtp-Secret", "hotp-secret"),
+            ("HmacOtp-Secret-Hex", "686f7470"),
+            ("HmacOtp-Secret-Base32", "NBUHI4A"),
+            ("HmacOtp-Secret-Base64", "aG90cA=="),
+            ("HmacOtp-Counter", "42"),
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected: false,
+                },
+            );
+        }
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("raw OTP namespace");
+        vault.root.entries.push(entry);
+        let key = test_key("raw-otp-namespace");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save raw OTP");
+        let loaded = load_kdbx(&bytes, &key).expect("load raw OTP");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.totp, None);
+        assert_eq!(loaded_entry.attributes.len(), 8);
+        for field in loaded_entry.attributes.values() {
+            assert!(field.protected);
+        }
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn invalid_passkey_flags_survive_kdbx_roundtrip_verbatim() {
+        let mut entry = Entry::new("invalid passkey flag");
+        for (key, value) in [
+            (PasskeyRecord::USERNAME_KEY, "alice"),
+            (PasskeyRecord::CREDENTIAL_ID_KEY, "credential"),
+            (PasskeyRecord::PRIVATE_KEY_PEM_KEY, "private-key"),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com"),
+            (PasskeyRecord::FLAG_BE_KEY, "yes"),
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected: false,
+                },
+            );
+        }
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("invalid passkey flag");
+        vault.root.entries.push(entry);
+        let key = test_key("invalid-passkey-flag");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save raw passkey");
+        let loaded = load_kdbx(&bytes, &key).expect("load raw passkey");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.passkey, None);
+        assert_eq!(
+            loaded_entry.attributes[PasskeyRecord::FLAG_BE_KEY].value,
+            "yes"
+        );
+        assert!(loaded_entry.attributes[PasskeyRecord::CREDENTIAL_ID_KEY].protected);
+        assert!(loaded_entry.attributes[PasskeyRecord::PRIVATE_KEY_PEM_KEY].protected);
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn save_rejects_nested_entry_history_for_every_write_version() {
+        let mut snapshot = Entry::new("snapshot");
+        snapshot.history.push(Entry::new("nested snapshot"));
+        let mut live = Entry::new("live");
+        live.history.push(snapshot);
+        let mut vault = Vault::empty("nested history");
+        vault.root.entries.push(live);
+
+        for version in [KdbxVersion::V4_0, KdbxVersion::V4_1] {
+            let mut profile = fast_profile();
+            profile.version = version;
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key("nested-history"), &profile),
+                    Err(KdbxError::InvalidValue)
+                ),
+                "nested history was accepted for {version:?}"
+            );
+        }
     }
 
     #[test]

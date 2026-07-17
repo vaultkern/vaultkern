@@ -6,7 +6,7 @@ use url::Url;
 use uuid::Uuid;
 use vaultkern_core::{
     CustomField, Entry, EntryCreate, Group, KeepassCore, MutationError, TotpAlgorithm, TotpSpec,
-    Vault,
+    Vault, is_totp_persistent_attribute_key,
 };
 use vaultkern_runtime_protocol::{
     AutofillPersistConflictCodeDto, AutofillPersistPlanDto, EntryFieldsDto,
@@ -27,13 +27,6 @@ const MAX_CUSTOM_FIELDS: usize = 128;
 const MAX_MATCHING_IDS: usize = 4_096;
 const MAX_PLAN_BYTES: usize = 8 * 1024 * 1024;
 const RESERVED_CUSTOM_FIELD_KEYS: [&str; 5] = ["Title", "UserName", "Password", "URL", "Notes"];
-const TOTP_SOURCE_CUSTOM_FIELD_KEYS: [&str; 5] = [
-    "otp",
-    "TimeOtp-Secret-Base32",
-    "TimeOtp-Algorithm",
-    "TimeOtp-Length",
-    "TimeOtp-Period",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AutofillPersistEngineError {
@@ -1100,7 +1093,7 @@ fn validate_fields(
             || RESERVED_CUSTOM_FIELD_KEYS
                 .iter()
                 .any(|reserved| field.key.eq_ignore_ascii_case(reserved))
-            || TOTP_SOURCE_CUSTOM_FIELD_KEYS.contains(&field.key.as_str())
+            || is_totp_persistent_attribute_key(&field.key)
             || field.key.starts_with("KPEX_PASSKEY_")
             || field.value.len() > MAX_FIELD_BYTES
         {
@@ -2510,10 +2503,18 @@ mod tests {
 
         for key in [
             "otp",
+            "TimeOtp-Secret",
+            "TimeOtp-Secret-Hex",
             "TimeOtp-Secret-Base32",
+            "TimeOtp-Secret-Base64",
             "TimeOtp-Algorithm",
             "TimeOtp-Length",
             "TimeOtp-Period",
+            "HmacOtp-Secret",
+            "HmacOtp-Secret-Hex",
+            "HmacOtp-Secret-Base32",
+            "HmacOtp-Secret-Base64",
+            "HmacOtp-Counter",
             "KPEX_PASSKEY_PRIVATE_KEY_PEM",
             "KPEX_PASSKEY_FUTURE_FIELD",
         ] {

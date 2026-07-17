@@ -16,7 +16,7 @@ pub use vaultkern_model::{
     AttachmentContent, AttachmentContentId, AttachmentMap, AutoTypeAssociation, AutoTypeConfig,
     CustomField, CustomIcon, DeletedObject, Entry, EntryFieldProtection, Group, GroupFlags,
     GroupTimes, MemoryProtection, MergeReport, ModelError, PasskeyRecord, TotpAlgorithm, TotpSpec,
-    Vault,
+    Vault, is_totp_persistent_attribute_key,
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -601,19 +601,9 @@ pub struct EntryCustomFieldInput {
 }
 
 fn is_reserved_entry_custom_field_key(key: &str) -> bool {
-    matches!(
-        key,
-        "Title"
-            | "UserName"
-            | "Password"
-            | "URL"
-            | "Notes"
-            | "otp"
-            | "TimeOtp-Secret-Base32"
-            | "TimeOtp-Algorithm"
-            | "TimeOtp-Length"
-            | "TimeOtp-Period"
-    ) || key.starts_with("KPEX_PASSKEY_")
+    matches!(key, "Title" | "UserName" | "Password" | "URL" | "Notes")
+        || is_totp_persistent_attribute_key(key)
+        || key.starts_with("KPEX_PASSKEY_")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3847,10 +3837,18 @@ mod internal_tests {
             "URL",
             "Notes",
             "otp",
+            "TimeOtp-Secret",
+            "TimeOtp-Secret-Hex",
             "TimeOtp-Secret-Base32",
+            "TimeOtp-Secret-Base64",
             "TimeOtp-Algorithm",
             "TimeOtp-Length",
             "TimeOtp-Period",
+            "HmacOtp-Secret",
+            "HmacOtp-Secret-Hex",
+            "HmacOtp-Secret-Base32",
+            "HmacOtp-Secret-Base64",
+            "HmacOtp-Counter",
             "KPEX_PASSKEY_PRIVATE_KEY_PEM",
             "KPEX_PASSKEY_FUTURE_FIELD",
         ] {
