@@ -257,11 +257,13 @@ values are limited to `SHA1`, `SHA256`, `SHA512` and their `HMAC-SHA-*`
 spellings, case-insensitively; present digits and period must parse as their
 model integer types. The `issuer` query parameter overrides a label issuer. The
 first literal `:` separates label issuer and account; only when the label
-contains no literal `:` does the first percent-encoded `%3A` separate them;
-otherwise the decoded non-empty label is the account. A literal separator
-always takes precedence over `%3A`, so re-parsing an emitted label — whose
-only literal `:` is the separator and whose content colons are `%3A` —
-inverts the emission exactly. With the encoded
+contains no literal `:` does the first percent-encoded colon separate them —
+matched hex-case-insensitively, so `%3A` and `%3a` are the same separator,
+as `%HH` decoding is already case-insensitive. Otherwise the decoded
+non-empty label is the account. A literal separator always takes precedence
+over an encoded one, so re-parsing an emitted label — whose only literal `:`
+is the separator and whose content colons are `%3A` — inverts the emission
+exactly. With the encoded
 separator form, leading `%20` sequences in the account are ignored. Valid
 `%HH` sequences are decoded and malformed escapes stay literal. If decoding
 any label or query value would produce invalid UTF-8, the URI is unprojectable;
@@ -579,13 +581,20 @@ absent or whitespace-only element to `None`. Materializing a default
 (`IconID` `0`, a default `AutoType` node, or any absent `Times` child) for an
 absent model value is forbidden: it would change `C1` across a vaultkern
 round trip and violate law 5. `Expires` is always written; `expiry_time`
-alone follows the optional rule. Inside a present `AutoType` element the same
-rule applies to each of its three optional children: `Enabled`,
-`DataTransferObfuscation`, and `DefaultSequence` are emitted only when
-modeled and load absent or whitespace-only as `None`. A present, non-blank
-element in these fields or in those `AutoType` children whose content does
-not parse as the field's type fails the load with a structured error rather
-than collapsing to `None`, matching the UUID rule above.
+alone follows the optional rule. The absent-or-whitespace-only rule applies
+to typed scalar elements; the `AutoType` container itself is presence-based:
+an absent `AutoType` element loads as `None`, while a present `AutoType`
+element — even one with no children — loads as `Some` with each child mapped
+individually, so `Some(AutoTypeConfig::default())` and `None` round-trip
+distinctly. Inside a present `AutoType` element, the typed children
+`Enabled` and `DataTransferObfuscation` are emitted only when modeled and
+load absent or whitespace-only as `None`; `DefaultSequence` is a text child —
+it is emitted whenever modeled, including empty or whitespace-only values,
+and a present element loads verbatim under this section's
+no-text-normalization rule. A present, non-blank typed element in these
+fields or in those typed `AutoType` children whose content does not parse as
+the field's type fails the load with a structured error rather than
+collapsing to `None`, matching the UUID rule above.
 
 `location_changed_at` is deliberately not in that group, because 001 decides
 group membership by the newer `location_changed_at` and treats an absent
@@ -595,18 +604,23 @@ tie-breaking cannot resolve, silently overriding a genuine move. In `P`,
 every current and history entry has `location_changed_at = Some` and the
 writer always emits `LocationChanged`. Entry-creation APIs set it to the
 creation time and every move updates it. The loader canonicalizes an absent
-or whitespace-only `LocationChanged` to the entry's `created_at` — the
-deterministic, KeePass-faithful reading "in this location since creation" —
-and a present, non-parsing value fails the load.
+or whitespace-only `LocationChanged` to the epoch (model value `0`) — exactly
+the value 001 already assigns to absence, so merge semantics are unchanged
+and any genuine move's present timestamp still wins — and a present,
+non-parsing value fails the load. Epoch spellings therefore arise only from
+loaded files that omitted the element.
 
 Accepted consequence, recorded deliberately: KeePass materializes these
 elements unconditionally on its own saves, so a third-party save of a
 vaultkern file that omitted them yields concrete values — for
 `LastAccessTime`, even a third-party load-time value — where vaultkern stored
 `None`, changing `C1` without a semantic edit. 001's same-second tie rule
-resolves that divergence deterministically; none of these fields drives a
-merge decision beyond that tie (`location_changed_at`, which does, is
-excluded above). To keep vaultkern output KeePass-shaped, product
+resolves that divergence deterministically. Among these fields only
+`usage_count` feeds a further 001 rule — it merges as the maximum — and a
+third-party materialization of an absent value is `0`, the identity of that
+maximum, so the accepted drift stays confined to the hash tie
+(`location_changed_at`, which drives placement, is excluded above). To keep
+vaultkern output KeePass-shaped, product
 entry-creation APIs MUST populate `icon_id` and `auto_type` at creation, so
 the `None` spellings arise only from third-party files that already omitted
 the elements, where the drift pre-exists.
@@ -742,9 +756,9 @@ At minimum, tests cover:
 | Dimension | Required cases |
 |---|---|
 | typed optional UUID | absent, empty, whitespace-only, nil sentinel, valid non-nil, malformed, direct `Some(nil)` rejection |
-| optional/default model values | every `VG` default; every §7 optional-empty rejection; present-empty Entry color/URL preservation; absent↔`None` round-trip for every §7-pinned entry field and `AutoType` child (current and history); malformed numeric/boolean element rejection; absent `LocationChanged` canonicalized to `created_at` and always re-emitted |
+| optional/default model values | every `VG` default; every §7 optional-empty rejection; present-empty Entry color/URL preservation; absent↔`None` round-trip for every §7-pinned entry field and typed `AutoType` child (current and history); present-empty `AutoType` round-trip as `Some(default)`; empty and whitespace-only `DefaultSequence` preservation; malformed numeric/boolean element rejection; absent `LocationChanged` canonicalized to the epoch and always re-emitted |
 | save profile | ordinary save reuses the loaded KDF salt with stable `kdf_generation`; rotation only on master-credential or explicit KDF parameter change; two successive saves differ in master seed, outer IV, and inner random-stream key |
-| TOTP | projection only; URI/discrete source only; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; content-colon labels (issuer, account-with-issuer, title fallback); no-issuer account-colon rejection; full-family clear/removal/protection/hiding |
+| TOTP | projection only; URI/discrete source only; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; content-colon labels (issuer, account-with-issuer, title fallback); lowercase `%3a` separator parsing; no-issuer account-colon rejection; full-family clear/removal/protection/hiding |
 | passkey | projection only, projectable source only, equivalent/conflicting cache, incomplete sensitive source, missing optional fields, invalid flag spelling, loaded strings verbatim, exact first-write base64url/PKCS#8 PEM profile |
 | CustomData | empty, matched map/blocks, duplicate keys, timestamps, map-only mismatch, block-only mismatch, empty block |
 | attachments | matched key/name, mismatched key/name rejection, rename, empty name |
@@ -897,10 +911,16 @@ implementation PR to land MUST carry them.
   third-party materialization consequence together with a normative
   creation-population rule for `icon_id` and `auto_type`. Excludes
   `location_changed_at` from that group because it drives 001's move
-  decision: `P` requires it present, the loader canonicalizes absence to
-  `created_at`, and the writer always emits it. Pins literal-`:`-first label
-  parsing and places the non-invertible no-issuer content-colon TOTP spelling
-  outside `P`. States plainly that the §10.2 workflow, 4.1 fixture, and
+  decision: `P` requires it present, the loader canonicalizes absence to the
+  epoch value 001 already assigns to it, and the writer always emits it. Pins
+  literal-`:`-first label parsing — with hex-case-insensitive encoded
+  separator matching — and places the non-invertible no-issuer content-colon
+  TOTP spelling outside `P`. A third review round refined the container/text
+  distinctions: present-empty `AutoType` loads as `Some` with children mapped
+  individually, `DefaultSequence` text is preserved verbatim, and
+  `usage_count`'s 001 max-merge rule is acknowledged with materialized
+  absence as its identity element. States plainly that the §10.2 workflow,
+  4.1 fixture, and
   executable audit are not yet on `main` and forbids write-capability claims
   from any tree that lacks them. No canonical byte layout, `A(e)` emission
   spelling, or golden bytes change; the parser precedence resolves a
