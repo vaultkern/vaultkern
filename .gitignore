@@ -13,7 +13,9 @@ spec/*
 !README.md
 !docs/design/
 !docs/design/*.md
-fixtures/
+/fixtures
+# 006 freeze evidence: this small externally generated KDBX 4.1 fixture and
+# its reproducible KeePassXC import source are part of the interoperability CI.
 # Phase 0 contract-freeze goldens are checked in (000, execution discipline
 # #1): they are the CI wire snapshot, not test-generated data.
 !crates/vaultkern-runtime-protocol/tests/fixtures/

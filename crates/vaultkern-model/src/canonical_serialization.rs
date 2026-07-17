@@ -550,6 +550,28 @@ mod tests {
     );
     const FULL_ENTRY_V1_SHA256_HEX: &str =
         "55979e79a38604f9dea969536290bdfc92864202db484614ff8c0e25ab4a54e2";
+    const OBSOLETE_PLAIN_005_FULL_ENTRY_V1_HEX: &str = concat!(
+        "564b435301000000000102030405060708090a0b0c0d0e0f05000000436166c3",
+        "a906000000e794a8e688b7090000007040737377c3b672641a00000068747470",
+        "733a2f2fe4be8b2e6578616d706c652fe799bbe5bd95110000006c696e65206f",
+        "6e650a6c696e652074776f010001010003000000010000006202000000616102",
+        "000000c3a902000000010000007a05000000706c61696e0002000000c3a90600",
+        "0000e7a798e5af860102000000050000007a2e62696e00381be1088d25cbd5ac",
+        "5a31056329ef74062114bcb70af9ab2df3a3c4707f024506000000c3a92e6269",
+        "6e0134e248fa5bfa5ae571d4174848b6e188234a05006a9609ee4617b0688913",
+        "e41c010403020101101112131415161718191a1b1c1d1e1f0107000000233131",
+        "323233330103000000e8939d010a000000636d643a2f2f6f70656e0807060504",
+        "03020118171615141312110101feffffffffffffff0128272625242322210138",
+        "3736353433323101484746454443424101f0f1f2f3f4f5f6f7f8f9fafbfcfdfe",
+        "ff01010001feffffff01200000007b555345524e414d457d7b5441427d7b5041",
+        "5353574f52447d7b454e5445527d0200000004000000e4be8b2a0a0000007b50",
+        "415353574f52447d0500000041646d696e0a0000007b555345524e414d457d02",
+        "000000010000007a040000006c61737402000000c3a906000000616363656e74",
+        "0200000003000000647570040000006c617374017b0000000000000004000000",
+        "6f6e6c7903000000e4b88001f9ffffffffffffff01",
+    );
+    const OBSOLETE_PLAIN_005_FULL_ENTRY_V1_SHA256_HEX: &str =
+        "b67612dd8309382583d1b1a132b599ae734f6427332a557dd4da07261a7616e6";
     type EntryMutation = (&'static str, fn(&mut Entry));
     type PositionedEntryMutation = (&'static str, usize, fn(&mut Entry));
     type PositionedFieldProtectionMutation = (&'static str, usize, fn(&mut EntryFieldProtection));
@@ -1121,6 +1143,180 @@ mod tests {
         canonical_entry_content_hash_v1(entry).expect("hash entry")
     }
 
+    struct GoldenCursor<'a> {
+        bytes: &'a [u8],
+        position: usize,
+    }
+
+    impl<'a> GoldenCursor<'a> {
+        fn take(&mut self, length: usize) -> &'a [u8] {
+            let end = self
+                .position
+                .checked_add(length)
+                .expect("golden cursor overflow");
+            assert!(
+                end <= self.bytes.len(),
+                "truncated canonical golden at {} taking {length} of {} bytes",
+                self.position,
+                self.bytes.len()
+            );
+            let value = &self.bytes[self.position..end];
+            self.position = end;
+            value
+        }
+
+        fn byte(&mut self) -> u8 {
+            self.take(1)[0]
+        }
+
+        fn boolean(&mut self) {
+            assert!(matches!(self.byte(), 0 | 1), "invalid canonical bool");
+        }
+
+        fn u32(&mut self) -> u32 {
+            u32::from_le_bytes(self.take(4).try_into().expect("four bytes"))
+        }
+
+        fn text(&mut self) {
+            let length = usize::try_from(self.u32()).expect("u32 fits usize");
+            self.take(length);
+        }
+
+        fn option(&mut self, present: impl FnOnce(&mut Self)) {
+            match self.byte() {
+                0 => {}
+                1 => present(self),
+                _ => panic!("invalid canonical option tag"),
+            }
+        }
+    }
+
+    fn decode_entry_v1_field_slices(bytes: &[u8]) -> (&[u8], Vec<&[u8]>) {
+        assert!(bytes.len() >= 8, "canonical framing");
+        assert_eq!(&bytes[..4], b"VKCS");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1);
+
+        let framing = &bytes[..8];
+        let mut cursor = GoldenCursor { bytes, position: 8 };
+        let mut fields = Vec::with_capacity(27);
+        macro_rules! field {
+            ($body:block) => {{
+                let start = cursor.position;
+                $body
+                fields.push(&bytes[start..cursor.position]);
+            }};
+        }
+
+        field!({
+            cursor.take(16);
+        });
+        for _ in 0..5 {
+            field!({
+                cursor.text();
+            });
+        }
+        field!({
+            for _ in 0..5 {
+                cursor.boolean();
+            }
+        });
+        field!({
+            let count = cursor.u32();
+            for _ in 0..count {
+                cursor.text();
+            }
+        });
+        field!({
+            let count = cursor.u32();
+            for _ in 0..count {
+                cursor.text();
+                cursor.text();
+                cursor.boolean();
+            }
+        });
+        field!({
+            let count = cursor.u32();
+            for _ in 0..count {
+                cursor.text();
+                cursor.boolean();
+                cursor.take(32);
+            }
+        });
+        field!({
+            cursor.option(|cursor| {
+                cursor.take(4);
+            });
+        });
+        field!({
+            cursor.option(|cursor| {
+                cursor.take(16);
+            });
+        });
+        for _ in 0..3 {
+            field!({
+                cursor.option(GoldenCursor::text);
+            });
+        }
+        for _ in 0..2 {
+            field!({
+                cursor.take(8);
+            });
+        }
+        field!({
+            cursor.boolean();
+        });
+        for _ in 0..4 {
+            field!({
+                cursor.option(|cursor| {
+                    cursor.take(8);
+                });
+            });
+        }
+        field!({
+            cursor.option(|cursor| {
+                cursor.take(16);
+            });
+        });
+        field!({
+            cursor.option(|cursor| {
+                cursor.option(GoldenCursor::boolean);
+                cursor.option(|cursor| {
+                    cursor.take(4);
+                });
+                cursor.option(GoldenCursor::text);
+                let count = cursor.u32();
+                for _ in 0..count {
+                    cursor.text();
+                    cursor.text();
+                }
+            });
+        });
+        field!({
+            let count = cursor.u32();
+            for _ in 0..count {
+                cursor.text();
+                cursor.text();
+            }
+        });
+        field!({
+            let count = cursor.u32();
+            for _ in 0..count {
+                cursor.text();
+                cursor.text();
+                cursor.option(|cursor| {
+                    cursor.take(8);
+                });
+            }
+        });
+        field!({
+            cursor.boolean();
+        });
+
+        assert_eq!(fields.len(), 27);
+        assert_eq!(cursor.position, bytes.len(), "trailing canonical bytes");
+        (framing, fields)
+    }
+
     #[test]
     fn minimal_entry_has_pinned_v1_bytes_and_digest() {
         let entry = minimal_entry();
@@ -1149,6 +1345,42 @@ mod tests {
             HEXLOWER.encode(&canonical_hash(&entry)),
             FULL_ENTRY_V1_SHA256_HEX
         );
+    }
+
+    #[test]
+    fn full_entry_golden_delta_is_confined_to_field_9() {
+        let obsolete = HEXLOWER
+            .decode(OBSOLETE_PLAIN_005_FULL_ENTRY_V1_HEX.as_bytes())
+            .expect("decode obsolete plain-005 golden");
+        let current = HEXLOWER
+            .decode(FULL_ENTRY_V1_HEX.as_bytes())
+            .expect("decode current golden");
+        let (obsolete_framing, obsolete_fields) = decode_entry_v1_field_slices(&obsolete);
+        let (current_framing, current_fields) = decode_entry_v1_field_slices(&current);
+
+        assert_eq!(obsolete.len(), 565);
+        assert_eq!(current.len(), 1173);
+        assert_eq!(obsolete_fields[8].len(), 36);
+        assert_eq!(current_fields[8].len(), 644);
+        assert_eq!(&obsolete_fields[8][..4], &2_u32.to_le_bytes());
+        assert_eq!(&current_fields[8][..4], &15_u32.to_le_bytes());
+        assert_eq!(
+            HEXLOWER.encode(&vaultkern_crypto::sha256_bytes(&obsolete)),
+            OBSOLETE_PLAIN_005_FULL_ENTRY_V1_SHA256_HEX
+        );
+        assert_eq!(obsolete_framing, current_framing);
+        for index in 0..27 {
+            if index == 8 {
+                assert_ne!(obsolete_fields[index], current_fields[index]);
+            } else {
+                assert_eq!(
+                    obsolete_fields[index],
+                    current_fields[index],
+                    "canonical field {} changed outside the field-9 amendment",
+                    index + 1
+                );
+            }
+        }
     }
 
     #[test]

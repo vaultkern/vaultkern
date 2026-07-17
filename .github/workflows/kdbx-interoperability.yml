@@ -1,0 +1,35 @@
+name: KDBX Interoperability
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  keepassxc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install KeePassXC CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends keepassxc
+          keepassxc-cli --version
+      - name: Verify canonical field 9 golden delta
+        run: >-
+          cargo test --locked -p vaultkern-model
+          full_entry_golden_delta_is_confined_to_field_9
+      - name: Read external KeePassXC KDBX 4.1 fixture
+        run: >-
+          cargo test --locked -p vaultkern-kdbx --features external-fixtures
+          --test external_kdbx41_fixture
+      - name: Open KDBX 4.0 and 4.1 writer output with KeePassXC
+        run: >-
+          cargo test --locked -p vaultkern-kdbx --features external-fixtures
+          --test keepassxc_writer_interop -- --nocapture
