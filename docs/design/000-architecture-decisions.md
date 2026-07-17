@@ -1,6 +1,9 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Frozen — r13** (seven external review rounds + four freeze-hardening rounds + PR-review fixes). 2026-07-13. Amendments only via the 000 revision process; contracts evolve additively per the 003 version matrix.
+Status: **Frozen — r14** (seven external review rounds + four freeze-hardening
+rounds + PR-review fixes + the coordinated 006 persistence freeze). 2026-07-17.
+Amendments only via the 000 revision process; contracts evolve additively per
+the 003 version matrix.
 
 This is the top-level decision record for the four-platform product form
 (Windows / macOS / iOS / Android; Linux deferred). Every decision here is a
@@ -24,7 +27,7 @@ classes at the design level.
 
 | # | Decision | Expanded in |
 |---|----------|-------------|
-| D1 | KDBX is the on-disk format and the interoperability contract; sync = file-level sync + full semantic merge | 001 |
+| D1 | KDBX is the on-disk format and the interoperability contract; sync = file-level sync + full semantic merge | 001, 006 |
 | D2 | The quick unlock envelope stores only post-KDF derived key material (the transformed key), never passwords or credential copies | 002 |
 | D3 | The quick unlock state machine is platform-neutral and designed once: explicit per-vault state + a monotonic generation baked into the envelope AAD; records in platform secure storage are ciphertext caches, not sources of truth | 003 |
 | D4 | The **target** process topology is identical on all four platforms: a resident app owns runtime state and is the sole KDBX writer; system extensions and the browser extension are clients. Client write paths differ by kind and are fixed in the 003 access matrix: **Apple system extensions** (separate appex processes) append to a journal and never touch the vault file; the **browser extension**'s mutations are protocol commands executed inside the app process — it writes neither the vault nor the journal; **Android services** run inside the app process and invoke the core directly (they *are* the resident app; no journal). Windows runs a **sanctioned transition topology** (extension + per-port native host) until the plugin-authenticator phase, under two binding constraints: its state layer uses the shared core ledger (no platform fork) and all KDBX writes go through the writer lock | 003 |
@@ -271,3 +274,7 @@ KDF caps.
   minLength 4). QuickUnlockLedgerEntry persists `schema_version` with
   no serde default — missing or unknown versions fail closed per the
   version matrix.
+- r14 (2026-07-17): coordinated 006 freeze. D1 now expands through 006 for
+  persistence-valid model states, canonical field-9 materialization, KDBX
+  read/write capability, fidelity transformations, and executable external
+  interoperability gates. The 001 merge semantics remain unchanged.

@@ -1,9 +1,13 @@
 # 005 — Canonical Serialization Byte Layout (v1)
 
-Status: **Frozen — r13** (frozen with the Phase 0 contract freeze; four
-freeze-hardening rounds). 2026-07-13.
+Status: **Frozen — r14** (frozen with the Phase 0 contract freeze; four
+freeze-hardening rounds; operational source clarified by the coordinated 006
+freeze). 2026-07-17.
 Upstream: 001 (same-second tie rule, history dedupe key, Meta content-hash
 fallback), 000 Execution discipline #1, 004 (contract-freeze root node).
+Operational amendment: 006 defines persistence validity and the materialized
+source `A(e)` consumed by field 9 without changing this byte layout or
+`schema_version`.
 
 This document pins the **canonical serialization** that 001 depends on: a
 fixed, versioned byte encoding of an entry's persistent fields whose SHA-256
@@ -116,11 +120,16 @@ absent-in-model (not "empty string").
 - **`history`** — excluded by definition (001: "canonical serialization of
   the entry fields, excluding history"). The hash identifies one version;
   history is the set of versions.
-- **`passkey`, `totp`** — these model fields are *projections* parsed out of
-  the entry's attributes (`KPEX_PASSKEY_*`, `otp`). The attributes map
-  (field 9) already contains their source of truth; encoding the projections
-  too would double-count the same data and let a projection-parsing
-  difference between implementations diverge the hash.
+- **`passkey`, `totp`** — these model fields are *projections* parsed from
+  persistent credential source attributes. Field 9 consumes the one
+  materialized persistent map `A(e)` defined by 006 §3.1; while a structured
+  projection is present, `A(e)` deterministically overlays its reserved source
+  attributes even when they are not retained directly in `Entry.attributes`.
+  The projections remain excluded as independent fields: encoding them again
+  would double-count the same data and let a projection-parsing difference
+  between implementations diverge the hash. This supersedes the r13
+  assumption that all source attributes always remain directly in
+  `Entry.attributes`; it does not change field 9's map encoding.
 - **`raw_state`, `opaque_xml`, custom-data block boundaries and anchors** —
   XML round-trip fidelity state (node order, raw string forms, unknown-node
   placement). Two tools writing the same semantic content in different XML
@@ -163,3 +172,11 @@ greater-wins.
   stream and its digest pinned in the repository. Those fixtures then have
   the same status as the `kdf_generation` fixtures: changing them is
   changing the contract.
+
+## 8. Revision history
+
+- r13 (2026-07-13): Phase 0 frozen canonical-v1 byte-layout baseline.
+- r14 (2026-07-17): coordinated 006 freeze. Records that field 9's operational
+  source is 006's `A(e)`, superseding the assumption that credential source
+  attributes always remain directly in `Entry.attributes`. The 27 fields,
+  primitive encodings, framing, and `schema_version = 1` are unchanged.
