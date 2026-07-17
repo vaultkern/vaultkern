@@ -9,6 +9,7 @@ use data_encoding::BASE32_NOPAD;
 use thiserror::Error;
 use uuid::Uuid;
 use vaultkern_crypto::{OtpAlgorithm, generate_totp};
+use zeroize::{Zeroize, Zeroizing};
 
 mod canonical_serialization;
 
@@ -33,6 +34,187 @@ pub type Result<T> = std::result::Result<T, ModelError>;
 pub struct CustomField {
     pub value: String,
     pub protected: bool,
+}
+
+enum MaterializedPersistentValue<'a> {
+    Borrowed(&'a str),
+    Owned(Zeroizing<String>),
+}
+
+/// One field in the transient persistent-attribute view.
+pub struct MaterializedPersistentAttribute<'a> {
+    value: MaterializedPersistentValue<'a>,
+    protected: bool,
+}
+
+impl MaterializedPersistentAttribute<'_> {
+    pub fn value(&self) -> &str {
+        match &self.value {
+            MaterializedPersistentValue::Borrowed(value) => value,
+            MaterializedPersistentValue::Owned(value) => value.as_str(),
+        }
+    }
+
+    pub fn protected(&self) -> bool {
+        self.protected
+    }
+}
+
+impl fmt::Debug for MaterializedPersistentAttribute<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MaterializedPersistentAttribute")
+            .field("value", &"[REDACTED]")
+            .field("protected", &self.protected)
+            .finish()
+    }
+}
+
+/// Transient materialized entry attributes shared by canonical and KDBX writers.
+pub struct MaterializedPersistentAttributes<'a> {
+    fields: BTreeMap<String, MaterializedPersistentAttribute<'a>>,
+    has_projectable_passkey: bool,
+}
+
+impl<'a> MaterializedPersistentAttributes<'a> {
+    fn from_entry(attributes: &'a BTreeMap<String, CustomField>) -> Self {
+        Self {
+            fields: attributes
+                .iter()
+                .map(|(key, field)| {
+                    (
+                        key.clone(),
+                        MaterializedPersistentAttribute {
+                            value: MaterializedPersistentValue::Borrowed(&field.value),
+                            protected: field.protected,
+                        },
+                    )
+                })
+                .collect(),
+            has_projectable_passkey: false,
+        }
+    }
+
+    fn insert_borrowed(&mut self, key: impl Into<String>, value: &'a str, protected: bool) {
+        self.fields.insert(
+            key.into(),
+            MaterializedPersistentAttribute {
+                value: MaterializedPersistentValue::Borrowed(value),
+                protected,
+            },
+        );
+    }
+
+    fn insert_static(&mut self, key: impl Into<String>, value: &'static str, protected: bool) {
+        self.fields.insert(
+            key.into(),
+            MaterializedPersistentAttribute {
+                value: MaterializedPersistentValue::Borrowed(value),
+                protected,
+            },
+        );
+    }
+
+    fn insert_owned(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<Zeroizing<String>>,
+        protected: bool,
+    ) {
+        self.fields.insert(
+            key.into(),
+            MaterializedPersistentAttribute {
+                value: MaterializedPersistentValue::Owned(value.into()),
+                protected,
+            },
+        );
+    }
+
+    fn insert_value(
+        &mut self,
+        key: impl Into<String>,
+        value: MaterializedPersistentValue<'a>,
+        protected: bool,
+    ) {
+        self.fields.insert(
+            key.into(),
+            MaterializedPersistentAttribute { value, protected },
+        );
+    }
+
+    pub fn get(&self, key: &str) -> Option<&MaterializedPersistentAttribute<'a>> {
+        self.fields.get(key)
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.fields.contains_key(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    pub fn has_projectable_passkey(&self) -> bool {
+        self.has_projectable_passkey
+    }
+
+    pub fn iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&str, &MaterializedPersistentAttribute<'a>)> {
+        self.fields.iter().map(|(key, field)| (key.as_str(), field))
+    }
+
+    #[cfg(test)]
+    fn to_custom_fields_for_test(&self) -> BTreeMap<String, CustomField> {
+        self.iter()
+            .map(|(key, field)| {
+                (
+                    key.to_owned(),
+                    CustomField {
+                        value: field.value().to_owned(),
+                        protected: field.protected(),
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+impl fmt::Debug for MaterializedPersistentAttributes<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_map().entries(self.fields.iter()).finish()
+    }
+}
+
+impl<'a> std::ops::Index<&str> for MaterializedPersistentAttributes<'a> {
+    type Output = MaterializedPersistentAttribute<'a>;
+
+    fn index(&self, key: &str) -> &Self::Output {
+        &self.fields[key]
+    }
+}
+
+impl<'a> std::ops::Index<&String> for MaterializedPersistentAttributes<'a> {
+    type Output = MaterializedPersistentAttribute<'a>;
+
+    fn index(&self, key: &String) -> &Self::Output {
+        &self.fields[key]
+    }
+}
+
+impl PartialEq<BTreeMap<String, CustomField>> for MaterializedPersistentAttributes<'_> {
+    fn eq(&self, other: &BTreeMap<String, CustomField>) -> bool {
+        self.len() == other.len()
+            && self.iter().all(|(key, field)| {
+                other.get(key).is_some_and(|other| {
+                    field.value() == other.value && field.protected() == other.protected
+                })
+            })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -341,12 +523,118 @@ pub struct CustomDataItem {
     pub last_modified: Option<i64>,
 }
 
+/// Reconciles CustomData's semantic map with its fidelity blocks after a mutation.
+pub fn reconcile_custom_data_blocks(
+    blocks: &mut Vec<CustomDataBlock>,
+    opaque_xml: &mut [OpaqueXmlFragment],
+    node_order: &mut Vec<String>,
+    merged: &BTreeMap<String, String>,
+    updated_item: Option<(&str, Option<i64>)>,
+) {
+    let mut retained_blocks = Vec::with_capacity(blocks.len());
+    let mut retained_occurrences = Vec::with_capacity(blocks.len());
+    let mut replacement_anchors = Vec::with_capacity(blocks.len());
+    for mut block in std::mem::take(blocks) {
+        let was_empty = block.items.is_empty();
+        block.items.retain(|item| merged.contains_key(&item.key));
+        let retargeted_after =
+            retarget_custom_data_anchor(block.after.take(), &replacement_anchors);
+        if was_empty || !block.items.is_empty() {
+            retained_occurrences.push(true);
+            block.after = retargeted_after;
+            retained_blocks.push(block);
+            replacement_anchors.push(Some(OpaqueXmlAnchor {
+                element_name: "CustomData".into(),
+                occurrence: retained_blocks.len(),
+            }));
+        } else {
+            retained_occurrences.push(false);
+            replacement_anchors.push(retargeted_after);
+        }
+    }
+    *blocks = retained_blocks;
+    for fragment in opaque_xml {
+        fragment.after = retarget_custom_data_anchor(fragment.after.take(), &replacement_anchors);
+    }
+    let mut custom_data_occurrence = 0;
+    node_order.retain(|name| {
+        if name != "CustomData" {
+            return true;
+        }
+        let retained = retained_occurrences
+            .get(custom_data_occurrence)
+            .copied()
+            .unwrap_or(true);
+        custom_data_occurrence += 1;
+        retained
+    });
+
+    let mut last_position_by_key = BTreeMap::new();
+    for (block_index, block) in blocks.iter().enumerate() {
+        for (item_index, item) in block.items.iter().enumerate() {
+            last_position_by_key.insert(item.key.clone(), (block_index, item_index));
+        }
+    }
+
+    let mut missing_items = Vec::new();
+    for (key, value) in merged {
+        if let Some(&(block_index, item_index)) = last_position_by_key.get(key) {
+            let item = &mut blocks[block_index].items[item_index];
+            item.value.clone_from(value);
+            if let Some((updated_key, last_modified)) = updated_item
+                && updated_key == key
+            {
+                item.last_modified = last_modified;
+            }
+        } else {
+            let last_modified = updated_item
+                .filter(|(updated_key, _)| *updated_key == key)
+                .and_then(|(_, last_modified)| last_modified);
+            missing_items.push(CustomDataItem {
+                key: key.clone(),
+                value: value.clone(),
+                last_modified,
+            });
+        }
+    }
+
+    if missing_items.is_empty() {
+        return;
+    }
+    if let Some(block) = blocks.last_mut() {
+        block.items.extend(missing_items);
+    } else {
+        blocks.push(CustomDataBlock {
+            items: missing_items,
+            after: None,
+        });
+    }
+}
+
+fn retarget_custom_data_anchor(
+    anchor: Option<OpaqueXmlAnchor>,
+    replacement_anchors: &[Option<OpaqueXmlAnchor>],
+) -> Option<OpaqueXmlAnchor> {
+    let anchor = anchor?;
+    if anchor.element_name != "CustomData" {
+        return Some(anchor);
+    }
+    let Some(index) = anchor.occurrence.checked_sub(1) else {
+        return Some(anchor);
+    };
+    replacement_anchors
+        .get(index)
+        .cloned()
+        .unwrap_or(Some(anchor))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetaRawState {
     pub node_order: Vec<String>,
     pub description_raw: Option<String>,
     pub default_username_raw: Option<String>,
     pub color_raw: Option<String>,
+    pub memory_protection_auto_enable_visual_hiding_raw: Option<String>,
     pub has_custom_icons_node: bool,
     pub recycle_bin_group_raw: Option<String>,
     pub entry_templates_group_raw: Option<String>,
@@ -361,6 +649,10 @@ pub struct RootRawState {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GroupRawState {
     pub node_order: Vec<String>,
+    /// UUIDs that own the retained `Entry` fidelity slots in `node_order`.
+    pub entry_order: Vec<Uuid>,
+    /// UUIDs that own the retained child `Group` fidelity slots in `node_order`.
+    pub group_order: Vec<Uuid>,
     pub default_auto_type_sequence_raw: Option<String>,
     pub enable_auto_type_raw: Option<String>,
     pub enable_searching_raw: Option<String>,
@@ -370,6 +662,10 @@ pub struct GroupRawState {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EntryRawState {
     pub node_order: Vec<String>,
+    /// Keys that own the retained `String` fidelity slots in `node_order`.
+    pub string_order: Vec<String>,
+    /// Names that own the retained `Binary` fidelity slots in `node_order`.
+    pub binary_order: Vec<String>,
     pub foreground_color_raw: Option<String>,
     pub background_color_raw: Option<String>,
     pub override_url_raw: Option<String>,
@@ -452,6 +748,81 @@ pub struct PasskeyRecord {
     pub backup_state: bool,
 }
 
+#[derive(Clone, Copy)]
+struct PasskeyPersistentView<'a> {
+    username: &'a str,
+    credential_id: &'a str,
+    generated_user_id: Option<&'a str>,
+    private_key_pem: &'a str,
+    relying_party: &'a str,
+    user_handle: Option<&'a str>,
+    backup_eligible: bool,
+    backup_state: bool,
+}
+
+impl<'a> PasskeyPersistentView<'a> {
+    fn from_record(passkey: &'a PasskeyRecord) -> Self {
+        Self {
+            username: &passkey.username,
+            credential_id: &passkey.credential_id,
+            generated_user_id: passkey.generated_user_id.as_deref(),
+            private_key_pem: &passkey.private_key_pem,
+            relying_party: &passkey.relying_party,
+            user_handle: passkey.user_handle.as_deref(),
+            backup_eligible: passkey.backup_eligible,
+            backup_state: passkey.backup_state,
+        }
+    }
+
+    fn from_attributes(attributes: &'a BTreeMap<String, CustomField>) -> Option<Self> {
+        Some(Self {
+            username: &attributes.get(PasskeyRecord::USERNAME_KEY)?.value,
+            credential_id: &attributes.get(PasskeyRecord::CREDENTIAL_ID_KEY)?.value,
+            generated_user_id: attributes
+                .get(PasskeyRecord::GENERATED_USER_ID_KEY)
+                .map(|field| field.value.as_str()),
+            private_key_pem: &attributes.get(PasskeyRecord::PRIVATE_KEY_PEM_KEY)?.value,
+            relying_party: &attributes.get(PasskeyRecord::RELYING_PARTY_KEY)?.value,
+            user_handle: attributes
+                .get(PasskeyRecord::USER_HANDLE_KEY)
+                .map(|field| field.value.as_str()),
+            backup_eligible: parse_passkey_flag(attributes.get(PasskeyRecord::FLAG_BE_KEY))?,
+            backup_state: parse_passkey_flag(attributes.get(PasskeyRecord::FLAG_BS_KEY))?,
+        })
+    }
+
+    fn visit_attributes(self, mut visit: impl FnMut(&'static str, &'a str, bool)) {
+        visit(PasskeyRecord::USERNAME_KEY, self.username, false);
+        visit(PasskeyRecord::CREDENTIAL_ID_KEY, self.credential_id, true);
+        if let Some(generated_user_id) = self.generated_user_id {
+            visit(
+                PasskeyRecord::GENERATED_USER_ID_KEY,
+                generated_user_id,
+                false,
+            );
+        }
+        visit(
+            PasskeyRecord::PRIVATE_KEY_PEM_KEY,
+            self.private_key_pem,
+            true,
+        );
+        visit(PasskeyRecord::RELYING_PARTY_KEY, self.relying_party, false);
+        if let Some(user_handle) = self.user_handle {
+            visit(PasskeyRecord::USER_HANDLE_KEY, user_handle, true);
+        }
+        visit(
+            PasskeyRecord::FLAG_BE_KEY,
+            if self.backup_eligible { "1" } else { "0" },
+            false,
+        );
+        visit(
+            PasskeyRecord::FLAG_BS_KEY,
+            if self.backup_state { "1" } else { "0" },
+            false,
+        );
+    }
+}
+
 impl PasskeyRecord {
     pub const USERNAME_KEY: &'static str = "KPEX_PASSKEY_USERNAME";
     pub const CREDENTIAL_ID_KEY: &'static str = "KPEX_PASSKEY_CREDENTIAL_ID";
@@ -491,82 +862,28 @@ impl PasskeyRecord {
     pub fn write_to_attributes(&self, attributes: &mut BTreeMap<String, CustomField>) {
         attributes.remove(Self::GENERATED_USER_ID_KEY);
         attributes.remove(Self::USER_HANDLE_KEY);
-        attributes.insert(
-            Self::USERNAME_KEY.into(),
-            CustomField {
-                value: self.username.clone(),
-                protected: false,
-            },
-        );
-        attributes.insert(
-            Self::CREDENTIAL_ID_KEY.into(),
-            CustomField {
-                value: self.credential_id.clone(),
-                protected: true,
-            },
-        );
-        if let Some(generated_user_id) = &self.generated_user_id {
+        PasskeyPersistentView::from_record(self).visit_attributes(|key, value, protected| {
             attributes.insert(
-                Self::GENERATED_USER_ID_KEY.into(),
+                key.into(),
                 CustomField {
-                    value: generated_user_id.clone(),
-                    protected: false,
+                    value: value.to_owned(),
+                    protected,
                 },
             );
-        }
-        attributes.insert(
-            Self::PRIVATE_KEY_PEM_KEY.into(),
-            CustomField {
-                value: self.private_key_pem.clone(),
-                protected: true,
-            },
-        );
-        attributes.insert(
-            Self::RELYING_PARTY_KEY.into(),
-            CustomField {
-                value: self.relying_party.clone(),
-                protected: false,
-            },
-        );
-        if let Some(user_handle) = &self.user_handle {
-            attributes.insert(
-                Self::USER_HANDLE_KEY.into(),
-                CustomField {
-                    value: user_handle.clone(),
-                    protected: true,
-                },
-            );
-        }
-        attributes.insert(
-            Self::FLAG_BE_KEY.into(),
-            CustomField {
-                value: if self.backup_eligible { "1" } else { "0" }.into(),
-                protected: false,
-            },
-        );
-        attributes.insert(
-            Self::FLAG_BS_KEY.into(),
-            CustomField {
-                value: if self.backup_state { "1" } else { "0" }.into(),
-                protected: false,
-            },
-        );
+        });
     }
 
     pub fn from_attributes(attributes: &BTreeMap<String, CustomField>) -> Option<Self> {
+        let view = PasskeyPersistentView::from_attributes(attributes)?;
         Some(Self {
-            username: attributes.get(Self::USERNAME_KEY)?.value.clone(),
-            credential_id: attributes.get(Self::CREDENTIAL_ID_KEY)?.value.clone(),
-            generated_user_id: attributes
-                .get(Self::GENERATED_USER_ID_KEY)
-                .map(|field| field.value.clone()),
-            private_key_pem: attributes.get(Self::PRIVATE_KEY_PEM_KEY)?.value.clone(),
-            relying_party: attributes.get(Self::RELYING_PARTY_KEY)?.value.clone(),
-            user_handle: attributes
-                .get(Self::USER_HANDLE_KEY)
-                .map(|field| field.value.clone()),
-            backup_eligible: parse_passkey_flag(attributes.get(Self::FLAG_BE_KEY))?,
-            backup_state: parse_passkey_flag(attributes.get(Self::FLAG_BS_KEY))?,
+            username: view.username.to_owned(),
+            credential_id: view.credential_id.to_owned(),
+            generated_user_id: view.generated_user_id.map(str::to_owned),
+            private_key_pem: view.private_key_pem.to_owned(),
+            relying_party: view.relying_party.to_owned(),
+            user_handle: view.user_handle.map(str::to_owned),
+            backup_eligible: view.backup_eligible,
+            backup_state: view.backup_state,
         })
     }
 }
@@ -598,6 +915,14 @@ pub struct TotpSpec {
     pub account_name: Option<String>,
 }
 
+impl Zeroize for TotpSpec {
+    fn zeroize(&mut self) {
+        self.secret_base32.zeroize();
+        self.issuer.zeroize();
+        self.account_name.zeroize();
+    }
+}
+
 impl TotpSpec {
     pub fn parse_otpauth(uri: &str) -> Result<Self> {
         const PREFIX: &str = "otpauth://totp/";
@@ -625,7 +950,7 @@ impl TotpSpec {
             let account = percent_decode(label)?;
             (None, (!account.is_empty()).then_some(account))
         };
-        let mut secret = None;
+        let mut secret: Option<Zeroizing<String>> = None;
         let mut issuer = None;
         let mut algorithm = TotpAlgorithm::Sha1;
         let mut digits = 6;
@@ -642,21 +967,29 @@ impl TotpSpec {
             {
                 return Err(ModelError::Unimplemented);
             }
-            let value = percent_decode(value)?;
+            let value = Zeroizing::new(percent_decode(value)?);
             match key {
                 "secret" => secret = Some(value),
-                "issuer" => issuer = Some(value),
+                "issuer" => issuer = Some(value.as_str().to_owned()),
                 "algorithm" => {
-                    algorithm = match value.to_ascii_uppercase().as_str() {
+                    algorithm = match value.as_str().to_ascii_uppercase().as_str() {
                         "SHA1" | "HMAC-SHA-1" => TotpAlgorithm::Sha1,
                         "SHA256" | "HMAC-SHA-256" => TotpAlgorithm::Sha256,
                         "SHA512" | "HMAC-SHA-512" => TotpAlgorithm::Sha512,
                         _ => return Err(ModelError::Unimplemented),
                     }
                 }
-                "digits" => digits = value.parse().map_err(|_| ModelError::Unimplemented)?,
+                "digits" => {
+                    digits = value
+                        .as_str()
+                        .parse()
+                        .map_err(|_| ModelError::Unimplemented)?
+                }
                 "period" => {
-                    period_seconds = value.parse().map_err(|_| ModelError::Unimplemented)?
+                    period_seconds = value
+                        .as_str()
+                        .parse()
+                        .map_err(|_| ModelError::Unimplemented)?
                 }
                 _ => unreachable!("query names were validated above"),
             }
@@ -666,8 +999,9 @@ impl TotpSpec {
             issuer = label_issuer;
         }
 
+        let mut secret = secret.ok_or(ModelError::Unimplemented)?;
         Ok(Self {
-            secret_base32: secret.ok_or(ModelError::Unimplemented)?,
+            secret_base32: std::mem::take(&mut *secret),
             algorithm,
             digits,
             period_seconds,
@@ -683,13 +1017,15 @@ impl TotpSpec {
             TotpAlgorithm::Sha512 => OtpAlgorithm::Sha512,
         };
 
-        let normalized = self.secret_base32.replace('=', "").to_ascii_uppercase();
-        let secret = BASE32_NOPAD
-            .decode(normalized.as_bytes())
-            .map_err(|_| ModelError::Unimplemented)?;
+        let normalized = Zeroizing::new(self.secret_base32.replace('=', "").to_ascii_uppercase());
+        let secret = Zeroizing::new(
+            BASE32_NOPAD
+                .decode(normalized.as_bytes())
+                .map_err(|_| ModelError::Unimplemented)?,
+        );
 
         generate_totp(
-            &secret,
+            secret.as_slice(),
             algorithm,
             self.digits,
             self.period_seconds,
@@ -774,76 +1110,151 @@ impl Entry {
     }
 }
 
-/// Builds the transient persistent-attribute view after overlaying credential projections.
-pub fn materialize_entry_persistent_attributes(entry: &Entry) -> BTreeMap<String, CustomField> {
-    let mut attributes = entry.attributes.clone();
-    let totp = entry
-        .totp
-        .clone()
-        .or_else(|| totp_from_persistent_attributes(&attributes));
-    let passkey = entry
-        .passkey
-        .clone()
-        .or_else(|| PasskeyRecord::from_attributes(&attributes));
-    if let Some(totp) = &totp {
-        attributes.retain(|key, _| !is_totp_persistent_attribute_key(key));
-        let (attribute_algorithm, uri_algorithm) = match totp.algorithm {
-            TotpAlgorithm::Sha1 => ("HMAC-SHA-1", "SHA1"),
-            TotpAlgorithm::Sha256 => ("HMAC-SHA-256", "SHA256"),
-            TotpAlgorithm::Sha512 => ("HMAC-SHA-512", "SHA512"),
+/// Converts a current entry clone into a one-level history snapshot.
+pub fn prepare_entry_history_snapshot(entry: &mut Entry) {
+    entry.history.clear();
+    if entry.raw_state.has_history_node
+        || entry
+            .raw_state
+            .node_order
+            .iter()
+            .any(|name| name == "History")
+    {
+        retarget_removed_entry_known_nodes(entry, "History");
+    }
+    entry.raw_state.has_history_node = false;
+}
+
+fn retarget_removed_entry_known_nodes(entry: &mut Entry, element_name: &str) {
+    let original_order = entry.raw_state.node_order.clone();
+    let mut retained_counts = BTreeMap::<String, usize>::new();
+    let mut predecessor = None;
+    let mut replacements = Vec::new();
+    for name in &original_order {
+        if name == element_name {
+            replacements.push(predecessor.clone());
+            continue;
+        }
+        let occurrence = retained_counts.entry(name.clone()).or_insert(0);
+        *occurrence += 1;
+        predecessor = Some(OpaqueXmlAnchor {
+            element_name: name.clone(),
+            occurrence: *occurrence,
+        });
+    }
+
+    for anchor in entry
+        .custom_data_blocks
+        .iter_mut()
+        .map(|block| &mut block.after)
+        .chain(
+            entry
+                .opaque_xml
+                .iter_mut()
+                .map(|fragment| &mut fragment.after),
+        )
+    {
+        let Some(existing) = anchor.as_ref() else {
+            continue;
         };
-        attributes.insert(
-            "otp".into(),
-            CustomField {
-                value: entry_otpauth_uri(entry, totp, uri_algorithm),
-                protected: true,
-            },
+        if existing.element_name != element_name {
+            continue;
+        }
+        *anchor = existing
+            .occurrence
+            .checked_sub(1)
+            .and_then(|index| replacements.get(index).cloned())
+            .flatten();
+    }
+    entry
+        .raw_state
+        .node_order
+        .retain(|name| name != element_name);
+}
+
+/// Builds the transient persistent-attribute view after overlaying credential projections.
+pub fn materialize_entry_persistent_attributes(
+    entry: &Entry,
+) -> MaterializedPersistentAttributes<'_> {
+    let mut attributes = MaterializedPersistentAttributes::from_entry(&entry.attributes);
+    let raw_totp = entry
+        .totp
+        .is_none()
+        .then(|| totp_from_persistent_attributes(&entry.attributes))
+        .flatten()
+        .map(Zeroizing::new);
+    if let Some(totp) = entry.totp.as_ref() {
+        overlay_totp_projection(
+            &mut attributes,
+            entry,
+            totp,
+            MaterializedPersistentValue::Borrowed(&totp.secret_base32),
         );
-        attributes.insert(
-            "TimeOtp-Secret-Base32".into(),
-            CustomField {
-                value: totp.secret_base32.clone(),
-                protected: true,
-            },
-        );
-        attributes.insert(
-            "TimeOtp-Algorithm".into(),
-            CustomField {
-                value: attribute_algorithm.into(),
-                protected: false,
-            },
-        );
-        attributes.insert(
-            "TimeOtp-Length".into(),
-            CustomField {
-                value: totp.digits.to_string(),
-                protected: false,
-            },
-        );
-        attributes.insert(
-            "TimeOtp-Period".into(),
-            CustomField {
-                value: totp.period_seconds.to_string(),
-                protected: false,
-            },
-        );
+    } else if let Some(totp) = raw_totp.as_deref() {
+        let secret = if !entry.attributes.contains_key("otp") {
+            MaterializedPersistentValue::Borrowed(&entry.attributes["TimeOtp-Secret-Base32"].value)
+        } else {
+            MaterializedPersistentValue::Owned(Zeroizing::new(totp.secret_base32.clone()))
+        };
+        overlay_totp_projection(&mut attributes, entry, totp, secret);
     } else {
-        for (key, field) in &mut attributes {
+        for (key, field) in &mut attributes.fields {
             if is_totp_secret_persistent_attribute_key(key) {
                 field.protected = true;
             }
         }
     }
-    if let Some(passkey) = &passkey {
-        passkey.write_to_attributes(&mut attributes);
+
+    let passkey = entry
+        .passkey
+        .as_ref()
+        .map(PasskeyPersistentView::from_record)
+        .or_else(|| PasskeyPersistentView::from_attributes(&entry.attributes));
+    if let Some(passkey) = passkey {
+        attributes.has_projectable_passkey = true;
+        attributes
+            .fields
+            .retain(|key, _| !PasskeyRecord::is_persistent_attribute_key(key));
+        passkey.visit_attributes(|key, value, protected| {
+            attributes.insert_borrowed(key, value, protected);
+        });
     } else {
-        for (key, field) in &mut attributes {
+        for (key, field) in &mut attributes.fields {
             if PasskeyRecord::is_sensitive_persistent_attribute_key(key) {
                 field.protected = true;
             }
         }
     }
     attributes
+}
+
+fn overlay_totp_projection<'a>(
+    attributes: &mut MaterializedPersistentAttributes<'a>,
+    entry: &Entry,
+    totp: &TotpSpec,
+    secret: MaterializedPersistentValue<'a>,
+) {
+    attributes
+        .fields
+        .retain(|key, _| !is_totp_persistent_attribute_key(key));
+    let (attribute_algorithm, uri_algorithm) = match totp.algorithm {
+        TotpAlgorithm::Sha1 => ("HMAC-SHA-1", "SHA1"),
+        TotpAlgorithm::Sha256 => ("HMAC-SHA-256", "SHA256"),
+        TotpAlgorithm::Sha512 => ("HMAC-SHA-512", "SHA512"),
+    };
+    attributes.insert_owned("otp", entry_otpauth_uri(entry, totp, uri_algorithm), true);
+    attributes.insert_value("TimeOtp-Secret-Base32", secret, true);
+    attributes.insert_static("TimeOtp-Algorithm", attribute_algorithm, false);
+    attributes.insert_owned(
+        "TimeOtp-Length",
+        Zeroizing::new(totp.digits.to_string()),
+        false,
+    );
+    attributes.insert_owned(
+        "TimeOtp-Period",
+        Zeroizing::new(totp.period_seconds.to_string()),
+        false,
+    );
 }
 
 /// Projects the TOTP represented by persistent source attributes using KDBX precedence rules.
@@ -856,23 +1267,30 @@ pub fn totp_from_persistent_attributes(fields: &BTreeMap<String, CustomField>) -
     }
 
     if let Some(uri_field) = fields.get("otp") {
-        let uri = TotpSpec::parse_otpauth(&uri_field.value).ok()?;
+        let uri = Zeroizing::new(TotpSpec::parse_otpauth(&uri_field.value).ok()?);
         if fields.contains_key("TimeOtp-Secret-Base32") {
-            let discrete = discrete_totp_from_persistent_attributes(fields)?;
-            if discrete.secret_base32 != uri.secret_base32
-                || discrete.algorithm != uri.algorithm
-                || discrete.digits != uri.digits
-                || discrete.period_seconds != uri.period_seconds
-            {
+            if !discrete_totp_matches(fields, &uri) {
                 return None;
             }
         } else if !present_discrete_totp_parameters_match(fields, &uri) {
             return None;
         }
-        return Some(uri);
+        return Some((*uri).clone());
     }
 
     discrete_totp_from_persistent_attributes(fields)
+}
+
+fn discrete_totp_matches(fields: &BTreeMap<String, CustomField>, uri: &TotpSpec) -> bool {
+    fields
+        .get("TimeOtp-Secret-Base32")
+        .is_some_and(|field| field.value == uri.secret_base32)
+        && parse_discrete_totp_algorithm(fields.get("TimeOtp-Algorithm"))
+            .is_some_and(|algorithm| algorithm == uri.algorithm)
+        && parse_discrete_totp_number(fields.get("TimeOtp-Length"), 6_u32)
+            .is_some_and(|digits| digits == uri.digits)
+        && parse_discrete_totp_number(fields.get("TimeOtp-Period"), 30_u64)
+            .is_some_and(|period| period == uri.period_seconds)
 }
 
 fn discrete_totp_from_persistent_attributes(
@@ -976,13 +1394,20 @@ pub fn is_totp_secret_persistent_attribute_key(key: &str) -> bool {
     )
 }
 
-fn entry_otpauth_uri(entry: &Entry, totp: &TotpSpec, algorithm: &str) -> String {
+fn entry_otpauth_uri(entry: &Entry, totp: &TotpSpec, algorithm: &str) -> Zeroizing<String> {
     let (label, issuer) = match (&totp.issuer, &totp.account_name) {
         (None, Some(account_name)) if !account_name.is_empty() => {
             (percent_encode_component(account_name), None)
         }
-        (issuer, account_name) => {
-            let issuer = issuer.as_deref().unwrap_or(&entry.title);
+        (None, _) => (
+            format!(
+                "{}:{}",
+                percent_encode_component(&entry.title),
+                percent_encode_component(&entry.username)
+            ),
+            Some(entry.title.as_str()),
+        ),
+        (Some(issuer), account_name) => {
             let account_name = account_name.as_deref().unwrap_or(&entry.username);
             (
                 format!(
@@ -990,14 +1415,15 @@ fn entry_otpauth_uri(entry: &Entry, totp: &TotpSpec, algorithm: &str) -> String 
                     percent_encode_component(issuer),
                     percent_encode_component(account_name)
                 ),
-                Some(issuer),
+                Some(issuer.as_str()),
             )
         }
     };
-    let mut uri = format!(
+    let encoded_secret = Zeroizing::new(percent_encode_component(&totp.secret_base32));
+    let mut uri = Zeroizing::new(format!(
         "otpauth://totp/{label}?secret={secret}",
-        secret = percent_encode_component(&totp.secret_base32),
-    );
+        secret = encoded_secret.as_str(),
+    ));
     if let Some(issuer) = issuer {
         uri.push_str("&issuer=");
         uri.push_str(&percent_encode_component(issuer));
@@ -1125,7 +1551,10 @@ impl Vault {
             meta_custom_data: BTreeMap::new(),
             meta_custom_data_blocks: Vec::new(),
             meta_raw_state: MetaRawState::default(),
-            root_raw_state: RootRawState::default(),
+            root_raw_state: RootRawState {
+                has_deleted_objects_node: true,
+                ..RootRawState::default()
+            },
             public_custom_data: BTreeMap::new(),
             deleted_objects: Vec::new(),
             maintenance_history_days: None,
@@ -1216,7 +1645,7 @@ fn merge_group(
             let existing = &mut target.entries[index];
             if incoming_entry.modified_at > existing.modified_at {
                 let mut snapshot = existing.clone();
-                snapshot.history.clear();
+                prepare_entry_history_snapshot(&mut snapshot);
                 let mut merged = incoming_entry.clone();
                 merged.history.push(snapshot);
                 normalize_entry_attachment_content(&mut merged, content_pool);
@@ -1288,7 +1717,7 @@ fn trim_encoded_label_spaces(mut input: &str) -> &str {
 
 fn percent_decode(input: &str) -> Result<String> {
     let bytes = input.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut decoded = Zeroizing::new(Vec::with_capacity(bytes.len()));
     let mut index = 0;
 
     while index < bytes.len() {
@@ -1309,7 +1738,13 @@ fn percent_decode(input: &str) -> Result<String> {
         }
     }
 
-    String::from_utf8(decoded).map_err(|_| ModelError::Unimplemented)
+    match String::from_utf8(std::mem::take(&mut *decoded)) {
+        Ok(decoded) => Ok(decoded),
+        Err(error) => {
+            let _invalid_bytes = Zeroizing::new(error.into_bytes());
+            Err(ModelError::Unimplemented)
+        }
+    }
 }
 
 fn decode_hex_byte(high: u8, low: u8) -> Option<u8> {
@@ -1329,9 +1764,9 @@ fn decode_hex_byte(high: u8, low: u8) -> Option<u8> {
 mod tests {
     use super::{
         Attachment, AttachmentContent, AttachmentContentId, AttachmentContentPool, CustomField,
-        Entry, Group, ModelError, PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
-        is_totp_persistent_attribute_key, materialize_entry_persistent_attributes,
-        totp_from_persistent_attributes,
+        Entry, Group, MaterializedPersistentValue, ModelError, OpaqueXmlAnchor, OpaqueXmlFragment,
+        PasskeyRecord, TotpAlgorithm, TotpSpec, Vault, is_totp_persistent_attribute_key,
+        materialize_entry_persistent_attributes, totp_from_persistent_attributes,
     };
     use std::collections::BTreeMap;
     use std::sync::{
@@ -1613,9 +2048,68 @@ mod tests {
 
         assert!(PasskeyRecord::from_attributes(&entry.attributes).is_none());
         let materialized = materialize_entry_persistent_attributes(&entry);
-        assert_eq!(materialized[PasskeyRecord::FLAG_BE_KEY].value, "yes");
-        assert!(materialized[PasskeyRecord::CREDENTIAL_ID_KEY].protected);
-        assert!(materialized[PasskeyRecord::PRIVATE_KEY_PEM_KEY].protected);
+        assert_eq!(materialized[PasskeyRecord::FLAG_BE_KEY].value(), "yes");
+        assert!(materialized[PasskeyRecord::CREDENTIAL_ID_KEY].protected());
+        assert!(materialized[PasskeyRecord::PRIVATE_KEY_PEM_KEY].protected());
+    }
+
+    #[test]
+    fn materialized_persistent_attributes_redact_secret_values_from_debug() {
+        let mut entry = Entry::new("debug redaction");
+        entry.attributes.insert(
+            PasskeyRecord::PRIVATE_KEY_PEM_KEY.into(),
+            CustomField {
+                value: "never-print-this-private-key".into(),
+                protected: false,
+            },
+        );
+
+        let materialized = materialize_entry_persistent_attributes(&entry);
+        let debug = format!("{materialized:?}");
+
+        assert!(!debug.contains("never-print-this-private-key"));
+    }
+
+    #[test]
+    fn materialized_persistent_attributes_borrow_sources_and_zeroize_owned_secrets() {
+        let mut entry = Entry::new("materialized lifecycle");
+        entry.attributes.insert(
+            "unchanged".into(),
+            CustomField {
+                value: "borrow-me".into(),
+                protected: false,
+            },
+        );
+        entry.totp = Some(TotpSpec {
+            secret_base32: "BORROWEDSECRET".into(),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: None,
+            account_name: None,
+        });
+        let attribute_pointer = entry.attributes["unchanged"].value.as_ptr();
+        let secret_pointer = entry
+            .totp
+            .as_ref()
+            .expect("TOTP projection")
+            .secret_base32
+            .as_ptr();
+
+        let materialized = materialize_entry_persistent_attributes(&entry);
+
+        assert_eq!(
+            materialized["unchanged"].value().as_ptr(),
+            attribute_pointer
+        );
+        assert_eq!(
+            materialized["TimeOtp-Secret-Base32"].value().as_ptr(),
+            secret_pointer
+        );
+        assert!(matches!(
+            &materialized.fields["otp"].value,
+            MaterializedPersistentValue::Owned(_)
+        ));
     }
 
     #[test]
@@ -1659,13 +2153,18 @@ mod tests {
 
         assert_eq!(materialized.len(), fields.len());
         for (key, original) in fields {
-            assert_eq!(materialized[&key].value, original.value, "value for {key}");
+            assert_eq!(
+                materialized[&key].value(),
+                original.value,
+                "value for {key}"
+            );
             let should_be_protected = !matches!(
                 key.as_str(),
                 "TimeOtp-Algorithm" | "TimeOtp-Length" | "TimeOtp-Period"
             );
             assert_eq!(
-                materialized[&key].protected, should_be_protected,
+                materialized[&key].protected(),
+                should_be_protected,
                 "protection for {key}"
             );
         }
@@ -1869,7 +2368,7 @@ mod tests {
 
         let materialized = materialize_entry_persistent_attributes(&entry);
         assert_eq!(materialized.len(), 5);
-        assert_eq!(materialized["TimeOtp-Secret-Base32"].value, "SECRET");
+        assert_eq!(materialized["TimeOtp-Secret-Base32"].value(), "SECRET");
         for stale_key in [
             "TimeOtp-Secret",
             "TimeOtp-Secret-Hex",
@@ -1935,40 +2434,33 @@ mod tests {
 
         assert_eq!(entry.attributes["otp"].value, "stale");
         assert_eq!(attributes.len(), 12);
+        let custom = attributes.get("Custom").expect("custom attribute");
+        assert_eq!(custom.value(), "kept");
+        assert!(!custom.protected());
+        let otp = attributes.get("otp").expect("OTP attribute");
         assert_eq!(
-            attributes.get("Custom"),
-            Some(&CustomField {
-                value: "kept".into(),
-                protected: false,
-            })
+            otp.value(),
+            "otpauth://totp/Example%20Login:alice%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example%20Login&algorithm=SHA512&digits=8&period=45"
         );
+        assert!(otp.protected());
+        let discrete_secret = attributes
+            .get("TimeOtp-Secret-Base32")
+            .expect("discrete TOTP secret");
+        assert_eq!(discrete_secret.value(), "JBSWY3DPEHPK3PXP");
+        assert!(discrete_secret.protected());
+        assert_eq!(attributes["TimeOtp-Algorithm"].value(), "HMAC-SHA-512");
+        assert_eq!(attributes["TimeOtp-Length"].value(), "8");
+        assert_eq!(attributes["TimeOtp-Period"].value(), "45");
         assert_eq!(
-            attributes.get("otp"),
-            Some(&CustomField {
-                value: "otpauth://totp/Example%20Login:alice%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example%20Login&algorithm=SHA512&digits=8&period=45".into(),
-                protected: true,
-            })
-        );
-        assert_eq!(
-            attributes.get("TimeOtp-Secret-Base32"),
-            Some(&CustomField {
-                value: "JBSWY3DPEHPK3PXP".into(),
-                protected: true,
-            })
-        );
-        assert_eq!(attributes["TimeOtp-Algorithm"].value, "HMAC-SHA-512");
-        assert_eq!(attributes["TimeOtp-Length"].value, "8");
-        assert_eq!(attributes["TimeOtp-Period"].value, "45");
-        assert_eq!(
-            attributes[PasskeyRecord::CREDENTIAL_ID_KEY].value,
+            attributes[PasskeyRecord::CREDENTIAL_ID_KEY].value(),
             "credential"
         );
-        assert!(attributes[PasskeyRecord::CREDENTIAL_ID_KEY].protected);
+        assert!(attributes[PasskeyRecord::CREDENTIAL_ID_KEY].protected());
         assert_eq!(
-            attributes[PasskeyRecord::PRIVATE_KEY_PEM_KEY].value,
+            attributes[PasskeyRecord::PRIVATE_KEY_PEM_KEY].value(),
             "private-key"
         );
-        assert!(attributes[PasskeyRecord::PRIVATE_KEY_PEM_KEY].protected);
+        assert!(attributes[PasskeyRecord::PRIVATE_KEY_PEM_KEY].protected());
         assert!(!attributes.contains_key(PasskeyRecord::GENERATED_USER_ID_KEY));
         assert!(!attributes.contains_key(PasskeyRecord::USER_HANDLE_KEY));
     }
@@ -1992,9 +2484,9 @@ mod tests {
 
             let attributes = materialize_entry_persistent_attributes(&entry);
 
-            assert_eq!(attributes["TimeOtp-Algorithm"].value, attribute_algorithm);
+            assert_eq!(attributes["TimeOtp-Algorithm"].value(), attribute_algorithm);
             assert_eq!(
-                attributes["otp"].value,
+                attributes["otp"].value(),
                 format!(
                     "otpauth://totp/Issuer:account?secret=SECRET&issuer=Issuer&algorithm={uri_algorithm}&digits=6&period=30"
                 )
@@ -2017,8 +2509,29 @@ mod tests {
         let attributes = materialize_entry_persistent_attributes(&entry);
 
         assert_eq!(
-            attributes["otp"].value,
+            attributes["otp"].value(),
             "otpauth://totp/Issuer:?secret=SECRET&issuer=Issuer&algorithm=SHA1&digits=6&period=30"
+        );
+    }
+
+    #[test]
+    fn persistent_totp_without_issuer_treats_an_empty_account_as_absent() {
+        let mut entry = Entry::new("Example");
+        entry.username = "fallback-account".into();
+        entry.totp = Some(TotpSpec {
+            secret_base32: "SECRET".into(),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: None,
+            account_name: Some(String::new()),
+        });
+
+        let attributes = materialize_entry_persistent_attributes(&entry);
+
+        assert_eq!(
+            attributes["otp"].value(),
+            "otpauth://totp/Example:fallback-account?secret=SECRET&issuer=Example&algorithm=SHA1&digits=6&period=30"
         );
     }
 
@@ -2080,6 +2593,15 @@ mod tests {
         base.id = uuid::Uuid::nil();
         base.password = "old-secret".into();
         base.modified_at = 10;
+        base.raw_state.node_order = vec!["Times".into(), "History".into()];
+        base.raw_state.has_history_node = true;
+        base.opaque_xml.push(OpaqueXmlFragment {
+            xml: "<AfterHistory />".into(),
+            after: Some(OpaqueXmlAnchor {
+                element_name: "History".into(),
+                occurrence: 1,
+            }),
+        });
         base.attachments.insert(
             "large.bin".into(),
             Attachment::new("large.bin", vec![0x3c; 1024 * 1024], false),
@@ -2098,6 +2620,15 @@ mod tests {
         assert_eq!(merged.password, "new-secret");
         assert_eq!(merged.history.len(), 1);
         assert_eq!(merged.history[0].password, "old-secret");
+        assert!(!merged.history[0].raw_state.has_history_node);
+        assert_eq!(merged.history[0].raw_state.node_order, ["Times"]);
+        assert_eq!(
+            merged.history[0].opaque_xml[0].after,
+            Some(OpaqueXmlAnchor {
+                element_name: "Times".into(),
+                occurrence: 1,
+            })
+        );
         assert!(
             merged.attachments["large.bin"]
                 .data

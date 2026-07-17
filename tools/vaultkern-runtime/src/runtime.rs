@@ -14,11 +14,11 @@ use sha2::{Digest, Sha256};
 use url::form_urlencoded::byte_serialize;
 use uuid::Uuid;
 use vaultkern_core::{
-    AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError, Entry,
-    EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    ExternalKdfConfirmation, ExternalKdfDecision, ExternalKdfPolicy, ExternalKdfRequest,
-    KdbxCipher, KdbxError, KdbxVersion, KdfPolicyEvaluator, KeepassCore, PasskeyRecord, SaveKdf,
-    SaveProfile, TotpSpec, Vault, required_version,
+    AttachmentContentUpdate, AttachmentMetadataUpdate, CompositeKey, Compression, CoreError,
+    CustomDataItemInput, Entry, EntryAttachmentInput, EntryCreate, EntryCustomFieldInput,
+    EntryTimesUpdate, EntryUpdate, ExternalKdfConfirmation, ExternalKdfDecision, ExternalKdfPolicy,
+    ExternalKdfRequest, KdbxCipher, KdbxError, KdbxVersion, KdfPolicyEvaluator, KeepassCore,
+    PasskeyRecord, SaveKdf, SaveProfile, TotpSpec, Vault, required_version,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
@@ -4952,6 +4952,7 @@ impl Runtime {
                 &pending_vault
             } else {
                 remove_pending_autofill_operation_receipt(
+                    &self.core,
                     &mut local_for_engine,
                     &chain.operation_id,
                 )?;
@@ -5920,7 +5921,11 @@ fn required_pending_autofill_receipt_binding(
         .context("pending autofill operation receipt is missing")
 }
 
-fn remove_pending_autofill_operation_receipt(vault: &mut Vault, operation_id: &str) -> Result<()> {
+fn remove_pending_autofill_operation_receipt(
+    core: &KeepassCore,
+    vault: &mut Vault,
+    operation_id: &str,
+) -> Result<()> {
     let ledger = vault
         .meta_custom_data
         .get(AUTOFILL_RECEIPT_KEY)
@@ -5941,11 +5946,15 @@ fn remove_pending_autofill_operation_receipt(vault: &mut Vault, operation_id: &s
     if receipts.len() + 1 != before {
         anyhow::bail!("pending autofill operation receipt is missing or duplicated");
     }
-    vault.meta_custom_data.insert(
-        AUTOFILL_RECEIPT_KEY.into(),
-        serde_json::to_string(&value)
-            .context("failed to rewrite pending autofill receipt ledger")?,
-    );
+    core.upsert_vault_custom_data(
+        vault,
+        CustomDataItemInput {
+            key: AUTOFILL_RECEIPT_KEY.into(),
+            value: serde_json::to_string(&value)
+                .context("failed to rewrite pending autofill receipt ledger")?,
+        },
+    )
+    .context("failed to reconcile the pending autofill receipt ledger")?;
     Ok(())
 }
 
@@ -8171,6 +8180,22 @@ mod tests {
             .unwrap()
     }
 
+    fn upsert_test_vault_custom_data(
+        core: &KeepassCore,
+        vault: &mut Vault,
+        key: &str,
+        value: &str,
+    ) {
+        core.upsert_vault_custom_data(
+            vault,
+            CustomDataItemInput {
+                key: key.into(),
+                value: value.into(),
+            },
+        )
+        .unwrap();
+    }
+
     fn entry_fields(detail: &EntryDetailDto) -> EntryFieldsDto {
         EntryFieldsDto {
             title: detail.title.clone(),
@@ -9243,9 +9268,7 @@ mod tests {
             let group = core.add_group(vault, &root_id, "Externally moved").unwrap();
             core.move_entry(vault, &moved.id, &group.id).unwrap();
             core.delete_entry(vault, &deleted.id).unwrap();
-            vault
-                .meta_custom_data
-                .insert("external-meta".into(), "preserved".into());
+            upsert_test_vault_custom_data(core, vault, "external-meta", "preserved");
             group.id
         };
         external.save_vault(&opened.vault_id).unwrap();
@@ -9363,15 +9386,17 @@ mod tests {
             matches!(committed, RuntimeResponse::AutofillPersistResult(_)),
             "unexpected initial persist response: {committed:?}"
         );
-        runtime
-            .vault_session
-            .find_loaded_mut(&opened.vault_id)
-            .unwrap()
-            .vault
-            .as_mut()
-            .unwrap()
-            .meta_custom_data
-            .insert("local-after-receipt".into(), "preserved".into());
+        {
+            let core = &runtime.core;
+            let vault = runtime
+                .vault_session
+                .find_loaded_mut(&opened.vault_id)
+                .unwrap()
+                .vault
+                .as_mut()
+                .unwrap();
+            upsert_test_vault_custom_data(core, vault, "local-after-receipt", "preserved");
+        }
 
         let mut external = Runtime::for_tests_at(1_700_000_026);
         let external_opened = external.open_local_vault(&opened.path).unwrap();
@@ -9979,9 +10004,11 @@ mod tests {
             .load_database(&remote_before, &key)
             .unwrap()
             .vault;
-        competing_cache_vault.meta_custom_data.insert(
-            "competing-cache-writer".into(),
-            "must-not-be-plan-baseline".into(),
+        upsert_test_vault_custom_data(
+            &runtime.core,
+            &mut competing_cache_vault,
+            "competing-cache-writer",
+            "must-not-be-plan-baseline",
         );
         let competing_cache_bytes = runtime
             .core
@@ -10409,9 +10436,12 @@ mod tests {
             .vault;
         core.delete_entry(&mut external_vault, &externally_deleted.id)
             .unwrap();
-        external_vault
-            .meta_custom_data
-            .insert("remote-during-pending".into(), "preserved".into());
+        upsert_test_vault_custom_data(
+            &core,
+            &mut external_vault,
+            "remote-during-pending",
+            "preserved",
+        );
         let external_bytes = core
             .save_kdbx(&external_vault, &key, SaveProfile::recommended())
             .unwrap();
@@ -10654,9 +10684,12 @@ mod tests {
             },
         )
         .unwrap();
-        changed_vault
-            .meta_custom_data
-            .insert("after-observed-source".into(), "preserved".into());
+        upsert_test_vault_custom_data(
+            &core,
+            &mut changed_vault,
+            "after-observed-source",
+            "preserved",
+        );
         let changed_bytes = core
             .save_kdbx(&changed_vault, &key, SaveProfile::recommended())
             .unwrap();
@@ -11617,9 +11650,7 @@ mod tests {
             },
         )
         .unwrap();
-        edited_vault
-            .meta_custom_data
-            .insert("post-receipt-meta".into(), "preserved".into());
+        upsert_test_vault_custom_data(&core, &mut edited_vault, "post-receipt-meta", "preserved");
         let edited_remote = core
             .save_kdbx(&edited_vault, &key, SaveProfile::recommended())
             .unwrap();

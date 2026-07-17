@@ -4,7 +4,7 @@ use vaultkern_core::{
     CompositeKey, CustomDataItemInput, CustomDataItemView, Entry, EntryCustomDataInput, Group,
     KeepassCore, PublicCustomDataItemInput, SaveProfile, Vault,
 };
-use vaultkern_model::{CustomDataBlock, CustomDataItem};
+use vaultkern_model::{CustomDataBlock, CustomDataItem, OpaqueXmlAnchor};
 
 const FIXTURE_NEW_DATABASE_BROWSER: &[u8] =
     include_bytes!("../../../fixtures/kdbx/NewDatabaseBrowser.kdbx");
@@ -40,7 +40,8 @@ fn facade_mutation_preserves_split_custom_data_blocks_on_roundtrip() {
             key: "meta-c".into(),
             value: "3".into(),
         },
-    );
+    )
+    .expect("upsert vault custom data");
     core.upsert_group_custom_data(
         &mut loaded,
         &group_id,
@@ -65,7 +66,8 @@ fn facade_mutation_preserves_split_custom_data_blocks_on_roundtrip() {
             key: "public-c".into(),
             value: b"3".to_vec(),
         },
-    );
+    )
+    .expect("upsert public custom data");
 
     let rewritten = core
         .save_kdbx(&loaded, &key, SaveProfile::recommended())
@@ -211,8 +213,15 @@ fn derived_external_fixture_mutation_preserves_split_custom_data_blocks() {
     assert_eq!(loaded.meta_custom_data_blocks.len(), 1);
     assert_eq!(loaded.root.entries[0].custom_data_blocks.len(), 1);
 
-    loaded.meta_custom_data_blocks = split_blocks(&loaded.meta_custom_data);
-    loaded.root.entries[0].custom_data_blocks = split_blocks(&loaded.root.entries[0].custom_data);
+    split_existing_blocks(
+        &mut loaded.meta_custom_data_blocks,
+        &loaded.meta_custom_data,
+    );
+    let entry_custom_data = loaded.root.entries[0].custom_data.clone();
+    split_existing_blocks(
+        &mut loaded.root.entries[0].custom_data_blocks,
+        &entry_custom_data,
+    );
 
     let split_bytes = core
         .save_kdbx(&loaded, &key, SaveProfile::recommended())
@@ -230,7 +239,8 @@ fn derived_external_fixture_mutation_preserves_split_custom_data_blocks() {
             key: "_LAST_MODIFIED".into(),
             value: "mutated-meta".into(),
         },
-    );
+    )
+    .expect("update vault custom data");
     core.upsert_entry_custom_data(
         &mut split_loaded,
         &root_entry_id,
@@ -277,8 +287,15 @@ fn derived_external_fixture_deletion_removes_only_affected_split_custom_data_blo
     let mut loaded = core
         .load_kdbx(FIXTURE_NEW_DATABASE_BROWSER, &key)
         .expect("load browser fixture");
-    loaded.meta_custom_data_blocks = split_blocks(&loaded.meta_custom_data);
-    loaded.root.entries[0].custom_data_blocks = split_blocks(&loaded.root.entries[0].custom_data);
+    split_existing_blocks(
+        &mut loaded.meta_custom_data_blocks,
+        &loaded.meta_custom_data,
+    );
+    let entry_custom_data = loaded.root.entries[0].custom_data.clone();
+    split_existing_blocks(
+        &mut loaded.root.entries[0].custom_data_blocks,
+        &entry_custom_data,
+    );
 
     let split_bytes = core
         .save_kdbx(&loaded, &key, SaveProfile::recommended())
@@ -320,7 +337,10 @@ fn derived_newdatabase_meta_mutation_preserves_split_custom_data_blocks() {
         .load_kdbx(FIXTURE_NEW_DATABASE, &key)
         .expect("load newdatabase fixture");
     assert_eq!(loaded.meta_custom_data_blocks.len(), 1);
-    loaded.meta_custom_data_blocks = split_blocks(&loaded.meta_custom_data);
+    split_existing_blocks(
+        &mut loaded.meta_custom_data_blocks,
+        &loaded.meta_custom_data,
+    );
 
     let split_bytes = core
         .save_kdbx(&loaded, &key, SaveProfile::recommended())
@@ -336,7 +356,8 @@ fn derived_newdatabase_meta_mutation_preserves_split_custom_data_blocks() {
             key: "_LAST_MODIFIED".into(),
             value: "mutated-newdb-meta".into(),
         },
-    );
+    )
+    .expect("update new database custom data");
 
     let rewritten = core
         .save_kdbx(&split_loaded, &key, SaveProfile::recommended())
@@ -534,7 +555,7 @@ fn split_custom_data_source_vault() -> Vault {
         },
         CustomDataBlock {
             items: vec![custom_data_item("meta-b", "2")],
-            after: None,
+            after: after_first_custom_data_block(),
         },
     ];
     vault
@@ -554,7 +575,7 @@ fn split_custom_data_source_vault() -> Vault {
         },
         CustomDataBlock {
             items: vec![custom_data_item("group-b", "2")],
-            after: None,
+            after: after_first_custom_data_block(),
         },
     ];
 
@@ -568,7 +589,7 @@ fn split_custom_data_source_vault() -> Vault {
         },
         CustomDataBlock {
             items: vec![custom_data_item("entry-b", "2")],
-            after: None,
+            after: after_first_custom_data_block(),
         },
     ];
 
@@ -578,6 +599,21 @@ fn split_custom_data_source_vault() -> Vault {
 }
 
 fn split_blocks(map: &std::collections::BTreeMap<String, String>) -> Vec<CustomDataBlock> {
+    split_blocks_after(map, None)
+}
+
+fn split_existing_blocks(
+    blocks: &mut Vec<CustomDataBlock>,
+    map: &std::collections::BTreeMap<String, String>,
+) {
+    let first_after = blocks.first().and_then(|block| block.after.clone());
+    *blocks = split_blocks_after(map, first_after);
+}
+
+fn split_blocks_after(
+    map: &std::collections::BTreeMap<String, String>,
+    first_after: Option<OpaqueXmlAnchor>,
+) -> Vec<CustomDataBlock> {
     let items = map
         .iter()
         .map(|(key, value)| CustomDataItem {
@@ -593,13 +629,20 @@ fn split_blocks(map: &std::collections::BTreeMap<String, String>) -> Vec<CustomD
     vec![
         CustomDataBlock {
             items: vec![items[0].clone()],
-            after: None,
+            after: first_after,
         },
         CustomDataBlock {
             items: items[1..].to_vec(),
-            after: None,
+            after: after_first_custom_data_block(),
         },
     ]
+}
+
+fn after_first_custom_data_block() -> Option<OpaqueXmlAnchor> {
+    Some(OpaqueXmlAnchor {
+        element_name: "CustomData".into(),
+        occurrence: 1,
+    })
 }
 
 fn custom_data_item(key: &str, value: &str) -> CustomDataItem {

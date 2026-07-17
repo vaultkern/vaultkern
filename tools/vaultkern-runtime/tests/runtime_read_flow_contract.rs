@@ -4644,6 +4644,7 @@ fn runtime_returns_entry_history_through_protocol_commands() {
     entry.notes = "current note".into();
 
     let mut snapshot = Entry::new("Old Example");
+    snapshot.id = entry.id;
     snapshot.username = "alice-old".into();
     snapshot.password = "old-secret".into();
     snapshot.url = "https://example.com/old".into();

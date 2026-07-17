@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::{
-    AttachmentContentId, AutoTypeConfig, CustomDataBlock, CustomField, Entry, EntryFieldProtection,
-    materialize_entry_persistent_attributes,
+    AttachmentContentId, AutoTypeConfig, CustomDataBlock, Entry, EntryFieldProtection,
+    MaterializedPersistentAttributes, materialize_entry_persistent_attributes,
 };
 
 pub const CANONICAL_SERIALIZATION_MAGIC: [u8; 4] = *b"VKCS";
@@ -101,7 +102,7 @@ struct CanonicalEntryReference<'a> {
     notes: &'a str,
     field_protection: &'a EntryFieldProtection,
     tags: &'a BTreeSet<String>,
-    attributes: BTreeMap<String, CustomField>,
+    attributes: MaterializedPersistentAttributes<'a>,
     attachments: Vec<(&'a str, AttachmentReference)>,
     icon_id: &'a Option<u32>,
     custom_icon_id: &'a Option<Uuid>,
@@ -369,17 +370,11 @@ fn canonical_entry_reference_bytes_v1(
     encoder.write_bool(entry.field_protection.protect_notes);
 
     encoder.write_set(entry.tags.iter(), |encoder, tag| encoder.write_text(tag))?;
-    encoder.write_string_map(
-        entry
-            .attributes
-            .iter()
-            .map(|(key, value)| (key.as_str(), value)),
-        |encoder, field| {
-            encoder.write_text(&field.value)?;
-            encoder.write_bool(field.protected);
-            Ok(())
-        },
-    )?;
+    encoder.write_string_map(entry.attributes.iter(), |encoder, field| {
+        encoder.write_text(field.value())?;
+        encoder.write_bool(field.protected());
+        Ok(())
+    })?;
     encoder.write_attachment_map(entry.attachments.into_iter())?;
 
     encoder.write_option(entry.icon_id.as_ref(), |encoder, value| {
@@ -469,7 +464,7 @@ pub fn canonical_entry_bytes_v1(entry: &Entry) -> Result<Vec<u8>, CanonicalSeria
 pub fn canonical_entry_content_hash_v1(
     entry: &Entry,
 ) -> Result<[u8; 32], CanonicalSerializationError> {
-    let bytes = canonical_entry_bytes_v1(entry)?;
+    let bytes = Zeroizing::new(canonical_entry_bytes_v1(entry)?);
     Ok(vaultkern_crypto::sha256_bytes(&bytes))
 }
 
@@ -1711,7 +1706,8 @@ mod tests {
         });
         projection_only.passkey = Some(passkey);
         let mut explicitly_backed = projection_only.clone();
-        explicitly_backed.attributes = materialize_entry_persistent_attributes(&projection_only);
+        explicitly_backed.attributes =
+            materialize_entry_persistent_attributes(&projection_only).to_custom_fields_for_test();
 
         let projection_bytes = canonical_bytes(&projection_only);
         assert_eq!(projection_bytes, canonical_bytes(&explicitly_backed));
@@ -1733,7 +1729,8 @@ mod tests {
     fn projections_are_encoded_only_through_the_materialized_attributes_field() {
         let projected = fully_populated_entry();
         let mut explicitly_materialized = projected.clone();
-        explicitly_materialized.attributes = materialize_entry_persistent_attributes(&projected);
+        explicitly_materialized.attributes =
+            materialize_entry_persistent_attributes(&projected).to_custom_fields_for_test();
         explicitly_materialized.totp = None;
         explicitly_materialized.passkey = None;
 
@@ -1765,6 +1762,7 @@ mod tests {
                     tags_raw: Some("raw-tags".into()),
                     quality_check_raw: Some("raw-quality".into()),
                     has_history_node: true,
+                    ..EntryRawState::default()
                 };
             }),
             ("opaque_xml", |entry| {

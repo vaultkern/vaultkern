@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 use vaultkern_core::{
-    CustomField, Entry, EntryCreate, Group, KeepassCore, MutationError, TotpAlgorithm, TotpSpec,
-    Vault, is_totp_persistent_attribute_key,
+    CustomDataItemInput, CustomField, Entry, EntryCreate, Group, KeepassCore, MutationError,
+    TotpAlgorithm, TotpSpec, Vault, is_totp_persistent_attribute_key,
 };
 use vaultkern_runtime_protocol::{
     AutofillPersistConflictCodeDto, AutofillPersistPlanDto, EntryFieldsDto,
@@ -278,9 +278,8 @@ fn merge_autofill_candidate(
         "vault metadata",
     )?;
     candidate.meta_custom_data = merge_unknown_meta_custom_data(baseline, local, current)?;
-    // Blocks are a serialization layout for the semantic map. Starting from
-    // the durable source preserves its opaque layout when possible; the KDBX
-    // writer canonicalizes it if the merged map no longer matches.
+    // Start from the durable block layout. The receipt-ledger Core mutation
+    // later reconciles it with the merged map before the candidate can be saved.
     candidate.meta_custom_data_blocks = current.meta_custom_data_blocks.clone();
     candidate.deleted_objects = deleted_objects
         .values()
@@ -921,6 +920,7 @@ pub(crate) fn prepare_autofill_persist(
         )?;
         protect_target_xml_forbidden_fields(&mut candidate, plan.entry_id());
         write_pruned_ledger(
+            &core,
             &mut candidate,
             merged_receipts.into_values().collect(),
             input.operation_id,
@@ -967,6 +967,7 @@ pub(crate) fn prepare_autofill_persist(
     protect_target_xml_forbidden_fields(&mut candidate, plan.entry_id());
     insert_receipt(&mut merged_receipts, intended_receipt)?;
     write_pruned_ledger(
+        &core,
         &mut candidate,
         merged_receipts.into_values().collect(),
         input.operation_id,
@@ -1426,6 +1427,7 @@ fn insert_receipt(
 }
 
 fn write_pruned_ledger(
+    core: &KeepassCore,
     candidate: &mut Vault,
     mut receipts: Vec<AutofillReceipt>,
     current_operation_id: &str,
@@ -1462,9 +1464,14 @@ fn write_pruned_ledger(
     if json.len() > MAX_LEDGER_BYTES {
         return invalid_ledger("encoded receipt ledger is too large");
     }
-    candidate
-        .meta_custom_data
-        .insert(AUTOFILL_RECEIPT_KEY.into(), json);
+    core.upsert_vault_custom_data(
+        candidate,
+        CustomDataItemInput {
+            key: AUTOFILL_RECEIPT_KEY.into(),
+            value: json,
+        },
+    )
+    .map_err(mutation_error)?;
     Ok(())
 }
 
@@ -2734,7 +2741,16 @@ mod tests {
             value: "custom\0value".into(),
             protected: false,
         });
-        let current = vault_with_entry(&desired);
+        let mut current = vault_with_entry(&fields("secret"));
+        let entry = find_entry_mut(&mut current, ENTRY_ID).unwrap();
+        entry.username.clone_from(&desired.username);
+        entry.attributes.insert(
+            "UnsafeValue".into(),
+            CustomField {
+                value: "custom\0value".into(),
+                protected: false,
+            },
+        );
 
         let prepared = execute(&current, &current, &update_plan(desired.clone(), desired)).unwrap();
         let entry = find_entry(&prepared.candidate, ENTRY_ID).unwrap().0;

@@ -3265,6 +3265,7 @@ dependencies = [
  "vaultkern-crypto",
  "vaultkern-model",
  "xmltree",
+ "zeroize",
 ]
 
 [[package]]
@@ -3275,6 +3276,7 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "vaultkern-crypto",
+ "zeroize",
 ]
 
 [[package]]

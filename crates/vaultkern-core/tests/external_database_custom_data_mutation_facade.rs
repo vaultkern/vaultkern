@@ -133,14 +133,16 @@ fn apply_browser_mutation(core: &KeepassCore, vault: &mut Vault) {
             key: "_LAST_MODIFIED".into(),
             value: "Fri Apr 11 12:00:00 2026 GMT".into(),
         },
-    );
+    )
+    .expect("update vault custom data");
     core.upsert_vault_custom_data(
         vault,
         CustomDataItemInput {
             key: "KPXC_BROWSER_stage".into(),
             value: "stage-browser".into(),
         },
-    );
+    )
+    .expect("insert vault custom data");
     core.delete_vault_custom_data(vault, "KPXC_BROWSER_test")
         .expect("delete browser custom data item");
 }
@@ -152,14 +154,16 @@ fn apply_new_database_mutation(core: &KeepassCore, vault: &mut Vault) {
             key: "_LAST_MODIFIED".into(),
             value: "Fri Apr 11 13:00:00 2026 GMT".into(),
         },
-    );
+    )
+    .expect("restore vault custom data");
     core.upsert_vault_custom_data(
         vault,
         CustomDataItemInput {
             key: "STAGE_FLAG".into(),
             value: "enabled".into(),
         },
-    );
+    )
+    .expect("restore second vault custom data");
     core.delete_vault_custom_data(vault, "FDO_SECRETS_EXPOSED_GROUP")
         .expect("delete new-database custom data item");
 }

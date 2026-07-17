@@ -16,3 +16,4 @@ vaultkern-model = { path = "../vaultkern-model" }
 thiserror.workspace = true
 uuid.workspace = true
 xmltree.workspace = true
+zeroize.workspace = true

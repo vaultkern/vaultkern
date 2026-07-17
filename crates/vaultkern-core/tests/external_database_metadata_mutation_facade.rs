@@ -105,17 +105,19 @@ fn apply_database_metadata_mutation(
         .id
         .to_string();
 
-    let metadata = core.update_vault_metadata(
-        vault,
-        VaultMetadataUpdate {
-            description: Some("External database description".into()),
-            default_username: Some("external-default-user".into()),
-            color: Some("#224466".into()),
-            history_max_items: Some(24),
-            history_max_size: Some(12_345_678),
-            memory_protection: Some(external_memory_protection()),
-        },
-    );
+    let metadata = core
+        .update_vault_metadata(
+            vault,
+            VaultMetadataUpdate {
+                description: Some("External database description".into()),
+                default_username: Some("external-default-user".into()),
+                color: Some("#224466".into()),
+                history_max_items: Some(24),
+                history_max_size: Some(12_345_678),
+                memory_protection: Some(external_memory_protection()),
+            },
+        )
+        .expect("update external database metadata");
     assert_eq!(
         metadata.description.as_deref(),
         Some("External database description")

@@ -55,7 +55,7 @@ fn external_format400_fixture_exposes_rich_oracle() {
                 Some(1_489_501_066),
                 (false, false, true, false, false),
                 10,
-                1,
+                0,
             ),
             root: ("Format400".into(), Some(49), Some(true), 1, 0),
             entry: EntryDigest {
@@ -106,7 +106,7 @@ fn external_format400_fixture_preserves_rich_semantics_on_roundtrip() {
             before.database.1,
             before.database.2,
             before.database.3,
-            2,
+            0,
         )
     );
     assert_eq!(after.root, before.root);
