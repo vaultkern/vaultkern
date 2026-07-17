@@ -1,7 +1,8 @@
 # 000 — Architecture Decision Record (Phase 0)
 
-Status: **Frozen — r14** (seven external review rounds + four freeze-hardening
-rounds + PR-review fixes + the coordinated 006 persistence freeze). 2026-07-17.
+Status: **Frozen — r15** (seven external review rounds + four freeze-hardening
+rounds + PR-review fixes + the coordinated 006 persistence freeze + the 006 r5
+operational amendments). 2026-07-17.
 Amendments only via the 000 revision process; contracts evolve additively per
 the 003 version matrix.
 
@@ -278,3 +279,15 @@ KDF caps.
   persistence-valid model states, canonical field-9 materialization, KDBX
   read/write capability, fidelity transformations, and executable external
   interoperability gates. The 001 merge semantics remain unchanged.
+- r15 (2026-07-17): 006 r5 operational amendments from the post-merge review
+  rounds on PR #35/#36. Ordinary saves re-emit the loaded `KdfParameters`
+  verbatim so `kdf_generation` is stable by construction (002 salt policy made
+  explicit); the previously ungoverned Option-typed entry wire spellings are
+  pinned, with `location_changed_at` required present and canonicalized to
+  001's absent≡epoch value; TOTP label parsing is disambiguated
+  (literal-first, hex-case-insensitive separator). 001 is bumped to r14,
+  totalizing its location and `usage_count` tie rules; the only previously
+  defined outcome that changes is the degenerate absent-versus-present-epoch
+  location corner, which becomes the tie branch so absence and the epoch
+  form one equivalence class. D1's decision is unchanged; the operational
+  contract beneath it is refined via 006 r5 and 001 r14.

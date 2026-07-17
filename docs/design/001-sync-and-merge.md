@@ -1,6 +1,6 @@
 # 001 — Sync and Merge Semantics
 
-Status: **Frozen — r13** (seven external review rounds + four freeze-hardening rounds + PR-review fixes). 2026-07-13. Amendments only via the 000 revision process; contracts evolve additively per the 003 version matrix.
+Status: **Frozen — r14** (seven external review rounds + four freeze-hardening rounds + PR-review fixes; r14 totalizes two tie rules with 006 r5). 2026-07-17. Amendments only via the 000 revision process; contracts evolve additively per the 003 version matrix.
 Upstream decision: D1 (000).
 
 ## Model
@@ -75,9 +75,14 @@ identical bytes, or same-second ties diverge.
 
 Edge rules:
 
-- `location_changed_at` absent is treated as the epoch (loses to any present
-  value); if absent on both sides and the groups differ, the winner is chosen
-  by byte-wise ordering of the two group UUIDs — deterministic on both ends.
+- `location_changed_at` comparison first normalizes absence to the epoch;
+  then a strictly newer normalized value wins, and if the normalized values
+  are equal — both absent, both the epoch, or one of each — and the groups
+  differ, the winner is the parent group whose UUID is byte-wise greater —
+  the same greater-wins direction 005 §6 pins for hash ties — deterministic
+  on both ends. Absence and a present epoch value are one
+  equivalence class in every branch, so a loader that canonicalizes absence
+  to the epoch cannot change any outcome.
   This corner is **arbitrary by necessity**: KDBX records only
   `previous_parent` + `location_changed_at`, no move lineage, and inventing a
   richer versioned location object would break interoperability (third-party
@@ -92,7 +97,10 @@ Edge rules:
 
 Supplementary rules:
 
-- `usage_count` merges as max.
+- `usage_count` merges as max; when the maxima are numerically equal across
+  different optional spellings, the present spelling (`Some(0)` over `None`)
+  is the merged result, so both merge directions converge on one canonical
+  encoding.
 - Timestamps are second-granularity local clocks. **The backstop for ties and
   clock skew is deterministic tie-breaking + history**: any discarded version
   of **entry data** must be recoverable from history, **subject to the
@@ -152,3 +160,16 @@ against real fixture files, not assumed.
    secure storage (DPAPI / Keychain / Keystore).
 3. Windows quick unlock records use non-atomic `fs::write`: unify on the
    durable atomic write path.
+
+## Revision history
+
+- r13 (2026-07-13): Phase 0 frozen baseline.
+- r14 (2026-07-17): coordinated with 006 r5. Two tie rules are made total:
+  the location comparison normalizes absence to the epoch before comparing —
+  strictly newer wins, equal breaks by the byte-wise greater group UUID
+  (005 §6's greater-wins direction) — and a
+  numerically equal `usage_count` maximum across different optional
+  spellings resolves to the present spelling. The only r13 outcome this
+  changes is the degenerate absent-versus-present-epoch corner, which
+  becomes the tie branch so that absence and the epoch form one equivalence
+  class in every rule.
