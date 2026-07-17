@@ -1,8 +1,9 @@
 # 006 — Canonical Persistence and Model Validity Invariants
 
-Status: **Frozen — r4**. 2026-07-17. Additive operational amendment to 000 D1
+Status: **Frozen — r5**. 2026-07-17. Additive operational amendment to 000 D1
 and 005, frozen after the r3 contract review and the interoperability/evidence
-gates in §10 passed.
+gates in §10 passed; r5 amends the frozen text for the PR #35 post-merge
+review findings (§12).
 
 Upstream: 000 D1 (KDBX interoperability), 001 (merge consumers), and 005
 (canonical entry serialization v1).
@@ -63,10 +64,16 @@ Let:
 - `VG(v)` be the modeled Vault/Meta/Group structural view defined below;
 - `T(v)` be the map from deleted-object UUID to its latest deletion time.
 
-A save profile is the tuple `(version, outer cipher, compression, KDF and all
-KDF parameters)`. The composite key is an input to serialization, not a profile
-property. Random master seeds, KDF salt/seed material, IVs, inner-stream keys,
-and block nonces are fresh physical output and are not profile properties.
+A save profile is the tuple `(version, outer cipher, compression, KDF
+algorithm and its work-factor parameters)`. The composite key is an input to
+serialization, not a profile property. The KDF salt/seed is neither a profile
+property nor fresh physical output: its lifecycle is owned by 002's rotation
+policy — an ordinary vaultkern save MUST reuse the vault's existing KDF salt,
+and only a master-credential change or an explicit KDF parameter change
+rotates it, because `kdf_generation` hashes the full `KdfParameters` including
+the salt and per-save rotation would invalidate every quick-unlock envelope on
+every save. Random master seeds, IVs, inner-stream keys, and block nonces are
+fresh physical output on every save and are not profile properties.
 
 `VG(v)` contains every modeled Vault/Meta field except `deleted_objects`, every
 modeled Group field recursively, custom-icon content and metadata, public
@@ -248,9 +255,13 @@ unprojectable so the original `otp` value and companion keys are preserved.
 Missing algorithm, digits, or period use SHA-1, 6, and 30. Present algorithm
 values are limited to `SHA1`, `SHA256`, `SHA512` and their `HMAC-SHA-*`
 spellings, case-insensitively; present digits and period must parse as their
-model integer types. The `issuer` query parameter overrides a label issuer. A
-literal `:` or the first percent-encoded `%3A` separates label issuer and
-account; otherwise the decoded non-empty label is the account. With the encoded
+model integer types. The `issuer` query parameter overrides a label issuer. The
+first literal `:` separates label issuer and account; only when the label
+contains no literal `:` does the first percent-encoded `%3A` separate them;
+otherwise the decoded non-empty label is the account. A literal separator
+always takes precedence over `%3A`, so re-parsing an emitted label — whose
+only literal `:` is the separator and whose content colons are `%3A` —
+inverts the emission exactly. With the encoded
 separator form, leading `%20` sequences in the account are ignored. Valid
 `%HH` sequences are decoded and malformed escapes stay literal. If decoding
 any label or query value would produce invalid UTF-8, the URI is unprojectable;
@@ -278,8 +289,9 @@ The displayed line break is not emitted. Components are UTF-8 percent-encoded
 byte by byte; only `ALPHA / DIGIT / "-" / "." / "_" / "~"` remain literal,
 and hexadecimal digits are uppercase. Issuer and account are encoded as two
 separate components and joined by one literal `:` byte; the separator is never
-encoded as `%3A`. A `:` inside either source component is encoded as `%3A`, so
-the split is unambiguous. Query parameters occur in the shown order.
+encoded as `%3A`. A `:` inside either source component is encoded as `%3A`, and
+the literal-first parsing rule above makes the split unambiguous. Query
+parameters occur in the shown order.
 
 `TotpSpec.secret_base32` is a stored spelling, not decoded secret bytes. Both
 the URI `secret=` value and `TimeOtp-Secret-Base32` emit that string verbatim
@@ -297,6 +309,15 @@ Label and issuer fallback are:
    issuer query parameter is emitted.
 3. Without an issuer and with an absent or empty account, label is
    `Entry.title:Entry.username` and `Entry.title` is emitted as issuer.
+
+Fallback 2 emits no literal separator, so a content colon in its label would
+re-parse as an issuer/account split. A modeled TOTP with no issuer whose
+account contains `:` therefore has no invertible URI spelling and is outside
+`P`; enrollment and mutation APIs MUST reject it or require an issuer. The
+parser never produces that state: a parsed account contains a colon only when
+a separator preceded it, which implies an issuer. Under literal-first
+precedence, fallbacks 1 and 3 and every parser-produced projection re-parse
+to themselves exactly.
 
 These URI rules and the parser precedence/defaults above are part of `A(e)` and
 therefore part of canonical v1 behavior.
@@ -549,6 +570,31 @@ clear to `None`; direct `Some("")` construction is rejected before save. Entry
 foreground/background colors and override URL are not in this list because
 their loader preserves present-empty distinctly.
 
+For the remaining Option-typed entry fields that 005 encodes and that neither
+§3, §5, nor the preceding paragraphs govern — `icon_id`, `expiry_time`,
+`last_accessed_at`, `usage_count`, `location_changed_at`, and `auto_type`, for
+current and history entries alike — the wire spelling is pinned to the model
+spelling: the writer emits the element only when the value is present, and the
+loader maps an absent or whitespace-only element to `None`. Materializing a
+default (`IconID` `0`, a default `AutoType` node, or any absent `Times` child)
+for an absent model value is forbidden: it would change `C1` across a
+vaultkern round trip and violate law 5. `Expires` is always written;
+`expiry_time` alone follows the optional rule. Inside a present `AutoType`
+element the same rule applies per child: `Enabled` and `DefaultSequence` are
+emitted only when modeled. A present, non-blank element in these fields whose
+content does not parse as the field's type fails the load with a structured
+error rather than collapsing to `None`, matching the UUID rule above.
+
+Accepted consequence, recorded deliberately: KeePass materializes these
+elements unconditionally on its own saves, so a third-party save of a
+vaultkern file that omitted them yields concrete values — for
+`LastAccessTime`, even a third-party load-time value — where vaultkern stored
+`None`, changing `C1` without a semantic edit. 001's same-second tie rule
+resolves that divergence deterministically. Product-created entries do not
+hit this: `Entry::new` populates `icon_id` and `auto_type`, so the `None`
+spellings arise only from third-party files that already omitted the
+elements, where the drift pre-exists.
+
 Interoperability basis: the pinned KeePass writer emits `CustomIconUUID` only
 when `CustomIconUuid.IsZero` is false ([KeePass source at
 `d1eec63`](https://github.com/dlech/KeePass2.x/blob/d1eec63f1bd73dc2d5273eaf94528f616b553ce5/KeePassLib/Serialization/KdbxFile.Write.cs)).
@@ -628,6 +674,8 @@ Entry. At minimum it checks:
   Unicode whitespace. KeePass splits on both delimiters and trims before
   replacing embedded separators, as pinned by
   [`StrUtil.cs`](https://github.com/dlech/KeePass2.x/blob/d1eec63f1bd73dc2d5273eaf94528f616b553ce5/KeePassLib/Utility/StrUtil.cs);
+- the §3.1 invertible-spelling rule: a modeled TOTP with no issuer MUST NOT
+  have an account containing `:`;
 - the optional-text canonical form in §7 and every modeled UUID uniqueness /
   known-node multiplicity rule in §6;
 - the requirement that a history snapshot's own `history` list is empty; KDBX
@@ -677,8 +725,9 @@ At minimum, tests cover:
 | Dimension | Required cases |
 |---|---|
 | typed optional UUID | absent, empty, whitespace-only, nil sentinel, valid non-nil, malformed, direct `Some(nil)` rejection |
-| optional/default model values | every `VG` default; every §7 optional-empty rejection; present-empty Entry color/URL preservation |
-| TOTP | projection only; URI/discrete source only; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; full-family clear/removal/protection/hiding |
+| optional/default model values | every `VG` default; every §7 optional-empty rejection; present-empty Entry color/URL preservation; absent↔`None` round-trip for every §7-pinned entry field (current and history); malformed numeric/boolean element rejection |
+| save profile | ordinary save reuses the loaded KDF salt with stable `kdf_generation`; rotation only on master-credential or explicit KDF parameter change; fresh master seed/IV per save |
+| TOTP | projection only; URI/discrete source only; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; content-colon labels (issuer, account-with-issuer, title fallback); no-issuer account-colon rejection; full-family clear/removal/protection/hiding |
 | passkey | projection only, projectable source only, equivalent/conflicting cache, incomplete sensitive source, missing optional fields, invalid flag spelling, loaded strings verbatim, exact first-write base64url/PKCS#8 PEM profile |
 | CustomData | empty, matched map/blocks, duplicate keys, timestamps, map-only mismatch, block-only mismatch, empty block |
 | attachments | matched key/name, mismatched key/name rejection, rename, empty name |
@@ -814,6 +863,21 @@ document PR; rebasing or merging it MUST preserve these artifacts and gates.
 
 ## 12. Revision history
 
+- r5 (2026-07-17): amendments for the PR #35 post-merge review findings.
+  Redefines the save profile as algorithm/work-factor parameters only and
+  places the KDF salt lifecycle under 002's rotation policy (ordinary saves
+  reuse the salt; rotation only on master-credential or explicit KDF change).
+  Pins the absent↔`None` wire mapping for the previously ungoverned
+  Option-typed entry fields, forbids default materialization, makes malformed
+  numeric/boolean elements fail the load, and records the accepted
+  third-party materialization consequence. Pins literal-`:`-first label
+  parsing and places the non-invertible no-issuer content-colon TOTP spelling
+  outside `P`. The reviewer's fourth comment (interoperability workflow not
+  yet on `main`) required no text change: §10.2 already binds the sequenced
+  implementation PR to preserve the evidence artifacts. No canonical byte
+  layout, `A(e)` emission spelling, or golden bytes change; the parser
+  precedence resolves a previously ambiguous reading rather than altering a
+  defined behavior, so the 005 `schema_version` process is not triggered.
 - r4 (2026-07-17): frozen after r3 review. Records passed evidence for an
   external KeePassXC-generated KDBX 4.1 fixture, mandatory 4.0/4.1
   `keepassxc-cli` decrypt/enumerate gates, and the executable field-9-only
