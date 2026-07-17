@@ -78,8 +78,9 @@ Edge rules:
 - `location_changed_at` comparison first normalizes absence to the epoch;
   then a strictly newer normalized value wins, and if the normalized values
   are equal — both absent, both the epoch, or one of each — and the groups
-  differ, the winner is chosen by byte-wise ordering of the two group UUIDs —
-  deterministic on both ends. Absence and a present epoch value are one
+  differ, the winner is the parent group whose UUID is byte-wise greater —
+  the same greater-wins direction 005 §6 pins for hash ties — deterministic
+  on both ends. Absence and a present epoch value are one
   equivalence class in every branch, so a loader that canonicalizes absence
   to the epoch cannot change any outcome.
   This corner is **arbitrary by necessity**: KDBX records only
@@ -165,7 +166,8 @@ against real fixture files, not assumed.
 - r13 (2026-07-13): Phase 0 frozen baseline.
 - r14 (2026-07-17): coordinated with 006 r5. Two tie rules are made total:
   the location comparison normalizes absence to the epoch before comparing —
-  strictly newer wins, equal breaks by group-UUID ordering — and a
+  strictly newer wins, equal breaks by the byte-wise greater group UUID
+  (005 §6's greater-wins direction) — and a
   numerically equal `usage_count` maximum across different optional
   spellings resolves to the present spelling. The only r13 outcome this
   changes is the degenerate absent-versus-present-epoch corner, which

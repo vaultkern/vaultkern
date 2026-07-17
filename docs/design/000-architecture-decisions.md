@@ -286,6 +286,8 @@ KDF caps.
   pinned, with `location_changed_at` required present and canonicalized to
   001's absent≡epoch value; TOTP label parsing is disambiguated
   (literal-first, hex-case-insensitive separator). 001 is bumped to r14,
-  totalizing its location and `usage_count` tie rules with no previously
-  defined outcome changed. D1's decision is unchanged; the operational
+  totalizing its location and `usage_count` tie rules; the only previously
+  defined outcome that changes is the degenerate absent-versus-present-epoch
+  location corner, which becomes the tie branch so absence and the epoch
+  form one equivalence class. D1's decision is unchanged; the operational
   contract beneath it is refined via 006 r5 and 001 r14.

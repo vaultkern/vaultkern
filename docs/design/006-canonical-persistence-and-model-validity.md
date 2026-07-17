@@ -279,10 +279,13 @@ unprojectable so the original `otp` value and companion keys are preserved.
 The decoded account MUST be non-empty after separator handling: an
 empty-account label such as `Issuer:` makes the URI unprojectable and it
 follows the raw-retention path, never a structured `TotpSpec` that would
-violate `P`. An empty decoded label issuer is treated as no issuer; if the
-remaining account then contains a colon, literal or encoded, the URI is
-likewise unprojectable — this keeps the invariant that a parsed projection
-never pairs a colon-bearing account with no issuer.
+violate `P`. An empty decoded issuer — whether from the label or from an
+empty `issuer` query value, which likewise means no issuer — never yields
+an issuer. As a final gate after every label and query rule: if the parse
+result would pair no issuer with an account containing a colon, the URI is
+unprojectable and follows the raw-retention path, whatever path produced
+that combination. This keeps the invariant that a parsed projection never
+pairs a colon-bearing account with no issuer.
 Missing algorithm, digits, or period use SHA-1, 6, and 30. Present algorithm
 values are limited to `SHA1`, `SHA256`, `SHA512` and their `HMAC-SHA-*`
 spellings, case-insensitively; present digits and period must parse as their
@@ -348,8 +351,8 @@ re-parse as an issuer/account split. A modeled TOTP with no issuer whose
 account contains `:` therefore has no invertible URI spelling and is outside
 `P`; enrollment and mutation APIs MUST reject it or require an issuer. The
 parser never produces that state: a parsed account contains a colon only when
-a separator preceded it, and the empty-issuer corner that would evade this is
-excluded from projectability above, so a parsed projection always pairs a
+a separator preceded it, and the final projectability gate above excludes
+every path that would evade this, so a parsed projection always pairs a
 colon-bearing account with a non-empty issuer.
 
 The label fallbacks that substitute `Entry.username` or `Entry.title` remain
@@ -1011,7 +1014,11 @@ implementation PR to land MUST carry them.
   empty-issuer label whose account contains a colon is excluded from
   projectability, preserving the parser invariant, and a newly created
   vault's first save constructs its `KdfParameters` dictionary as an
-  explicit-change equivalent.
+  explicit-change equivalent. An eighth round generalizes that guard into
+  one final projectability gate that also covers empty `issuer` query
+  values, pins 001's group-UUID tie to the byte-wise greater UUID (005 §6's
+  greater-wins direction), and mirrors the epoch-corner exception into
+  000 r15.
 - r4 (2026-07-17): frozen after r3 review. Records passed evidence for an
   external KeePassXC-generated KDBX 4.1 fixture, mandatory 4.0/4.1
   `keepassxc-cli` decrypt/enumerate gates, and the executable field-9-only
