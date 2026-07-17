@@ -72,10 +72,15 @@ not rebuild the dictionary from the profile. An ordinary save MUST re-emit
 the vault's loaded `KdfParameters` in full — the salt, version fields such as
 Argon2 `V`, and any unknown `VariantDictionary` entries preserved verbatim —
 so `kdf_generation`, which hashes the full canonical dictionary, is stable
-across ordinary saves by construction (002's rotation policy). Only a
-master-credential change or an explicit KDF parameter change constructs a
-new dictionary and thereby rotates the salt; per-save rotation would
-invalidate every quick-unlock envelope on every save. Random master seeds,
+across ordinary saves by construction (002's rotation policy). This
+stability mandate applies when the loaded vault already carries a KDBX4
+`KdfParameters` dictionary: loading a KDBX2/3 vault and saving it under a
+4.x profile is the explicit §8 format upgrade, which constructs the KDBX4
+dictionary for the first time and changes `kdf_generation` exactly as 002
+already records for that upgrade. Otherwise only a master-credential change
+or an explicit KDF parameter change constructs a new dictionary and thereby
+rotates the salt; per-save rotation would invalidate every quick-unlock
+envelope on every save. Random master seeds,
 IVs, inner-stream keys, and block nonces are fresh physical output on every
 save and are not profile properties.
 
@@ -321,9 +326,21 @@ re-parse as an issuer/account split. A modeled TOTP with no issuer whose
 account contains `:` therefore has no invertible URI spelling and is outside
 `P`; enrollment and mutation APIs MUST reject it or require an issuer. The
 parser never produces that state: a parsed account contains a colon only when
-a separator preceded it, which implies an issuer. Under literal-first
-precedence, fallbacks 1 and 3 and every parser-produced projection re-parse
-to themselves exactly.
+a separator preceded it, which implies an issuer.
+
+The label fallbacks that substitute `Entry.username` or `Entry.title` remain
+defined so `C1` stays total over `M`, but they do not reload exactly: the
+substituted values re-parse as an explicit account and issuer, and a later
+username or title edit would silently change the emitted URI. `P` therefore
+requires a structured TOTP projection to carry a present, non-empty
+`account_name` — the otpauth label grammar itself makes the account
+mandatory — and enrollment APIs materialize it at enrollment time, from
+`Entry.username` when the user supplies nothing. A parsed source whose label
+yields an empty account is retained as raw source rather than converted to a
+structured projection, per §3.2's exact-reconstruction condition. Every
+emission from a state in `P` therefore uses explicit issuer and account
+values only and re-parses to itself exactly at both the URI and the model
+level.
 
 These URI rules and the parser precedence/defaults above are part of `A(e)` and
 therefore part of canonical v1 behavior.
@@ -630,11 +647,14 @@ maximum, so the accepted drift stays confined to the hash tie
 (`location_changed_at`, which drives placement, is excluded above). Because
 `None` and `Some(0)` are distinct canonical spellings, a numerically equal
 maximum across different spellings MUST resolve to the present spelling —
-`Some(0)` wins over `None` — so both merge directions converge on one `C1`. To keep
-vaultkern output KeePass-shaped, product
-entry-creation APIs MUST populate `icon_id` and `auto_type` at creation, so
-the `None` spellings arise only from third-party files that already omitted
-the elements, where the drift pre-exists.
+`Some(0)` wins over `None` — so both merge directions converge on one `C1`.
+To keep vaultkern output KeePass-shaped, product entry-creation APIs MUST
+populate the full KeePass-materialized set at creation: `icon_id`,
+`auto_type`, `expiry_time` and `last_accessed_at` set to the creation time
+(with `expires = false`), and `usage_count = Some(0)`, alongside the
+`location_changed_at` requirement above. The `None` spellings then arise
+only from third-party files that already omitted the elements, where the
+drift pre-exists.
 
 Interoperability basis: the pinned KeePass writer emits `CustomIconUUID` only
 when `CustomIconUuid.IsZero` is false ([KeePass source at
@@ -715,8 +735,8 @@ Entry. At minimum it checks:
   Unicode whitespace. KeePass splits on both delimiters and trims before
   replacing embedded separators, as pinned by
   [`StrUtil.cs`](https://github.com/dlech/KeePass2.x/blob/d1eec63f1bd73dc2d5273eaf94528f616b553ce5/KeePassLib/Utility/StrUtil.cs);
-- the §3.1 invertible-spelling rule: a modeled TOTP with no issuer MUST NOT
-  have an account containing `:`;
+- the §3.1 structured-TOTP validity rules: `account_name` present and
+  non-empty, and no `:` in the account when there is no issuer;
 - `location_changed_at` present on every current and history entry (§7);
 - the optional-text canonical form in §7 and every modeled UUID uniqueness /
   known-node multiplicity rule in §6;
@@ -768,8 +788,8 @@ At minimum, tests cover:
 |---|---|
 | typed optional UUID | absent, empty, whitespace-only, nil sentinel, valid non-nil, malformed, direct `Some(nil)` rejection |
 | optional/default model values | every `VG` default; every §7 optional-empty rejection; present-empty Entry color/URL preservation; absent↔`None` round-trip for every §7-pinned entry field and typed `AutoType` child (current and history); present-empty `AutoType` round-trip as `Some(default)`; empty and whitespace-only `DefaultSequence` preservation; malformed numeric/boolean element rejection; absent `LocationChanged` canonicalized to the epoch and always re-emitted |
-| save profile | ordinary save reuses the loaded KDF salt with stable `kdf_generation`; rotation only on master-credential or explicit KDF parameter change; Argon2 `V` and unknown `KdfParameters` entries re-emitted verbatim with stable `kdf_generation`; two successive saves differ in master seed, outer IV, and inner random-stream key |
-| TOTP | projection only; URI/discrete source only; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; content-colon labels (issuer, account-with-issuer, title fallback); lowercase `%3a` separator parsing; no-issuer account-colon rejection; full-family clear/removal/protection/hiding |
+| save profile | ordinary save reuses the loaded KDF salt with stable `kdf_generation`; rotation only on master-credential or explicit KDF parameter change; Argon2 `V` and unknown `KdfParameters` entries re-emitted verbatim with stable `kdf_generation`; KDBX3→4 upgrade changes `kdf_generation` per 002; product-created entry emits the full KeePass-shaped element set; two successive saves differ in master seed, outer IV, and inner random-stream key |
+| TOTP | projection only; URI/discrete source only; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; content-colon labels (issuer, account-with-issuer, title fallback); lowercase `%3a` separator parsing; no-issuer account-colon rejection; empty-`account_name` projection rejection with raw retention of empty-account labels; full-family clear/removal/protection/hiding |
 | passkey | projection only, projectable source only, equivalent/conflicting cache, incomplete sensitive source, missing optional fields, invalid flag spelling, loaded strings verbatim, exact first-write base64url/PKCS#8 PEM profile |
 | CustomData | empty, matched map/blocks, duplicate keys, timestamps, map-only mismatch, block-only mismatch, empty block |
 | attachments | matched key/name, mismatched key/name rejection, rename, empty name |
@@ -935,7 +955,12 @@ implementation PR to land MUST carry them.
   construction), the epoch canonicalization is recorded as merge-invisible
   via 001's own absent≡epoch equivalence, numerically equal `usage_count`
   maxima resolve to the present spelling, and 000 r15 records this amendment
-  in the decision ledger. States plainly that the §10.2 workflow,
+  in the decision ledger. A fifth round: the `KdfParameters` stability
+  mandate carves out the KDBX3→4 format upgrade (002's generation change
+  stands), `P` requires a non-empty TOTP `account_name` with empty-account
+  labels retained as raw source (username/title fallbacks stay defined only
+  so `C1` is total over `M`), and creation populates the full
+  KeePass-materialized field set. States plainly that the §10.2 workflow,
   4.1 fixture, and
   executable audit are not yet on `main` and forbids write-capability claims
   from any tree that lacks them. No canonical byte layout, `A(e)` emission
