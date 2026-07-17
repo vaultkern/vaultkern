@@ -66,14 +66,18 @@ Let:
 
 A save profile is the tuple `(version, outer cipher, compression, KDF
 algorithm and its work-factor parameters)`. The composite key is an input to
-serialization, not a profile property. The KDF salt/seed is neither a profile
-property nor fresh physical output: its lifecycle is owned by 002's rotation
-policy — an ordinary vaultkern save MUST reuse the vault's existing KDF salt,
-and only a master-credential change or an explicit KDF parameter change
-rotates it, because `kdf_generation` hashes the full `KdfParameters` including
-the salt and per-save rotation would invalidate every quick-unlock envelope on
-every save. Random master seeds, IVs, inner-stream keys, and block nonces are
-fresh physical output on every save and are not profile properties.
+serialization, not a profile property. The profile's KDF component describes
+a *requested* configuration for an explicit KDF change; an ordinary save does
+not rebuild the dictionary from the profile. An ordinary save MUST re-emit
+the vault's loaded `KdfParameters` in full — the salt, version fields such as
+Argon2 `V`, and any unknown `VariantDictionary` entries preserved verbatim —
+so `kdf_generation`, which hashes the full canonical dictionary, is stable
+across ordinary saves by construction (002's rotation policy). Only a
+master-credential change or an explicit KDF parameter change constructs a
+new dictionary and thereby rotates the salt; per-save rotation would
+invalidate every quick-unlock envelope on every save. Random master seeds,
+IVs, inner-stream keys, and block nonces are fresh physical output on every
+save and are not profile properties.
 
 `VG(v)` contains every modeled Vault/Meta field except `deleted_objects`, every
 modeled Group field recursively, custom-icon content and metadata, public
@@ -608,7 +612,11 @@ or whitespace-only `LocationChanged` to the epoch (model value `0`) — exactly
 the value 001 already assigns to absence, so merge semantics are unchanged
 and any genuine move's present timestamp still wins — and a present,
 non-parsing value fails the load. Epoch spellings therefore arise only from
-loaded files that omitted the element.
+loaded files that omitted the element. Because 001 itself defines absence as
+the epoch, an epoch-valued `location_changed_at` participates in merge
+exactly as absence does: equal epoch values with differing groups fall under
+001's both-absent group-UUID tie rule, so this canonicalization is invisible
+to the merge layer.
 
 Accepted consequence, recorded deliberately: KeePass materializes these
 elements unconditionally on its own saves, so a third-party save of a
@@ -619,7 +627,10 @@ resolves that divergence deterministically. Among these fields only
 `usage_count` feeds a further 001 rule — it merges as the maximum — and a
 third-party materialization of an absent value is `0`, the identity of that
 maximum, so the accepted drift stays confined to the hash tie
-(`location_changed_at`, which drives placement, is excluded above). To keep
+(`location_changed_at`, which drives placement, is excluded above). Because
+`None` and `Some(0)` are distinct canonical spellings, a numerically equal
+maximum across different spellings MUST resolve to the present spelling —
+`Some(0)` wins over `None` — so both merge directions converge on one `C1`. To keep
 vaultkern output KeePass-shaped, product
 entry-creation APIs MUST populate `icon_id` and `auto_type` at creation, so
 the `None` spellings arise only from third-party files that already omitted
@@ -757,7 +768,7 @@ At minimum, tests cover:
 |---|---|
 | typed optional UUID | absent, empty, whitespace-only, nil sentinel, valid non-nil, malformed, direct `Some(nil)` rejection |
 | optional/default model values | every `VG` default; every §7 optional-empty rejection; present-empty Entry color/URL preservation; absent↔`None` round-trip for every §7-pinned entry field and typed `AutoType` child (current and history); present-empty `AutoType` round-trip as `Some(default)`; empty and whitespace-only `DefaultSequence` preservation; malformed numeric/boolean element rejection; absent `LocationChanged` canonicalized to the epoch and always re-emitted |
-| save profile | ordinary save reuses the loaded KDF salt with stable `kdf_generation`; rotation only on master-credential or explicit KDF parameter change; two successive saves differ in master seed, outer IV, and inner random-stream key |
+| save profile | ordinary save reuses the loaded KDF salt with stable `kdf_generation`; rotation only on master-credential or explicit KDF parameter change; Argon2 `V` and unknown `KdfParameters` entries re-emitted verbatim with stable `kdf_generation`; two successive saves differ in master seed, outer IV, and inner random-stream key |
 | TOTP | projection only; URI/discrete source only; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; content-colon labels (issuer, account-with-issuer, title fallback); lowercase `%3a` separator parsing; no-issuer account-colon rejection; full-family clear/removal/protection/hiding |
 | passkey | projection only, projectable source only, equivalent/conflicting cache, incomplete sensitive source, missing optional fields, invalid flag spelling, loaded strings verbatim, exact first-write base64url/PKCS#8 PEM profile |
 | CustomData | empty, matched map/blocks, duplicate keys, timestamps, map-only mismatch, block-only mismatch, empty block |
@@ -919,7 +930,12 @@ implementation PR to land MUST carry them.
   distinctions: present-empty `AutoType` loads as `Some` with children mapped
   individually, `DefaultSequence` text is preserved verbatim, and
   `usage_count`'s 001 max-merge rule is acknowledged with materialized
-  absence as its identity element. States plainly that the §10.2 workflow,
+  absence as its identity element. A fourth round: ordinary saves re-emit the
+  full loaded `KdfParameters` verbatim (`kdf_generation` stable by
+  construction), the epoch canonicalization is recorded as merge-invisible
+  via 001's own absent≡epoch equivalence, numerically equal `usage_count`
+  maxima resolve to the present spelling, and 000 r15 records this amendment
+  in the decision ledger. States plainly that the §10.2 workflow,
   4.1 fixture, and
   executable audit are not yet on `main` and forbids write-capability claims
   from any tree that lacks them. No canonical byte layout, `A(e)` emission
