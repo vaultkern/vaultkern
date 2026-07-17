@@ -220,13 +220,22 @@ fn merge_autofill_candidate(
         return merge_conflict("vault root identity changed");
     }
     if local == current {
-        return Ok(local.clone());
+        return Ok(clone_with_permanent_tombstones(
+            local,
+            [baseline, local, current],
+        ));
     }
     if local == baseline {
-        return Ok(current.clone());
+        return Ok(clone_with_permanent_tombstones(
+            current,
+            [baseline, local, current],
+        ));
     }
     if current == baseline {
-        return Ok(local.clone());
+        return Ok(clone_with_permanent_tombstones(
+            local,
+            [baseline, local, current],
+        ));
     }
     let baseline_index = index_vault(baseline)?;
     let local_index = index_vault(local)?;
@@ -243,12 +252,11 @@ fn merge_autofill_candidate(
         &current_index.entries,
         "entry",
     )?;
-    let deleted_objects = merge_indexed_maps(
+    let deleted_objects = merge_deleted_object_maps(
         &baseline_index.deleted_objects,
         &local_index.deleted_objects,
         &current_index.deleted_objects,
-        "deleted object",
-    )?;
+    );
 
     if entries.keys().any(|id| groups.contains_key(id)) {
         return merge_conflict("entry and group UUID namespaces collide");
@@ -287,7 +295,33 @@ fn merge_autofill_candidate(
         .collect();
     candidate.deleted_objects.sort_by_key(|item| item.id);
     candidate.root = rebuild_group_tree(baseline.root.id, &groups, &entries)?;
+    apply_candidate_tombstones(&mut candidate);
     Ok(candidate)
+}
+
+fn clone_with_permanent_tombstones(candidate: &Vault, sources: [&Vault; 3]) -> Vault {
+    let mut candidate = candidate.clone();
+    let mut latest = BTreeMap::<Uuid, vaultkern_core::DeletedObject>::new();
+    for tombstone in sources.into_iter().flat_map(|vault| &vault.deleted_objects) {
+        latest
+            .entry(tombstone.id)
+            .and_modify(|existing| {
+                if tombstone.deleted_at > existing.deleted_at {
+                    existing.deleted_at = tombstone.deleted_at;
+                }
+            })
+            .or_insert_with(|| tombstone.clone());
+    }
+    candidate.deleted_objects = latest.into_values().collect();
+    apply_candidate_tombstones(&mut candidate);
+    candidate
+}
+
+fn apply_candidate_tombstones(candidate: &mut Vault) {
+    let mut tombstone_source = Vault::empty("");
+    tombstone_source.root.id = candidate.root.id;
+    tombstone_source.deleted_objects = candidate.deleted_objects.clone();
+    candidate.merge_from(&tombstone_source);
 }
 
 fn validate_vault_identifiers(vault: &Vault) -> Result<(), AutofillPersistEngineError> {
@@ -447,6 +481,29 @@ fn merge_indexed_maps<T: Clone + PartialEq + Eq>(
         }
     }
     Ok(merged)
+}
+
+fn merge_deleted_object_maps(
+    baseline: &BTreeMap<Uuid, Indexed<vaultkern_core::DeletedObject>>,
+    local: &BTreeMap<Uuid, Indexed<vaultkern_core::DeletedObject>>,
+    current: &BTreeMap<Uuid, Indexed<vaultkern_core::DeletedObject>>,
+) -> BTreeMap<Uuid, Indexed<vaultkern_core::DeletedObject>> {
+    let mut merged = BTreeMap::<Uuid, Indexed<vaultkern_core::DeletedObject>>::new();
+    for record in baseline
+        .values()
+        .chain(local.values())
+        .chain(current.values())
+    {
+        merged
+            .entry(record.located.value.id)
+            .and_modify(|existing| {
+                if record.located.value.deleted_at > existing.located.value.deleted_at {
+                    *existing = record.clone();
+                }
+            })
+            .or_insert_with(|| record.clone());
+    }
+    merged
 }
 
 fn merge_sibling_orders<T>(
@@ -1727,15 +1784,18 @@ fn force_entry_state_from_source(
     let candidate_position =
         locate_entry(&candidate.root, id).map(|(parent_id, index, _)| (parent_id, index));
     remove_entry_from_group(&mut candidate.root, id);
+    let latest_tombstone = candidate
+        .deleted_objects
+        .iter()
+        .chain(&source.deleted_objects)
+        .filter(|item| item.id == id)
+        .max_by_key(|item| item.deleted_at)
+        .cloned();
     candidate.deleted_objects.retain(|item| item.id != id);
-    candidate.deleted_objects.extend(
-        source
-            .deleted_objects
-            .iter()
-            .filter(|item| item.id == id)
-            .cloned(),
-    );
+    candidate.deleted_objects.extend(latest_tombstone);
+    candidate.deleted_objects.sort_by_key(|item| item.id);
     let Some((parent_id, _, entry)) = locate_entry(&source.root, id) else {
+        apply_candidate_tombstones(candidate);
         return Ok(());
     };
     let parent = find_group_by_uuid_mut(&mut candidate.root, parent_id).ok_or_else(|| {
@@ -1748,6 +1808,7 @@ fn force_entry_state_from_source(
     parent
         .entries
         .insert(index.min(parent.entries.len()), entry);
+    apply_candidate_tombstones(candidate);
     Ok(())
 }
 
@@ -3100,10 +3161,6 @@ mod tests {
 
         let mut deleted = original.clone();
         core.delete_entry(&mut deleted, OTHER_ID).unwrap();
-        deleted.deleted_objects.push(DeletedObject {
-            id: Uuid::parse_str(OTHER_ID).unwrap(),
-            deleted_at: 42,
-        });
         let deleted_candidate = execute_with_baseline(
             &original,
             &local,
@@ -3133,6 +3190,103 @@ mod tests {
         assert_eq!(
             locate_entry(&moved_candidate.root, other_id).map(|(parent, _, _)| parent),
             Some(Uuid::parse_str(&group_b).unwrap())
+        );
+    }
+
+    #[test]
+    fn three_way_merge_keeps_latest_tombstone_without_allowing_pruning() {
+        let expected = fields("old-secret");
+        let desired = fields("new-secret");
+        let mut baseline = vault_with_entry(&expected);
+        let deleted_id = Uuid::parse_str(OTHER_ID).unwrap();
+        baseline.deleted_objects.push(DeletedObject {
+            id: deleted_id,
+            deleted_at: 10,
+        });
+        let mut local = baseline.clone();
+        local.deleted_objects.clear();
+        let mut current = baseline.clone();
+        current.deleted_objects[0].deleted_at = 20;
+
+        let candidate =
+            execute_with_baseline(&baseline, &local, &current, &update_plan(expected, desired))
+                .expect("merge tombstones")
+                .candidate;
+
+        assert_eq!(
+            candidate.deleted_objects,
+            [DeletedObject {
+                id: deleted_id,
+                deleted_at: 20,
+            }]
+        );
+
+        let mut both_pruned = baseline.clone();
+        both_pruned.deleted_objects.clear();
+        let candidate = merge_autofill_candidate(&baseline, &both_pruned, &both_pruned)
+            .expect("fast-path merge tombstones");
+        assert_eq!(candidate.deleted_objects, baseline.deleted_objects);
+    }
+
+    #[test]
+    fn forcing_entry_state_preserves_a_tombstone_missing_from_the_source() {
+        let fields = fields("secret");
+        let mut candidate = vault_with_entry(&fields);
+        let entry_id = Uuid::parse_str(ENTRY_ID).unwrap();
+        let deleted_at = find_entry(&candidate, ENTRY_ID)
+            .map(|(entry, _)| {
+                i64::try_from(
+                    entry
+                        .modified_at
+                        .max(entry.location_changed_at.unwrap_or(0)),
+                )
+                .expect("fixture timestamp range")
+                .checked_add(1)
+                .expect("fixture timestamp")
+            })
+            .expect("fixture entry");
+        candidate.deleted_objects.push(DeletedObject {
+            id: entry_id,
+            deleted_at,
+        });
+        let mut source = candidate.clone();
+        source.deleted_objects.clear();
+
+        force_entry_state_from_source(&mut candidate, &source, ENTRY_ID)
+            .expect("force entry state");
+
+        assert_eq!(
+            candidate.deleted_objects,
+            [DeletedObject {
+                id: entry_id,
+                deleted_at,
+            }]
+        );
+        assert!(find_entry(&candidate, ENTRY_ID).is_none());
+    }
+
+    #[test]
+    fn three_way_fast_path_does_not_keep_an_object_older_than_a_tombstone() {
+        let fields = fields("secret");
+        let mut baseline = vault_with_entry(&fields);
+        add_entry(&mut baseline, OTHER_ID, &fields);
+        let stale = find_entry(&baseline, OTHER_ID).unwrap().0.clone();
+        KeepassCore::new()
+            .delete_entry(&mut baseline, OTHER_ID)
+            .expect("delete unrelated entry");
+        let mut stale_replica = baseline.clone();
+        stale_replica.deleted_objects.clear();
+        stale_replica.root.entries.push(stale);
+
+        let candidate = merge_autofill_candidate(&baseline, &stale_replica, &stale_replica)
+            .expect("fast-path merge");
+
+        assert!(find_entry(&candidate, OTHER_ID).is_none());
+        assert!(
+            candidate
+                .deleted_objects
+                .iter()
+                .any(|item| item.id.to_string() == OTHER_ID)
         );
     }
 
@@ -3459,7 +3613,7 @@ mod tests {
                 .candidate
                 .deleted_objects
                 .iter()
-                .any(|item| item.id.to_string() == ENTRY_ID)
+                .all(|item| item.id.to_string() != ENTRY_ID)
         );
     }
 

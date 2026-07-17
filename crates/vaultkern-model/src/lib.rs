@@ -1488,6 +1488,203 @@ impl Group {
     }
 }
 
+fn reconcile_group_entry_nodes(group: &mut Group, old_identities: &[Uuid]) {
+    let new_identities = group
+        .entries
+        .iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    reconcile_keyed_known_nodes(
+        "Entry",
+        &mut group.raw_state.node_order,
+        &mut group.raw_state.entry_order,
+        &mut group.opaque_xml,
+        &mut group.custom_data_blocks,
+        (old_identities, &new_identities, &[]),
+    );
+}
+
+fn reconcile_group_child_nodes(group: &mut Group, old_identities: &[Uuid]) {
+    let new_identities = group
+        .children
+        .iter()
+        .map(|child| child.id)
+        .collect::<Vec<_>>();
+    reconcile_keyed_known_nodes(
+        "Group",
+        &mut group.raw_state.node_order,
+        &mut group.raw_state.group_order,
+        &mut group.opaque_xml,
+        &mut group.custom_data_blocks,
+        (old_identities, &new_identities, &[]),
+    );
+}
+
+/// Reconciles keyed KDBX fidelity slots after semantic identities change.
+#[doc(hidden)]
+pub fn reconcile_keyed_known_nodes<T: Clone + Eq>(
+    element_name: &str,
+    node_order: &mut Vec<String>,
+    tracked_identities: &mut Vec<T>,
+    opaque_xml: &mut [OpaqueXmlFragment],
+    custom_data_blocks: &mut [CustomDataBlock],
+    identity_change: (&[T], &[T], &[(T, T)]),
+) {
+    let (old_identities, new_identities, renamed_identities) = identity_change;
+    let tracked_mapping = tracked_identities
+        .iter()
+        .map(|old_identity| {
+            let identity = renamed_identities
+                .iter()
+                .find_map(|(old, new)| (old == old_identity).then_some(new))
+                .unwrap_or(old_identity);
+            new_identities.contains(identity).then(|| identity.clone())
+        })
+        .collect::<Vec<_>>();
+    let mut effective_new_identities = tracked_mapping
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    let untracked_new_identities = new_identities
+        .iter()
+        .filter(|identity| !effective_new_identities.contains(identity))
+        .cloned()
+        .collect::<Vec<_>>();
+    effective_new_identities.extend(untracked_new_identities);
+
+    let mapped_identities = old_identities
+        .iter()
+        .map(|old_identity| {
+            let identity = renamed_identities
+                .iter()
+                .find_map(|(old, new)| (old == old_identity).then_some(new))
+                .unwrap_or(old_identity);
+            effective_new_identities
+                .contains(identity)
+                .then(|| identity.clone())
+        })
+        .collect::<Vec<_>>();
+
+    let mut replacement_anchors = Vec::with_capacity(old_identities.len());
+    for (old_occurrence, mapped_identity) in mapped_identities.iter().enumerate() {
+        let replacement = mapped_identity.as_ref().map_or_else(
+            || {
+                keyed_predecessor_anchor(
+                    node_order,
+                    element_name,
+                    old_occurrence + 1,
+                    &replacement_anchors,
+                )
+            },
+            |identity| {
+                let occurrence = effective_new_identities
+                    .iter()
+                    .position(|candidate| candidate == identity)
+                    .expect("mapped keyed identity")
+                    + 1;
+                Some(OpaqueXmlAnchor {
+                    element_name: element_name.into(),
+                    occurrence,
+                })
+            },
+        );
+        replacement_anchors.push(replacement);
+    }
+
+    for anchor in custom_data_blocks
+        .iter_mut()
+        .filter_map(|block| block.after.as_mut())
+        .chain(
+            opaque_xml
+                .iter_mut()
+                .filter_map(|fragment| fragment.after.as_mut()),
+        )
+    {
+        if anchor.element_name != element_name {
+            continue;
+        }
+        let Some(index) = anchor.occurrence.checked_sub(1) else {
+            continue;
+        };
+        let Some(replacement) = replacement_anchors.get(index) else {
+            continue;
+        };
+        match replacement {
+            Some(replacement) => anchor.clone_from(replacement),
+            None => {
+                anchor.element_name.clear();
+                anchor.occurrence = 0;
+            }
+        }
+    }
+    for block in custom_data_blocks {
+        if block
+            .after
+            .as_ref()
+            .is_some_and(|anchor| anchor.element_name.is_empty())
+        {
+            block.after = None;
+        }
+    }
+    for fragment in opaque_xml {
+        if fragment
+            .after
+            .as_ref()
+            .is_some_and(|anchor| anchor.element_name.is_empty())
+        {
+            fragment.after = None;
+        }
+    }
+
+    let mut occurrence = 0;
+    node_order.retain(|name| {
+        if name != element_name {
+            return true;
+        }
+        let retained = tracked_mapping.get(occurrence).is_none_or(Option::is_some);
+        occurrence += 1;
+        retained
+    });
+    *tracked_identities = tracked_mapping.into_iter().flatten().collect();
+}
+
+fn keyed_predecessor_anchor(
+    node_order: &[String],
+    element_name: &str,
+    old_occurrence: usize,
+    replacement_anchors: &[Option<OpaqueXmlAnchor>],
+) -> Option<OpaqueXmlAnchor> {
+    let mut occurrence = 0;
+    let removed_index = node_order.iter().position(|name| {
+        if name != element_name {
+            return false;
+        }
+        occurrence += 1;
+        occurrence == old_occurrence
+    });
+    let Some(removed_index) = removed_index else {
+        return old_occurrence
+            .checked_sub(2)
+            .and_then(|index| replacement_anchors.get(index).cloned().flatten());
+    };
+
+    let index = removed_index.checked_sub(1)?;
+    let name = &node_order[index];
+    let occurrence = node_order[..=index]
+        .iter()
+        .filter(|candidate| *candidate == name)
+        .count();
+    if name == element_name {
+        replacement_anchors.get(occurrence - 1).cloned().flatten()
+    } else {
+        Some(OpaqueXmlAnchor {
+            element_name: name.clone(),
+            occurrence,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Vault {
     pub generator: Option<String>,
@@ -1584,7 +1781,18 @@ impl Vault {
         let mut report = MergeReport::default();
         let mut content_pool = AttachmentContentPool::new();
         normalize_group_attachment_content(&mut self.root, &mut content_pool);
-        merge_group(&mut self.root, &other.root, &mut content_pool, &mut report);
+        let deleted_objects = merged_deleted_objects(self, other);
+        report.merged_entries += prune_vault_for_tombstones(self, &deleted_objects);
+
+        let mut incoming = other.clone();
+        prune_vault_for_tombstones(&mut incoming, &deleted_objects);
+        self.deleted_objects = deleted_objects.into_values().collect();
+        merge_group(
+            &mut self.root,
+            &incoming.root,
+            &mut content_pool,
+            &mut report,
+        );
         report
     }
 }
@@ -1593,6 +1801,121 @@ impl Vault {
 pub struct MergeReport {
     pub merged_entries: usize,
     pub history_snapshots_added: usize,
+}
+
+fn merged_deleted_objects(local: &Vault, incoming: &Vault) -> BTreeMap<Uuid, DeletedObject> {
+    let mut merged = BTreeMap::<Uuid, DeletedObject>::new();
+    for tombstone in local
+        .deleted_objects
+        .iter()
+        .chain(&incoming.deleted_objects)
+    {
+        let candidate = tombstone.clone();
+        merged
+            .entry(candidate.id)
+            .and_modify(|existing| {
+                if candidate.deleted_at > existing.deleted_at {
+                    existing.deleted_at = candidate.deleted_at;
+                }
+            })
+            .or_insert(candidate);
+    }
+    merged
+}
+
+fn prune_vault_for_tombstones(
+    vault: &mut Vault,
+    tombstones: &BTreeMap<Uuid, DeletedObject>,
+) -> usize {
+    let (_, removed_entries) = prune_group_for_tombstones(&mut vault.root, tombstones, None, true);
+    removed_entries
+}
+
+fn prune_group_for_tombstones(
+    group: &mut Group,
+    tombstones: &BTreeMap<Uuid, DeletedObject>,
+    inherited_deletion: Option<i64>,
+    is_root: bool,
+) -> (bool, usize) {
+    let effective_deletion = latest_deletion(
+        inherited_deletion,
+        tombstones.get(&group.id).map(|item| item.deleted_at),
+    );
+    let old_entry_ids = group
+        .entries
+        .iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    let old_entry_count = group.entries.len();
+    group.entries.retain(|entry| {
+        let deletion = latest_deletion(
+            latest_deletion(
+                effective_deletion,
+                tombstones.get(&entry.id).map(|item| item.deleted_at),
+            ),
+            entry
+                .previous_parent
+                .and_then(|id| tombstones.get(&id))
+                .map(|item| item.deleted_at),
+        );
+        !deletion.is_some_and(|deleted_at| deletion_wins(deleted_at, entry_last_update(entry)))
+    });
+    if group.entries.len() != old_entry_count {
+        reconcile_group_entry_nodes(group, &old_entry_ids);
+    }
+    let mut removed_entries = old_entry_count - group.entries.len();
+
+    let old_child_ids = group
+        .children
+        .iter()
+        .map(|child| child.id)
+        .collect::<Vec<_>>();
+    let old_child_count = group.children.len();
+    group.children.retain_mut(|child| {
+        let (keep, child_removed_entries) =
+            prune_group_for_tombstones(child, tombstones, effective_deletion, false);
+        removed_entries += child_removed_entries;
+        keep
+    });
+    if group.children.len() != old_child_count {
+        reconcile_group_child_nodes(group, &old_child_ids);
+    }
+
+    let group_survives = effective_deletion
+        .is_none_or(|deleted_at| !deletion_wins(deleted_at, group_last_update(group)));
+    (
+        is_root || group_survives || !group.entries.is_empty() || !group.children.is_empty(),
+        removed_entries,
+    )
+}
+
+fn latest_deletion(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn entry_last_update(entry: &Entry) -> u64 {
+    entry
+        .modified_at
+        .max(entry.location_changed_at.unwrap_or(0))
+}
+
+fn group_last_update(group: &Group) -> u64 {
+    group
+        .times
+        .map(|times| {
+            times
+                .modified_at
+                .max(times.location_changed_at.unwrap_or(0))
+        })
+        .unwrap_or(0)
+}
+
+fn deletion_wins(deleted_at: i64, last_update: u64) -> bool {
+    i128::from(deleted_at) > i128::from(last_update)
 }
 
 fn collect_search<'a>(group: &'a Group, needle: &str, matches: &mut Vec<&'a Entry>) {
@@ -1758,9 +2081,10 @@ fn decode_hex_byte(high: u8, low: u8) -> Option<u8> {
 mod tests {
     use super::{
         Attachment, AttachmentContent, AttachmentContentId, AttachmentContentPool, CustomField,
-        Entry, Group, MaterializedPersistentValue, ModelError, OpaqueXmlAnchor, OpaqueXmlFragment,
-        PasskeyRecord, TotpAlgorithm, TotpSpec, Vault, is_totp_persistent_attribute_key,
-        materialize_entry_persistent_attributes, totp_from_persistent_attributes,
+        DeletedObject, Entry, Group, GroupTimes, MaterializedPersistentValue, ModelError,
+        OpaqueXmlAnchor, OpaqueXmlFragment, PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
+        is_totp_persistent_attribute_key, materialize_entry_persistent_attributes,
+        totp_from_persistent_attributes,
     };
     use std::collections::BTreeMap;
     use std::sync::{
@@ -2782,6 +3106,326 @@ mod tests {
         );
         assert_eq!(report.merged_entries, 1);
         assert_eq!(report.history_snapshots_added, 1);
+    }
+
+    #[test]
+    fn merge_applies_latest_tombstone_to_older_entries_on_both_sides() {
+        let entry_id = uuid::Uuid::new_v4();
+        let mut local = Vault::empty("Local");
+        let mut local_entry = Entry::new("local stale copy");
+        local_entry.id = entry_id;
+        local_entry.modified_at = 10;
+        local.root.entries.push(local_entry);
+        local.deleted_objects.push(DeletedObject {
+            id: entry_id,
+            deleted_at: 15,
+        });
+
+        let mut incoming = Vault::empty("Incoming");
+        let mut incoming_entry = Entry::new("remote stale copy");
+        incoming_entry.id = entry_id;
+        incoming_entry.modified_at = 20;
+        incoming.root.entries.push(incoming_entry);
+        incoming.deleted_objects.extend([
+            DeletedObject {
+                id: entry_id,
+                deleted_at: 12,
+            },
+            DeletedObject {
+                id: entry_id,
+                deleted_at: 30,
+            },
+        ]);
+
+        local.merge_from(&incoming);
+
+        assert!(local.root.entries.is_empty());
+        assert_eq!(
+            local.deleted_objects,
+            [DeletedObject {
+                id: entry_id,
+                deleted_at: 30,
+            }]
+        );
+    }
+
+    #[test]
+    fn merge_keeps_equal_or_newer_entry_edits_and_move_timestamps() {
+        let equal_id = uuid::Uuid::new_v4();
+        let moved_id = uuid::Uuid::new_v4();
+        let resurrected_id = uuid::Uuid::new_v4();
+        let mut local = Vault::empty("Local");
+        local.deleted_objects.extend([
+            DeletedObject {
+                id: equal_id,
+                deleted_at: 20,
+            },
+            DeletedObject {
+                id: moved_id,
+                deleted_at: 30,
+            },
+            DeletedObject {
+                id: resurrected_id,
+                deleted_at: 40,
+            },
+        ]);
+
+        let mut incoming = Vault::empty("Incoming");
+        let mut equal = Entry::new("equal edit survives");
+        equal.id = equal_id;
+        equal.modified_at = 20;
+        let mut moved = Entry::new("newer move survives");
+        moved.id = moved_id;
+        moved.modified_at = 10;
+        moved.location_changed_at = Some(31);
+        let mut resurrected = Entry::new("newer edit resurrects");
+        resurrected.id = resurrected_id;
+        resurrected.modified_at = 41;
+        incoming.root.entries.extend([equal, moved, resurrected]);
+
+        local.merge_from(&incoming);
+
+        assert_eq!(local.root.entries.len(), 3);
+        assert!(local.root.entries.iter().any(|entry| entry.id == equal_id));
+        assert!(local.root.entries.iter().any(|entry| entry.id == moved_id));
+        assert!(
+            local
+                .root
+                .entries
+                .iter()
+                .any(|entry| entry.id == resurrected_id)
+        );
+        assert_eq!(local.deleted_objects.len(), 3);
+    }
+
+    #[test]
+    fn merge_group_tombstone_removes_stale_subtree_but_keeps_newer_descendant() {
+        let deleted_group_id = uuid::Uuid::new_v4();
+        let surviving_group_id = uuid::Uuid::new_v4();
+        let survivor_id = uuid::Uuid::new_v4();
+        let mut local = Vault::empty("Local");
+        local.deleted_objects.extend([
+            DeletedObject {
+                id: deleted_group_id,
+                deleted_at: 50,
+            },
+            DeletedObject {
+                id: surviving_group_id,
+                deleted_at: 50,
+            },
+        ]);
+
+        let mut incoming = Vault::empty("Incoming");
+        let mut stale_group = Group::new("stale subtree");
+        stale_group.id = deleted_group_id;
+        stale_group.times = Some(group_times(20));
+        let mut stale_entry = Entry::new("stale entry");
+        stale_entry.modified_at = 30;
+        stale_group.entries.push(stale_entry);
+
+        let mut surviving_group = Group::new("container survives");
+        surviving_group.id = surviving_group_id;
+        surviving_group.times = Some(group_times(20));
+        let mut survivor = Entry::new("newer descendant");
+        survivor.id = survivor_id;
+        survivor.modified_at = 51;
+        surviving_group.entries.push(survivor);
+        incoming
+            .root
+            .children
+            .extend([stale_group, surviving_group]);
+
+        local.merge_from(&incoming);
+
+        assert_eq!(local.root.children.len(), 1);
+        assert_eq!(local.root.children[0].id, surviving_group_id);
+        assert_eq!(local.root.children[0].entries[0].id, survivor_id);
+    }
+
+    #[test]
+    fn merge_root_group_tombstone_prunes_stale_descendants_but_keeps_root() {
+        let mut local = Vault::empty("Local");
+        let root_id = local.root.id;
+        let mut stale = Entry::new("stale");
+        stale.modified_at = 10;
+        local.root.entries.push(stale);
+
+        let mut incoming = local.clone();
+        incoming.deleted_objects.push(DeletedObject {
+            id: root_id,
+            deleted_at: 20,
+        });
+
+        local.merge_from(&incoming);
+
+        assert_eq!(local.root.id, root_id);
+        assert!(local.root.entries.is_empty());
+        assert_eq!(local.deleted_objects[0].id, root_id);
+    }
+
+    #[test]
+    fn merge_group_delete_competes_with_entries_moved_out_of_that_group() {
+        let deleted_group_id = uuid::Uuid::new_v4();
+        let stale_move_id = uuid::Uuid::new_v4();
+        let newer_move_id = uuid::Uuid::new_v4();
+        let mut local = Vault::empty("Local");
+        local.deleted_objects.push(DeletedObject {
+            id: deleted_group_id,
+            deleted_at: 50,
+        });
+
+        let mut incoming = local.clone();
+        incoming.deleted_objects.clear();
+        let mut destination = Group::new("Destination");
+        let mut stale_move = Entry::new("stale move");
+        stale_move.id = stale_move_id;
+        stale_move.modified_at = 10;
+        stale_move.previous_parent = Some(deleted_group_id);
+        stale_move.location_changed_at = Some(40);
+        let mut newer_move = Entry::new("newer move");
+        newer_move.id = newer_move_id;
+        newer_move.modified_at = 10;
+        newer_move.previous_parent = Some(deleted_group_id);
+        newer_move.location_changed_at = Some(51);
+        destination.entries.extend([stale_move, newer_move]);
+        incoming.root.children.push(destination);
+
+        local.merge_from(&incoming);
+
+        assert_eq!(local.root.children.len(), 1);
+        assert_eq!(local.root.children[0].entries.len(), 1);
+        assert_eq!(local.root.children[0].entries[0].id, newer_move_id);
+    }
+
+    #[test]
+    fn merge_tombstone_pruning_retargets_group_fidelity_anchors() {
+        let deleted_entry_id = uuid::Uuid::new_v4();
+        let deleted_group_id = uuid::Uuid::new_v4();
+        let mut local = Vault::empty("Local");
+        let mut entry = Entry::new("deleted");
+        entry.id = deleted_entry_id;
+        entry.modified_at = 10;
+        local.root.entries.push(entry);
+        let mut child = Group::new("deleted");
+        child.id = deleted_group_id;
+        child.times = Some(group_times(10));
+        local.root.children.push(child);
+        local.root.raw_state.node_order = vec![
+            "Name".into(),
+            "Entry".into(),
+            "Group".into(),
+            "CustomData".into(),
+        ];
+        local.root.raw_state.entry_order = vec![deleted_entry_id];
+        local.root.raw_state.group_order = vec![deleted_group_id];
+        local.root.opaque_xml.push(OpaqueXmlFragment {
+            xml: "<AfterEntry />".into(),
+            after: Some(OpaqueXmlAnchor {
+                element_name: "Entry".into(),
+                occurrence: 1,
+            }),
+        });
+        local.root.custom_data_blocks.push(super::CustomDataBlock {
+            items: Vec::new(),
+            after: Some(OpaqueXmlAnchor {
+                element_name: "Group".into(),
+                occurrence: 1,
+            }),
+        });
+
+        let mut incoming = Vault::empty("Incoming");
+        incoming.deleted_objects.extend([
+            DeletedObject {
+                id: deleted_entry_id,
+                deleted_at: 20,
+            },
+            DeletedObject {
+                id: deleted_group_id,
+                deleted_at: 20,
+            },
+        ]);
+
+        local.merge_from(&incoming);
+
+        assert_eq!(local.root.raw_state.node_order, ["Name", "CustomData"]);
+        assert!(local.root.raw_state.entry_order.is_empty());
+        assert!(local.root.raw_state.group_order.is_empty());
+        assert_eq!(
+            local.root.opaque_xml[0].after,
+            Some(OpaqueXmlAnchor {
+                element_name: "Name".into(),
+                occurrence: 1,
+            })
+        );
+        assert_eq!(
+            local.root.custom_data_blocks[0].after,
+            Some(OpaqueXmlAnchor {
+                element_name: "Name".into(),
+                occurrence: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn tombstone_merge_is_two_sided_convergent_for_delete_and_resurrect() {
+        let mut base = Vault::empty("Shared");
+        let mut entry = Entry::new("Shared entry");
+        entry.modified_at = 10;
+        let entry_id = entry.id;
+        base.root.entries.push(entry);
+
+        let mut deleted = base.clone();
+        deleted.root.entries.clear();
+        deleted.deleted_objects.push(DeletedObject {
+            id: entry_id,
+            deleted_at: 20,
+        });
+        let mut resurrected = base;
+        resurrected.root.entries[0].title = "Resurrected".into();
+        resurrected.root.entries[0].modified_at = 21;
+
+        let mut delete_then_edit = deleted.clone();
+        delete_then_edit.merge_from(&resurrected);
+        let mut edit_then_delete = resurrected;
+        edit_then_delete.merge_from(&deleted);
+
+        assert_eq!(delete_then_edit, edit_then_delete);
+        assert_eq!(delete_then_edit.root.entries[0].title, "Resurrected");
+        assert_eq!(delete_then_edit.deleted_objects.len(), 1);
+    }
+
+    #[test]
+    fn tombstone_merge_is_idempotent() {
+        let mut local = Vault::empty("Shared");
+        let mut stale = Entry::new("Stale");
+        stale.modified_at = 10;
+        let stale_id = stale.id;
+        local.root.entries.push(stale);
+
+        let mut incoming = local.clone();
+        incoming.root.entries.clear();
+        incoming.deleted_objects.push(DeletedObject {
+            id: stale_id,
+            deleted_at: 20,
+        });
+
+        local.merge_from(&incoming);
+        let merged_once = local.clone();
+        local.merge_from(&incoming);
+
+        assert_eq!(local, merged_once);
+    }
+
+    fn group_times(modified_at: u64) -> GroupTimes {
+        GroupTimes {
+            created_at: 0,
+            modified_at,
+            expires: false,
+            expiry_time: None,
+            last_accessed_at: None,
+            usage_count: None,
+            location_changed_at: None,
+        }
     }
 
     #[test]

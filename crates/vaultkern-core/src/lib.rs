@@ -1799,11 +1799,14 @@ impl KeepassCore {
     }
 
     pub fn delete_entry(&self, vault: &mut Vault, entry_id: &str) -> Result<(), MutationError> {
-        if delete_entry_from_group(&mut vault.root, entry_id) {
-            Ok(())
-        } else {
-            Err(MutationError::EntryNotFound(entry_id.into()))
-        }
+        let entry = find_entry_by_id(&vault.root, entry_id)
+            .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        let entry_id = entry.id;
+        let deletion_time = next_deletion_timestamp(vault, [(entry.id, entry_last_update(entry))])?;
+        delete_entry_from_group(&mut vault.root, &entry_id.to_string())
+            .expect("entry existence checked");
+        record_deleted_objects(vault, [entry_id], deletion_time);
+        Ok(())
     }
 
     pub fn add_group(
@@ -1827,11 +1830,20 @@ impl KeepassCore {
         if vault.root.id.to_string() == group_id {
             return Err(MutationError::CannotDeleteRootGroup);
         }
-        if delete_group_from_group(&mut vault.root, group_id) {
-            Ok(())
-        } else {
-            Err(MutationError::GroupNotFound(group_id.into()))
-        }
+        let group = find_group_by_id(&vault.root, group_id)
+            .ok_or_else(|| MutationError::GroupNotFound(group_id.into()))?;
+        let mut deleted_objects = Vec::new();
+        collect_group_deletion_candidates(group, &mut deleted_objects);
+        let deletion_time = next_deletion_timestamp(vault, deleted_objects.iter().copied())?;
+        let group_id = group.id;
+        delete_group_from_group(&mut vault.root, &group_id.to_string())
+            .expect("group existence checked");
+        record_deleted_objects(
+            vault,
+            deleted_objects.into_iter().map(|(id, _)| id),
+            deletion_time,
+        );
+        Ok(())
     }
 
     pub fn merge_vaults(&self, target: &mut Vault, source: &Vault) -> MergeSummaryView {
@@ -3116,13 +3128,6 @@ impl KeepassCore {
         entry.previous_parent = Some(parent_group_id);
         entry.location_changed_at = Some(next_location);
 
-        let deleted_at = current_unix_timestamp();
-        vault.deleted_objects.retain(|item| item.id != entry.id);
-        vault.deleted_objects.push(DeletedObject {
-            id: entry.id,
-            deleted_at,
-        });
-
         let recycle_bin = find_group_by_id_mut(&mut vault.root, &recycle_bin_id)
             .ok_or_else(|| MutationError::GroupNotFound(recycle_bin_id.clone()))?;
         recycle_bin.entries.push(entry);
@@ -3177,9 +3182,6 @@ impl KeepassCore {
             .ok_or_else(|| MutationError::GroupNotFound(target_group_id.clone()))?;
         target_group.entries.push(entry);
         let entry = target_group.entries.last().expect("restored entry");
-        vault
-            .deleted_objects
-            .retain(|item| item.id.to_string() != entry_id);
         Ok(project_entry(entry))
     }
 
@@ -3674,159 +3676,14 @@ fn retarget_keyed_known_nodes<T: Clone + Eq>(
     custom_data_blocks: &mut [vaultkern_model::CustomDataBlock],
     identity_change: (&[T], &[T], &[(T, T)]),
 ) {
-    let (old_identities, new_identities, renamed_identities) = identity_change;
-    let tracked_mapping = tracked_identities
-        .iter()
-        .map(|old_identity| {
-            let identity = renamed_identities
-                .iter()
-                .find_map(|(old, new)| (old == old_identity).then_some(new))
-                .unwrap_or(old_identity);
-            new_identities.contains(identity).then(|| identity.clone())
-        })
-        .collect::<Vec<_>>();
-    let mut effective_new_identities = tracked_mapping
-        .iter()
-        .flatten()
-        .cloned()
-        .collect::<Vec<_>>();
-    let untracked_new_identities = new_identities
-        .iter()
-        .filter(|identity| !effective_new_identities.contains(identity))
-        .cloned()
-        .collect::<Vec<_>>();
-    effective_new_identities.extend(untracked_new_identities);
-
-    let mapped_identities = old_identities
-        .iter()
-        .map(|old_identity| {
-            let identity = renamed_identities
-                .iter()
-                .find_map(|(old, new)| (old == old_identity).then_some(new))
-                .unwrap_or(old_identity);
-            effective_new_identities
-                .contains(identity)
-                .then(|| identity.clone())
-        })
-        .collect::<Vec<_>>();
-
-    let mut replacement_anchors = Vec::with_capacity(old_identities.len());
-    for (old_occurrence, mapped_identity) in mapped_identities.iter().enumerate() {
-        let replacement = mapped_identity.as_ref().map_or_else(
-            || {
-                keyed_predecessor_anchor(
-                    node_order,
-                    element_name,
-                    old_occurrence + 1,
-                    &replacement_anchors,
-                )
-            },
-            |identity| {
-                let occurrence = effective_new_identities
-                    .iter()
-                    .position(|candidate| candidate == identity)
-                    .expect("mapped keyed identity")
-                    + 1;
-                Some(vaultkern_model::OpaqueXmlAnchor {
-                    element_name: element_name.into(),
-                    occurrence,
-                })
-            },
-        );
-        replacement_anchors.push(replacement);
-    }
-
-    for anchor in custom_data_blocks
-        .iter_mut()
-        .filter_map(|block| block.after.as_mut())
-        .chain(
-            opaque_xml
-                .iter_mut()
-                .filter_map(|fragment| fragment.after.as_mut()),
-        )
-    {
-        if anchor.element_name != element_name {
-            continue;
-        }
-        let Some(index) = anchor.occurrence.checked_sub(1) else {
-            continue;
-        };
-        let Some(replacement) = replacement_anchors.get(index) else {
-            continue;
-        };
-        match replacement {
-            Some(replacement) => anchor.clone_from(replacement),
-            None => {
-                anchor.element_name.clear();
-                anchor.occurrence = 0;
-            }
-        }
-    }
-    for block in custom_data_blocks {
-        if block
-            .after
-            .as_ref()
-            .is_some_and(|anchor| anchor.element_name.is_empty())
-        {
-            block.after = None;
-        }
-    }
-    for fragment in opaque_xml {
-        if fragment
-            .after
-            .as_ref()
-            .is_some_and(|anchor| anchor.element_name.is_empty())
-        {
-            fragment.after = None;
-        }
-    }
-
-    let mut occurrence = 0;
-    node_order.retain(|name| {
-        if name != element_name {
-            return true;
-        }
-        let retained = tracked_mapping.get(occurrence).is_none_or(Option::is_some);
-        occurrence += 1;
-        retained
-    });
-    *tracked_identities = tracked_mapping.into_iter().flatten().collect();
-}
-
-fn keyed_predecessor_anchor(
-    node_order: &[String],
-    element_name: &str,
-    old_occurrence: usize,
-    replacement_anchors: &[Option<vaultkern_model::OpaqueXmlAnchor>],
-) -> Option<vaultkern_model::OpaqueXmlAnchor> {
-    let mut occurrence = 0;
-    let removed_index = node_order.iter().position(|name| {
-        if name != element_name {
-            return false;
-        }
-        occurrence += 1;
-        occurrence == old_occurrence
-    });
-    let Some(removed_index) = removed_index else {
-        return old_occurrence
-            .checked_sub(2)
-            .and_then(|index| replacement_anchors.get(index).cloned().flatten());
-    };
-
-    let index = removed_index.checked_sub(1)?;
-    let name = &node_order[index];
-    let occurrence = node_order[..=index]
-        .iter()
-        .filter(|candidate| *candidate == name)
-        .count();
-    if name == element_name {
-        replacement_anchors.get(occurrence - 1).cloned().flatten()
-    } else {
-        Some(vaultkern_model::OpaqueXmlAnchor {
-            element_name: name.clone(),
-            occurrence,
-        })
-    }
+    vaultkern_model::reconcile_keyed_known_nodes(
+        element_name,
+        node_order,
+        tracked_identities,
+        opaque_xml,
+        custom_data_blocks,
+        identity_change,
+    );
 }
 
 fn retarget_removed_known_node(
@@ -4183,7 +4040,7 @@ fn find_entry_by_id_mut<'a>(group: &'a mut Group, id: &str) -> Option<&'a mut En
     None
 }
 
-fn delete_entry_from_group(group: &mut Group, entry_id: &str) -> bool {
+fn delete_entry_from_group(group: &mut Group, entry_id: &str) -> Option<Entry> {
     if let Some(index) = group
         .entries
         .iter()
@@ -4194,7 +4051,7 @@ fn delete_entry_from_group(group: &mut Group, entry_id: &str) -> bool {
             .iter()
             .map(|entry| entry.id)
             .collect::<Vec<_>>();
-        group.entries.remove(index);
+        let removed = group.entries.remove(index);
         let new_identities = group
             .entries
             .iter()
@@ -4208,17 +4065,17 @@ fn delete_entry_from_group(group: &mut Group, entry_id: &str) -> bool {
             &mut group.custom_data_blocks,
             (&old_identities, &new_identities, &[]),
         );
-        return true;
+        return Some(removed);
     }
     for child in &mut group.children {
-        if delete_entry_from_group(child, entry_id) {
-            return true;
+        if let Some(removed) = delete_entry_from_group(child, entry_id) {
+            return Some(removed);
         }
     }
-    false
+    None
 }
 
-fn delete_group_from_group(group: &mut Group, group_id: &str) -> bool {
+fn delete_group_from_group(group: &mut Group, group_id: &str) -> Option<Group> {
     if let Some(index) = group
         .children
         .iter()
@@ -4229,7 +4086,7 @@ fn delete_group_from_group(group: &mut Group, group_id: &str) -> bool {
             .iter()
             .map(|child| child.id)
             .collect::<Vec<_>>();
-        group.children.remove(index);
+        let removed = group.children.remove(index);
         let new_identities = group
             .children
             .iter()
@@ -4243,14 +4100,14 @@ fn delete_group_from_group(group: &mut Group, group_id: &str) -> bool {
             &mut group.custom_data_blocks,
             (&old_identities, &new_identities, &[]),
         );
-        return true;
+        return Some(removed);
     }
     for child in &mut group.children {
-        if delete_group_from_group(child, group_id) {
-            return true;
+        if let Some(removed) = delete_group_from_group(child, group_id) {
+            return Some(removed);
         }
     }
-    false
+    None
 }
 
 fn take_group_from_group(group: &mut Group, group_id: &str) -> Option<Group> {
@@ -4358,6 +4215,83 @@ fn current_unix_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn entry_last_update(entry: &Entry) -> u64 {
+    entry
+        .modified_at
+        .max(entry.location_changed_at.unwrap_or(0))
+}
+
+fn group_last_update(group: &Group) -> u64 {
+    group
+        .times
+        .map(|times| {
+            times
+                .modified_at
+                .max(times.location_changed_at.unwrap_or(0))
+        })
+        .unwrap_or(0)
+}
+
+fn collect_group_deletion_candidates(group: &Group, candidates: &mut Vec<(Uuid, u64)>) {
+    candidates.push((group.id, group_last_update(group)));
+    candidates.extend(
+        group
+            .entries
+            .iter()
+            .map(|entry| (entry.id, entry_last_update(entry))),
+    );
+    for child in &group.children {
+        collect_group_deletion_candidates(child, candidates);
+    }
+}
+
+fn next_deletion_timestamp(
+    vault: &Vault,
+    candidates: impl IntoIterator<Item = (Uuid, u64)>,
+) -> Result<i64, MutationError> {
+    let mut causal_floor = i128::MIN;
+    for (id, last_update) in candidates {
+        causal_floor = causal_floor.max(i128::from(last_update));
+        if let Some(deleted_at) = vault
+            .deleted_objects
+            .iter()
+            .filter(|deleted| deleted.id == id)
+            .map(|deleted| deleted.deleted_at)
+            .max()
+        {
+            causal_floor = causal_floor.max(i128::from(deleted_at));
+        }
+    }
+    let timestamp = i128::from(current_unix_timestamp()).max(causal_floor.saturating_add(1));
+    let timestamp = i64::try_from(timestamp).map_err(|_| {
+        MutationError::InvalidEntryValue(format!(
+            "timestamp is outside the KDBX4 domain: {timestamp}"
+        ))
+    })?;
+    validate_persistent_timestamp(timestamp)?;
+    Ok(timestamp)
+}
+
+fn record_deleted_objects(vault: &mut Vault, ids: impl IntoIterator<Item = Uuid>, deleted_at: i64) {
+    let mut merged = std::collections::BTreeMap::<Uuid, i64>::new();
+    for existing in std::mem::take(&mut vault.deleted_objects) {
+        merged
+            .entry(existing.id)
+            .and_modify(|timestamp| *timestamp = (*timestamp).max(existing.deleted_at))
+            .or_insert(existing.deleted_at);
+    }
+    for id in ids {
+        merged
+            .entry(id)
+            .and_modify(|timestamp| *timestamp = (*timestamp).max(deleted_at))
+            .or_insert(deleted_at);
+    }
+    vault.deleted_objects = merged
+        .into_iter()
+        .map(|(id, deleted_at)| DeletedObject { id, deleted_at })
+        .collect();
 }
 
 fn next_entry_location_timestamp(previous: Option<u64>) -> Result<u64, MutationError> {
@@ -4842,12 +4776,7 @@ mod internal_tests {
                 .iter()
                 .any(|entry| entry.id.to_string() == entry_id)
         );
-        assert!(
-            vault
-                .deleted_objects
-                .iter()
-                .any(|deleted| deleted.id.to_string() == entry_id)
-        );
+        assert!(vault.deleted_objects.is_empty());
 
         let before = vault.clone();
         assert!(matches!(
@@ -5500,6 +5429,137 @@ mod internal_tests {
         assert_eq!(vault, before);
     }
 
+    #[test]
+    fn hard_delete_records_a_tombstone_newer_than_the_entry() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("hard delete");
+        let mut entry = Entry::new("entry");
+        entry.modified_at = 4_000_000_000;
+        let entry_id = entry.id;
+        vault.root.entries.push(entry);
+
+        core.delete_entry(&mut vault, &entry_id.to_string())
+            .expect("hard delete entry");
+
+        assert!(vault.root.entries.is_empty());
+        assert_eq!(vault.deleted_objects.len(), 1);
+        assert_eq!(vault.deleted_objects[0].id, entry_id);
+        assert!(vault.deleted_objects[0].deleted_at > 4_000_000_000);
+    }
+
+    #[test]
+    fn hard_delete_is_atomic_when_no_later_timestamp_is_representable() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("hard delete overflow");
+        let mut entry = Entry::new("entry");
+        entry.modified_at = i64::MAX as u64;
+        let entry_id = entry.id;
+        vault.root.entries.push(entry);
+        let before = vault.clone();
+
+        assert!(matches!(
+            core.delete_entry(&mut vault, &entry_id.to_string()),
+            Err(MutationError::InvalidEntryValue(_))
+        ));
+        assert_eq!(vault, before);
+    }
+
+    #[test]
+    fn hard_group_delete_tombstones_the_whole_subtree() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("hard delete group");
+        let mut parent = Group::new("parent");
+        let parent_id = parent.id;
+        let mut child = Group::new("child");
+        let child_id = child.id;
+        let entry = Entry::new("entry");
+        let entry_id = entry.id;
+        child.entries.push(entry);
+        parent.children.push(child);
+        vault.root.children.push(parent);
+
+        core.delete_group(&mut vault, &parent_id.to_string())
+            .expect("hard delete group");
+
+        assert!(vault.root.children.is_empty());
+        assert_eq!(
+            vault
+                .deleted_objects
+                .iter()
+                .map(|deleted| deleted.id)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([parent_id, child_id, entry_id])
+        );
+    }
+
+    #[test]
+    fn recycle_bin_moves_do_not_create_or_remove_tombstones() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("recycle");
+        let entry = Entry::new("entry");
+        let entry_id = entry.id;
+        vault.root.entries.push(entry);
+        vault.deleted_objects.push(DeletedObject {
+            id: entry_id,
+            deleted_at: -1,
+        });
+
+        core.soft_delete_entry_to_recycle_bin(&mut vault, &entry_id.to_string())
+            .expect("move to recycle bin");
+        core.restore_entry_from_recycle_bin(&mut vault, &entry_id.to_string(), None)
+            .expect("restore from recycle bin");
+
+        assert_eq!(
+            vault.deleted_objects,
+            [DeletedObject {
+                id: entry_id,
+                deleted_at: -1,
+            }]
+        );
+    }
+
+    #[test]
+    fn tombstone_merge_of_loaded_nodes_remains_kdbx_saveable() {
+        let core = KeepassCore::new();
+        let mut original = Vault::empty("merge fidelity");
+        let mut entry = Entry::new("deleted entry");
+        entry.modified_at = 10;
+        let entry_id = entry.id;
+        original.root.entries.push(entry);
+        let child = Group::new("deleted group");
+        let child_id = child.id;
+        original.root.children.push(child);
+        let mut key = CompositeKey::default();
+        key.add_password("merge fidelity");
+        let bytes = core
+            .save_kdbx(&original, &key, SaveProfile::recommended())
+            .expect("save source vault");
+        let mut loaded = core.load_kdbx(&bytes, &key).expect("load source vault");
+
+        let mut incoming = Vault::empty("incoming");
+        incoming.deleted_objects.extend([
+            DeletedObject {
+                id: entry_id,
+                deleted_at: 20,
+            },
+            DeletedObject {
+                id: child_id,
+                deleted_at: 20,
+            },
+        ]);
+        core.merge_vaults(&mut loaded, &incoming);
+
+        let merged_bytes = core
+            .save_kdbx(&loaded, &key, SaveProfile::recommended())
+            .expect("save merged vault");
+        let merged = core
+            .load_kdbx(&merged_bytes, &key)
+            .expect("load merged vault");
+        assert!(merged.root.entries.is_empty());
+        assert!(merged.root.children.is_empty());
+        assert_eq!(merged.deleted_objects.len(), 2);
+    }
+
     fn stable_entry_create() -> EntryCreate {
         EntryCreate {
             title: "Example".into(),
@@ -6044,6 +6104,9 @@ mod tests {
 
         assert!(core.find_entry_view_by_id(&vault, &created.id).is_none());
         assert!(vault.root.entries.is_empty());
+        assert_eq!(vault.deleted_objects.len(), 1);
+        assert_eq!(vault.deleted_objects[0].id.to_string(), created.id);
+        assert!(i128::from(vault.deleted_objects[0].deleted_at) > i128::from(created.modified_at));
     }
 
     #[test]
@@ -6055,6 +6118,22 @@ mod tests {
         let child = core
             .add_group(&mut vault, &root_id, "Created Group")
             .expect("add group");
+        let grandchild = core
+            .add_group(&mut vault, &child.id, "Grandchild")
+            .expect("add grandchild");
+        let nested_entry = core
+            .add_entry(
+                &mut vault,
+                &grandchild.id,
+                EntryCreate {
+                    title: "Nested".into(),
+                    username: String::new(),
+                    password: String::new(),
+                    url: String::new(),
+                    notes: String::new(),
+                },
+            )
+            .expect("add nested entry");
 
         assert_eq!(child.title, "Created Group");
         assert_eq!(vault.root.children.len(), 1);
@@ -6065,6 +6144,14 @@ mod tests {
 
         assert!(core.find_group_view_by_id(&vault, &child.id).is_none());
         assert!(vault.root.children.is_empty());
+        assert_eq!(
+            vault
+                .deleted_objects
+                .iter()
+                .map(|deleted| deleted.id.to_string())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([child.id, grandchild.id, nested_entry.id])
+        );
     }
 
     #[test]
@@ -6573,7 +6660,7 @@ mod tests {
     }
 
     #[test]
-    fn facade_soft_deletes_entry_to_recycle_bin_and_records_deleted_object() {
+    fn facade_soft_deletes_entry_to_recycle_bin_without_tombstoning_live_entry() {
         let core = KeepassCore::new();
         let mut vault = Vault::empty("Recycle");
         let mut group = Group::new("Active");
@@ -6586,20 +6673,12 @@ mod tests {
         let deleted = core
             .soft_delete_entry_to_recycle_bin(&mut vault, &entry_id)
             .expect("soft delete entry");
-        let deleted_objects = core.list_deleted_objects(&vault);
 
         assert_eq!(deleted.id, entry_id);
         assert!(vault.root.children[0].entries.is_empty());
         assert_eq!(vault.recycle_bin_enabled, Some(true));
         assert!(vault.recycle_bin_group.is_some());
-        assert_eq!(deleted_objects.len(), 1);
-        assert_eq!(
-            deleted_objects,
-            vec![DeletedObjectView {
-                id: entry_id.clone(),
-                deleted_at: vault.deleted_objects[0].deleted_at,
-            }]
-        );
+        assert!(core.list_deleted_objects(&vault).is_empty());
 
         let recycle_bin_id = vault.recycle_bin_group.expect("recycle bin id");
         let recycle_bin = core
@@ -6621,7 +6700,7 @@ mod tests {
     }
 
     #[test]
-    fn facade_restores_entry_from_recycle_bin_and_clears_deleted_object() {
+    fn facade_restores_entry_from_recycle_bin_without_tombstone_churn() {
         let core = KeepassCore::new();
         let mut vault = Vault::empty("Recycle");
         let mut group = Group::new("Active");
@@ -6630,6 +6709,10 @@ mod tests {
         let entry_id = entry.id.to_string();
         group.entries.push(entry);
         vault.root.children.push(group);
+        vault.deleted_objects.push(DeletedObject {
+            id: entry_id.parse().expect("entry uuid"),
+            deleted_at: -1,
+        });
 
         core.soft_delete_entry_to_recycle_bin(&mut vault, &entry_id)
             .expect("soft delete entry");
@@ -6642,8 +6725,13 @@ mod tests {
             .expect("restore entry");
 
         assert_eq!(restored.id, entry_id);
-        assert_eq!(vault.deleted_objects.len(), 0);
-        assert!(core.list_deleted_objects(&vault).is_empty());
+        assert_eq!(
+            core.list_deleted_objects(&vault),
+            [DeletedObjectView {
+                id: entry_id.clone(),
+                deleted_at: -1,
+            }]
+        );
         let group = core
             .find_group_view_by_id(&vault, &group_id)
             .expect("restored group");
@@ -6683,7 +6771,7 @@ mod tests {
             .load_kdbx(&bytes, &key)
             .expect("reload recycle bin state");
 
-        assert_eq!(loaded.deleted_objects.len(), 1);
+        assert!(loaded.deleted_objects.is_empty());
         assert_eq!(loaded.root.entries.len(), 0);
         let recycle_bin_id = loaded.recycle_bin_group.expect("loaded recycle bin id");
         let recycle_bin = core
