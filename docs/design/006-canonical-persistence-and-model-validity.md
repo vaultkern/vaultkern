@@ -781,10 +781,9 @@ harness" happens to exist. The mandatory `KDBX Interoperability` workflow in
 checks their raw version words, then uses `keepassxc-cli ls` and `show` to
 decrypt, enumerate, and assert a sentinel username.
 
-Freeze evidence was produced before this documentation-only freeze on 4A
-implementation commit
-[`9a818d8`](https://github.com/vaultkern/vaultkern/commit/9a818d862e034fa26afae4e832c6dd1c915652dd).
-The corresponding
+Freeze evidence was produced before this documentation-only freeze in
+[Wave 4A PR #34](https://github.com/vaultkern/vaultkern/pull/34). The
+corresponding
 [`KDBX Interoperability` run](https://github.com/vaultkern/vaultkern/actions/runs/29553222382)
 passed the field-9 audit, the external 4.1 read, and the KeePassXC 4.0/4.1
 decrypt-and-enumerate gates. The implementation PR is sequenced after this
