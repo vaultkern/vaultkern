@@ -69,11 +69,11 @@ fn verify_writer_profile(version: KdbxVersion, label: &str, username: &str) {
         version,
         cipher: KdbxCipher::Aes256,
         compression: Compression::Gzip,
-        kdf: SaveKdf::Argon2id {
+        kdf: Some(SaveKdf::Argon2id {
             iterations: 2,
             memory_kib: 8 * 1024,
             parallelism: 1,
-        },
+        }),
     };
     let bytes = save_kdbx(&vault, &key, &profile).expect("write interoperability database");
     fs::write(&database, &bytes).expect("persist interoperability database");

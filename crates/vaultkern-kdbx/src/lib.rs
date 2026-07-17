@@ -107,12 +107,22 @@ pub enum VariantValue {
     Int64(i64),
     String(String),
     Bytes(Vec<u8>),
+    Unknown { type_tag: u8, bytes: Vec<u8> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct VariantDictionary {
     items: BTreeMap<String, VariantValue>,
+    loaded_encoding: Option<Vec<u8>>,
 }
+
+impl PartialEq for VariantDictionary {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+    }
+}
+
+impl Eq for VariantDictionary {}
 
 impl VariantDictionary {
     pub fn insert(&mut self, key: impl Into<String>, value: VariantValue) {
@@ -128,6 +138,12 @@ impl VariantDictionary {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
+        if let Some(encoded) = &self.loaded_encoding
+            && Self::decode_items(encoded)? == self.items
+        {
+            return Ok(encoded.clone());
+        }
+
         let mut bytes = Vec::new();
         bytes.extend(0x0100_u16.to_le_bytes());
 
@@ -146,6 +162,13 @@ impl VariantDictionary {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
+        Ok(Self {
+            items: Self::decode_items(bytes)?,
+            loaded_encoding: Some(bytes.to_vec()),
+        })
+    }
+
+    fn decode_items(bytes: &[u8]) -> Result<BTreeMap<String, VariantValue>> {
         let mut cursor = Cursor::new(bytes);
         let version = cursor.read_u16()?;
         if version != 0x0100 {
@@ -167,7 +190,7 @@ impl VariantDictionary {
             items.insert(name, value);
         }
 
-        Ok(Self { items })
+        Ok(items)
     }
 }
 
@@ -301,6 +324,11 @@ pub enum SaveKdf {
     AesKdbx4 {
         rounds: u64,
     },
+    Argon2d {
+        iterations: u32,
+        memory_kib: u32,
+        parallelism: u32,
+    },
     Argon2id {
         iterations: u32,
         memory_kib: u32,
@@ -308,12 +336,23 @@ pub enum SaveKdf {
     },
 }
 
+impl SaveKdf {
+    pub fn recommended() -> Self {
+        Self::Argon2id {
+            iterations: 2,
+            memory_kib: 64 * 1024,
+            parallelism: 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveProfile {
     pub version: KdbxVersion,
     pub cipher: KdbxCipher,
     pub compression: Compression,
-    pub kdf: SaveKdf,
+    /// `None` preserves a loaded KDBX4 dictionary and uses product defaults only on first save.
+    pub kdf: Option<SaveKdf>,
 }
 
 impl SaveProfile {
@@ -322,11 +361,7 @@ impl SaveProfile {
             version: KdbxVersion::V4_1,
             cipher: KdbxCipher::Aes256,
             compression: Compression::Gzip,
-            kdf: SaveKdf::Argon2id {
-                iterations: 2,
-                memory_kib: 64 * 1024,
-                parallelism: 1,
-            },
+            kdf: None,
         }
     }
 }
@@ -400,8 +435,8 @@ pub fn save_kdbx(
     header.compression = profile.compression;
     header.master_seed = random_array_32();
     header.encryption_iv = random_iv(profile.cipher);
-    let kdf = build_kdf_profile(&profile.kdf);
-    header.kdf_parameters = kdf_to_variant_dict(&kdf);
+    let (kdf, kdf_parameters) = save_kdf_state(vault, profile.kdf.as_ref())?;
+    header.kdf_parameters = kdf_parameters;
     for (key, value) in &vault.public_custom_data {
         header
             .public_custom_data
@@ -668,6 +703,7 @@ fn encode_variant_value(value: &VariantValue) -> (u8, Vec<u8>) {
         VariantValue::Int64(value) => (0x0D, value.to_le_bytes().to_vec()),
         VariantValue::String(value) => (0x18, value.as_bytes().to_vec()),
         VariantValue::Bytes(value) => (0x42, value.clone()),
+        VariantValue::Unknown { type_tag, bytes } => (*type_tag, bytes.clone()),
     }
 }
 
@@ -690,7 +726,10 @@ fn decode_variant_value(kind: u8, bytes: &[u8]) -> Result<VariantValue> {
             String::from_utf8(bytes.to_vec()).map_err(|_| KdbxError::InvalidValue)?,
         ),
         0x42 => VariantValue::Bytes(bytes.to_vec()),
-        _ => return Err(KdbxError::InvalidValue),
+        type_tag => VariantValue::Unknown {
+            type_tag,
+            bytes: bytes.to_vec(),
+        },
     })
 }
 
@@ -699,6 +738,16 @@ fn build_kdf_profile(profile: &SaveKdf) -> KdfProfile {
         SaveKdf::AesKdbx4 { rounds } => KdfProfile::AesKdbx4 {
             rounds: *rounds,
             salt: random_array_32(),
+        },
+        SaveKdf::Argon2d {
+            iterations,
+            memory_kib,
+            parallelism,
+        } => KdfProfile::Argon2d {
+            iterations: *iterations,
+            memory_kib: *memory_kib,
+            parallelism: *parallelism,
+            salt: random_bytes(32),
         },
         SaveKdf::Argon2id {
             iterations,
@@ -713,6 +762,56 @@ fn build_kdf_profile(profile: &SaveKdf) -> KdfProfile {
     }
 }
 
+pub fn retained_or_recommended_save_kdf(vault: &Vault) -> Result<SaveKdf> {
+    let Some(encoded) = &vault.kdf_parameters else {
+        return Ok(SaveKdf::recommended());
+    };
+    let parameters = ExternalKdfParameters::decode_kdbx4(&VariantDictionary::decode(encoded)?)?;
+    match parameters.algorithm() {
+        ExternalKdfAlgorithm::AesKdbx3 | ExternalKdfAlgorithm::AesKdbx4 => Ok(SaveKdf::AesKdbx4 {
+            rounds: parameters.rounds().ok_or(KdbxError::UnsupportedKdf)?,
+        }),
+        ExternalKdfAlgorithm::Argon2d | ExternalKdfAlgorithm::Argon2id => {
+            let (iterations, memory_kib, parallelism) = parameters
+                .argon2_work_factors()
+                .ok_or(KdbxError::UnsupportedKdf)?;
+            if parameters.algorithm() == ExternalKdfAlgorithm::Argon2d {
+                Ok(SaveKdf::Argon2d {
+                    iterations,
+                    memory_kib,
+                    parallelism,
+                })
+            } else {
+                Ok(SaveKdf::Argon2id {
+                    iterations,
+                    memory_kib,
+                    parallelism,
+                })
+            }
+        }
+    }
+}
+
+fn save_kdf_state(
+    vault: &Vault,
+    requested: Option<&SaveKdf>,
+) -> Result<(KdfProfile, VariantDictionary)> {
+    if let Some(requested) = requested {
+        let profile = build_kdf_profile(requested);
+        let parameters = kdf_to_variant_dict(&profile);
+        return Ok((profile, parameters));
+    }
+    if let Some(encoded) = &vault.kdf_parameters {
+        let parameters = VariantDictionary::decode(encoded)?;
+        let profile = ExternalKdfParameters::decode_kdbx4(&parameters)?.into_profile();
+        return Ok((profile, parameters));
+    }
+
+    let profile = build_kdf_profile(&SaveKdf::recommended());
+    let parameters = kdf_to_variant_dict(&profile);
+    Ok((profile, parameters))
+}
+
 fn kdf_to_variant_dict(kdf: &KdfProfile) -> VariantDictionary {
     let mut dict = VariantDictionary::default();
     match kdf {
@@ -724,7 +823,13 @@ fn kdf_to_variant_dict(kdf: &KdfProfile) -> VariantDictionary {
             dict.insert("R", VariantValue::UInt64(*rounds));
             dict.insert("S", VariantValue::Bytes(salt.to_vec()));
         }
-        KdfProfile::Argon2id {
+        KdfProfile::Argon2d {
+            iterations,
+            memory_kib,
+            parallelism,
+            salt,
+        }
+        | KdfProfile::Argon2id {
             iterations,
             memory_kib,
             parallelism,
@@ -732,7 +837,15 @@ fn kdf_to_variant_dict(kdf: &KdfProfile) -> VariantDictionary {
         } => {
             dict.insert(
                 "$UUID",
-                VariantValue::Bytes(KDF_ARGON2ID_UUID.into_bytes().to_vec()),
+                VariantValue::Bytes(
+                    match kdf {
+                        KdfProfile::Argon2d { .. } => KDF_ARGON2D_UUID,
+                        KdfProfile::Argon2id { .. } => KDF_ARGON2ID_UUID,
+                        _ => unreachable!("matched an Argon2 KDF"),
+                    }
+                    .into_bytes()
+                    .to_vec(),
+                ),
             );
             dict.insert("V", VariantValue::UInt32(0x13));
             dict.insert("I", VariantValue::UInt64(u64::from(*iterations)));
@@ -740,7 +853,7 @@ fn kdf_to_variant_dict(kdf: &KdfProfile) -> VariantDictionary {
             dict.insert("P", VariantValue::UInt32(*parallelism));
             dict.insert("S", VariantValue::Bytes(salt.clone()));
         }
-        KdfProfile::AesKdbx3 { .. } | KdfProfile::Argon2d { .. } => {}
+        KdfProfile::AesKdbx3 { .. } => {}
     }
     dict
 }
@@ -2147,7 +2260,7 @@ fn validate_entry_shape(entry: &Element) -> Result<()> {
         decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
     })?;
     validate_typed_children(entry, &["IconID"], |value| {
-        value.trim().parse::<u32>().is_ok()
+        value.trim().is_empty() || value.trim().parse::<u32>().is_ok()
     })?;
     validate_typed_children(entry, &["CustomIconUUID", "PreviousParentGroup"], |value| {
         parse_optional_uuid(value).is_ok()
@@ -2170,24 +2283,20 @@ fn validate_times_shape(times: &Element) -> Result<()> {
     ];
     validate_only_singletons(times, FIELDS, &[])?;
     validate_known_scalar_children(times, FIELDS, &[])?;
-    validate_typed_children(
-        times,
-        &[
-            "CreationTime",
-            "LastModificationTime",
-            "LastAccessTime",
-            "LocationChanged",
-        ],
-        |value| parse_datetime_value(value).is_some(),
-    )?;
+    validate_typed_children(times, &["CreationTime", "LastModificationTime"], |value| {
+        parse_datetime_value(value).is_some()
+    })?;
+    validate_typed_children(times, &["LastAccessTime", "LocationChanged"], |value| {
+        value.trim().is_empty() || parse_datetime_value(value).is_some()
+    })?;
     validate_typed_children(times, &["ExpiryTime"], |value| {
-        parse_datetime_i64(value).is_some()
+        value.trim().is_empty() || parse_datetime_i64(value).is_some()
     })?;
     validate_typed_children(times, &["Expires"], |value| {
         parse_bool_text_strict(value).is_some()
     })?;
     validate_typed_children(times, &["UsageCount"], |value| {
-        value.trim().parse::<u64>().is_ok()
+        value.trim().is_empty() || value.trim().parse::<u64>().is_ok()
     })
 }
 
@@ -2210,7 +2319,7 @@ fn validate_auto_type_shape(auto_type: &Element) -> Result<()> {
         parse_nullable_bool_strict(value).is_some()
     })?;
     validate_typed_children(auto_type, &["DataTransferObfuscation"], |value| {
-        value.trim().parse::<i32>().is_ok()
+        value.trim().is_empty() || value.trim().parse::<i32>().is_ok()
     })?;
     Ok(())
 }
@@ -2513,6 +2622,7 @@ fn parse_xml(
                 .is_some(),
         },
         root: group,
+        kdf_parameters: Some(header.kdf_parameters.encode()?),
         public_custom_data: header
             .public_custom_data
             .iter()
@@ -2711,6 +2821,7 @@ fn parse_kdbx3_xml(
                 .is_some(),
         },
         root: group,
+        kdf_parameters: None,
         public_custom_data: BTreeMap::new(),
         deleted_objects,
         maintenance_history_days,
@@ -3402,6 +3513,10 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
 ) -> Result<Entry> {
     let mut entry = Entry::new("");
     entry.auto_type = None;
+    entry.expiry_time = None;
+    entry.last_accessed_at = None;
+    entry.usage_count = None;
+    entry.location_changed_at = Some(0);
     entry.id = decode_uuid(&child_text(element, "UUID").ok_or(KdbxError::InvalidValue)?)?;
     entry.icon_id =
         child_text(element, "IconID").and_then(|value| value.trim().parse::<u32>().ok());
@@ -3489,8 +3604,9 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
             child_text(&times, "LastAccessTime").and_then(|value| parse_datetime_value(&value));
         entry.usage_count =
             child_text(&times, "UsageCount").and_then(|value| value.trim().parse().ok());
-        entry.location_changed_at =
-            child_text(&times, "LocationChanged").and_then(|value| parse_datetime_value(&value));
+        entry.location_changed_at = child_text(&times, "LocationChanged")
+            .and_then(|value| parse_datetime_value(&value))
+            .or(Some(0));
     }
 
     let mut raw_fields = BTreeMap::new();
@@ -3630,6 +3746,9 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
     }
 
     let mut collapsed_optional_nodes = Vec::new();
+    if child_optional(element, "IconID").is_some() && entry.icon_id.is_none() {
+        collapsed_optional_nodes.push("IconID");
+    }
     if child_optional(element, "CustomIconUUID").is_some() && entry.custom_icon_id.is_none() {
         collapsed_optional_nodes.push("CustomIconUUID");
     }
@@ -4766,6 +4885,12 @@ fn validate_entry_model(entry: &Entry, owner_id: Uuid, is_snapshot: bool) -> Res
             .tags_raw
             .as_deref()
             .is_some_and(|raw| parse_tags(raw) != entry.tags)
+        || entry.location_changed_at.is_none()
+        || (entry.expires && entry.expiry_time.is_none())
+        || entry
+            .totp
+            .as_ref()
+            .is_some_and(|totp| !structured_totp_is_persistence_valid(totp))
     {
         return Err(KdbxError::InvalidValue);
     }
@@ -4819,6 +4944,19 @@ fn validate_entry_model(entry: &Entry, owner_id: Uuid, is_snapshot: bool) -> Res
         validate_entry_model(snapshot, entry.id, true)?;
     }
     Ok(())
+}
+
+fn structured_totp_is_persistence_valid(totp: &vaultkern_model::TotpSpec) -> bool {
+    let Some(account_name) = totp.account_name.as_deref() else {
+        return false;
+    };
+    !account_name.is_empty()
+        && !totp.secret_base32.is_empty()
+        && totp
+            .issuer
+            .as_deref()
+            .is_none_or(|issuer| !issuer.is_empty())
+        && (totp.issuer.is_some() || !account_name.contains(':'))
 }
 
 fn validate_tracked_identity_slots<T: Ord>(
@@ -5653,7 +5791,7 @@ mod external_kdf_policy_tests {
     fn load_does_not_derive_until_confirmed_and_then_loads_normally() {
         let key = CompositeKey::default();
         let profile = super::SaveProfile {
-            kdf: super::SaveKdf::AesKdbx4 { rounds: 1 },
+            kdf: Some(super::SaveKdf::AesKdbx4 { rounds: 1 }),
             ..super::SaveProfile::recommended()
         };
         let bytes = save_kdbx(&Vault::empty("confirm"), &key, &profile).expect("save fixture");
@@ -5678,6 +5816,32 @@ mod external_kdf_policy_tests {
         )
         .expect("explicit confirmation authorizes the KDF");
         assert_eq!(loaded.name, "confirm");
+    }
+
+    #[test]
+    fn ordinary_save_preserves_the_loaded_kdf_dictionary() {
+        let key = CompositeKey::default();
+        let profile = super::SaveProfile {
+            kdf: Some(super::SaveKdf::AesKdbx4 { rounds: 1 }),
+            ..super::SaveProfile::recommended()
+        };
+        let first =
+            save_kdbx(&Vault::empty("preserve kdf"), &key, &profile).expect("save initial vault");
+        let loaded = load_kdbx(&first, &key).expect("load initial vault");
+
+        let second =
+            save_kdbx(&loaded, &key, &super::SaveProfile::recommended()).expect("ordinary save");
+        let first_header = super::KdbxHeader::decode(&first).expect("first header");
+        let second_header = super::KdbxHeader::decode(&second).expect("second header");
+
+        assert_eq!(
+            super::kdf_generation::kdf_generation(&second_header.kdf_parameters),
+            super::kdf_generation::kdf_generation(&first_header.kdf_parameters)
+        );
+        assert_eq!(
+            second_header.kdf_parameters.encode().expect("second KDF"),
+            first_header.kdf_parameters.encode().expect("first KDF")
+        );
     }
 }
 
@@ -5708,7 +5872,7 @@ mod compatibility_tests {
             version: KdbxVersion::V4_1,
             cipher: KdbxCipher::Aes256,
             compression: Compression::Gzip,
-            kdf: SaveKdf::AesKdbx4 { rounds: 1 },
+            kdf: Some(SaveKdf::AesKdbx4 { rounds: 1 }),
         }
     }
 
@@ -7810,10 +7974,8 @@ mod compatibility_tests {
     #[test]
     fn totp_label_edge_cases_roundtrip_with_stable_canonical_content() {
         for (case, issuer, account_name) in [
-            ("empty-account", "Issuer", ""),
             ("leading-space-account", "Issuer", " alice"),
             ("encoded-colons", "Issuer:Prod", "account:west"),
-            ("empty-account-colon-issuer", "Issuer:Prod", ""),
         ] {
             let mut entry = credential_entry();
             let totp = entry.totp.as_mut().expect("credential TOTP");
@@ -7851,42 +8013,332 @@ mod compatibility_tests {
     }
 
     #[test]
-    fn totp_without_issuer_and_with_empty_account_normalizes_stably() {
-        let mut entry = credential_entry();
-        let totp = entry.totp.as_mut().expect("credential TOTP");
-        totp.issuer = None;
-        totp.account_name = Some(String::new());
-        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
-        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
-        let mut vault = Vault::empty("empty-account-without-issuer");
+    fn persistence_rejects_noninvertible_structured_totp_states() {
+        let key = test_key("invalid-structured-totp");
+        for (case, mutate) in [
+            ("missing-account", 0_u8),
+            ("empty-account", 1),
+            ("empty-secret", 2),
+            ("empty-issuer", 3),
+            ("colon-account-without-issuer", 4),
+        ] {
+            let mut entry = credential_entry();
+            let totp = entry.totp.as_mut().expect("credential TOTP");
+            match mutate {
+                0 => totp.account_name = None,
+                1 => totp.account_name = Some(String::new()),
+                2 => totp.secret_base32.clear(),
+                3 => totp.issuer = Some(String::new()),
+                4 => {
+                    totp.issuer = None;
+                    totp.account_name = Some("account:west".into());
+                }
+                _ => unreachable!(),
+            }
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+
+            assert!(matches!(
+                save_kdbx(&vault, &key, &fast_profile()),
+                Err(KdbxError::InvalidValue)
+            ));
+        }
+    }
+
+    #[test]
+    fn persistence_rejects_missing_required_entry_time_state() {
+        let key = test_key("invalid-entry-times");
+        let mut missing_location = credential_entry();
+        missing_location.location_changed_at = None;
+        let mut vault = Vault::empty("missing location");
+        vault.root.entries.push(missing_location);
+        assert!(matches!(
+            save_kdbx(&vault, &key, &fast_profile()),
+            Err(KdbxError::InvalidValue)
+        ));
+
+        let mut missing_expiry = credential_entry();
+        missing_expiry.expiry_time = None;
+        let mut vault = Vault::empty("missing expiry");
+        vault.root.entries.push(missing_expiry);
+        assert!(matches!(
+            save_kdbx(&vault, &key, &fast_profile()),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn absent_optional_entry_elements_remain_absent_while_location_becomes_epoch() {
+        fn remove_options(entry: &mut Element) {
+            entry.children.retain(|child| {
+                !matches!(child, XMLNode::Element(element) if element.name == "IconID" || element.name == "AutoType")
+            });
+            let times = entry
+                .children
+                .iter_mut()
+                .find_map(|child| match child {
+                    XMLNode::Element(element) if element.name == "Times" => Some(element),
+                    _ => None,
+                })
+                .expect("times");
+            times.children.retain(|child| {
+                !matches!(child, XMLNode::Element(element) if matches!(element.name.as_str(), "ExpiryTime" | "LastAccessTime" | "UsageCount" | "LocationChanged"))
+            });
+        }
+
+        let mut entry = Entry::new("entry");
+        let mut history = Entry::new("history");
+        history.id = entry.id;
+        entry.history.push(history);
+        let mut vault = Vault::empty("absent entry options");
         vault.root.entries.push(entry);
-        let key = test_key("empty-account-without-issuer");
+        let key = test_key("absent-entry-options");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save source");
+        let without_options = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            remove_options(entry);
+            let history = entry
+                .get_mut_child("History")
+                .expect("history")
+                .get_mut_child("Entry")
+                .expect("history entry");
+            remove_options(history);
+        })
+        .expect("remove optional elements");
 
-        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save credentials");
-        let loaded = load_kdbx(&bytes, &key).expect("load credentials");
-        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+        let loaded = load_kdbx(&without_options, &key).expect("load absent options");
+        let entry = &loaded.root.entries[0];
+        for candidate in [entry, &entry.history[0]] {
+            assert_eq!(candidate.icon_id, None);
+            assert_eq!(candidate.auto_type, None);
+            assert_eq!(candidate.expiry_time, None);
+            assert_eq!(candidate.last_accessed_at, None);
+            assert_eq!(candidate.usage_count, None);
+            assert_eq!(candidate.location_changed_at, Some(0));
+        }
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("rewrite absent options");
+        let reloaded = load_kdbx(&rewritten, &key).expect("reload absent options");
+        assert_eq!(reloaded.root.entries[0], *entry);
+    }
+
+    #[test]
+    fn ordinary_saves_refresh_physical_encryption_material_but_not_kdf_state() {
+        let key = test_key("fresh-physical-state");
+        let first = save_kdbx(&Vault::empty("fresh physical state"), &key, &fast_profile())
+            .expect("first save");
+        let loaded = load_kdbx(&first, &key).expect("load first save");
+        let second =
+            save_kdbx(&loaded, &key, &SaveProfile::recommended()).expect("ordinary second save");
+        let first_header = KdbxHeader::decode(&first).expect("first header");
+        let second_header = KdbxHeader::decode(&second).expect("second header");
 
         assert_eq!(
-            loaded_entry
-                .totp
-                .as_ref()
-                .and_then(|totp| totp.account_name.as_deref()),
-            Some("alice@example.com")
+            first_header.kdf_parameters.encode().expect("first KDF"),
+            second_header.kdf_parameters.encode().expect("second KDF")
         );
-        assert_eq!(
-            loaded_entry
-                .totp
-                .as_ref()
-                .and_then(|totp| totp.issuer.as_deref()),
-            Some("Example Login")
+        assert_ne!(first_header.master_seed, second_header.master_seed);
+        assert_ne!(first_header.encryption_iv, second_header.encryption_iv);
+        assert_ne!(
+            extract_kdbx4_inner_key(&first, &key).expect("first inner key"),
+            extract_kdbx4_inner_key(&second, &key).expect("second inner key")
         );
-        assert_eq!(
-            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
-            expected_bytes
+    }
+
+    #[test]
+    fn ordinary_save_reemits_unknown_kdf_entries_verbatim_until_explicit_change() {
+        fn push_entry(encoded: &mut Vec<u8>, kind: u8, key: &str, value: &[u8]) {
+            encoded.push(kind);
+            encoded.extend((key.len() as i32).to_le_bytes());
+            encoded.extend(key.as_bytes());
+            encoded.extend((value.len() as i32).to_le_bytes());
+            encoded.extend(value);
+        }
+
+        let mut retained = 0x0100_u16.to_le_bytes().to_vec();
+        push_entry(&mut retained, 0x42, "S", &[0x5a; 32]);
+        push_entry(&mut retained, 0x77, "X-Future", &[0xde, 0xad]);
+        push_entry(
+            &mut retained,
+            0x42,
+            "$UUID",
+            super::KDF_AES_KDBX4_UUID.as_bytes(),
         );
+        push_entry(&mut retained, 0x05, "R", &1_u64.to_le_bytes());
+        retained.push(0);
+
+        let key = test_key("unknown-kdf-entry");
+        let mut vault = Vault::empty("unknown KDF entry");
+        vault.kdf_parameters = Some(retained.clone());
+        let ordinary = save_kdbx(&vault, &key, &SaveProfile::recommended())
+            .expect("ordinary save with retained dictionary");
+        let ordinary_header = KdbxHeader::decode(&ordinary).expect("ordinary header");
         assert_eq!(
-            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
-            expected_hash
+            ordinary_header
+                .kdf_parameters
+                .encode()
+                .expect("ordinary KDF"),
+            retained
+        );
+
+        let explicit = save_kdbx(&vault, &key, &fast_profile()).expect("explicit KDF change");
+        let explicit_header = KdbxHeader::decode(&explicit).expect("explicit header");
+        let explicit_kdf = explicit_header
+            .kdf_parameters
+            .encode()
+            .expect("explicit KDF");
+        assert_ne!(explicit_kdf, retained);
+        assert!(explicit_header.kdf_parameters.get("X-Future").is_none());
+    }
+
+    #[test]
+    fn ordinary_save_reemits_argon2_version_and_unknown_entries_verbatim() {
+        fn push_entry(encoded: &mut Vec<u8>, kind: u8, key: &str, value: &[u8]) {
+            encoded.push(kind);
+            encoded.extend((key.len() as i32).to_le_bytes());
+            encoded.extend(key.as_bytes());
+            encoded.extend((value.len() as i32).to_le_bytes());
+            encoded.extend(value);
+        }
+
+        let mut retained = 0x0100_u16.to_le_bytes().to_vec();
+        push_entry(&mut retained, 0x04, "V", &0x13_u32.to_le_bytes());
+        push_entry(&mut retained, 0x77, "X-Future", &[0xde, 0xad]);
+        push_entry(&mut retained, 0x05, "M", &(8 * 1024_u64).to_le_bytes());
+        push_entry(&mut retained, 0x42, "S", &[0x5a; 32]);
+        push_entry(&mut retained, 0x04, "P", &1_u32.to_le_bytes());
+        push_entry(
+            &mut retained,
+            0x42,
+            "$UUID",
+            super::KDF_ARGON2ID_UUID.as_bytes(),
+        );
+        push_entry(&mut retained, 0x05, "I", &1_u64.to_le_bytes());
+        retained.push(0);
+
+        let key = test_key("argon-version");
+        let mut vault = Vault::empty("Argon version");
+        vault.kdf_parameters = Some(retained.clone());
+        let bytes = save_kdbx(&vault, &key, &SaveProfile::recommended())
+            .expect("ordinary save with retained Argon2 dictionary");
+        let header = KdbxHeader::decode(&bytes).expect("ordinary header");
+
+        assert_eq!(
+            header.kdf_parameters.encode().expect("ordinary KDF"),
+            retained
+        );
+        load_kdbx(&bytes, &key).expect("retained Argon2 output decrypts");
+    }
+
+    #[test]
+    fn whitespace_optional_entry_values_map_to_none_without_losing_text_children() {
+        fn blank_options(entry: &mut Element) {
+            let set_blank = |element: &mut Element| {
+                element.children.clear();
+                element.children.push(XMLNode::Text(" \n ".into()));
+            };
+            let icon = entry.get_mut_child("IconID").expect("icon ID");
+            set_blank(icon);
+            let times = entry.get_mut_child("Times").expect("times");
+            for name in [
+                "ExpiryTime",
+                "LastAccessTime",
+                "UsageCount",
+                "LocationChanged",
+            ] {
+                set_blank(times.get_mut_child(name).expect("optional time"));
+            }
+            let auto_type = entry.get_mut_child("AutoType").expect("auto type");
+            auto_type
+                .children
+                .push(XMLNode::Element(text_element("Enabled", " \n ")));
+            auto_type.children.push(XMLNode::Element(text_element(
+                "DataTransferObfuscation",
+                " \n ",
+            )));
+            auto_type.children.push(XMLNode::Element(text_element(
+                "DefaultSequence",
+                " {USERNAME} ",
+            )));
+        }
+
+        let mut entry = Entry::new("entry");
+        let mut history = Entry::new("history");
+        history.id = entry.id;
+        entry.history.push(history);
+        let mut vault = Vault::empty("blank entry options");
+        vault.root.entries.push(entry);
+        let key = test_key("blank-entry-options");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save source");
+        let blank_options = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            blank_options(entry);
+            let history = entry
+                .get_mut_child("History")
+                .expect("history")
+                .get_mut_child("Entry")
+                .expect("history entry");
+            blank_options(history);
+        })
+        .expect("blank optional elements");
+
+        let loaded = load_kdbx(&blank_options, &key).expect("load blank options");
+        let entry = &loaded.root.entries[0];
+        for candidate in [entry, &entry.history[0]] {
+            assert_eq!(candidate.icon_id, None);
+            assert_eq!(candidate.expiry_time, None);
+            assert_eq!(candidate.last_accessed_at, None);
+            assert_eq!(candidate.usage_count, None);
+            assert_eq!(candidate.location_changed_at, Some(0));
+            let auto_type = candidate.auto_type.as_ref().expect("present auto type");
+            assert_eq!(auto_type.enabled, None);
+            assert_eq!(auto_type.obfuscation, None);
+            assert_eq!(auto_type.default_sequence.as_deref(), Some(" {USERNAME} "));
+        }
+    }
+
+    #[test]
+    fn present_empty_auto_type_maps_to_some_default_for_current_and_history_entries() {
+        let mut entry = Entry::new("entry");
+        let mut history = Entry::new("history");
+        history.id = entry.id;
+        entry.history.push(history);
+
+        let mut vault = Vault::empty("empty auto type");
+        vault.root.entries.push(entry);
+        let key = test_key("empty-auto-type");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save source");
+        let empty_auto_types = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            entry
+                .get_mut_child("AutoType")
+                .expect("current auto type")
+                .children
+                .clear();
+            entry
+                .get_mut_child("History")
+                .expect("history")
+                .get_mut_child("Entry")
+                .expect("history entry")
+                .get_mut_child("AutoType")
+                .expect("history auto type")
+                .children
+                .clear();
+        })
+        .expect("empty auto type containers");
+
+        let loaded = load_kdbx(&empty_auto_types, &key).expect("load empty auto types");
+        let entry = &loaded.root.entries[0];
+        assert_eq!(entry.auto_type, Some(AutoTypeConfig::default()));
+        assert_eq!(entry.history[0].auto_type, Some(AutoTypeConfig::default()));
+
+        let rewritten = save_kdbx(&loaded, &key, &SaveProfile::recommended())
+            .expect("rewrite empty auto types");
+        let reloaded = load_kdbx(&rewritten, &key).expect("reload empty auto types");
+        assert_eq!(reloaded.root.entries[0].auto_type, entry.auto_type);
+        assert_eq!(
+            reloaded.root.entries[0].history[0].auto_type,
+            entry.history[0].auto_type
         );
     }
 
@@ -8935,6 +9387,34 @@ mod compatibility_tests {
             Some(("custom legacy label", false))
         );
     }
+
+    fn extract_kdbx4_inner_key(
+        bytes: &[u8],
+        composite_key: &CompositeKey,
+    ) -> super::Result<Vec<u8>> {
+        let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
+        let mut cursor = super::Cursor::new(&bytes[header_len..]);
+        cursor.read_exact(32)?;
+        cursor.read_exact(32)?;
+        let raw_key = composite_key.raw_key()?;
+        let kdf = kdf_from_variant_dict(&header.kdf_parameters)?;
+        let transformed = kdf.derive_key(&raw_key)?;
+        let encryption_key = sha256_seeded(&header.master_seed, &transformed);
+        let mac_seed = mac_seed(&header.master_seed, &transformed);
+        let encrypted_payload = decode_block_stream(&mac_seed, cursor.read_remaining())?;
+        let payload = decrypt_payload(
+            header.cipher,
+            &encryption_key,
+            &header.encryption_iv,
+            &encrypted_payload,
+        )?;
+        let payload = match header.compression {
+            Compression::None => payload,
+            Compression::Gzip => gzip_decompress(&payload)?,
+        };
+        let (_, inner_key, _, _) = parse_inner_header(&payload)?;
+        Ok(inner_key)
+    }
 }
 
 #[cfg(all(test, feature = "external-fixtures"))]
@@ -9023,6 +9503,29 @@ mod tests {
             Some(&VariantValue::String("alpha".into()))
         );
         assert_eq!(decoded.get("Enabled"), Some(&VariantValue::Bool(true)));
+    }
+
+    #[test]
+    fn variant_dictionary_reemits_loaded_entry_order_and_unknown_keys_verbatim() {
+        let mut encoded = 0x0100_u16.to_le_bytes().to_vec();
+        for (kind, key, value) in [
+            (0x42_u8, "S", vec![0x55; 32]),
+            (0x08, "X-ThirdParty", vec![1]),
+            (0x77, "X-Future-Type", vec![0xde, 0xad]),
+            (0x05, "R", 42_u64.to_le_bytes().to_vec()),
+        ] {
+            encoded.push(kind);
+            encoded.extend((key.len() as i32).to_le_bytes());
+            encoded.extend(key.as_bytes());
+            encoded.extend((value.len() as i32).to_le_bytes());
+            encoded.extend(value);
+        }
+        encoded.push(0);
+
+        let decoded = VariantDictionary::decode(&encoded).expect("decode dictionary");
+
+        assert_eq!(decoded.get("X-ThirdParty"), Some(&VariantValue::Bool(true)));
+        assert_eq!(decoded.encode().expect("re-encode dictionary"), encoded);
     }
 
     #[test]

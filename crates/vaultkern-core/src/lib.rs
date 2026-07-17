@@ -9,7 +9,7 @@ pub use vaultkern_kdbx::{
     ExternalKdfResource, KdbxCipher, KdbxError, KdbxHeader, KdbxHeaderSummary, KdbxVersion,
     KdfPolicyEvaluator, SaveKdf, SaveProfile, VariantDictionary, VariantValue, inspect_kdbx_header,
     is_xml_10_text, load_kdbx as load_kdbx_bytes, load_kdbx_with_policy, required_version,
-    save_kdbx as save_kdbx_bytes,
+    retained_or_recommended_save_kdf, save_kdbx as save_kdbx_bytes,
 };
 use vaultkern_model::Attachment as ModelAttachment;
 pub use vaultkern_model::{
@@ -749,16 +749,16 @@ impl StableSaveProfile {
             },
             kdf: match self.kdf {
                 StableSaveKdf::Recommended => SaveProfile::recommended().kdf,
-                StableSaveKdf::AesKdbx4 { rounds } => SaveKdf::AesKdbx4 { rounds },
+                StableSaveKdf::AesKdbx4 { rounds } => Some(SaveKdf::AesKdbx4 { rounds }),
                 StableSaveKdf::Argon2id {
                     iterations,
                     memory_kib,
                     parallelism,
-                } => SaveKdf::Argon2id {
+                } => Some(SaveKdf::Argon2id {
                     iterations,
                     memory_kib,
                     parallelism,
-                },
+                }),
             },
         }
     }
@@ -1698,6 +1698,11 @@ impl KeepassCore {
         entry_id: &str,
         update: EntryTimesUpdate,
     ) -> Result<EntryTimesView, MutationError> {
+        if matches!(update.location_changed_at, Some(None)) {
+            return Err(MutationError::InvalidEntryValue(
+                "entry location_changed_at cannot be cleared".into(),
+            ));
+        }
         for timestamp in [update.created_at, update.modified_at]
             .into_iter()
             .flatten()
@@ -1775,11 +1780,19 @@ impl KeepassCore {
             .ok_or_else(|| MutationError::GroupNotFound(parent_group_id.into()))?;
 
         let mut entry = Entry::new(create.title);
+        let creation_time = current_unix_timestamp().max(0) as u64;
+        validate_persistent_unsigned_timestamp(creation_time)?;
         entry.id = parsed_entry_id;
         entry.username = create.username;
         entry.password = create.password;
         entry.url = create.url;
         entry.notes = create.notes;
+        entry.created_at = creation_time;
+        entry.modified_at = creation_time;
+        entry.expiry_time = Some(creation_time as i64);
+        entry.last_accessed_at = Some(creation_time);
+        entry.usage_count = Some(0);
+        entry.location_changed_at = Some(creation_time);
         parent.entries.push(entry);
         let entry = parent.entries.last().expect("created entry");
         Ok(project_entry(entry))
@@ -1845,8 +1858,14 @@ impl KeepassCore {
         if find_group_by_id(&vault.root, target_group_id).is_none() {
             return Err(MutationError::GroupNotFound(target_group_id.into()));
         }
-        let (entry, _) = take_entry_from_group(&mut vault.root, entry_id)
+        let next_location = next_entry_location_timestamp(
+            find_entry_by_id(&vault.root, entry_id)
+                .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?
+                .location_changed_at,
+        )?;
+        let (mut entry, _) = take_entry_from_group(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        entry.location_changed_at = Some(next_location);
         let target_group = find_group_by_id_mut(&mut vault.root, target_group_id)
             .ok_or_else(|| MutationError::GroupNotFound(target_group_id.into()))?;
         target_group.entries.push(entry);
@@ -2801,6 +2820,11 @@ impl KeepassCore {
         entry_id: &str,
         update: EntryExpiryUpdate,
     ) -> Result<EntryView, MutationError> {
+        if update.expires && update.expiry_time.is_none() {
+            return Err(MutationError::InvalidEntryValue(
+                "an expiring entry requires expiry_time".into(),
+            ));
+        }
         if let Some(expiry_time) = update.expiry_time {
             validate_persistent_timestamp(expiry_time)?;
         }
@@ -2862,8 +2886,32 @@ impl KeepassCore {
         &self,
         vault: &mut Vault,
         entry_id: &str,
-        totp: TotpSpec,
+        mut totp: TotpSpec,
     ) -> Result<EntryView, MutationError> {
+        let current = find_entry_by_id(&vault.root, entry_id)
+            .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        if totp.issuer.as_deref() == Some("") {
+            totp.issuer = None;
+        }
+        if totp.account_name.as_deref().is_none_or(str::is_empty) {
+            totp.account_name = Some(current.username.clone());
+        }
+        let account_name = totp.account_name.as_deref().unwrap_or_default();
+        if account_name.is_empty() {
+            return Err(MutationError::InvalidEntryValue(
+                "TOTP account_name cannot be empty".into(),
+            ));
+        }
+        if totp.secret_base32.is_empty() {
+            return Err(MutationError::InvalidEntryValue(
+                "TOTP secret_base32 cannot be empty".into(),
+            ));
+        }
+        if totp.issuer.is_none() && account_name.contains(':') {
+            return Err(MutationError::InvalidEntryValue(
+                "TOTP account_name containing ':' requires an issuer".into(),
+            ));
+        }
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
         let old_identities = entry_string_identities(entry);
@@ -3057,10 +3105,16 @@ impl KeepassCore {
         if find_entry_by_id(&vault.root, entry_id).is_none() {
             return Err(MutationError::EntryNotFound(entry_id.into()));
         }
+        let next_location = next_entry_location_timestamp(
+            find_entry_by_id(&vault.root, entry_id)
+                .expect("entry existence checked")
+                .location_changed_at,
+        )?;
         let recycle_bin_id = ensure_recycle_bin(vault);
         let (mut entry, parent_group_id) = take_entry_from_group(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
         entry.previous_parent = Some(parent_group_id);
+        entry.location_changed_at = Some(next_location);
 
         let deleted_at = current_unix_timestamp();
         vault.deleted_objects.retain(|item| item.id != entry.id);
@@ -3086,7 +3140,7 @@ impl KeepassCore {
             .recycle_bin_group
             .map(|id| id.to_string())
             .ok_or_else(|| MutationError::GroupNotFound("recycle-bin".into()))?;
-        let target_group_id = {
+        let (target_group_id, next_location) = {
             let recycle_bin = find_group_by_id(&vault.root, &recycle_bin_id)
                 .ok_or_else(|| MutationError::GroupNotFound(recycle_bin_id.clone()))?;
             let entry = recycle_bin
@@ -3094,10 +3148,14 @@ impl KeepassCore {
                 .iter()
                 .find(|entry| entry.id.to_string() == entry_id)
                 .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
-            target_group_id
+            let target_group_id = target_group_id
                 .map(str::to_owned)
                 .or_else(|| entry.previous_parent.map(|id| id.to_string()))
-                .ok_or_else(|| MutationError::GroupNotFound("restore-target".into()))?
+                .ok_or_else(|| MutationError::GroupNotFound("restore-target".into()))?;
+            (
+                target_group_id,
+                next_entry_location_timestamp(entry.location_changed_at)?,
+            )
         };
         if find_group_by_id(&vault.root, &target_group_id).is_none() {
             return Err(MutationError::GroupNotFound(target_group_id));
@@ -3113,6 +3171,7 @@ impl KeepassCore {
             );
         }
         entry.previous_parent = None;
+        entry.location_changed_at = Some(next_location);
 
         let target_group = find_group_by_id_mut(&mut vault.root, &target_group_id)
             .ok_or_else(|| MutationError::GroupNotFound(target_group_id.clone()))?;
@@ -4299,6 +4358,13 @@ fn current_unix_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn next_entry_location_timestamp(previous: Option<u64>) -> Result<u64, MutationError> {
+    let now = current_unix_timestamp().max(0) as u64;
+    let next = now.max(previous.unwrap_or(0).saturating_add(1));
+    validate_persistent_unsigned_timestamp(next)?;
+    Ok(next)
 }
 
 fn search_entries_view(vault: &Vault, term: &str) -> Vec<EntryMatchView> {
@@ -6546,6 +6612,12 @@ mod tests {
             vault.root.children[1].entries[0].previous_parent,
             Some(group_id.parse().expect("uuid"))
         );
+        assert!(
+            vault.root.children[1].entries[0]
+                .location_changed_at
+                .expect("soft-delete location time")
+                > 0
+        );
     }
 
     #[test]
@@ -6561,6 +6633,9 @@ mod tests {
 
         core.soft_delete_entry_to_recycle_bin(&mut vault, &entry_id)
             .expect("soft delete entry");
+        let deleted_location = vault.root.children[1].entries[0]
+            .location_changed_at
+            .expect("soft-delete location time");
 
         let restored = core
             .restore_entry_from_recycle_bin(&mut vault, &entry_id, None)
@@ -6574,6 +6649,12 @@ mod tests {
             .expect("restored group");
         assert_eq!(group.entries.len(), 1);
         assert_eq!(group.entries[0].title, "Disposable");
+        assert!(
+            vault.root.children[0].entries[0]
+                .location_changed_at
+                .expect("restore location time")
+                > deleted_location
+        );
         let recycle_bin = core
             .find_group_view_by_id(
                 &vault,
@@ -7707,7 +7788,7 @@ mod tests {
                     modified_at: Some(11),
                     last_accessed_at: Some(Some(12)),
                     usage_count: Some(Some(13)),
-                    location_changed_at: Some(None),
+                    location_changed_at: Some(Some(14)),
                 },
             )
             .expect("update entry times");
@@ -7716,14 +7797,70 @@ mod tests {
         assert_eq!(times.modified_at, 11);
         assert_eq!(times.last_accessed_at, Some(12));
         assert_eq!(times.usage_count, Some(13));
-        assert_eq!(times.location_changed_at, None);
+        assert_eq!(times.location_changed_at, Some(14));
         assert_eq!(vault.root.entries[0].created_at, 10);
         assert_eq!(vault.root.entries[0].modified_at, 11);
         assert_eq!(vault.root.entries[0].last_accessed_at, Some(12));
         assert_eq!(vault.root.entries[0].usage_count, Some(13));
-        assert_eq!(vault.root.entries[0].location_changed_at, None);
+        assert_eq!(vault.root.entries[0].location_changed_at, Some(14));
         assert!(vault.root.entries[0].expires);
         assert_eq!(vault.root.entries[0].expiry_time, Some(999));
+    }
+
+    #[test]
+    fn add_entry_populates_the_full_keepass_creation_time_set() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Create");
+        let root_id = vault.root.id.to_string();
+        let created = core
+            .add_entry(
+                &mut vault,
+                &root_id,
+                EntryCreate {
+                    title: "Created".into(),
+                    username: "alice".into(),
+                    password: "secret".into(),
+                    url: String::new(),
+                    notes: String::new(),
+                },
+            )
+            .expect("create entry");
+        let entry = vault.root.entries.first().expect("created entry");
+
+        assert_eq!(created.id, entry.id.to_string());
+        assert!(entry.created_at > 0);
+        assert_eq!(entry.modified_at, entry.created_at);
+        assert_eq!(entry.expiry_time, Some(entry.created_at as i64));
+        assert_eq!(entry.last_accessed_at, Some(entry.created_at));
+        assert_eq!(entry.usage_count, Some(0));
+        assert_eq!(entry.location_changed_at, Some(entry.created_at));
+        assert_eq!(entry.icon_id, Some(0));
+        assert_eq!(entry.auto_type, Some(AutoTypeConfig::default()));
+        assert!(!entry.expires);
+    }
+
+    #[test]
+    fn entry_time_mutation_rejects_clearing_required_location_atomically() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Times");
+        let entry = Entry::new("Timed");
+        let entry_id = entry.id.to_string();
+        vault.root.entries.push(entry);
+        let before = vault.clone();
+
+        assert!(matches!(
+            core.update_entry_times(
+                &mut vault,
+                &entry_id,
+                EntryTimesUpdate {
+                    modified_at: Some(99),
+                    location_changed_at: Some(None),
+                    ..EntryTimesUpdate::default()
+                },
+            ),
+            Err(super::MutationError::InvalidEntryValue(_))
+        ));
+        assert_eq!(vault, before);
     }
 
     #[test]
@@ -7853,6 +7990,9 @@ mod tests {
         let entry = Entry::new("Entry");
         let entry_id = entry.id.to_string();
         vault.root.children[0].entries.push(entry);
+        let previous_location = vault.root.children[0].entries[0]
+            .location_changed_at
+            .expect("created location time");
 
         let moved_entry = core
             .move_entry(&mut vault, &entry_id, &group_b_id)
@@ -7861,6 +8001,12 @@ mod tests {
         assert!(vault.root.children[0].entries.is_empty());
         assert_eq!(vault.root.children[1].entries.len(), 1);
         assert_eq!(vault.root.children[1].entries[0].title, "Entry");
+        assert!(
+            vault.root.children[1].entries[0]
+                .location_changed_at
+                .expect("moved location time")
+                > previous_location
+        );
 
         let mut nested = Group::new("Nested");
         let nested_id = nested.id.to_string();
@@ -7972,6 +8118,29 @@ mod tests {
     }
 
     #[test]
+    fn entry_expiry_mutation_rejects_enabled_without_time_atomically() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Semantic");
+        let entry = Entry::new("Expiry");
+        let entry_id = entry.id.to_string();
+        vault.root.entries.push(entry);
+        let before = vault.clone();
+
+        assert!(matches!(
+            core.update_entry_expiry(
+                &mut vault,
+                &entry_id,
+                EntryExpiryUpdate {
+                    expires: true,
+                    expiry_time: None,
+                },
+            ),
+            Err(super::MutationError::InvalidEntryValue(_))
+        ));
+        assert_eq!(vault, before);
+    }
+
+    #[test]
     fn facade_sets_and_clears_entry_totp() {
         let core = KeepassCore::new();
         let mut vault = Vault::empty("Semantic");
@@ -8026,6 +8195,52 @@ mod tests {
         assert!(vault.root.entries[0].totp.is_none());
         assert_eq!(vault.root.entries[0].attributes.len(), 1);
         assert!(vault.root.entries[0].attributes.contains_key("unrelated"));
+    }
+
+    #[test]
+    fn totp_mutation_materializes_account_and_rejects_noninvertible_states() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("Semantic");
+        let mut entry = Entry::new("Totp");
+        entry.username = "alice@example.com".into();
+        let entry_id = entry.id.to_string();
+        vault.root.entries.push(entry);
+
+        let mut materialized = TotpSpec {
+            secret_base32: "JBSWY3DPEHPK3PXP".into(),
+            algorithm: vaultkern_model::TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: Some(String::new()),
+            account_name: None,
+        };
+        core.set_entry_totp(&mut vault, &entry_id, materialized.clone())
+            .expect("materialize account");
+        let stored = vault.root.entries[0].totp.as_ref().expect("stored TOTP");
+        assert_eq!(stored.account_name.as_deref(), Some("alice@example.com"));
+        assert_eq!(stored.issuer, None);
+
+        for invalid in [
+            {
+                materialized.secret_base32.clear();
+                materialized.clone()
+            },
+            TotpSpec {
+                secret_base32: "JBSWY3DPEHPK3PXP".into(),
+                issuer: None,
+                account_name: Some("account:west".into()),
+                algorithm: materialized.algorithm,
+                digits: materialized.digits,
+                period_seconds: materialized.period_seconds,
+            },
+        ] {
+            let before = vault.clone();
+            assert!(matches!(
+                core.set_entry_totp(&mut vault, &entry_id, invalid),
+                Err(super::MutationError::InvalidEntryValue(_))
+            ));
+            assert_eq!(vault, before);
+        }
     }
 
     #[test]
@@ -10232,7 +10447,7 @@ mod tests {
         assert_eq!(loaded.root.entries.len(), 1);
         assert_eq!(
             stable.to_save_profile().kdf,
-            super::SaveKdf::AesKdbx4 { rounds: 42 }
+            Some(super::SaveKdf::AesKdbx4 { rounds: 42 })
         );
     }
 

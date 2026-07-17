@@ -950,8 +950,9 @@ impl TotpSpec {
             let account = percent_decode(label)?;
             (None, (!account.is_empty()).then_some(account))
         };
+        let label_issuer = label_issuer.filter(|issuer| !issuer.is_empty());
         let mut secret: Option<Zeroizing<String>> = None;
-        let mut issuer = None;
+        let mut query_issuer: Option<Option<String>> = None;
         let mut algorithm = TotpAlgorithm::Sha1;
         let mut digits = 6;
         let mut period_seconds = 30_u64;
@@ -970,7 +971,9 @@ impl TotpSpec {
             let value = Zeroizing::new(percent_decode(value)?);
             match key {
                 "secret" => secret = Some(value),
-                "issuer" => issuer = Some(value.as_str().to_owned()),
+                "issuer" => {
+                    query_issuer = Some((!value.is_empty()).then(|| value.as_str().to_owned()))
+                }
                 "algorithm" => {
                     algorithm = match value.as_str().to_ascii_uppercase().as_str() {
                         "SHA1" | "HMAC-SHA-1" => TotpAlgorithm::Sha1,
@@ -995,18 +998,24 @@ impl TotpSpec {
             }
         }
 
-        if issuer.is_none() {
-            issuer = label_issuer;
-        }
-
         let mut secret = secret.ok_or(ModelError::Unimplemented)?;
+        if secret.is_empty() {
+            return Err(ModelError::Unimplemented);
+        }
+        let issuer = query_issuer.unwrap_or(label_issuer);
+        let account_name = account_name
+            .filter(|account| !account.is_empty())
+            .ok_or(ModelError::Unimplemented)?;
+        if issuer.is_none() && account_name.contains(':') {
+            return Err(ModelError::Unimplemented);
+        }
         Ok(Self {
             secret_base32: std::mem::take(&mut *secret),
             algorithm,
             digits,
             period_seconds,
             issuer,
-            account_name,
+            account_name: Some(account_name),
         })
     }
 
@@ -1095,10 +1104,10 @@ impl Entry {
             created_at: 0,
             modified_at: 0,
             expires: false,
-            expiry_time: None,
-            last_accessed_at: None,
-            usage_count: None,
-            location_changed_at: None,
+            expiry_time: Some(0),
+            last_accessed_at: Some(0),
+            usage_count: Some(0),
+            location_changed_at: Some(0),
             auto_type: Some(AutoTypeConfig::default()),
             custom_data: BTreeMap::new(),
             custom_data_blocks: Vec::new(),
@@ -1191,12 +1200,12 @@ pub fn materialize_entry_persistent_attributes(
             MaterializedPersistentValue::Borrowed(&totp.secret_base32),
         );
     } else if let Some(totp) = raw_totp.as_deref() {
-        let secret = if !entry.attributes.contains_key("otp") {
-            MaterializedPersistentValue::Borrowed(&entry.attributes["TimeOtp-Secret-Base32"].value)
-        } else {
-            MaterializedPersistentValue::Owned(Zeroizing::new(totp.secret_base32.clone()))
-        };
-        overlay_totp_projection(&mut attributes, entry, totp, secret);
+        overlay_totp_projection(
+            &mut attributes,
+            entry,
+            totp,
+            MaterializedPersistentValue::Owned(Zeroizing::new(totp.secret_base32.clone())),
+        );
     } else {
         for (key, field) in &mut attributes.fields {
             if is_totp_secret_persistent_attribute_key(key) {
@@ -1278,7 +1287,7 @@ pub fn totp_from_persistent_attributes(fields: &BTreeMap<String, CustomField>) -
         return Some((*uri).clone());
     }
 
-    discrete_totp_from_persistent_attributes(fields)
+    None
 }
 
 fn discrete_totp_matches(fields: &BTreeMap<String, CustomField>, uri: &TotpSpec) -> bool {
@@ -1291,24 +1300,6 @@ fn discrete_totp_matches(fields: &BTreeMap<String, CustomField>, uri: &TotpSpec)
             .is_some_and(|digits| digits == uri.digits)
         && parse_discrete_totp_number(fields.get("TimeOtp-Period"), 30_u64)
             .is_some_and(|period| period == uri.period_seconds)
-}
-
-fn discrete_totp_from_persistent_attributes(
-    fields: &BTreeMap<String, CustomField>,
-) -> Option<TotpSpec> {
-    let secret_base32 = fields.get("TimeOtp-Secret-Base32")?.value.clone();
-    let algorithm = parse_discrete_totp_algorithm(fields.get("TimeOtp-Algorithm"))?;
-    let digits = parse_discrete_totp_number(fields.get("TimeOtp-Length"), 6_u32)?;
-    let period_seconds = parse_discrete_totp_number(fields.get("TimeOtp-Period"), 30_u64)?;
-
-    Some(TotpSpec {
-        secret_base32,
-        algorithm,
-        digits,
-        period_seconds,
-        issuer: None,
-        account_name: None,
-    })
 }
 
 fn present_discrete_totp_parameters_match(
@@ -1512,6 +1503,8 @@ pub struct Vault {
     pub meta_raw_state: MetaRawState,
     pub root_raw_state: RootRawState,
     pub root: Group,
+    /// Exact encoded KDBX4 `KdfParameters` dictionary retained across ordinary saves.
+    pub kdf_parameters: Option<Vec<u8>>,
     pub public_custom_data: BTreeMap<String, Vec<u8>>,
     pub deleted_objects: Vec<DeletedObject>,
     pub maintenance_history_days: Option<i32>,
@@ -1555,6 +1548,7 @@ impl Vault {
                 has_deleted_objects_node: true,
                 ..RootRawState::default()
             },
+            kdf_parameters: None,
             public_custom_data: BTreeMap::new(),
             deleted_objects: Vec::new(),
             maintenance_history_days: None,
@@ -1803,6 +1797,10 @@ mod tests {
 
         assert_eq!(entry.icon_id, Some(0));
         assert_eq!(entry.auto_type, Some(super::AutoTypeConfig::default()));
+        assert_eq!(entry.expiry_time, Some(0));
+        assert_eq!(entry.last_accessed_at, Some(0));
+        assert_eq!(entry.usage_count, Some(0));
+        assert_eq!(entry.location_changed_at, Some(0));
     }
 
     #[test]
@@ -1875,11 +1873,10 @@ mod tests {
     }
 
     #[test]
-    fn otpauth_parser_preserves_an_empty_account_name() {
-        let spec = TotpSpec::parse_otpauth("otpauth://totp/Issuer:?secret=SECRET&issuer=Issuer")
-            .expect("parse otpauth");
-
-        assert_eq!(spec.account_name.as_deref(), Some(""));
+    fn otpauth_parser_rejects_an_empty_account_name() {
+        assert!(
+            TotpSpec::parse_otpauth("otpauth://totp/Issuer:?secret=SECRET&issuer=Issuer").is_err()
+        );
     }
 
     #[test]
@@ -1893,21 +1890,18 @@ mod tests {
     }
 
     #[test]
-    fn otpauth_parser_preserves_an_empty_account_when_the_issuer_contains_a_colon() {
-        let spec = TotpSpec::parse_otpauth(
-            "otpauth://totp/Issuer%3AProd:?secret=SECRET&issuer=Issuer%3AProd",
-        )
-        .expect("parse otpauth");
-
-        assert_eq!(spec.issuer.as_deref(), Some("Issuer:Prod"));
-        assert_eq!(spec.account_name.as_deref(), Some(""));
+    fn otpauth_parser_rejects_an_empty_account_when_the_issuer_contains_a_colon() {
+        assert!(
+            TotpSpec::parse_otpauth(
+                "otpauth://totp/Issuer%3AProd:?secret=SECRET&issuer=Issuer%3AProd",
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn otpauth_parser_does_not_invent_an_empty_account_without_an_issuer() {
-        let spec = TotpSpec::parse_otpauth("otpauth://totp/?secret=SECRET").expect("parse otpauth");
-
-        assert_eq!(spec.account_name, None);
+    fn otpauth_parser_rejects_an_absent_account_without_an_issuer() {
+        assert!(TotpSpec::parse_otpauth("otpauth://totp/?secret=SECRET").is_err());
     }
 
     #[test]
@@ -2003,6 +1997,31 @@ mod tests {
                 "invalid UTF-8 was projected: {uri}"
             );
         }
+    }
+
+    #[test]
+    fn otpauth_parser_rejects_noninvertible_projection_states() {
+        for uri in [
+            "otpauth://totp/Issuer:?secret=SECRET&issuer=Issuer",
+            "otpauth://totp/?secret=SECRET",
+            "otpauth://totp/alice?secret=",
+            "otpauth://totp/%3Aaccount%3Awest?secret=SECRET",
+            "otpauth://totp/Issuer:account%3Awest?secret=SECRET&issuer=",
+        ] {
+            assert!(
+                TotpSpec::parse_otpauth(uri).is_err(),
+                "non-invertible URI was projected: {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn otpauth_parser_normalizes_an_empty_issuer_to_absent() {
+        let spec = TotpSpec::parse_otpauth("otpauth://totp/alice?secret=SECRET&issuer=")
+            .expect("empty issuer means no issuer");
+
+        assert_eq!(spec.issuer, None);
+        assert_eq!(spec.account_name.as_deref(), Some("alice"));
     }
 
     #[test]
@@ -2265,6 +2284,52 @@ mod tests {
         assert_eq!(projected.algorithm, TotpAlgorithm::Sha256);
         assert_eq!(projected.digits, 8);
         assert_eq!(projected.period_seconds, 45);
+    }
+
+    #[test]
+    fn discrete_only_totp_source_is_retained_verbatim() {
+        let fields = BTreeMap::from([
+            (
+                "TimeOtp-Secret-Base32".into(),
+                CustomField {
+                    value: "abcd==".into(),
+                    protected: false,
+                },
+            ),
+            (
+                "TimeOtp-Algorithm".into(),
+                CustomField {
+                    value: "hmac-sha-256".into(),
+                    protected: false,
+                },
+            ),
+            (
+                "TimeOtp-Length".into(),
+                CustomField {
+                    value: "08".into(),
+                    protected: false,
+                },
+            ),
+            (
+                "TimeOtp-Period".into(),
+                CustomField {
+                    value: "045".into(),
+                    protected: false,
+                },
+            ),
+        ]);
+        let mut entry = Entry::new("discrete only");
+        entry.attributes = fields.clone();
+
+        assert!(totp_from_persistent_attributes(&fields).is_none());
+        let materialized = materialize_entry_persistent_attributes(&entry);
+        for (key, field) in fields {
+            assert_eq!(materialized[&key].value(), field.value);
+            assert_eq!(
+                materialized[&key].protected(),
+                key == "TimeOtp-Secret-Base32"
+            );
+        }
     }
 
     #[test]

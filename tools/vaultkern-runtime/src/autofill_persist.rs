@@ -6,7 +6,7 @@ use url::Url;
 use uuid::Uuid;
 use vaultkern_core::{
     CustomDataItemInput, CustomField, Entry, EntryCreate, Group, KeepassCore, MutationError,
-    TotpAlgorithm, TotpSpec, Vault, is_totp_persistent_attribute_key,
+    PasskeyRecord, TotpAlgorithm, TotpSpec, Vault, is_totp_persistent_attribute_key,
 };
 use vaultkern_runtime_protocol::{
     AutofillPersistConflictCodeDto, AutofillPersistPlanDto, EntryFieldsDto,
@@ -1159,34 +1159,14 @@ pub(crate) fn effective_xml_field_protection(value: &str, protected: bool) -> bo
 }
 
 pub(crate) fn totp_specs_semantically_equal(
-    left_title: &str,
-    left_username: &str,
+    _left_title: &str,
+    _left_username: &str,
     left: Option<&TotpSpec>,
-    right_title: &str,
-    right_username: &str,
+    _right_title: &str,
+    _right_username: &str,
     right: Option<&TotpSpec>,
 ) -> bool {
-    fn effective_account_name<'a>(spec: &'a TotpSpec, username: &'a str) -> Option<&'a str> {
-        let value = spec.account_name.as_deref().unwrap_or(username);
-        (!value.is_empty()).then_some(value)
-    }
-
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            left.secret_base32
-                .trim_end_matches('=')
-                .eq_ignore_ascii_case(right.secret_base32.trim_end_matches('='))
-                && left.algorithm == right.algorithm
-                && left.digits == right.digits
-                && left.period_seconds == right.period_seconds
-                && left.issuer.as_deref().unwrap_or(left_title)
-                    == right.issuer.as_deref().unwrap_or(right_title)
-                && effective_account_name(left, left_username)
-                    == effective_account_name(right, right_username)
-        }
-        _ => false,
-    }
+    left == right
 }
 
 fn validate_desired_fields(
@@ -1279,13 +1259,7 @@ fn hash_fields(hasher: &mut Sha256, fields: &ValidatedFields) {
     match fields.totp.as_ref() {
         Some(totp) => {
             hasher.update([1]);
-            hash_component(
-                hasher,
-                totp.secret_base32
-                    .trim_end_matches('=')
-                    .to_ascii_uppercase()
-                    .as_bytes(),
-            );
+            hash_component(hasher, totp.secret_base32.as_bytes());
             hasher.update([match totp.algorithm {
                 TotpAlgorithm::Sha1 => 1,
                 TotpAlgorithm::Sha256 => 2,
@@ -1293,15 +1267,8 @@ fn hash_fields(hasher: &mut Sha256, fields: &ValidatedFields) {
             }]);
             hasher.update(totp.digits.to_be_bytes());
             hasher.update(totp.period_seconds.to_be_bytes());
-            hash_component(
-                hasher,
-                totp.issuer
-                    .as_deref()
-                    .unwrap_or(&fields.dto.title)
-                    .as_bytes(),
-            );
-            let account_name = totp.account_name.as_deref().unwrap_or(&fields.dto.username);
-            hash_optional_component(hasher, (!account_name.is_empty()).then_some(account_name));
+            hash_optional_component(hasher, totp.issuer.as_deref());
+            hash_optional_component(hasher, totp.account_name.as_deref());
         }
         None => hasher.update([0]),
     }
@@ -1621,6 +1588,7 @@ fn apply_idempotent_mutation(
                 AutofillPersistEngineError::Mutation("created entry missing".into())
             })?;
             apply_fields(entry, desired_fields, now_epoch_ms);
+            initialize_created_entry_times(entry, now_epoch_ms)?;
             Ok(())
         }
     }
@@ -1645,6 +1613,9 @@ fn same_validated_fields(left: &ValidatedFields, right: &ValidatedFields) -> boo
 
 fn apply_fields(entry: &mut Entry, fields: &ValidatedFields, now_epoch_ms: u64) {
     let next_modified_at = (now_epoch_ms / 1_000).max(entry.modified_at.saturating_add(1));
+    let preserve_raw_totp = entry.totp.is_none() && fields.totp.is_none();
+    let preserve_raw_passkey = entry.passkey.is_none();
+    let previous_attributes = std::mem::take(&mut entry.attributes);
     entry.title = fields.dto.title.clone();
     entry.username = fields.dto.username.clone();
     entry.password = fields.dto.password.clone();
@@ -1652,8 +1623,32 @@ fn apply_fields(entry: &mut Entry, fields: &ValidatedFields, now_epoch_ms: u64) 
     entry.notes = fields.dto.notes.clone();
     entry.totp = fields.totp.clone();
     entry.attributes = fields.custom_fields.clone();
+    entry
+        .attributes
+        .extend(previous_attributes.into_iter().filter(|(key, _)| {
+            (preserve_raw_totp && is_totp_persistent_attribute_key(key))
+                || (preserve_raw_passkey && PasskeyRecord::is_persistent_attribute_key(key))
+        }));
     protect_xml_forbidden_fields(entry);
     entry.modified_at = next_modified_at;
+}
+
+fn initialize_created_entry_times(
+    entry: &mut Entry,
+    now_epoch_ms: u64,
+) -> Result<(), AutofillPersistEngineError> {
+    let creation_time = now_epoch_ms / 1_000;
+    let expiry_time = i64::try_from(creation_time).map_err(|_| {
+        AutofillPersistEngineError::Mutation("creation time exceeds the KDBX domain".into())
+    })?;
+    entry.created_at = creation_time;
+    entry.modified_at = creation_time;
+    entry.expires = false;
+    entry.expiry_time = Some(expiry_time);
+    entry.last_accessed_at = Some(creation_time);
+    entry.usage_count = Some(0);
+    entry.location_changed_at = Some(creation_time);
+    Ok(())
 }
 
 fn protect_xml_forbidden_fields(entry: &mut Entry) {
@@ -1704,7 +1699,11 @@ fn custom_fields_match(
     actual: &BTreeMap<String, CustomField>,
     expected: &BTreeMap<String, CustomField>,
 ) -> bool {
-    actual.len() == expected.len()
+    actual
+        .keys()
+        .filter(|key| !is_hidden_credential_attribute(key))
+        .count()
+        == expected.len()
         && expected.iter().all(|(key, expected_field)| {
             actual.get(key).is_some_and(|actual_field| {
                 actual_field.value == expected_field.value
@@ -1712,6 +1711,10 @@ fn custom_fields_match(
                         == expected_field.protected
             })
         })
+}
+
+fn is_hidden_credential_attribute(key: &str) -> bool {
+    is_totp_persistent_attribute_key(key) || PasskeyRecord::is_persistent_attribute_key(key)
 }
 
 fn force_entry_state_from_source(
@@ -2337,11 +2340,12 @@ mod tests {
             unreachable!()
         };
         let reordered = create_plan(parent_group_id, Vec::new(), reordered);
-        let mut fallback_fields = fields("secret");
-        fallback_fields.totp_uri = Some(
-            "otpauth://totp/?secret=JBSWY3DPEHPK3PXP&algorithm=SHA256&digits=8&period=45".into(),
+        let mut inferred_issuer_fields = fields("secret");
+        inferred_issuer_fields.totp_uri = Some(
+            "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&algorithm=SHA256&digits=8&period=45"
+                .into(),
         );
-        let fallback = create_plan(parent_group_id, Vec::new(), fallback_fields);
+        let inferred_issuer = create_plan(parent_group_id, Vec::new(), inferred_issuer_fields);
         let mut normalized_secret_fields = fields("secret");
         normalized_secret_fields.totp_uri =
             Some(TOTP_URI.replace("JBSWY3DPEHPK3PXP", "jbswy3dpehpk3pxp===="));
@@ -2355,9 +2359,9 @@ mod tests {
         );
         assert_eq!(
             canonical_digest,
-            plan_sha256(TRANSACTION_ID, VAULT_ID, SOURCE_SHA, &fallback).unwrap()
+            plan_sha256(TRANSACTION_ID, VAULT_ID, SOURCE_SHA, &inferred_issuer).unwrap()
         );
-        assert_eq!(
+        assert_ne!(
             canonical_digest,
             plan_sha256(TRANSACTION_ID, VAULT_ID, SOURCE_SHA, &normalized_secret,).unwrap()
         );
@@ -2665,7 +2669,41 @@ mod tests {
     }
 
     #[test]
-    fn update_accepts_entry_totp_using_title_and_username_fallbacks() {
+    fn update_preserves_hidden_unprojectable_credential_sources() {
+        let expected = fields("old-secret");
+        let desired = EntryFieldsDto {
+            password: "new-secret".into(),
+            ..expected.clone()
+        };
+        let mut current = vault_with_entry(&expected);
+        let entry = find_entry_mut(&mut current, ENTRY_ID).unwrap();
+        entry.attributes.insert(
+            "HmacOtp-Secret".into(),
+            CustomField {
+                value: "raw-hotp-secret".into(),
+                protected: false,
+            },
+        );
+        entry.attributes.insert(
+            "KPEX_PASSKEY_PRIVATE_KEY_PEM".into(),
+            CustomField {
+                value: "incomplete-passkey-private-key".into(),
+                protected: false,
+            },
+        );
+
+        let prepared = execute(&current, &current, &update_plan(expected, desired)).unwrap();
+        let entry = find_entry(&prepared.candidate, ENTRY_ID).unwrap().0;
+
+        assert_eq!(entry.attributes["HmacOtp-Secret"].value, "raw-hotp-secret");
+        assert_eq!(
+            entry.attributes["KPEX_PASSKEY_PRIVATE_KEY_PEM"].value,
+            "incomplete-passkey-private-key"
+        );
+    }
+
+    #[test]
+    fn update_rejects_nonpersistent_entry_totp_fallback_state() {
         let expected = fields_with_custom_and_totp("old-secret");
         let desired = EntryFieldsDto {
             password: "new-secret".into(),
@@ -2677,21 +2715,18 @@ mod tests {
         totp.issuer = None;
         totp.account_name = None;
 
-        let prepared = execute(&current, &current, &update_plan(expected, desired)).unwrap();
-        let entry = find_entry(&prepared.candidate, ENTRY_ID).unwrap().0;
-
-        assert_eq!(entry.password, "new-secret");
-        assert_eq!(entry.history.len(), 1);
+        assert_eq!(
+            execute(&current, &current, &update_plan(expected, desired)),
+            Err(AutofillPersistEngineError::Conflict(
+                AutofillPersistConflictCodeDto::UpdatePreconditionFailed
+            ))
+        );
     }
 
     #[test]
-    fn semantically_unchanged_totp_fallback_does_not_add_history() {
+    fn exactly_unchanged_projectable_totp_does_not_add_history() {
         let desired = fields_with_custom_and_totp("secret");
-        let mut current = vault_with_entry(&desired);
-        let entry = find_entry_mut(&mut current, ENTRY_ID).unwrap();
-        let totp = entry.totp.as_mut().unwrap();
-        totp.issuer = None;
-        totp.account_name = None;
+        let current = vault_with_entry(&desired);
 
         let prepared = execute(&current, &current, &update_plan(desired.clone(), desired)).unwrap();
 
@@ -2778,16 +2813,24 @@ mod tests {
             &validate_fields("desired", &desired).unwrap()
         ));
         assert!(entry.history.is_empty());
+        let creation_time = NOW_MS / 1_000;
+        assert_eq!(entry.created_at, creation_time);
+        assert_eq!(entry.modified_at, creation_time);
+        assert_eq!(entry.expiry_time, Some(creation_time as i64));
+        assert_eq!(entry.last_accessed_at, Some(creation_time));
+        assert_eq!(entry.usage_count, Some(0));
+        assert_eq!(entry.location_changed_at, Some(creation_time));
+        assert_eq!(entry.icon_id, Some(0));
+        assert_eq!(
+            entry.auto_type,
+            Some(vaultkern_core::AutoTypeConfig::default())
+        );
     }
 
     #[test]
-    fn create_matching_set_accepts_entry_totp_fallbacks() {
+    fn create_matching_set_accepts_existing_projectable_totp() {
         let desired = fields_with_custom_and_totp("secret");
-        let mut current = vault_with_entry(&desired);
-        let entry = find_entry_mut(&mut current, ENTRY_ID).unwrap();
-        let totp = entry.totp.as_mut().unwrap();
-        totp.issuer = None;
-        totp.account_name = None;
+        let current = vault_with_entry(&desired);
         let plan = create_plan(&current.root.id.to_string(), vec![ENTRY_ID.into()], desired);
 
         let prepared = execute(&current, &current, &plan).unwrap();

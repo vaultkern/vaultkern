@@ -19,6 +19,7 @@ use vaultkern_core::{
     EntryTimesUpdate, EntryUpdate, ExternalKdfConfirmation, ExternalKdfDecision, ExternalKdfPolicy,
     ExternalKdfRequest, KdbxCipher, KdbxError, KdbxVersion, KdfPolicyEvaluator, KeepassCore,
     PasskeyRecord, SaveKdf, SaveProfile, TotpSpec, Vault, required_version,
+    retained_or_recommended_save_kdf,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
@@ -330,7 +331,10 @@ impl Runtime {
         key: &CompositeKey,
     ) -> std::result::Result<vaultkern_core::MergeSummaryView, CoreError> {
         let source = Self::load_external_database(core, bytes, key)?;
-        Ok(core.merge_vaults(target, &source.vault))
+        let source_kdf_parameters = source.vault.kdf_parameters.clone();
+        let summary = core.merge_vaults(target, &source.vault);
+        target.kdf_parameters = source_kdf_parameters;
+        Ok(summary)
     }
 
     fn trusted_internal_kdf_policy() -> TrustedInternalKdfPolicy {
@@ -958,6 +962,12 @@ impl Runtime {
 
         let database = Self::load_external_database(&self.core, &loaded.bytes, &key)
             .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
+        loaded.save_profile = SaveProfile {
+            version: database.inspection.save_target_version,
+            cipher: database.inspection.header.cipher,
+            compression: database.inspection.header.compression,
+            kdf: None,
+        };
         loaded.name = database.vault.name.clone();
         loaded.password = credentials.password;
         loaded.key_file_path = credentials.key_file_path;
@@ -1422,16 +1432,32 @@ impl Runtime {
             }
 
             if let Some(encryption) = update.encryption {
-                loaded.save_profile = save_profile_from_settings(encryption)?;
+                let mut requested = save_profile_from_settings(encryption)?;
+                let requested_kdf = requested
+                    .kdf
+                    .take()
+                    .expect("settings always carry explicit KDF parameters");
+                let preserves_retained_kdf = loaded.save_profile.kdf.is_none()
+                    && requested_kdf == retained_or_recommended_save_kdf(vault)?;
+                requested.kdf = (!preserves_retained_kdf).then_some(requested_kdf);
+                loaded.save_profile = requested;
             }
 
             if let Some(credentials) = update.credentials {
+                let mut credentials_changed = false;
                 if credentials.remove_password {
+                    credentials_changed |= loaded.password.is_some();
                     loaded.password = None;
                 } else if let Some(password) = credentials.new_password {
+                    credentials_changed |= loaded.password.as_deref() != Some(password.as_str());
                     loaded.password = Some(password);
                 }
-                loaded.quick_unlock_refresh_pending = true;
+                if credentials_changed {
+                    if loaded.save_profile.kdf.is_none() {
+                        loaded.save_profile.kdf = Some(retained_or_recommended_save_kdf(vault)?);
+                    }
+                    loaded.quick_unlock_refresh_pending = true;
+                }
             }
 
             if let Some(autosave_delay_seconds) = update.autosave_delay_seconds {
@@ -1565,6 +1591,7 @@ impl Runtime {
         totp_uri: Option<String>,
     ) -> Result<EntryDetailDto> {
         let modified_at = self.current_unix_time();
+        let totp = parse_totp_uri(totp_uri)?;
         let entry_id = {
             let loaded = self
                 .vault_session
@@ -1587,11 +1614,11 @@ impl Runtime {
                 },
             )?;
 
-            if let Some(totp) = parse_totp_uri(totp_uri)? {
+            initialize_entry_creation_times(&self.core, vault, &created.id, modified_at)?;
+
+            if let Some(totp) = totp {
                 self.core.set_entry_totp(vault, &created.id, totp)?;
             }
-
-            touch_entry_modified_at(&self.core, vault, &created.id, modified_at)?;
 
             created.id
         };
@@ -1632,6 +1659,7 @@ impl Runtime {
         custom_fields: Vec<EntryCustomFieldDto>,
     ) -> Result<EntryDetailDto> {
         let modified_at = self.current_unix_time();
+        let requested_totp = parse_totp_uri(totp_uri)?;
         {
             let loaded = self
                 .vault_session
@@ -1642,6 +1670,7 @@ impl Runtime {
                 .as_mut()
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
 
+            let had_projectable_totp = self.core.project_entry_totp(vault, entry_id)?.is_some();
             self.core.snapshot_entry_to_history(vault, entry_id)?;
             self.core.update_entry_fields(
                 vault,
@@ -1655,13 +1684,14 @@ impl Runtime {
                 },
             )?;
 
-            match parse_totp_uri(totp_uri)? {
+            match requested_totp {
                 Some(totp) => {
                     self.core.set_entry_totp(vault, entry_id, totp)?;
                 }
-                None => {
+                None if had_projectable_totp => {
                     self.core.clear_entry_totp(vault, entry_id)?;
                 }
+                None => {}
             }
 
             let existing_keys = self
@@ -2598,7 +2628,7 @@ impl Runtime {
             vault.root.entries.push(created_entry);
             self.core
                 .set_entry_passkey(vault, &entry_id, registration.passkey)?;
-            touch_entry_modified_at(&self.core, vault, &entry_id, modified_at)?;
+            initialize_entry_creation_times(&self.core, vault, &entry_id, modified_at)?;
         }
         self.set_passkey_ceremony_durable_state(
             ceremony_token,
@@ -4339,6 +4369,7 @@ impl Runtime {
         loaded.vault = Some(vault);
         loaded.bytes = bytes;
         loaded.baseline_fingerprint = fingerprint;
+        loaded.save_profile.kdf = None;
         if let Some(source_status) = source_status {
             loaded.source_status = Some(source_status);
         }
@@ -4447,6 +4478,7 @@ impl Runtime {
             };
             let bytes = save_kdbx_with_history_limits(&self.core, vault, &key, save_profile)
                 .with_context(|| format!("failed to save vault: {vault_id}"))?;
+            loaded.save_profile.kdf = None;
             (bytes, merge_summary)
         };
 
@@ -4543,8 +4575,10 @@ impl Runtime {
         let Some(vault) = loaded.vault.as_mut() else {
             anyhow::bail!("vault is locked: {vault_id}");
         };
-        save_kdbx_with_history_limits(&self.core, vault, key, save_profile)
-            .with_context(|| format!("failed to save vault: {vault_id}"))
+        let bytes = save_kdbx_with_history_limits(&self.core, vault, key, save_profile)
+            .with_context(|| format!("failed to save vault: {vault_id}"))?;
+        loaded.save_profile.kdf = None;
+        Ok(bytes)
     }
 
     fn save_remote_vault_to_pending_cache(
@@ -5133,8 +5167,15 @@ impl Runtime {
                 Self::merge_external_database(&self.core, vault, &snapshot.bytes, key)?;
             }
             let bytes = if let (Some(vault), Some(key)) = (loaded.vault.as_mut(), key) {
-                save_kdbx_with_history_limits(&self.core, vault, key, loaded.save_profile.clone())
-                    .with_context(|| format!("failed to save vault: {vault_id}"))?
+                let bytes = save_kdbx_with_history_limits(
+                    &self.core,
+                    vault,
+                    key,
+                    loaded.save_profile.clone(),
+                )
+                .with_context(|| format!("failed to save vault: {vault_id}"))?;
+                loaded.save_profile.kdf = None;
+                bytes
             } else {
                 loaded.bytes.clone()
             };
@@ -6454,15 +6495,20 @@ fn save_kdbx_with_history_limits(
         save_profile.version = KdbxVersion::V4_1;
     }
 
-    if vault.history_max_items.is_none() && vault.history_max_size.is_none() {
-        return core.save_kdbx(vault, key, save_profile);
+    let has_history_limits = vault.history_max_items.is_some() || vault.history_max_size.is_some();
+    let mut history_snapshots =
+        has_history_limits.then(|| clone_entry_histories(&vault.root).into_iter());
+    if has_history_limits {
+        enforce_history_limits(vault);
     }
-
-    let mut history_snapshots = clone_entry_histories(&vault.root).into_iter();
-    enforce_history_limits(vault);
     let result = core.save_kdbx(vault, key, save_profile);
-    restore_entry_histories(&mut vault.root, &mut history_snapshots);
-    result
+    if let Some(history_snapshots) = &mut history_snapshots {
+        restore_entry_histories(&mut vault.root, history_snapshots);
+    }
+    let bytes = result?;
+    let header = vaultkern_core::KdbxHeader::decode(&bytes)?;
+    vault.kdf_parameters = Some(header.kdf_parameters.encode()?);
+    Ok(bytes)
 }
 
 fn clone_entry_histories(group: &vaultkern_core::Group) -> Vec<Vec<Entry>> {
@@ -6650,13 +6696,18 @@ fn database_settings_dto(
         recycle_bin: DatabaseRecycleBinSettingsDto {
             enabled: vault.recycle_bin_enabled.unwrap_or(true),
         },
-        encryption: encryption_settings_dto(profile),
+        encryption: encryption_settings_dto(vault, profile),
         autosave_delay_seconds,
         has_password,
     }
 }
 
-fn encryption_settings_dto(profile: &SaveProfile) -> DatabaseEncryptionSettingsDto {
+fn encryption_settings_dto(vault: &Vault, profile: &SaveProfile) -> DatabaseEncryptionSettingsDto {
+    let kdf = profile
+        .kdf
+        .clone()
+        .or_else(|| retained_or_recommended_save_kdf(vault).ok())
+        .unwrap_or_else(SaveKdf::recommended);
     DatabaseEncryptionSettingsDto {
         compression: match profile.compression {
             Compression::None => "none",
@@ -6669,13 +6720,24 @@ fn encryption_settings_dto(profile: &SaveProfile) -> DatabaseEncryptionSettingsD
             KdbxCipher::Twofish => "twofish",
         }
         .into(),
-        kdf: match profile.kdf {
+        kdf: match kdf {
             SaveKdf::AesKdbx4 { rounds } => DatabaseKdfSettingsDto {
                 algorithm: "aes_kdbx4".into(),
                 transform_rounds: Some(rounds),
                 iterations: None,
                 memory_kib: None,
                 parallelism: None,
+            },
+            SaveKdf::Argon2d {
+                iterations,
+                memory_kib,
+                parallelism,
+            } => DatabaseKdfSettingsDto {
+                algorithm: "argon2d".into(),
+                transform_rounds: None,
+                iterations: Some(iterations),
+                memory_kib: Some(memory_kib),
+                parallelism: Some(parallelism),
             },
             SaveKdf::Argon2id {
                 iterations,
@@ -6711,20 +6773,33 @@ fn save_profile_from_settings(settings: DatabaseEncryptionSettingsDto) -> Result
                 .transform_rounds
                 .context("aes_kdbx4 requires transform_rounds")?,
         },
-        "argon2id" => SaveKdf::Argon2id {
-            iterations: settings
+        "argon2d" | "argon2id" => {
+            let iterations = settings
                 .kdf
                 .iterations
-                .context("argon2id requires iterations")?,
-            memory_kib: settings
+                .with_context(|| format!("{} requires iterations", settings.kdf.algorithm))?;
+            let memory_kib = settings
                 .kdf
                 .memory_kib
-                .context("argon2id requires memory_kib")?,
-            parallelism: settings
+                .with_context(|| format!("{} requires memory_kib", settings.kdf.algorithm))?;
+            let parallelism = settings
                 .kdf
                 .parallelism
-                .context("argon2id requires parallelism")?,
-        },
+                .with_context(|| format!("{} requires parallelism", settings.kdf.algorithm))?;
+            if settings.kdf.algorithm == "argon2d" {
+                SaveKdf::Argon2d {
+                    iterations,
+                    memory_kib,
+                    parallelism,
+                }
+            } else {
+                SaveKdf::Argon2id {
+                    iterations,
+                    memory_kib,
+                    parallelism,
+                }
+            }
+        }
         value => anyhow::bail!("unsupported kdf setting: {value}"),
     };
 
@@ -6732,7 +6807,7 @@ fn save_profile_from_settings(settings: DatabaseEncryptionSettingsDto) -> Result
         version: vaultkern_core::KdbxVersion::V4_1,
         cipher,
         compression,
-        kdf,
+        kdf: Some(kdf),
     })
 }
 
@@ -6788,6 +6863,35 @@ fn touch_entry_modified_at(
             last_accessed_at: None,
             usage_count: None,
             location_changed_at: None,
+        },
+    )?;
+    Ok(())
+}
+
+fn initialize_entry_creation_times(
+    core: &KeepassCore,
+    vault: &mut Vault,
+    entry_id: &str,
+    creation_time: u64,
+) -> Result<()> {
+    let expiry_time = i64::try_from(creation_time).context("creation time exceeds i64")?;
+    core.update_entry_expiry(
+        vault,
+        entry_id,
+        vaultkern_core::EntryExpiryUpdate {
+            expires: false,
+            expiry_time: Some(expiry_time),
+        },
+    )?;
+    core.update_entry_times(
+        vault,
+        entry_id,
+        EntryTimesUpdate {
+            created_at: Some(creation_time),
+            modified_at: Some(creation_time),
+            last_accessed_at: Some(Some(creation_time)),
+            usage_count: Some(Some(0)),
+            location_changed_at: Some(Some(creation_time)),
         },
     )?;
     Ok(())
@@ -7529,7 +7633,7 @@ mod tests {
             version: vaultkern_core::KdbxVersion::V4_0,
             cipher: KdbxCipher::Aes256,
             compression: Compression::None,
-            kdf: SaveKdf::AesKdbx4 { rounds: 1 },
+            kdf: Some(SaveKdf::AesKdbx4 { rounds: 1 }),
         };
 
         let bytes = save_kdbx_with_history_limits(&core, &mut vault, &key, profile)
@@ -7539,6 +7643,248 @@ mod tests {
 
         assert_eq!(header.version, vaultkern_core::KdbxVersion::V4_1);
         assert!(loaded.root.entries[0].exclude_from_reports);
+    }
+
+    #[test]
+    fn save_helper_adopts_generated_kdf_for_followup_ordinary_saves() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("retained KDF");
+        let mut key = CompositeKey::default();
+        key.add_password("retained-kdf");
+        let explicit_profile = SaveProfile {
+            version: KdbxVersion::V4_1,
+            cipher: KdbxCipher::Aes256,
+            compression: Compression::None,
+            kdf: Some(SaveKdf::AesKdbx4 { rounds: 1 }),
+        };
+
+        let first = save_kdbx_with_history_limits(&core, &mut vault, &key, explicit_profile)
+            .expect("first save");
+        let first_header = vaultkern_core::KdbxHeader::decode(&first).expect("first header");
+        let second =
+            save_kdbx_with_history_limits(&core, &mut vault, &key, SaveProfile::recommended())
+                .expect("ordinary save");
+        let second_header = vaultkern_core::KdbxHeader::decode(&second).expect("second header");
+
+        assert_eq!(
+            second_header
+                .kdf_parameters
+                .encode()
+                .expect("second KDF dictionary"),
+            first_header
+                .kdf_parameters
+                .encode()
+                .expect("first KDF dictionary")
+        );
+    }
+
+    #[test]
+    fn runtime_rotates_kdf_once_for_explicit_or_credential_changes_only() {
+        fn retained_kdf(runtime: &Runtime, vault_id: &str) -> Vec<u8> {
+            let bytes = &runtime
+                .vault_session
+                .find_loaded(vault_id)
+                .expect("loaded vault")
+                .bytes;
+            vaultkern_core::KdbxHeader::decode(bytes)
+                .expect("saved header")
+                .kdf_parameters
+                .encode()
+                .expect("saved KDF dictionary")
+        }
+
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    encryption: Some(DatabaseEncryptionSettingsDto {
+                        compression: "gzip".into(),
+                        cipher: "aes256".into(),
+                        kdf: DatabaseKdfSettingsDto {
+                            algorithm: "aes_kdbx4".into(),
+                            transform_rounds: Some(1),
+                            iterations: None,
+                            memory_kib: None,
+                            parallelism: None,
+                        },
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .expect("request explicit KDF change");
+        runtime.save_vault(&opened.vault_id).expect("explicit save");
+        let explicit_generation = retained_kdf(&runtime, &opened.vault_id);
+        runtime.save_vault(&opened.vault_id).expect("ordinary save");
+        assert_eq!(
+            retained_kdf(&runtime, &opened.vault_id),
+            explicit_generation
+        );
+
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    encryption: Some(DatabaseEncryptionSettingsDto {
+                        compression: "none".into(),
+                        cipher: "aes256".into(),
+                        kdf: DatabaseKdfSettingsDto {
+                            algorithm: "aes_kdbx4".into(),
+                            transform_rounds: Some(1),
+                            iterations: None,
+                            memory_kib: None,
+                            parallelism: None,
+                        },
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .expect("change compression without changing the KDF");
+        runtime
+            .save_vault(&opened.vault_id)
+            .expect("compression-only save");
+        assert_eq!(
+            retained_kdf(&runtime, &opened.vault_id),
+            explicit_generation
+        );
+
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    credentials: Some(DatabaseCredentialsUpdateDto {
+                        new_password: Some("rotated-password".into()),
+                        remove_password: false,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .expect("request credential change");
+        runtime
+            .save_vault(&opened.vault_id)
+            .expect("credential-change save");
+        let credential_generation = retained_kdf(&runtime, &opened.vault_id);
+        assert_ne!(credential_generation, explicit_generation);
+        runtime
+            .save_vault(&opened.vault_id)
+            .expect("ordinary post-credential save");
+        assert_eq!(
+            retained_kdf(&runtime, &opened.vault_id),
+            credential_generation
+        );
+    }
+
+    #[test]
+    fn unlock_adopts_loaded_cipher_compression_and_kdf_settings() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("loaded-profile");
+        let source = core
+            .save_kdbx(
+                &Vault::empty("loaded profile"),
+                &key,
+                SaveProfile {
+                    version: KdbxVersion::V4_1,
+                    cipher: KdbxCipher::ChaCha20,
+                    compression: Compression::None,
+                    kdf: Some(SaveKdf::AesKdbx4 { rounds: 1 }),
+                },
+            )
+            .expect("save source");
+        let source_kdf = vaultkern_core::KdbxHeader::decode(&source)
+            .expect("source header")
+            .kdf_parameters
+            .encode()
+            .expect("source KDF");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("loaded-profile.kdbx");
+        std::fs::write(&path, source).expect("write source");
+        let mut runtime = Runtime::for_tests();
+        let opened = runtime
+            .open_local_vault(path.to_str().expect("UTF-8 path"))
+            .expect("open source");
+        runtime
+            .unlock_vault(&opened.vault_id, Some("loaded-profile"), None)
+            .expect("unlock source");
+
+        let settings = runtime
+            .get_database_settings(&opened.vault_id)
+            .expect("loaded settings");
+        assert_eq!(settings.encryption.cipher, "chacha20");
+        assert_eq!(settings.encryption.compression, "none");
+        assert_eq!(settings.encryption.kdf.algorithm, "aes_kdbx4");
+        assert_eq!(settings.encryption.kdf.transform_rounds, Some(1));
+
+        runtime.save_vault(&opened.vault_id).expect("ordinary save");
+        let rewritten = std::fs::read(path).expect("read rewritten source");
+        let rewritten_header =
+            vaultkern_core::KdbxHeader::decode(&rewritten).expect("saved header");
+        assert_eq!(rewritten_header.cipher, KdbxCipher::ChaCha20);
+        assert_eq!(rewritten_header.compression, Compression::None);
+        assert_eq!(
+            rewritten_header
+                .kdf_parameters
+                .encode()
+                .expect("rewritten KDF"),
+            source_kdf
+        );
+    }
+
+    #[test]
+    fn merge_save_adopts_the_current_sources_kdf_fidelity_state() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("merge-kdf");
+        let initial = core
+            .save_kdbx(
+                &Vault::empty("merge KDF"),
+                &key,
+                SaveProfile {
+                    kdf: Some(SaveKdf::AesKdbx4 { rounds: 1 }),
+                    ..SaveProfile::recommended()
+                },
+            )
+            .expect("save initial source");
+        let external_vault = core.load_kdbx(&initial, &key).expect("load initial source");
+        let external = core
+            .save_kdbx(
+                &external_vault,
+                &key,
+                SaveProfile {
+                    kdf: Some(SaveKdf::AesKdbx4 { rounds: 2 }),
+                    ..SaveProfile::recommended()
+                },
+            )
+            .expect("save external KDF change");
+        let expected_kdf = vaultkern_core::KdbxHeader::decode(&external)
+            .expect("external header")
+            .kdf_parameters
+            .encode()
+            .expect("external KDF");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("merge-kdf.kdbx");
+        std::fs::write(&path, initial).expect("write initial source");
+        let mut runtime = Runtime::for_tests();
+        let opened = runtime
+            .open_local_vault(path.to_str().expect("UTF-8 path"))
+            .expect("open source");
+        runtime
+            .unlock_vault(&opened.vault_id, Some("merge-kdf"), None)
+            .expect("unlock source");
+        std::fs::write(&path, external).expect("publish external KDF change");
+
+        runtime.save_vault(&opened.vault_id).expect("merge save");
+
+        let merged = std::fs::read(path).expect("read merged source");
+        assert_eq!(
+            vaultkern_core::KdbxHeader::decode(&merged)
+                .expect("merged header")
+                .kdf_parameters
+                .encode()
+                .expect("merged KDF"),
+            expected_kdf
+        );
     }
 
     #[test]
@@ -8180,6 +8526,131 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn runtime_creation_uses_the_product_clock_for_all_keepass_entry_times() {
+        let creation_time = 1_700_000_123;
+        let mut runtime = Runtime::for_tests_at(creation_time);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let created = create_demo_entry(&mut runtime, &opened.vault_id);
+        let entry = runtime
+            .loaded_vault(&opened.vault_id)
+            .expect("loaded vault")
+            .root
+            .entries
+            .iter()
+            .find(|entry| entry.id.to_string() == created.id)
+            .expect("created entry");
+
+        assert_eq!(entry.created_at, creation_time);
+        assert_eq!(entry.modified_at, creation_time);
+        assert_eq!(entry.expiry_time, Some(creation_time as i64));
+        assert_eq!(entry.last_accessed_at, Some(creation_time));
+        assert_eq!(entry.usage_count, Some(0));
+        assert_eq!(entry.location_changed_at, Some(creation_time));
+        assert_eq!(entry.icon_id, Some(0));
+        assert_eq!(
+            entry.auto_type,
+            Some(vaultkern_core::AutoTypeConfig::default())
+        );
+    }
+
+    #[test]
+    fn runtime_creation_rejects_invalid_totp_before_adding_the_entry() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let root_group_id = runtime.list_groups(&opened.vault_id).unwrap().root.id;
+        let before = runtime
+            .loaded_vault(&opened.vault_id)
+            .expect("loaded vault")
+            .root
+            .entries
+            .len();
+
+        assert!(
+            runtime
+                .create_entry(
+                    &opened.vault_id,
+                    &root_group_id,
+                    "Invalid TOTP".into(),
+                    "alice".into(),
+                    "secret".into(),
+                    "https://example.com".into(),
+                    String::new(),
+                    Some("otpauth://totp/Issuer:?secret=SECRET&issuer=Issuer".into()),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            runtime
+                .loaded_vault(&opened.vault_id)
+                .expect("loaded vault")
+                .root
+                .entries
+                .len(),
+            before
+        );
+    }
+
+    #[test]
+    fn ordinary_entry_update_preserves_hidden_unprojectable_totp_source() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let created = create_demo_entry(&mut runtime, &opened.vault_id);
+        let raw_key = "HmacOtp-Secret";
+        {
+            let loaded = runtime
+                .vault_session
+                .find_loaded_mut(&opened.vault_id)
+                .expect("loaded vault");
+            let entry = loaded
+                .vault
+                .as_mut()
+                .expect("unlocked vault")
+                .root
+                .entries
+                .iter_mut()
+                .find(|entry| entry.id.to_string() == created.id)
+                .expect("created entry");
+            entry.attributes.insert(
+                raw_key.into(),
+                vaultkern_core::CustomField {
+                    value: "raw-hotp-secret".into(),
+                    protected: false,
+                },
+            );
+        }
+
+        runtime
+            .update_entry_fields(
+                &opened.vault_id,
+                &created.id,
+                created.title,
+                created.username,
+                "changed password".into(),
+                created.url,
+                created.notes,
+                None,
+                created.custom_fields,
+            )
+            .expect("ordinary entry update");
+
+        let entry = runtime
+            .loaded_vault(&opened.vault_id)
+            .expect("loaded vault")
+            .root
+            .entries
+            .iter()
+            .find(|entry| entry.id.to_string() == created.id)
+            .expect("updated entry");
+        assert_eq!(
+            entry
+                .attributes
+                .get(raw_key)
+                .map(|field| field.value.as_str()),
+            Some("raw-hotp-secret")
+        );
+    }
+
     fn upsert_test_vault_custom_data(
         core: &KeepassCore,
         vault: &mut Vault,
@@ -8717,14 +9188,16 @@ mod tests {
     }
 
     #[test]
-    fn pending_create_reconstruction_matches_semantic_totp_fallbacks() {
+    fn pending_create_reconstruction_matches_semantic_totp_spellings() {
         let mut previous = Vault::empty("Autofill");
         let mut existing = Entry::new("Example");
         existing.username = "alice".into();
         existing.password = "secret".into();
         existing.url = "https://example.com/login".into();
-        existing.totp =
-            Some(TotpSpec::parse_otpauth("otpauth://totp/?secret=JBSWY3DPEHPK3PXP").unwrap());
+        existing.totp = Some(
+            TotpSpec::parse_otpauth("otpauth://totp/Example%3Aalice?secret=JBSWY3DPEHPK3PXP")
+                .unwrap(),
+        );
         let existing_id = existing.id.to_string();
         previous.root.entries.push(existing);
         let mut target = previous.root.entries[0].clone();
@@ -11785,8 +12258,7 @@ mod tests {
         let entry = create_demo_entry(&mut first, &vault_id);
         first.save_vault(&vault_id).unwrap();
         let expected_fields = entry_fields(&entry);
-        let noncanonical_totp =
-            "otpauth://totp/?period=45&digits=8&algorithm=SHA256&secret=JBSWY3DPEHPK3PXP";
+        let noncanonical_totp = "otpauth://totp/Example%3Aalice?period=45&digits=8&algorithm=SHA256&secret=JBSWY3DPEHPK3PXP";
         first.queue_test_onedrive_ambiguous_write(false);
         let pending = first
             .handle(RuntimeCommand::PersistAutofillMutation {

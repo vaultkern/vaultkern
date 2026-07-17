@@ -998,6 +998,10 @@ mod tests {
         let mut entry = Entry::new("");
         entry.id = Uuid::nil();
         entry.icon_id = None;
+        entry.expiry_time = None;
+        entry.last_accessed_at = None;
+        entry.usage_count = None;
+        entry.location_changed_at = None;
         entry.auto_type = None;
         entry
     }
