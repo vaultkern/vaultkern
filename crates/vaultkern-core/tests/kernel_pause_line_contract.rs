@@ -32,17 +32,19 @@ fn code_built_vault_supports_pause_line_contract_on_stable_roundtrip() {
         .add_group(&mut vault, &root_id, "Archive")
         .expect("create archive group");
 
-    let metadata = core.update_vault_metadata(
-        &mut vault,
-        VaultMetadataUpdate {
-            description: Some("Kernel pause-line demo".into()),
-            default_username: Some("demo-user".into()),
-            color: Some("#224466".into()),
-            history_max_items: Some(24),
-            history_max_size: Some(12_345_678),
-            memory_protection: Some(demo_memory_protection()),
-        },
-    );
+    let metadata = core
+        .update_vault_metadata(
+            &mut vault,
+            VaultMetadataUpdate {
+                description: Some("Kernel pause-line demo".into()),
+                default_username: Some("demo-user".into()),
+                color: Some("#224466".into()),
+                history_max_items: Some(24),
+                history_max_size: Some(12_345_678),
+                memory_protection: Some(demo_memory_protection()),
+            },
+        )
+        .expect("update pause-line metadata");
     assert_eq!(
         metadata.description.as_deref(),
         Some("Kernel pause-line demo")
@@ -71,14 +73,16 @@ fn code_built_vault_supports_pause_line_contract_on_stable_roundtrip() {
         Some(archive.id.as_str())
     );
 
-    let identity = core.update_vault_identity_metadata(
-        &mut vault,
-        VaultIdentityMetadataUpdate {
-            name: Some("PauseLine UI".into()),
-            generator: Some("kernel-pause-line-contract".into()),
-            ..Default::default()
-        },
-    );
+    let identity = core
+        .update_vault_identity_metadata(
+            &mut vault,
+            VaultIdentityMetadataUpdate {
+                name: Some("PauseLine UI".into()),
+                generator: Some("kernel-pause-line-contract".into()),
+                ..Default::default()
+            },
+        )
+        .expect("update vault identity");
     assert_eq!(identity.name, "PauseLine UI");
     assert_eq!(
         identity.generator.as_deref(),

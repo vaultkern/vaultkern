@@ -72,22 +72,26 @@ fn apply_public_custom_data_mutation(
 ) {
     assert!(core.list_vault_public_custom_data(vault).is_empty());
 
-    let items = core.upsert_vault_public_custom_data(
-        vault,
-        vaultkern_core::PublicCustomDataItemInput {
-            key: transient_key.into(),
-            value: transient_value.to_vec(),
-        },
-    );
+    let items = core
+        .upsert_vault_public_custom_data(
+            vault,
+            vaultkern_core::PublicCustomDataItemInput {
+                key: transient_key.into(),
+                value: transient_value.to_vec(),
+            },
+        )
+        .expect("insert transient public custom data");
     assert_eq!(items.len(), 1);
 
-    let items = core.upsert_vault_public_custom_data(
-        vault,
-        vaultkern_core::PublicCustomDataItemInput {
-            key: retained_key.into(),
-            value: b"stable".to_vec(),
-        },
-    );
+    let items = core
+        .upsert_vault_public_custom_data(
+            vault,
+            vaultkern_core::PublicCustomDataItemInput {
+                key: retained_key.into(),
+                value: b"stable".to_vec(),
+            },
+        )
+        .expect("insert retained public custom data");
     assert_eq!(items.len(), 2);
 
     let items = core

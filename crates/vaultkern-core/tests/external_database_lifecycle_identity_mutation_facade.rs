@@ -87,30 +87,34 @@ fn external_database_lifecycle_identity_mutation_oracle_preserves_fixture_matrix
 }
 
 fn apply_lifecycle_identity_mutation(core: &KeepassCore, vault: &mut Vault) {
-    let lifecycle = core.update_vault_lifecycle_metadata(
-        vault,
-        VaultLifecycleMetadataUpdate {
-            settings_changed: Some(1_700_200_001),
-            maintenance_history_days: Some(42),
-            master_key_changed: Some(1_700_200_002),
-            master_key_change_rec: Some(90),
-            master_key_change_force: Some(120),
-            master_key_change_force_once: Some(true),
-        },
-    );
+    let lifecycle = core
+        .update_vault_lifecycle_metadata(
+            vault,
+            VaultLifecycleMetadataUpdate {
+                settings_changed: Some(1_700_200_001),
+                maintenance_history_days: Some(42),
+                master_key_changed: Some(1_700_200_002),
+                master_key_change_rec: Some(90),
+                master_key_change_force: Some(120),
+                master_key_change_force_once: Some(true),
+            },
+        )
+        .expect("update lifecycle metadata");
     assert_eq!(lifecycle.settings_changed, Some(1_700_200_001));
     assert_eq!(lifecycle.master_key_change_force_once, Some(true));
 
-    let identity = core.update_vault_identity_metadata(
-        vault,
-        VaultIdentityMetadataUpdate {
-            name: Some("External Database Identity".into()),
-            generator: Some("keepass-rust-external".into()),
-            database_name_changed: Some(1_700_200_003),
-            description_changed: Some(1_700_200_004),
-            default_username_changed: Some(1_700_200_005),
-        },
-    );
+    let identity = core
+        .update_vault_identity_metadata(
+            vault,
+            VaultIdentityMetadataUpdate {
+                name: Some("External Database Identity".into()),
+                generator: Some("keepass-rust-external".into()),
+                database_name_changed: Some(1_700_200_003),
+                description_changed: Some(1_700_200_004),
+                default_username_changed: Some(1_700_200_005),
+            },
+        )
+        .expect("update identity metadata");
     assert_eq!(identity.name, "External Database Identity");
     assert_eq!(identity.generator.as_deref(), Some("keepass-rust-external"));
 }

@@ -9,3 +9,4 @@ data-encoding.workspace = true
 vaultkern-crypto = { path = "../vaultkern-crypto" }
 thiserror.workspace = true
 uuid.workspace = true
+zeroize.workspace = true

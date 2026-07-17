@@ -2413,6 +2413,28 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
     assert!(passkey.backup_state);
     assert!(passkey.private_key_pem.contains("BEGIN PRIVATE KEY"));
 
+    runtime
+        .handle(RuntimeCommand::SaveVault {
+            vault_id: handle.vault_id.clone(),
+        })
+        .expect("save registered passkey entry");
+    let saved = std::fs::read(&path).expect("read saved passkey vault");
+    let loaded = core
+        .load_kdbx(&saved, &key)
+        .expect("load saved passkey vault");
+    let created_entry = loaded
+        .root
+        .entries
+        .iter()
+        .find(|entry| entry.id.to_string() == registration.entry_id)
+        .expect("created passkey entry");
+    assert_eq!(created_entry.created_at, 59);
+    assert_eq!(created_entry.modified_at, 59);
+    assert_eq!(created_entry.expiry_time, Some(59));
+    assert_eq!(created_entry.last_accessed_at, Some(59));
+    assert_eq!(created_entry.usage_count, Some(0));
+    assert_eq!(created_entry.location_changed_at, Some(59));
+
     let get_client_data = br#"{"type":"webauthn.get","challenge":"bG9naW4tMQ","origin":"https://example.com","crossOrigin":false}"#;
     register_get_ceremony_at_s4(&mut runtime, "assertion-token-6", "bG9naW4tMQ");
     let assertion = runtime
@@ -4644,6 +4666,7 @@ fn runtime_returns_entry_history_through_protocol_commands() {
     entry.notes = "current note".into();
 
     let mut snapshot = Entry::new("Old Example");
+    snapshot.id = entry.id;
     snapshot.username = "alice-old".into();
     snapshot.password = "old-secret".into();
     snapshot.url = "https://example.com/old".into();

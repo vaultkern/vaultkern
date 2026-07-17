@@ -217,6 +217,29 @@ impl ExternalKdfParameters {
         }
     }
 
+    pub fn algorithm(&self) -> ExternalKdfAlgorithm {
+        self.algorithm
+    }
+
+    pub fn rounds(&self) -> Option<u64> {
+        match &self.material {
+            ExternalKdfMaterial::Aes { rounds, .. } => Some(*rounds),
+            ExternalKdfMaterial::Argon2 { .. } => None,
+        }
+    }
+
+    pub fn argon2_work_factors(&self) -> Option<(u32, u32, u32)> {
+        match &self.material {
+            ExternalKdfMaterial::Argon2 {
+                iterations,
+                memory_kib,
+                parallelism,
+                ..
+            } => Some((*iterations, *memory_kib, *parallelism)),
+            ExternalKdfMaterial::Aes { .. } => None,
+        }
+    }
+
     pub(crate) fn into_profile(self) -> KdfProfile {
         match (self.algorithm, self.material) {
             (ExternalKdfAlgorithm::AesKdbx3, ExternalKdfMaterial::Aes { rounds, salt }) => {

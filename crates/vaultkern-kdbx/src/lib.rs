@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::{Cursor as IoCursor, Read, Write};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -15,10 +15,12 @@ use vaultkern_model::{
     Attachment, AttachmentContent, AttachmentContentId, AttachmentContentPool, AutoTypeAssociation,
     AutoTypeConfig, CustomDataBlock, CustomDataItem, CustomField, CustomIcon, DeletedObject, Entry,
     EntryRawState, Group, GroupRawState, GroupTimes, MemoryProtection, MetaRawState, ModelError,
-    OpaqueXmlAnchor, OpaqueXmlFragment, PasskeyRecord, RootRawState, TotpAlgorithm, TotpSpec,
-    Vault,
+    OpaqueXmlAnchor, OpaqueXmlFragment, PasskeyRecord, RootRawState, Vault,
+    is_totp_persistent_attribute_key, is_totp_secret_persistent_attribute_key,
+    materialize_entry_persistent_attributes, totp_from_persistent_attributes,
 };
 use xmltree::{Element, XMLNode};
+use zeroize::{Zeroize, Zeroizing};
 
 mod external_kdf;
 pub use external_kdf::{
@@ -105,12 +107,22 @@ pub enum VariantValue {
     Int64(i64),
     String(String),
     Bytes(Vec<u8>),
+    Unknown { type_tag: u8, bytes: Vec<u8> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct VariantDictionary {
     items: BTreeMap<String, VariantValue>,
+    loaded_encoding: Option<Vec<u8>>,
 }
+
+impl PartialEq for VariantDictionary {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+    }
+}
+
+impl Eq for VariantDictionary {}
 
 impl VariantDictionary {
     pub fn insert(&mut self, key: impl Into<String>, value: VariantValue) {
@@ -126,6 +138,12 @@ impl VariantDictionary {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
+        if let Some(encoded) = &self.loaded_encoding
+            && Self::decode_items(encoded)? == self.items
+        {
+            return Ok(encoded.clone());
+        }
+
         let mut bytes = Vec::new();
         bytes.extend(0x0100_u16.to_le_bytes());
 
@@ -144,6 +162,13 @@ impl VariantDictionary {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
+        Ok(Self {
+            items: Self::decode_items(bytes)?,
+            loaded_encoding: Some(bytes.to_vec()),
+        })
+    }
+
+    fn decode_items(bytes: &[u8]) -> Result<BTreeMap<String, VariantValue>> {
         let mut cursor = Cursor::new(bytes);
         let version = cursor.read_u16()?;
         if version != 0x0100 {
@@ -165,7 +190,7 @@ impl VariantDictionary {
             items.insert(name, value);
         }
 
-        Ok(Self { items })
+        Ok(items)
     }
 }
 
@@ -299,6 +324,11 @@ pub enum SaveKdf {
     AesKdbx4 {
         rounds: u64,
     },
+    Argon2d {
+        iterations: u32,
+        memory_kib: u32,
+        parallelism: u32,
+    },
     Argon2id {
         iterations: u32,
         memory_kib: u32,
@@ -306,12 +336,23 @@ pub enum SaveKdf {
     },
 }
 
+impl SaveKdf {
+    pub fn recommended() -> Self {
+        Self::Argon2id {
+            iterations: 2,
+            memory_kib: 64 * 1024,
+            parallelism: 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveProfile {
     pub version: KdbxVersion,
     pub cipher: KdbxCipher,
     pub compression: Compression,
-    pub kdf: SaveKdf,
+    /// `None` preserves a loaded KDBX4 dictionary and uses product defaults only on first save.
+    pub kdf: Option<SaveKdf>,
 }
 
 impl SaveProfile {
@@ -320,11 +361,7 @@ impl SaveProfile {
             version: KdbxVersion::V4_1,
             cipher: KdbxCipher::Aes256,
             compression: Compression::Gzip,
-            kdf: SaveKdf::Argon2id {
-                iterations: 2,
-                memory_kib: 64 * 1024,
-                parallelism: 1,
-            },
+            kdf: None,
         }
     }
 }
@@ -338,7 +375,13 @@ pub struct KdbxHeaderSummary {
 }
 
 pub fn required_version(vault: &Vault) -> KdbxVersion {
-    if group_requires_41(&vault.root) {
+    if custom_data_requires_41(&vault.meta_custom_data_blocks, &vault.meta_custom_data)
+        || vault.custom_icons.iter().any(|icon| {
+            icon.name.as_deref().is_some_and(|name| !name.is_empty())
+                || icon.last_modified.is_some()
+        })
+        || group_requires_41(&vault.root)
+    {
         KdbxVersion::V4_1
     } else {
         KdbxVersion::V4_0
@@ -380,12 +423,20 @@ pub fn save_kdbx(
     composite_key: &CompositeKey,
     profile: &SaveProfile,
 ) -> Result<Vec<u8>> {
+    if !matches!(profile.version, KdbxVersion::V4_0 | KdbxVersion::V4_1) {
+        return Err(KdbxError::UnsupportedVersion);
+    }
+    validate_vault_model(vault)?;
+    if required_version(vault) == KdbxVersion::V4_1 && profile.version != KdbxVersion::V4_1 {
+        return Err(KdbxError::UnsupportedVersion);
+    }
+
     let mut header = KdbxHeader::new(profile.version, profile.cipher);
     header.compression = profile.compression;
     header.master_seed = random_array_32();
     header.encryption_iv = random_iv(profile.cipher);
-    let kdf = build_kdf_profile(&profile.kdf);
-    header.kdf_parameters = kdf_to_variant_dict(&kdf);
+    let (kdf, kdf_parameters) = save_kdf_state(vault, profile.kdf.as_ref())?;
+    header.kdf_parameters = kdf_parameters;
     for (key, value) in &vault.public_custom_data {
         header
             .public_custom_data
@@ -652,6 +703,7 @@ fn encode_variant_value(value: &VariantValue) -> (u8, Vec<u8>) {
         VariantValue::Int64(value) => (0x0D, value.to_le_bytes().to_vec()),
         VariantValue::String(value) => (0x18, value.as_bytes().to_vec()),
         VariantValue::Bytes(value) => (0x42, value.clone()),
+        VariantValue::Unknown { type_tag, bytes } => (*type_tag, bytes.clone()),
     }
 }
 
@@ -674,7 +726,10 @@ fn decode_variant_value(kind: u8, bytes: &[u8]) -> Result<VariantValue> {
             String::from_utf8(bytes.to_vec()).map_err(|_| KdbxError::InvalidValue)?,
         ),
         0x42 => VariantValue::Bytes(bytes.to_vec()),
-        _ => return Err(KdbxError::InvalidValue),
+        type_tag => VariantValue::Unknown {
+            type_tag,
+            bytes: bytes.to_vec(),
+        },
     })
 }
 
@@ -683,6 +738,16 @@ fn build_kdf_profile(profile: &SaveKdf) -> KdfProfile {
         SaveKdf::AesKdbx4 { rounds } => KdfProfile::AesKdbx4 {
             rounds: *rounds,
             salt: random_array_32(),
+        },
+        SaveKdf::Argon2d {
+            iterations,
+            memory_kib,
+            parallelism,
+        } => KdfProfile::Argon2d {
+            iterations: *iterations,
+            memory_kib: *memory_kib,
+            parallelism: *parallelism,
+            salt: random_bytes(32),
         },
         SaveKdf::Argon2id {
             iterations,
@@ -697,6 +762,56 @@ fn build_kdf_profile(profile: &SaveKdf) -> KdfProfile {
     }
 }
 
+pub fn retained_or_recommended_save_kdf(vault: &Vault) -> Result<SaveKdf> {
+    let Some(encoded) = &vault.kdf_parameters else {
+        return Ok(SaveKdf::recommended());
+    };
+    let parameters = ExternalKdfParameters::decode_kdbx4(&VariantDictionary::decode(encoded)?)?;
+    match parameters.algorithm() {
+        ExternalKdfAlgorithm::AesKdbx3 | ExternalKdfAlgorithm::AesKdbx4 => Ok(SaveKdf::AesKdbx4 {
+            rounds: parameters.rounds().ok_or(KdbxError::UnsupportedKdf)?,
+        }),
+        ExternalKdfAlgorithm::Argon2d | ExternalKdfAlgorithm::Argon2id => {
+            let (iterations, memory_kib, parallelism) = parameters
+                .argon2_work_factors()
+                .ok_or(KdbxError::UnsupportedKdf)?;
+            if parameters.algorithm() == ExternalKdfAlgorithm::Argon2d {
+                Ok(SaveKdf::Argon2d {
+                    iterations,
+                    memory_kib,
+                    parallelism,
+                })
+            } else {
+                Ok(SaveKdf::Argon2id {
+                    iterations,
+                    memory_kib,
+                    parallelism,
+                })
+            }
+        }
+    }
+}
+
+fn save_kdf_state(
+    vault: &Vault,
+    requested: Option<&SaveKdf>,
+) -> Result<(KdfProfile, VariantDictionary)> {
+    if let Some(requested) = requested {
+        let profile = build_kdf_profile(requested);
+        let parameters = kdf_to_variant_dict(&profile);
+        return Ok((profile, parameters));
+    }
+    if let Some(encoded) = &vault.kdf_parameters {
+        let parameters = VariantDictionary::decode(encoded)?;
+        let profile = ExternalKdfParameters::decode_kdbx4(&parameters)?.into_profile();
+        return Ok((profile, parameters));
+    }
+
+    let profile = build_kdf_profile(&SaveKdf::recommended());
+    let parameters = kdf_to_variant_dict(&profile);
+    Ok((profile, parameters))
+}
+
 fn kdf_to_variant_dict(kdf: &KdfProfile) -> VariantDictionary {
     let mut dict = VariantDictionary::default();
     match kdf {
@@ -708,7 +823,13 @@ fn kdf_to_variant_dict(kdf: &KdfProfile) -> VariantDictionary {
             dict.insert("R", VariantValue::UInt64(*rounds));
             dict.insert("S", VariantValue::Bytes(salt.to_vec()));
         }
-        KdfProfile::Argon2id {
+        KdfProfile::Argon2d {
+            iterations,
+            memory_kib,
+            parallelism,
+            salt,
+        }
+        | KdfProfile::Argon2id {
             iterations,
             memory_kib,
             parallelism,
@@ -716,7 +837,15 @@ fn kdf_to_variant_dict(kdf: &KdfProfile) -> VariantDictionary {
         } => {
             dict.insert(
                 "$UUID",
-                VariantValue::Bytes(KDF_ARGON2ID_UUID.into_bytes().to_vec()),
+                VariantValue::Bytes(
+                    match kdf {
+                        KdfProfile::Argon2d { .. } => KDF_ARGON2D_UUID,
+                        KdfProfile::Argon2id { .. } => KDF_ARGON2ID_UUID,
+                        _ => unreachable!("matched an Argon2 KDF"),
+                    }
+                    .into_bytes()
+                    .to_vec(),
+                ),
             );
             dict.insert("V", VariantValue::UInt32(0x13));
             dict.insert("I", VariantValue::UInt64(u64::from(*iterations)));
@@ -724,7 +853,7 @@ fn kdf_to_variant_dict(kdf: &KdfProfile) -> VariantDictionary {
             dict.insert("P", VariantValue::UInt32(*parallelism));
             dict.insert("S", VariantValue::Bytes(salt.clone()));
         }
-        KdfProfile::AesKdbx3 { .. } | KdfProfile::Argon2d { .. } => {}
+        KdfProfile::AesKdbx3 { .. } => {}
     }
     dict
 }
@@ -853,7 +982,12 @@ fn build_xml(
     inner_key: &[u8],
     version: KdbxVersion,
 ) -> Result<Vec<u8>> {
-    let mut root = Element::new("KeePassFile");
+    if !matches!(version, KdbxVersion::V4_0 | KdbxVersion::V4_1) {
+        return Err(KdbxError::UnsupportedVersion);
+    }
+
+    let mut guarded_root = ZeroizingXmlElement::new("KeePassFile");
+    let root = guarded_root.element_mut();
 
     let mut meta = Element::new("Meta");
     if let Some(generator) = &vault.generator {
@@ -925,6 +1059,10 @@ fn build_xml(
         meta.children
             .push(XMLNode::Element(memory_protection_to_xml(
                 memory_protection,
+                vault
+                    .meta_raw_state
+                    .memory_protection_auto_enable_visual_hiding_raw
+                    .as_deref(),
             )));
     }
     if !vault.custom_icons.is_empty() || vault.meta_raw_state.has_custom_icons_node {
@@ -944,11 +1082,6 @@ fn build_xml(
             "RecycleBinUUID",
             &encode_uuid(recycle_bin_group),
         )));
-    } else if let Some(raw_recycle_bin_group) = &vault.meta_raw_state.recycle_bin_group_raw {
-        meta.children.push(XMLNode::Element(text_element(
-            "RecycleBinUUID",
-            raw_recycle_bin_group,
-        )));
     }
     if let Some(recycle_bin_changed) = vault.recycle_bin_changed {
         meta.children.push(XMLNode::Element(text_element(
@@ -960,12 +1093,6 @@ fn build_xml(
         meta.children.push(XMLNode::Element(text_element(
             "EntryTemplatesGroup",
             &encode_uuid(entry_templates_group),
-        )));
-    } else if let Some(raw_entry_templates_group) = &vault.meta_raw_state.entry_templates_group_raw
-    {
-        meta.children.push(XMLNode::Element(text_element(
-            "EntryTemplatesGroup",
-            raw_entry_templates_group,
         )));
     }
     if let Some(entry_templates_group_changed) = vault.entry_templates_group_changed {
@@ -1030,24 +1157,31 @@ fn build_xml(
         version,
     )?;
     reorder_known_xml_nodes(&mut meta.children, &vault.meta_raw_state.node_order);
+    validate_custom_data_block_positions(&meta.children, &vault.meta_custom_data_blocks)?;
     append_opaque_xml(&mut meta, &vault.meta_opaque_xml)?;
     root.children.push(XMLNode::Element(meta));
 
     let mut root_node = Element::new("Root");
-    let mut root_group = group_to_xml(&vault.root, attachment_refs, version)?;
+    let mut root_group =
+        ZeroizingXmlElement::from_element(group_to_xml(&vault.root, attachment_refs, version)?);
     let mut protected = ProtectedStream::new_chacha(inner_key)?;
-    protect_xml_group(&mut root_group, &mut protected)?;
-    root_node.children.push(XMLNode::Element(root_group));
+    protect_xml_group(root_group.element_mut(), &mut protected)?;
     root_node
         .children
-        .push(XMLNode::Element(deleted_objects_to_xml(
-            &vault.deleted_objects,
-            version,
-        )));
+        .push(XMLNode::Element(root_group.into_inner()));
+    if !vault.deleted_objects.is_empty() || vault.root_raw_state.has_deleted_objects_node {
+        root_node
+            .children
+            .push(XMLNode::Element(deleted_objects_to_xml(
+                &vault.deleted_objects,
+                version,
+            )));
+    }
+    reorder_known_xml_nodes(&mut root_node.children, &vault.root_raw_state.node_order);
     append_opaque_xml(&mut root_node, &vault.root_opaque_xml)?;
     root.children.push(XMLNode::Element(root_node));
 
-    validate_xml_text(&root)?;
+    validate_xml_text(root)?;
     let mut bytes = Vec::new();
     root.write(&mut bytes)
         .map_err(|error| KdbxError::Xml(error.to_string()))?;
@@ -1059,7 +1193,8 @@ fn group_to_xml(
     attachment_refs: &HashMap<(usize, String), usize>,
     version: KdbxVersion,
 ) -> Result<Element> {
-    let mut element = Element::new("Group");
+    let mut guarded = ZeroizingXmlElement::new("Group");
+    let element = guarded.element_mut();
     element.children.push(XMLNode::Element(text_element(
         "UUID",
         &encode_uuid(group.id),
@@ -1110,30 +1245,30 @@ fn group_to_xml(
             "",
         )));
     }
-    if let Some(enable_auto_type) = group.flags.enable_auto_type {
-        element.children.push(XMLNode::Element(text_element(
-            "EnableAutoType",
-            bool_text(enable_auto_type),
-        )));
-    } else if let Some(enable_auto_type_raw) = &group.raw_state.enable_auto_type_raw {
+    if let Some(enable_auto_type_raw) = &group.raw_state.enable_auto_type_raw {
         element.children.push(XMLNode::Element(text_element(
             "EnableAutoType",
             enable_auto_type_raw,
+        )));
+    } else if let Some(enable_auto_type) = group.flags.enable_auto_type {
+        element.children.push(XMLNode::Element(text_element(
+            "EnableAutoType",
+            bool_text(enable_auto_type),
         )));
     } else {
         element
             .children
             .push(XMLNode::Element(text_element("EnableAutoType", "null")));
     }
-    if let Some(enable_searching) = group.flags.enable_searching {
-        element.children.push(XMLNode::Element(text_element(
-            "EnableSearching",
-            bool_text(enable_searching),
-        )));
-    } else if let Some(enable_searching_raw) = &group.raw_state.enable_searching_raw {
+    if let Some(enable_searching_raw) = &group.raw_state.enable_searching_raw {
         element.children.push(XMLNode::Element(text_element(
             "EnableSearching",
             enable_searching_raw,
+        )));
+    } else if let Some(enable_searching) = group.flags.enable_searching {
+        element.children.push(XMLNode::Element(text_element(
+            "EnableSearching",
+            bool_text(enable_searching),
         )));
     } else {
         element
@@ -1145,24 +1280,7 @@ fn group_to_xml(
             "LastTopVisibleEntry",
             &encode_uuid(last_top_visible_entry),
         )));
-    } else if let Some(last_top_visible_entry_raw) = &group.raw_state.last_top_visible_entry_raw {
-        element.children.push(XMLNode::Element(text_element(
-            "LastTopVisibleEntry",
-            last_top_visible_entry_raw,
-        )));
-    } else {
-        element.children.push(XMLNode::Element(text_element(
-            "LastTopVisibleEntry",
-            &encode_uuid(Uuid::nil()),
-        )));
     }
-    append_custom_data_blocks(
-        &mut element,
-        &group.custom_data_blocks,
-        &group.custom_data,
-        true,
-        version,
-    )?;
     if version == KdbxVersion::V4_1
         && let Some(previous_parent) = group.previous_parent
     {
@@ -1186,9 +1304,17 @@ fn group_to_xml(
             version,
         )?));
     }
+    append_custom_data_blocks(
+        element,
+        &group.custom_data_blocks,
+        &group.custom_data,
+        true,
+        version,
+    )?;
     reorder_known_xml_nodes(&mut element.children, &group.raw_state.node_order);
-    append_opaque_xml(&mut element, &group.opaque_xml)?;
-    Ok(element)
+    validate_custom_data_block_positions(&element.children, &group.custom_data_blocks)?;
+    append_opaque_xml(element, &group.opaque_xml)?;
+    Ok(guarded.into_inner())
 }
 
 fn entry_to_xml(
@@ -1197,15 +1323,18 @@ fn entry_to_xml(
     include_history: bool,
     version: KdbxVersion,
 ) -> Result<Element> {
-    let mut element = Element::new("Entry");
+    let mut guarded = ZeroizingXmlElement::new("Entry");
+    let element = guarded.element_mut();
     element.children.push(XMLNode::Element(text_element(
         "UUID",
         &encode_uuid(entry.id),
     )));
-    element.children.push(XMLNode::Element(text_element(
-        "IconID",
-        &entry.icon_id.unwrap_or(0).to_string(),
-    )));
+    if let Some(icon_id) = entry.icon_id {
+        element.children.push(XMLNode::Element(text_element(
+            "IconID",
+            &icon_id.to_string(),
+        )));
+    }
     if let Some(custom_icon_id) = entry.custom_icon_id {
         element.children.push(XMLNode::Element(text_element(
             "CustomIconUUID",
@@ -1244,15 +1373,15 @@ fn entry_to_xml(
             override_url_raw,
         )));
     }
-    if !entry.tags.is_empty() {
+    if let Some(tags_raw) = &entry.raw_state.tags_raw {
+        element
+            .children
+            .push(XMLNode::Element(text_element("Tags", tags_raw)));
+    } else if !entry.tags.is_empty() {
         element.children.push(XMLNode::Element(text_element(
             "Tags",
             &entry.tags.iter().cloned().collect::<Vec<_>>().join(";"),
         )));
-    } else if let Some(tags_raw) = &entry.raw_state.tags_raw {
-        element
-            .children
-            .push(XMLNode::Element(text_element("Tags", tags_raw)));
     }
     if version == KdbxVersion::V4_1
         && let Some(previous_parent) = entry.previous_parent
@@ -1263,17 +1392,15 @@ fn entry_to_xml(
         )));
     }
     if version == KdbxVersion::V4_1 {
-        if entry.exclude_from_reports {
-            element
-                .children
-                .push(XMLNode::Element(text_element("QualityCheck", "False")));
-        } else if let Some(quality_check_raw) = &entry.raw_state.quality_check_raw
-            && parse_bool_text(quality_check_raw)
-        {
+        if let Some(quality_check_raw) = &entry.raw_state.quality_check_raw {
             element.children.push(XMLNode::Element(text_element(
                 "QualityCheck",
                 quality_check_raw,
             )));
+        } else if entry.exclude_from_reports {
+            element
+                .children
+                .push(XMLNode::Element(text_element("QualityCheck", "False")));
         }
     }
 
@@ -1281,121 +1408,76 @@ fn entry_to_xml(
         .children
         .push(XMLNode::Element(entry_times_to_xml(entry, version)));
 
-    let mut fields = entry.attributes.clone();
+    let materialized = materialize_entry_persistent_attributes(entry);
+    let mut fields: BTreeMap<&str, (&str, bool)> = materialized
+        .iter()
+        .map(|(key, field)| (key, (field.value(), field.protected())))
+        .collect();
     fields.insert(
-        "Title".into(),
-        CustomField {
-            value: entry.title.clone(),
-            protected: entry.field_protection.protect_title,
-        },
+        "Title",
+        (&entry.title, entry.field_protection.protect_title),
     );
     fields.insert(
-        "UserName".into(),
-        CustomField {
-            value: entry.username.clone(),
-            protected: entry.field_protection.protect_username,
-        },
+        "UserName",
+        (&entry.username, entry.field_protection.protect_username),
     );
     fields.insert(
-        "Password".into(),
-        CustomField {
-            value: entry.password.clone(),
-            protected: entry.field_protection.protect_password,
-        },
+        "Password",
+        (&entry.password, entry.field_protection.protect_password),
     );
+    fields.insert("URL", (&entry.url, entry.field_protection.protect_url));
     fields.insert(
-        "URL".into(),
-        CustomField {
-            value: entry.url.clone(),
-            protected: entry.field_protection.protect_url,
-        },
+        "Notes",
+        (&entry.notes, entry.field_protection.protect_notes),
     );
-    fields.insert(
-        "Notes".into(),
-        CustomField {
-            value: entry.notes.clone(),
-            protected: entry.field_protection.protect_notes,
-        },
-    );
-    if let Some(totp) = &entry.totp {
-        fields.insert(
-            "otp".into(),
-            CustomField {
-                value: build_otpauth_uri(entry, totp),
-                protected: true,
-            },
-        );
-        fields.insert(
-            "TimeOtp-Secret-Base32".into(),
-            CustomField {
-                value: totp.secret_base32.clone(),
-                protected: true,
-            },
-        );
-        fields.insert(
-            "TimeOtp-Algorithm".into(),
-            CustomField {
-                value: match totp.algorithm {
-                    TotpAlgorithm::Sha1 => "HMAC-SHA-1",
-                    TotpAlgorithm::Sha256 => "HMAC-SHA-256",
-                    TotpAlgorithm::Sha512 => "HMAC-SHA-512",
-                }
-                .into(),
-                protected: false,
-            },
-        );
-        fields.insert(
-            "TimeOtp-Length".into(),
-            CustomField {
-                value: totp.digits.to_string(),
-                protected: false,
-            },
-        );
-        fields.insert(
-            "TimeOtp-Period".into(),
-            CustomField {
-                value: totp.period_seconds.to_string(),
-                protected: false,
-            },
-        );
+    let mut ordered_fields = Vec::with_capacity(fields.len());
+    for key in &entry.raw_state.string_order {
+        if let Some(field) = fields.remove(key.as_str()) {
+            ordered_fields.push((key.as_str(), field));
+        }
     }
-    if let Some(passkey) = &entry.passkey {
-        passkey.write_to_attributes(&mut fields);
-    }
-
-    for (key, field) in fields {
+    ordered_fields.extend(fields);
+    for (key, (value, protected)) in ordered_fields {
         element
             .children
-            .push(XMLNode::Element(string_field_to_xml(&key, &field)));
+            .push(XMLNode::Element(string_field_to_xml(key, value, protected)));
     }
 
-    for attachment in entry.attachments.values() {
+    let mut ordered_attachments = Vec::with_capacity(entry.attachments.len());
+    let mut retained_names = BTreeSet::new();
+    for name in &entry.raw_state.binary_order {
+        if let Some(attachment) = entry.attachments.get(name) {
+            retained_names.insert(name.as_str());
+            ordered_attachments.push((name.as_str(), attachment));
+        }
+    }
+    ordered_attachments.extend(
+        entry
+            .attachments
+            .iter()
+            .filter(|(name, _)| !retained_names.contains(name.as_str()))
+            .map(|(name, attachment)| (name.as_str(), attachment)),
+    );
+    for (name, _) in ordered_attachments {
         let mut binary = Element::new("Binary");
         binary
             .children
-            .push(XMLNode::Element(text_element("Key", &attachment.name)));
+            .push(XMLNode::Element(text_element("Key", name)));
         let mut value = Element::new("Value");
         value.attributes.insert(
             "Ref".into(),
-            attachment_refs[&(entry_ref_key(entry), attachment.name.clone())].to_string(),
+            attachment_refs[&(entry_ref_key(entry), name.to_owned())].to_string(),
         );
         binary.children.push(XMLNode::Element(value));
         element.children.push(XMLNode::Element(binary));
     }
 
-    let auto_type = entry.auto_type.as_ref().cloned().unwrap_or_default();
-    element
-        .children
-        .push(XMLNode::Element(auto_type_to_xml(&auto_type)));
-    append_custom_data_blocks(
-        &mut element,
-        &entry.custom_data_blocks,
-        &entry.custom_data,
-        true,
-        version,
-    )?;
-
-    if include_history && !entry.history.is_empty() {
+    if let Some(auto_type) = &entry.auto_type {
+        element
+            .children
+            .push(XMLNode::Element(auto_type_to_xml(auto_type)));
+    }
+    if should_emit_history(entry, include_history) {
         let mut history = Element::new("History");
         for old_entry in &entry.history {
             history.children.push(XMLNode::Element(entry_to_xml(
@@ -1406,15 +1488,24 @@ fn entry_to_xml(
             )?));
         }
         element.children.push(XMLNode::Element(history));
-    } else if include_history {
-        element
-            .children
-            .push(XMLNode::Element(Element::new("History")));
     }
 
+    append_custom_data_blocks(
+        element,
+        &entry.custom_data_blocks,
+        &entry.custom_data,
+        true,
+        version,
+    )?;
+
     reorder_known_xml_nodes(&mut element.children, &entry.raw_state.node_order);
-    append_opaque_xml(&mut element, &entry.opaque_xml)?;
-    Ok(element)
+    validate_custom_data_block_positions(&element.children, &entry.custom_data_blocks)?;
+    append_opaque_xml(element, &entry.opaque_xml)?;
+    Ok(guarded.into_inner())
+}
+
+fn is_standard_entry_field_name(name: &str) -> bool {
+    matches!(name, "Title" | "UserName" | "Password" | "URL" | "Notes")
 }
 
 fn group_times_to_xml(times: GroupTimes, version: KdbxVersion) -> Element {
@@ -1615,68 +1706,74 @@ fn append_custom_data_blocks(
         return Ok(());
     }
 
-    let has_empty_blocks = blocks.iter().any(|block| block.items.is_empty());
-    let has_non_empty_blocks = blocks.iter().any(|block| !block.items.is_empty());
-    if has_empty_blocks && has_non_empty_blocks {
-        if !merged.is_empty() {
-            target
-                .children
-                .push(XMLNode::Element(custom_data_to_xml(merged)));
-        }
-        return Ok(());
-    }
-
     if merge_custom_data_blocks(blocks) != *merged {
-        if !merged.is_empty() {
-            target
-                .children
-                .push(XMLNode::Element(custom_data_to_xml(merged)));
-        }
-        return Ok(());
+        return Err(KdbxError::InvalidValue);
     }
 
-    let mut rebuilt = Vec::new();
-    let mut anchored = Vec::new();
+    let mut minimum_insertion_index = 0;
     for block in blocks {
         let node = XMLNode::Element(custom_data_block_to_xml(block, include_item_times, version));
-        if let Some(anchor) = &block.after {
-            anchored.push((anchor.clone(), node));
-        } else {
-            rebuilt.push(node);
-        }
-    }
-
-    let original_children = std::mem::take(&mut target.children);
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for child in original_children {
-        let current_anchor = match &child {
-            XMLNode::Element(element) => {
-                let occurrence = counts.entry(element.name.clone()).or_insert(0);
-                *occurrence += 1;
-                Some(OpaqueXmlAnchor {
-                    element_name: element.name.clone(),
-                    occurrence: *occurrence,
-                })
-            }
-            _ => None,
+        let desired_index = match block.after.as_ref() {
+            Some(anchor) => xml_anchor_index(&target.children, anchor)
+                .map(|anchor_index| anchor_index + 1)
+                .ok_or(KdbxError::InvalidValue)?,
+            None => 0,
         };
-        rebuilt.push(child);
-
-        if let Some(current_anchor) = current_anchor {
-            let mut index = 0;
-            while index < anchored.len() {
-                if anchored[index].0 == current_anchor {
-                    let (_, node) = anchored.remove(index);
-                    rebuilt.push(node);
-                } else {
-                    index += 1;
-                }
-            }
+        if desired_index < minimum_insertion_index {
+            return Err(KdbxError::InvalidValue);
         }
+        let insertion_index = desired_index.min(target.children.len());
+        target.children.insert(insertion_index, node);
+        minimum_insertion_index = insertion_index + 1;
     }
+    Ok(())
+}
 
-    rebuilt.extend(anchored.into_iter().map(|(_, node)| node));
-    target.children = rebuilt;
+fn xml_anchor_index(children: &[XMLNode], anchor: &OpaqueXmlAnchor) -> Option<usize> {
+    let mut occurrence = 0;
+    children.iter().position(|child| {
+        let XMLNode::Element(element) = child else {
+            return false;
+        };
+        if element.name != anchor.element_name {
+            return false;
+        }
+        occurrence += 1;
+        occurrence == anchor.occurrence
+    })
+}
+
+fn validate_custom_data_block_positions(
+    children: &[XMLNode],
+    blocks: &[CustomDataBlock],
+) -> Result<()> {
+    if blocks.is_empty() {
+        return Ok(());
+    }
+    let mut counts = HashMap::<&str, usize>::new();
+    let mut predecessor = None;
+    let mut block_index = 0;
+    for child in children {
+        let XMLNode::Element(element) = child else {
+            continue;
+        };
+        if element.name == "CustomData" {
+            let block = blocks.get(block_index).ok_or(KdbxError::InvalidValue)?;
+            if block.after != predecessor {
+                return Err(KdbxError::InvalidValue);
+            }
+            block_index += 1;
+        }
+        let occurrence = counts.entry(element.name.as_str()).or_insert(0);
+        *occurrence += 1;
+        predecessor = Some(OpaqueXmlAnchor {
+            element_name: element.name.clone(),
+            occurrence: *occurrence,
+        });
+    }
+    if block_index != blocks.len() {
+        return Err(KdbxError::InvalidValue);
+    }
     Ok(())
 }
 
@@ -1789,18 +1886,60 @@ fn reorder_known_xml_nodes(children: &mut Vec<XMLNode>, original_order: &[String
     *children = rebuilt;
 }
 
-fn string_field_to_xml(key: &str, field: &CustomField) -> Element {
+fn string_field_to_xml(key: &str, field_value: &str, protected: bool) -> Element {
     let mut string = Element::new("String");
     string
         .children
         .push(XMLNode::Element(text_element("Key", key)));
     let mut value = Element::new("Value");
-    if field.protected {
+    if protected {
         value.attributes.insert("Protected".into(), "True".into());
     }
-    value.children.push(XMLNode::Text(field.value.clone()));
+    value.children.push(XMLNode::Text(field_value.to_owned()));
     string.children.push(XMLNode::Element(value));
     string
+}
+
+struct ZeroizingXmlElement {
+    element: Option<Element>,
+}
+
+impl ZeroizingXmlElement {
+    fn new(name: &str) -> Self {
+        Self::from_element(Element::new(name))
+    }
+
+    fn from_element(element: Element) -> Self {
+        Self {
+            element: Some(element),
+        }
+    }
+
+    fn element_mut(&mut self) -> &mut Element {
+        self.element.as_mut().expect("live XML guard")
+    }
+
+    fn into_inner(mut self) -> Element {
+        self.element.take().expect("live XML guard")
+    }
+}
+
+impl Drop for ZeroizingXmlElement {
+    fn drop(&mut self) {
+        if let Some(element) = self.element.as_mut() {
+            zeroize_xml_text(element);
+        }
+    }
+}
+
+fn zeroize_xml_text(element: &mut Element) {
+    for child in &mut element.children {
+        match child {
+            XMLNode::Element(child) => zeroize_xml_text(child),
+            XMLNode::Text(text) | XMLNode::CData(text) => text.zeroize(),
+            _ => {}
+        }
+    }
 }
 
 fn protect_xml_group(group: &mut Element, protected: &mut ProtectedStream) -> Result<()> {
@@ -1852,14 +1991,488 @@ fn protect_xml_string(string: &mut Element, protected: &mut ProtectedStream) -> 
         return Ok(());
     }
 
-    let mut bytes = value
-        .get_text()
-        .map(|text| text.as_bytes().to_vec())
-        .unwrap_or_default();
-    protected.apply(&mut bytes);
+    let mut bytes = Zeroizing::new(
+        value
+            .get_text()
+            .map(|text| text.as_bytes().to_vec())
+            .unwrap_or_default(),
+    );
+    protected.apply(bytes.as_mut_slice());
+    let encoded = STANDARD.encode(bytes.as_slice());
+    for child in &mut value.children {
+        if let XMLNode::Text(text) | XMLNode::CData(text) = child {
+            text.zeroize();
+        }
+    }
     value.children.clear();
-    value.children.push(XMLNode::Text(STANDARD.encode(bytes)));
+    value.children.push(XMLNode::Text(encoded));
     Ok(())
+}
+
+fn validate_xml_model_shape(root: &Element) -> Result<()> {
+    if root.name != "KeePassFile" {
+        return Err(KdbxError::InvalidValue);
+    }
+    validate_only_element_children(root, &["Meta", "Root"])?;
+    validate_child_multiplicity(root, &["Meta", "Root"], &["Meta", "Root"])?;
+    let meta = root.get_child("Meta").ok_or(KdbxError::InvalidValue)?;
+    let root_node = root.get_child("Root").ok_or(KdbxError::InvalidValue)?;
+    validate_meta_shape(meta)?;
+    validate_root_shape(root_node)
+}
+
+fn validate_meta_shape(meta: &Element) -> Result<()> {
+    const SINGLETONS: &[&str] = &[
+        "Generator",
+        "SettingsChanged",
+        "DatabaseName",
+        "DatabaseNameChanged",
+        "HeaderHash",
+        "Binaries",
+        "DatabaseDescription",
+        "DatabaseDescriptionChanged",
+        "DefaultUserName",
+        "DefaultUserNameChanged",
+        "MaintenanceHistoryDays",
+        "Color",
+        "MemoryProtection",
+        "CustomIcons",
+        "RecycleBinEnabled",
+        "RecycleBinUUID",
+        "RecycleBinChanged",
+        "EntryTemplatesGroup",
+        "EntryTemplatesGroupChanged",
+        "MasterKeyChanged",
+        "MasterKeyChangeRec",
+        "MasterKeyChangeForce",
+        "MasterKeyChangeForceOnce",
+        "LastSelectedGroup",
+        "LastTopVisibleGroup",
+        "HistoryMaxItems",
+        "HistoryMaxSize",
+    ];
+    validate_child_multiplicity(meta, SINGLETONS, &[])?;
+    validate_known_scalar_children(
+        meta,
+        SINGLETONS,
+        &["MemoryProtection", "CustomIcons", "Binaries"],
+    )?;
+    for child in element_children(meta) {
+        match child.name.as_str() {
+            "MemoryProtection" => {
+                const FIELDS: &[&str] = &[
+                    "ProtectTitle",
+                    "ProtectUserName",
+                    "ProtectPassword",
+                    "ProtectURL",
+                    "ProtectNotes",
+                    "AutoEnableVisualHiding",
+                ];
+                validate_only_singletons(child, FIELDS, &[])?;
+                validate_known_scalar_children(child, FIELDS, &[])?;
+            }
+            "CustomIcons" => validate_custom_icons_shape(child)?,
+            "Binaries" => validate_legacy_binaries_shape(child)?,
+            "CustomData" => validate_custom_data_shape(child)?,
+            _ => {}
+        }
+    }
+    if let Some(memory_protection) = meta.get_child("MemoryProtection") {
+        validate_typed_children(
+            memory_protection,
+            &[
+                "ProtectTitle",
+                "ProtectUserName",
+                "ProtectPassword",
+                "ProtectURL",
+                "ProtectNotes",
+                "AutoEnableVisualHiding",
+            ],
+            |value| parse_bool_text_strict(value).is_some(),
+        )?;
+    }
+    validate_typed_children(
+        meta,
+        &[
+            "SettingsChanged",
+            "DatabaseNameChanged",
+            "DatabaseDescriptionChanged",
+            "DefaultUserNameChanged",
+            "RecycleBinChanged",
+            "EntryTemplatesGroupChanged",
+            "MasterKeyChanged",
+        ],
+        |value| parse_datetime_i64(value).is_some(),
+    )?;
+    validate_typed_children(
+        meta,
+        &["RecycleBinEnabled", "MasterKeyChangeForceOnce"],
+        |value| parse_bool_text_strict(value).is_some(),
+    )?;
+    validate_typed_children(
+        meta,
+        &["MaintenanceHistoryDays", "HistoryMaxItems"],
+        |value| value.trim().parse::<i32>().is_ok(),
+    )?;
+    validate_typed_children(
+        meta,
+        &[
+            "MasterKeyChangeRec",
+            "MasterKeyChangeForce",
+            "HistoryMaxSize",
+        ],
+        |value| value.trim().parse::<i64>().is_ok(),
+    )?;
+    validate_typed_children(
+        meta,
+        &[
+            "RecycleBinUUID",
+            "EntryTemplatesGroup",
+            "LastSelectedGroup",
+            "LastTopVisibleGroup",
+        ],
+        |value| parse_optional_uuid(value).is_ok(),
+    )?;
+    Ok(())
+}
+
+fn validate_root_shape(root: &Element) -> Result<()> {
+    validate_child_multiplicity(root, &["Group", "DeletedObjects"], &["Group"])?;
+    let group = root.get_child("Group").ok_or(KdbxError::InvalidValue)?;
+    validate_group_shape(group)?;
+    if let Some(deleted) = root.get_child("DeletedObjects") {
+        validate_deleted_objects_shape(deleted)?;
+    }
+    Ok(())
+}
+
+fn validate_group_shape(group: &Element) -> Result<()> {
+    const SINGLETONS: &[&str] = &[
+        "UUID",
+        "Name",
+        "Notes",
+        "IconID",
+        "CustomIconUUID",
+        "Tags",
+        "Times",
+        "IsExpanded",
+        "DefaultAutoTypeSequence",
+        "EnableAutoType",
+        "EnableSearching",
+        "LastTopVisibleEntry",
+        "PreviousParentGroup",
+    ];
+    validate_child_multiplicity(group, SINGLETONS, &["UUID"])?;
+    validate_known_scalar_children(group, SINGLETONS, &["Times"])?;
+    for child in element_children(group) {
+        match child.name.as_str() {
+            "Times" => validate_times_shape(child)?,
+            "CustomData" => validate_custom_data_shape(child)?,
+            "Entry" => validate_entry_shape(child)?,
+            "Group" => validate_group_shape(child)?,
+            _ => {}
+        }
+    }
+    validate_typed_children(group, &["UUID"], |value| {
+        decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
+    })?;
+    validate_typed_children(group, &["IconID"], |value| {
+        value.trim().parse::<u32>().is_ok()
+    })?;
+    validate_typed_children(
+        group,
+        &[
+            "CustomIconUUID",
+            "LastTopVisibleEntry",
+            "PreviousParentGroup",
+        ],
+        |value| parse_optional_uuid(value).is_ok(),
+    )?;
+    validate_typed_children(group, &["IsExpanded"], |value| {
+        parse_bool_text_strict(value).is_some()
+    })?;
+    validate_typed_children(group, &["EnableAutoType", "EnableSearching"], |value| {
+        parse_nullable_bool_strict(value).is_some()
+    })?;
+    Ok(())
+}
+
+fn validate_entry_shape(entry: &Element) -> Result<()> {
+    const SINGLETONS: &[&str] = &[
+        "UUID",
+        "IconID",
+        "CustomIconUUID",
+        "ForegroundColor",
+        "BackgroundColor",
+        "OverrideURL",
+        "Tags",
+        "PreviousParentGroup",
+        "QualityCheck",
+        "Times",
+        "AutoType",
+        "History",
+    ];
+    validate_child_multiplicity(entry, SINGLETONS, &["UUID"])?;
+    validate_known_scalar_children(entry, SINGLETONS, &["Times", "AutoType", "History"])?;
+    let mut string_keys = BTreeSet::new();
+    let mut binary_names = BTreeSet::new();
+    for child in element_children(entry) {
+        match child.name.as_str() {
+            "Times" => validate_times_shape(child)?,
+            "String" => {
+                validate_only_singletons(child, &["Key", "Value"], &["Key", "Value"])?;
+                validate_known_scalar_children(child, &["Key", "Value"], &[])?;
+                let key = child_text(child, "Key").ok_or(KdbxError::InvalidValue)?;
+                if !string_keys.insert(key) {
+                    return Err(KdbxError::InvalidValue);
+                }
+                let value = child.get_child("Value").ok_or(KdbxError::InvalidValue)?;
+                validate_bool_attribute_if_present(value, "Protected")?;
+            }
+            "Binary" => {
+                validate_only_singletons(child, &["Key", "Value"], &["Key", "Value"])?;
+                validate_known_scalar_children(child, &["Key", "Value"], &[])?;
+                let name = child_text(child, "Key").ok_or(KdbxError::InvalidValue)?;
+                if !binary_names.insert(name) {
+                    return Err(KdbxError::InvalidValue);
+                }
+                let value = child.get_child("Value").ok_or(KdbxError::InvalidValue)?;
+                validate_bool_attribute_if_present(value, "Protected")?;
+                validate_bool_attribute_if_present(value, "Compressed")?;
+                if let Some(reference) = value.attributes.get("Ref")
+                    && reference.trim().parse::<usize>().is_err()
+                {
+                    return Err(KdbxError::InvalidValue);
+                }
+            }
+            "AutoType" => validate_auto_type_shape(child)?,
+            "CustomData" => validate_custom_data_shape(child)?,
+            "History" => {
+                validate_only_element_children(child, &["Entry"])?;
+                for history_entry in element_children(child) {
+                    validate_entry_shape(history_entry)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    validate_typed_children(entry, &["UUID"], |value| {
+        decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
+    })?;
+    validate_typed_children(entry, &["IconID"], |value| {
+        value.trim().is_empty() || value.trim().parse::<u32>().is_ok()
+    })?;
+    validate_typed_children(entry, &["CustomIconUUID", "PreviousParentGroup"], |value| {
+        parse_optional_uuid(value).is_ok()
+    })?;
+    validate_typed_children(entry, &["QualityCheck"], |value| {
+        parse_bool_text_strict(value).is_some()
+    })?;
+    Ok(())
+}
+
+fn validate_times_shape(times: &Element) -> Result<()> {
+    const FIELDS: &[&str] = &[
+        "CreationTime",
+        "LastModificationTime",
+        "LastAccessTime",
+        "ExpiryTime",
+        "Expires",
+        "UsageCount",
+        "LocationChanged",
+    ];
+    validate_only_singletons(times, FIELDS, &[])?;
+    validate_known_scalar_children(times, FIELDS, &[])?;
+    validate_typed_children(times, &["CreationTime", "LastModificationTime"], |value| {
+        parse_datetime_value(value).is_some()
+    })?;
+    validate_typed_children(times, &["LastAccessTime", "LocationChanged"], |value| {
+        value.trim().is_empty() || parse_datetime_value(value).is_some()
+    })?;
+    validate_typed_children(times, &["ExpiryTime"], |value| {
+        value.trim().is_empty() || parse_datetime_i64(value).is_some()
+    })?;
+    validate_typed_children(times, &["Expires"], |value| {
+        parse_bool_text_strict(value).is_some()
+    })?;
+    validate_typed_children(times, &["UsageCount"], |value| {
+        value.trim().is_empty() || value.trim().parse::<u64>().is_ok()
+    })
+}
+
+fn validate_auto_type_shape(auto_type: &Element) -> Result<()> {
+    const FIELDS: &[&str] = &["Enabled", "DataTransferObfuscation", "DefaultSequence"];
+    validate_child_multiplicity(auto_type, FIELDS, &[])?;
+    validate_known_scalar_children(auto_type, FIELDS, &[])?;
+    for child in element_children(auto_type) {
+        match child.name.as_str() {
+            "Enabled" | "DataTransferObfuscation" | "DefaultSequence" => {}
+            "Association" => {
+                const ASSOCIATION_FIELDS: &[&str] = &["Window", "KeystrokeSequence"];
+                validate_only_singletons(child, ASSOCIATION_FIELDS, &[])?;
+                validate_known_scalar_children(child, ASSOCIATION_FIELDS, &[])?;
+            }
+            _ => return Err(KdbxError::InvalidValue),
+        }
+    }
+    validate_typed_children(auto_type, &["Enabled"], |value| {
+        parse_nullable_bool_strict(value).is_some()
+    })?;
+    validate_typed_children(auto_type, &["DataTransferObfuscation"], |value| {
+        value.trim().is_empty() || value.trim().parse::<i32>().is_ok()
+    })?;
+    Ok(())
+}
+
+fn validate_custom_data_shape(custom_data: &Element) -> Result<()> {
+    validate_only_element_children(custom_data, &["Item"])?;
+    for item in element_children(custom_data) {
+        const FIELDS: &[&str] = &["Key", "Value", "LastModificationTime"];
+        validate_only_singletons(item, FIELDS, &["Key"])?;
+        validate_known_scalar_children(item, FIELDS, &[])?;
+        validate_typed_children(item, &["LastModificationTime"], |value| {
+            parse_datetime_i64(value).is_some()
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_custom_icons_shape(custom_icons: &Element) -> Result<()> {
+    validate_only_element_children(custom_icons, &["Icon"])?;
+    for icon in element_children(custom_icons) {
+        const FIELDS: &[&str] = &["UUID", "Data", "Name", "LastModificationTime"];
+        validate_only_singletons(icon, FIELDS, &["UUID", "Data"])?;
+        validate_known_scalar_children(icon, FIELDS, &[])?;
+        validate_typed_children(icon, &["UUID"], |value| {
+            decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
+        })?;
+        validate_typed_children(icon, &["Data"], |value| {
+            STANDARD.decode(value.trim().as_bytes()).is_ok()
+        })?;
+        validate_typed_children(icon, &["LastModificationTime"], |value| {
+            parse_datetime_i64(value).is_some()
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_legacy_binaries_shape(binaries: &Element) -> Result<()> {
+    validate_only_element_children(binaries, &["Binary"])?;
+    let mut ids = BTreeSet::new();
+    for binary in element_children(binaries) {
+        validate_scalar_element(binary)?;
+        let id = binary.attributes.get("ID").ok_or(KdbxError::InvalidValue)?;
+        if !ids.insert(id.as_str()) {
+            return Err(KdbxError::InvalidValue);
+        }
+    }
+    Ok(())
+}
+
+fn validate_deleted_objects_shape(deleted: &Element) -> Result<()> {
+    validate_only_element_children(deleted, &["DeletedObject"])?;
+    for object in element_children(deleted) {
+        const FIELDS: &[&str] = &["UUID", "DeletionTime"];
+        validate_only_singletons(object, FIELDS, FIELDS)?;
+        validate_known_scalar_children(object, FIELDS, &[])?;
+        validate_typed_children(object, &["UUID"], |value| {
+            decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
+        })?;
+        validate_typed_children(object, &["DeletionTime"], |value| {
+            parse_datetime_i64(value).is_some()
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_only_singletons(element: &Element, allowed: &[&str], required: &[&str]) -> Result<()> {
+    validate_only_element_children(element, allowed)?;
+    validate_child_multiplicity(element, allowed, required)
+}
+
+fn validate_only_element_children(element: &Element, allowed: &[&str]) -> Result<()> {
+    if element_children(element).any(|child| !allowed.contains(&child.name.as_str())) {
+        return Err(KdbxError::InvalidValue);
+    }
+    Ok(())
+}
+
+fn validate_child_multiplicity(
+    element: &Element,
+    singleton_names: &[&str],
+    required_names: &[&str],
+) -> Result<()> {
+    let mut counts = BTreeMap::new();
+    for child in element_children(element) {
+        if singleton_names.contains(&child.name.as_str()) {
+            let count = counts.entry(child.name.as_str()).or_insert(0_usize);
+            *count += 1;
+            if *count > 1 {
+                return Err(KdbxError::InvalidValue);
+            }
+        }
+    }
+    if required_names
+        .iter()
+        .any(|name| counts.get(name).copied().unwrap_or(0) != 1)
+    {
+        return Err(KdbxError::InvalidValue);
+    }
+    Ok(())
+}
+
+fn validate_known_scalar_children(
+    element: &Element,
+    known_names: &[&str],
+    container_names: &[&str],
+) -> Result<()> {
+    for child in element_children(element).filter(|child| {
+        known_names.contains(&child.name.as_str())
+            && !container_names.contains(&child.name.as_str())
+    }) {
+        validate_scalar_element(child)?;
+    }
+    Ok(())
+}
+
+fn validate_scalar_element(element: &Element) -> Result<()> {
+    if element_children(element).next().is_some() {
+        return Err(KdbxError::InvalidValue);
+    }
+    Ok(())
+}
+
+fn validate_typed_children(
+    element: &Element,
+    names: &[&str],
+    validate: impl Fn(&str) -> bool,
+) -> Result<()> {
+    for child in element_children(element).filter(|child| names.contains(&child.name.as_str())) {
+        validate_scalar_element(child)?;
+        let value = child.get_text().unwrap_or_default();
+        if !validate(&value) {
+            return Err(KdbxError::InvalidValue);
+        }
+    }
+    Ok(())
+}
+
+fn validate_bool_attribute_if_present(element: &Element, name: &str) -> Result<()> {
+    if element
+        .attributes
+        .get(name)
+        .is_some_and(|value| parse_bool_text_strict(value).is_none())
+    {
+        return Err(KdbxError::InvalidValue);
+    }
+    Ok(())
+}
+
+fn element_children(element: &Element) -> impl Iterator<Item = &Element> {
+    element.children.iter().filter_map(|child| match child {
+        XMLNode::Element(child) => Some(child),
+        _ => None,
+    })
 }
 
 fn parse_xml(
@@ -1871,6 +2484,7 @@ fn parse_xml(
 ) -> Result<Vault> {
     let root = Element::parse(IoCursor::new(strip_utf8_bom(bytes)))
         .map_err(|error| KdbxError::Xml(error.to_string()))?;
+    validate_xml_model_shape(&root)?;
     let meta = child(&root, "Meta")?;
     let generator = child_text(&meta, "Generator");
     let settings_changed = child_text(&meta, "SettingsChanged")
@@ -1888,8 +2502,8 @@ fn parse_xml(
     let default_username_changed = child_text(&meta, "DefaultUserNameChanged")
         .as_deref()
         .and_then(parse_optional_datetime);
-    let maintenance_history_days =
-        child_text(&meta, "MaintenanceHistoryDays").and_then(|value| value.parse::<i32>().ok());
+    let maintenance_history_days = child_text(&meta, "MaintenanceHistoryDays")
+        .and_then(|value| value.trim().parse::<i32>().ok());
     let color = child_text(&meta, "Color");
     let memory_protection = parse_memory_protection(&meta);
     let custom_icons = parse_custom_icons(&meta)?;
@@ -1915,9 +2529,9 @@ fn parse_xml(
         .as_deref()
         .and_then(parse_optional_datetime);
     let master_key_change_rec =
-        child_text(&meta, "MasterKeyChangeRec").and_then(|value| value.parse::<i64>().ok());
-    let master_key_change_force =
-        child_text(&meta, "MasterKeyChangeForce").and_then(|value| value.parse::<i64>().ok());
+        child_text(&meta, "MasterKeyChangeRec").and_then(|value| value.trim().parse::<i64>().ok());
+    let master_key_change_force = child_text(&meta, "MasterKeyChangeForce")
+        .and_then(|value| value.trim().parse::<i64>().ok());
     let master_key_change_force_once =
         child_text(&meta, "MasterKeyChangeForceOnce").map(|value| parse_bool_text(&value));
     let last_selected_group = child_text(&meta, "LastSelectedGroup")
@@ -1931,11 +2545,11 @@ fn parse_xml(
         .transpose()?
         .flatten();
     let history_max_items =
-        child_text(&meta, "HistoryMaxItems").and_then(|value| value.parse::<i32>().ok());
+        child_text(&meta, "HistoryMaxItems").and_then(|value| value.trim().parse::<i32>().ok());
     let history_max_size =
-        child_text(&meta, "HistoryMaxSize").and_then(|value| value.parse::<i64>().ok());
-    let (meta_custom_data, meta_custom_data_blocks) = parse_meta_custom_data(&meta)?;
-    let meta_raw_state = MetaRawState {
+        child_text(&meta, "HistoryMaxSize").and_then(|value| value.trim().parse::<i64>().ok());
+    let (meta_custom_data, mut meta_custom_data_blocks) = parse_meta_custom_data(&meta)?;
+    let mut meta_raw_state = MetaRawState {
         node_order: collect_meta_known_node_order(&meta),
         description_raw: child_optional(&meta, "DatabaseDescription").map(|child| {
             child
@@ -1955,20 +2569,31 @@ fn parse_xml(
                 .map(|text| text.to_string())
                 .unwrap_or_default()
         }),
+        memory_protection_auto_enable_visual_hiding_raw: child_optional(&meta, "MemoryProtection")
+            .and_then(|memory| child_text_preserve_empty(&memory, "AutoEnableVisualHiding")),
         has_custom_icons_node: child_optional(&meta, "CustomIcons").is_some(),
-        recycle_bin_group_raw: child_optional(&meta, "RecycleBinUUID").map(|child| {
-            child
-                .get_text()
-                .map(|text| text.to_string())
-                .unwrap_or_default()
-        }),
-        entry_templates_group_raw: child_optional(&meta, "EntryTemplatesGroup").map(|child| {
-            child
-                .get_text()
-                .map(|text| text.to_string())
-                .unwrap_or_default()
-        }),
+        recycle_bin_group_raw: None,
+        entry_templates_group_raw: None,
     };
+    let mut meta_opaque_xml = collect_meta_opaque_xml(&meta)?;
+    let mut collapsed_optional_nodes = Vec::new();
+    for (element_name, value_is_none) in [
+        ("Generator", generator.is_none()),
+        ("RecycleBinUUID", recycle_bin_group.is_none()),
+        ("EntryTemplatesGroup", entry_templates_group.is_none()),
+        ("LastSelectedGroup", last_selected_group.is_none()),
+        ("LastTopVisibleGroup", last_top_visible_group.is_none()),
+    ] {
+        if value_is_none && child_optional(&meta, element_name).is_some() {
+            collapsed_optional_nodes.push(element_name);
+        }
+    }
+    retarget_removed_scope_nodes(
+        &mut meta_custom_data_blocks,
+        &mut meta_opaque_xml,
+        &mut meta_raw_state.node_order,
+        &collapsed_optional_nodes,
+    )?;
     let root_group = child(&child(&root, "Root")?, "Group")?;
 
     let mut protected = ProtectedStream::from_stream(inner_algorithm, inner_key)?;
@@ -1978,7 +2603,7 @@ fn parse_xml(
     }
     let group = parse_group(&root_group, binaries, &mut content_pool, &mut protected)?;
 
-    Ok(Vault {
+    let vault = Vault {
         generator,
         settings_changed,
         name,
@@ -1997,6 +2622,7 @@ fn parse_xml(
                 .is_some(),
         },
         root: group,
+        kdf_parameters: Some(header.kdf_parameters.encode()?),
         public_custom_data: header
             .public_custom_data
             .iter()
@@ -2023,9 +2649,11 @@ fn parse_xml(
         recycle_bin_changed,
         entry_templates_group,
         entry_templates_group_changed,
-        meta_opaque_xml: collect_meta_opaque_xml(&meta)?,
+        meta_opaque_xml,
         root_opaque_xml: collect_root_opaque_xml(&root)?,
-    })
+    };
+    validate_vault_model(&vault)?;
+    Ok(vault)
 }
 
 fn parse_kdbx3_xml(
@@ -2037,6 +2665,7 @@ fn parse_kdbx3_xml(
     let xml_bytes = strip_utf8_bom(bytes);
     let root = Element::parse(IoCursor::new(xml_bytes))
         .map_err(|error| KdbxError::Xml(error.to_string()))?;
+    validate_xml_model_shape(&root)?;
     let meta = child(&root, "Meta")?;
 
     if let Some(header_hash) = child_text(&meta, "HeaderHash")
@@ -2066,8 +2695,8 @@ fn parse_kdbx3_xml(
     let default_username_changed = child_text(&meta, "DefaultUserNameChanged")
         .as_deref()
         .and_then(parse_optional_datetime);
-    let maintenance_history_days =
-        child_text(&meta, "MaintenanceHistoryDays").and_then(|value| value.parse::<i32>().ok());
+    let maintenance_history_days = child_text(&meta, "MaintenanceHistoryDays")
+        .and_then(|value| value.trim().parse::<i32>().ok());
     let color = child_text(&meta, "Color");
     let memory_protection = parse_memory_protection(&meta);
     let custom_icons = parse_custom_icons(&meta)?;
@@ -2093,9 +2722,9 @@ fn parse_kdbx3_xml(
         .as_deref()
         .and_then(parse_optional_datetime);
     let master_key_change_rec =
-        child_text(&meta, "MasterKeyChangeRec").and_then(|value| value.parse::<i64>().ok());
-    let master_key_change_force =
-        child_text(&meta, "MasterKeyChangeForce").and_then(|value| value.parse::<i64>().ok());
+        child_text(&meta, "MasterKeyChangeRec").and_then(|value| value.trim().parse::<i64>().ok());
+    let master_key_change_force = child_text(&meta, "MasterKeyChangeForce")
+        .and_then(|value| value.trim().parse::<i64>().ok());
     let master_key_change_force_once =
         child_text(&meta, "MasterKeyChangeForceOnce").map(|value| parse_bool_text(&value));
     let last_selected_group = child_text(&meta, "LastSelectedGroup")
@@ -2109,11 +2738,11 @@ fn parse_kdbx3_xml(
         .transpose()?
         .flatten();
     let history_max_items =
-        child_text(&meta, "HistoryMaxItems").and_then(|value| value.parse::<i32>().ok());
+        child_text(&meta, "HistoryMaxItems").and_then(|value| value.trim().parse::<i32>().ok());
     let history_max_size =
-        child_text(&meta, "HistoryMaxSize").and_then(|value| value.parse::<i64>().ok());
-    let (meta_custom_data, meta_custom_data_blocks) = parse_meta_custom_data(&meta)?;
-    let meta_raw_state = MetaRawState {
+        child_text(&meta, "HistoryMaxSize").and_then(|value| value.trim().parse::<i64>().ok());
+    let (meta_custom_data, mut meta_custom_data_blocks) = parse_meta_custom_data(&meta)?;
+    let mut meta_raw_state = MetaRawState {
         node_order: collect_meta_known_node_order(&meta),
         description_raw: child_optional(&meta, "DatabaseDescription").map(|child| {
             child
@@ -2133,19 +2762,11 @@ fn parse_kdbx3_xml(
                 .map(|text| text.to_string())
                 .unwrap_or_default()
         }),
+        memory_protection_auto_enable_visual_hiding_raw: child_optional(&meta, "MemoryProtection")
+            .and_then(|memory| child_text_preserve_empty(&memory, "AutoEnableVisualHiding")),
         has_custom_icons_node: child_optional(&meta, "CustomIcons").is_some(),
-        recycle_bin_group_raw: child_optional(&meta, "RecycleBinUUID").map(|child| {
-            child
-                .get_text()
-                .map(|text| text.to_string())
-                .unwrap_or_default()
-        }),
-        entry_templates_group_raw: child_optional(&meta, "EntryTemplatesGroup").map(|child| {
-            child
-                .get_text()
-                .map(|text| text.to_string())
-                .unwrap_or_default()
-        }),
+        recycle_bin_group_raw: None,
+        entry_templates_group_raw: None,
     };
     let root_group = child(&child(&root, "Root")?, "Group")?;
     let mut protected = ProtectedStream::from_stream(inner_random_stream_id, protected_stream_key)?;
@@ -2156,8 +2777,32 @@ fn parse_kdbx3_xml(
     }
     let group = parse_group(&root_group, &binaries, &mut content_pool, &mut protected)?;
     let deleted_objects = parse_deleted_objects(&root)?;
+    let mut meta_opaque_xml = collect_meta_opaque_xml(&meta)?;
+    let mut collapsed_optional_nodes = Vec::new();
+    for (element_name, value_is_none) in [
+        ("Generator", generator.is_none()),
+        ("RecycleBinUUID", recycle_bin_group.is_none()),
+        ("EntryTemplatesGroup", entry_templates_group.is_none()),
+        ("LastSelectedGroup", last_selected_group.is_none()),
+        ("LastTopVisibleGroup", last_top_visible_group.is_none()),
+    ] {
+        if value_is_none && child_optional(&meta, element_name).is_some() {
+            collapsed_optional_nodes.push(element_name);
+        }
+    }
+    retarget_removed_scope_nodes(
+        &mut meta_custom_data_blocks,
+        &mut meta_opaque_xml,
+        &mut meta_raw_state.node_order,
+        &collapsed_optional_nodes,
+    )?;
+    retarget_legacy_meta_anchors(
+        &mut meta_custom_data_blocks,
+        &mut meta_opaque_xml,
+        &mut meta_raw_state.node_order,
+    )?;
 
-    Ok(Vault {
+    let vault = Vault {
         generator,
         settings_changed,
         name,
@@ -2176,6 +2821,7 @@ fn parse_kdbx3_xml(
                 .is_some(),
         },
         root: group,
+        kdf_parameters: None,
         public_custom_data: BTreeMap::new(),
         deleted_objects,
         maintenance_history_days,
@@ -2195,9 +2841,77 @@ fn parse_kdbx3_xml(
         recycle_bin_changed,
         entry_templates_group,
         entry_templates_group_changed,
-        meta_opaque_xml: collect_meta_opaque_xml(&meta)?,
+        meta_opaque_xml,
         root_opaque_xml: collect_root_opaque_xml(&root)?,
-    })
+    };
+    validate_vault_model(&vault)?;
+    Ok(vault)
+}
+
+fn retarget_legacy_meta_anchors(
+    blocks: &mut [CustomDataBlock],
+    opaque: &mut [OpaqueXmlFragment],
+    node_order: &mut Vec<String>,
+) -> Result<()> {
+    retarget_removed_scope_nodes(blocks, opaque, node_order, &["HeaderHash", "Binaries"])
+}
+
+fn retarget_removed_scope_nodes(
+    blocks: &mut [CustomDataBlock],
+    opaque: &mut [OpaqueXmlFragment],
+    node_order: &mut Vec<String>,
+    removed_names: &[&str],
+) -> Result<()> {
+    for removed_name in removed_names {
+        let original_order = node_order.clone();
+        for anchor in blocks
+            .iter_mut()
+            .map(|block| &mut block.after)
+            .chain(opaque.iter_mut().map(|fragment| &mut fragment.after))
+        {
+            if anchor
+                .as_ref()
+                .is_some_and(|anchor| anchor.element_name == *removed_name)
+            {
+                *anchor =
+                    predecessor_anchor(&original_order, anchor.as_ref().expect("matching anchor"))?;
+            }
+        }
+        node_order.retain(|name| name != removed_name);
+    }
+    Ok(())
+}
+
+fn predecessor_anchor(
+    node_order: &[String],
+    removed: &OpaqueXmlAnchor,
+) -> Result<Option<OpaqueXmlAnchor>> {
+    if removed.occurrence == 0 {
+        return Err(KdbxError::InvalidValue);
+    }
+    let mut occurrence = 0;
+    let removed_index = node_order
+        .iter()
+        .position(|name| {
+            if name == &removed.element_name {
+                occurrence += 1;
+            }
+            name == &removed.element_name && occurrence == removed.occurrence
+        })
+        .ok_or(KdbxError::InvalidValue)?;
+
+    let Some(index) = removed_index.checked_sub(1) else {
+        return Ok(None);
+    };
+    let name = &node_order[index];
+    let occurrence = node_order[..=index]
+        .iter()
+        .filter(|candidate| *candidate == name)
+        .count();
+    Ok(Some(OpaqueXmlAnchor {
+        element_name: name.clone(),
+        occurrence,
+    }))
 }
 
 fn parse_deleted_objects(root: &Element) -> Result<Vec<DeletedObject>> {
@@ -2206,23 +2920,32 @@ fn parse_deleted_objects(root: &Element) -> Result<Vec<DeletedObject>> {
         return Ok(Vec::new());
     };
 
-    let mut objects = Vec::new();
+    let mut objects: BTreeMap<Uuid, i64> = BTreeMap::new();
     for child in &deleted_objects.children {
         let XMLNode::Element(child) = child else {
             continue;
         };
         if child.name != "DeletedObject" {
-            continue;
+            return Err(KdbxError::InvalidValue);
         }
 
         let id = decode_uuid(&child_text(child, "UUID").ok_or(KdbxError::InvalidValue)?)?;
+        if id.is_nil() {
+            return Err(KdbxError::InvalidValue);
+        }
         let deleted_at = child_text(child, "DeletionTime")
-            .and_then(|value| parse_datetime_value(&value).map(|value| value as i64))
+            .and_then(|value| parse_datetime_i64(&value))
             .ok_or(KdbxError::InvalidValue)?;
-        objects.push(DeletedObject { id, deleted_at });
+        objects
+            .entry(id)
+            .and_modify(|current| *current = (*current).max(deleted_at))
+            .or_insert(deleted_at);
     }
 
-    Ok(objects)
+    Ok(objects
+        .into_iter()
+        .map(|(id, deleted_at)| DeletedObject { id, deleted_at })
+        .collect())
 }
 
 fn collect_meta_opaque_xml(meta: &Element) -> Result<Vec<OpaqueXmlFragment>> {
@@ -2234,32 +2957,7 @@ fn collect_meta_opaque_xml(meta: &Element) -> Result<Vec<OpaqueXmlFragment>> {
             continue;
         };
         match child.name.as_str() {
-            "Generator"
-            | "DatabaseName"
-            | "DatabaseNameChanged"
-            | "HeaderHash"
-            | "Binaries"
-            | "DatabaseDescription"
-            | "DatabaseDescriptionChanged"
-            | "DefaultUserName"
-            | "DefaultUserNameChanged"
-            | "MaintenanceHistoryDays"
-            | "Color"
-            | "MemoryProtection"
-            | "CustomIcons"
-            | "RecycleBinEnabled"
-            | "RecycleBinUUID"
-            | "RecycleBinChanged"
-            | "EntryTemplatesGroup"
-            | "EntryTemplatesGroupChanged"
-            | "MasterKeyChanged"
-            | "MasterKeyChangeRec"
-            | "MasterKeyChangeForce"
-            | "LastSelectedGroup"
-            | "LastTopVisibleGroup"
-            | "HistoryMaxItems"
-            | "HistoryMaxSize"
-            | "CustomData" => {
+            name if meta_known_child_name(name) => {
                 let occurrence = counts.entry(child.name.clone()).or_insert(0);
                 *occurrence += 1;
                 last_anchor = Some(OpaqueXmlAnchor {
@@ -2336,6 +3034,8 @@ fn collect_root_known_node_order(root: &Element) -> Vec<String> {
 
 fn deleted_objects_to_xml(deleted_objects: &[DeletedObject], version: KdbxVersion) -> Element {
     let mut element = Element::new("DeletedObjects");
+    let mut deleted_objects: Vec<_> = deleted_objects.iter().collect();
+    deleted_objects.sort_unstable_by_key(|deleted| *deleted.id.as_bytes());
     for deleted_object in deleted_objects {
         let mut child = Element::new("DeletedObject");
         child.children.push(XMLNode::Element(text_element(
@@ -2359,7 +3059,11 @@ fn append_opaque_xml(target: &mut Element, opaque_xml: &[OpaqueXmlFragment]) -> 
     let mut rebuilt = Vec::new();
     let mut anchored = Vec::new();
     for fragment in opaque_xml {
-        let node = XMLNode::Element(parse_xml_fragment(&fragment.xml)?);
+        let element = parse_xml_fragment(&fragment.xml)?;
+        if known_child_name_for_scope(&target.name, &element.name) {
+            return Err(KdbxError::InvalidValue);
+        }
+        let node = XMLNode::Element(element);
         if let Some(anchor) = &fragment.after {
             anchored.push((anchor.clone(), node));
         } else {
@@ -2395,12 +3099,27 @@ fn append_opaque_xml(target: &mut Element, opaque_xml: &[OpaqueXmlFragment]) -> 
             }
         }
     }
-    rebuilt.extend(anchored.into_iter().map(|(_, node)| node));
+    if !anchored.is_empty() {
+        return Err(KdbxError::InvalidValue);
+    }
     target.children = rebuilt;
     Ok(())
 }
 
-fn memory_protection_to_xml(memory_protection: MemoryProtection) -> Element {
+fn known_child_name_for_scope(parent: &str, child: &str) -> bool {
+    match parent {
+        "Meta" => meta_known_child_name(child),
+        "Root" => matches!(child, "Group" | "DeletedObjects"),
+        "Group" => group_known_child_name(child),
+        "Entry" => entry_known_child_name(child),
+        _ => false,
+    }
+}
+
+fn memory_protection_to_xml(
+    memory_protection: MemoryProtection,
+    auto_enable_visual_hiding_raw: Option<&str>,
+) -> Element {
     let mut element = Element::new("MemoryProtection");
     element.children.push(XMLNode::Element(text_element(
         "ProtectTitle",
@@ -2442,6 +3161,12 @@ fn memory_protection_to_xml(memory_protection: MemoryProtection) -> Element {
             "False"
         },
     )));
+    if let Some(raw) = auto_enable_visual_hiding_raw {
+        element.children.push(XMLNode::Element(text_element(
+            "AutoEnableVisualHiding",
+            raw,
+        )));
+    }
     element
 }
 
@@ -2566,7 +3291,7 @@ fn parse_kdbx3_binaries(
         let index = binary
             .attributes
             .get("ID")
-            .and_then(|value| value.parse::<usize>().ok())
+            .and_then(|value| value.trim().parse::<usize>().ok())
             .ok_or(KdbxError::InvalidValue)?;
         let compressed = parse_bool_attribute(binary, "Compressed")?;
         let protected_in_memory = parse_bool_attribute(binary, "Protected")?;
@@ -2606,7 +3331,8 @@ fn parse_group<B: BinaryLookup + ?Sized>(
     let mut group = Group::new(child_text(element, "Name").unwrap_or_else(|| "Group".into()));
     group.id = decode_uuid(&child_text(element, "UUID").ok_or(KdbxError::InvalidValue)?)?;
     group.notes = child_text(element, "Notes").unwrap_or_default();
-    group.icon_id = child_text(element, "IconID").and_then(|value| value.parse::<u32>().ok());
+    group.icon_id =
+        child_text(element, "IconID").and_then(|value| value.trim().parse::<u32>().ok());
     group.custom_icon_id = child_text(element, "CustomIconUUID")
         .as_deref()
         .map(parse_optional_uuid)
@@ -2636,11 +3362,15 @@ fn parse_group<B: BinaryLookup + ?Sized>(
     let (custom_data, custom_data_blocks) = parse_group_custom_data(element)?;
     group.custom_data = custom_data;
     group.custom_data_blocks = custom_data_blocks;
-    if let Some(previous_parent) = child_text(element, "PreviousParentGroup") {
-        group.previous_parent = Some(decode_uuid(&previous_parent)?);
-    }
+    group.previous_parent = child_text(element, "PreviousParentGroup")
+        .as_deref()
+        .map(parse_optional_uuid)
+        .transpose()?
+        .flatten();
     group.raw_state = GroupRawState {
         node_order: collect_group_known_node_order(element),
+        entry_order: Vec::new(),
+        group_order: Vec::new(),
         default_auto_type_sequence_raw: child_optional(element, "DefaultAutoTypeSequence").map(
             |child| {
                 child
@@ -2661,12 +3391,7 @@ fn parse_group<B: BinaryLookup + ?Sized>(
                 .map(|text| text.to_string())
                 .unwrap_or_default()
         }),
-        last_top_visible_entry_raw: child_optional(element, "LastTopVisibleEntry").map(|child| {
-            child
-                .get_text()
-                .map(|text| text.to_string())
-                .unwrap_or_default()
-        }),
+        last_top_visible_entry_raw: None,
     };
 
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -2675,9 +3400,9 @@ fn parse_group<B: BinaryLookup + ?Sized>(
         if let XMLNode::Element(child) = child {
             match child.name.as_str() {
                 "Group" => {
-                    group
-                        .children
-                        .push(parse_group(child, binaries, content_pool, protected)?);
+                    let parsed = parse_group(child, binaries, content_pool, protected)?;
+                    group.raw_state.group_order.push(parsed.id);
+                    group.children.push(parsed);
                     let occurrence = counts.entry(child.name.clone()).or_insert(0);
                     *occurrence += 1;
                     last_anchor = Some(OpaqueXmlAnchor {
@@ -2686,9 +3411,9 @@ fn parse_group<B: BinaryLookup + ?Sized>(
                     });
                 }
                 "Entry" => {
-                    group
-                        .entries
-                        .push(parse_entry(child, binaries, content_pool, protected)?);
+                    let parsed = parse_entry(child, binaries, content_pool, protected)?;
+                    group.raw_state.entry_order.push(parsed.id);
+                    group.entries.push(parsed);
                     let occurrence = counts.entry(child.name.clone()).or_insert(0);
                     *occurrence += 1;
                     last_anchor = Some(OpaqueXmlAnchor {
@@ -2724,6 +3449,25 @@ fn parse_group<B: BinaryLookup + ?Sized>(
             }
         }
     }
+
+    let mut collapsed_optional_nodes = Vec::new();
+    if child_optional(element, "CustomIconUUID").is_some() && group.custom_icon_id.is_none() {
+        collapsed_optional_nodes.push("CustomIconUUID");
+    }
+    if child_optional(element, "LastTopVisibleEntry").is_some()
+        && group.last_top_visible_entry.is_none()
+    {
+        collapsed_optional_nodes.push("LastTopVisibleEntry");
+    }
+    if child_optional(element, "PreviousParentGroup").is_some() && group.previous_parent.is_none() {
+        collapsed_optional_nodes.push("PreviousParentGroup");
+    }
+    retarget_removed_scope_nodes(
+        &mut group.custom_data_blocks,
+        &mut group.opaque_xml,
+        &mut group.raw_state.node_order,
+        &collapsed_optional_nodes,
+    )?;
 
     Ok(group)
 }
@@ -2768,37 +3512,37 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
     protected: &mut ProtectedStream,
 ) -> Result<Entry> {
     let mut entry = Entry::new("");
+    entry.auto_type = None;
+    entry.expiry_time = None;
+    entry.last_accessed_at = None;
+    entry.usage_count = None;
+    entry.location_changed_at = Some(0);
     entry.id = decode_uuid(&child_text(element, "UUID").ok_or(KdbxError::InvalidValue)?)?;
-    entry.icon_id = child_text(element, "IconID").and_then(|value| value.parse::<u32>().ok());
+    entry.icon_id =
+        child_text(element, "IconID").and_then(|value| value.trim().parse::<u32>().ok());
     entry.custom_icon_id = child_text(element, "CustomIconUUID")
         .as_deref()
         .map(parse_optional_uuid)
         .transpose()?
         .flatten();
-    entry.foreground_color = child_text(element, "ForegroundColor");
-    entry.background_color = child_text(element, "BackgroundColor");
-    entry.override_url = child_text(element, "OverrideURL");
+    entry.foreground_color = child_text_preserve_empty(element, "ForegroundColor");
+    entry.background_color = child_text_preserve_empty(element, "BackgroundColor");
+    entry.override_url = child_text_preserve_empty(element, "OverrideURL");
     let (custom_data, custom_data_blocks) = parse_entry_custom_data(element)?;
     entry.custom_data = custom_data;
     entry.custom_data_blocks = custom_data_blocks;
-    let legacy_known_bad = entry.custom_data.remove("KnownBad");
-    if legacy_known_bad.is_some() {
-        let mut cleaned_blocks = Vec::with_capacity(entry.custom_data_blocks.len());
-        for mut block in std::mem::take(&mut entry.custom_data_blocks) {
-            let original_item_count = block.items.len();
-            block.items.retain(|item| item.key != "KnownBad");
-            if original_item_count == block.items.len() || !block.items.is_empty() {
-                cleaned_blocks.push(block);
-            }
-        }
-        entry.custom_data_blocks = cleaned_blocks;
-    }
+    let legacy_known_bad = entry
+        .custom_data
+        .get("KnownBad")
+        .and_then(|value| parse_bool_text_strict(value));
     if let Some(tags) = child_text(element, "Tags") {
         entry.tags = parse_tags(&tags);
     }
-    if let Some(previous_parent) = child_text(element, "PreviousParentGroup") {
-        entry.previous_parent = Some(decode_uuid(&previous_parent)?);
-    }
+    entry.previous_parent = child_text(element, "PreviousParentGroup")
+        .as_deref()
+        .map(parse_optional_uuid)
+        .transpose()?
+        .flatten();
     let quality_check_raw = child_optional(element, "QualityCheck").map(|child| {
         child
             .get_text()
@@ -2810,10 +3554,12 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
         .map(|value| !parse_bool_text(value))
         .unwrap_or(false);
     if let Some(known_bad) = legacy_known_bad {
-        entry.exclude_from_reports = parse_bool_text(&known_bad);
+        entry.exclude_from_reports = known_bad;
     }
     entry.raw_state = EntryRawState {
         node_order: collect_entry_known_node_order(element),
+        string_order: Vec::new(),
+        binary_order: Vec::new(),
         foreground_color_raw: child_optional(element, "ForegroundColor").map(|child| {
             child
                 .get_text()
@@ -2852,13 +3598,15 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
         entry.expires = child_text(&times, "Expires")
             .map(|value| parse_bool_text(&value))
             .unwrap_or(false);
-        entry.expiry_time = child_text(&times, "ExpiryTime")
-            .and_then(|value| parse_datetime_value(&value).map(|value| value as i64));
+        entry.expiry_time =
+            child_text(&times, "ExpiryTime").and_then(|value| parse_datetime_i64(&value));
         entry.last_accessed_at =
             child_text(&times, "LastAccessTime").and_then(|value| parse_datetime_value(&value));
-        entry.usage_count = child_text(&times, "UsageCount").and_then(|value| value.parse().ok());
-        entry.location_changed_at =
-            child_text(&times, "LocationChanged").and_then(|value| parse_datetime_value(&value));
+        entry.usage_count =
+            child_text(&times, "UsageCount").and_then(|value| value.trim().parse().ok());
+        entry.location_changed_at = child_text(&times, "LocationChanged")
+            .and_then(|value| parse_datetime_value(&value))
+            .or(Some(0));
     }
 
     let mut raw_fields = BTreeMap::new();
@@ -2869,6 +3617,7 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
             match child.name.as_str() {
                 "String" => {
                     let (key, field) = parse_string_field(child, protected)?;
+                    entry.raw_state.string_order.push(key.clone());
                     raw_fields.insert(key, field);
                     let occurrence = counts.entry(child.name.clone()).or_insert(0);
                     *occurrence += 1;
@@ -2880,6 +3629,7 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
                 "Binary" => {
                     let attachment_name =
                         child_text(child, "Key").ok_or(KdbxError::InvalidValue)?;
+                    entry.raw_state.binary_order.push(attachment_name.clone());
                     let value = child_optional(child, "Value").ok_or(KdbxError::InvalidValue)?;
                     let attachment = if let Some(reference) = value.attributes.get("Ref") {
                         if parse_bool_attribute(&value, "Protected")?
@@ -2888,6 +3638,7 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
                             return Err(KdbxError::InvalidValue);
                         }
                         let index = reference
+                            .trim()
                             .parse::<usize>()
                             .map_err(|_| KdbxError::InvalidValue)?;
                         let binary = binaries.get_binary(index).ok_or(KdbxError::InvalidValue)?;
@@ -2994,6 +3745,34 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
         }
     }
 
+    let mut collapsed_optional_nodes = Vec::new();
+    if child_optional(element, "IconID").is_some() && entry.icon_id.is_none() {
+        collapsed_optional_nodes.push("IconID");
+    }
+    if child_optional(element, "CustomIconUUID").is_some() && entry.custom_icon_id.is_none() {
+        collapsed_optional_nodes.push("CustomIconUUID");
+    }
+    if child_optional(element, "PreviousParentGroup").is_some() && entry.previous_parent.is_none() {
+        collapsed_optional_nodes.push("PreviousParentGroup");
+    }
+    retarget_removed_scope_nodes(
+        &mut entry.custom_data_blocks,
+        &mut entry.opaque_xml,
+        &mut entry.raw_state.node_order,
+        &collapsed_optional_nodes,
+    )?;
+
+    if legacy_known_bad.is_some() {
+        entry.custom_data.remove("KnownBad");
+        vaultkern_model::reconcile_custom_data_blocks(
+            &mut entry.custom_data_blocks,
+            &mut entry.opaque_xml,
+            &mut entry.raw_state.node_order,
+            &entry.custom_data,
+            None,
+        );
+    }
+
     if let Some(field) = raw_fields.remove("Title") {
         entry.title = field.value;
         entry.field_protection.protect_title = field.protected;
@@ -3015,54 +3794,31 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
         entry.field_protection.protect_notes = field.protected;
     }
 
-    entry.totp = build_totp(&raw_fields);
+    entry.totp = totp_from_persistent_attributes(&raw_fields);
     entry.passkey = PasskeyRecord::from_attributes(&raw_fields);
+    let has_projectable_totp = entry.totp.is_some();
     let has_complete_passkey = entry.passkey.is_some();
     entry.attributes = raw_fields
         .into_iter()
-        .map(|(key, mut field)| {
-            if !has_complete_passkey && is_sensitive_passkey_attribute_key(&key) {
+        .filter_map(|(key, mut field)| {
+            if !has_projectable_totp && is_totp_secret_persistent_attribute_key(&key) {
                 field.protected = true;
             }
-            (key, field)
-        })
-        .filter(|(key, _)| {
-            !(is_totp_attribute_key(key) || has_complete_passkey && is_passkey_attribute_key(key))
+            if !has_complete_passkey && PasskeyRecord::is_sensitive_persistent_attribute_key(&key) {
+                field.protected = true;
+            }
+            if has_projectable_totp && is_totp_persistent_attribute_key(&key)
+                || has_complete_passkey && PasskeyRecord::is_persistent_attribute_key(&key)
+            {
+                field.value.zeroize();
+                None
+            } else {
+                Some((key, field))
+            }
         })
         .collect();
 
     Ok(entry)
-}
-
-fn is_totp_attribute_key(key: &str) -> bool {
-    matches!(
-        key,
-        "otp" | "TimeOtp-Secret-Base32" | "TimeOtp-Algorithm" | "TimeOtp-Length" | "TimeOtp-Period"
-    )
-}
-
-fn is_passkey_attribute_key(key: &str) -> bool {
-    matches!(
-        key,
-        PasskeyRecord::USERNAME_KEY
-            | PasskeyRecord::CREDENTIAL_ID_KEY
-            | PasskeyRecord::GENERATED_USER_ID_KEY
-            | PasskeyRecord::PRIVATE_KEY_PEM_KEY
-            | PasskeyRecord::RELYING_PARTY_KEY
-            | PasskeyRecord::USER_HANDLE_KEY
-            | PasskeyRecord::FLAG_BE_KEY
-            | PasskeyRecord::FLAG_BS_KEY
-    )
-}
-
-fn is_sensitive_passkey_attribute_key(key: &str) -> bool {
-    matches!(
-        key,
-        PasskeyRecord::CREDENTIAL_ID_KEY
-            | PasskeyRecord::GENERATED_USER_ID_KEY
-            | PasskeyRecord::PRIVATE_KEY_PEM_KEY
-            | PasskeyRecord::USER_HANDLE_KEY
-    )
 }
 
 fn collect_entry_known_node_order(entry: &Element) -> Vec<String> {
@@ -3108,11 +3864,10 @@ fn parse_group_times(element: &Element) -> Result<GroupTimes> {
         expires: child_text(element, "Expires")
             .map(|value| parse_bool_text(&value))
             .unwrap_or(false),
-        expiry_time: child_text(element, "ExpiryTime")
-            .and_then(|value| parse_datetime_value(&value).map(|value| value as i64)),
+        expiry_time: child_text(element, "ExpiryTime").and_then(|value| parse_datetime_i64(&value)),
         last_accessed_at: child_text(element, "LastAccessTime")
             .and_then(|value| parse_datetime_value(&value)),
-        usage_count: child_text(element, "UsageCount").and_then(|value| value.parse().ok()),
+        usage_count: child_text(element, "UsageCount").and_then(|value| value.trim().parse().ok()),
         location_changed_at: child_text(element, "LocationChanged")
             .and_then(|value| parse_datetime_value(&value)),
     })
@@ -3124,8 +3879,8 @@ fn parse_auto_type(element: &Element) -> AutoTypeConfig {
             .as_deref()
             .and_then(parse_nullable_bool),
         obfuscation: child_text(element, "DataTransferObfuscation")
-            .and_then(|value| value.parse::<i32>().ok()),
-        default_sequence: child_text(element, "DefaultSequence"),
+            .and_then(|value| value.trim().parse::<i32>().ok()),
+        default_sequence: child_text_preserve_empty(element, "DefaultSequence"),
         ..AutoTypeConfig::default()
     };
 
@@ -3325,18 +4080,17 @@ fn parse_string_field(
         .get_text()
         .map(|text| text.to_string())
         .unwrap_or_default();
-    let is_protected = value_element
-        .attributes
-        .get("Protected")
-        .map(|value| parse_bool_text(value))
-        .unwrap_or(false);
+    let is_protected = parse_bool_attribute(&value_element, "Protected")?;
 
     if is_protected {
-        let mut bytes = STANDARD
-            .decode(value.as_bytes())
-            .map_err(|_| KdbxError::InvalidValue)?;
-        protected.apply(&mut bytes);
-        value = String::from_utf8(bytes).map_err(|_| KdbxError::InvalidValue)?;
+        let mut bytes = Zeroizing::new(
+            STANDARD
+                .decode(value.as_bytes())
+                .map_err(|_| KdbxError::InvalidValue)?,
+        );
+        protected.apply(bytes.as_mut_slice());
+        value =
+            String::from_utf8(std::mem::take(&mut *bytes)).map_err(|_| KdbxError::InvalidValue)?;
     }
 
     Ok((
@@ -3607,7 +4361,8 @@ fn random_iv(cipher: KdbxCipher) -> Vec<u8> {
 }
 
 fn parse_tags(tags: &str) -> std::collections::BTreeSet<String> {
-    tags.split(';')
+    tags.split([',', ';'])
+        .map(str::trim)
         .filter(|tag| !tag.is_empty())
         .map(|tag| tag.to_string())
         .collect()
@@ -3619,7 +4374,7 @@ fn encode_uuid(uuid: Uuid) -> String {
 
 fn decode_uuid(text: &str) -> Result<Uuid> {
     let bytes = STANDARD
-        .decode(text.as_bytes())
+        .decode(text.trim().as_bytes())
         .map_err(|_| KdbxError::InvalidValue)?;
     Uuid::from_slice(&bytes).map_err(|_| KdbxError::InvalidValue)
 }
@@ -3628,7 +4383,7 @@ fn parse_optional_uuid(text: &str) -> Result<Option<Uuid>> {
     if text.trim().is_empty() {
         Ok(None)
     } else {
-        let uuid = decode_uuid(text)?;
+        let uuid = decode_uuid(text.trim())?;
         if uuid.is_nil() {
             Ok(None)
         } else {
@@ -3652,6 +4407,15 @@ fn child_text(element: &Element, name: &str) -> Option<String> {
     child_optional(element, name).and_then(|child| child.get_text().map(|text| text.to_string()))
 }
 
+fn child_text_preserve_empty(element: &Element, name: &str) -> Option<String> {
+    child_optional(element, name).map(|child| {
+        child
+            .get_text()
+            .map(|text| text.to_string())
+            .unwrap_or_default()
+    })
+}
+
 fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         &bytes[3..]
@@ -3661,7 +4425,19 @@ fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
 }
 
 fn parse_bool_text(text: &str) -> bool {
+    let text = text.trim();
     text.eq_ignore_ascii_case("true") || text == "1"
+}
+
+fn parse_bool_text_strict(text: &str) -> Option<bool> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("true") || text == "1" {
+        Some(true)
+    } else if text.eq_ignore_ascii_case("false") || text == "0" {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn parse_bool_attribute(element: &Element, name: &str) -> Result<bool> {
@@ -3679,10 +4455,15 @@ fn parse_bool_attribute(element: &Element, name: &str) -> Result<bool> {
 }
 
 fn parse_nullable_bool(text: &str) -> Option<bool> {
-    if text.trim().is_empty() || text.eq_ignore_ascii_case("null") {
-        None
+    parse_nullable_bool_strict(text).flatten()
+}
+
+fn parse_nullable_bool_strict(text: &str) -> Option<Option<bool>> {
+    let text = text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("null") {
+        Some(None)
     } else {
-        Some(parse_bool_text(text))
+        parse_bool_text_strict(text).map(Some)
     }
 }
 
@@ -3713,9 +4494,19 @@ where
 }
 
 fn parse_datetime_value(text: &str) -> Option<u64> {
-    const KDBX4_TIME_OFFSET: i64 = 62_135_596_800;
-
+    let text = text.trim();
     if let Ok(value) = text.parse::<u64>() {
+        return Some(value);
+    }
+
+    parse_datetime_i64(text)?.try_into().ok()
+}
+
+fn parse_datetime_i64(text: &str) -> Option<i64> {
+    const KDBX4_TIME_OFFSET: i64 = 62_135_596_800;
+    let text = text.trim();
+
+    if let Ok(value) = text.parse::<i64>() {
         return Some(value);
     }
 
@@ -3723,18 +4514,18 @@ fn parse_datetime_value(text: &str) -> Option<u64> {
         && bytes.len() == 8
     {
         let raw = i64::from_le_bytes(bytes.try_into().ok()?);
-        return (raw - KDBX4_TIME_OFFSET).try_into().ok();
+        return raw.checked_sub(KDBX4_TIME_OFFSET);
     }
 
     let parsed = DateTime::parse_from_rfc3339(text).ok()?;
-    parsed.with_timezone(&Utc).timestamp().try_into().ok()
+    Some(parsed.with_timezone(&Utc).timestamp())
 }
 
 fn parse_optional_datetime(text: &str) -> Option<i64> {
     if text.trim().is_empty() {
         None
     } else {
-        parse_datetime_value(text).map(|value| value as i64)
+        parse_datetime_i64(text)
     }
 }
 
@@ -3751,13 +4542,17 @@ fn is_xml_10_character(character: char) -> bool {
     )
 }
 
+pub fn is_xml_10_text(value: &str) -> bool {
+    value.chars().all(is_xml_10_character)
+}
+
 fn validate_xml_text(root: &Element) -> Result<()> {
     let mut pending = vec![root];
     while let Some(element) = pending.pop() {
         if element
             .attributes
             .values()
-            .any(|value| !value.chars().all(is_xml_10_character))
+            .any(|value| !is_xml_10_text(value))
         {
             return Err(KdbxError::InvalidValue);
         }
@@ -3765,15 +4560,13 @@ fn validate_xml_text(root: &Element) -> Result<()> {
             match child {
                 XMLNode::Element(child) => pending.push(child),
                 XMLNode::Comment(value) | XMLNode::CData(value) | XMLNode::Text(value) => {
-                    if !value.chars().all(is_xml_10_character) {
+                    if !is_xml_10_text(value) {
                         return Err(KdbxError::InvalidValue);
                     }
                 }
                 XMLNode::ProcessingInstruction(target, value) => {
-                    if !target.chars().all(is_xml_10_character)
-                        || value
-                            .as_deref()
-                            .is_some_and(|value| !value.chars().all(is_xml_10_character))
+                    if !is_xml_10_text(target)
+                        || value.as_deref().is_some_and(|value| !is_xml_10_text(value))
                     {
                         return Err(KdbxError::InvalidValue);
                     }
@@ -3832,100 +4625,633 @@ fn write_field(bytes: &mut Vec<u8>, id: u8, data: &[u8]) {
     bytes.extend(data);
 }
 
+fn custom_data_requires_41(blocks: &[CustomDataBlock], merged: &BTreeMap<String, String>) -> bool {
+    merge_custom_data_blocks(blocks) == *merged
+        && blocks
+            .iter()
+            .flat_map(|block| &block.items)
+            .any(|item| item.last_modified.is_some())
+}
+
+fn entry_state_requires_41(entry: &Entry) -> bool {
+    entry.exclude_from_reports
+        || entry.raw_state.quality_check_raw.is_some()
+        || entry.previous_parent.is_some()
+        || materialize_entry_persistent_attributes(entry).has_projectable_passkey()
+        || custom_data_requires_41(&entry.custom_data_blocks, &entry.custom_data)
+}
+
+fn entry_requires_41(entry: &Entry) -> bool {
+    entry_state_requires_41(entry) || entry.history.iter().any(entry_requires_41)
+}
+
 fn group_requires_41(group: &Group) -> bool {
-    if !group.tags.is_empty() || group.previous_parent.is_some() {
+    if !group.tags.is_empty()
+        || group.previous_parent.is_some()
+        || custom_data_requires_41(&group.custom_data_blocks, &group.custom_data)
+    {
         return true;
     }
 
-    if group.entries.iter().any(|entry| {
-        entry.exclude_from_reports || entry.previous_parent.is_some() || entry.passkey.is_some()
-    }) {
+    if group.entries.iter().any(entry_requires_41) {
         return true;
     }
 
     group.children.iter().any(group_requires_41)
 }
 
-fn build_totp(fields: &BTreeMap<String, CustomField>) -> Option<TotpSpec> {
-    if let Some(field) = fields.get("otp")
-        && let Ok(spec) = TotpSpec::parse_otpauth(&field.value)
+fn validate_vault_model(vault: &Vault) -> Result<()> {
+    if [
+        vault.generator.as_deref(),
+        vault.description.as_deref(),
+        vault.default_username.as_deref(),
+        vault.color.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(str::is_empty)
+        || [
+            vault.recycle_bin_group,
+            vault.entry_templates_group,
+            vault.last_selected_group,
+            vault.last_top_visible_group,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|id| id.is_nil())
+        || vault.public_custom_data.keys().any(String::is_empty)
+        || !raw_collapsed_optional_text_matches(
+            vault.description.as_deref(),
+            vault.meta_raw_state.description_raw.as_deref(),
+        )
+        || !raw_collapsed_optional_text_matches(
+            vault.default_username.as_deref(),
+            vault.meta_raw_state.default_username_raw.as_deref(),
+        )
+        || !raw_collapsed_optional_text_matches(
+            vault.color.as_deref(),
+            vault.meta_raw_state.color_raw.as_deref(),
+        )
+        || vault.meta_raw_state.recycle_bin_group_raw.is_some()
+        || vault.meta_raw_state.entry_templates_group_raw.is_some()
+        || vault
+            .meta_raw_state
+            .memory_protection_auto_enable_visual_hiding_raw
+            .as_deref()
+            .is_some_and(|raw| {
+                vault.memory_protection.is_none() || parse_bool_text_strict(raw).is_none()
+            })
     {
-        return Some(spec);
+        return Err(KdbxError::InvalidValue);
     }
 
-    let secret = fields.get("TimeOtp-Secret-Base32")?.value.clone();
-    let algorithm = match fields
-        .get("TimeOtp-Algorithm")
-        .map(|field| field.value.as_str())
+    validate_raw_node_slots(
+        &vault.meta_raw_state.node_order,
+        &meta_emitted_node_counts(vault),
+    )?;
+    let root_counts = BTreeMap::from([
+        ("Group", 1_usize),
+        (
+            "DeletedObjects",
+            usize::from(
+                !vault.deleted_objects.is_empty() || vault.root_raw_state.has_deleted_objects_node,
+            ),
+        ),
+    ]);
+    validate_raw_node_slots(&vault.root_raw_state.node_order, &root_counts)?;
+
+    validate_custom_data_model(&vault.meta_custom_data, &vault.meta_custom_data_blocks)?;
+    for timestamp in [
+        vault.settings_changed,
+        vault.database_name_changed,
+        vault.description_changed,
+        vault.default_username_changed,
+        vault.master_key_changed,
+        vault.recycle_bin_changed,
+        vault.entry_templates_group_changed,
+    ]
+    .into_iter()
+    .flatten()
     {
-        Some("HMAC-SHA-256") => TotpAlgorithm::Sha256,
-        Some("HMAC-SHA-512") => TotpAlgorithm::Sha512,
-        _ => TotpAlgorithm::Sha1,
-    };
-    let digits = fields
-        .get("TimeOtp-Length")
-        .and_then(|field| field.value.parse().ok())
-        .unwrap_or(6);
-    let period_seconds = fields
-        .get("TimeOtp-Period")
-        .and_then(|field| field.value.parse().ok())
-        .unwrap_or(30);
+        validate_kdbx4_timestamp(timestamp)?;
+    }
 
-    Some(TotpSpec {
-        secret_base32: secret,
-        algorithm,
-        digits,
-        period_seconds,
-        issuer: None,
-        account_name: None,
-    })
-}
-
-fn build_otpauth_uri(entry: &Entry, totp: &TotpSpec) -> String {
-    let issuer = totp.issuer.clone().unwrap_or_else(|| entry.title.clone());
-    let account_name = totp
-        .account_name
-        .clone()
-        .unwrap_or_else(|| entry.username.clone());
-    let label = if account_name.is_empty() {
-        percent_encode_component(&issuer)
-    } else {
-        format!(
-            "{}:{}",
-            percent_encode_component(&issuer),
-            percent_encode_component(&account_name)
-        )
-    };
-    let algorithm = match totp.algorithm {
-        TotpAlgorithm::Sha1 => "SHA1",
-        TotpAlgorithm::Sha256 => "SHA256",
-        TotpAlgorithm::Sha512 => "SHA512",
-    };
-    format!(
-        "otpauth://totp/{label}?secret={secret}&issuer={issuer}&algorithm={algorithm}&digits={digits}&period={period}",
-        label = label,
-        secret = percent_encode_component(&totp.secret_base32),
-        issuer = percent_encode_component(&issuer),
-        algorithm = algorithm,
-        digits = totp.digits,
-        period = totp.period_seconds,
-    )
-}
-
-fn percent_encode_component(input: &str) -> String {
-    let mut encoded = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push_str(&format!("{byte:02X}"));
-            }
+    let mut custom_icon_ids = BTreeSet::new();
+    for icon in &vault.custom_icons {
+        if icon.id.is_nil()
+            || !custom_icon_ids.insert(icon.id)
+            || icon.name.as_deref().is_some_and(str::is_empty)
+        {
+            return Err(KdbxError::InvalidValue);
+        }
+        if let Some(last_modified) = icon.last_modified {
+            validate_kdbx4_timestamp(last_modified)?;
         }
     }
-    encoded
+
+    let mut live_ids = BTreeSet::new();
+    validate_group_model(&vault.root, &mut live_ids)?;
+
+    let mut tombstone_ids = BTreeSet::new();
+    for deleted in &vault.deleted_objects {
+        if deleted.id.is_nil() || !tombstone_ids.insert(deleted.id) {
+            return Err(KdbxError::InvalidValue);
+        }
+        validate_kdbx4_timestamp(deleted.deleted_at)?;
+    }
+    Ok(())
+}
+
+fn validate_group_model(group: &Group, live_ids: &mut BTreeSet<Uuid>) -> Result<()> {
+    if group.id.is_nil()
+        || !live_ids.insert(group.id)
+        || [
+            group.custom_icon_id,
+            group.last_top_visible_entry,
+            group.previous_parent,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|id| id.is_nil())
+        || group
+            .default_auto_type_sequence
+            .as_deref()
+            .is_some_and(str::is_empty)
+        || !raw_collapsed_optional_text_matches(
+            group.default_auto_type_sequence.as_deref(),
+            group.raw_state.default_auto_type_sequence_raw.as_deref(),
+        )
+        || !raw_nullable_bool_matches(
+            group.flags.enable_auto_type,
+            group.raw_state.enable_auto_type_raw.as_deref(),
+        )
+        || !raw_nullable_bool_matches(
+            group.flags.enable_searching,
+            group.raw_state.enable_searching_raw.as_deref(),
+        )
+        || group.raw_state.last_top_visible_entry_raw.is_some()
+        || !tags_are_persistence_valid(&group.tags)
+    {
+        return Err(KdbxError::InvalidValue);
+    }
+    validate_raw_node_slots(
+        &group.raw_state.node_order,
+        &group_emitted_node_counts(group),
+    )?;
+    let entry_ids = group
+        .entries
+        .iter()
+        .map(|entry| entry.id)
+        .collect::<BTreeSet<_>>();
+    validate_tracked_identity_slots(
+        "Entry",
+        &group.raw_state.node_order,
+        &group.raw_state.entry_order,
+        &entry_ids,
+    )?;
+    validate_tracked_identity_prefix(&group.raw_state.entry_order, &group.entries, |entry| {
+        entry.id
+    })?;
+    let group_ids = group
+        .children
+        .iter()
+        .map(|child| child.id)
+        .collect::<BTreeSet<_>>();
+    validate_tracked_identity_slots(
+        "Group",
+        &group.raw_state.node_order,
+        &group.raw_state.group_order,
+        &group_ids,
+    )?;
+    validate_tracked_identity_prefix(&group.raw_state.group_order, &group.children, |child| {
+        child.id
+    })?;
+    validate_custom_data_model(&group.custom_data, &group.custom_data_blocks)?;
+    if let Some(times) = group.times {
+        validate_unsigned_kdbx4_timestamp(times.created_at)?;
+        validate_unsigned_kdbx4_timestamp(times.modified_at)?;
+        if let Some(value) = times.expiry_time {
+            validate_kdbx4_timestamp(value)?;
+        }
+        if let Some(value) = times.last_accessed_at {
+            validate_unsigned_kdbx4_timestamp(value)?;
+        }
+        if let Some(value) = times.location_changed_at {
+            validate_unsigned_kdbx4_timestamp(value)?;
+        }
+    }
+
+    for entry in &group.entries {
+        if entry.id.is_nil() || !live_ids.insert(entry.id) {
+            return Err(KdbxError::InvalidValue);
+        }
+        validate_entry_model(entry, entry.id, false)?;
+    }
+    for child in &group.children {
+        validate_group_model(child, live_ids)?;
+    }
+    Ok(())
+}
+
+fn validate_entry_model(entry: &Entry, owner_id: Uuid, is_snapshot: bool) -> Result<()> {
+    if (is_snapshot
+        && (entry.id != owner_id || !entry.history.is_empty() || entry.raw_state.has_history_node))
+        || [entry.custom_icon_id, entry.previous_parent]
+            .into_iter()
+            .flatten()
+            .any(|id| id.is_nil())
+        || !tags_are_persistence_valid(&entry.tags)
+        || entry
+            .attributes
+            .keys()
+            .any(|key| key.is_empty() || is_standard_entry_field_name(key))
+        || entry.attachments.iter().any(|(key, attachment)| {
+            key.is_empty() || attachment.name.is_empty() || attachment.name != *key
+        })
+        || !raw_present_text_matches(
+            entry.foreground_color.as_deref(),
+            entry.raw_state.foreground_color_raw.as_deref(),
+        )
+        || !raw_present_text_matches(
+            entry.background_color.as_deref(),
+            entry.raw_state.background_color_raw.as_deref(),
+        )
+        || !raw_present_text_matches(
+            entry.override_url.as_deref(),
+            entry.raw_state.override_url_raw.as_deref(),
+        )
+        || entry
+            .raw_state
+            .tags_raw
+            .as_deref()
+            .is_some_and(|raw| parse_tags(raw) != entry.tags)
+        || entry.location_changed_at.is_none()
+        || (entry.expires && entry.expiry_time.is_none())
+        || entry
+            .totp
+            .as_ref()
+            .is_some_and(|totp| !structured_totp_is_persistence_valid(totp))
+    {
+        return Err(KdbxError::InvalidValue);
+    }
+    validate_raw_node_slots(
+        &entry.raw_state.node_order,
+        &entry_emitted_node_counts(entry, !is_snapshot),
+    )?;
+    let materialized = materialize_entry_persistent_attributes(entry);
+    let mut string_keys = BTreeSet::from([
+        "Title".to_owned(),
+        "UserName".to_owned(),
+        "Password".to_owned(),
+        "URL".to_owned(),
+        "Notes".to_owned(),
+    ]);
+    string_keys.extend(materialized.iter().map(|(key, _)| key.to_owned()));
+    validate_tracked_identity_slots(
+        "String",
+        &entry.raw_state.node_order,
+        &entry.raw_state.string_order,
+        &string_keys,
+    )?;
+    let binary_names = entry.attachments.keys().cloned().collect::<BTreeSet<_>>();
+    validate_tracked_identity_slots(
+        "Binary",
+        &entry.raw_state.node_order,
+        &entry.raw_state.binary_order,
+        &binary_names,
+    )?;
+    validate_custom_data_model(&entry.custom_data, &entry.custom_data_blocks)?;
+    validate_unsigned_kdbx4_timestamp(entry.created_at)?;
+    validate_unsigned_kdbx4_timestamp(entry.modified_at)?;
+    if let Some(value) = entry.expiry_time {
+        validate_kdbx4_timestamp(value)?;
+    }
+    if let Some(value) = entry.last_accessed_at {
+        validate_unsigned_kdbx4_timestamp(value)?;
+    }
+    if let Some(value) = entry.location_changed_at {
+        validate_unsigned_kdbx4_timestamp(value)?;
+    }
+
+    if let Some(raw) = entry.raw_state.quality_check_raw.as_deref() {
+        let value = parse_bool_text_strict(raw).ok_or(KdbxError::InvalidValue)?;
+        if entry.exclude_from_reports == value {
+            return Err(KdbxError::InvalidValue);
+        }
+    }
+
+    for snapshot in &entry.history {
+        validate_entry_model(snapshot, entry.id, true)?;
+    }
+    Ok(())
+}
+
+fn structured_totp_is_persistence_valid(totp: &vaultkern_model::TotpSpec) -> bool {
+    let Some(account_name) = totp.account_name.as_deref() else {
+        return false;
+    };
+    !account_name.is_empty()
+        && !totp.secret_base32.is_empty()
+        && totp
+            .issuer
+            .as_deref()
+            .is_none_or(|issuer| !issuer.is_empty())
+        && (totp.issuer.is_some() || !account_name.contains(':'))
+}
+
+fn validate_tracked_identity_slots<T: Ord>(
+    element_name: &str,
+    node_order: &[String],
+    tracked_identities: &[T],
+    current_identities: &BTreeSet<T>,
+) -> Result<()> {
+    let slot_count = node_order
+        .iter()
+        .filter(|name| name.as_str() == element_name)
+        .count();
+    let unique = tracked_identities.iter().collect::<BTreeSet<_>>();
+    if slot_count != tracked_identities.len()
+        || unique.len() != tracked_identities.len()
+        || tracked_identities
+            .iter()
+            .any(|identity| !current_identities.contains(identity))
+    {
+        return Err(KdbxError::InvalidValue);
+    }
+    Ok(())
+}
+
+fn validate_tracked_identity_prefix<T: Copy + Eq, U>(
+    tracked_identities: &[T],
+    current_values: &[U],
+    identity: impl Fn(&U) -> T,
+) -> Result<()> {
+    if current_values.len() < tracked_identities.len()
+        || current_values
+            .iter()
+            .take(tracked_identities.len())
+            .map(identity)
+            .ne(tracked_identities.iter().copied())
+    {
+        return Err(KdbxError::InvalidValue);
+    }
+    Ok(())
+}
+
+fn validate_raw_node_slots(
+    node_order: &[String],
+    emitted_counts: &BTreeMap<&str, usize>,
+) -> Result<()> {
+    let mut recorded_counts = BTreeMap::new();
+    for name in node_order {
+        let Some(emitted_count) = emitted_counts.get(name.as_str()) else {
+            return Err(KdbxError::InvalidValue);
+        };
+        let recorded_count = recorded_counts.entry(name.as_str()).or_insert(0_usize);
+        *recorded_count += 1;
+        if *recorded_count > *emitted_count {
+            return Err(KdbxError::InvalidValue);
+        }
+    }
+    Ok(())
+}
+
+fn custom_data_emitted_count(
+    blocks: &[CustomDataBlock],
+    merged: &BTreeMap<String, String>,
+) -> usize {
+    if blocks.is_empty() {
+        usize::from(!merged.is_empty())
+    } else {
+        blocks.len()
+    }
+}
+
+fn meta_emitted_node_counts(vault: &Vault) -> BTreeMap<&'static str, usize> {
+    let mut counts = BTreeMap::new();
+    let mut present = |name, is_present| {
+        counts.insert(name, usize::from(is_present));
+    };
+    present("Generator", vault.generator.is_some());
+    present("SettingsChanged", vault.settings_changed.is_some());
+    present("DatabaseName", true);
+    present("DatabaseNameChanged", vault.database_name_changed.is_some());
+    present(
+        "DatabaseDescription",
+        vault.description.is_some() || vault.meta_raw_state.description_raw.is_some(),
+    );
+    present(
+        "DatabaseDescriptionChanged",
+        vault.description_changed.is_some(),
+    );
+    present(
+        "DefaultUserName",
+        vault.default_username.is_some() || vault.meta_raw_state.default_username_raw.is_some(),
+    );
+    present(
+        "DefaultUserNameChanged",
+        vault.default_username_changed.is_some(),
+    );
+    present(
+        "MaintenanceHistoryDays",
+        vault.maintenance_history_days.is_some(),
+    );
+    present(
+        "Color",
+        vault.color.is_some() || vault.meta_raw_state.color_raw.is_some(),
+    );
+    present("MemoryProtection", vault.memory_protection.is_some());
+    present(
+        "CustomIcons",
+        !vault.custom_icons.is_empty() || vault.meta_raw_state.has_custom_icons_node,
+    );
+    present("RecycleBinEnabled", vault.recycle_bin_enabled.is_some());
+    present("RecycleBinUUID", vault.recycle_bin_group.is_some());
+    present("RecycleBinChanged", vault.recycle_bin_changed.is_some());
+    present("EntryTemplatesGroup", vault.entry_templates_group.is_some());
+    present(
+        "EntryTemplatesGroupChanged",
+        vault.entry_templates_group_changed.is_some(),
+    );
+    present("MasterKeyChanged", vault.master_key_changed.is_some());
+    present("MasterKeyChangeRec", vault.master_key_change_rec.is_some());
+    present(
+        "MasterKeyChangeForce",
+        vault.master_key_change_force.is_some(),
+    );
+    present(
+        "MasterKeyChangeForceOnce",
+        vault.master_key_change_force_once.is_some(),
+    );
+    present("LastSelectedGroup", vault.last_selected_group.is_some());
+    present(
+        "LastTopVisibleGroup",
+        vault.last_top_visible_group.is_some(),
+    );
+    present("HistoryMaxItems", vault.history_max_items.is_some());
+    present("HistoryMaxSize", vault.history_max_size.is_some());
+    counts.insert(
+        "CustomData",
+        custom_data_emitted_count(&vault.meta_custom_data_blocks, &vault.meta_custom_data),
+    );
+    counts
+}
+
+fn group_emitted_node_counts(group: &Group) -> BTreeMap<&'static str, usize> {
+    let mut counts = BTreeMap::from([
+        ("UUID", 1),
+        ("Name", 1),
+        ("Notes", 1),
+        ("IconID", 1),
+        ("Times", 1),
+        ("IsExpanded", 1),
+        ("DefaultAutoTypeSequence", 1),
+        ("EnableAutoType", 1),
+        ("EnableSearching", 1),
+    ]);
+    counts.insert(
+        "LastTopVisibleEntry",
+        usize::from(group.last_top_visible_entry.is_some()),
+    );
+    counts.insert(
+        "CustomIconUUID",
+        usize::from(group.custom_icon_id.is_some()),
+    );
+    counts.insert("Tags", usize::from(!group.tags.is_empty()));
+    counts.insert(
+        "PreviousParentGroup",
+        usize::from(group.previous_parent.is_some()),
+    );
+    counts.insert("Entry", group.entries.len());
+    counts.insert("Group", group.children.len());
+    counts.insert(
+        "CustomData",
+        custom_data_emitted_count(&group.custom_data_blocks, &group.custom_data),
+    );
+    counts
+}
+
+fn entry_emitted_node_counts(
+    entry: &Entry,
+    include_history: bool,
+) -> BTreeMap<&'static str, usize> {
+    let materialized_count = materialize_entry_persistent_attributes(entry).len();
+    let mut counts = BTreeMap::from([("UUID", 1), ("Times", 1)]);
+    counts.insert("IconID", usize::from(entry.icon_id.is_some()));
+    counts.insert(
+        "CustomIconUUID",
+        usize::from(entry.custom_icon_id.is_some()),
+    );
+    counts.insert(
+        "ForegroundColor",
+        usize::from(
+            entry.foreground_color.is_some() || entry.raw_state.foreground_color_raw.is_some(),
+        ),
+    );
+    counts.insert(
+        "BackgroundColor",
+        usize::from(
+            entry.background_color.is_some() || entry.raw_state.background_color_raw.is_some(),
+        ),
+    );
+    counts.insert(
+        "OverrideURL",
+        usize::from(entry.override_url.is_some() || entry.raw_state.override_url_raw.is_some()),
+    );
+    counts.insert(
+        "Tags",
+        usize::from(!entry.tags.is_empty() || entry.raw_state.tags_raw.is_some()),
+    );
+    counts.insert(
+        "PreviousParentGroup",
+        usize::from(entry.previous_parent.is_some()),
+    );
+    counts.insert(
+        "QualityCheck",
+        usize::from(
+            entry.exclude_from_reports
+                || entry
+                    .raw_state
+                    .quality_check_raw
+                    .as_deref()
+                    .is_some_and(parse_bool_text),
+        ),
+    );
+    counts.insert("String", materialized_count + 5);
+    counts.insert("Binary", entry.attachments.len());
+    counts.insert("AutoType", usize::from(entry.auto_type.is_some()));
+    counts.insert(
+        "History",
+        usize::from(should_emit_history(entry, include_history)),
+    );
+    counts.insert(
+        "CustomData",
+        custom_data_emitted_count(&entry.custom_data_blocks, &entry.custom_data),
+    );
+    counts
+}
+
+fn should_emit_history(entry: &Entry, include_history: bool) -> bool {
+    include_history
+        && (!entry.history.is_empty()
+            || entry.raw_state.has_history_node
+            || entry.raw_state.node_order.is_empty())
+}
+
+fn validate_custom_data_model(
+    merged: &BTreeMap<String, String>,
+    blocks: &[CustomDataBlock],
+) -> Result<()> {
+    if merged.keys().any(String::is_empty)
+        || blocks
+            .iter()
+            .flat_map(|block| &block.items)
+            .any(|item| item.key.is_empty())
+        || merge_custom_data_blocks(blocks) != *merged
+    {
+        return Err(KdbxError::InvalidValue);
+    }
+    for last_modified in blocks
+        .iter()
+        .flat_map(|block| &block.items)
+        .filter_map(|item| item.last_modified)
+    {
+        validate_kdbx4_timestamp(last_modified)?;
+    }
+    Ok(())
+}
+
+fn tags_are_persistence_valid(tags: &BTreeSet<String>) -> bool {
+    tags.iter()
+        .all(|tag| !tag.is_empty() && tag.trim() == tag && !tag.contains(',') && !tag.contains(';'))
+}
+
+fn raw_collapsed_optional_text_matches(modeled: Option<&str>, raw: Option<&str>) -> bool {
+    raw.is_none_or(|raw| modeled == (!raw.is_empty()).then_some(raw))
+}
+
+fn raw_present_text_matches(modeled: Option<&str>, raw: Option<&str>) -> bool {
+    raw.is_none_or(|raw| modeled == Some(raw))
+}
+
+fn raw_nullable_bool_matches(modeled: Option<bool>, raw: Option<&str>) -> bool {
+    raw.is_none_or(|raw| parse_nullable_bool_strict(raw) == Some(modeled))
+}
+
+fn validate_unsigned_kdbx4_timestamp(timestamp: u64) -> Result<()> {
+    let timestamp = i64::try_from(timestamp).map_err(|_| KdbxError::InvalidValue)?;
+    validate_kdbx4_timestamp(timestamp)
+}
+
+fn validate_kdbx4_timestamp(timestamp: i64) -> Result<()> {
+    const KDBX4_TIME_OFFSET: i64 = 62_135_596_800;
+    if timestamp
+        .checked_add(KDBX4_TIME_OFFSET)
+        .is_none_or(|encoded| encoded < 0)
+    {
+        return Err(KdbxError::InvalidValue);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4465,7 +5791,7 @@ mod external_kdf_policy_tests {
     fn load_does_not_derive_until_confirmed_and_then_loads_normally() {
         let key = CompositeKey::default();
         let profile = super::SaveProfile {
-            kdf: super::SaveKdf::AesKdbx4 { rounds: 1 },
+            kdf: Some(super::SaveKdf::AesKdbx4 { rounds: 1 }),
             ..super::SaveProfile::recommended()
         };
         let bytes = save_kdbx(&Vault::empty("confirm"), &key, &profile).expect("save fixture");
@@ -4491,22 +5817,53 @@ mod external_kdf_policy_tests {
         .expect("explicit confirmation authorizes the KDF");
         assert_eq!(loaded.name, "confirm");
     }
+
+    #[test]
+    fn ordinary_save_preserves_the_loaded_kdf_dictionary() {
+        let key = CompositeKey::default();
+        let profile = super::SaveProfile {
+            kdf: Some(super::SaveKdf::AesKdbx4 { rounds: 1 }),
+            ..super::SaveProfile::recommended()
+        };
+        let first =
+            save_kdbx(&Vault::empty("preserve kdf"), &key, &profile).expect("save initial vault");
+        let loaded = load_kdbx(&first, &key).expect("load initial vault");
+
+        let second =
+            save_kdbx(&loaded, &key, &super::SaveProfile::recommended()).expect("ordinary save");
+        let first_header = super::KdbxHeader::decode(&first).expect("first header");
+        let second_header = super::KdbxHeader::decode(&second).expect("second header");
+
+        assert_eq!(
+            super::kdf_generation::kdf_generation(&second_header.kdf_parameters),
+            super::kdf_generation::kdf_generation(&first_header.kdf_parameters)
+        );
+        assert_eq!(
+            second_header.kdf_parameters.encode().expect("second KDF"),
+            first_header.kdf_parameters.encode().expect("first KDF")
+        );
+    }
 }
 
 #[cfg(test)]
 mod compatibility_tests {
+    use std::collections::BTreeMap;
+
     use super::{
         Compression, KdbxCipher, KdbxError, KdbxHeader, KdbxVersion, ProtectedStream, SaveKdf,
         SaveProfile, binary_index_for_content_id, child_text, collect_attachment_refs,
         decode_block_stream, decrypt_payload, encode_block_stream, entry_ref_key, gzip_compress,
         gzip_decompress, header_hmac, kdf_from_variant_dict, load_kdbx, mac_seed,
-        parse_inner_header, parse_kdbx3_binaries, save_kdbx, sha256_seeded, text_element,
+        parse_inner_header, parse_kdbx3_binaries, required_version, save_kdbx, sha256_seeded,
+        text_element, validate_xml_model_shape,
     };
     use base64::Engine as _;
     use vaultkern_crypto::{CompositeKey, sha256_bytes};
     use vaultkern_model::{
-        Attachment, AttachmentContent, AttachmentContentId, CustomField, Entry, Group, ModelError,
-        PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
+        Attachment, AttachmentContent, AttachmentContentId, AutoTypeConfig, CustomDataBlock,
+        CustomDataItem, CustomField, CustomIcon, DeletedObject, Entry, Group, ModelError,
+        OpaqueXmlAnchor, OpaqueXmlFragment, PasskeyRecord, TotpAlgorithm, TotpSpec, Vault,
+        canonical_entry_bytes_v1, canonical_entry_content_hash_v1,
     };
     use xmltree::{Element, XMLNode};
 
@@ -4515,7 +5872,7 @@ mod compatibility_tests {
             version: KdbxVersion::V4_1,
             cipher: KdbxCipher::Aes256,
             compression: Compression::Gzip,
-            kdf: SaveKdf::AesKdbx4 { rounds: 1 },
+            kdf: Some(SaveKdf::AesKdbx4 { rounds: 1 }),
         }
     }
 
@@ -4523,6 +5880,53 @@ mod compatibility_tests {
         let mut key = CompositeKey::default();
         key.add_password(password);
         key
+    }
+
+    #[test]
+    fn xml_shape_validation_rejects_malformed_typed_values() {
+        let wrap = |body: &str| {
+            Element::parse(
+                format!(
+                    "<KeePassFile><Meta>{body}</Meta><Root><Group><UUID>AQEBAQEBAQEBAQEBAQEBAQ==</UUID></Group></Root></KeePassFile>"
+                )
+                .as_bytes(),
+            )
+            .expect("typed XML fixture")
+        };
+
+        for body in [
+            "<RecycleBinEnabled>maybe</RecycleBinEnabled>",
+            "<MaintenanceHistoryDays>many</MaintenanceHistoryDays>",
+            "<SettingsChanged>not-a-time</SettingsChanged>",
+            "<RecycleBinUUID>not-base64</RecycleBinUUID>",
+            "<MemoryProtection><ProtectPassword>sometimes</ProtectPassword></MemoryProtection>",
+        ] {
+            assert!(validate_xml_model_shape(&wrap(body)).is_err(), "{body}");
+        }
+
+        let entry = Element::parse(
+            b"<KeePassFile><Meta/><Root><Group><UUID>AQEBAQEBAQEBAQEBAQEBAQ==</UUID><Entry><UUID>AgICAgICAgICAgICAgICAg==</UUID><Times><CreationTime>not-a-time</CreationTime></Times><String><Key>field</Key><Value Protected='maybe'>value</Value></String></Entry></Group></Root></KeePassFile>"
+                .as_slice(),
+        )
+        .expect("entry typed XML fixture");
+        assert!(validate_xml_model_shape(&entry).is_err());
+    }
+
+    #[test]
+    fn xml_shape_validation_rejects_nested_elements_inside_modeled_scalar_values() {
+        let cases = [
+            "<KeePassFile><Meta><DatabaseName>visible<Future/>discarded</DatabaseName></Meta><Root><Group><UUID>AQEBAQEBAQEBAQEBAQEBAQ==</UUID></Group></Root></KeePassFile>",
+            "<KeePassFile><Meta><MemoryProtection><ProtectPassword>True<Future/></ProtectPassword></MemoryProtection></Meta><Root><Group><UUID>AQEBAQEBAQEBAQEBAQEBAQ==</UUID></Group></Root></KeePassFile>",
+            "<KeePassFile><Meta><CustomData><Item><Key>key<Future/></Key><Value>value</Value></Item></CustomData></Meta><Root><Group><UUID>AQEBAQEBAQEBAQEBAQEBAQ==</UUID></Group></Root></KeePassFile>",
+            "<KeePassFile><Meta/><Root><Group><UUID>AQEBAQEBAQEBAQEBAQEBAQ==</UUID><Entry><UUID>AgICAgICAgICAgICAgICAg==</UUID><String><Key>field<Future/></Key><Value>value</Value></String></Entry></Group></Root></KeePassFile>",
+            "<KeePassFile><Meta/><Root><Group><UUID>AQEBAQEBAQEBAQEBAQEBAQ==</UUID><Entry><UUID>AgICAgICAgICAgICAgICAg==</UUID><AutoType><Association><Window>target<Future/></Window></Association></AutoType></Entry></Group></Root></KeePassFile>",
+            "<KeePassFile><Meta><Binaries><Binary ID='0'>Ynl0ZXM=<Future/></Binary></Binaries></Meta><Root><Group><UUID>AQEBAQEBAQEBAQEBAQEBAQ==</UUID></Group></Root></KeePassFile>",
+        ];
+
+        for xml in cases {
+            let root = Element::parse(xml.as_bytes()).expect("nested scalar XML fixture");
+            assert!(validate_xml_model_shape(&root).is_err(), "{xml}");
+        }
     }
 
     #[test]
@@ -5048,12 +6452,2410 @@ mod compatibility_tests {
             .expect("live entry")
     }
 
+    fn projection_string_fields(
+        entry: &Element,
+    ) -> std::collections::BTreeMap<String, (String, Option<String>)> {
+        let mut fields = std::collections::BTreeMap::new();
+        for child in &entry.children {
+            let XMLNode::Element(field) = child else {
+                continue;
+            };
+            if field.name != "String" {
+                continue;
+            }
+            let Some(key) = child_text(field, "Key") else {
+                continue;
+            };
+            if !matches!(
+                key.as_str(),
+                "otp"
+                    | "TimeOtp-Secret-Base32"
+                    | "TimeOtp-Algorithm"
+                    | "TimeOtp-Length"
+                    | "TimeOtp-Period"
+            ) && !key.starts_with("KPEX_PASSKEY_")
+            {
+                continue;
+            }
+            let value = field.get_child("Value").expect("projection value");
+            let previous = fields.insert(
+                key.clone(),
+                (
+                    value.get_text().unwrap_or_default().into_owned(),
+                    value.attributes.get("Protected").cloned(),
+                ),
+            );
+            assert!(previous.is_none(), "duplicate projection field: {key}");
+        }
+        fields
+    }
+
+    fn credential_entry() -> Entry {
+        let mut entry = Entry::new("Example Login");
+        entry.username = "alice@example.com".into();
+        entry.created_at = 101;
+        entry.modified_at = 202;
+        entry.expires = true;
+        entry.expiry_time = Some(303);
+        entry.last_accessed_at = Some(404);
+        entry.usage_count = Some(5);
+        entry.location_changed_at = Some(606);
+        entry.icon_id = Some(0);
+        entry.auto_type = Some(AutoTypeConfig::default());
+        entry.totp = Some(TotpSpec {
+            secret_base32: "JBSWY3DPEHPK3PXP".into(),
+            algorithm: TotpAlgorithm::Sha256,
+            digits: 8,
+            period_seconds: 45,
+            issuer: Some("Example Inc".into()),
+            account_name: Some("alice+prod@example.com".into()),
+        });
+        entry.passkey = Some(PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "credential-1".into(),
+            generated_user_id: Some("generated-1".into()),
+            private_key_pem: "-----BEGIN PRIVATE KEY-----\nkey-1\n-----END PRIVATE KEY-----".into(),
+            relying_party: "example.com".into(),
+            user_handle: Some("user-handle-1".into()),
+            backup_eligible: true,
+            backup_state: false,
+        });
+        entry
+    }
+
+    #[test]
+    fn loader_rejects_duplicate_known_singletons_and_repeated_field_identities() {
+        let mut vault = Vault::empty("duplicate known nodes");
+        let mut entry = Entry::new("entry");
+        entry.attachments.insert(
+            "file.bin".into(),
+            Attachment::new("file.bin", b"data".to_vec(), false),
+        );
+        vault.root.entries.push(entry);
+        let key = test_key("duplicate-known-nodes");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save fixture");
+
+        let duplicate_entry_uuid = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            let uuid = entry.get_child("UUID").expect("entry UUID").clone();
+            entry.children.push(XMLNode::Element(uuid));
+        })
+        .expect("duplicate UUID");
+
+        let duplicate_string_key = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            let title = entry
+                .children
+                .iter()
+                .find_map(|child| match child {
+                    XMLNode::Element(field)
+                        if field.name == "String"
+                            && child_text(field, "Key").as_deref() == Some("Title") =>
+                    {
+                        Some(field.clone())
+                    }
+                    _ => None,
+                })
+                .expect("Title field");
+            entry.children.push(XMLNode::Element(title));
+        })
+        .expect("duplicate String key");
+
+        let duplicate_binary_name = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            let binary = entry.get_child("Binary").expect("Binary").clone();
+            entry.children.push(XMLNode::Element(binary));
+        })
+        .expect("duplicate Binary name");
+
+        let duplicate_root_group = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let root_node = root.get_mut_child("Root").expect("Root");
+            let group = root_node.get_child("Group").expect("Group").clone();
+            root_node.children.push(XMLNode::Element(group));
+        })
+        .expect("duplicate root Group");
+
+        let duplicate_meta = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let meta = root.get_child("Meta").expect("Meta").clone();
+            root.children.push(XMLNode::Element(meta));
+        })
+        .expect("duplicate Meta");
+
+        for (case, malformed) in [
+            ("entry UUID", duplicate_entry_uuid),
+            ("String key", duplicate_string_key),
+            ("Binary name", duplicate_binary_name),
+            ("root Group", duplicate_root_group),
+            ("Meta", duplicate_meta),
+        ] {
+            assert!(
+                matches!(load_kdbx(&malformed, &key), Err(KdbxError::InvalidValue)),
+                "duplicate {case} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn loader_rejects_live_uuid_collisions_and_history_uuid_mismatches() {
+        let mut vault = Vault::empty("UUID graph");
+        let first = Entry::new("first");
+        let mut second = Entry::new("second");
+        let mut snapshot = second.clone();
+        snapshot.history.clear();
+        second.history.push(snapshot);
+        vault.root.entries.extend([first, second]);
+        let key = test_key("uuid-graph");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save UUID fixture");
+
+        let collision = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let group = root
+                .get_mut_child("Root")
+                .and_then(|root| root.get_mut_child("Group"))
+                .expect("root Group");
+            let mut entries = group.children.iter_mut().filter_map(|child| match child {
+                XMLNode::Element(entry) if entry.name == "Entry" => Some(entry),
+                _ => None,
+            });
+            let first_uuid =
+                child_text(entries.next().expect("first entry"), "UUID").expect("first UUID");
+            let second = entries.next().expect("second entry");
+            second.get_mut_child("UUID").expect("second UUID").children =
+                vec![XMLNode::Text(first_uuid)];
+        })
+        .expect("rewrite collision");
+
+        let history_mismatch = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let group = root
+                .get_mut_child("Root")
+                .and_then(|root| root.get_mut_child("Group"))
+                .expect("root Group");
+            let second = group
+                .children
+                .iter_mut()
+                .filter_map(|child| match child {
+                    XMLNode::Element(entry) if entry.name == "Entry" => Some(entry),
+                    _ => None,
+                })
+                .nth(1)
+                .expect("second entry");
+            let history_entry = second
+                .get_mut_child("History")
+                .and_then(|history| history.get_mut_child("Entry"))
+                .expect("history entry");
+            history_entry
+                .get_mut_child("UUID")
+                .expect("history UUID")
+                .children = vec![XMLNode::Text(super::encode_uuid(uuid::Uuid::new_v4()))];
+        })
+        .expect("rewrite history UUID");
+
+        for (case, malformed) in [
+            ("live collision", collision),
+            ("history mismatch", history_mismatch),
+        ] {
+            assert!(
+                matches!(load_kdbx(&malformed, &key), Err(KdbxError::InvalidValue)),
+                "invalid UUID graph was accepted: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_entry_icon_id_survives_kdbx_roundtrip_in_canonical_v1() {
+        let mut entry = Entry::new("No icon");
+        entry.icon_id = None;
+        entry.auto_type = Some(AutoTypeConfig::default());
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("NoIcon");
+        vault.root.entries.push(entry);
+
+        let key = test_key("no-icon");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.icon_id, None);
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+    }
+
+    #[test]
+    fn absent_entry_auto_type_survives_kdbx_roundtrip_in_canonical_v1() {
+        let mut entry = Entry::new("No auto type");
+        entry.icon_id = Some(0);
+        entry.auto_type = None;
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("NoAutoType");
+        vault.root.entries.push(entry);
+
+        let key = test_key("no-auto-type");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.auto_type, None);
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+    }
+
+    #[test]
+    fn present_empty_entry_text_options_survive_kdbx_roundtrip() {
+        let mut foreground = Entry::new("empty foreground");
+        foreground.foreground_color = Some(String::new());
+
+        let mut background = Entry::new("empty background");
+        background.background_color = Some(String::new());
+
+        let mut override_url = Entry::new("empty override URL");
+        override_url.override_url = Some(String::new());
+
+        let mut auto_type = Entry::new("empty auto type sequence");
+        auto_type
+            .auto_type
+            .as_mut()
+            .expect("default auto type")
+            .default_sequence = Some(String::new());
+
+        for (case, entry) in [
+            ("foreground", foreground),
+            ("background", background),
+            ("override-url", override_url),
+            ("auto-type-default-sequence", auto_type),
+        ] {
+            let expected = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+            let key = test_key(case);
+            let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+            let loaded = load_kdbx(&bytes, &key).expect("load entry");
+            let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+            assert_eq!(
+                canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_rejects_present_nil_entry_custom_icon_id() {
+        let mut entry = Entry::new("nil custom icon");
+        entry.custom_icon_id = Some(uuid::Uuid::nil());
+        let mut vault = Vault::empty("nil custom icon");
+        vault.root.entries.push(entry);
+        let key = test_key("nil-custom-icon");
+
+        assert!(matches!(
+            save_kdbx(&vault, &key, &fast_profile()),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn blank_entry_custom_icon_id_parses_as_none() {
+        let mut element = Element::new("Entry");
+        element.children.push(XMLNode::Element(text_element(
+            "UUID",
+            &super::encode_uuid(uuid::Uuid::nil()),
+        )));
+        element
+            .children
+            .push(XMLNode::Element(text_element("CustomIconUUID", " \n\t ")));
+        let mut protected = ProtectedStream::from_stream(2, &[0x42; 32]).expect("stream");
+        let mut content_pool = vaultkern_model::AttachmentContentPool::new();
+
+        let entry = super::parse_entry(&element, &[], &mut content_pool, &mut protected)
+            .expect("parse entry with blank custom icon");
+
+        assert_eq!(entry.custom_icon_id, None);
+    }
+
+    #[test]
+    fn nil_entry_custom_icon_id_parses_as_none() {
+        let mut element = Element::new("Entry");
+        element.children.push(XMLNode::Element(text_element(
+            "UUID",
+            &super::encode_uuid(uuid::Uuid::new_v4()),
+        )));
+        element.children.push(XMLNode::Element(text_element(
+            "CustomIconUUID",
+            &super::encode_uuid(uuid::Uuid::nil()),
+        )));
+        let mut protected = ProtectedStream::from_stream(2, &[0x42; 32]).expect("stream");
+        let mut content_pool = vaultkern_model::AttachmentContentPool::new();
+
+        let entry = super::parse_entry(&element, &[], &mut content_pool, &mut protected)
+            .expect("parse entry with nil custom icon");
+
+        assert_eq!(entry.custom_icon_id, None);
+    }
+
+    #[test]
+    fn negative_signed_entry_times_survive_kdbx_roundtrip() {
+        let mut entry = Entry::new("negative timestamps");
+        entry.expiry_time = Some(-1);
+        entry
+            .custom_data
+            .insert("timestamped".into(), "value".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "timestamped".into(),
+                value: "value".into(),
+                last_modified: Some(-2),
+            }],
+            after: None,
+        });
+        let expected = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("negative timestamps");
+        vault.root.entries.push(entry);
+        let key = test_key("negative-timestamps");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.expiry_time, Some(-1));
+        assert_eq!(
+            loaded_entry.custom_data_blocks[0].items[0].last_modified,
+            Some(-2)
+        );
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected
+        );
+    }
+
+    #[test]
+    fn chained_custom_data_anchors_preserve_duplicate_key_order() {
+        let mut entry = Entry::new("chained custom data anchors");
+        entry.custom_data.insert("duplicate".into(), "third".into());
+        entry.custom_data_blocks = [
+            ("first", "Times"),
+            ("second", "CustomData"),
+            ("third", "AutoType"),
+        ]
+        .into_iter()
+        .map(|(value, anchor)| CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "duplicate".into(),
+                value: value.into(),
+                last_modified: None,
+            }],
+            after: Some(OpaqueXmlAnchor {
+                element_name: anchor.into(),
+                occurrence: 1,
+            }),
+        })
+        .collect();
+        entry.raw_state.node_order = [
+            "Times",
+            "CustomData",
+            "CustomData",
+            "AutoType",
+            "CustomData",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let expected = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("chained custom data anchors");
+        vault.root.entries.push(entry);
+        let key = test_key("chained-custom-data-anchors");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+        let values = loaded_entry
+            .custom_data_blocks
+            .iter()
+            .flat_map(|block| &block.items)
+            .map(|item| item.value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, ["first", "second", "third"]);
+        assert_eq!(loaded_entry.custom_data["duplicate"], "third");
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected
+        );
+    }
+
+    #[test]
+    fn raw_typed_spellings_survive_write_when_they_match_semantics() {
+        let mut vault = Vault::empty("raw typed spellings");
+        vault.root.flags.enable_auto_type = Some(true);
+        vault.root.raw_state.enable_auto_type_raw = Some(" 1 ".into());
+
+        let mut entry = Entry::new("entry");
+        entry.tags = ["alpha".into(), "beta".into()].into_iter().collect();
+        entry.raw_state.tags_raw = Some(" beta , alpha ".into());
+        entry.exclude_from_reports = true;
+        entry.raw_state.quality_check_raw = Some(" 0 ".into());
+        vault.root.entries.push(entry);
+
+        let xml = super::build_xml(
+            &vault,
+            &std::collections::HashMap::new(),
+            &[0_u8; 64],
+            KdbxVersion::V4_1,
+        )
+        .expect("build xml");
+        let parsed = Element::parse(std::io::Cursor::new(xml)).expect("parse generated xml");
+        let group = parsed
+            .get_child("Root")
+            .and_then(|root| root.get_child("Group"))
+            .expect("group");
+        assert_eq!(child_text(group, "EnableAutoType").as_deref(), Some(" 1 "));
+        let entry = group.get_child("Entry").expect("entry");
+        assert_eq!(child_text(entry, "Tags").as_deref(), Some(" beta , alpha "));
+        assert_eq!(child_text(entry, "QualityCheck").as_deref(), Some(" 0 "));
+    }
+
+    #[test]
+    fn save_rejects_contradictory_raw_and_typed_replicas() {
+        let mut meta = Vault::empty("meta raw contradiction");
+        meta.description = Some("semantic".into());
+        meta.meta_raw_state.description_raw = Some("different".into());
+
+        let mut group = Vault::empty("group raw contradiction");
+        group.root.flags.enable_searching = Some(true);
+        group.root.raw_state.enable_searching_raw = Some("False".into());
+
+        let mut entry = Vault::empty("entry raw contradiction");
+        let mut item = Entry::new("entry");
+        item.tags.insert("semantic".into());
+        item.raw_state.tags_raw = Some("different".into());
+        entry.root.entries.push(item);
+
+        for vault in [meta, group, entry] {
+            assert!(matches!(
+                save_kdbx(&vault, &test_key("raw contradiction"), &fast_profile()),
+                Err(KdbxError::InvalidValue)
+            ));
+        }
+    }
+
+    #[test]
+    fn missing_custom_data_anchor_is_rejected() {
+        let mut entry = Entry::new("missing custom data anchor");
+        entry
+            .custom_data
+            .insert("duplicate".into(), "second".into());
+        entry.custom_data_blocks = [("first", "ForegroundColor"), ("second", "Times")]
+            .into_iter()
+            .map(|(value, anchor)| CustomDataBlock {
+                items: vec![CustomDataItem {
+                    key: "duplicate".into(),
+                    value: value.into(),
+                    last_modified: None,
+                }],
+                after: Some(OpaqueXmlAnchor {
+                    element_name: anchor.into(),
+                    occurrence: 1,
+                }),
+            })
+            .collect();
+        entry.raw_state.node_order = ["Times", "ForegroundColor", "CustomData", "CustomData"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut vault = Vault::empty("missing custom data anchor");
+        vault.root.entries.push(entry);
+        let key = test_key("missing-custom-data-anchor");
+
+        assert!(matches!(
+            save_kdbx(&vault, &key, &fast_profile()),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn mixed_empty_and_timestamped_custom_data_blocks_roundtrip_without_flattening() {
+        let mut entry = Entry::new("mixed custom data blocks");
+        entry
+            .custom_data
+            .insert("timestamped".into(), "value".into());
+        entry.custom_data_blocks = vec![
+            CustomDataBlock {
+                items: Vec::new(),
+                after: None,
+            },
+            CustomDataBlock {
+                items: vec![CustomDataItem {
+                    key: "timestamped".into(),
+                    value: "value".into(),
+                    last_modified: Some(456),
+                }],
+                after: Some(OpaqueXmlAnchor {
+                    element_name: "CustomData".into(),
+                    occurrence: 1,
+                }),
+            },
+        ];
+        let expected = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let mut vault = Vault::empty("mixed custom data blocks");
+        vault.root.entries.push(entry);
+        let key = test_key("mixed-custom-data-blocks");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.custom_data_blocks.len(), 2);
+        assert!(loaded_entry.custom_data_blocks[0].items.is_empty());
+        assert_eq!(
+            loaded_entry.custom_data_blocks[1].items[0].last_modified,
+            Some(456)
+        );
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected
+        );
+    }
+
+    #[test]
+    fn required_version_accounts_for_timestamped_custom_data_at_every_level() {
+        fn add_timestamped_item(
+            merged: &mut std::collections::BTreeMap<String, String>,
+            blocks: &mut Vec<CustomDataBlock>,
+        ) {
+            merged.insert("timestamped".into(), "value".into());
+            blocks.push(CustomDataBlock {
+                items: vec![CustomDataItem {
+                    key: "timestamped".into(),
+                    value: "value".into(),
+                    last_modified: Some(7),
+                }],
+                after: None,
+            });
+        }
+
+        let mut meta = Vault::empty("meta custom data");
+        add_timestamped_item(
+            &mut meta.meta_custom_data,
+            &mut meta.meta_custom_data_blocks,
+        );
+
+        let mut group = Vault::empty("group custom data");
+        add_timestamped_item(
+            &mut group.root.custom_data,
+            &mut group.root.custom_data_blocks,
+        );
+
+        let mut current = Vault::empty("entry custom data");
+        let mut current_entry = Entry::new("current");
+        add_timestamped_item(
+            &mut current_entry.custom_data,
+            &mut current_entry.custom_data_blocks,
+        );
+        current.root.entries.push(current_entry);
+
+        let mut history = Vault::empty("history custom data");
+        let mut live_entry = Entry::new("live");
+        let mut history_entry = Entry::new("history");
+        add_timestamped_item(
+            &mut history_entry.custom_data,
+            &mut history_entry.custom_data_blocks,
+        );
+        live_entry.history.push(history_entry);
+        history.root.entries.push(live_entry);
+
+        for (case, vault) in [
+            ("meta", meta),
+            ("group", group),
+            ("current entry", current),
+            ("history entry", history),
+        ] {
+            assert_eq!(required_version(&vault), KdbxVersion::V4_1, "{case}");
+        }
+    }
+
+    #[test]
+    fn required_version_accounts_for_each_custom_icon_4_1_field() {
+        for (case, name, last_modified) in [
+            ("name", Some("icon".to_string()), None),
+            ("last modified", None, Some(11)),
+        ] {
+            let mut vault = Vault::empty(case);
+            vault.custom_icons.push(CustomIcon {
+                id: uuid::Uuid::new_v4(),
+                data: vec![1, 2, 3],
+                name,
+                last_modified,
+            });
+
+            assert_eq!(required_version(&vault), KdbxVersion::V4_1, "{case}");
+        }
+    }
+
+    #[test]
+    fn required_version_recurses_into_history_entry_metadata() {
+        let root = Vault::empty("history metadata").root;
+        for (case, previous_parent, exclude_from_reports) in [
+            ("previous parent", Some(root.id), false),
+            ("exclude from reports", None, true),
+        ] {
+            let mut vault = Vault::empty(case);
+            let mut live_entry = Entry::new("live");
+            let mut history_entry = Entry::new("history");
+            history_entry.previous_parent = previous_parent;
+            history_entry.exclude_from_reports = exclude_from_reports;
+            live_entry.history.push(history_entry);
+            vault.root.entries.push(live_entry);
+
+            assert_eq!(required_version(&vault), KdbxVersion::V4_1, "{case}");
+        }
+    }
+
+    #[test]
+    fn required_version_observes_raw_quality_check_and_projectable_passkey_sources() {
+        let mut raw_quality = Vault::empty("raw quality check");
+        let mut entry = Entry::new("entry");
+        entry.raw_state.quality_check_raw = Some("true".into());
+        raw_quality.root.entries.push(entry);
+        assert_eq!(required_version(&raw_quality), KdbxVersion::V4_1);
+
+        let mut raw_passkey = Vault::empty("raw passkey");
+        let mut entry = Entry::new("entry");
+        for (key, value) in [
+            (PasskeyRecord::USERNAME_KEY, "alice"),
+            (PasskeyRecord::CREDENTIAL_ID_KEY, "credential"),
+            (PasskeyRecord::PRIVATE_KEY_PEM_KEY, "private-key"),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com"),
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected: false,
+                },
+            );
+        }
+        raw_passkey.root.entries.push(entry);
+        assert_eq!(required_version(&raw_passkey), KdbxVersion::V4_1);
+    }
+
+    #[test]
+    fn save_rejects_a_profile_below_the_vaults_required_version() {
+        let mut vault = Vault::empty("minimum version");
+        let mut entry = Entry::new("timestamped");
+        entry.custom_data.insert("key".into(), "value".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "key".into(),
+                value: "value".into(),
+                last_modified: Some(13),
+            }],
+            after: None,
+        });
+        vault.root.entries.push(entry);
+        let mut profile = fast_profile();
+        profile.version = KdbxVersion::V4_0;
+
+        assert!(matches!(
+            save_kdbx(&vault, &test_key("minimum-version"), &profile),
+            Err(KdbxError::UnsupportedVersion)
+        ));
+    }
+
+    #[test]
+    fn save_rejects_legacy_write_profiles_before_emitting_kdbx4_payloads() {
+        let vault = Vault::empty("unsupported writer version");
+        for version in [KdbxVersion::V2_0, KdbxVersion::V3_0, KdbxVersion::V3_1] {
+            let mut profile = fast_profile();
+            profile.version = version;
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key("unsupported-version"), &profile),
+                    Err(KdbxError::UnsupportedVersion)
+                ),
+                "legacy writer version was accepted: {version:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_rejects_nil_and_duplicate_live_object_ids() {
+        let mut cases = Vec::new();
+
+        let mut nil_group = Vault::empty("nil group");
+        nil_group.root.id = uuid::Uuid::nil();
+        cases.push(("nil group", nil_group));
+
+        let mut nil_entry = Vault::empty("nil entry");
+        let mut entry = Entry::new("entry");
+        entry.id = uuid::Uuid::nil();
+        nil_entry.root.entries.push(entry);
+        cases.push(("nil entry", nil_entry));
+
+        let mut duplicate_live = Vault::empty("duplicate live");
+        let mut entry = Entry::new("entry");
+        entry.id = duplicate_live.root.id;
+        duplicate_live.root.entries.push(entry);
+        cases.push(("duplicate live", duplicate_live));
+
+        let mut duplicate_icons = Vault::empty("duplicate icons");
+        let icon_id = uuid::Uuid::new_v4();
+        duplicate_icons.custom_icons.extend([
+            CustomIcon {
+                id: icon_id,
+                data: vec![1],
+                name: None,
+                last_modified: None,
+            },
+            CustomIcon {
+                id: icon_id,
+                data: vec![2],
+                name: None,
+                last_modified: None,
+            },
+        ]);
+        cases.push(("duplicate custom icons", duplicate_icons));
+
+        let mut mismatched_history = Vault::empty("history UUID");
+        let mut live = Entry::new("live");
+        live.history.push(Entry::new("snapshot with another UUID"));
+        mismatched_history.root.entries.push(live);
+        cases.push(("history UUID mismatch", mismatched_history));
+
+        for (case, vault) in cases {
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key(case), &fast_profile()),
+                    Err(KdbxError::InvalidValue)
+                ),
+                "invalid graph was accepted: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_rejects_nil_optional_uuid_values_at_every_graph_level() {
+        let mut cases = Vec::new();
+
+        let mut meta = Vault::empty("meta optional UUID");
+        meta.recycle_bin_group = Some(uuid::Uuid::nil());
+        cases.push(("meta", meta));
+
+        let mut group = Vault::empty("group optional UUID");
+        group.root.previous_parent = Some(uuid::Uuid::nil());
+        cases.push(("group", group));
+
+        let mut entry = Vault::empty("entry optional UUID");
+        let mut live = Entry::new("entry");
+        live.previous_parent = Some(uuid::Uuid::nil());
+        entry.root.entries.push(live);
+        cases.push(("entry", entry));
+
+        for (case, vault) in cases {
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key(case), &fast_profile()),
+                    Err(KdbxError::InvalidValue)
+                ),
+                "nil optional UUID was accepted at {case} scope"
+            );
+        }
+    }
+
+    #[test]
+    fn previous_parent_uuid_loader_uses_the_typed_optional_matrix() {
+        let valid = uuid::Uuid::new_v4();
+        for (case, wire_value, expected) in [
+            ("empty", String::new(), None),
+            ("whitespace", " \t\n".into(), None),
+            ("nil", super::encode_uuid(uuid::Uuid::nil()), None),
+            ("valid", super::encode_uuid(valid), Some(valid)),
+        ] {
+            let mut vault = Vault::empty(case);
+            vault.root.previous_parent = Some(valid);
+            let mut entry = Entry::new("entry");
+            entry.previous_parent = Some(valid);
+            vault.root.entries.push(entry);
+            let mut xml = super::group_to_xml(
+                &vault.root,
+                &std::collections::HashMap::new(),
+                KdbxVersion::V4_1,
+            )
+            .expect("build group XML");
+            xml.get_mut_child("PreviousParentGroup")
+                .expect("group previous parent")
+                .children = vec![XMLNode::Text(wire_value.clone())];
+            xml.get_mut_child("Entry")
+                .and_then(|entry| entry.get_mut_child("PreviousParentGroup"))
+                .expect("entry previous parent")
+                .children = vec![XMLNode::Text(wire_value)];
+
+            let mut content_pool = vaultkern_model::AttachmentContentPool::new();
+            let parsed = super::parse_group(
+                &xml,
+                &[],
+                &mut content_pool,
+                &mut ProtectedStream::new_plain(),
+            )
+            .unwrap_or_else(|error| panic!("parse {case} group XML: {error:?}"));
+            assert_eq!(parsed.previous_parent, expected, "group {case}");
+            assert_eq!(parsed.entries[0].previous_parent, expected, "entry {case}");
+        }
+
+        let mut vault = Vault::empty("malformed");
+        vault.root.previous_parent = Some(valid);
+        let mut xml = super::group_to_xml(
+            &vault.root,
+            &std::collections::HashMap::new(),
+            KdbxVersion::V4_1,
+        )
+        .expect("build malformed group XML");
+        xml.get_mut_child("PreviousParentGroup")
+            .expect("group previous parent")
+            .children = vec![XMLNode::Text("not-a-uuid".into())];
+        let mut content_pool = vaultkern_model::AttachmentContentPool::new();
+        assert!(matches!(
+            super::parse_group(
+                &xml,
+                &[],
+                &mut content_pool,
+                &mut ProtectedStream::new_plain(),
+            ),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn save_rejects_optional_text_values_that_collapse_to_absence() {
+        let mut cases = Vec::new();
+        let mut generator = Vault::empty("generator");
+        generator.generator = Some(String::new());
+        cases.push(("generator", generator));
+        let mut description = Vault::empty("description");
+        description.description = Some(String::new());
+        cases.push(("description", description));
+        let mut default_username = Vault::empty("default username");
+        default_username.default_username = Some(String::new());
+        cases.push(("default username", default_username));
+        let mut color = Vault::empty("color");
+        color.color = Some(String::new());
+        cases.push(("color", color));
+        let mut icon_name = Vault::empty("icon name");
+        icon_name.custom_icons.push(CustomIcon {
+            id: uuid::Uuid::new_v4(),
+            data: vec![1],
+            name: Some(String::new()),
+            last_modified: None,
+        });
+        cases.push(("custom icon name", icon_name));
+        let mut group_sequence = Vault::empty("group sequence");
+        group_sequence.root.default_auto_type_sequence = Some(String::new());
+        cases.push(("group default sequence", group_sequence));
+
+        for (case, vault) in cases {
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key(case), &fast_profile()),
+                    Err(KdbxError::InvalidValue)
+                ),
+                "collapsible optional text was accepted: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_rejects_tags_with_ambiguous_delimiters_or_boundary_whitespace() {
+        for tag in [
+            "",
+            "one,two",
+            "one;two",
+            " leading",
+            "trailing ",
+            "\u{2003}wide",
+        ] {
+            let mut vault = Vault::empty("invalid tag");
+            vault.root.tags.insert(tag.into());
+            let mut entry = Entry::new("entry");
+            entry.tags.insert(tag.into());
+            vault.root.entries.push(entry);
+
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key("invalid-tag"), &fast_profile()),
+                    Err(KdbxError::InvalidValue)
+                ),
+                "invalid tag was accepted: {tag:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn loaded_tags_split_both_delimiters_and_trim_unicode_whitespace() {
+        assert_eq!(
+            super::parse_tags(" alpha,\u{2003}beta ; gamma ,, ; "),
+            std::collections::BTreeSet::from(["alpha".into(), "beta".into(), "gamma".into(),])
+        );
+    }
+
+    #[test]
+    fn save_rejects_unrepresentable_kdbx4_timestamps() {
+        let mut unsigned = Vault::empty("unsigned timestamp");
+        unsigned.root.times = Some(vaultkern_model::GroupTimes {
+            created_at: u64::MAX,
+            modified_at: 0,
+            expires: false,
+            expiry_time: None,
+            last_accessed_at: None,
+            usage_count: None,
+            location_changed_at: None,
+        });
+        let mut too_early = Vault::empty("early timestamp");
+        too_early.settings_changed = Some(i64::MIN);
+        let mut too_late = Vault::empty("late timestamp");
+        too_late.settings_changed = Some(i64::MAX);
+
+        for (case, vault) in [
+            ("unsigned", unsigned),
+            ("too early", too_early),
+            ("too late", too_late),
+        ] {
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key(case), &fast_profile()),
+                    Err(KdbxError::InvalidValue)
+                ),
+                "unrepresentable timestamp was accepted: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_rejects_invalid_opaque_and_custom_data_anchors() {
+        let mut dangling = Vault::empty("dangling opaque anchor");
+        let mut entry = Entry::new("entry");
+        entry.opaque_xml.push(OpaqueXmlFragment {
+            xml: "<FutureNode/>".into(),
+            after: Some(OpaqueXmlAnchor {
+                element_name: "String".into(),
+                occurrence: 99,
+            }),
+        });
+        dangling.root.entries.push(entry);
+
+        let mut known_collision = Vault::empty("known opaque collision");
+        let mut entry = Entry::new("entry");
+        entry.opaque_xml.push(OpaqueXmlFragment {
+            xml: "<Tags>shadow</Tags>".into(),
+            after: None,
+        });
+        known_collision.root.entries.push(entry);
+
+        let mut forward_block = Vault::empty("forward block anchor");
+        let mut entry = Entry::new("entry");
+        entry.custom_data.insert("key".into(), "value".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "key".into(),
+                value: "value".into(),
+                last_modified: None,
+            }],
+            after: Some(OpaqueXmlAnchor {
+                element_name: "CustomData".into(),
+                occurrence: 1,
+            }),
+        });
+        forward_block.root.entries.push(entry);
+
+        for (case, vault) in [
+            ("dangling opaque anchor", dangling),
+            ("known opaque collision", known_collision),
+            ("forward custom-data anchor", forward_block),
+        ] {
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key(case), &fast_profile()),
+                    Err(KdbxError::InvalidValue) | Err(KdbxError::Xml(_))
+                ),
+                "invalid fidelity state was accepted: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_rejects_raw_fidelity_slots_without_modeled_nodes() {
+        let mut missing_key = Vault::empty("missing keyed identity");
+        let mut entry = Entry::new("entry");
+        entry.raw_state.node_order.push("String".into());
+        entry.raw_state.string_order.push("missing".into());
+        missing_key.root.entries.push(entry);
+
+        let mut missing_singleton = Vault::empty("missing singleton");
+        let mut entry = Entry::new("entry");
+        entry.raw_state.node_order.push("CustomIconUUID".into());
+        missing_singleton.root.entries.push(entry);
+
+        for vault in [missing_key, missing_singleton] {
+            assert!(matches!(
+                save_kdbx(&vault, &test_key("raw fidelity"), &fast_profile()),
+                Err(KdbxError::InvalidValue)
+            ));
+        }
+    }
+
+    #[test]
+    fn deleted_objects_fold_latest_reject_unknown_and_write_in_uuid_order() {
+        fn deleted_element(id: uuid::Uuid, deleted_at: i64) -> Element {
+            let mut element = Element::new("DeletedObject");
+            element.children.push(XMLNode::Element(text_element(
+                "UUID",
+                &super::encode_uuid(id),
+            )));
+            element.children.push(XMLNode::Element(text_element(
+                "DeletionTime",
+                &super::datetime_text(KdbxVersion::V4_1, deleted_at),
+            )));
+            element
+        }
+
+        fn root_with_deleted(children: Vec<Element>) -> Element {
+            let mut deleted = Element::new("DeletedObjects");
+            deleted
+                .children
+                .extend(children.into_iter().map(XMLNode::Element));
+            let mut root_node = Element::new("Root");
+            root_node.children.push(XMLNode::Element(deleted));
+            let mut root = Element::new("KeePassFile");
+            root.children.push(XMLNode::Element(root_node));
+            root
+        }
+
+        let lower = uuid::Uuid::from_bytes([0x10; 16]);
+        let higher = uuid::Uuid::from_bytes([0x20; 16]);
+        let root = root_with_deleted(vec![
+            deleted_element(higher, 7),
+            deleted_element(lower, 3),
+            deleted_element(higher, 11),
+            deleted_element(lower, 3),
+        ]);
+        let parsed = super::parse_deleted_objects(&root).expect("fold tombstones");
+        assert_eq!(
+            parsed,
+            vec![
+                DeletedObject {
+                    id: lower,
+                    deleted_at: 3,
+                },
+                DeletedObject {
+                    id: higher,
+                    deleted_at: 11,
+                },
+            ]
+        );
+
+        let mut unknown = Element::new("UnknownTombstoneState");
+        unknown
+            .children
+            .push(XMLNode::Text("must not disappear".into()));
+        assert!(matches!(
+            super::parse_deleted_objects(&root_with_deleted(vec![unknown])),
+            Err(KdbxError::InvalidValue)
+        ));
+
+        let written = super::deleted_objects_to_xml(
+            &[
+                DeletedObject {
+                    id: higher,
+                    deleted_at: 11,
+                },
+                DeletedObject {
+                    id: lower,
+                    deleted_at: 3,
+                },
+            ],
+            KdbxVersion::V4_1,
+        );
+        let written_ids: Vec<_> = written
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                XMLNode::Element(child) => child_text(child, "UUID"),
+                _ => None,
+            })
+            .map(|value| super::decode_uuid(&value).expect("written UUID"))
+            .collect();
+        assert_eq!(written_ids, vec![lower, higher]);
+    }
+
+    #[test]
+    fn save_rejects_nil_or_duplicate_deleted_objects() {
+        let duplicate_id = uuid::Uuid::new_v4();
+        for (case, deleted_objects) in [
+            (
+                "nil",
+                vec![DeletedObject {
+                    id: uuid::Uuid::nil(),
+                    deleted_at: 1,
+                }],
+            ),
+            (
+                "duplicate",
+                vec![
+                    DeletedObject {
+                        id: duplicate_id,
+                        deleted_at: 1,
+                    },
+                    DeletedObject {
+                        id: duplicate_id,
+                        deleted_at: 2,
+                    },
+                ],
+            ),
+        ] {
+            let mut vault = Vault::empty(case);
+            vault.deleted_objects = deleted_objects;
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key(case), &fast_profile()),
+                    Err(KdbxError::InvalidValue)
+                ),
+                "invalid tombstones were accepted: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_rejects_standard_entry_field_names_in_custom_attributes() {
+        for field_name in ["Title", "UserName", "Password", "URL", "Notes"] {
+            let mut entry = Entry::new(format!("reserved {field_name}"));
+            entry.attributes.insert(
+                field_name.into(),
+                CustomField {
+                    value: "shadowed".into(),
+                    protected: false,
+                },
+            );
+            let mut vault = Vault::empty(field_name);
+            vault.root.entries.push(entry);
+
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key(field_name), &fast_profile()),
+                    Err(KdbxError::InvalidValue)
+                ),
+                "{field_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_rejects_entry_text_values_that_cannot_roundtrip() {
+        let mut empty_tag = Entry::new("empty tag");
+        empty_tag.tags.insert(String::new());
+
+        let mut delimited_tag = Entry::new("delimited tag");
+        delimited_tag.tags.insert("one;two".into());
+
+        let mut empty_attribute_key = Entry::new("empty attribute key");
+        empty_attribute_key.attributes.insert(
+            String::new(),
+            CustomField {
+                value: "value".into(),
+                protected: false,
+            },
+        );
+
+        let mut empty_attachment_name = Entry::new("empty attachment name");
+        empty_attachment_name.attachments.insert(
+            String::new(),
+            Attachment::new(String::new(), b"content".to_vec(), false),
+        );
+
+        let mut empty_custom_data_key = Entry::new("empty custom data key");
+        empty_custom_data_key
+            .custom_data
+            .insert(String::new(), "value".into());
+
+        let mut empty_custom_data_item_key = Entry::new("empty custom data item key");
+        empty_custom_data_item_key
+            .custom_data_blocks
+            .push(CustomDataBlock {
+                items: vec![CustomDataItem {
+                    key: String::new(),
+                    value: "value".into(),
+                    last_modified: None,
+                }],
+                after: None,
+            });
+
+        for (case, entry) in [
+            ("empty-tag", empty_tag),
+            ("delimited-tag", delimited_tag),
+            ("empty-attribute-key", empty_attribute_key),
+            ("empty-attachment-name", empty_attachment_name),
+            ("empty-custom-data-key", empty_custom_data_key),
+            ("empty-custom-data-item-key", empty_custom_data_item_key),
+        ] {
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+            assert!(matches!(
+                save_kdbx(&vault, &test_key(case), &fast_profile()),
+                Err(KdbxError::InvalidValue)
+            ));
+        }
+    }
+
+    #[test]
+    fn credential_projections_roundtrip_with_stable_canonical_content_and_times() {
+        let entry = credential_entry();
+        let expected_times = (
+            entry.created_at,
+            entry.modified_at,
+            entry.expires,
+            entry.expiry_time,
+            entry.last_accessed_at,
+            entry.usage_count,
+            entry.location_changed_at,
+        );
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("CredentialRoundtrip");
+        vault.root.entries.push(entry);
+
+        let key = test_key("credential-roundtrip");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save credentials");
+        let loaded = load_kdbx(&bytes, &key).expect("load credentials");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        for reserved_key in [
+            "otp",
+            "TimeOtp-Secret-Base32",
+            "TimeOtp-Algorithm",
+            "TimeOtp-Length",
+            "TimeOtp-Period",
+            PasskeyRecord::USERNAME_KEY,
+            PasskeyRecord::CREDENTIAL_ID_KEY,
+            PasskeyRecord::GENERATED_USER_ID_KEY,
+            PasskeyRecord::PRIVATE_KEY_PEM_KEY,
+            PasskeyRecord::RELYING_PARTY_KEY,
+            PasskeyRecord::USER_HANDLE_KEY,
+            PasskeyRecord::FLAG_BE_KEY,
+            PasskeyRecord::FLAG_BS_KEY,
+        ] {
+            assert!(
+                !loaded_entry.attributes.contains_key(reserved_key),
+                "reserved projection field leaked into custom attributes: {reserved_key}"
+            );
+        }
+        assert_eq!(
+            (
+                loaded_entry.created_at,
+                loaded_entry.modified_at,
+                loaded_entry.expires,
+                loaded_entry.expiry_time,
+                loaded_entry.last_accessed_at,
+                loaded_entry.usage_count,
+                loaded_entry.location_changed_at,
+            ),
+            expected_times
+        );
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+
+        let mut changed = loaded_entry.clone();
+        changed.totp.as_mut().expect("loaded TOTP").secret_base32 = "KRSXG5DSNFXGOIDB".into();
+        assert_eq!(changed.modified_at, loaded_entry.modified_at);
+        assert_ne!(
+            canonical_entry_bytes_v1(&changed).expect("changed canonical bytes"),
+            expected_bytes
+        );
+        assert_ne!(
+            canonical_entry_content_hash_v1(&changed).expect("changed canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn model_matrix_preserves_projection_replica_and_anchor_laws() {
+        for totp_case in 0..4 {
+            for passkey_case in 0..4 {
+                for custom_data_case in 0..3 {
+                    for anchored in [false, true] {
+                        let mut entry = Entry::new(format!(
+                            "matrix-{totp_case}-{passkey_case}-{custom_data_case}-{anchored}"
+                        ));
+                        match totp_case {
+                            0 => {}
+                            1 => {
+                                entry.totp = Some(TotpSpec {
+                                    secret_base32: "JBSWY3DPEHPK3PXP".into(),
+                                    algorithm: TotpAlgorithm::Sha256,
+                                    digits: 8,
+                                    period_seconds: 45,
+                                    issuer: Some("Matrix".into()),
+                                    account_name: Some("user@example.com".into()),
+                                });
+                            }
+                            2 => {
+                                entry.attributes.insert(
+                                    "otp".into(),
+                                    CustomField {
+                                        value: "otpauth://totp/Matrix:user%40example.com?secret=jbswy3dp%3D&issuer=Matrix&algorithm=SHA1&digits=6&period=30".into(),
+                                        protected: false,
+                                    },
+                                );
+                            }
+                            3 => {
+                                entry.attributes.insert(
+                                    "HmacOtp-Secret-Hex".into(),
+                                    CustomField {
+                                        value: "deadbeef".into(),
+                                        protected: false,
+                                    },
+                                );
+                                entry.attributes.insert(
+                                    "HmacOtp-Counter".into(),
+                                    CustomField {
+                                        value: "7".into(),
+                                        protected: false,
+                                    },
+                                );
+                            }
+                            _ => unreachable!(),
+                        }
+                        match passkey_case {
+                            0 => {}
+                            1 => {
+                                entry.passkey = Some(PasskeyRecord {
+                                    username: "matrix-user".into(),
+                                    credential_id: "Y3JlZGVudGlhbA".into(),
+                                    generated_user_id: None,
+                                    private_key_pem: "-----BEGIN PRIVATE KEY-----\nYWJj\n-----END PRIVATE KEY-----\n".into(),
+                                    relying_party: "example.com".into(),
+                                    user_handle: Some("aGFuZGxl".into()),
+                                    backup_eligible: true,
+                                    backup_state: false,
+                                });
+                            }
+                            2 => {
+                                for (key, value) in [
+                                    (PasskeyRecord::USERNAME_KEY, "matrix-user"),
+                                    (PasskeyRecord::CREDENTIAL_ID_KEY, "credential"),
+                                    (PasskeyRecord::PRIVATE_KEY_PEM_KEY, "private-key"),
+                                    (PasskeyRecord::RELYING_PARTY_KEY, "example.com"),
+                                    (PasskeyRecord::FLAG_BE_KEY, "true"),
+                                    (PasskeyRecord::FLAG_BS_KEY, "0"),
+                                ] {
+                                    entry.attributes.insert(
+                                        key.into(),
+                                        CustomField {
+                                            value: value.into(),
+                                            protected: false,
+                                        },
+                                    );
+                                }
+                            }
+                            3 => {
+                                entry.attributes.insert(
+                                    PasskeyRecord::PRIVATE_KEY_PEM_KEY.into(),
+                                    CustomField {
+                                        value: "future-private-key".into(),
+                                        protected: false,
+                                    },
+                                );
+                                entry.attributes.insert(
+                                    PasskeyRecord::FLAG_BE_KEY.into(),
+                                    CustomField {
+                                        value: "future".into(),
+                                        protected: false,
+                                    },
+                                );
+                            }
+                            _ => unreachable!(),
+                        }
+                        match custom_data_case {
+                            0 => {}
+                            1 => {
+                                entry.custom_data.insert("scope".into(), "one".into());
+                                entry.custom_data_blocks.push(CustomDataBlock {
+                                    items: vec![CustomDataItem {
+                                        key: "scope".into(),
+                                        value: "one".into(),
+                                        last_modified: None,
+                                    }],
+                                    after: None,
+                                });
+                            }
+                            2 => {
+                                entry.custom_data = BTreeMap::from([
+                                    ("scope".into(), "new".into()),
+                                    ("stable".into(), "value".into()),
+                                ]);
+                                entry.custom_data_blocks = vec![
+                                    CustomDataBlock {
+                                        items: vec![CustomDataItem {
+                                            key: "scope".into(),
+                                            value: "old".into(),
+                                            last_modified: None,
+                                        }],
+                                        after: None,
+                                    },
+                                    CustomDataBlock {
+                                        items: vec![
+                                            CustomDataItem {
+                                                key: "scope".into(),
+                                                value: "new".into(),
+                                                last_modified: None,
+                                            },
+                                            CustomDataItem {
+                                                key: "stable".into(),
+                                                value: "value".into(),
+                                                last_modified: None,
+                                            },
+                                        ],
+                                        after: Some(OpaqueXmlAnchor {
+                                            element_name: "CustomData".into(),
+                                            occurrence: 1,
+                                        }),
+                                    },
+                                ];
+                            }
+                            _ => unreachable!(),
+                        }
+                        if anchored {
+                            entry.opaque_xml.push(OpaqueXmlFragment {
+                                xml: "<MatrixOpaque />".into(),
+                                after: Some(OpaqueXmlAnchor {
+                                    element_name: "Times".into(),
+                                    occurrence: 1,
+                                }),
+                            });
+                        }
+
+                        let expected_canonical =
+                            canonical_entry_bytes_v1(&entry).expect("matrix canonical bytes");
+                        let expected_blocks = entry.custom_data_blocks.clone();
+                        let mut vault = Vault::empty("matrix");
+                        vault.root.entries.push(entry);
+                        let key = test_key("model-matrix");
+                        let bytes = save_kdbx(&vault, &key, &fast_profile())
+                            .expect("save valid matrix state");
+                        let loaded = load_kdbx(&bytes, &key).expect("load valid matrix state");
+                        let loaded_entry = &loaded.root.entries[0];
+
+                        assert_eq!(
+                            canonical_entry_bytes_v1(loaded_entry)
+                                .expect("loaded matrix canonical bytes"),
+                            expected_canonical
+                        );
+                        assert_eq!(loaded_entry.custom_data_blocks, expected_blocks);
+                        assert_eq!(loaded_entry.opaque_xml.len(), usize::from(anchored));
+                        if anchored {
+                            assert_eq!(
+                                loaded_entry.opaque_xml[0].after,
+                                Some(OpaqueXmlAnchor {
+                                    element_name: "Times".into(),
+                                    occurrence: 1,
+                                })
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn totp_label_edge_cases_roundtrip_with_stable_canonical_content() {
+        for (case, issuer, account_name) in [
+            ("leading-space-account", "Issuer", " alice"),
+            ("encoded-colons", "Issuer:Prod", "account:west"),
+        ] {
+            let mut entry = credential_entry();
+            let totp = entry.totp.as_mut().expect("credential TOTP");
+            totp.issuer = Some(issuer.into());
+            totp.account_name = Some(account_name.into());
+            let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+            let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+
+            let key = test_key(case);
+            let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save credentials");
+            let loaded = load_kdbx(&bytes, &key).expect("load credentials");
+            let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+            assert_eq!(
+                loaded_entry
+                    .totp
+                    .as_ref()
+                    .and_then(|totp| totp.account_name.as_deref()),
+                Some(account_name),
+                "account name changed for {case}"
+            );
+            assert_eq!(
+                canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+                expected_bytes,
+                "canonical bytes changed for {case}"
+            );
+            assert_eq!(
+                canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+                expected_hash,
+                "canonical hash changed for {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn persistence_rejects_noninvertible_structured_totp_states() {
+        let key = test_key("invalid-structured-totp");
+        for (case, mutate) in [
+            ("missing-account", 0_u8),
+            ("empty-account", 1),
+            ("empty-secret", 2),
+            ("empty-issuer", 3),
+            ("colon-account-without-issuer", 4),
+        ] {
+            let mut entry = credential_entry();
+            let totp = entry.totp.as_mut().expect("credential TOTP");
+            match mutate {
+                0 => totp.account_name = None,
+                1 => totp.account_name = Some(String::new()),
+                2 => totp.secret_base32.clear(),
+                3 => totp.issuer = Some(String::new()),
+                4 => {
+                    totp.issuer = None;
+                    totp.account_name = Some("account:west".into());
+                }
+                _ => unreachable!(),
+            }
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+
+            assert!(matches!(
+                save_kdbx(&vault, &key, &fast_profile()),
+                Err(KdbxError::InvalidValue)
+            ));
+        }
+    }
+
+    #[test]
+    fn persistence_rejects_missing_required_entry_time_state() {
+        let key = test_key("invalid-entry-times");
+        let mut missing_location = credential_entry();
+        missing_location.location_changed_at = None;
+        let mut vault = Vault::empty("missing location");
+        vault.root.entries.push(missing_location);
+        assert!(matches!(
+            save_kdbx(&vault, &key, &fast_profile()),
+            Err(KdbxError::InvalidValue)
+        ));
+
+        let mut missing_expiry = credential_entry();
+        missing_expiry.expiry_time = None;
+        let mut vault = Vault::empty("missing expiry");
+        vault.root.entries.push(missing_expiry);
+        assert!(matches!(
+            save_kdbx(&vault, &key, &fast_profile()),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn absent_optional_entry_elements_remain_absent_while_location_becomes_epoch() {
+        fn remove_options(entry: &mut Element) {
+            entry.children.retain(|child| {
+                !matches!(child, XMLNode::Element(element) if element.name == "IconID" || element.name == "AutoType")
+            });
+            let times = entry
+                .children
+                .iter_mut()
+                .find_map(|child| match child {
+                    XMLNode::Element(element) if element.name == "Times" => Some(element),
+                    _ => None,
+                })
+                .expect("times");
+            times.children.retain(|child| {
+                !matches!(child, XMLNode::Element(element) if matches!(element.name.as_str(), "ExpiryTime" | "LastAccessTime" | "UsageCount" | "LocationChanged"))
+            });
+        }
+
+        let mut entry = Entry::new("entry");
+        let mut history = Entry::new("history");
+        history.id = entry.id;
+        entry.history.push(history);
+        let mut vault = Vault::empty("absent entry options");
+        vault.root.entries.push(entry);
+        let key = test_key("absent-entry-options");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save source");
+        let without_options = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            remove_options(entry);
+            let history = entry
+                .get_mut_child("History")
+                .expect("history")
+                .get_mut_child("Entry")
+                .expect("history entry");
+            remove_options(history);
+        })
+        .expect("remove optional elements");
+
+        let loaded = load_kdbx(&without_options, &key).expect("load absent options");
+        let entry = &loaded.root.entries[0];
+        for candidate in [entry, &entry.history[0]] {
+            assert_eq!(candidate.icon_id, None);
+            assert_eq!(candidate.auto_type, None);
+            assert_eq!(candidate.expiry_time, None);
+            assert_eq!(candidate.last_accessed_at, None);
+            assert_eq!(candidate.usage_count, None);
+            assert_eq!(candidate.location_changed_at, Some(0));
+        }
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("rewrite absent options");
+        let reloaded = load_kdbx(&rewritten, &key).expect("reload absent options");
+        assert_eq!(reloaded.root.entries[0], *entry);
+    }
+
+    #[test]
+    fn ordinary_saves_refresh_physical_encryption_material_but_not_kdf_state() {
+        let key = test_key("fresh-physical-state");
+        let first = save_kdbx(&Vault::empty("fresh physical state"), &key, &fast_profile())
+            .expect("first save");
+        let loaded = load_kdbx(&first, &key).expect("load first save");
+        let second =
+            save_kdbx(&loaded, &key, &SaveProfile::recommended()).expect("ordinary second save");
+        let first_header = KdbxHeader::decode(&first).expect("first header");
+        let second_header = KdbxHeader::decode(&second).expect("second header");
+
+        assert_eq!(
+            first_header.kdf_parameters.encode().expect("first KDF"),
+            second_header.kdf_parameters.encode().expect("second KDF")
+        );
+        assert_ne!(first_header.master_seed, second_header.master_seed);
+        assert_ne!(first_header.encryption_iv, second_header.encryption_iv);
+        assert_ne!(
+            extract_kdbx4_inner_key(&first, &key).expect("first inner key"),
+            extract_kdbx4_inner_key(&second, &key).expect("second inner key")
+        );
+    }
+
+    #[test]
+    fn ordinary_save_reemits_unknown_kdf_entries_verbatim_until_explicit_change() {
+        fn push_entry(encoded: &mut Vec<u8>, kind: u8, key: &str, value: &[u8]) {
+            encoded.push(kind);
+            encoded.extend((key.len() as i32).to_le_bytes());
+            encoded.extend(key.as_bytes());
+            encoded.extend((value.len() as i32).to_le_bytes());
+            encoded.extend(value);
+        }
+
+        let mut retained = 0x0100_u16.to_le_bytes().to_vec();
+        push_entry(&mut retained, 0x42, "S", &[0x5a; 32]);
+        push_entry(&mut retained, 0x77, "X-Future", &[0xde, 0xad]);
+        push_entry(
+            &mut retained,
+            0x42,
+            "$UUID",
+            super::KDF_AES_KDBX4_UUID.as_bytes(),
+        );
+        push_entry(&mut retained, 0x05, "R", &1_u64.to_le_bytes());
+        retained.push(0);
+
+        let key = test_key("unknown-kdf-entry");
+        let mut vault = Vault::empty("unknown KDF entry");
+        vault.kdf_parameters = Some(retained.clone());
+        let ordinary = save_kdbx(&vault, &key, &SaveProfile::recommended())
+            .expect("ordinary save with retained dictionary");
+        let ordinary_header = KdbxHeader::decode(&ordinary).expect("ordinary header");
+        assert_eq!(
+            ordinary_header
+                .kdf_parameters
+                .encode()
+                .expect("ordinary KDF"),
+            retained
+        );
+
+        let explicit = save_kdbx(&vault, &key, &fast_profile()).expect("explicit KDF change");
+        let explicit_header = KdbxHeader::decode(&explicit).expect("explicit header");
+        let explicit_kdf = explicit_header
+            .kdf_parameters
+            .encode()
+            .expect("explicit KDF");
+        assert_ne!(explicit_kdf, retained);
+        assert!(explicit_header.kdf_parameters.get("X-Future").is_none());
+    }
+
+    #[test]
+    fn ordinary_save_reemits_argon2_version_and_unknown_entries_verbatim() {
+        fn push_entry(encoded: &mut Vec<u8>, kind: u8, key: &str, value: &[u8]) {
+            encoded.push(kind);
+            encoded.extend((key.len() as i32).to_le_bytes());
+            encoded.extend(key.as_bytes());
+            encoded.extend((value.len() as i32).to_le_bytes());
+            encoded.extend(value);
+        }
+
+        let mut retained = 0x0100_u16.to_le_bytes().to_vec();
+        push_entry(&mut retained, 0x04, "V", &0x13_u32.to_le_bytes());
+        push_entry(&mut retained, 0x77, "X-Future", &[0xde, 0xad]);
+        push_entry(&mut retained, 0x05, "M", &(8 * 1024_u64).to_le_bytes());
+        push_entry(&mut retained, 0x42, "S", &[0x5a; 32]);
+        push_entry(&mut retained, 0x04, "P", &1_u32.to_le_bytes());
+        push_entry(
+            &mut retained,
+            0x42,
+            "$UUID",
+            super::KDF_ARGON2ID_UUID.as_bytes(),
+        );
+        push_entry(&mut retained, 0x05, "I", &1_u64.to_le_bytes());
+        retained.push(0);
+
+        let key = test_key("argon-version");
+        let mut vault = Vault::empty("Argon version");
+        vault.kdf_parameters = Some(retained.clone());
+        let bytes = save_kdbx(&vault, &key, &SaveProfile::recommended())
+            .expect("ordinary save with retained Argon2 dictionary");
+        let header = KdbxHeader::decode(&bytes).expect("ordinary header");
+
+        assert_eq!(
+            header.kdf_parameters.encode().expect("ordinary KDF"),
+            retained
+        );
+        load_kdbx(&bytes, &key).expect("retained Argon2 output decrypts");
+    }
+
+    #[test]
+    fn whitespace_optional_entry_values_map_to_none_without_losing_text_children() {
+        fn blank_options(entry: &mut Element) {
+            let set_blank = |element: &mut Element| {
+                element.children.clear();
+                element.children.push(XMLNode::Text(" \n ".into()));
+            };
+            let icon = entry.get_mut_child("IconID").expect("icon ID");
+            set_blank(icon);
+            let times = entry.get_mut_child("Times").expect("times");
+            for name in [
+                "ExpiryTime",
+                "LastAccessTime",
+                "UsageCount",
+                "LocationChanged",
+            ] {
+                set_blank(times.get_mut_child(name).expect("optional time"));
+            }
+            let auto_type = entry.get_mut_child("AutoType").expect("auto type");
+            auto_type
+                .children
+                .push(XMLNode::Element(text_element("Enabled", " \n ")));
+            auto_type.children.push(XMLNode::Element(text_element(
+                "DataTransferObfuscation",
+                " \n ",
+            )));
+            auto_type.children.push(XMLNode::Element(text_element(
+                "DefaultSequence",
+                " {USERNAME} ",
+            )));
+        }
+
+        let mut entry = Entry::new("entry");
+        let mut history = Entry::new("history");
+        history.id = entry.id;
+        entry.history.push(history);
+        let mut vault = Vault::empty("blank entry options");
+        vault.root.entries.push(entry);
+        let key = test_key("blank-entry-options");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save source");
+        let blank_options = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            blank_options(entry);
+            let history = entry
+                .get_mut_child("History")
+                .expect("history")
+                .get_mut_child("Entry")
+                .expect("history entry");
+            blank_options(history);
+        })
+        .expect("blank optional elements");
+
+        let loaded = load_kdbx(&blank_options, &key).expect("load blank options");
+        let entry = &loaded.root.entries[0];
+        for candidate in [entry, &entry.history[0]] {
+            assert_eq!(candidate.icon_id, None);
+            assert_eq!(candidate.expiry_time, None);
+            assert_eq!(candidate.last_accessed_at, None);
+            assert_eq!(candidate.usage_count, None);
+            assert_eq!(candidate.location_changed_at, Some(0));
+            let auto_type = candidate.auto_type.as_ref().expect("present auto type");
+            assert_eq!(auto_type.enabled, None);
+            assert_eq!(auto_type.obfuscation, None);
+            assert_eq!(auto_type.default_sequence.as_deref(), Some(" {USERNAME} "));
+        }
+    }
+
+    #[test]
+    fn present_empty_auto_type_maps_to_some_default_for_current_and_history_entries() {
+        let mut entry = Entry::new("entry");
+        let mut history = Entry::new("history");
+        history.id = entry.id;
+        entry.history.push(history);
+
+        let mut vault = Vault::empty("empty auto type");
+        vault.root.entries.push(entry);
+        let key = test_key("empty-auto-type");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save source");
+        let empty_auto_types = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            entry
+                .get_mut_child("AutoType")
+                .expect("current auto type")
+                .children
+                .clear();
+            entry
+                .get_mut_child("History")
+                .expect("history")
+                .get_mut_child("Entry")
+                .expect("history entry")
+                .get_mut_child("AutoType")
+                .expect("history auto type")
+                .children
+                .clear();
+        })
+        .expect("empty auto type containers");
+
+        let loaded = load_kdbx(&empty_auto_types, &key).expect("load empty auto types");
+        let entry = &loaded.root.entries[0];
+        assert_eq!(entry.auto_type, Some(AutoTypeConfig::default()));
+        assert_eq!(entry.history[0].auto_type, Some(AutoTypeConfig::default()));
+
+        let rewritten = save_kdbx(&loaded, &key, &SaveProfile::recommended())
+            .expect("rewrite empty auto types");
+        let reloaded = load_kdbx(&rewritten, &key).expect("reload empty auto types");
+        assert_eq!(reloaded.root.entries[0].auto_type, entry.auto_type);
+        assert_eq!(
+            reloaded.root.entries[0].history[0].auto_type,
+            entry.history[0].auto_type
+        );
+    }
+
+    #[test]
+    fn model_created_map_only_custom_data_is_rejected_as_unpersistable() {
+        let mut entry = Entry::new("map-only-custom-data");
+        entry
+            .custom_data
+            .insert("model-key".into(), "model-value".into());
+        let mut vault = Vault::empty("map-only-custom-data");
+        vault.root.entries.push(entry);
+        let key = test_key("map-only-custom-data");
+
+        assert!(matches!(
+            save_kdbx(&vault, &key, &fast_profile()),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn unprojectable_totp_source_attributes_keep_canonical_content_after_roundtrip() {
+        let mut entry = Entry::new("unmodeled-totp-source");
+        entry.attributes.insert(
+            "otp".into(),
+            CustomField {
+                value: "not-an-otpauth-uri".into(),
+                protected: false,
+            },
+        );
+        entry.attributes.insert(
+            "TimeOtp-Period".into(),
+            CustomField {
+                value: "45".into(),
+                protected: false,
+            },
+        );
+        entry.attributes.insert(
+            "ordinary".into(),
+            CustomField {
+                value: "kept".into(),
+                protected: false,
+            },
+        );
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("unmodeled-totp-source");
+        vault.root.entries.push(entry);
+        let key = test_key("unmodeled-totp-source");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.totp, None);
+        assert_eq!(loaded_entry.attributes.len(), 3);
+        assert_eq!(loaded_entry.attributes["otp"].value, "not-an-otpauth-uri");
+        assert!(loaded_entry.attributes["otp"].protected);
+        assert_eq!(loaded_entry.attributes["TimeOtp-Period"].value, "45");
+        assert_eq!(loaded_entry.attributes["ordinary"].value, "kept");
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn lossy_otpauth_query_shapes_survive_kdbx_roundtrip_verbatim() {
+        for (case, uri) in [
+            (
+                "unknown-query",
+                "otpauth://totp/alice?secret=SECRET&image=logo.png",
+            ),
+            (
+                "duplicate-query",
+                "otpauth://totp/alice?secret=SECRET&secret=OTHER",
+            ),
+            (
+                "missing-equals",
+                "otpauth://totp/alice?secret=SECRET&issuer",
+            ),
+            (
+                "empty-query-component",
+                "otpauth://totp/alice?secret=SECRET&&period=30",
+            ),
+            ("invalid-query-utf8", "otpauth://totp/alice?secret=%FF"),
+        ] {
+            let mut entry = Entry::new(case);
+            entry.attributes.insert(
+                "otp".into(),
+                CustomField {
+                    value: uri.into(),
+                    protected: false,
+                },
+            );
+            let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+            let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+            let key = test_key(case);
+
+            let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save raw URI");
+            let loaded = load_kdbx(&bytes, &key).expect("load raw URI");
+            let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+            assert_eq!(loaded_entry.totp, None, "projected {case}");
+            assert_eq!(loaded_entry.attributes["otp"].value, uri, "URI for {case}");
+            assert!(
+                loaded_entry.attributes["otp"].protected,
+                "protection for {case}"
+            );
+            assert_eq!(
+                canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+                expected_bytes,
+                "bytes for {case}"
+            );
+            assert_eq!(
+                canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+                expected_hash,
+                "hash for {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_and_malformed_discrete_totp_sources_survive_roundtrip_verbatim() {
+        let cases = [
+            (
+                "conflicting-secret",
+                vec![
+                    (
+                        "otp",
+                        "otpauth://totp/alice?secret=URISECRET&algorithm=SHA256&digits=8&period=45",
+                    ),
+                    ("TimeOtp-Secret-Base32", "DIFFERENT"),
+                    ("TimeOtp-Algorithm", "HMAC-SHA-256"),
+                    ("TimeOtp-Length", "8"),
+                    ("TimeOtp-Period", "45"),
+                ],
+            ),
+            (
+                "malformed-algorithm",
+                vec![
+                    ("TimeOtp-Secret-Base32", "SECRET"),
+                    ("TimeOtp-Algorithm", "MD5"),
+                ],
+            ),
+            (
+                "malformed-length",
+                vec![
+                    ("TimeOtp-Secret-Base32", "SECRET"),
+                    ("TimeOtp-Length", "six"),
+                ],
+            ),
+            (
+                "malformed-period",
+                vec![
+                    ("TimeOtp-Secret-Base32", "SECRET"),
+                    ("TimeOtp-Period", "thirty"),
+                ],
+            ),
+        ];
+
+        for (case, fields) in cases {
+            let mut entry = Entry::new(case);
+            for (key, value) in &fields {
+                entry.attributes.insert(
+                    (*key).into(),
+                    CustomField {
+                        value: (*value).into(),
+                        protected: key == &"otp" || key == &"TimeOtp-Secret-Base32",
+                    },
+                );
+            }
+            let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+            let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+            let key = test_key(case);
+
+            let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save raw TOTP");
+            let loaded = load_kdbx(&bytes, &key).expect("load raw TOTP");
+            let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+            assert_eq!(loaded_entry.totp, None, "projected {case}");
+            for (field_key, value) in fields {
+                assert_eq!(
+                    loaded_entry.attributes[field_key].value, value,
+                    "value for {case}/{field_key}"
+                );
+            }
+            assert_eq!(
+                canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+                expected_bytes,
+                "bytes for {case}"
+            );
+            assert_eq!(
+                canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+                expected_hash,
+                "hash for {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn alternate_and_hotp_sources_survive_kdbx_roundtrip_verbatim() {
+        let mut entry = Entry::new("raw OTP namespace");
+        for (key, value) in [
+            ("TimeOtp-Secret", "alternate-secret"),
+            ("TimeOtp-Secret-Hex", "616c7465726e617465"),
+            ("TimeOtp-Secret-Base64", "YWx0ZXJuYXRl"),
+            ("HmacOtp-Secret", "hotp-secret"),
+            ("HmacOtp-Secret-Hex", "686f7470"),
+            ("HmacOtp-Secret-Base32", "NBUHI4A"),
+            ("HmacOtp-Secret-Base64", "aG90cA=="),
+            ("HmacOtp-Counter", "42"),
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected: false,
+                },
+            );
+        }
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("raw OTP namespace");
+        vault.root.entries.push(entry);
+        let key = test_key("raw-otp-namespace");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save raw OTP");
+        let loaded = load_kdbx(&bytes, &key).expect("load raw OTP");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.totp, None);
+        assert_eq!(loaded_entry.attributes.len(), 8);
+        for field in loaded_entry.attributes.values() {
+            assert!(field.protected);
+        }
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn invalid_passkey_flags_survive_kdbx_roundtrip_verbatim() {
+        let mut entry = Entry::new("invalid passkey flag");
+        for (key, value) in [
+            (PasskeyRecord::USERNAME_KEY, "alice"),
+            (PasskeyRecord::CREDENTIAL_ID_KEY, "credential"),
+            (PasskeyRecord::PRIVATE_KEY_PEM_KEY, "private-key"),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com"),
+            (PasskeyRecord::FLAG_BE_KEY, "yes"),
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected: false,
+                },
+            );
+        }
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("invalid passkey flag");
+        vault.root.entries.push(entry);
+        let key = test_key("invalid-passkey-flag");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save raw passkey");
+        let loaded = load_kdbx(&bytes, &key).expect("load raw passkey");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.passkey, None);
+        assert_eq!(
+            loaded_entry.attributes[PasskeyRecord::FLAG_BE_KEY].value,
+            "yes"
+        );
+        assert!(loaded_entry.attributes[PasskeyRecord::CREDENTIAL_ID_KEY].protected);
+        assert!(loaded_entry.attributes[PasskeyRecord::PRIVATE_KEY_PEM_KEY].protected);
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn save_rejects_nested_entry_history_for_every_write_version() {
+        let mut snapshot = Entry::new("snapshot");
+        snapshot.history.push(Entry::new("nested snapshot"));
+        let mut live = Entry::new("live");
+        live.history.push(snapshot);
+        let mut vault = Vault::empty("nested history");
+        vault.root.entries.push(live);
+
+        for version in [KdbxVersion::V4_0, KdbxVersion::V4_1] {
+            let mut profile = fast_profile();
+            profile.version = version;
+            assert!(
+                matches!(
+                    save_kdbx(&vault, &test_key("nested-history"), &profile),
+                    Err(KdbxError::InvalidValue)
+                ),
+                "nested history was accepted for {version:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_unprojected_passkey_attributes_keep_canonical_content_after_roundtrip() {
+        let mut entry = Entry::new("unprojected-passkey-source");
+        for (key, value) in [
+            (PasskeyRecord::USERNAME_KEY, "alice"),
+            (PasskeyRecord::CREDENTIAL_ID_KEY, "credential"),
+            (PasskeyRecord::PRIVATE_KEY_PEM_KEY, "private-key"),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com"),
+        ] {
+            entry.attributes.insert(
+                key.into(),
+                CustomField {
+                    value: value.into(),
+                    protected: false,
+                },
+            );
+        }
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("unprojected-passkey-source");
+        vault.root.entries.push(entry);
+        let key = test_key("unprojected-passkey-source");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert!(loaded_entry.passkey.is_some());
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn incomplete_sensitive_passkey_attribute_keeps_canonical_content_after_roundtrip() {
+        let mut entry = Entry::new("incomplete-passkey-source");
+        entry.attributes.insert(
+            PasskeyRecord::CREDENTIAL_ID_KEY.into(),
+            CustomField {
+                value: "credential".into(),
+                protected: false,
+            },
+        );
+        let expected_bytes = canonical_entry_bytes_v1(&entry).expect("canonical bytes");
+        let expected_hash = canonical_entry_content_hash_v1(&entry).expect("canonical hash");
+        let mut vault = Vault::empty("incomplete-passkey-source");
+        vault.root.entries.push(entry);
+        let key = test_key("incomplete-passkey-source");
+
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save entry");
+        let loaded = load_kdbx(&bytes, &key).expect("load entry");
+        let loaded_entry = loaded.root.entries.first().expect("loaded entry");
+
+        assert_eq!(loaded_entry.passkey, None);
+        assert!(loaded_entry.attributes[PasskeyRecord::CREDENTIAL_ID_KEY].protected);
+        assert_eq!(
+            canonical_entry_bytes_v1(loaded_entry).expect("loaded canonical bytes"),
+            expected_bytes
+        );
+        assert_eq!(
+            canonical_entry_content_hash_v1(loaded_entry).expect("loaded canonical hash"),
+            expected_hash
+        );
+    }
+
+    #[test]
+    fn imported_standard_otpauth_labels_materialize_stably() {
+        for (case, uri, expected_issuer, expected_account) in [
+            (
+                "unprefixed-account",
+                "otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP",
+                None,
+                "alice",
+            ),
+            (
+                "unprefixed-account-matching-issuer",
+                "otpauth://totp/GitHub?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
+                Some("GitHub"),
+                "GitHub",
+            ),
+            (
+                "encoded-separator",
+                "otpauth://totp/Example%3Aalice?secret=JBSWY3DPEHPK3PXP&issuer=Example",
+                Some("Example"),
+                "alice",
+            ),
+            (
+                "label-only-issuer",
+                "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP",
+                Some("Example"),
+                "alice",
+            ),
+        ] {
+            let mut entry = Entry::new("Fallback Issuer");
+            entry.username = "fallback-account".into();
+            entry.attributes.insert(
+                "otp".into(),
+                CustomField {
+                    value: uri.into(),
+                    protected: true,
+                },
+            );
+            let mut vault = Vault::empty(case);
+            vault.root.entries.push(entry);
+            let key = test_key(case);
+
+            let imported_bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save import");
+            let imported = load_kdbx(&imported_bytes, &key).expect("load import");
+            let imported_entry = imported.root.entries.first().expect("imported entry");
+            let imported_totp = imported_entry.totp.as_ref().expect("imported TOTP");
+            assert_eq!(imported_totp.issuer.as_deref(), expected_issuer, "{case}");
+            assert_eq!(
+                imported_totp.account_name.as_deref(),
+                Some(expected_account),
+                "{case}"
+            );
+            let expected_bytes =
+                canonical_entry_bytes_v1(imported_entry).expect("imported canonical bytes");
+
+            let rewritten = save_kdbx(&imported, &key, &fast_profile()).expect("rewrite import");
+            let reloaded = load_kdbx(&rewritten, &key).expect("reload import");
+            let reloaded_entry = reloaded.root.entries.first().expect("reloaded entry");
+            assert_eq!(
+                canonical_entry_bytes_v1(reloaded_entry).expect("reloaded canonical bytes"),
+                expected_bytes,
+                "canonical bytes changed for {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_projection_writer_fields_are_exact() {
+        let entry = credential_entry();
+        let xml = super::entry_to_xml(
+            &entry,
+            &std::collections::HashMap::new(),
+            false,
+            KdbxVersion::V4_1,
+        )
+        .expect("build entry XML");
+        let fields = projection_string_fields(&xml);
+        let expected = [
+            (PasskeyRecord::USERNAME_KEY, "alice@example.com", None),
+            (
+                PasskeyRecord::CREDENTIAL_ID_KEY,
+                "credential-1",
+                Some("True"),
+            ),
+            (PasskeyRecord::GENERATED_USER_ID_KEY, "generated-1", None),
+            (
+                PasskeyRecord::PRIVATE_KEY_PEM_KEY,
+                "-----BEGIN PRIVATE KEY-----\nkey-1\n-----END PRIVATE KEY-----",
+                Some("True"),
+            ),
+            (PasskeyRecord::RELYING_PARTY_KEY, "example.com", None),
+            (
+                PasskeyRecord::USER_HANDLE_KEY,
+                "user-handle-1",
+                Some("True"),
+            ),
+            (PasskeyRecord::FLAG_BE_KEY, "1", None),
+            (PasskeyRecord::FLAG_BS_KEY, "0", None),
+            (
+                "otp",
+                "otpauth://totp/Example%20Inc:alice%2Bprod%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example%20Inc&algorithm=SHA256&digits=8&period=45",
+                Some("True"),
+            ),
+            ("TimeOtp-Secret-Base32", "JBSWY3DPEHPK3PXP", Some("True")),
+            ("TimeOtp-Algorithm", "HMAC-SHA-256", None),
+            ("TimeOtp-Length", "8", None),
+            ("TimeOtp-Period", "45", None),
+        ];
+
+        assert_eq!(fields.len(), expected.len());
+        for (key, value, protected) in expected {
+            assert_eq!(
+                fields.get(key).map(|(actual_value, actual_protected)| {
+                    (actual_value.as_str(), actual_protected.as_deref())
+                }),
+                Some((value, protected)),
+                "unexpected persistent field: {key}"
+            );
+        }
+    }
+
     #[test]
     fn loaded_entry_with_history_accepts_new_protected_totp_and_custom_field() {
         let mut vault = Vault::empty("ProtectedHistoryMutation");
         let mut entry = Entry::new("Live");
         entry.password = "live-password".into();
         let mut history = Entry::new("History");
+        history.id = entry.id;
         history.password = "history-password".into();
         entry.history.push(history);
         vault.root.entries.push(entry);
@@ -5155,6 +8957,7 @@ mod compatibility_tests {
         let mut entry = Entry::new("Live");
         entry.password = "live-secret".into();
         let mut history = Entry::new("History");
+        history.id = entry.id;
         history.password = "history-secret".into();
         entry.history.push(history);
         entry.raw_state.node_order = vec![
@@ -5168,6 +8971,13 @@ mod compatibility_tests {
             "String".into(),
             "String".into(),
             "AutoType".into(),
+        ];
+        entry.raw_state.string_order = vec![
+            "Title".into(),
+            "UserName".into(),
+            "Password".into(),
+            "URL".into(),
+            "Notes".into(),
         ];
         vault.root.entries.push(entry);
 
@@ -5192,6 +9002,8 @@ mod compatibility_tests {
         child.entries.push(child_entry);
         vault.root.children.push(child);
         vault.root.raw_state.node_order = vec!["Group".into(), "Entry".into()];
+        vault.root.raw_state.group_order = vec![vault.root.children[0].id];
+        vault.root.raw_state.entry_order = vec![vault.root.entries[0].id];
 
         let key = test_key("mixed-group-order");
         let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save mixed group order");
@@ -5210,6 +9022,7 @@ mod compatibility_tests {
         let mut root_entry = Entry::new("Root entry");
         root_entry.password = "root-entry-secret".into();
         let mut history = Entry::new("History");
+        history.id = root_entry.id;
         history.password = "history-secret".into();
         root_entry.history.push(history);
         root_entry.raw_state.node_order = vec!["History".into(), "String".into()];
@@ -5249,6 +9062,7 @@ mod compatibility_tests {
         let mut entry = Entry::new("Live");
         entry.password = "live-secret".into();
         let mut history = Entry::new("History");
+        history.id = entry.id;
         history.password = "history-secret".into();
         entry.history.push(history);
         vault.root.entries.push(entry);
@@ -5295,7 +9109,9 @@ mod compatibility_tests {
     fn new_known_node_name_uses_its_canonical_neighbor() {
         let mut vault = Vault::empty("NewKnownNodePlacement");
         let mut entry = Entry::new("Live");
-        entry.history.push(Entry::new("History"));
+        let mut history = Entry::new("History");
+        history.id = entry.id;
+        entry.history.push(history);
         vault.root.entries.push(entry);
 
         let key = test_key("new-known-node-placement");
@@ -5331,6 +9147,14 @@ mod compatibility_tests {
         let mut vault = Vault::empty("KnownBad");
         let mut entry = Entry::new("Legacy");
         entry.custom_data.insert("KnownBad".into(), "True".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "KnownBad".into(),
+                value: "True".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
         vault.root.entries.push(entry);
 
         let key = test_key("known-bad");
@@ -5356,6 +9180,34 @@ mod compatibility_tests {
 
         assert_eq!(child_text(entry, "QualityCheck").as_deref(), Some("False"));
         assert!(!xml.contains("<Key>KnownBad</Key>"));
+    }
+
+    #[test]
+    fn unrecognized_known_bad_value_remains_ordinary_custom_data() {
+        let mut vault = Vault::empty("UnknownKnownBad");
+        let mut entry = Entry::new("Legacy");
+        entry.custom_data.insert("KnownBad".into(), "maybe".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "KnownBad".into(),
+                value: "maybe".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
+        vault.root.entries.push(entry);
+
+        let key = test_key("unknown-known-bad");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save custom data");
+        let loaded = load_kdbx(&bytes, &key).expect("load custom data");
+        let loaded_entry = &loaded.root.entries[0];
+
+        assert!(!loaded_entry.exclude_from_reports);
+        assert_eq!(
+            loaded_entry.custom_data.get("KnownBad").map(String::as_str),
+            Some("maybe")
+        );
+        assert_eq!(loaded_entry.custom_data_blocks[0].items[0].value, "maybe");
     }
 
     #[test]
@@ -5535,21 +9387,52 @@ mod compatibility_tests {
             Some(("custom legacy label", false))
         );
     }
+
+    fn extract_kdbx4_inner_key(
+        bytes: &[u8],
+        composite_key: &CompositeKey,
+    ) -> super::Result<Vec<u8>> {
+        let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
+        let mut cursor = super::Cursor::new(&bytes[header_len..]);
+        cursor.read_exact(32)?;
+        cursor.read_exact(32)?;
+        let raw_key = composite_key.raw_key()?;
+        let kdf = kdf_from_variant_dict(&header.kdf_parameters)?;
+        let transformed = kdf.derive_key(&raw_key)?;
+        let encryption_key = sha256_seeded(&header.master_seed, &transformed);
+        let mac_seed = mac_seed(&header.master_seed, &transformed);
+        let encrypted_payload = decode_block_stream(&mac_seed, cursor.read_remaining())?;
+        let payload = decrypt_payload(
+            header.cipher,
+            &encryption_key,
+            &header.encryption_iv,
+            &encrypted_payload,
+        )?;
+        let payload = match header.compression {
+            Compression::None => payload,
+            Compression::Gzip => gzip_decompress(&payload)?,
+        };
+        let (_, inner_key, _, _) = parse_inner_header(&payload)?;
+        Ok(inner_key)
+    }
 }
 
 #[cfg(all(test, feature = "external-fixtures"))]
 mod tests {
     use super::{
-        Compression, KdbxCipher, KdbxHeader, KdbxVersion, SaveProfile, VariantDictionary,
-        VariantValue, bool_text, child_text, decode_block_stream, decode_kdbx3_header,
-        decode_legacy_block_stream, decrypt_payload, detect_file_version, encode_block_stream,
-        gzip_compress, gzip_decompress, header_hmac, kdf_from_variant_dict, load_kdbx, mac_seed,
-        parse_inner_header, parse_xml_fragment, required_version, save_kdbx, sha256_seeded,
-        text_element,
+        Compression, KdbxCipher, KdbxError, KdbxHeader, KdbxVersion, SaveProfile,
+        VariantDictionary, VariantValue, bool_text, child_text, decode_block_stream,
+        decode_kdbx3_header, decode_legacy_block_stream, decrypt_payload, detect_file_version,
+        encode_block_stream, gzip_compress, gzip_decompress, header_hmac, kdf_from_variant_dict,
+        load_kdbx, mac_seed, parse_inner_header, parse_xml_fragment, required_version, save_kdbx,
+        sha256_seeded, text_element,
     };
     use base64::Engine as _;
     use vaultkern_crypto::{CompositeKey, KdfProfile, sha256_bytes};
-    use vaultkern_model::{CustomDataBlock, CustomDataItem, Entry, Group, MemoryProtection, Vault};
+    use vaultkern_model::{
+        Attachment, CustomDataBlock, CustomDataItem, CustomField, Entry, Group, MemoryProtection,
+        Vault,
+    };
     use xmltree::{Element, XMLNode};
 
     const FIXTURE_NEW_DATABASE_BROWSER: &[u8] =
@@ -5620,6 +9503,29 @@ mod tests {
             Some(&VariantValue::String("alpha".into()))
         );
         assert_eq!(decoded.get("Enabled"), Some(&VariantValue::Bool(true)));
+    }
+
+    #[test]
+    fn variant_dictionary_reemits_loaded_entry_order_and_unknown_keys_verbatim() {
+        let mut encoded = 0x0100_u16.to_le_bytes().to_vec();
+        for (kind, key, value) in [
+            (0x42_u8, "S", vec![0x55; 32]),
+            (0x08, "X-ThirdParty", vec![1]),
+            (0x77, "X-Future-Type", vec![0xde, 0xad]),
+            (0x05, "R", 42_u64.to_le_bytes().to_vec()),
+        ] {
+            encoded.push(kind);
+            encoded.extend((key.len() as i32).to_le_bytes());
+            encoded.extend(key.as_bytes());
+            encoded.extend((value.len() as i32).to_le_bytes());
+            encoded.extend(value);
+        }
+        encoded.push(0);
+
+        let decoded = VariantDictionary::decode(&encoded).expect("decode dictionary");
+
+        assert_eq!(decoded.get("X-ThirdParty"), Some(&VariantValue::Bool(true)));
+        assert_eq!(decoded.encode().expect("re-encode dictionary"), encoded);
     }
 
     #[test]
@@ -5875,6 +9781,17 @@ mod tests {
         entry
             .custom_data
             .insert("EntryKey".into(), "EntryValue".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "EntryKey".into(),
+                value: "EntryValue".into(),
+                last_modified: None,
+            }],
+            after: Some(vaultkern_model::OpaqueXmlAnchor {
+                element_name: "AutoType".into(),
+                occurrence: 1,
+            }),
+        });
         vault.root.entries.push(entry);
 
         let mut key = CompositeKey::default();
@@ -5964,6 +9881,127 @@ mod tests {
     }
 
     #[test]
+    fn kdbx4_roundtrip_preserves_keyed_string_and_binary_identity_order() {
+        let mut vault = Vault::empty("KeyedOrder");
+        let mut entry = Entry::new("Entry");
+        entry.attributes.insert(
+            "Alpha".into(),
+            CustomField {
+                value: "one".into(),
+                protected: false,
+            },
+        );
+        entry.attributes.insert(
+            "Zeta".into(),
+            CustomField {
+                value: "two".into(),
+                protected: false,
+            },
+        );
+        entry.attachments.insert(
+            "alpha.bin".into(),
+            Attachment::new("alpha.bin", vec![1], false),
+        );
+        entry.attachments.insert(
+            "zeta.bin".into(),
+            Attachment::new("zeta.bin", vec![2], false),
+        );
+        vault.root.entries.push(entry);
+
+        let mut key = CompositeKey::default();
+        key.add_password("keyed-order");
+        let bytes = save_kdbx(&vault, &key, &SaveProfile::recommended()).expect("save kdbx");
+        let mutated = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = root
+                .get_mut_child("Root")
+                .and_then(|root| root.get_mut_child("Group"))
+                .and_then(|group| group.get_mut_child("Entry"))
+                .expect("entry");
+            let child_key = |node: &XMLNode, name: &str| match node {
+                XMLNode::Element(element) if element.name == name => child_text(element, "Key"),
+                _ => None,
+            };
+            let alpha = entry
+                .children
+                .iter()
+                .position(|node| child_key(node, "String").as_deref() == Some("Alpha"))
+                .expect("alpha string");
+            let zeta = entry
+                .children
+                .iter()
+                .position(|node| child_key(node, "String").as_deref() == Some("Zeta"))
+                .expect("zeta string");
+            entry.children.swap(alpha, zeta);
+            let zeta = entry
+                .children
+                .iter()
+                .position(|node| child_key(node, "String").as_deref() == Some("Zeta"))
+                .expect("moved zeta string");
+            entry.children.insert(
+                zeta + 1,
+                XMLNode::Element(parse_xml_fragment("<AfterZeta />").expect("opaque node")),
+            );
+
+            let alpha = entry
+                .children
+                .iter()
+                .position(|node| child_key(node, "Binary").as_deref() == Some("alpha.bin"))
+                .expect("alpha binary");
+            let zeta = entry
+                .children
+                .iter()
+                .position(|node| child_key(node, "Binary").as_deref() == Some("zeta.bin"))
+                .expect("zeta binary");
+            entry.children.swap(alpha, zeta);
+        })
+        .expect("rewrite keyed order");
+
+        let loaded = load_kdbx(&mutated, &key).expect("load keyed order");
+        let loaded_entry = &loaded.root.entries[0];
+        assert!(
+            loaded_entry
+                .raw_state
+                .string_order
+                .iter()
+                .position(|name| name == "Zeta")
+                < loaded_entry
+                    .raw_state
+                    .string_order
+                    .iter()
+                    .position(|name| name == "Alpha")
+        );
+        assert_eq!(
+            loaded_entry.raw_state.binary_order,
+            ["zeta.bin", "alpha.bin"]
+        );
+
+        let rewritten =
+            save_kdbx(&loaded, &key, &SaveProfile::recommended()).expect("save keyed order");
+        let xml = extract_kdbx4_xml(&rewritten, &key).expect("extract keyed order xml");
+        let parsed = Element::parse(xml.as_bytes()).expect("parse keyed order xml");
+        let entry = parsed
+            .get_child("Root")
+            .and_then(|root| root.get_child("Group"))
+            .and_then(|group| group.get_child("Entry"))
+            .expect("entry");
+        let position = |name: &str, key: Option<&str>| {
+            entry
+                .children
+                .iter()
+                .position(|node| match node {
+                    XMLNode::Element(element) if element.name == name => key
+                        .map(|key| child_text(element, "Key").as_deref() == Some(key))
+                        .unwrap_or(true),
+                    _ => false,
+                })
+                .expect("expected keyed node")
+        };
+        assert!(position("String", Some("Zeta")) < position("AfterZeta", None));
+        assert!(position("AfterZeta", None) < position("String", Some("Alpha")));
+        assert!(position("Binary", Some("zeta.bin")) < position("Binary", Some("alpha.bin")));
+    }
+
+    #[test]
     fn kdbx4_roundtrip_preserves_root_opaque_xml_order_relative_to_known_nodes() {
         let mut vault = Vault::empty("RootOpaqueOrder");
         vault.root.title = "Root".into();
@@ -6009,7 +10047,7 @@ mod tests {
     }
 
     #[test]
-    fn kdbx4_roundtrip_writes_root_group_first_for_keepassxc_compatibility() {
+    fn kdbx4_roundtrip_preserves_mixed_root_known_and_opaque_order() {
         let mut vault = Vault::empty("RootMixedOrder");
         vault.root.title = "Root".into();
         vault.deleted_objects.push(vaultkern_model::DeletedObject {
@@ -6059,14 +10097,76 @@ mod tests {
         let parsed = Element::parse(xml.as_bytes()).expect("parse rewritten xml");
 
         let root_node = parsed.get_child("Root").expect("root node");
-        assert_eq!(
-            child_element_names(root_node).first().copied(),
-            Some("Group")
-        );
         assert_in_order(
             child_element_names(root_node),
-            &["Group", "DeletedObjects", "UnknownRootMixed"],
+            &["DeletedObjects", "UnknownRootMixed", "Group"],
         );
+    }
+
+    #[test]
+    fn kdbx4_roundtrip_preserves_absent_empty_deleted_objects_container() {
+        let vault = Vault::empty("RootWithoutDeletedObjects");
+        let mut key = CompositeKey::default();
+        key.add_password("root-without-deleted-objects");
+
+        let bytes = save_kdbx(&vault, &key, &SaveProfile::recommended()).expect("save kdbx");
+        let mutated = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let root_node = root.get_mut_child("Root").expect("root node");
+            root_node.children.retain(
+                |child| !matches!(child, XMLNode::Element(element) if element.name == "DeletedObjects"),
+            );
+        })
+        .expect("rewrite root xml");
+
+        let loaded = load_kdbx(&mutated, &key).expect("load mutated kdbx");
+        assert!(!loaded.root_raw_state.has_deleted_objects_node);
+
+        let rewritten =
+            save_kdbx(&loaded, &key, &SaveProfile::recommended()).expect("save rewritten kdbx");
+        let xml = extract_kdbx4_xml(&rewritten, &key).expect("extract xml");
+        let parsed = Element::parse(xml.as_bytes()).expect("parse rewritten xml");
+        assert!(
+            parsed
+                .get_child("Root")
+                .expect("root node")
+                .get_child("DeletedObjects")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn kdbx4_roundtrip_preserves_absent_empty_history_container() {
+        let mut vault = Vault::empty("EntryWithoutHistory");
+        vault.root.entries.push(Entry::new("Entry"));
+        let mut key = CompositeKey::default();
+        key.add_password("entry-without-history");
+
+        let bytes = save_kdbx(&vault, &key, &SaveProfile::recommended()).expect("save kdbx");
+        let mutated = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = root
+                .get_mut_child("Root")
+                .and_then(|root| root.get_mut_child("Group"))
+                .and_then(|group| group.get_mut_child("Entry"))
+                .expect("entry");
+            entry.children.retain(
+                |child| !matches!(child, XMLNode::Element(element) if element.name == "History"),
+            );
+        })
+        .expect("rewrite entry xml");
+
+        let loaded = load_kdbx(&mutated, &key).expect("load mutated kdbx");
+        assert!(!loaded.root.entries[0].raw_state.has_history_node);
+
+        let rewritten =
+            save_kdbx(&loaded, &key, &SaveProfile::recommended()).expect("save rewritten kdbx");
+        let xml = extract_kdbx4_xml(&rewritten, &key).expect("extract xml");
+        let parsed = Element::parse(xml.as_bytes()).expect("parse rewritten xml");
+        let entry = parsed
+            .get_child("Root")
+            .and_then(|root| root.get_child("Group"))
+            .and_then(|group| group.get_child("Entry"))
+            .expect("entry");
+        assert!(entry.get_child("History").is_none());
     }
 
     #[test]
@@ -6078,6 +10178,21 @@ mod tests {
         vault.root.previous_parent = Some(uuid::Uuid::new_v4());
         vault.root.custom_data.insert("group-a".into(), "1".into());
         vault.root.custom_data.insert("group-b".into(), "2".into());
+        vault.root.custom_data_blocks.push(CustomDataBlock {
+            items: vec![
+                CustomDataItem {
+                    key: "group-a".into(),
+                    value: "1".into(),
+                    last_modified: None,
+                },
+                CustomDataItem {
+                    key: "group-b".into(),
+                    value: "2".into(),
+                    last_modified: None,
+                },
+            ],
+            after: None,
+        });
 
         let mut key = CompositeKey::default();
         key.add_password("group-mixed-order");
@@ -6164,11 +10279,21 @@ mod tests {
         entry.tags.insert("entry-tag".into());
         entry.previous_parent = Some(uuid::Uuid::new_v4());
         entry.custom_data.insert("entry-a".into(), "1".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "entry-a".into(),
+                value: "1".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
         entry.auto_type = Some(vaultkern_model::AutoTypeConfig {
             default_sequence: Some("{USERNAME}{TAB}{PASSWORD}{ENTER}".into()),
             ..Default::default()
         });
-        entry.history.push(Entry::new("Old"));
+        let mut history_entry = Entry::new("Old");
+        history_entry.id = entry.id;
+        entry.history.push(history_entry);
         vault.root.entries.push(entry);
 
         let mut key = CompositeKey::default();
@@ -6360,7 +10485,7 @@ mod tests {
     }
 
     #[test]
-    fn kdbx4_save_omits_nested_history_nodes_from_history_entries() {
+    fn kdbx4_save_rejects_nested_history_fidelity_nodes() {
         let mut vault = Vault::empty("HistoryCompat");
         let mut entry = Entry::new("Live");
         entry.created_at = 1;
@@ -6375,18 +10500,10 @@ mod tests {
         let mut key = CompositeKey::default();
         key.add_password("history-compat");
 
-        let bytes = save_kdbx(&vault, &key, &SaveProfile::recommended()).expect("save kdbx");
-        let xml = extract_kdbx4_xml(&bytes, &key).expect("extract xml");
-        let parsed = Element::parse(xml.as_bytes()).expect("parse xml");
-        let history_entry = parsed
-            .get_child("Root")
-            .and_then(|root| root.get_child("Group"))
-            .and_then(|group| group.get_child("Entry"))
-            .and_then(|entry| entry.get_child("History"))
-            .and_then(|history| history.get_child("Entry"))
-            .expect("history entry");
-
-        assert!(history_entry.get_child("History").is_none());
+        assert!(matches!(
+            save_kdbx(&vault, &key, &SaveProfile::recommended()),
+            Err(KdbxError::InvalidValue)
+        ));
     }
 
     #[test]
@@ -6478,6 +10595,9 @@ mod tests {
             }],
             after: None,
         });
+        vault
+            .meta_custom_data
+            .insert("meta-key".into(), "meta-value".into());
         vault.root.previous_parent = Some(uuid::Uuid::nil());
         vault.root.custom_data_blocks.push(CustomDataBlock {
             items: vec![CustomDataItem {
@@ -6487,6 +10607,10 @@ mod tests {
             }],
             after: None,
         });
+        vault
+            .root
+            .custom_data
+            .insert("group-key".into(), "group-value".into());
 
         let mut entry = Entry::new("Entry");
         entry.previous_parent = Some(uuid::Uuid::nil());
@@ -6499,6 +10623,9 @@ mod tests {
             }],
             after: None,
         });
+        entry
+            .custom_data
+            .insert("entry-key".into(), "entry-value".into());
         vault.root.entries.push(entry);
 
         let parsed = generated_xml(&vault, KdbxVersion::V4_0);
@@ -6525,7 +10652,7 @@ mod tests {
     }
 
     #[test]
-    fn kdbx3_save_omits_kdbx4_xml_only_custom_data() {
+    fn kdbx3_xml_builder_rejects_legacy_write_versions() {
         let mut vault = Vault::empty("LegacyNoCustomData");
         vault
             .meta_custom_data
@@ -6538,19 +10665,27 @@ mod tests {
         entry
             .custom_data
             .insert("entry-key".into(), "entry-value".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "entry-key".into(),
+                value: "entry-value".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
         vault.root.entries.push(entry);
 
-        let parsed = generated_xml(&vault, KdbxVersion::V3_1);
-        let meta = parsed.get_child("Meta").expect("meta");
-        assert!(meta.get_child("CustomData").is_none());
-
-        let group = parsed
-            .get_child("Root")
-            .and_then(|root| root.get_child("Group"))
-            .expect("group");
-        assert!(group.get_child("CustomData").is_none());
-        let entry = group.get_child("Entry").expect("entry");
-        assert!(entry.get_child("CustomData").is_none());
+        for version in [KdbxVersion::V2_0, KdbxVersion::V3_0, KdbxVersion::V3_1] {
+            assert!(matches!(
+                super::build_xml(
+                    &vault,
+                    &std::collections::HashMap::new(),
+                    &[0_u8; 64],
+                    version,
+                ),
+                Err(KdbxError::UnsupportedVersion)
+            ));
+        }
     }
 
     #[test]
@@ -6572,10 +10707,7 @@ mod tests {
             child_text(group, "EnableSearching").as_deref(),
             Some("null")
         );
-        assert_eq!(
-            child_text(group, "LastTopVisibleEntry").as_deref(),
-            Some("AAAAAAAAAAAAAAAAAAAAAA==")
-        );
+        assert!(group.get_child("LastTopVisibleEntry").is_none());
 
         let entry = group.get_child("Entry").expect("entry");
         assert_eq!(child_text(entry, "IconID").as_deref(), Some("0"));
@@ -6747,15 +10879,39 @@ mod tests {
     fn kdbx4_roundtrip_merges_multiple_custom_data_nodes_across_layers() {
         let mut vault = Vault::empty("CustomDataMatrix");
         vault.meta_custom_data.insert("meta-a".into(), "A".into());
+        vault.meta_custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "meta-a".into(),
+                value: "A".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
         vault
             .public_custom_data
             .insert("client".into(), b"web".to_vec());
 
         let mut group = Group::new("Nested");
         group.custom_data.insert("group-a".into(), "A".into());
+        group.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "group-a".into(),
+                value: "A".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
 
         let mut entry = Entry::new("Entry");
         entry.custom_data.insert("entry-a".into(), "A".into());
+        entry.custom_data_blocks.push(CustomDataBlock {
+            items: vec![CustomDataItem {
+                key: "entry-a".into(),
+                value: "A".into(),
+                last_modified: None,
+            }],
+            after: None,
+        });
         group.entries.push(entry);
         vault.root.children.push(group);
 
@@ -7032,7 +11188,9 @@ mod tests {
             default_sequence: Some("{USERNAME}{TAB}{PASSWORD}".into()),
             associations: Vec::new(),
         });
-        entry.history.push(Entry::new("History"));
+        let mut history_entry = Entry::new("History");
+        history_entry.id = entry.id;
+        entry.history.push(history_entry);
         vault.root.entries.push(entry);
 
         let mut key = CompositeKey::default();
@@ -7370,20 +11528,13 @@ mod tests {
     }
 
     #[test]
-    fn mutated_custom_data_maps_fall_back_to_canonical_single_block_output() {
+    fn mutated_meta_custom_data_map_is_rejected_as_unpersistable() {
         let mut key = CompositeKey::default();
         key.add_password("a");
 
         let mutated = rewrite_kdbx4_xml(FIXTURE_NEW_DATABASE_BROWSER, &key, |root| {
             let meta = root.get_mut_child("Meta").expect("meta");
             split_first_custom_data_block(meta);
-
-            let entry = root
-                .get_mut_child("Root")
-                .and_then(|root| root.get_mut_child("Group"))
-                .and_then(|group| group.get_mut_child("Entry"))
-                .expect("root entry");
-            split_first_custom_data_block(entry);
         })
         .expect("rewrite browser fixture");
 
@@ -7391,42 +11542,30 @@ mod tests {
         loaded
             .meta_custom_data
             .insert("KeePassXC-Browser Settings".into(), "mutated-meta".into());
+
+        assert!(matches!(
+            save_kdbx(&loaded, &key, &SaveProfile::recommended()),
+            Err(KdbxError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn mutated_entry_custom_data_map_is_rejected_as_unpersistable() {
+        let mut key = CompositeKey::default();
+        key.add_password("a");
+        let mut loaded = load_kdbx(FIXTURE_NEW_DATABASE_BROWSER, &key).expect("load fixture");
         loaded.root.entries[0]
             .custom_data
             .insert("KPH: {USERNAME}".into(), "mutated-entry".into());
 
-        let rewritten =
-            save_kdbx(&loaded, &key, &SaveProfile::recommended()).expect("save mutated model");
-        let rewritten_xml = extract_kdbx4_xml(&rewritten, &key).expect("extract rewritten xml");
-        let rewritten_parsed =
-            Element::parse(rewritten_xml.as_bytes()).expect("parse rewritten xml");
-        let rewritten_meta = rewritten_parsed.get_child("Meta").expect("rewritten meta");
-        let rewritten_entry = rewritten_parsed
-            .get_child("Root")
-            .and_then(|root| root.get_child("Group"))
-            .and_then(|group| group.get_child("Entry"))
-            .expect("rewritten root entry");
-
-        assert_eq!(custom_data_blocks(rewritten_meta).len(), 1);
-        assert_eq!(
-            custom_data_blocks(rewritten_meta)[0]
-                .iter()
-                .find(|(key, _)| key == "KeePassXC-Browser Settings")
-                .map(|(_, value)| value.as_str()),
-            Some("mutated-meta")
-        );
-        assert_eq!(custom_data_blocks(rewritten_entry).len(), 1);
-        assert_eq!(
-            custom_data_blocks(rewritten_entry)[0]
-                .iter()
-                .find(|(key, _)| key == "KPH: {USERNAME}")
-                .map(|(_, value)| value.as_str()),
-            Some("mutated-entry")
-        );
+        assert!(matches!(
+            save_kdbx(&loaded, &key, &SaveProfile::recommended()),
+            Err(KdbxError::InvalidValue)
+        ));
     }
 
     #[test]
-    fn deleting_custom_data_item_with_empty_split_block_falls_back_to_canonical_output() {
+    fn deleting_custom_data_item_preserves_empty_split_block() {
         let mut key = CompositeKey::default();
         key.add_password("a");
 
@@ -7449,9 +11588,10 @@ mod tests {
             Element::parse(rewritten_xml.as_bytes()).expect("parse rewritten xml");
         let rewritten_meta = rewritten_parsed.get_child("Meta").expect("rewritten meta");
 
-        assert_eq!(custom_data_blocks(rewritten_meta).len(), 1);
+        assert_eq!(custom_data_blocks(rewritten_meta).len(), 2);
+        assert!(custom_data_blocks(rewritten_meta)[0].is_empty());
         assert_eq!(
-            custom_data_blocks(rewritten_meta)[0]
+            custom_data_blocks(rewritten_meta)[1]
                 .iter()
                 .find(|(key, _)| key == "KPXC_BROWSER_test")
                 .map(|(_, value)| value.as_str())
@@ -7492,6 +11632,8 @@ mod tests {
         assert!(original_meta.get_child("CustomIcons").is_some());
         assert!(original_recycle_bin_uuid.is_some());
         assert!(original_entry_templates_group.is_some());
+        assert_eq!(loaded.recycle_bin_group, None);
+        assert_eq!(loaded.entry_templates_group, None);
 
         assert_eq!(
             meta_child_text_or_empty(rewritten_meta, "DatabaseDescription"),
@@ -7506,14 +11648,8 @@ mod tests {
             original_color
         );
         assert!(rewritten_meta.get_child("CustomIcons").is_some());
-        assert_eq!(
-            meta_child_text_or_empty(rewritten_meta, "RecycleBinUUID"),
-            original_recycle_bin_uuid
-        );
-        assert_eq!(
-            meta_child_text_or_empty(rewritten_meta, "EntryTemplatesGroup"),
-            original_entry_templates_group
-        );
+        assert!(rewritten_meta.get_child("RecycleBinUUID").is_none());
+        assert!(rewritten_meta.get_child("EntryTemplatesGroup").is_none());
     }
 
     #[test]
@@ -7573,7 +11709,7 @@ mod tests {
         let rewritten_parsed =
             Element::parse(rewritten_xml.as_bytes()).expect("parse rewritten format400 xml");
         let rewritten_meta = rewritten_parsed.get_child("Meta").expect("rewritten meta");
-        let expected_order = child_element_names(original_meta);
+        let expected_order = child_element_names_after_optional_uuid_normalization(original_meta);
 
         assert_in_order(child_element_names(rewritten_meta), &expected_order);
     }
@@ -8541,17 +12677,15 @@ mod tests {
 
         let mutated = rewrite_kdbx4_xml(FIXTURE_NEW_DATABASE_BROWSER, &key, |root| {
             let meta = root.get_mut_child("Meta").expect("meta");
-            let database_name_index = meta
+            let settings_changed = meta
                 .children
-                .iter()
-                .position(
-                    |child| matches!(child, XMLNode::Element(element) if element.name == "DatabaseName"),
-                )
-                .expect("database name index");
-            meta.children.insert(
-                database_name_index,
-                XMLNode::Element(text_element("SettingsChanged", "1700000000")),
-            );
+                .iter_mut()
+                .find_map(|child| match child {
+                    XMLNode::Element(element) if element.name == "SettingsChanged" => Some(element),
+                    _ => None,
+                })
+                .expect("settings changed");
+            settings_changed.children = vec![XMLNode::Text("1700000000".into())];
 
             let memory_protection_index = meta
                 .children
@@ -8572,7 +12706,7 @@ mod tests {
         let mutated_meta = mutated_parsed.get_child("Meta").expect("mutated meta");
         assert_in_order(
             child_element_names(mutated_meta),
-            &["Generator", "SettingsChanged", "DatabaseName"],
+            &["HistoryMaxSize", "SettingsChanged", "CustomData"],
         );
         assert_in_order(
             child_element_names(mutated_meta),
@@ -8595,17 +12729,14 @@ mod tests {
             Element::parse(rewritten_xml.as_bytes()).expect("parse rewritten browser xml");
         let rewritten_meta = rewritten_parsed.get_child("Meta").expect("rewritten meta");
 
-        assert_eq!(
-            meta_child_text_or_empty(rewritten_meta, "SettingsChanged"),
-            Some("1700000000".into())
-        );
+        assert_datetime_text(rewritten_meta, "SettingsChanged", 1_700_000_000, true);
         assert_eq!(
             meta_child_text_or_empty(rewritten_meta, "MasterKeyChangeForceOnce"),
             Some("True".into())
         );
         assert_in_order(
             child_element_names(rewritten_meta),
-            &["Generator", "SettingsChanged", "DatabaseName"],
+            &["HistoryMaxSize", "SettingsChanged", "CustomData"],
         );
         assert_in_order(
             child_element_names(rewritten_meta),
@@ -8621,6 +12752,7 @@ mod tests {
     fn browser_fixture_roundtrip_preserves_custom_icon_name_and_last_modification_time() {
         let mut key = CompositeKey::default();
         key.add_password("a");
+        let icon_id = uuid::Uuid::new_v4();
 
         let mutated = rewrite_kdbx4_xml(FIXTURE_NEW_DATABASE_BROWSER, &key, |root| {
             let custom_icons = root
@@ -8628,14 +12760,15 @@ mod tests {
                 .and_then(|meta| meta.get_mut_child("CustomIcons"))
                 .expect("custom icons");
             custom_icons.children.push(XMLNode::Element(
-                parse_xml_fragment(
+                parse_xml_fragment(&format!(
                     "<Icon>\
-                        <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>\
+                        <UUID>{}</UUID>\
                         <Data>AQIDBA==</Data>\
                         <Name>Browser Icon</Name>\
                         <LastModificationTime>1700000005</LastModificationTime>\
                     </Icon>",
-                )
+                    super::encode_uuid(icon_id),
+                ))
                 .expect("custom icon"),
             ));
         })
@@ -8943,6 +13076,38 @@ mod tests {
             .collect()
     }
 
+    fn child_element_names_after_optional_uuid_normalization(element: &Element) -> Vec<&str> {
+        element
+            .children
+            .iter()
+            .filter_map(|child| {
+                let XMLNode::Element(child) = child else {
+                    return None;
+                };
+                let optional_uuid = matches!(
+                    child.name.as_str(),
+                    "RecycleBinUUID"
+                        | "EntryTemplatesGroup"
+                        | "LastSelectedGroup"
+                        | "LastTopVisibleGroup"
+                        | "CustomIconUUID"
+                        | "LastTopVisibleEntry"
+                        | "PreviousParentGroup"
+                );
+                if optional_uuid
+                    && matches!(
+                        super::parse_optional_uuid(child.get_text().as_deref().unwrap_or_default()),
+                        Ok(None)
+                    )
+                {
+                    None
+                } else {
+                    Some(child.name.as_str())
+                }
+            })
+            .collect()
+    }
+
     fn collect_entry_elements<'a>(root: &'a Element, entries: &mut Vec<&'a Element>) {
         if root.name == "Entry" {
             entries.push(root);
@@ -9038,7 +13203,7 @@ mod tests {
 
         let mut rows = vec![(
             path.clone(),
-            child_element_names(group)
+            child_element_names_after_optional_uuid_normalization(group)
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
