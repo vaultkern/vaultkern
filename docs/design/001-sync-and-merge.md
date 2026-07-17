@@ -75,10 +75,13 @@ identical bytes, or same-second ties diverge.
 
 Edge rules:
 
-- `location_changed_at` absent is treated as the epoch (loses to any present
-  value); if the two values are equal — including both absent, which compare
-  as the epoch — and the groups differ, the winner is chosen by byte-wise
-  ordering of the two group UUIDs — deterministic on both ends.
+- `location_changed_at` comparison first normalizes absence to the epoch;
+  then a strictly newer normalized value wins, and if the normalized values
+  are equal — both absent, both the epoch, or one of each — and the groups
+  differ, the winner is chosen by byte-wise ordering of the two group UUIDs —
+  deterministic on both ends. Absence and a present epoch value are one
+  equivalence class in every branch, so a loader that canonicalizes absence
+  to the epoch cannot change any outcome.
   This corner is **arbitrary by necessity**: KDBX records only
   `previous_parent` + `location_changed_at`, no move lineage, and inventing a
   richer versioned location object would break interoperability (third-party
@@ -160,9 +163,11 @@ against real fixture files, not assumed.
 ## Revision history
 
 - r13 (2026-07-13): Phase 0 frozen baseline.
-- r14 (2026-07-17): coordinated with 006 r5. Two tie rules are made total,
-  changing no previously defined outcome: the location group-UUID tie now
-  applies whenever the two `location_changed_at` values are equal (both
-  absent compare as the epoch, so epoch-canonicalized loads behave
-  identically), and a numerically equal `usage_count` maximum across
-  different optional spellings resolves to the present spelling.
+- r14 (2026-07-17): coordinated with 006 r5. Two tie rules are made total:
+  the location comparison normalizes absence to the epoch before comparing —
+  strictly newer wins, equal breaks by group-UUID ordering — and a
+  numerically equal `usage_count` maximum across different optional
+  spellings resolves to the present spelling. The only r13 outcome this
+  changes is the degenerate absent-versus-present-epoch corner, which
+  becomes the tie branch so that absence and the epoch form one equivalence
+  class in every rule.

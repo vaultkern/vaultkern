@@ -2,8 +2,8 @@
 
 Status: **Frozen — r5**. 2026-07-17. Additive operational amendment to 000 D1
 and 005, frozen after the r3 contract review and the interoperability/evidence
-gates in §10 passed; r5 amends the frozen text for the PR #35 post-merge
-review findings (§12).
+gates in §10 passed; r5 amends the frozen text for the PR #35/#36 post-merge
+review rounds (§12).
 
 Upstream: 000 D1 (KDBX interoperability), 001 (merge consumers), and 005
 (canonical entry serialization v1).
@@ -84,7 +84,9 @@ by construction (002's rotation policy). This applies when the loaded vault
 already carries a KDBX4 `KdfParameters` dictionary: loading a KDBX2/3 vault
 and saving it under a 4.x profile is the explicit §8 format upgrade, which
 constructs the KDBX4 dictionary for the first time and changes
-`kdf_generation` exactly as 002 already records for that upgrade. Otherwise
+`kdf_generation` exactly as 002 already records for that upgrade. A newly
+created vault has no retained dictionary; its first save constructs one,
+equivalent to an explicit KDF change with product defaults. Otherwise
 only a master-credential change or an explicit KDF change (a present KDF
 component) constructs a new dictionary and thereby rotates the salt;
 per-save rotation would invalidate every quick-unlock envelope on every
@@ -274,6 +276,13 @@ label followed by `?`, and exactly lower-case query names drawn from `secret`,
 `name=value` pair, every name MUST occur at most once, and `secret` MUST occur.
 An unknown name, duplicate name, missing `=`, or empty component makes the URI
 unprojectable so the original `otp` value and companion keys are preserved.
+The decoded account MUST be non-empty after separator handling: an
+empty-account label such as `Issuer:` makes the URI unprojectable and it
+follows the raw-retention path, never a structured `TotpSpec` that would
+violate `P`. An empty decoded label issuer is treated as no issuer; if the
+remaining account then contains a colon, literal or encoded, the URI is
+likewise unprojectable — this keeps the invariant that a parsed projection
+never pairs a colon-bearing account with no issuer.
 Missing algorithm, digits, or period use SHA-1, 6, and 30. Present algorithm
 values are limited to `SHA1`, `SHA256`, `SHA512` and their `HMAC-SHA-*`
 spellings, case-insensitively; present digits and period must parse as their
@@ -339,7 +348,9 @@ re-parse as an issuer/account split. A modeled TOTP with no issuer whose
 account contains `:` therefore has no invertible URI spelling and is outside
 `P`; enrollment and mutation APIs MUST reject it or require an issuer. The
 parser never produces that state: a parsed account contains a colon only when
-a separator preceded it, which implies an issuer.
+a separator preceded it, and the empty-issuer corner that would evade this is
+excluded from projectability above, so a parsed projection always pairs a
+colon-bearing account with a non-empty issuer.
 
 The label fallbacks that substitute `Entry.username` or `Entry.title` remain
 defined so `C1` stays total over `M`, but they do not reload exactly: the
@@ -946,8 +957,8 @@ implementation PR to land MUST carry them.
 
 ## 12. Revision history
 
-- r5 (2026-07-17): amendments for the two post-merge review rounds (PR #35
-  comments, then PR #36 comments). Redefines the save profile as
+- r5 (2026-07-17): amendments for the post-merge review rounds on PR #35 and
+  PR #36, plus a full-document coherence pass. Redefines the save profile as
   algorithm/work-factor parameters only and places the KDF salt lifecycle
   under 002's rotation policy (ordinary saves reuse the salt; rotation only
   on master-credential or explicit KDF change). Pins the absent↔`None` wire
@@ -983,11 +994,24 @@ implementation PR to land MUST carry them.
   where merge decisions belong. States plainly that the §10.2 workflow,
   4.1 fixture, and
   executable audit are not yet on `main` and forbids write-capability claims
-  from any tree that lacks them. No canonical byte layout, `A(e)` emission
-  spelling, or golden bytes change; the parser precedence resolves a
-  previously ambiguous reading, and the `LocationChanged` load
-  canonicalization is defined before canonical v1 ships as a merge
-  dependency, so the 005 `schema_version` process is not triggered.
+  from any tree that lacks them. A seventh round restates 001's location
+  comparison as normalize-absence-then-compare (honestly recording the
+  degenerate absent-versus-present-epoch corner as the one changed outcome)
+  and excludes empty-account URIs from projectability. The canonical byte
+  layout and the frozen golden bytes are unchanged — both goldens'
+  credentials are structured-projection-backed, a path r5 does not touch —
+  but `A(e)` output does change relative to r4 for one class: a raw
+  discrete-only TOTP source is now retained verbatim instead of being
+  materialized through the canonical URI. That change rides the same
+  pre-ship window as introducing `A(e)` itself (canonical v1 has no shipped
+  merge consumer) and is recorded here for the §3.2-mandated review; the
+  parser precedence and `LocationChanged` canonicalization likewise predate
+  any shipped dependency, so the 005 `schema_version` process is not
+  triggered. A closing full-document pass caught two of its own corners: an
+  empty-issuer label whose account contains a colon is excluded from
+  projectability, preserving the parser invariant, and a newly created
+  vault's first save constructs its `KdfParameters` dictionary as an
+  explicit-change equivalent.
 - r4 (2026-07-17): frozen after r3 review. Records passed evidence for an
   external KeePassXC-generated KDBX 4.1 fixture, mandatory 4.0/4.1
   `keepassxc-cli` decrypt/enumerate gates, and the executable field-9-only
