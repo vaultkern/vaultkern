@@ -65,24 +65,31 @@ Let:
 - `T(v)` be the map from deleted-object UUID to its latest deletion time.
 
 A save profile is the tuple `(version, outer cipher, compression, KDF
-algorithm and its work-factor parameters)`. The composite key is an input to
-serialization, not a profile property. The profile's KDF component describes
-a *requested* configuration for an explicit KDF change; an ordinary save does
-not rebuild the dictionary from the profile. An ordinary save MUST re-emit
-the vault's loaded `KdfParameters` in full — the salt, version fields such as
-Argon2 `V`, and any unknown `VariantDictionary` entries preserved verbatim —
-so `kdf_generation`, which hashes the full canonical dictionary, is stable
-across ordinary saves by construction (002's rotation policy). This
-stability mandate applies when the loaded vault already carries a KDBX4
-`KdfParameters` dictionary: loading a KDBX2/3 vault and saving it under a
-4.x profile is the explicit §8 format upgrade, which constructs the KDBX4
-dictionary for the first time and changes `kdf_generation` exactly as 002
-already records for that upgrade. Otherwise only a master-credential change
-or an explicit KDF parameter change constructs a new dictionary and thereby
-rotates the salt; per-save rotation would invalidate every quick-unlock
-envelope on every save. Random master seeds,
-IVs, inner-stream keys, and block nonces are fresh physical output on every
-save and are not profile properties.
+component)`. The KDF component is optional: absent means *preserve* — the
+ordinary save — while present means an explicit KDF change carrying the
+requested algorithm and work-factor parameters. The composite key is an
+input to serialization, not a profile property. The vault's loaded KDBX4
+`KdfParameters` dictionary — the salt, version fields such as Argon2 `V`,
+and any unknown `VariantDictionary` entries, verbatim — is required
+vault-level fidelity state carried by `v` itself, so `S_p(v)` has a defined
+state carrier for the preservation mandate instead of rebuilding from the
+profile. An ordinary save MUST re-emit that retained dictionary unchanged
+and therefore satisfies
+
+```text
+kdf_generation(L(S_p(v))) = kdf_generation(v)
+```
+
+by construction (002's rotation policy). This applies when the loaded vault
+already carries a KDBX4 `KdfParameters` dictionary: loading a KDBX2/3 vault
+and saving it under a 4.x profile is the explicit §8 format upgrade, which
+constructs the KDBX4 dictionary for the first time and changes
+`kdf_generation` exactly as 002 already records for that upgrade. Otherwise
+only a master-credential change or an explicit KDF change (a present KDF
+component) constructs a new dictionary and thereby rotates the salt;
+per-save rotation would invalidate every quick-unlock envelope on every
+save. Random master seeds, IVs, inner-stream keys, and block nonces are
+fresh physical output on every save and are not profile properties.
 
 `VG(v)` contains every modeled Vault/Meta field except `deleted_objects`, every
 modeled Group field recursively, custom-icon content and metadata, public
@@ -226,18 +233,24 @@ the pinned [`EntryUtil.cs`](https://github.com/dlech/KeePass2.x/blob/d1eec63f1bd
 
 HOTP and the UTF-8/hex/base64 TOTP secret spellings are recognized for
 preservation, hiding, protection, and removal, but are not projectable into the
-current `TotpSpec`. A raw OTP set is projectable only in one of these forms:
+current `TotpSpec`. A raw OTP set is convertible to a persisted structured
+projection only when `otp` is a projectable TOTP URI and every other present
+OTP key is one of the four canonical discrete TOTP keys emitted below.
 
-1. `otp` is a projectable TOTP URI and every other present OTP key is one of
-   the four canonical discrete TOTP keys emitted below; or
-2. `otp` is absent, `TimeOtp-Secret-Base32` is present, and the only other OTP
-   keys present are `TimeOtp-Algorithm`, `TimeOtp-Length`, and
-   `TimeOtp-Period`.
+A discrete-only set — `otp` absent, `TimeOtp-Secret-Base32` present, and the
+only other OTP keys the three `TimeOtp-*` parameter keys — is recognized and
+MAY back a read-only in-memory code generator, but MUST NOT be converted to
+a persisted structured projection: it carries no issuer or account, so
+emitting the canonical URI would require the non-exact username/title
+fallback below. The set is retained verbatim, with §3.2 protection
+escalation, until an explicit product TOTP edit re-enrolls it as a
+structured projection with a materialized account.
 
-Thus any HOTP key, any alternate TOTP secret spelling, or an unprojectable
-present `otp` makes the whole raw set unprojectable. This prevents a lower-
-priority Base32 value from replacing a higher-priority KeePass secret and
-prevents partial normalization from discarding data. When URI and discrete
+Thus any HOTP key, any alternate TOTP secret spelling, an unprojectable
+present `otp`, or a discrete-only set leaves the whole raw namespace
+preserved verbatim. This prevents a lower-priority Base32 value from
+replacing a higher-priority KeePass secret and prevents partial
+normalization from discarding data. When URI and discrete
 keys coexist without a structured projection, every present discrete value
 MUST be semantically equivalent to the URI value after the pinned defaults;
 otherwise the whole reserved namespace remains an unprojectable raw payload;
@@ -629,11 +642,11 @@ or whitespace-only `LocationChanged` to the epoch (model value `0`) — exactly
 the value 001 already assigns to absence, so merge semantics are unchanged
 and any genuine move's present timestamp still wins — and a present,
 non-parsing value fails the load. Epoch spellings therefore arise only from
-loaded files that omitted the element. Because 001 itself defines absence as
-the epoch, an epoch-valued `location_changed_at` participates in merge
-exactly as absence does: equal epoch values with differing groups fall under
-001's both-absent group-UUID tie rule, so this canonicalization is invisible
-to the merge layer.
+loaded files that omitted the element. 001 r14 makes the location tie total:
+whenever the two values are equal — and both-absent compares as the epoch —
+with differing groups, the group-UUID ordering decides. Epoch-canonicalized
+loads therefore take exactly the branch absence took; the canonicalization
+is invisible to the merge layer, and 006 adds no merge rule of its own.
 
 Accepted consequence, recorded deliberately: KeePass materializes these
 elements unconditionally on its own saves, so a third-party save of a
@@ -645,9 +658,10 @@ resolves that divergence deterministically. Among these fields only
 third-party materialization of an absent value is `0`, the identity of that
 maximum, so the accepted drift stays confined to the hash tie
 (`location_changed_at`, which drives placement, is excluded above). Because
-`None` and `Some(0)` are distinct canonical spellings, a numerically equal
-maximum across different spellings MUST resolve to the present spelling —
-`Some(0)` wins over `None` — so both merge directions converge on one `C1`.
+`None` and `Some(0)` are distinct canonical spellings, 001 r14 pins the
+merged spelling of a numerically equal maximum to the present one —
+`Some(0)` over `None` — so both merge directions converge on one `C1`; that
+rule lives in 001, where merge decisions belong.
 To keep vaultkern output KeePass-shaped, product entry-creation APIs MUST
 populate the full KeePass-materialized set at creation: `icon_id`,
 `auto_type`, `expiry_time` and `last_accessed_at` set to the creation time
@@ -789,7 +803,7 @@ At minimum, tests cover:
 | typed optional UUID | absent, empty, whitespace-only, nil sentinel, valid non-nil, malformed, direct `Some(nil)` rejection |
 | optional/default model values | every `VG` default; every §7 optional-empty rejection; present-empty Entry color/URL preservation; absent↔`None` round-trip for every §7-pinned entry field and typed `AutoType` child (current and history); present-empty `AutoType` round-trip as `Some(default)`; empty and whitespace-only `DefaultSequence` preservation; malformed numeric/boolean element rejection; absent `LocationChanged` canonicalized to the epoch and always re-emitted |
 | save profile | ordinary save reuses the loaded KDF salt with stable `kdf_generation`; rotation only on master-credential or explicit KDF parameter change; Argon2 `V` and unknown `KdfParameters` entries re-emitted verbatim with stable `kdf_generation`; KDBX3→4 upgrade changes `kdf_generation` per 002; product-created entry emits the full KeePass-shaped element set; two successive saves differ in master seed, outer IV, and inner random-stream key |
-| TOTP | projection only; URI/discrete source only; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; content-colon labels (issuer, account-with-issuer, title fallback); lowercase `%3a` separator parsing; no-issuer account-colon rejection; empty-`account_name` projection rejection with raw retention of empty-account labels; full-family clear/removal/protection/hiding |
+| TOTP | projection only; URI source only; discrete-only source retained verbatim and never projected; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; content-colon labels (issuer, account-with-issuer, title fallback); lowercase `%3a` separator parsing; no-issuer account-colon rejection; empty-`account_name` projection rejection with raw retention of empty-account labels; full-family clear/removal/protection/hiding |
 | passkey | projection only, projectable source only, equivalent/conflicting cache, incomplete sensitive source, missing optional fields, invalid flag spelling, loaded strings verbatim, exact first-write base64url/PKCS#8 PEM profile |
 | CustomData | empty, matched map/blocks, duplicate keys, timestamps, map-only mismatch, block-only mismatch, empty block |
 | attachments | matched key/name, mismatched key/name rejection, rename, empty name |
@@ -915,7 +929,8 @@ implementation PR to land MUST carry them.
 - The r4 freeze audit rechecked 001 r13 and found no equivalent
   projection/source-of-truth contradiction: 001 delegates the canonical layout
   to 005 and does not state where credential backing attributes live. No 001
-  amendment is therefore required.
+  amendment was required on that axis. (001 r14, coordinated with r5, later
+  totalized two tie rules — an unrelated, purely gap-filling change.)
 - The checked-in external KDBX 4.1 fixture and mandatory KeePassXC 4.0/4.1
   writer-open gates described in §10.2 are permanent freeze evidence and MUST
   remain passing.
@@ -960,7 +975,12 @@ implementation PR to land MUST carry them.
   stands), `P` requires a non-empty TOTP `account_name` with empty-account
   labels retained as raw source (username/title fallbacks stay defined only
   so `C1` is total over `M`), and creation populates the full
-  KeePass-materialized field set. States plainly that the §10.2 workflow,
+  KeePass-materialized field set. A sixth round: the retained `KdfParameters`
+  dictionary becomes required vault fidelity state behind an optional profile
+  KDF component with an explicit `kdf_generation` stability equation,
+  discrete-only TOTP sources are retained verbatim instead of projected
+  (they carry no account), and the two merge-tie spellings move into 001 r14
+  where merge decisions belong. States plainly that the §10.2 workflow,
   4.1 fixture, and
   executable audit are not yet on `main` and forbids write-capability claims
   from any tree that lacks them. No canonical byte layout, `A(e)` emission

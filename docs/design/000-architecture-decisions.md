@@ -285,5 +285,7 @@ KDF caps.
   explicit); the previously ungoverned Option-typed entry wire spellings are
   pinned, with `location_changed_at` required present and canonicalized to
   001's absent≡epoch value; TOTP label parsing is disambiguated
-  (literal-first, hex-case-insensitive separator). D1's decision is
-  unchanged; the operational contract beneath it is refined via 006 r5.
+  (literal-first, hex-case-insensitive separator). 001 is bumped to r14,
+  totalizing its location and `usage_count` tie rules with no previously
+  defined outcome changed. D1's decision is unchanged; the operational
+  contract beneath it is refined via 006 r5 and 001 r14.
