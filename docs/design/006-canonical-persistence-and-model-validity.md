@@ -238,6 +238,10 @@ preservation, hiding, protection, and removal, but are not projectable into the
 current `TotpSpec`. A raw OTP set is convertible to a persisted structured
 projection only when `otp` is a projectable TOTP URI and every other present
 OTP key is one of the four canonical discrete TOTP keys emitted below.
+Re-emitting such a set produces exactly the modeled-TOTP five-key output
+below — regardless of which subset of those keys the source carried — so the
+materialized view is identical whether or not the loader retains a
+structured projection.
 
 A discrete-only set — `otp` absent, `TimeOtp-Secret-Base32` present, and the
 only other OTP keys the three `TimeOtp-*` parameter keys — is recognized and
@@ -282,9 +286,9 @@ follows the raw-retention path, never a structured `TotpSpec` that would
 violate `P`. An empty decoded issuer — whether from the label or from an
 empty `issuer` query value, which likewise means no issuer — never yields
 an issuer. As a final gate after every label and query rule: if the parse
-result would pair no issuer with an account containing a colon, the URI is
-unprojectable and follows the raw-retention path, whatever path produced
-that combination. This keeps the invariant that a parsed projection never
+result would pair no issuer with an account containing a colon, or would
+carry an empty `secret` value, the URI is unprojectable and follows the
+raw-retention path, whatever path produced that state. This keeps the invariant that a parsed projection never
 pairs a colon-bearing account with no issuer.
 Missing algorithm, digits, or period use SHA-1, 6, and 30. Present algorithm
 values are limited to `SHA1`, `SHA256`, `SHA512` and their `HMAC-SHA-*`
@@ -362,7 +366,9 @@ username or title edit would silently change the emitted URI. `P` therefore
 requires a structured TOTP projection to carry a present, non-empty
 `account_name` — the otpauth label grammar itself makes the account
 mandatory — and enrollment APIs materialize it at enrollment time, from
-`Entry.username` when the user supplies nothing. A parsed source whose label
+`Entry.username` when the user supplies nothing. An empty issuer is
+normalized to absent and an empty `secret_base32` is rejected at
+enrollment; `P` admits neither spelling. A parsed source whose label
 yields an empty account is retained as raw source rather than converted to a
 structured projection, per §3.2's exact-reconstruction condition. Every
 emission from a state in `P` therefore uses explicit issuer and account
@@ -629,7 +635,8 @@ absent or whitespace-only element to `None`. Materializing a default
 (`IconID` `0`, a default `AutoType` node, or any absent `Times` child) for an
 absent model value is forbidden: it would change `C1` across a vaultkern
 round trip and violate law 5. `Expires` is always written; `expiry_time`
-alone follows the optional rule. The absent-or-whitespace-only rule applies
+alone follows the optional rule, except that `P` rejects `expires = true`
+with an absent `expiry_time` (§9). The absent-or-whitespace-only rule applies
 to typed scalar elements; the `AutoType` container itself is presence-based:
 an absent `AutoType` element loads as `None`, while a present `AutoType`
 element — even one with no children — loads as `Some` with each child mapped
@@ -763,8 +770,11 @@ Entry. At minimum it checks:
   Unicode whitespace. KeePass splits on both delimiters and trims before
   replacing embedded separators, as pinned by
   [`StrUtil.cs`](https://github.com/dlech/KeePass2.x/blob/d1eec63f1bd73dc2d5273eaf94528f616b553ce5/KeePassLib/Utility/StrUtil.cs);
-- the §3.1 structured-TOTP validity rules: `account_name` present and
-  non-empty, and no `:` in the account when there is no issuer;
+- the §3.1 structured-TOTP validity rules: `account_name` and
+  `secret_base32` present and non-empty, issuer absent or non-empty, and no
+  `:` in the account when there is no issuer;
+- `expires = true` requires a present `expiry_time`; a third-party load of
+  the contradictory spelling would materialize an arbitrary expiry;
 - `location_changed_at` present on every current and history entry (§7);
 - the optional-text canonical form in §7 and every modeled UUID uniqueness /
   known-node multiplicity rule in §6;
@@ -815,9 +825,9 @@ At minimum, tests cover:
 | Dimension | Required cases |
 |---|---|
 | typed optional UUID | absent, empty, whitespace-only, nil sentinel, valid non-nil, malformed, direct `Some(nil)` rejection |
-| optional/default model values | every `VG` default; every §7 optional-empty rejection; present-empty Entry color/URL preservation; absent↔`None` round-trip for every §7-pinned entry field and typed `AutoType` child (current and history); present-empty `AutoType` round-trip as `Some(default)`; empty and whitespace-only `DefaultSequence` preservation; malformed numeric/boolean element rejection; absent `LocationChanged` canonicalized to the epoch and always re-emitted |
+| optional/default model values | every `VG` default; every §7 optional-empty rejection; present-empty Entry color/URL preservation; absent↔`None` round-trip for every §7-pinned entry field and typed `AutoType` child (current and history); present-empty `AutoType` round-trip as `Some(default)`; empty and whitespace-only `DefaultSequence` preservation; malformed numeric/boolean element rejection; absent `LocationChanged` canonicalized to the epoch and always re-emitted; `expires = true` with absent `expiry_time` rejected |
 | save profile | ordinary save reuses the loaded KDF salt with stable `kdf_generation`; rotation only on master-credential or explicit KDF parameter change; Argon2 `V` and unknown `KdfParameters` entries re-emitted verbatim with stable `kdf_generation`; KDBX3→4 upgrade changes `kdf_generation` per 002; product-created entry emits the full KeePass-shaped element set; two successive saves differ in master seed, outer IV, and inner random-stream key |
-| TOTP | projection only; URI source only; discrete-only source retained verbatim and never projected; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; content-colon labels (issuer, account-with-issuer, title fallback); lowercase `%3a` separator parsing; no-issuer account-colon rejection; empty-`account_name` projection rejection with raw retention of empty-account labels; full-family clear/removal/protection/hiding |
+| TOTP | projection only; URI source only; discrete-only source retained verbatim and never projected; equivalent/conflicting projection cache; equivalent/conflicting URI plus discrete source; each alternate secret spelling; HOTP secret/counter; unknown/duplicate/malformed or invalid-UTF-8 URI query; malformed discrete parameters; lower-case and padded Base32 preservation; per-component label encoding; content-colon labels (issuer, account-with-issuer, title fallback); lowercase `%3a` separator parsing; no-issuer account-colon rejection; empty-`account_name` projection rejection with raw retention of empty-account labels; empty `secret=` and empty `issuer=` final-gate cases; raw URI-bearing sets re-emit the five-key canonical spelling; full-family clear/removal/protection/hiding |
 | passkey | projection only, projectable source only, equivalent/conflicting cache, incomplete sensitive source, missing optional fields, invalid flag spelling, loaded strings verbatim, exact first-write base64url/PKCS#8 PEM profile |
 | CustomData | empty, matched map/blocks, duplicate keys, timestamps, map-only mismatch, block-only mismatch, empty block |
 | attachments | matched key/name, mismatched key/name rejection, rename, empty name |
@@ -1018,7 +1028,12 @@ implementation PR to land MUST carry them.
   one final projectability gate that also covers empty `issuer` query
   values, pins 001's group-UUID tie to the byte-wise greater UUID (005 §6's
   greater-wins direction), and mirrors the epoch-corner exception into
-  000 r15.
+  000 r15. A ninth, self-initiated adversarial pass pins the five-key
+  canonical re-emission for every convertible raw set, extends the final
+  gate to empty `secret` values, requires a non-empty secret and an
+  absent-or-non-empty issuer in `P`, and rejects `expires = true` without
+  an `expiry_time` — the contradictory spelling a third-party load would
+  resolve by materializing an arbitrary expiry.
 - r4 (2026-07-17): frozen after r3 review. Records passed evidence for an
   external KeePassXC-generated KDBX 4.1 fixture, mandatory 4.0/4.1
   `keepassxc-cli` decrypt/enumerate gates, and the executable field-9-only
