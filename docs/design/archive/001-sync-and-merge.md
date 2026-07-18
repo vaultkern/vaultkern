@@ -1,3 +1,6 @@
+> **Retired (2026-07-19).** Superseded by the r16 scope reset (000) and 007.
+> Historical record only — not a requirement on any current code.
+
 # 001 — Sync and Merge Semantics
 
 Status: **Frozen — r14** (seven external review rounds + four freeze-hardening rounds + PR-review fixes; r14 totalizes two tie rules with 006 r5). 2026-07-17. Amendments only via the 000 revision process; contracts evolve additively per the 003 version matrix.

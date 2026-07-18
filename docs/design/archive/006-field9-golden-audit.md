@@ -1,3 +1,6 @@
+> **Retired (2026-07-19).** Superseded by the r16 scope reset (000) and 007.
+> Historical record only — not a requirement on any current code.
+
 # 006 Freeze Evidence — Canonical Field 9 Golden Audit
 
 Status: **Recorded freeze evidence**. 2026-07-17.
