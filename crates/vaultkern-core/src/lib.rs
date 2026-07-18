@@ -1903,8 +1903,23 @@ impl KeepassCore {
             return Err(MutationError::GroupNotFound(target_parent_group_id.into()));
         }
 
-        let moved_group = take_group_from_group(&mut vault.root, group_id)
-            .ok_or_else(|| MutationError::GroupNotFound(group_id.into()))?;
+        let next_location = next_group_location_timestamp(vault, moving_group)?;
+        let (mut moved_group, previous_parent) =
+            take_group_from_group(&mut vault.root, group_id)
+                .ok_or_else(|| MutationError::GroupNotFound(group_id.into()))?;
+        moved_group.previous_parent = Some(previous_parent);
+        moved_group
+            .times
+            .get_or_insert(GroupTimes {
+                created_at: 0,
+                modified_at: 0,
+                expires: false,
+                expiry_time: None,
+                last_accessed_at: None,
+                usage_count: None,
+                location_changed_at: None,
+            })
+            .location_changed_at = Some(next_location);
         let target_parent = find_group_by_id_mut(&mut vault.root, target_parent_group_id)
             .ok_or_else(|| MutationError::GroupNotFound(target_parent_group_id.into()))?;
         target_parent.children.push(moved_group);
@@ -4105,7 +4120,7 @@ fn delete_group_from_group(group: &mut Group, group_id: &str) -> Option<Group> {
     None
 }
 
-fn take_group_from_group(group: &mut Group, group_id: &str) -> Option<Group> {
+fn take_group_from_group(group: &mut Group, group_id: &str) -> Option<(Group, Uuid)> {
     if let Some(index) = group
         .children
         .iter()
@@ -4130,7 +4145,7 @@ fn take_group_from_group(group: &mut Group, group_id: &str) -> Option<Group> {
             &mut group.custom_data_blocks,
             (&old_identities, &new_identities, &[]),
         );
-        return Some(removed);
+        return Some((removed, group.id));
     }
     for child in &mut group.children {
         if let Some(found) = take_group_from_group(child, group_id) {
@@ -4298,6 +4313,29 @@ fn next_entry_location_timestamp(vault: &Vault, entry: &Entry) -> Result<u64, Mu
         .max()
         .unwrap_or(i128::MIN);
     let causal_floor = i128::from(entry.location_changed_at.unwrap_or(0)).max(tombstone_floor);
+    let next = i128::from(current_unix_timestamp().max(0)).max(causal_floor.saturating_add(1));
+    let next = u64::try_from(next).map_err(|_| {
+        MutationError::InvalidEntryValue(format!("timestamp is outside the KDBX4 domain: {next}"))
+    })?;
+    validate_persistent_unsigned_timestamp(next)?;
+    Ok(next)
+}
+
+fn next_group_location_timestamp(vault: &Vault, group: &Group) -> Result<u64, MutationError> {
+    let tombstone_floor = vault
+        .deleted_objects
+        .iter()
+        .filter(|deleted| deleted.id == group.id)
+        .map(|deleted| i128::from(deleted.deleted_at))
+        .max()
+        .unwrap_or(i128::MIN);
+    let causal_floor = i128::from(
+        group
+            .times
+            .and_then(|times| times.location_changed_at)
+            .unwrap_or(0),
+    )
+    .max(tombstone_floor);
     let next = i128::from(current_unix_timestamp().max(0)).max(causal_floor.saturating_add(1));
     let next = u64::try_from(next).map_err(|_| {
         MutationError::InvalidEntryValue(format!("timestamp is outside the KDBX4 domain: {next}"))
@@ -5559,6 +5597,63 @@ mod internal_tests {
             core.find_entry_view_by_id(&vault, &entry_id.to_string())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn move_group_advances_lineage_past_retained_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("move group after deletion");
+        let mut source = Group::new("source");
+        let source_id = source.id;
+        let mut moved = Group::new("moved");
+        let moved_id = moved.id;
+        moved.times = Some(vaultkern_model::GroupTimes {
+            created_at: 0,
+            modified_at: 10,
+            expires: false,
+            expiry_time: None,
+            last_accessed_at: None,
+            usage_count: None,
+            location_changed_at: Some(10),
+        });
+        moved.entries.push(Entry::new("subtree entry"));
+        source.children.push(moved);
+        let destination = Group::new("destination");
+        let destination_id = destination.id;
+        vault.root.children.extend([source, destination]);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: moved_id,
+            deleted_at,
+        });
+
+        core.move_group(
+            &mut vault,
+            &moved_id.to_string(),
+            &destination_id.to_string(),
+        )
+        .expect("move group");
+
+        let moved = &vault.root.children[1].children[0];
+        assert_eq!(moved.previous_parent, Some(source_id));
+        assert!(
+            i128::from(
+                moved
+                    .times
+                    .and_then(|times| times.location_changed_at)
+                    .expect("location")
+            ) > i128::from(deleted_at)
+        );
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects = vault.deleted_objects.clone();
+        vault.merge_from(&tombstones);
+        let moved = core
+            .find_group_view_by_id(&vault, &moved_id.to_string())
+            .expect("moved group survives its retained tombstone");
+        assert_eq!(moved.entries.len(), 1);
     }
 
     #[test]
