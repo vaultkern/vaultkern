@@ -1870,13 +1870,17 @@ impl KeepassCore {
         if find_group_by_id(&vault.root, target_group_id).is_none() {
             return Err(MutationError::GroupNotFound(target_group_id.into()));
         }
+        let previous_parent = find_entry_parent_id(&vault.root, entry_id)
+            .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
         let entry = find_entry_by_id(&vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
         let target_deletion = group_subtree_deletion_at(vault, target_group_id);
         let next_location =
-            next_entry_location_timestamp(vault, entry, target_deletion, entry.previous_parent)?;
-        let (mut entry, _) = take_entry_from_group(&mut vault.root, entry_id)
+            next_entry_location_timestamp(vault, entry, target_deletion, Some(previous_parent))?;
+        let (mut entry, removed_from) = take_entry_from_group(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        debug_assert_eq!(removed_from, previous_parent);
+        entry.previous_parent = Some(previous_parent);
         entry.location_changed_at = Some(next_location);
         let target_group = find_group_by_id_mut(&mut vault.root, target_group_id)
             .ok_or_else(|| MutationError::GroupNotFound(target_group_id.into()))?;
@@ -5713,6 +5717,48 @@ mod internal_tests {
         assert!(
             core.find_entry_view_by_id(&vault, &entry_id.to_string())
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn move_entry_preserves_source_parent_for_later_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("move before source deletion");
+        let mut source = Group::new("source");
+        let source_id = source.id;
+        let entry = Entry::new("entry");
+        let entry_id = entry.id;
+        source.entries.push(entry);
+        let destination = Group::new("destination");
+        let destination_id = destination.id;
+        vault.root.children.extend([source, destination]);
+
+        core.move_entry(
+            &mut vault,
+            &entry_id.to_string(),
+            &destination_id.to_string(),
+        )
+        .expect("move entry");
+
+        let moved_at = vault.root.children[1].entries[0]
+            .location_changed_at
+            .expect("moved location time");
+        let deleted_at = i64::try_from(moved_at)
+            .expect("location time fits tombstone timestamp")
+            .checked_add(1)
+            .expect("later tombstone timestamp");
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects.push(DeletedObject {
+            id: source_id,
+            deleted_at,
+        });
+
+        vault.merge_from(&tombstones);
+
+        assert!(
+            core.find_entry_view_by_id(&vault, &entry_id.to_string())
+                .is_none()
         );
     }
 
