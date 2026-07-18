@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Weak};
 
@@ -1782,10 +1782,16 @@ impl Vault {
         let mut content_pool = AttachmentContentPool::new();
         normalize_group_attachment_content(&mut self.root, &mut content_pool);
         let deleted_objects = merged_deleted_objects(self, other);
-        let mut merged_entry_ids = prune_vault_for_tombstones(self, &deleted_objects);
+        let group_lineage_deletions = merged_group_lineage_deletions(self, other, &deleted_objects);
+        let mut merged_entry_ids =
+            prune_vault_for_tombstones(self, &deleted_objects, &group_lineage_deletions);
 
         let mut incoming = other.clone();
-        merged_entry_ids.extend(prune_vault_for_tombstones(&mut incoming, &deleted_objects));
+        merged_entry_ids.extend(prune_vault_for_tombstones(
+            &mut incoming,
+            &deleted_objects,
+            &group_lineage_deletions,
+        ));
         self.deleted_objects = deleted_objects.into_values().collect();
         merge_group(
             &mut self.root,
@@ -1825,26 +1831,77 @@ fn merged_deleted_objects(local: &Vault, incoming: &Vault) -> BTreeMap<Uuid, Del
     merged
 }
 
+fn merged_group_lineage_deletions(
+    local: &Vault,
+    incoming: &Vault,
+    tombstones: &BTreeMap<Uuid, DeletedObject>,
+) -> BTreeMap<Uuid, i64> {
+    let mut children_by_parent = BTreeMap::<Uuid, BTreeSet<Uuid>>::new();
+    collect_group_lineage_edges(&local.root, None, &mut children_by_parent);
+    collect_group_lineage_edges(&incoming.root, None, &mut children_by_parent);
+
+    let mut deletions = tombstones
+        .iter()
+        .map(|(id, tombstone)| (*id, tombstone.deleted_at))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = deletions
+        .iter()
+        .map(|(id, deleted_at)| (*id, *deleted_at))
+        .collect::<VecDeque<_>>();
+    while let Some((parent_id, deleted_at)) = pending.pop_front() {
+        let Some(children) = children_by_parent.get(&parent_id) else {
+            continue;
+        };
+        for child_id in children {
+            let inherited = deletions.entry(*child_id).or_insert(i64::MIN);
+            if deleted_at > *inherited {
+                *inherited = deleted_at;
+                pending.push_back((*child_id, deleted_at));
+            }
+        }
+    }
+    deletions
+}
+
+fn collect_group_lineage_edges(
+    group: &Group,
+    current_parent: Option<Uuid>,
+    children_by_parent: &mut BTreeMap<Uuid, BTreeSet<Uuid>>,
+) {
+    for parent_id in current_parent.into_iter().chain(group.previous_parent) {
+        children_by_parent
+            .entry(parent_id)
+            .or_default()
+            .insert(group.id);
+    }
+    for child in &group.children {
+        collect_group_lineage_edges(child, Some(group.id), children_by_parent);
+    }
+}
+
 fn prune_vault_for_tombstones(
     vault: &mut Vault,
     tombstones: &BTreeMap<Uuid, DeletedObject>,
+    group_lineage_deletions: &BTreeMap<Uuid, i64>,
 ) -> BTreeSet<Uuid> {
-    let mut removed_entry_ids = BTreeSet::new();
+    let mut tombstone_resolved_entry_ids = BTreeSet::new();
     prune_group_for_tombstones(
         &mut vault.root,
         tombstones,
+        group_lineage_deletions,
         None,
-        &mut removed_entry_ids,
+        &mut tombstone_resolved_entry_ids,
         true,
     );
-    removed_entry_ids
+    tombstone_resolved_entry_ids
 }
 
 fn prune_group_for_tombstones(
     group: &mut Group,
     tombstones: &BTreeMap<Uuid, DeletedObject>,
+    group_lineage_deletions: &BTreeMap<Uuid, i64>,
     inherited_deletion: Option<i64>,
-    removed_entry_ids: &mut BTreeSet<Uuid>,
+    tombstone_resolved_entry_ids: &mut BTreeSet<Uuid>,
     is_root: bool,
 ) -> bool {
     let group_deletion = latest_deletion(
@@ -1854,8 +1911,8 @@ fn prune_group_for_tombstones(
         ),
         group
             .previous_parent
-            .and_then(|id| tombstones.get(&id))
-            .map(|item| item.deleted_at),
+            .and_then(|id| group_lineage_deletions.get(&id))
+            .copied(),
     );
     let subtree_deletion = group_deletion
         .filter(|deleted_at| deletion_wins(*deleted_at, group_location_update(group)));
@@ -1873,13 +1930,13 @@ fn prune_group_for_tombstones(
             ),
             entry
                 .previous_parent
-                .and_then(|id| tombstones.get(&id))
-                .map(|item| item.deleted_at),
+                .and_then(|id| group_lineage_deletions.get(&id))
+                .copied(),
         );
         let keep =
             !deletion.is_some_and(|deleted_at| deletion_wins(deleted_at, entry_last_update(entry)));
-        if !keep {
-            removed_entry_ids.insert(entry.id);
+        if deletion.is_some() {
+            tombstone_resolved_entry_ids.insert(entry.id);
         }
         keep
     });
@@ -1897,8 +1954,9 @@ fn prune_group_for_tombstones(
         prune_group_for_tombstones(
             child,
             tombstones,
+            group_lineage_deletions,
             subtree_deletion,
-            removed_entry_ids,
+            tombstone_resolved_entry_ids,
             false,
         )
     });
@@ -3329,6 +3387,168 @@ mod tests {
     }
 
     #[test]
+    fn merge_ancestor_delete_competes_with_entries_moved_from_nested_parent() {
+        let deleted_ancestor_id = uuid::Uuid::new_v4();
+        let nested_parent_id = uuid::Uuid::new_v4();
+        let stale_move_id = uuid::Uuid::new_v4();
+        let newer_move_id = uuid::Uuid::new_v4();
+        let mut local = Vault::empty("Shared");
+
+        let mut deleted_ancestor = Group::new("deleted ancestor");
+        deleted_ancestor.id = deleted_ancestor_id;
+        deleted_ancestor.times = Some(group_times(10));
+        let mut nested_parent = Group::new("nested parent");
+        nested_parent.id = nested_parent_id;
+        nested_parent.times = Some(group_times(10));
+        deleted_ancestor.children.push(nested_parent);
+
+        let mut destination = Group::new("Destination");
+        let mut stale_move = Entry::new("stale move");
+        stale_move.id = stale_move_id;
+        stale_move.modified_at = 10;
+        stale_move.previous_parent = Some(nested_parent_id);
+        stale_move.location_changed_at = Some(40);
+        let mut newer_move = Entry::new("newer move");
+        newer_move.id = newer_move_id;
+        newer_move.modified_at = 10;
+        newer_move.previous_parent = Some(nested_parent_id);
+        newer_move.location_changed_at = Some(51);
+        destination.entries.extend([stale_move, newer_move]);
+        local.root.children.extend([deleted_ancestor, destination]);
+
+        let mut deleted = Vault::empty("Shared");
+        deleted.root.id = local.root.id;
+        deleted.deleted_objects.push(DeletedObject {
+            id: deleted_ancestor_id,
+            deleted_at: 50,
+        });
+
+        local.merge_from(&deleted);
+
+        assert_eq!(local.root.children.len(), 1);
+        assert_eq!(local.root.children[0].entries.len(), 1);
+        assert_eq!(local.root.children[0].entries[0].id, newer_move_id);
+    }
+
+    #[test]
+    fn merge_ancestor_delete_competes_with_groups_moved_from_nested_parent() {
+        let deleted_ancestor_id = uuid::Uuid::new_v4();
+        let nested_parent_id = uuid::Uuid::new_v4();
+        let stale_move_id = uuid::Uuid::new_v4();
+        let newer_move_id = uuid::Uuid::new_v4();
+        let mut local = Vault::empty("Shared");
+
+        let mut deleted_ancestor = Group::new("deleted ancestor");
+        deleted_ancestor.id = deleted_ancestor_id;
+        deleted_ancestor.times = Some(group_times(10));
+        let mut nested_parent = Group::new("nested parent");
+        nested_parent.id = nested_parent_id;
+        nested_parent.times = Some(group_times(10));
+        deleted_ancestor.children.push(nested_parent);
+
+        let mut destination = Group::new("Destination");
+        let mut stale_move = Group::new("stale move");
+        stale_move.id = stale_move_id;
+        stale_move.previous_parent = Some(nested_parent_id);
+        stale_move.times = Some(GroupTimes {
+            location_changed_at: Some(40),
+            ..group_times(10)
+        });
+        stale_move.entries.push(Entry::new("stale subtree"));
+        let mut newer_move = Group::new("newer move");
+        newer_move.id = newer_move_id;
+        newer_move.previous_parent = Some(nested_parent_id);
+        newer_move.times = Some(GroupTimes {
+            location_changed_at: Some(51),
+            ..group_times(10)
+        });
+        newer_move.entries.push(Entry::new("newer subtree"));
+        destination.children.extend([stale_move, newer_move]);
+        local.root.children.extend([deleted_ancestor, destination]);
+
+        let mut deleted = Vault::empty("Shared");
+        deleted.root.id = local.root.id;
+        deleted.deleted_objects.push(DeletedObject {
+            id: deleted_ancestor_id,
+            deleted_at: 50,
+        });
+
+        local.merge_from(&deleted);
+
+        assert_eq!(local.root.children.len(), 1);
+        assert_eq!(local.root.children[0].children.len(), 1);
+        assert_eq!(local.root.children[0].children[0].id, newer_move_id);
+        assert_eq!(local.root.children[0].children[0].entries.len(), 1);
+    }
+
+    #[test]
+    fn merge_ancestor_delete_follows_transitive_previous_parent_lineage() {
+        let deleted_ancestor_id = uuid::Uuid::new_v4();
+        let intermediate_parent_id = uuid::Uuid::new_v4();
+        let previous_parent_id = uuid::Uuid::new_v4();
+        let stale_move_id = uuid::Uuid::new_v4();
+        let newer_move_id = uuid::Uuid::new_v4();
+        let mut local = Vault::empty("Shared");
+
+        let mut deleted_ancestor = Group::new("deleted ancestor");
+        deleted_ancestor.id = deleted_ancestor_id;
+        deleted_ancestor.times = Some(group_times(10));
+
+        let mut intermediate_parent = Group::new("intermediate parent");
+        intermediate_parent.id = intermediate_parent_id;
+        intermediate_parent.previous_parent = Some(deleted_ancestor_id);
+        intermediate_parent.times = Some(GroupTimes {
+            location_changed_at: Some(40),
+            ..group_times(10)
+        });
+
+        let mut previous_parent = Group::new("previous parent");
+        previous_parent.id = previous_parent_id;
+        previous_parent.previous_parent = Some(intermediate_parent_id);
+        previous_parent.times = Some(GroupTimes {
+            location_changed_at: Some(40),
+            ..group_times(10)
+        });
+
+        let mut destination = Group::new("Destination");
+        let mut stale_move = Entry::new("stale move");
+        stale_move.id = stale_move_id;
+        stale_move.modified_at = 10;
+        stale_move.previous_parent = Some(previous_parent_id);
+        stale_move.location_changed_at = Some(40);
+        let mut newer_move = Entry::new("newer move");
+        newer_move.id = newer_move_id;
+        newer_move.modified_at = 10;
+        newer_move.previous_parent = Some(previous_parent_id);
+        newer_move.location_changed_at = Some(51);
+        destination.entries.extend([stale_move, newer_move]);
+        local.root.children.extend([
+            deleted_ancestor,
+            intermediate_parent,
+            previous_parent,
+            destination,
+        ]);
+
+        let mut deleted = Vault::empty("Shared");
+        deleted.root.id = local.root.id;
+        deleted.deleted_objects.push(DeletedObject {
+            id: deleted_ancestor_id,
+            deleted_at: 50,
+        });
+
+        local.merge_from(&deleted);
+
+        let destination = local
+            .root
+            .children
+            .iter()
+            .find(|group| group.title == "Destination")
+            .expect("destination survives");
+        assert_eq!(destination.entries.len(), 1);
+        assert_eq!(destination.entries[0].id, newer_move_id);
+    }
+
+    #[test]
     fn merge_rejects_stale_group_move_from_deleted_parent() {
         let deleted_parent_id = uuid::Uuid::new_v4();
         let moved_group_id = uuid::Uuid::new_v4();
@@ -3390,6 +3610,31 @@ mod tests {
         let mut live = Vault::empty("Shared");
         let mut entry = Entry::new("stale");
         entry.modified_at = 10;
+        let entry_id = entry.id;
+        live.root.entries.push(entry);
+
+        let mut deleted = live.clone();
+        deleted.root.entries.clear();
+        deleted.deleted_objects.push(DeletedObject {
+            id: entry_id,
+            deleted_at: 20,
+        });
+
+        let mut live_target = live.clone();
+        let live_target_report = live_target.merge_from(&deleted);
+        let mut deleted_target = deleted;
+        let deleted_target_report = deleted_target.merge_from(&live);
+
+        assert_eq!(live_target, deleted_target);
+        assert_eq!(live_target_report, deleted_target_report);
+        assert_eq!(live_target_report.merged_entries, 1);
+    }
+
+    #[test]
+    fn tombstone_merge_report_is_direction_independent_when_live_edit_wins() {
+        let mut live = Vault::empty("Shared");
+        let mut entry = Entry::new("resurrected");
+        entry.modified_at = 21;
         let entry_id = entry.id;
         live.root.entries.push(entry);
 

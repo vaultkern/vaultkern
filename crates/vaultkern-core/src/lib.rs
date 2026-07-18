@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as StdError;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1867,16 +1868,20 @@ impl KeepassCore {
         entry_id: &str,
         target_group_id: &str,
     ) -> Result<EntryView, MutationError> {
-        if find_group_by_id(&vault.root, target_group_id).is_none() {
-            return Err(MutationError::GroupNotFound(target_group_id.into()));
-        }
+        let target_group_uuid = find_group_by_id(&vault.root, target_group_id)
+            .map(|group| group.id)
+            .ok_or_else(|| MutationError::GroupNotFound(target_group_id.into()))?;
         let previous_parent = find_entry_parent_id(&vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
         let entry = find_entry_by_id(&vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        if previous_parent == target_group_uuid {
+            return Ok(project_entry(entry));
+        }
         let target_deletion = group_subtree_deletion_at(vault, target_group_id);
+        let source_deletion = group_lineage_deletion_at(vault, previous_parent);
         let next_location =
-            next_entry_location_timestamp(vault, entry, target_deletion, Some(previous_parent))?;
+            next_entry_location_timestamp(vault, entry, target_deletion, source_deletion)?;
         let (mut entry, removed_from) = take_entry_from_group(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
         debug_assert_eq!(removed_from, previous_parent);
@@ -1905,19 +1910,19 @@ impl KeepassCore {
         {
             return Err(MutationError::CannotMoveGroupIntoDescendant);
         }
-        if find_group_by_id(&vault.root, target_parent_group_id).is_none() {
-            return Err(MutationError::GroupNotFound(target_parent_group_id.into()));
-        }
+        let target_parent_uuid = find_group_by_id(&vault.root, target_parent_group_id)
+            .map(|group| group.id)
+            .ok_or_else(|| MutationError::GroupNotFound(target_parent_group_id.into()))?;
 
         let previous_parent = find_group_parent_id(&vault.root, group_id)
             .ok_or_else(|| MutationError::GroupNotFound(group_id.into()))?;
+        if previous_parent == target_parent_uuid {
+            return Ok(project_group(moving_group));
+        }
         let target_deletion = group_subtree_deletion_at(vault, target_parent_group_id);
-        let next_location = next_group_location_timestamp(
-            vault,
-            moving_group,
-            target_deletion,
-            Some(previous_parent),
-        )?;
+        let source_deletion = group_lineage_deletion_at(vault, previous_parent);
+        let next_location =
+            next_group_location_timestamp(vault, moving_group, target_deletion, source_deletion)?;
         let (mut moved_group, removed_from) = take_group_from_group(&mut vault.root, group_id)
             .ok_or_else(|| MutationError::GroupNotFound(group_id.into()))?;
         debug_assert_eq!(removed_from, previous_parent);
@@ -3147,6 +3152,9 @@ impl KeepassCore {
         let entry = find_entry_by_id(&vault.root, entry_id).expect("entry existence checked");
         let previous_parent =
             find_entry_parent_id(&vault.root, entry_id).expect("entry existence checked");
+        if vault.recycle_bin_group == Some(previous_parent) {
+            return Ok(project_entry(entry));
+        }
         let recycle_bin_deletion = match vault.recycle_bin_group {
             Some(recycle_bin_id)
                 if find_group_by_id(&vault.root, &recycle_bin_id.to_string()).is_some() =>
@@ -3159,7 +3167,7 @@ impl KeepassCore {
             vault,
             entry,
             recycle_bin_deletion,
-            Some(previous_parent),
+            group_lineage_deletion_at(vault, previous_parent),
         )?;
         let recycle_bin_id = ensure_recycle_bin(vault);
         let (mut entry, parent_group_id) = take_entry_from_group(&mut vault.root, entry_id)
@@ -3199,6 +3207,9 @@ impl KeepassCore {
                 .ok_or_else(|| MutationError::GroupNotFound("restore-target".into()))?;
             if find_group_by_id(&vault.root, &target_group_id).is_none() {
                 return Err(MutationError::GroupNotFound(target_group_id));
+            }
+            if target_group_id == recycle_bin_id {
+                return Ok(project_entry(entry));
             }
             let target_deletion = group_subtree_deletion_at(vault, &target_group_id);
             (
@@ -4367,11 +4378,11 @@ fn next_entry_location_timestamp(
     vault: &Vault,
     entry: &Entry,
     target_deletion: Option<i64>,
-    resulting_previous_parent: Option<Uuid>,
+    source_deletion: Option<i64>,
 ) -> Result<u64, MutationError> {
     let tombstone_floor = [
         latest_tombstone_timestamp(vault, entry.id),
-        resulting_previous_parent.and_then(|id| latest_tombstone_timestamp(vault, id)),
+        source_deletion,
         target_deletion,
     ]
     .into_iter()
@@ -4392,11 +4403,11 @@ fn next_group_location_timestamp(
     vault: &Vault,
     group: &Group,
     target_deletion: Option<i64>,
-    resulting_previous_parent: Option<Uuid>,
+    source_deletion: Option<i64>,
 ) -> Result<u64, MutationError> {
     let tombstone_floor = [
         latest_tombstone_timestamp(vault, group.id),
-        resulting_previous_parent.and_then(|id| latest_tombstone_timestamp(vault, id)),
+        source_deletion,
         target_deletion,
     ]
     .into_iter()
@@ -4428,6 +4439,43 @@ fn latest_tombstone_timestamp(vault: &Vault, id: Uuid) -> Option<i64> {
         .max()
 }
 
+fn group_lineage_deletion_at(vault: &Vault, group_id: Uuid) -> Option<i64> {
+    fn collect_parents(
+        group: &Group,
+        current_parent: Option<Uuid>,
+        parents_by_group: &mut BTreeMap<Uuid, BTreeSet<Uuid>>,
+    ) {
+        for parent_id in current_parent.into_iter().chain(group.previous_parent) {
+            parents_by_group
+                .entry(group.id)
+                .or_default()
+                .insert(parent_id);
+        }
+        for child in &group.children {
+            collect_parents(child, Some(group.id), parents_by_group);
+        }
+    }
+
+    let mut parents_by_group = BTreeMap::<Uuid, BTreeSet<Uuid>>::new();
+    collect_parents(&vault.root, None, &mut parents_by_group);
+    let mut pending = vec![group_id];
+    let mut visited = BTreeSet::new();
+    let mut latest = None;
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        latest = [latest, latest_tombstone_timestamp(vault, id)]
+            .into_iter()
+            .flatten()
+            .max();
+        if let Some(parents) = parents_by_group.get(&id) {
+            pending.extend(parents);
+        }
+    }
+    latest
+}
+
 fn group_subtree_deletion_at(vault: &Vault, target_group_id: &str) -> Option<i64> {
     fn visit(
         vault: &Vault,
@@ -4440,7 +4488,7 @@ fn group_subtree_deletion_at(vault: &Vault, target_group_id: &str) -> Option<i64
             latest_tombstone_timestamp(vault, group.id),
             group
                 .previous_parent
-                .and_then(|id| latest_tombstone_timestamp(vault, id)),
+                .and_then(|id| group_lineage_deletion_at(vault, id)),
         ]
         .into_iter()
         .flatten()
@@ -5683,6 +5731,134 @@ mod internal_tests {
     }
 
     #[test]
+    fn move_entry_to_current_parent_is_a_noop_and_preserves_restore_lineage() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("same-parent entry move");
+        let mut active = Group::new("active");
+        let active_id = active.id;
+        let entry = Entry::new("entry");
+        let entry_id = entry.id;
+        active.entries.push(entry);
+        let recycle_bin = Group::new("recycle bin");
+        let recycle_bin_id = recycle_bin.id;
+        vault.root.children.extend([active, recycle_bin]);
+        vault.recycle_bin_enabled = Some(true);
+        vault.recycle_bin_group = Some(recycle_bin_id);
+
+        core.soft_delete_entry_to_recycle_bin(&mut vault, &entry_id.to_string())
+            .expect("move to recycle bin");
+        let before_same_parent_move = vault.clone();
+
+        core.move_entry(
+            &mut vault,
+            &entry_id.to_string(),
+            &recycle_bin_id.to_string(),
+        )
+        .expect("same-parent move");
+
+        assert_eq!(vault, before_same_parent_move);
+        core.restore_entry_from_recycle_bin(&mut vault, &entry_id.to_string(), None)
+            .expect("restore to original parent");
+        assert_eq!(vault.root.children[0].id, active_id);
+        assert_eq!(vault.root.children[0].entries[0].id, entry_id);
+        assert!(vault.root.children[1].entries.is_empty());
+    }
+
+    #[test]
+    fn move_group_to_current_parent_is_a_noop() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("same-parent group move");
+        let old_parent = Group::new("old parent");
+        let old_parent_id = old_parent.id;
+        let mut current_parent = Group::new("current parent");
+        let current_parent_id = current_parent.id;
+        let mut moved = Group::new("moved");
+        let moved_id = moved.id;
+        moved.previous_parent = Some(old_parent_id);
+        moved.times = Some(vaultkern_model::GroupTimes {
+            created_at: 0,
+            modified_at: 10,
+            expires: false,
+            expiry_time: None,
+            last_accessed_at: None,
+            usage_count: None,
+            location_changed_at: Some(20),
+        });
+        moved.entries.push(Entry::new("subtree entry"));
+        current_parent.children.push(moved);
+        vault.root.children.extend([old_parent, current_parent]);
+        let before_same_parent_move = vault.clone();
+
+        core.move_group(
+            &mut vault,
+            &moved_id.to_string(),
+            &current_parent_id.to_string(),
+        )
+        .expect("same-parent move");
+
+        assert_eq!(vault, before_same_parent_move);
+    }
+
+    #[test]
+    fn repeated_soft_delete_is_a_noop_and_preserves_restore_lineage() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("repeated soft delete");
+        let mut active = Group::new("active");
+        let active_id = active.id;
+        let entry = Entry::new("entry");
+        let entry_id = entry.id;
+        active.entries.push(entry);
+        vault.root.children.push(active);
+
+        core.soft_delete_entry_to_recycle_bin(&mut vault, &entry_id.to_string())
+            .expect("first soft delete");
+        let before_second_delete = vault.clone();
+
+        core.soft_delete_entry_to_recycle_bin(&mut vault, &entry_id.to_string())
+            .expect("second soft delete");
+
+        assert_eq!(vault, before_second_delete);
+        core.restore_entry_from_recycle_bin(&mut vault, &entry_id.to_string(), None)
+            .expect("restore to original parent");
+        assert_eq!(vault.root.children[0].id, active_id);
+        assert_eq!(vault.root.children[0].entries[0].id, entry_id);
+    }
+
+    #[test]
+    fn restore_to_recycle_bin_is_a_noop_and_preserves_default_restore_lineage() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("same-parent restore");
+        let mut active = Group::new("active");
+        let active_id = active.id;
+        let entry = Entry::new("entry");
+        let entry_id = entry.id;
+        active.entries.push(entry);
+        let recycle_bin = Group::new("recycle bin");
+        let recycle_bin_id = recycle_bin.id;
+        vault.root.children.extend([active, recycle_bin]);
+        vault.recycle_bin_enabled = Some(true);
+        vault.recycle_bin_group = Some(recycle_bin_id);
+
+        core.soft_delete_entry_to_recycle_bin(&mut vault, &entry_id.to_string())
+            .expect("move to recycle bin");
+        let before_same_parent_restore = vault.clone();
+
+        core.restore_entry_from_recycle_bin(
+            &mut vault,
+            &entry_id.to_string(),
+            Some(&recycle_bin_id.to_string()),
+        )
+        .expect("same-parent restore");
+
+        assert_eq!(vault, before_same_parent_restore);
+        core.restore_entry_from_recycle_bin(&mut vault, &entry_id.to_string(), None)
+            .expect("restore to original parent");
+        assert_eq!(vault.root.children[0].id, active_id);
+        assert_eq!(vault.root.children[0].entries[0].id, entry_id);
+        assert!(vault.root.children[1].entries.is_empty());
+    }
+
+    #[test]
     fn move_entry_advances_location_past_retained_tombstone() {
         let core = KeepassCore::new();
         let mut vault = Vault::empty("move after deletion");
@@ -5759,6 +5935,193 @@ mod internal_tests {
         assert!(
             core.find_entry_view_by_id(&vault, &entry_id.to_string())
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn move_entry_advances_location_past_source_ancestor_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("move after source ancestor deletion");
+        let mut ancestor = Group::new("ancestor");
+        let ancestor_id = ancestor.id;
+        let mut source = Group::new("source");
+        let entry = Entry::new("entry");
+        let entry_id = entry.id;
+        source.entries.push(entry);
+        ancestor.children.push(source);
+        let destination = Group::new("destination");
+        let destination_id = destination.id;
+        vault.root.children.extend([ancestor, destination]);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: ancestor_id,
+            deleted_at,
+        });
+
+        core.move_entry(
+            &mut vault,
+            &entry_id.to_string(),
+            &destination_id.to_string(),
+        )
+        .expect("move entry");
+
+        let moved = &vault.root.children[1].entries[0];
+        assert!(i128::from(moved.location_changed_at.expect("location")) > i128::from(deleted_at));
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects = vault.deleted_objects.clone();
+        vault.merge_from(&tombstones);
+        assert!(
+            core.find_entry_view_by_id(&vault, &entry_id.to_string())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn move_entry_advances_location_past_transitive_source_lineage_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("move after transitive source deletion");
+        let ancestor = Group::new("ancestor");
+        let ancestor_id = ancestor.id;
+        let mut intermediate = Group::new("intermediate");
+        let intermediate_id = intermediate.id;
+        intermediate.previous_parent = Some(ancestor_id);
+        intermediate.times = Some(vaultkern_model::GroupTimes {
+            created_at: 0,
+            modified_at: 10,
+            expires: false,
+            expiry_time: None,
+            last_accessed_at: None,
+            usage_count: None,
+            location_changed_at: Some(10),
+        });
+        let mut source = Group::new("source");
+        source.previous_parent = Some(intermediate_id);
+        source.times = Some(vaultkern_model::GroupTimes {
+            created_at: 0,
+            modified_at: 10,
+            expires: false,
+            expiry_time: None,
+            last_accessed_at: None,
+            usage_count: None,
+            location_changed_at: Some(10),
+        });
+        let entry = Entry::new("entry");
+        let entry_id = entry.id;
+        source.entries.push(entry);
+        let destination = Group::new("destination");
+        let destination_id = destination.id;
+        vault
+            .root
+            .children
+            .extend([ancestor, intermediate, source, destination]);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: ancestor_id,
+            deleted_at,
+        });
+
+        core.move_entry(
+            &mut vault,
+            &entry_id.to_string(),
+            &destination_id.to_string(),
+        )
+        .expect("move entry");
+
+        let moved = &vault.root.children[3].entries[0];
+        assert!(i128::from(moved.location_changed_at.expect("location")) > i128::from(deleted_at));
+    }
+
+    #[test]
+    fn move_group_advances_location_past_source_ancestor_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("move group after source ancestor deletion");
+        let mut ancestor = Group::new("ancestor");
+        let ancestor_id = ancestor.id;
+        let mut source = Group::new("source");
+        let mut moved = Group::new("moved");
+        let moved_id = moved.id;
+        moved.entries.push(Entry::new("subtree entry"));
+        source.children.push(moved);
+        ancestor.children.push(source);
+        let destination = Group::new("destination");
+        let destination_id = destination.id;
+        vault.root.children.extend([ancestor, destination]);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: ancestor_id,
+            deleted_at,
+        });
+
+        core.move_group(
+            &mut vault,
+            &moved_id.to_string(),
+            &destination_id.to_string(),
+        )
+        .expect("move group");
+
+        let moved = &vault.root.children[1].children[0];
+        assert!(
+            i128::from(
+                moved
+                    .times
+                    .and_then(|times| times.location_changed_at)
+                    .expect("location")
+            ) > i128::from(deleted_at)
+        );
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects = vault.deleted_objects.clone();
+        vault.merge_from(&tombstones);
+        assert!(
+            core.find_group_view_by_id(&vault, &moved_id.to_string())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn soft_delete_advances_location_past_source_ancestor_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("recycle after source ancestor deletion");
+        let mut ancestor = Group::new("ancestor");
+        let ancestor_id = ancestor.id;
+        let mut source = Group::new("source");
+        let entry = Entry::new("entry");
+        let entry_id = entry.id;
+        source.entries.push(entry);
+        ancestor.children.push(source);
+        vault.root.children.push(ancestor);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: ancestor_id,
+            deleted_at,
+        });
+
+        core.soft_delete_entry_to_recycle_bin(&mut vault, &entry_id.to_string())
+            .expect("move entry to recycle bin");
+
+        let recycle_bin_id = vault.recycle_bin_group.expect("recycle bin");
+        let recycled = super::find_group_by_id(&vault.root, &recycle_bin_id.to_string())
+            .and_then(|group| group.entries.first())
+            .expect("recycled entry");
+        assert!(
+            i128::from(recycled.location_changed_at.expect("location")) > i128::from(deleted_at)
+        );
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects = vault.deleted_objects.clone();
+        vault.merge_from(&tombstones);
+        assert!(
+            core.find_entry_view_by_id(&vault, &entry_id.to_string())
+                .is_some()
         );
     }
 
