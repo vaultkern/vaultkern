@@ -63,11 +63,9 @@ fn external_fixtures_support_recycle_bin_mutation_oracle() {
     let core = KeepassCore::new();
 
     let mut not_yet_created = load_fixture(&core, FIXTURE_RECYCLE_BIN_NOT_YET_CREATED, "123");
-    let mut not_yet_created_expected_deleted_object_ids =
+    let not_yet_created_expected_deleted_object_ids =
         collect_deleted_object_ids(&core, &not_yet_created);
     let not_yet_created_refs = soft_delete_first_active_entry(&core, &mut not_yet_created);
-    not_yet_created_expected_deleted_object_ids.push(not_yet_created_refs.deleted_entry_id.clone());
-    not_yet_created_expected_deleted_object_ids.sort();
     assert_eq!(
         collect_soft_delete_digest(&core, &not_yet_created, &not_yet_created_refs),
         SoftDeleteDigest {
@@ -92,14 +90,12 @@ fn external_fixtures_support_recycle_bin_mutation_oracle() {
     );
 
     let mut empty = load_fixture(&core, FIXTURE_RECYCLE_BIN_EMPTY, "123");
-    let mut empty_expected_deleted_object_ids = collect_deleted_object_ids(&core, &empty);
+    let empty_expected_deleted_object_ids = collect_deleted_object_ids(&core, &empty);
     let empty_existing_recycle_bin_id = empty
         .recycle_bin_group
         .expect("existing recycle bin id")
         .to_string();
     let empty_refs = soft_delete_first_active_entry(&core, &mut empty);
-    empty_expected_deleted_object_ids.push(empty_refs.deleted_entry_id.clone());
-    empty_expected_deleted_object_ids.sort();
     assert_eq!(
         empty_refs.recycle_bin_group_id,
         empty_existing_recycle_bin_id

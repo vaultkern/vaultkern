@@ -200,7 +200,7 @@ fn code_built_vault_supports_pause_line_contract_on_stable_roundtrip() {
     let bin_metadata = core.project_vault_bin_template_metadata(&vault);
     assert_eq!(bin_metadata.recycle_bin_enabled, Some(true));
     assert!(bin_metadata.recycle_bin_group_id.is_some());
-    assert_eq!(core.list_deleted_objects(&vault).len(), 1);
+    assert!(core.list_deleted_objects(&vault).is_empty());
 
     core.restore_entry_from_recycle_bin(&mut vault, &entry_id, Some(&archive.id))
         .expect("restore entry into archive");

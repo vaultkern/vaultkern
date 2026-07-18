@@ -1870,11 +1870,9 @@ impl KeepassCore {
         if find_group_by_id(&vault.root, target_group_id).is_none() {
             return Err(MutationError::GroupNotFound(target_group_id.into()));
         }
-        let next_location = next_entry_location_timestamp(
-            find_entry_by_id(&vault.root, entry_id)
-                .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?
-                .location_changed_at,
-        )?;
+        let entry = find_entry_by_id(&vault.root, entry_id)
+            .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        let next_location = next_entry_location_timestamp(vault, entry)?;
         let (mut entry, _) = take_entry_from_group(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
         entry.location_changed_at = Some(next_location);
@@ -3117,11 +3115,8 @@ impl KeepassCore {
         if find_entry_by_id(&vault.root, entry_id).is_none() {
             return Err(MutationError::EntryNotFound(entry_id.into()));
         }
-        let next_location = next_entry_location_timestamp(
-            find_entry_by_id(&vault.root, entry_id)
-                .expect("entry existence checked")
-                .location_changed_at,
-        )?;
+        let entry = find_entry_by_id(&vault.root, entry_id).expect("entry existence checked");
+        let next_location = next_entry_location_timestamp(vault, entry)?;
         let recycle_bin_id = ensure_recycle_bin(vault);
         let (mut entry, parent_group_id) = take_entry_from_group(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
@@ -3159,7 +3154,7 @@ impl KeepassCore {
                 .ok_or_else(|| MutationError::GroupNotFound("restore-target".into()))?;
             (
                 target_group_id,
-                next_entry_location_timestamp(entry.location_changed_at)?,
+                next_entry_location_timestamp(vault, entry)?,
             )
         };
         if find_group_by_id(&vault.root, &target_group_id).is_none() {
@@ -4294,9 +4289,19 @@ fn record_deleted_objects(vault: &mut Vault, ids: impl IntoIterator<Item = Uuid>
         .collect();
 }
 
-fn next_entry_location_timestamp(previous: Option<u64>) -> Result<u64, MutationError> {
-    let now = current_unix_timestamp().max(0) as u64;
-    let next = now.max(previous.unwrap_or(0).saturating_add(1));
+fn next_entry_location_timestamp(vault: &Vault, entry: &Entry) -> Result<u64, MutationError> {
+    let tombstone_floor = vault
+        .deleted_objects
+        .iter()
+        .filter(|deleted| deleted.id == entry.id)
+        .map(|deleted| i128::from(deleted.deleted_at))
+        .max()
+        .unwrap_or(i128::MIN);
+    let causal_floor = i128::from(entry.location_changed_at.unwrap_or(0)).max(tombstone_floor);
+    let next = i128::from(current_unix_timestamp().max(0)).max(causal_floor.saturating_add(1));
+    let next = u64::try_from(next).map_err(|_| {
+        MutationError::InvalidEntryValue(format!("timestamp is outside the KDBX4 domain: {next}"))
+    })?;
     validate_persistent_unsigned_timestamp(next)?;
     Ok(next)
 }
@@ -5519,6 +5524,85 @@ mod internal_tests {
     }
 
     #[test]
+    fn move_entry_advances_location_past_retained_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("move after deletion");
+        let mut entry = Entry::new("entry");
+        entry.location_changed_at = Some(10);
+        let entry_id = entry.id;
+        vault.root.entries.push(entry);
+        let destination = Group::new("destination");
+        let destination_id = destination.id;
+        vault.root.children.push(destination);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: entry_id,
+            deleted_at,
+        });
+
+        core.move_entry(
+            &mut vault,
+            &entry_id.to_string(),
+            &destination_id.to_string(),
+        )
+        .expect("move entry");
+
+        let moved = &vault.root.children[0].entries[0];
+        assert!(i128::from(moved.location_changed_at.expect("location")) > i128::from(deleted_at));
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects = vault.deleted_objects.clone();
+        vault.merge_from(&tombstones);
+        assert!(
+            core.find_entry_view_by_id(&vault, &entry_id.to_string())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn restore_entry_advances_location_past_retained_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("restore after deletion");
+        let active = Group::new("active");
+        let active_id = active.id;
+        let mut recycle_bin = Group::new("recycle bin");
+        let recycle_bin_id = recycle_bin.id;
+        let mut entry = Entry::new("entry");
+        entry.location_changed_at = Some(10);
+        entry.previous_parent = Some(active_id);
+        let entry_id = entry.id;
+        recycle_bin.entries.push(entry);
+        vault.root.children.extend([active, recycle_bin]);
+        vault.recycle_bin_enabled = Some(true);
+        vault.recycle_bin_group = Some(recycle_bin_id);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: entry_id,
+            deleted_at,
+        });
+
+        core.restore_entry_from_recycle_bin(&mut vault, &entry_id.to_string(), None)
+            .expect("restore entry");
+
+        let restored = &vault.root.children[0].entries[0];
+        assert!(
+            i128::from(restored.location_changed_at.expect("location")) > i128::from(deleted_at)
+        );
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects = vault.deleted_objects.clone();
+        vault.merge_from(&tombstones);
+        assert!(
+            core.find_entry_view_by_id(&vault, &entry_id.to_string())
+                .is_some()
+        );
+    }
+
+    #[test]
     fn tombstone_merge_of_loaded_nodes_remains_kdbx_saveable() {
         let core = KeepassCore::new();
         let mut original = Vault::empty("merge fidelity");
@@ -5576,7 +5660,7 @@ mod tests {
     use super::{
         Attachment, AttachmentContentUpdate, AttachmentMetadataUpdate, AttachmentView,
         AutoTypeAssociation, AutoTypeConfig, CompositeKey, CustomDataItemInput, CustomDataItemView,
-        CustomIcon, CustomIconInput, CustomIconView, DeletedObjectView, Entry,
+        CustomIcon, CustomIconInput, CustomIconView, DeletedObject, DeletedObjectView, Entry,
         EntryAttachmentInput, EntryAutoTypeAssociationInput, EntryAutoTypeAssociationView,
         EntryAutoTypeUpdate, EntryCreate, EntryCustomDataInput, EntryCustomFieldInput,
         EntryExpiryUpdate, EntryFieldProtection, EntryFieldProtectionUpdate, EntryHistoryItemView,
@@ -6098,6 +6182,7 @@ mod tests {
         assert_eq!(created.title, "Created");
         assert_eq!(created.username, "alice");
         assert_eq!(vault.root.entries[0].password, "secret");
+        let created_modified_at = vault.root.entries[0].modified_at;
 
         core.delete_entry(&mut vault, &created.id)
             .expect("delete entry");
@@ -6106,7 +6191,7 @@ mod tests {
         assert!(vault.root.entries.is_empty());
         assert_eq!(vault.deleted_objects.len(), 1);
         assert_eq!(vault.deleted_objects[0].id.to_string(), created.id);
-        assert!(i128::from(vault.deleted_objects[0].deleted_at) > i128::from(created.modified_at));
+        assert!(i128::from(vault.deleted_objects[0].deleted_at) > i128::from(created_modified_at));
     }
 
     #[test]

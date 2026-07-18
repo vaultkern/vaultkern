@@ -1782,17 +1782,19 @@ impl Vault {
         let mut content_pool = AttachmentContentPool::new();
         normalize_group_attachment_content(&mut self.root, &mut content_pool);
         let deleted_objects = merged_deleted_objects(self, other);
-        report.merged_entries += prune_vault_for_tombstones(self, &deleted_objects);
+        let mut merged_entry_ids = prune_vault_for_tombstones(self, &deleted_objects);
 
         let mut incoming = other.clone();
-        prune_vault_for_tombstones(&mut incoming, &deleted_objects);
+        merged_entry_ids.extend(prune_vault_for_tombstones(&mut incoming, &deleted_objects));
         self.deleted_objects = deleted_objects.into_values().collect();
         merge_group(
             &mut self.root,
             &incoming.root,
             &mut content_pool,
+            &mut merged_entry_ids,
             &mut report,
         );
+        report.merged_entries = merged_entry_ids.len();
         report
     }
 }
@@ -1826,21 +1828,37 @@ fn merged_deleted_objects(local: &Vault, incoming: &Vault) -> BTreeMap<Uuid, Del
 fn prune_vault_for_tombstones(
     vault: &mut Vault,
     tombstones: &BTreeMap<Uuid, DeletedObject>,
-) -> usize {
-    let (_, removed_entries) = prune_group_for_tombstones(&mut vault.root, tombstones, None, true);
-    removed_entries
+) -> BTreeSet<Uuid> {
+    let mut removed_entry_ids = BTreeSet::new();
+    prune_group_for_tombstones(
+        &mut vault.root,
+        tombstones,
+        None,
+        &mut removed_entry_ids,
+        true,
+    );
+    removed_entry_ids
 }
 
 fn prune_group_for_tombstones(
     group: &mut Group,
     tombstones: &BTreeMap<Uuid, DeletedObject>,
     inherited_deletion: Option<i64>,
+    removed_entry_ids: &mut BTreeSet<Uuid>,
     is_root: bool,
-) -> (bool, usize) {
-    let effective_deletion = latest_deletion(
-        inherited_deletion,
-        tombstones.get(&group.id).map(|item| item.deleted_at),
+) -> bool {
+    let group_deletion = latest_deletion(
+        latest_deletion(
+            inherited_deletion,
+            tombstones.get(&group.id).map(|item| item.deleted_at),
+        ),
+        group
+            .previous_parent
+            .and_then(|id| tombstones.get(&id))
+            .map(|item| item.deleted_at),
     );
+    let subtree_deletion = group_deletion
+        .filter(|deleted_at| deletion_wins(*deleted_at, group_location_update(group)));
     let old_entry_ids = group
         .entries
         .iter()
@@ -1850,7 +1868,7 @@ fn prune_group_for_tombstones(
     group.entries.retain(|entry| {
         let deletion = latest_deletion(
             latest_deletion(
-                effective_deletion,
+                subtree_deletion,
                 tombstones.get(&entry.id).map(|item| item.deleted_at),
             ),
             entry
@@ -1858,12 +1876,16 @@ fn prune_group_for_tombstones(
                 .and_then(|id| tombstones.get(&id))
                 .map(|item| item.deleted_at),
         );
-        !deletion.is_some_and(|deleted_at| deletion_wins(deleted_at, entry_last_update(entry)))
+        let keep =
+            !deletion.is_some_and(|deleted_at| deletion_wins(deleted_at, entry_last_update(entry)));
+        if !keep {
+            removed_entry_ids.insert(entry.id);
+        }
+        keep
     });
     if group.entries.len() != old_entry_count {
         reconcile_group_entry_nodes(group, &old_entry_ids);
     }
-    let mut removed_entries = old_entry_count - group.entries.len();
 
     let old_child_ids = group
         .children
@@ -1872,21 +1894,21 @@ fn prune_group_for_tombstones(
         .collect::<Vec<_>>();
     let old_child_count = group.children.len();
     group.children.retain_mut(|child| {
-        let (keep, child_removed_entries) =
-            prune_group_for_tombstones(child, tombstones, effective_deletion, false);
-        removed_entries += child_removed_entries;
-        keep
+        prune_group_for_tombstones(
+            child,
+            tombstones,
+            subtree_deletion,
+            removed_entry_ids,
+            false,
+        )
     });
     if group.children.len() != old_child_count {
         reconcile_group_child_nodes(group, &old_child_ids);
     }
 
-    let group_survives = effective_deletion
+    let group_survives = group_deletion
         .is_none_or(|deleted_at| !deletion_wins(deleted_at, group_last_update(group)));
-    (
-        is_root || group_survives || !group.entries.is_empty() || !group.children.is_empty(),
-        removed_entries,
-    )
+    is_root || group_survives || !group.entries.is_empty() || !group.children.is_empty()
 }
 
 fn latest_deletion(left: Option<i64>, right: Option<i64>) -> Option<i64> {
@@ -1911,6 +1933,13 @@ fn group_last_update(group: &Group) -> u64 {
                 .modified_at
                 .max(times.location_changed_at.unwrap_or(0))
         })
+        .unwrap_or(0)
+}
+
+fn group_location_update(group: &Group) -> u64 {
+    group
+        .times
+        .and_then(|times| times.location_changed_at)
         .unwrap_or(0)
 }
 
@@ -1951,6 +1980,7 @@ fn merge_group(
     target: &mut Group,
     source: &Group,
     content_pool: &mut AttachmentContentPool,
+    merged_entry_ids: &mut BTreeSet<Uuid>,
     report: &mut MergeReport,
 ) {
     for incoming_entry in &source.entries {
@@ -1967,14 +1997,14 @@ fn merge_group(
                 merged.history.push(snapshot);
                 normalize_entry_attachment_content(&mut merged, content_pool);
                 *existing = merged;
-                report.merged_entries += 1;
+                merged_entry_ids.insert(incoming_entry.id);
                 report.history_snapshots_added += 1;
             }
         } else {
             let mut incoming_entry = incoming_entry.clone();
             normalize_entry_attachment_content(&mut incoming_entry, content_pool);
+            merged_entry_ids.insert(incoming_entry.id);
             target.entries.push(incoming_entry);
-            report.merged_entries += 1;
         }
     }
 
@@ -1988,6 +2018,7 @@ fn merge_group(
                 &mut target.children[index],
                 incoming_group,
                 content_pool,
+                merged_entry_ids,
                 report,
             );
         } else {
@@ -3295,6 +3326,110 @@ mod tests {
         assert_eq!(local.root.children.len(), 1);
         assert_eq!(local.root.children[0].entries.len(), 1);
         assert_eq!(local.root.children[0].entries[0].id, newer_move_id);
+    }
+
+    #[test]
+    fn merge_rejects_stale_group_move_from_deleted_parent() {
+        let deleted_parent_id = uuid::Uuid::new_v4();
+        let moved_group_id = uuid::Uuid::new_v4();
+        let mut local = Vault::empty("Shared");
+        local.deleted_objects.push(DeletedObject {
+            id: deleted_parent_id,
+            deleted_at: 50,
+        });
+
+        let mut incoming = local.clone();
+        incoming.deleted_objects.clear();
+        let mut moved_group = Group::new("stale moved group");
+        moved_group.id = moved_group_id;
+        moved_group.previous_parent = Some(deleted_parent_id);
+        moved_group.times = Some(GroupTimes {
+            location_changed_at: Some(40),
+            ..group_times(10)
+        });
+        incoming.root.children.push(moved_group);
+
+        local.merge_from(&incoming);
+
+        assert!(local.root.children.is_empty());
+    }
+
+    #[test]
+    fn merge_preserves_subtree_of_group_moved_after_deletion() {
+        let moved_group_id = uuid::Uuid::new_v4();
+        let moved_entry_id = uuid::Uuid::new_v4();
+        let mut local = Vault::empty("Shared");
+        local.deleted_objects.push(DeletedObject {
+            id: moved_group_id,
+            deleted_at: 50,
+        });
+
+        let mut incoming = local.clone();
+        incoming.deleted_objects.clear();
+        let mut moved_group = Group::new("newer moved group");
+        moved_group.id = moved_group_id;
+        moved_group.times = Some(GroupTimes {
+            location_changed_at: Some(51),
+            ..group_times(10)
+        });
+        let mut entry = Entry::new("subtree secret");
+        entry.id = moved_entry_id;
+        entry.modified_at = 10;
+        moved_group.entries.push(entry);
+        incoming.root.children.push(moved_group);
+
+        local.merge_from(&incoming);
+
+        assert_eq!(local.root.children.len(), 1);
+        assert_eq!(local.root.children[0].entries.len(), 1);
+        assert_eq!(local.root.children[0].entries[0].id, moved_entry_id);
+    }
+
+    #[test]
+    fn tombstone_merge_report_is_direction_independent() {
+        let mut live = Vault::empty("Shared");
+        let mut entry = Entry::new("stale");
+        entry.modified_at = 10;
+        let entry_id = entry.id;
+        live.root.entries.push(entry);
+
+        let mut deleted = live.clone();
+        deleted.root.entries.clear();
+        deleted.deleted_objects.push(DeletedObject {
+            id: entry_id,
+            deleted_at: 20,
+        });
+
+        let mut live_target = live.clone();
+        let live_target_report = live_target.merge_from(&deleted);
+        let mut deleted_target = deleted;
+        let deleted_target_report = deleted_target.merge_from(&live);
+
+        assert_eq!(live_target, deleted_target);
+        assert_eq!(live_target_report, deleted_target_report);
+        assert_eq!(live_target_report.merged_entries, 1);
+    }
+
+    #[test]
+    fn tombstone_merge_report_counts_a_resurrected_entry_once() {
+        let mut local = Vault::empty("Shared");
+        let mut stale = Entry::new("stale");
+        stale.modified_at = 10;
+        let entry_id = stale.id;
+        local.root.entries.push(stale);
+        local.deleted_objects.push(DeletedObject {
+            id: entry_id,
+            deleted_at: 15,
+        });
+
+        let mut incoming = local.clone();
+        incoming.root.entries[0].title = "resurrected".into();
+        incoming.root.entries[0].modified_at = 20;
+
+        let report = local.merge_from(&incoming);
+
+        assert_eq!(local.root.entries[0].title, "resurrected");
+        assert_eq!(report.merged_entries, 1);
     }
 
     #[test]
