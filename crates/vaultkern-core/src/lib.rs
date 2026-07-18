@@ -1777,12 +1777,15 @@ impl KeepassCore {
             validate_unprotected_xml_text(value, kind)?;
         }
 
+        if find_group_by_id(&vault.root, parent_group_id).is_none() {
+            return Err(MutationError::GroupNotFound(parent_group_id.into()));
+        }
+        let creation_time =
+            next_creation_timestamp(group_subtree_deletion_at(vault, parent_group_id))?;
         let parent = find_group_by_id_mut(&mut vault.root, parent_group_id)
-            .ok_or_else(|| MutationError::GroupNotFound(parent_group_id.into()))?;
+            .expect("parent existence checked");
 
         let mut entry = Entry::new(create.title);
-        let creation_time = current_unix_timestamp().max(0) as u64;
-        validate_persistent_unsigned_timestamp(creation_time)?;
         entry.id = parsed_entry_id;
         entry.username = create.username;
         entry.password = create.password;
@@ -1818,10 +1821,24 @@ impl KeepassCore {
     ) -> Result<GroupView, MutationError> {
         let title = title.into();
         validate_unprotected_xml_text(&title, "group title")?;
+        if find_group_by_id(&vault.root, parent_group_id).is_none() {
+            return Err(MutationError::GroupNotFound(parent_group_id.into()));
+        }
+        let creation_time =
+            next_creation_timestamp(group_subtree_deletion_at(vault, parent_group_id))?;
         let mut new_group = Group::new(title);
         new_group.id = fresh_live_uuid(vault);
+        new_group.times = Some(GroupTimes {
+            created_at: creation_time,
+            modified_at: creation_time,
+            expires: false,
+            expiry_time: Some(creation_time as i64),
+            last_accessed_at: Some(creation_time),
+            usage_count: Some(0),
+            location_changed_at: Some(creation_time),
+        });
         let parent = find_group_by_id_mut(&mut vault.root, parent_group_id)
-            .ok_or_else(|| MutationError::GroupNotFound(parent_group_id.into()))?;
+            .expect("parent existence checked");
         parent.children.push(new_group);
         let group = parent.children.last().expect("created group");
         Ok(project_group(group))
@@ -3214,7 +3231,12 @@ impl KeepassCore {
             let target_deletion = group_subtree_deletion_at(vault, &target_group_id);
             (
                 target_group_id,
-                next_entry_location_timestamp(vault, entry, target_deletion, None)?,
+                next_entry_location_timestamp(
+                    vault,
+                    entry,
+                    target_deletion,
+                    group_lineage_deletion_at(vault, recycle_bin_uuid),
+                )?,
             )
         };
         let (mut entry, _) = take_entry_from_group(&mut vault.root, entry_id)
@@ -4399,6 +4421,16 @@ fn next_entry_location_timestamp(
     Ok(next)
 }
 
+fn next_creation_timestamp(target_deletion: Option<i64>) -> Result<u64, MutationError> {
+    let tombstone_floor = target_deletion.map(i128::from).unwrap_or(i128::MIN);
+    let next = i128::from(current_unix_timestamp().max(0)).max(tombstone_floor.saturating_add(1));
+    let next = u64::try_from(next).map_err(|_| {
+        MutationError::InvalidEntryValue(format!("timestamp is outside the KDBX4 domain: {next}"))
+    })?;
+    validate_persistent_unsigned_timestamp(next)?;
+    Ok(next)
+}
+
 fn next_group_location_timestamp(
     vault: &Vault,
     group: &Group,
@@ -5409,6 +5441,132 @@ mod internal_tests {
     }
 
     #[test]
+    fn add_entry_with_id_advances_creation_past_parent_ancestor_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("create entry after ancestor deletion");
+        let mut ancestor = Group::new("ancestor");
+        let ancestor_id = ancestor.id;
+        let target = Group::new("target");
+        let target_id = target.id;
+        ancestor.children.push(target);
+        vault.root.children.push(ancestor);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: ancestor_id,
+            deleted_at,
+        });
+        let entry_id = Uuid::new_v4();
+
+        core.add_entry_with_id(
+            &mut vault,
+            &target_id.to_string(),
+            &entry_id.to_string(),
+            stable_entry_create(),
+        )
+        .expect("create entry");
+
+        let entry = &vault.root.children[0].children[0].entries[0];
+        assert!(i128::from(entry.created_at) > i128::from(deleted_at));
+        assert!(i128::from(entry.modified_at) > i128::from(deleted_at));
+        assert!(i128::from(entry.location_changed_at.expect("location")) > i128::from(deleted_at));
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects = vault.deleted_objects.clone();
+        vault.merge_from(&tombstones);
+        assert!(
+            core.find_entry_view_by_id(&vault, &entry_id.to_string())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn add_entry_with_id_is_atomic_when_parent_tombstone_has_no_successor() {
+        const MAX_KDBX4_TIMESTAMP: i64 = i64::MAX - 62_135_596_800;
+
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("entry creation clock overflow");
+        let target = Group::new("target");
+        let target_id = target.id;
+        vault.root.children.push(target);
+        vault.deleted_objects.push(DeletedObject {
+            id: target_id,
+            deleted_at: MAX_KDBX4_TIMESTAMP,
+        });
+        let before = vault.clone();
+        let entry_id = Uuid::new_v4().to_string();
+
+        assert!(matches!(
+            core.add_entry_with_id(
+                &mut vault,
+                &target_id.to_string(),
+                &entry_id,
+                stable_entry_create(),
+            ),
+            Err(MutationError::InvalidEntryValue(_))
+        ));
+        assert_eq!(vault, before);
+    }
+
+    #[test]
+    fn add_group_advances_creation_past_parent_ancestor_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("create group after ancestor deletion");
+        let mut ancestor = Group::new("ancestor");
+        let ancestor_id = ancestor.id;
+        let target = Group::new("target");
+        let target_id = target.id;
+        ancestor.children.push(target);
+        vault.root.children.push(ancestor);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: ancestor_id,
+            deleted_at,
+        });
+
+        let created = core
+            .add_group(&mut vault, &target_id.to_string(), "created")
+            .expect("create group");
+
+        let group = &vault.root.children[0].children[0].children[0];
+        assert_eq!(group.id.to_string(), created.id);
+        let times = group.times.expect("created group times");
+        assert!(i128::from(times.created_at) > i128::from(deleted_at));
+        assert!(i128::from(times.modified_at) > i128::from(deleted_at));
+        assert!(i128::from(times.location_changed_at.expect("location")) > i128::from(deleted_at));
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects = vault.deleted_objects.clone();
+        vault.merge_from(&tombstones);
+        assert!(core.find_group_view_by_id(&vault, &created.id).is_some());
+    }
+
+    #[test]
+    fn add_group_is_atomic_when_parent_tombstone_has_no_successor() {
+        const MAX_KDBX4_TIMESTAMP: i64 = i64::MAX - 62_135_596_800;
+
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("group creation clock overflow");
+        let target = Group::new("target");
+        let target_id = target.id;
+        vault.root.children.push(target);
+        vault.deleted_objects.push(DeletedObject {
+            id: target_id,
+            deleted_at: MAX_KDBX4_TIMESTAMP,
+        });
+        let before = vault.clone();
+
+        assert!(matches!(
+            core.add_group(&mut vault, &target_id.to_string(), "created"),
+            Err(MutationError::InvalidEntryValue(_))
+        ));
+        assert_eq!(vault, before);
+    }
+
+    #[test]
     fn attachment_facade_reuses_content_across_entries_and_history_clones() {
         let core = KeepassCore::new();
         let mut vault = Vault::empty("shared attachments");
@@ -6399,7 +6557,7 @@ mod internal_tests {
     }
 
     #[test]
-    fn restore_ignores_the_recycle_bin_tombstone_being_left() {
+    fn restore_is_atomic_when_recycle_bin_tombstone_has_no_successor() {
         const MAX_KDBX4_TIMESTAMP: i64 = i64::MAX - 62_135_596_800;
 
         let core = KeepassCore::new();
@@ -6419,12 +6577,96 @@ mod internal_tests {
             id: recycle_bin_id,
             deleted_at: MAX_KDBX4_TIMESTAMP,
         });
+        let before = vault.clone();
+
+        assert!(matches!(
+            core.restore_entry_from_recycle_bin(&mut vault, &entry_id.to_string(), None),
+            Err(MutationError::InvalidEntryValue(_))
+        ));
+        assert_eq!(vault, before);
+    }
+
+    #[test]
+    fn restore_entry_advances_location_past_recycle_bin_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("restore after recycle-bin deletion");
+        let active = Group::new("active");
+        let active_id = active.id;
+        let mut recycle_bin = Group::new("recycle bin");
+        let recycle_bin_id = recycle_bin.id;
+        let mut entry = Entry::new("entry");
+        entry.previous_parent = Some(active_id);
+        let entry_id = entry.id;
+        recycle_bin.entries.push(entry);
+        vault.root.children.extend([active, recycle_bin]);
+        vault.recycle_bin_enabled = Some(true);
+        vault.recycle_bin_group = Some(recycle_bin_id);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: recycle_bin_id,
+            deleted_at,
+        });
 
         core.restore_entry_from_recycle_bin(&mut vault, &entry_id.to_string(), None)
-            .expect("restore does not inherit the recycle-bin tombstone");
+            .expect("restore entry");
 
-        assert_eq!(vault.root.children[0].entries[0].id, entry_id);
-        assert_eq!(vault.root.children[0].entries[0].previous_parent, None);
+        let restored = &vault.root.children[0].entries[0];
+        assert!(
+            i128::from(restored.location_changed_at.expect("location")) > i128::from(deleted_at)
+        );
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects = vault.deleted_objects.clone();
+        vault.merge_from(&tombstones);
+        assert!(
+            core.find_entry_view_by_id(&vault, &entry_id.to_string())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn restore_entry_advances_location_past_recycle_bin_ancestor_tombstone() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("restore after recycle-bin ancestor deletion");
+        let active = Group::new("active");
+        let active_id = active.id;
+        let mut ancestor = Group::new("recycle ancestor");
+        let ancestor_id = ancestor.id;
+        let mut recycle_bin = Group::new("recycle bin");
+        let recycle_bin_id = recycle_bin.id;
+        let mut entry = Entry::new("entry");
+        entry.previous_parent = Some(active_id);
+        let entry_id = entry.id;
+        recycle_bin.entries.push(entry);
+        ancestor.children.push(recycle_bin);
+        vault.root.children.extend([active, ancestor]);
+        vault.recycle_bin_enabled = Some(true);
+        vault.recycle_bin_group = Some(recycle_bin_id);
+        let deleted_at = super::current_unix_timestamp()
+            .checked_add(10_000)
+            .expect("future tombstone");
+        vault.deleted_objects.push(DeletedObject {
+            id: ancestor_id,
+            deleted_at,
+        });
+
+        core.restore_entry_from_recycle_bin(&mut vault, &entry_id.to_string(), None)
+            .expect("restore entry");
+
+        let restored = &vault.root.children[0].entries[0];
+        assert!(
+            i128::from(restored.location_changed_at.expect("location")) > i128::from(deleted_at)
+        );
+        let mut tombstones = Vault::empty("tombstones");
+        tombstones.root.id = vault.root.id;
+        tombstones.deleted_objects = vault.deleted_objects.clone();
+        vault.merge_from(&tombstones);
+        assert!(
+            core.find_entry_view_by_id(&vault, &entry_id.to_string())
+                .is_some()
+        );
     }
 
     #[test]

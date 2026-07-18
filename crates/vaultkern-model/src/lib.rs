@@ -1779,6 +1779,7 @@ impl Vault {
 
     pub fn merge_from(&mut self, other: &Vault) -> MergeReport {
         let mut report = MergeReport::default();
+        let differing_entry_ids = differing_entry_ids(self, other);
         let mut content_pool = AttachmentContentPool::new();
         normalize_group_attachment_content(&mut self.root, &mut content_pool);
         let deleted_objects = merged_deleted_objects(self, other);
@@ -1792,6 +1793,7 @@ impl Vault {
             &deleted_objects,
             &group_lineage_deletions,
         ));
+        merged_entry_ids.retain(|id| differing_entry_ids.contains(id));
         self.deleted_objects = deleted_objects.into_values().collect();
         merge_group(
             &mut self.root,
@@ -1829,6 +1831,28 @@ fn merged_deleted_objects(local: &Vault, incoming: &Vault) -> BTreeMap<Uuid, Del
             .or_insert(candidate);
     }
     merged
+}
+
+fn differing_entry_ids(local: &Vault, incoming: &Vault) -> BTreeSet<Uuid> {
+    fn collect<'a>(group: &'a Group, entries: &mut BTreeMap<Uuid, (Uuid, &'a Entry)>) {
+        for entry in &group.entries {
+            entries.insert(entry.id, (group.id, entry));
+        }
+        for child in &group.children {
+            collect(child, entries);
+        }
+    }
+
+    let mut local_entries = BTreeMap::new();
+    collect(&local.root, &mut local_entries);
+    let mut incoming_entries = BTreeMap::new();
+    collect(&incoming.root, &mut incoming_entries);
+    local_entries
+        .keys()
+        .chain(incoming_entries.keys())
+        .filter(|id| local_entries.get(id) != incoming_entries.get(id))
+        .copied()
+        .collect()
 }
 
 fn merged_group_lineage_deletions(
@@ -3653,6 +3677,58 @@ mod tests {
         assert_eq!(live_target, deleted_target);
         assert_eq!(live_target_report, deleted_target_report);
         assert_eq!(live_target_report.merged_entries, 1);
+    }
+
+    #[test]
+    fn identical_resurrected_states_report_no_merged_entries() {
+        let mut resurrected = Vault::empty("Shared");
+        let mut entry = Entry::new("resurrected");
+        entry.modified_at = 21;
+        let entry_id = entry.id;
+        resurrected.root.entries.push(entry);
+        resurrected.deleted_objects.push(DeletedObject {
+            id: entry_id,
+            deleted_at: 20,
+        });
+        let identical = resurrected.clone();
+
+        let report = resurrected.merge_from(&identical);
+
+        assert_eq!(resurrected, identical);
+        assert_eq!(report, super::MergeReport::default());
+    }
+
+    #[test]
+    fn identical_resurrected_states_with_ancestor_tombstone_report_no_merged_entries() {
+        let ancestor_id = uuid::Uuid::new_v4();
+        let previous_parent_id = uuid::Uuid::new_v4();
+        let mut resurrected = Vault::empty("Shared");
+
+        let mut ancestor = Group::new("ancestor");
+        ancestor.id = ancestor_id;
+        ancestor.times = Some(group_times(21));
+        let mut previous_parent = Group::new("previous parent");
+        previous_parent.id = previous_parent_id;
+        previous_parent.times = Some(group_times(21));
+        ancestor.children.push(previous_parent);
+
+        let mut destination = Group::new("destination");
+        let mut entry = Entry::new("resurrected descendant");
+        entry.modified_at = 10;
+        entry.previous_parent = Some(previous_parent_id);
+        entry.location_changed_at = Some(21);
+        destination.entries.push(entry);
+        resurrected.root.children.extend([ancestor, destination]);
+        resurrected.deleted_objects.push(DeletedObject {
+            id: ancestor_id,
+            deleted_at: 20,
+        });
+        let identical = resurrected.clone();
+
+        let report = resurrected.merge_from(&identical);
+
+        assert_eq!(resurrected, identical);
+        assert_eq!(report, super::MergeReport::default());
     }
 
     #[test]
