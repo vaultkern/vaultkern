@@ -41,16 +41,17 @@ contracts.
   serialized by ETag CAS; local state keeps the content fingerprint. After
   a successful sync, keep the synced **base copy** locally.
 - Remote changed, no local edits → adopt it. Remote changed, local edits →
-  keep one version live, write the other as a sibling conflict-copy
-  `.kdbx`; the user reconciles. Foreign (non-vaultkern) writes are handled
-  identically — adopt or fork, never silently blended.
+  the three-way field patch below. Anything the patch cannot represent —
+  including a foreign write whose lineage over our kept base is unclear —
+  becomes a sibling conflict-copy `.kdbx` for the user to reconcile;
+  nothing is ever silently blended outside the patch rules.
 - Quick unlock survives foreign saves: in the app, the blob's master
   credential re-derives silently after a salt rotation (002) — one slow
   unlock, no password prompt. Extension processes never run a KDF, so on a
   cache miss they fail gracefully and direct the user to open the app once
   (002/003).
 
-## Three-way field patch (specified now; built when conflict copies annoy)
+## Three-way field patch
 
 Because pushes are serialized by CAS, the kept base `B` is always an
 ancestor of the remote head `R`, and the local vault `L` is `B` plus this
