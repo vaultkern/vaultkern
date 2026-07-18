@@ -1,3 +1,5 @@
+> **Retired (2026-07-19).** Mission completed; retained as historical record.
+
 # 004 — Touch ID Branch Salvage Manifest
 
 Status: **Frozen — r13** (seven external review rounds + four freeze-hardening rounds + PR-review fixes). 2026-07-13. Amendments only via the 000 revision process; contracts evolve additively per the 003 version matrix.

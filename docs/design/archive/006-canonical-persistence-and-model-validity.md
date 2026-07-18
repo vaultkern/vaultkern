@@ -1,3 +1,6 @@
+> **Retired (2026-07-19).** Superseded by the r16 scope reset (000) and 007.
+> Historical record only — not a requirement on any current code.
+
 # 006 — Canonical Persistence and Model Validity Invariants
 
 Status: **Frozen — r5**. 2026-07-17. Additive operational amendment to 000 D1
