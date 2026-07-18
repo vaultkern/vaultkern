@@ -41,11 +41,34 @@ contracts.
   master credential re-derives silently (002); the cost is one slow unlock,
   never a password prompt.
 
-## Designated upgrade path (not built now)
+## Three-way field patch (specified now; built when conflict copies annoy)
 
-If conflict copies ever become a real annoyance: a three-way field patch
-against the kept base — `diff(base, local)` applied onto the remote head;
-disjoint fields merge; same-field collisions resolve by entry `modified_at`
-or user choice; overwritten values go into KDBX history. The ETag loop
-remains the serializer. Permanently out of scope: merge algebra, canonical
-hashes, convergence proofs.
+Because pushes are serialized by CAS, the kept base `B` is always an
+ancestor of the remote head `R`, and the local vault `L` is `B` plus this
+device's edits. On a failed CAS push: pull `R`, compute `diff(B, L)`, apply
+it onto `R`, push again under CAS (retry loop). One device at a time
+performs this rebase; no symmetric-convergence requirement exists.
+
+- Granularity: per object UUID (entry, group, meta); within an entry, per
+  field — each standard field, each attribute by key, the tag set, each
+  attachment by name, TOTP and passkey as single units, icon and colors,
+  and the parent group as the location field.
+- Only one side differs from `B` → take that side. Both sides identical →
+  nothing to do.
+- Both changed the same field → the later entry `modified_at` wins; on a
+  tie the remote value stays. The losing entry version is pushed into KDBX
+  history first, so nothing becomes unrecoverable.
+- Edit versus delete → the edit wins (the entry comes back). A delete
+  sticks only when the other side left the object untouched.
+- Conflicting parents resolve by the later `location_changed_at`; tie →
+  remote stays.
+- A group deletion never orphans entries: if anything inside changed, the
+  group survives.
+- History lists merge by union, subject to the vault's own retention
+  settings.
+- Any situation the patch cannot represent falls back to the conflict-copy
+  path above — the optimization's failure mode is the mechanism it
+  optimizes away.
+
+Permanently out of scope: merge algebra, canonical hashes, convergence
+proofs. The ETag loop is the serializer.
