@@ -14,7 +14,10 @@ contracts.
 
 - Unknown CustomData entries, String keys, and XML elements are carried
   verbatim: never read, never interpreted, never modified — re-emitted on
-  save. Unknown protected values stay protected.
+  save. Verbatim means the decrypted value: protected values are deciphered
+  at load and re-enciphered under the fresh inner stream at save, keeping
+  their protected flag — raw ciphertext bytes cannot survive a save because
+  the inner stream key and positions change every time.
 - vaultkern's own extension data lives only in CustomData and String
   key-values — no invented XML elements. (KeePass-family tools preserve the
   former and may drop the latter.)
@@ -26,7 +29,11 @@ contracts.
   (`otp`, `TimeOtp-*`, `HmacOtp-*`) before writing the new spelling —
   mirroring KeePass's own `RemoveOtpSecrets` — so no stale higher-priority
   secret survives an edit.
-- Saves are atomic: temp file + rename.
+- Saves are atomic and durable: write the temp file, flush it, rename, and
+  flush the directory metadata (the existing durable-write path). The save
+  commits only if the target still matches the session's last-known content
+  fingerprint, checked immediately before the rename; a mismatch takes the
+  conflict path instead of silently replacing a foreign edit.
 
 ## Sync
 
@@ -37,9 +44,11 @@ contracts.
   keep one version live, write the other as a sibling conflict-copy
   `.kdbx`; the user reconciles. Foreign (non-vaultkern) writes are handled
   identically — adopt or fork, never silently blended.
-- Quick unlock survives foreign saves: after a salt rotation the blob's
-  master credential re-derives silently (002); the cost is one slow unlock,
-  never a password prompt.
+- Quick unlock survives foreign saves: in the app, the blob's master
+  credential re-derives silently after a salt rotation (002) — one slow
+  unlock, no password prompt. Extension processes never run a KDF, so on a
+  cache miss they fail gracefully and direct the user to open the app once
+  (002/003).
 
 ## Three-way field patch (specified now; built when conflict copies annoy)
 

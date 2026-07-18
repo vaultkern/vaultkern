@@ -29,8 +29,15 @@ Miss (someone rotated the salt) → derive from `master_credential`, open,
 write the fresh transformed key back. Credential wrong (master password
 changed elsewhere) → interactive prompt; on success, recreate the blob.
 
-States: enrolled (blob exists) / not enrolled. Revoke = delete the blob.
-There are no generations, no ledgers, and no reconciliation machinery.
+States: enrolled (blob exists and decrypts) / not enrolled. A blob that can
+no longer decrypt for non-cancel reasons — e.g. a biometric re-enrollment
+invalidated its ACL — is treated as not enrolled: delete it and offer
+re-enrollment. Revoke = delete the blob. There are no generations, no
+ledgers, and no reconciliation machinery.
+
+Extension processes never run a KDF (D9): on a cache miss they fail
+gracefully and direct the user to open the app once; the app re-derives
+silently and refreshes the blob.
 
 Keyfiles are stored as their content-hash contribution, never as a path.
 
@@ -40,7 +47,10 @@ Keyfiles are stored as their content-hash contribution, never as a path.
   the cached transformed key warm. Master seed, IVs, and inner-stream keys
   are fresh on every save.
 - Only a master-credential change or an explicit KDF-parameter change
-  generates a fresh salt; both re-derive and update the blob.
+  generates a fresh salt; both re-obtain the master credential — from the
+  blob via a fresh biometric, or interactively when not enrolled — since
+  `transformed` alone cannot re-run the KDF; then re-derive and update the
+  blob.
 - After unlock the session holds `transformed` in a zeroizing buffer and
   discards plaintext credentials; saving consumes the session key handle,
   not credentials.

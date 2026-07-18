@@ -21,7 +21,9 @@ system credential extensions, and the UI layers.
    newly registered passkey — is written as **one keychain item in the
    shared access group**: encrypted, atomic, and shared for free. The app
    consumes outbox items on activation: apply to the vault, save, delete the
-   item. A WebAuthn ceremony completes once its outbox item is stored. The
+   item. Items are keyed by credential ID and applied as create-or-update,
+   so replaying an item after a crash between apply and delete is harmless.
+   A WebAuthn ceremony completes once its outbox item is stored. The
    extension's read view is the vault's local working copy — which lives in
    the app group container precisely so extensions can read it — plus its
    own unconsumed outbox items, so a just-registered passkey can assert
