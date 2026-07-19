@@ -18,9 +18,6 @@ use twofish::Twofish;
 use uuid::Uuid;
 use xmltree::{Element, XMLNode};
 
-pub mod journal;
-pub mod quick_unlock;
-
 #[derive(Debug, Error)]
 pub enum CryptoError {
     #[error("feature not implemented yet")]
@@ -45,7 +42,7 @@ pub type Result<T> = std::result::Result<T, CryptoError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyComponent {
-    Password(String),
+    Password(Vec<u8>),
     KeyFile(Vec<u8>),
     OpaqueProviderBytes(Vec<u8>),
 }
@@ -57,8 +54,13 @@ pub struct CompositeKey {
 
 impl CompositeKey {
     pub fn add_password(&mut self, password: impl Into<String>) {
+        let password = password.into();
+        self.add_password_bytes(password.as_bytes());
+    }
+
+    pub fn add_password_bytes(&mut self, password: impl AsRef<[u8]>) {
         self.components
-            .push(KeyComponent::Password(password.into()));
+            .push(KeyComponent::Password(password.as_ref().to_vec()));
     }
 
     pub fn add_key_file(&mut self, bytes: impl Into<Vec<u8>>) {
@@ -83,9 +85,7 @@ impl CompositeKey {
         let mut stream = Vec::new();
         for component in &self.components {
             match component {
-                KeyComponent::Password(password) => {
-                    stream.extend(Sha256::digest(password.as_bytes()))
-                }
+                KeyComponent::Password(password) => stream.extend(Sha256::digest(password)),
                 KeyComponent::KeyFile(bytes) | KeyComponent::OpaqueProviderBytes(bytes) => {
                     stream.extend(bytes);
                 }
@@ -496,6 +496,21 @@ fn argon2_thread_mode_name_for_tests(parallelism: u32) -> &'static str {
     match argon2_thread_mode(parallelism) {
         Argon2ThreadMode::Sequential => "sequential",
         Argon2ThreadMode::Parallel => "parallel",
+    }
+}
+
+#[cfg(test)]
+mod password_bytes_tests {
+    use super::CompositeKey;
+
+    #[test]
+    fn password_bytes_have_the_same_composite_contribution_as_text() {
+        let mut text = CompositeKey::default();
+        text.add_password("密钥 password");
+        let mut bytes = CompositeKey::default();
+        bytes.add_password_bytes("密钥 password".as_bytes());
+
+        assert_eq!(bytes.raw_key().unwrap(), text.raw_key().unwrap());
     }
 }
 

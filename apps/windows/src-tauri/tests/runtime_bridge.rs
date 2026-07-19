@@ -1,0 +1,185 @@
+use serde_json::json;
+use vaultkern_core::{CompositeKey, EntryCreate, KeepassCore, SaveProfile, Vault};
+use vaultkern_runtime::{PlatformPasskeyAssertionInput, PlatformPasskeyRegistrationInput};
+use vaultkern_windows::RuntimeBridge;
+
+#[test]
+fn runtime_bridge_serves_protocol_envelopes_from_its_runtime_thread() {
+    let bridge = RuntimeBridge::new_for_tests();
+
+    let response = bridge.request(json!({
+        "version": 1,
+        "command": { "type": "get_session_state" }
+    }));
+
+    assert_eq!(response["type"], "session_state");
+    assert_eq!(response["unlocked"], false);
+    assert_eq!(response["supportsBiometricUnlock"], false);
+}
+
+#[test]
+fn runtime_bridge_returns_a_protocol_error_for_invalid_envelopes() {
+    let bridge = RuntimeBridge::new_for_tests();
+
+    let response = bridge.request(json!({ "command": { "type": "not_a_command" } }));
+
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "invalid_request");
+}
+
+#[test]
+fn runtime_bridge_opens_edits_and_saves_a_real_local_vault() {
+    let scratch = tempfile::tempdir().unwrap();
+    let database_path = scratch.path().join("resident-slice.kdbx");
+    let core = KeepassCore::new();
+    let mut vault = Vault::empty("Resident Slice");
+    let root_id = vault.root.id.to_string();
+    let entry = core
+        .add_entry(
+            &mut vault,
+            &root_id,
+            EntryCreate {
+                title: "Before Edit".into(),
+                username: "alice".into(),
+                password: "before-secret".into(),
+                url: "https://example.com".into(),
+                notes: "before".into(),
+            },
+        )
+        .unwrap();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+    std::fs::write(
+        &database_path,
+        core.save_kdbx(&vault, &key, SaveProfile::recommended())
+            .unwrap(),
+    )
+    .unwrap();
+
+    let bridge = RuntimeBridge::new_for_tests();
+    let path = database_path.to_string_lossy().into_owned();
+    let reference = bridge.request(json!({
+        "version": 1,
+        "command": { "type": "add_local_vault_reference", "path": path }
+    }));
+    assert_eq!(reference["type"], "vault_reference");
+
+    let session = bridge.request(json!({
+        "version": 1,
+        "command": {
+            "type": "unlock_current_vault",
+            "password": "demo-password",
+            "key_file_path": null
+        }
+    }));
+    assert_eq!(session["type"], "session_state");
+    assert_eq!(session["unlocked"], true);
+    let vault_id = session["activeVaultId"].as_str().unwrap();
+
+    let entries = bridge.request(json!({
+        "version": 1,
+        "command": { "type": "list_entries", "vault_id": vault_id }
+    }));
+    assert_eq!(entries["entries"][0]["title"], "Before Edit");
+
+    let updated = bridge.request(json!({
+        "version": 1,
+        "command": {
+            "type": "update_entry_fields",
+            "vault_id": vault_id,
+            "entry_id": entry.id,
+            "title": "After Edit",
+            "username": "alice",
+            "password": "after-secret",
+            "url": "https://example.com/after",
+            "notes": "after",
+            "totp_uri": null,
+            "custom_fields": []
+        }
+    }));
+    assert_eq!(updated["type"], "entry_detail");
+    assert_eq!(updated["title"], "After Edit");
+
+    let saved = bridge.request(json!({
+        "version": 1,
+        "command": { "type": "save_vault", "vault_id": vault_id }
+    }));
+    assert_eq!(saved["type"], "save_vault_result");
+    assert_eq!(saved["status"], "saved");
+
+    let persisted = core
+        .load_kdbx(&std::fs::read(&database_path).unwrap(), &key)
+        .unwrap();
+    let persisted_entry = persisted
+        .root
+        .entries
+        .iter()
+        .find(|candidate| candidate.title == "After Edit")
+        .unwrap();
+    assert_eq!(persisted_entry.title, "After Edit");
+    assert_eq!(persisted_entry.password, "after-secret");
+}
+
+#[test]
+fn runtime_bridge_runs_platform_passkeys_on_the_same_resident_runtime_thread() {
+    let scratch = tempfile::tempdir().unwrap();
+    let database_path = scratch.path().join("resident-passkeys.kdbx");
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+    std::fs::write(
+        &database_path,
+        core.save_kdbx(
+            &Vault::empty("Resident Passkeys"),
+            &key,
+            SaveProfile::recommended(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let bridge = RuntimeBridge::new_for_tests();
+    assert!(!bridge.platform_passkey_is_unlocked());
+    let path = database_path.to_string_lossy().into_owned();
+    bridge.request(json!({
+        "version": 1,
+        "command": { "type": "add_local_vault_reference", "path": path }
+    }));
+    bridge.request(json!({
+        "version": 1,
+        "command": {
+            "type": "unlock_current_vault",
+            "password": "demo-password",
+            "key_file_path": null
+        }
+    }));
+    assert!(bridge.platform_passkey_is_unlocked());
+
+    let registration = bridge
+        .register_platform_passkey(PlatformPasskeyRegistrationInput {
+            relying_party: "example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_handle: b"bridge-user".to_vec(),
+            public_key_algorithm: -7,
+            user_verified: true,
+        })
+        .expect("typed registration");
+    let credentials = bridge
+        .list_platform_passkey_credentials()
+        .expect("typed credential list");
+    assert_eq!(credentials, vec![registration.credential.clone()]);
+
+    let assertion = bridge
+        .create_platform_passkey_assertion(PlatformPasskeyAssertionInput {
+            relying_party: "example.com".into(),
+            allowed_credential_ids: vec![registration.credential.credential_id.clone()],
+            client_data_hash: vec![0x61; 32],
+            user_verified: true,
+        })
+        .expect("typed assertion");
+    assert_eq!(
+        assertion.credential_id,
+        registration.credential.credential_id
+    );
+    assert_eq!(assertion.user_handle, b"bridge-user");
+}

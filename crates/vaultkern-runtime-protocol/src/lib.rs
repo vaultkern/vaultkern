@@ -1,8 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-pub mod contracts;
-pub mod framing;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolEnvelope {
     pub version: u32,
@@ -60,7 +57,10 @@ pub enum RuntimeCommand {
         password: Option<String>,
         key_file_path: Option<String>,
     },
-    EnableQuickUnlockForCurrentVault,
+    EnableQuickUnlockForCurrentVault {
+        password: Option<String>,
+        key_file_path: Option<String>,
+    },
     UnlockCurrentVaultWithQuickUnlock,
     DisableQuickUnlockForCurrentVault,
     OpenLocalVault {
@@ -810,6 +810,7 @@ pub enum SaveVaultStatusDto {
     Saved,
     Merged,
     SavedToCache,
+    ConflictCopy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -818,13 +819,11 @@ pub enum SaveVaultStatusDto {
 pub struct MergeSummaryDto {
     pub merged_entries: usize,
     pub history_snapshots_added: usize,
-    /// 001 merge algebra: resolved Meta / recycle-bin config conflicts.
-    /// Additive extension pinned by the Phase 0 contract freeze (004).
+    /// 007 field patch: resolved Meta / recycle-bin configuration conflicts.
     #[serde(default)]
     pub meta_conflicts_resolved: u32,
-    /// 001 merge algebra: custom icon conflicts where the losing version was
-    /// discarded (counted so the user can see a configuration conflict
-    /// occurred). Additive extension pinned by the Phase 0 contract freeze.
+    /// 007 field patch: custom-icon conflicts where the losing version was
+    /// discarded, counted so the user can see that a configuration conflict occurred.
     #[serde(default)]
     pub icon_conflicts_resolved: u32,
 }
@@ -834,6 +833,8 @@ pub struct MergeSummaryDto {
 pub struct SaveVaultResultDto {
     pub status: SaveVaultStatusDto,
     pub merge_summary: Option<MergeSummaryDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_copy_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

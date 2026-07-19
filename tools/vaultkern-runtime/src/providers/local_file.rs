@@ -85,16 +85,6 @@ impl std::error::Error for LocalFileCommitError {
     }
 }
 
-impl LocalFileCommitError {
-    fn into_io_error(self) -> io::Error {
-        let kind = match self {
-            Self::Conflict { .. } => io::ErrorKind::WouldBlock,
-            Self::BeforePublish { .. } | Self::OutcomeUnknown { .. } => io::ErrorKind::Other,
-        };
-        io::Error::new(kind, self)
-    }
-}
-
 impl LocalFileVaultSourceProvider {
     #[cfg(test)]
     pub(crate) fn with_before_write_hook(
@@ -145,14 +135,6 @@ impl LocalFileVaultSourceProvider {
             initial_metadata: metadata,
         };
         Ok((transaction, snapshot))
-    }
-
-    pub fn write(&self, path: &str, bytes: &[u8]) -> std::io::Result<()> {
-        let (transaction, snapshot) = self.begin_write(path)?;
-        transaction
-            .commit(&snapshot.fingerprint, bytes)
-            .map(|_| ())
-            .map_err(LocalFileCommitError::into_io_error)
     }
 
     pub fn write_if_unchanged(
@@ -360,13 +342,13 @@ impl LocalFileWriteTxn {
                 let _ = sync_parent(&self.target);
                 return Err(error);
             }
-            return Ok(backup);
+            Ok(backup)
         }
         #[cfg(windows)]
         {
             let backup = unique_sibling_path(&self.target, "bak")?;
             faults.check(DurableFaultPoint::BackupPublished)?;
-            return Ok(backup);
+            Ok(backup)
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -861,6 +843,15 @@ mod tests {
         fs::write(temp, bytes).unwrap();
     }
 
+    fn write_current(path: &std::path::Path, bytes: &[u8]) {
+        let provider = LocalFileVaultSourceProvider::default();
+        let path = path.to_str().unwrap();
+        let snapshot = provider.read_snapshot(path).unwrap();
+        provider
+            .write_if_unchanged(path, &snapshot.fingerprint, bytes)
+            .unwrap();
+    }
+
     #[test]
     fn picker_stdout_decodes_utf8_paths_without_corruption() {
         let path = decode_picker_stdout("C:\\Users\\Example\\Desktop\\测试.kdbx\r\n".into())
@@ -1073,9 +1064,7 @@ mod tests {
             assert_was_abruptly_killed(status, point);
             assert_eq!(fs::metadata(&path).unwrap().nlink(), 2, "{point:?}");
 
-            LocalFileVaultSourceProvider::default()
-                .write(path.to_str().unwrap(), b"retry-generation")
-                .expect("retry must clean only the pre-publish hard-link backup");
+            write_current(&path, b"retry-generation");
 
             assert_eq!(fs::read(&path).unwrap(), b"retry-generation");
             assert_eq!(fs::metadata(&path).unwrap().nlink(), 1);
@@ -1210,9 +1199,7 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 
         fs::remove_file(alias).unwrap();
-        provider
-            .write(path.to_str().unwrap(), b"new-generation")
-            .unwrap();
+        write_current(&path, b"new-generation");
         assert_eq!(fs::read(&path).unwrap(), b"new-generation");
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -1291,9 +1278,7 @@ mod tests {
             0o640
         );
 
-        LocalFileVaultSourceProvider::default()
-            .write(path.to_str().unwrap(), b"new-generation")
-            .unwrap();
+        write_current(&path, b"new-generation");
 
         assert_eq!(get_xattr(&path, "system.posix_acl_access"), acl);
         assert_eq!(get_xattr(&path, "user.vaultkern.test"), b"preserve-me");
@@ -1369,9 +1354,7 @@ mod tests {
         fs::write(&target, b"old-generation").unwrap();
         symlink(&target, &link).unwrap();
 
-        LocalFileVaultSourceProvider::default()
-            .write(link.to_str().unwrap(), b"new-generation")
-            .unwrap();
+        write_current(&link, b"new-generation");
 
         assert_eq!(fs::read(&target).unwrap(), b"new-generation");
         assert!(

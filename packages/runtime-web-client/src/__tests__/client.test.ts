@@ -306,13 +306,20 @@ describe("RuntimeClient", () => {
     };
 
     const client = new RuntimeClient(transport);
-    await client.enableQuickUnlockForCurrentVault();
+    await client.enableQuickUnlockForCurrentVault({
+      password: "demo-password",
+      keyFilePath: "/tmp/demo.keyx"
+    });
     await client.unlockCurrentVaultWithQuickUnlock();
     await client.disableQuickUnlockForCurrentVault();
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
       version: 1,
-      command: { type: "enable_quick_unlock_for_current_vault" }
+      command: {
+        type: "enable_quick_unlock_for_current_vault",
+        password: "demo-password",
+        key_file_path: "/tmp/demo.keyx"
+      }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
       version: 1,

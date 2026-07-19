@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/windows/src-tauri",
     "crates/vaultkern-crypto",
     "crates/vaultkern-model",
     "crates/vaultkern-kdbx",

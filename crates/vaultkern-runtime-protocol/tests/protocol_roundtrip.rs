@@ -228,6 +228,7 @@ fn protocol_roundtrips_save_vault_result_response() {
             meta_conflicts_resolved: 1,
             icon_conflicts_resolved: 1,
         }),
+        conflict_copy_path: None,
     });
 
     let value = serde_json::to_value(&response).expect("serialize response");
@@ -255,6 +256,7 @@ fn protocol_roundtrips_local_cache_save_result_response() {
     let response = RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
         status: SaveVaultStatusDto::SavedToCache,
         merge_summary: None,
+        conflict_copy_path: None,
     });
 
     let value = serde_json::to_value(&response).expect("serialize response");
@@ -264,6 +266,26 @@ fn protocol_roundtrips_local_cache_save_result_response() {
 
     let decoded: RuntimeResponse = serde_json::from_value(value).expect("deserialize response");
     assert_eq!(decoded, response);
+}
+
+#[test]
+fn protocol_roundtrips_conflict_copy_save_result() {
+    let response = RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+        status: SaveVaultStatusDto::ConflictCopy,
+        merge_summary: None,
+        conflict_copy_path: Some(r"C:\Vaults\personal (VaultKern conflict 1).kdbx".into()),
+    });
+
+    let value = serde_json::to_value(&response).expect("serialize response");
+    assert_eq!(value["status"], "conflict_copy");
+    assert_eq!(
+        value["conflictCopyPath"],
+        r"C:\Vaults\personal (VaultKern conflict 1).kdbx"
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(value).unwrap(),
+        response
+    );
 }
 
 #[test]
@@ -692,7 +714,10 @@ fn protocol_roundtrips_key_file_unlock_commands() {
 
 #[test]
 fn protocol_roundtrips_quick_unlock_commands() {
-    let enable = ProtocolEnvelope::new(RuntimeCommand::EnableQuickUnlockForCurrentVault);
+    let enable = ProtocolEnvelope::new(RuntimeCommand::EnableQuickUnlockForCurrentVault {
+        password: Some("demo-password".into()),
+        key_file_path: Some("/tmp/demo.keyx".into()),
+    });
     let unlock = ProtocolEnvelope::new(RuntimeCommand::UnlockCurrentVaultWithQuickUnlock);
     let disable = ProtocolEnvelope::new(RuntimeCommand::DisableQuickUnlockForCurrentVault);
 
@@ -701,6 +726,8 @@ fn protocol_roundtrips_quick_unlock_commands() {
         enable_json["command"]["type"],
         "enable_quick_unlock_for_current_vault"
     );
+    assert_eq!(enable_json["command"]["password"], "demo-password");
+    assert_eq!(enable_json["command"]["key_file_path"], "/tmp/demo.keyx");
 
     let unlock_json = serde_json::to_value(&unlock).unwrap();
     assert_eq!(

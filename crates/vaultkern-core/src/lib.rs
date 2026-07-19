@@ -7,16 +7,19 @@ pub use vaultkern_kdbx::{
     Compression, ExternalKdfAlgorithm, ExternalKdfConfirmation, ExternalKdfDecision,
     ExternalKdfParameter, ExternalKdfParameters, ExternalKdfPolicy, ExternalKdfRequest,
     ExternalKdfResource, KdbxCipher, KdbxError, KdbxHeader, KdbxHeaderSummary, KdbxVersion,
-    KdfPolicyEvaluator, SaveKdf, SaveProfile, VariantDictionary, VariantValue, inspect_kdbx_header,
-    is_xml_10_text, load_kdbx as load_kdbx_bytes, load_kdbx_with_policy, required_version,
-    retained_or_recommended_save_kdf, save_kdbx as save_kdbx_bytes,
+    KdfPolicyEvaluator, SaveKdf, SaveProfile, TransformedKey, VariantDictionary, VariantValue,
+    derive_transformed_key, derive_transformed_key_with_policy, inspect_kdbx_header,
+    is_xml_10_text, load_kdbx as load_kdbx_bytes, load_kdbx_with_policy,
+    load_kdbx_with_transformed_key, required_version, retained_or_recommended_save_kdf,
+    save_kdbx as save_kdbx_bytes, save_kdbx_with_transformed_key,
 };
 use vaultkern_model::Attachment as ModelAttachment;
 pub use vaultkern_model::{
     AttachmentContent, AttachmentContentId, AttachmentMap, AutoTypeAssociation, AutoTypeConfig,
     CustomField, CustomIcon, DeletedObject, Entry, EntryFieldProtection, Group, GroupFlags,
-    GroupTimes, MemoryProtection, MergeReport, ModelError, PasskeyRecord, TotpAlgorithm, TotpSpec,
-    Vault, is_totp_persistent_attribute_key, prepare_entry_history_snapshot,
+    GroupTimes, MemoryProtection, ModelError, PasskeyRecord, ThreeWayPatchError,
+    ThreeWayPatchReport, ThreeWayPatchResult, TotpAlgorithm, TotpSpec, Vault,
+    is_totp_persistent_attribute_key, prepare_entry_history_snapshot, three_way_field_patch,
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -76,12 +79,6 @@ pub struct LoadedDatabase {
     pub vault: Vault,
     pub summary: VaultSummary,
     pub inspection: DatabaseInspection,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MergeSummaryView {
-    pub merged_entries: usize,
-    pub history_snapshots_added: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1254,10 +1251,6 @@ impl KeepassCore {
         search_entries_view(vault, term)
     }
 
-    pub fn summarize_merge_report(&self, report: &MergeReport) -> MergeSummaryView {
-        project_merge_report(report)
-    }
-
     pub fn list_entry_history(
         &self,
         vault: &Vault,
@@ -1832,21 +1825,6 @@ impl KeepassCore {
         } else {
             Err(MutationError::GroupNotFound(group_id.into()))
         }
-    }
-
-    pub fn merge_vaults(&self, target: &mut Vault, source: &Vault) -> MergeSummaryView {
-        let report = target.merge_from(source);
-        project_merge_report(&report)
-    }
-
-    pub fn load_and_merge_kdbx(
-        &self,
-        target: &mut Vault,
-        bytes: &[u8],
-        composite_key: &CompositeKey,
-    ) -> Result<MergeSummaryView, CoreError> {
-        let source = self.load_kdbx(bytes, composite_key)?;
-        Ok(self.merge_vaults(target, &source))
     }
 
     pub fn move_entry(
@@ -3884,13 +3862,6 @@ fn project_public_custom_data_items(
         .collect()
 }
 
-fn project_merge_report(report: &MergeReport) -> MergeSummaryView {
-    MergeSummaryView {
-        merged_entries: report.merged_entries,
-        history_snapshots_added: report.history_snapshots_added,
-    }
-}
-
 fn project_group(group: &Group) -> GroupView {
     GroupView {
         id: group.id.to_string(),
@@ -5522,8 +5493,8 @@ mod tests {
         EntryExpiryUpdate, EntryFieldProtection, EntryFieldProtectionUpdate, EntryHistoryItemView,
         EntryPresentationMetadataUpdate, EntryTimesUpdate, EntryUpdate, Group,
         GroupBehaviorMetadataUpdate, GroupExpiryUpdate, GroupFlags, GroupMetadataUpdate,
-        GroupTimes, GroupTimesUpdate, KeepassCore, LoadWarning, MemoryProtection, MergeSummaryView,
-        PasskeyRecord, PublicCustomDataItemInput, PublicCustomDataItemView, StableSaveCipher,
+        GroupTimes, GroupTimesUpdate, KeepassCore, LoadWarning, MemoryProtection, PasskeyRecord,
+        PublicCustomDataItemInput, PublicCustomDataItemView, StableSaveCipher,
         StableSaveCompression, StableSaveKdf, StableSaveProfile, TotpSpec, Vault,
         VaultBinTemplateMetadataUpdate, VaultIdentityMetadataUpdate, VaultLifecycleMetadataUpdate,
         VaultMetadataUpdate, VaultSelectionMetadataUpdate,
@@ -7909,71 +7880,6 @@ mod tests {
         assert_eq!(times.location_changed_at, Some(14));
         assert!(entry.expires);
         assert_eq!(entry.expiry_time, Some(999));
-    }
-
-    #[test]
-    fn facade_merges_vaults_and_reports_summary() {
-        let core = KeepassCore::new();
-        let mut local = Vault::empty("Local");
-        let mut base = Entry::new("Shared");
-        base.password = "old-secret".into();
-        base.modified_at = 10;
-        local.root.entries.push(base.clone());
-
-        let mut incoming = Vault::empty("Incoming");
-        let mut updated = base;
-        updated.password = "new-secret".into();
-        updated.modified_at = 20;
-        incoming.root.entries.push(updated);
-
-        let summary = core.merge_vaults(&mut local, &incoming);
-
-        assert_eq!(
-            summary,
-            MergeSummaryView {
-                merged_entries: 1,
-                history_snapshots_added: 1,
-            }
-        );
-        assert_eq!(local.root.entries[0].password, "new-secret");
-        assert_eq!(local.root.entries[0].history.len(), 1);
-        assert_eq!(local.root.entries[0].history[0].password, "old-secret");
-    }
-
-    #[test]
-    fn merge_facade_loads_kdbx_and_merges_into_target() {
-        let core = KeepassCore::new();
-        let mut local = Vault::empty("Local");
-        let mut base = Entry::new("Shared");
-        base.password = "old-secret".into();
-        base.modified_at = 10;
-        local.root.entries.push(base.clone());
-
-        let mut incoming = Vault::empty("Incoming");
-        let mut updated = base;
-        updated.password = "new-secret".into();
-        updated.modified_at = 20;
-        incoming.root.entries.push(updated);
-
-        let mut key = CompositeKey::default();
-        key.add_password("merge");
-        let bytes = core
-            .save_kdbx(&incoming, &key, super::SaveProfile::recommended())
-            .expect("save merge source");
-
-        let summary = core
-            .load_and_merge_kdbx(&mut local, &bytes, &key)
-            .expect("load and merge kdbx");
-
-        assert_eq!(
-            summary,
-            MergeSummaryView {
-                merged_entries: 1,
-                history_snapshots_added: 1,
-            }
-        );
-        assert_eq!(local.root.entries[0].password, "new-secret");
-        assert_eq!(local.root.entries[0].history.len(), 1);
     }
 
     #[test]

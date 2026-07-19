@@ -74,7 +74,7 @@ export interface RuntimeClientLike {
   openLocalVault(path: string): Promise<VaultHandle>;
   unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
-  enableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
+  enableQuickUnlockForCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
   unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
   disableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
   unlockWithPassword(vaultId: string, password: string): Promise<SessionStateLike>;
@@ -437,12 +437,17 @@ export function App({
 
   async function syncQuickUnlockPreferenceToCurrentVault(
     enabled: boolean,
-    settingsForReload: ExtensionSettings
+    settingsForReload: ExtensionSettings,
+    credentials?: UnlockCredentials
   ) {
     const currentVault =
       recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
       recentVaults.find((vault) => vault.isCurrent) ??
       null;
+
+    if (enabled && !credentials) {
+      return;
+    }
 
     if (!currentVault || currentVault.supportsQuickUnlock === enabled) {
       return;
@@ -450,9 +455,15 @@ export function App({
 
     setQuickUnlockBusy(true);
     try {
-      const nextSession = enabled
-        ? await client.enableQuickUnlockForCurrentVault()
-        : await client.disableQuickUnlockForCurrentVault();
+      let nextSession: SessionStateLike;
+      if (enabled) {
+        if (!credentials) {
+          return;
+        }
+        nextSession = await client.enableQuickUnlockForCurrentVault(credentials);
+      } else {
+        nextSession = await client.disableQuickUnlockForCurrentVault();
+      }
       setSession(nextSession);
       await applyRecentVaultLimit(await client.listRecentVaults(), settingsForReload);
     } catch (quickUnlockFailure) {
@@ -507,6 +518,18 @@ export function App({
               }
             }
           : current
+      );
+    } else if (result?.status === "conflict_copy") {
+      setSaveTip(
+        result.conflictCopyPath
+          ? `${translate(
+              extensionSettings.language,
+              "Vault changed on disk. Local edits were saved to a conflict copy:"
+            )} ${result.conflictCopyPath}`
+          : translate(
+              extensionSettings.language,
+              "Vault changed on disk. Local edits were saved as a conflict copy."
+            )
       );
     }
   }
@@ -1196,8 +1219,7 @@ export function App({
     if (
       !currentVault ||
       currentVault.supportsQuickUnlock === extensionSettings.quickUnlockEnabled ||
-      (extensionSettings.quickUnlockEnabled &&
-        session?.supportsBiometricUnlock !== true)
+      extensionSettings.quickUnlockEnabled
     ) {
       return;
     }
@@ -1544,8 +1566,17 @@ export function App({
               error={extensionSettingsError}
               quickUnlockSupported={session?.supportsBiometricUnlock !== false}
               quickUnlockEnabled={extensionSettings.quickUnlockEnabled}
+              quickUnlockEnrolled={Boolean(currentVaultReference?.supportsQuickUnlock)}
+              quickUnlockVaultUnlocked={session.unlocked}
               quickUnlockBusy={quickUnlockBusy}
               quickUnlockError={quickUnlockError}
+              onEnrollQuickUnlock={(credentials) =>
+                syncQuickUnlockPreferenceToCurrentVault(
+                  true,
+                  extensionSettings,
+                  credentials
+                )
+              }
               onSave={(settings) => {
                 void saveExtensionSettings(settings);
               }}
@@ -1621,6 +1652,17 @@ export function App({
               keyFilePath
             });
             setSession(nextSession);
+            if (
+              extensionSettings.quickUnlockEnabled &&
+              nextSession.supportsBiometricUnlock === true &&
+              !currentVaultReference?.supportsQuickUnlock
+            ) {
+              await syncQuickUnlockPreferenceToCurrentVault(
+                true,
+                extensionSettings,
+                { password, keyFilePath }
+              );
+            }
           } catch (unlockFailure) {
             setUnlockError(
               errorMessage(
@@ -1648,6 +1690,14 @@ export function App({
               )
             );
             setUnlockErrorCause(unlockFailure);
+            try {
+              await applyRecentVaultLimit(
+                await client.listRecentVaults(),
+                extensionSettings
+              );
+            } catch {
+              // Preserve the original quick-unlock error when status refresh also fails.
+            }
           } finally {
             setUnlockBusy(false);
           }

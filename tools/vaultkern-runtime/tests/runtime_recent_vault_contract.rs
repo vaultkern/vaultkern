@@ -169,7 +169,7 @@ fn deleting_recent_vault_reference_removes_quick_unlock_credentials() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     runtime
-        .handle(vaultkern_runtime_protocol::RuntimeCommand::EnableQuickUnlockForCurrentVault)
+        .enroll_quick_unlock_for_current_vault(Some("demo-password"), None)
         .unwrap();
 
     runtime
@@ -206,7 +206,7 @@ fn deleting_recent_vault_reference_ignores_quick_unlock_delete_failures() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     runtime
-        .handle(vaultkern_runtime_protocol::RuntimeCommand::EnableQuickUnlockForCurrentVault)
+        .enroll_quick_unlock_for_current_vault(Some("demo-password"), None)
         .unwrap();
 
     let listed = runtime

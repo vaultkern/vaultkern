@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
+import type { UnlockCredentials } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
 import type { ExtensionSettings } from "../extensionSettings";
@@ -11,8 +12,11 @@ interface ExtensionSettingsPanelProps {
   error: string | null;
   quickUnlockSupported?: boolean;
   quickUnlockEnabled?: boolean;
+  quickUnlockEnrolled?: boolean;
+  quickUnlockVaultUnlocked?: boolean;
   quickUnlockBusy?: boolean;
   quickUnlockError?: string | null;
+  onEnrollQuickUnlock?(credentials: UnlockCredentials): Promise<void>;
   onSave(settings: ExtensionSettings): void;
 }
 
@@ -21,17 +25,30 @@ export function ExtensionSettingsPanel({
   saving,
   error,
   quickUnlockSupported = true,
+  quickUnlockEnabled = false,
+  quickUnlockEnrolled = false,
+  quickUnlockVaultUnlocked = false,
   quickUnlockBusy = false,
   quickUnlockError = null,
+  onEnrollQuickUnlock,
   onSave
 }: ExtensionSettingsPanelProps) {
   const text = useText();
   const [draft, setDraft] = useState(() => toDraft(settings));
+  const [quickUnlockPassword, setQuickUnlockPassword] = useState("");
+  const [quickUnlockKeyFilePath, setQuickUnlockKeyFilePath] = useState("");
   const quickUnlockAvailable = quickUnlockSupported !== false;
 
   useEffect(() => {
     setDraft(toDraft(settings));
   }, [settings]);
+
+  useEffect(() => {
+    if (quickUnlockEnrolled) {
+      setQuickUnlockPassword("");
+      setQuickUnlockKeyFilePath("");
+    }
+  }, [quickUnlockEnrolled]);
 
   return (
     <form
@@ -169,6 +186,64 @@ export function ExtensionSettingsPanel({
         />
         <span>{text("Quick Unlock")}</span>
       </label>
+      {quickUnlockAvailable &&
+      quickUnlockEnabled &&
+      draft.quickUnlockEnabled &&
+      !quickUnlockEnrolled ? (
+        <div style={enrollmentStyle}>
+          <p style={noteStyle}>
+            {quickUnlockVaultUnlocked
+              ? text(
+                  "Enter the current master credentials once. VaultKern does not retain them after enrollment."
+                )
+              : text("Unlock this vault before enrolling Windows Hello.")}
+          </p>
+          {quickUnlockVaultUnlocked ? (
+            <>
+              <div style={gridStyle}>
+                <label style={fieldStyle}>
+                  {text("Quick Unlock Master Password")}
+                  <input
+                    aria-label={text("Quick Unlock Master Password")}
+                    type="password"
+                    value={quickUnlockPassword}
+                    onChange={(event) => setQuickUnlockPassword(event.target.value)}
+                    style={inputStyle}
+                  />
+                </label>
+                <label style={fieldStyle}>
+                  {text("Quick Unlock Key File Path")}
+                  <input
+                    aria-label={text("Quick Unlock Key File Path")}
+                    type="text"
+                    value={quickUnlockKeyFilePath}
+                    onChange={(event) => setQuickUnlockKeyFilePath(event.target.value)}
+                    style={inputStyle}
+                  />
+                </label>
+              </div>
+              <button
+                type="button"
+                disabled={
+                  quickUnlockBusy ||
+                  (!quickUnlockPassword.trim() && !quickUnlockKeyFilePath.trim())
+                }
+                style={primaryButtonStyle}
+                onClick={() => {
+                  void onEnrollQuickUnlock?.({
+                    password: quickUnlockPassword,
+                    keyFilePath: quickUnlockKeyFilePath
+                  });
+                }}
+              >
+                {quickUnlockBusy
+                  ? text("Enrolling...")
+                  : text("Enable Windows Hello")}
+              </button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
       {quickUnlockError ? <div role="alert">{quickUnlockError}</div> : null}
       <p style={noteStyle}>
         {text("Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.")}
@@ -305,4 +380,13 @@ const noteStyle: CSSProperties = {
   margin: 0,
   color: archiveTheme.colors.textMuted,
   lineHeight: 1.5
+};
+
+const enrollmentStyle: CSSProperties = {
+  display: "grid",
+  gap: archiveTheme.spacing.md,
+  padding: archiveTheme.spacing.md,
+  border: `1px solid ${archiveTheme.colors.line}`,
+  borderRadius: archiveTheme.radius.field,
+  background: archiveTheme.colors.surfaceMuted
 };

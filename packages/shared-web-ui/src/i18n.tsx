@@ -33,6 +33,12 @@ type TranslationKey =
   | "VaultKern passkey provider"
   | "Page-load autofill"
   | "Quick Unlock"
+  | "Quick Unlock Master Password"
+  | "Quick Unlock Key File Path"
+  | "Enable Windows Hello"
+  | "Enrolling..."
+  | "Unlock this vault before enrolling Windows Hello."
+  | "Enter the current master credentials once. VaultKern does not retain them after enrollment."
   | "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret."
   | "Database"
   | "Loading database settings..."
@@ -154,6 +160,8 @@ type TranslationKey =
   | "This only removes the recent vault record."
   | "Back"
   | "Vault changed on disk. Merged and saved."
+  | "Vault changed on disk. Local edits were saved to a conflict copy:"
+  | "Vault changed on disk. Local edits were saved as a conflict copy."
   | "Saved to local cache. Remote sync pending."
   | "Using local cache."
   | "Using local cache. Remote sync failed."
@@ -240,6 +248,12 @@ const ZH_CN: Record<TranslationKey, string> = {
   "VaultKern passkey provider": "VaultKern 通行密钥提供器",
   "Page-load autofill": "页面加载时自动填充",
   "Quick Unlock": "快速解锁",
+  "Quick Unlock Master Password": "快速解锁主密码",
+  "Quick Unlock Key File Path": "快速解锁密钥文件路径",
+  "Enable Windows Hello": "启用 Windows Hello",
+  "Enrolling...": "正在注册...",
+  "Unlock this vault before enrolling Windows Hello.": "请先解锁此数据库，再注册 Windows Hello。",
+  "Enter the current master credentials once. VaultKern does not retain them after enrollment.": "请一次性输入当前主凭据；注册完成后 VaultKern 不会保留它们。",
   "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.": "剪贴板清空会在延迟后写入空字符串。浏览器 API 不允许后台可靠确认剪贴板仍包含刚复制的秘密。",
   Database: "数据库",
   "Loading database settings...": "正在加载数据库设置...",
@@ -361,6 +375,8 @@ const ZH_CN: Record<TranslationKey, string> = {
   "This only removes the recent vault record.": "这只会移除最近数据库记录。",
   Back: "返回",
   "Vault changed on disk. Merged and saved.": "数据库文件已在磁盘上变化，已合并并保存。",
+  "Vault changed on disk. Local edits were saved to a conflict copy:": "数据库文件已在磁盘上变化，本地编辑已保存到冲突副本：",
+  "Vault changed on disk. Local edits were saved as a conflict copy.": "数据库文件已在磁盘上变化，本地编辑已保存为冲突副本。",
   "Saved to local cache. Remote sync pending.": "已保存到本地缓存，等待远程同步。",
   "Using local cache.": "正在使用本地缓存。",
   "Using local cache. Remote sync failed.": "正在使用本地缓存，远程同步失败。",

@@ -313,6 +313,82 @@ it("unlocks the current recent vault with Windows Hello when quick unlock is ena
   expect(await screen.findByText("No entries available.")).toBeInTheDocument();
 });
 
+it("refreshes an invalidated Hello enrollment and re-enrolls after password unlock", async () => {
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: true,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    unlockCurrentVaultWithQuickUnlock: vi.fn(async () => {
+      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: false };
+      throw new Error("Windows Hello enrollment was invalidated");
+    }),
+    unlockCurrentVault: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    })),
+    enableQuickUnlockForCurrentVault: vi.fn(async () => {
+      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
+      return {
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      };
+    })
+  } satisfies RuntimeClientLike;
+
+  render(
+    <App
+      client={client}
+      extensionSettingsStore={createSettingsStore({ quickUnlockEnabled: true })}
+    />
+  );
+
+  expect(await screen.findByText("Personal")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Unlock with Windows Hello" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Windows Hello enrollment was invalidated"
+  );
+  await waitFor(() => {
+    expect(
+      screen.queryByRole("button", { name: "Unlock with Windows Hello" })
+    ).not.toBeInTheDocument();
+  });
+
+  fireEvent.change(screen.getByLabelText("Master Password"), {
+    target: { value: "demo-password" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+  await waitFor(() => {
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledWith({
+      password: "demo-password",
+      keyFilePath: ""
+    });
+  });
+  expect(await screen.findByText("No entries available.")).toBeInTheDocument();
+});
+
 it("opens extension settings while locked and saves local extension preferences", async () => {
   const settingsStore = createSettingsStore();
   const client = {
@@ -466,9 +542,24 @@ it("toggles quick unlock for the current vault from extension settings", async (
   fireEvent.click(quickUnlock);
   fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
   await waitFor(() => {
-    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+    expect(settingsStore.save).toHaveBeenCalled();
   });
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).toBeChecked();
+  expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+
+  fireEvent.change(screen.getByLabelText("Quick Unlock Master Password"), {
+    target: { value: "demo-password" }
+  });
+  fireEvent.change(screen.getByLabelText("Quick Unlock Key File Path"), {
+    target: { value: "/tmp/demo.keyx" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Enable Windows Hello" }));
+  await waitFor(() => {
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledWith({
+      password: "demo-password",
+      keyFilePath: "/tmp/demo.keyx"
+    });
+  });
 
   fireEvent.click(screen.getByRole("checkbox", { name: "Quick Unlock" }));
   fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
@@ -478,7 +569,7 @@ it("toggles quick unlock for the current vault from extension settings", async (
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).not.toBeChecked();
 });
 
-it("syncs the quick unlock preference to the current vault when available", async () => {
+it("stores the quick unlock preference without enrolling a locked vault", async () => {
   const settingsStore = createSettingsStore();
   const recentVaults = [
     {
@@ -524,12 +615,16 @@ it("syncs the quick unlock preference to the current vault when available", asyn
   fireEvent.click(quickUnlock);
   fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
   await waitFor(() => {
-    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+    expect(settingsStore.save).toHaveBeenCalled();
   });
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).toBeChecked();
+  expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+  expect(
+    screen.getByText("Unlock this vault before enrolling Windows Hello.")
+  ).toBeInTheDocument();
 });
 
-it("retries quick unlock preference sync after the current vault is unlocked", async () => {
+it("enrolls quick unlock with the credentials from a successful vault unlock", async () => {
   const settingsStore = createSettingsStore({
     quickUnlockEnabled: true
   });
@@ -560,26 +655,21 @@ it("retries quick unlock preference sync after the current vault is unlocked", a
       currentVaultRefId: "vault-ref-1",
       supportsBiometricUnlock: true
     })),
-    enableQuickUnlockForCurrentVault: vi
-      .fn()
-      .mockRejectedValueOnce(new Error("current vault is locked"))
-      .mockImplementation(async () => {
-        recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
-        return {
-          unlocked: true,
-          activeVaultId: "vault-1",
-          currentVaultRefId: "vault-ref-1",
-          supportsBiometricUnlock: true
-        };
-      })
+    enableQuickUnlockForCurrentVault: vi.fn(async () => {
+      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
+      return {
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      };
+    })
   } satisfies RuntimeClientLike;
 
   render(<App client={client} extensionSettingsStore={settingsStore} />);
 
   expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
-  await waitFor(() => {
-    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
-  });
+  expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 
   fireEvent.change(screen.getByLabelText("Master Password"), {
     target: { value: "demo-password" }
@@ -587,7 +677,10 @@ it("retries quick unlock preference sync after the current vault is unlocked", a
   fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
 
   await waitFor(() => {
-    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(2);
+    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledWith({
+      password: "demo-password",
+      keyFilePath: ""
+    });
   });
 });
 

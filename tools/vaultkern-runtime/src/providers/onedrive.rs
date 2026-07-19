@@ -232,6 +232,12 @@ struct GraphDriveItem {
 #[serde(rename_all = "camelCase")]
 struct GraphWriteResponse {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
     e_tag: Option<String>,
 }
 
@@ -240,6 +246,8 @@ struct GraphWriteResponse {
 struct GraphParentReference {
     #[serde(default)]
     drive_id: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
 }
 
 impl OneDriveVaultSourceProvider {
@@ -748,48 +756,6 @@ impl OneDriveVaultSourceProvider {
         })
     }
 
-    pub fn write_with_known_etag(
-        &mut self,
-        drive_id: &str,
-        item_id: &str,
-        bytes: &[u8],
-        if_match: Option<&str>,
-    ) -> Result<VaultSourceFingerprint> {
-        if !self.memory_items.is_empty() {
-            self.memory_writes.set(self.memory_writes.get() + 1);
-            let item = self
-                .memory_items
-                .get_mut(&(drive_id.to_owned(), item_id.to_owned()))
-                .with_context(|| format!("OneDrive item not found: {drive_id}/{item_id}"))?;
-            item.bytes = bytes.to_vec();
-            item.revision += 1;
-            return Ok(fingerprint_for_memory_item(item));
-        }
-
-        let etag = if_match.context("current OneDrive item did not include an ETag")?;
-        let request = self
-            .authorized_request(
-                "PUT",
-                &self.graph_url(&format!(
-                    "/drives/{}/items/{}/content",
-                    encode_component(drive_id),
-                    encode_component(item_id)
-                )),
-            )?
-            .set("If-Match", etag);
-        let response = request
-            .send_bytes(bytes)
-            .context("failed to upload OneDrive item content")?;
-        let response_etag = response
-            .into_json::<GraphWriteResponse>()
-            .ok()
-            .and_then(|body| body.e_tag);
-        Ok(fingerprint_for_graph_item(
-            bytes,
-            response_etag.as_deref().or(if_match),
-        ))
-    }
-
     pub fn conditional_write(
         &mut self,
         drive_id: &str,
@@ -882,6 +848,67 @@ impl OneDriveVaultSourceProvider {
                 })
             }
         }
+    }
+
+    pub fn upload_sibling_conflict_copy(
+        &mut self,
+        drive_id: &str,
+        item_id: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<OneDriveItemDto> {
+        if !self.memory_items.is_empty() {
+            let account_label = self.item(drive_id, item_id)?.account_label.clone();
+            let conflict_item_id = format!("vaultkern-conflict-{}", Uuid::new_v4());
+            self.memory_writes.set(self.memory_writes.get() + 1);
+            self.memory_items.insert(
+                (drive_id.to_owned(), conflict_item_id.clone()),
+                MemoryOneDriveItem {
+                    drive_id: drive_id.to_owned(),
+                    item_id: conflict_item_id.clone(),
+                    name: name.to_owned(),
+                    account_label,
+                    bytes: bytes.to_vec(),
+                    revision: 1,
+                },
+            );
+            return Ok(OneDriveItemDto {
+                drive_id: drive_id.to_owned(),
+                item_id: conflict_item_id,
+                name: name.to_owned(),
+                folder: false,
+                size: Some(bytes.len() as u64),
+            });
+        }
+
+        let item = self.graph_item(drive_id, item_id)?;
+        let parent_id = item
+            .parent_reference
+            .and_then(|parent| parent.id)
+            .context("OneDrive item did not include its parent folder")?;
+        let path = format!(
+            "/drives/{}/items/{}:/{}:/content",
+            encode_component(drive_id),
+            encode_component(&parent_id),
+            encode_component(name),
+        );
+        let url =
+            self.graph_url_with_query(&path, &[("@microsoft.graph.conflictBehavior", "rename")]);
+        let response = self
+            .authorized_request("PUT", &url)?
+            .send_bytes(bytes)
+            .context("failed to upload OneDrive conflict copy")?
+            .into_json::<GraphWriteResponse>()
+            .context("failed to decode OneDrive conflict-copy response")?;
+        Ok(OneDriveItemDto {
+            drive_id: drive_id.to_owned(),
+            item_id: response
+                .id
+                .context("OneDrive conflict-copy response omitted item id")?,
+            name: response.name.unwrap_or_else(|| name.to_owned()),
+            folder: false,
+            size: response.size.or(Some(bytes.len() as u64)),
+        })
     }
 
     fn item(&self, drive_id: &str, item_id: &str) -> Result<&MemoryOneDriveItem> {
@@ -983,14 +1010,14 @@ impl OneDriveVaultSourceProvider {
     }
 
     fn access_token(&self) -> Result<String> {
-        if let Some(state) = self.token_state.borrow().as_ref() {
-            if let Some(access_token) = state.access_token.clone() {
-                let token_is_fresh = state.access_expires_at.is_some_and(|expires_at| {
-                    expires_at > Instant::now() + ACCESS_TOKEN_EXPIRY_SKEW
-                });
-                if token_is_fresh {
-                    return Ok(access_token);
-                }
+        if let Some(state) = self.token_state.borrow().as_ref()
+            && let Some(access_token) = state.access_token.clone()
+        {
+            let token_is_fresh = state
+                .access_expires_at
+                .is_some_and(|expires_at| expires_at > Instant::now() + ACCESS_TOKEN_EXPIRY_SKEW);
+            if token_is_fresh {
+                return Ok(access_token);
             }
         }
         self.refresh_access_token()
@@ -1273,14 +1300,24 @@ fn code_challenge(verifier: &str) -> String {
 }
 
 fn encode_component(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        OneDriveConditionalWriteError, OneDriveConditionalWriteOutcome,
-        OneDriveVaultSourceProvider, stable_u64_for_text,
+        OneDriveConditionalWriteError, OneDriveConditionalWriteOutcome, OneDriveVaultSourceProvider,
     };
     use crate::providers::onedrive_token_store::{
         MemoryOneDriveRefreshTokenStore, OneDriveRefreshTokenStore,
@@ -1613,12 +1650,16 @@ mod tests {
         let item_metadata = provider.metadata("drive-1", "item-1").unwrap();
         let state = provider.remote_state("drive-1", "item-1").unwrap();
         let snapshot = provider.read_snapshot("drive-1", "item-1").unwrap();
-        provider
-            .write_with_known_etag("drive-1", "item-1", b"next", state.e_tag.as_deref())
+        let outcome = provider
+            .conditional_write("drive-1", "item-1", b"next", &state)
             .unwrap();
 
         assert_eq!(item_metadata.account_label, "OneDrive");
         assert_eq!(snapshot.bytes, b"kdbx");
+        assert!(matches!(
+            outcome,
+            OneDriveConditionalWriteOutcome::Committed { .. }
+        ));
         metadata.assert();
         content.assert();
         write.assert();
@@ -1723,59 +1764,6 @@ mod tests {
     }
 
     #[test]
-    fn graph_provider_writes_with_known_etag_without_fetching_metadata() {
-        let mut server = mockito::Server::new();
-        let write = server
-            .mock("PUT", "/v1.0/drives/drive-1/items/item-1/content")
-            .match_header("authorization", "Bearer access-1")
-            .match_header("if-match", "etag-1")
-            .match_body("next")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"eTag":"etag-2"}"#)
-            .create();
-
-        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
-            "client-1",
-            &format!("{}/authorize", server.url()),
-            &format!("{}/token", server.url()),
-            &format!("{}/v1.0", server.url()),
-        );
-        provider.set_test_tokens("access-1", "refresh-1");
-
-        let fingerprint = provider
-            .write_with_known_etag("drive-1", "item-1", b"next", Some("etag-1"))
-            .unwrap();
-
-        assert_eq!(fingerprint.size_bytes, 4);
-        assert_eq!(fingerprint.modified_at, Some(stable_u64_for_text("etag-2")));
-        write.assert();
-    }
-
-    #[test]
-    fn graph_provider_rejects_write_when_known_etag_is_missing() {
-        let mut server = mockito::Server::new();
-        let write = server
-            .mock("PUT", "/v1.0/drives/drive-1/items/item-1/content")
-            .expect(0)
-            .create();
-        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
-            "client-1",
-            &format!("{}/authorize", server.url()),
-            &format!("{}/token", server.url()),
-            &format!("{}/v1.0", server.url()),
-        );
-        provider.set_test_tokens("access-1", "refresh-1");
-
-        let error = provider
-            .write_with_known_etag("drive-1", "item-1", b"next", None)
-            .expect_err("missing Graph ETag must fail before PUT");
-
-        assert!(error.to_string().contains("ETag"));
-        write.assert();
-    }
-
-    #[test]
     fn graph_conditional_write_fails_closed_when_current_etag_is_missing() {
         let mut server = mockito::Server::new();
         let metadata = server
@@ -1856,6 +1844,63 @@ mod tests {
         ));
         metadata.assert();
         write.assert();
+    }
+
+    #[test]
+    fn graph_conflict_copy_uploads_beside_the_source_with_rename_fallback() {
+        let mut server = mockito::Server::new();
+        let metadata = server
+            .mock("GET", "/v1.0/drives/drive-1/items/item-1")
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "$select".into(),
+                "id,name,size,eTag,parentReference,@microsoft.graph.downloadUrl".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"item-1","name":"Vault.kdbx","size":4,"eTag":"etag-1","parentReference":{"driveId":"drive-1","id":"folder-1"}}"#,
+            )
+            .create();
+        let upload = server
+            .mock(
+                "PUT",
+                "/v1.0/drives/drive-1/items/folder-1:/Vault%20%28VaultKern%20conflict%20100%29.kdbx:/content",
+            )
+            .match_header("authorization", "Bearer access-1")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "@microsoft.graph.conflictBehavior".into(),
+                "rename".into(),
+            ))
+            .match_body("copy")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"copy-1","name":"Vault (VaultKern conflict 100).kdbx","size":4,"eTag":"etag-copy"}"#,
+            )
+            .create();
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+        provider.set_test_tokens("access-1", "refresh-1");
+
+        let item = provider
+            .upload_sibling_conflict_copy(
+                "drive-1",
+                "item-1",
+                "Vault (VaultKern conflict 100).kdbx",
+                b"copy",
+            )
+            .unwrap();
+
+        assert_eq!(item.item_id, "copy-1");
+        assert_eq!(item.name, "Vault (VaultKern conflict 100).kdbx");
+        assert_eq!(item.size, Some(4));
+        metadata.assert();
+        upload.assert();
     }
 
     #[test]

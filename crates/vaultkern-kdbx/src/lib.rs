@@ -374,6 +374,21 @@ pub struct KdbxHeaderSummary {
     pub public_custom_data: BTreeMap<String, Vec<u8>>,
 }
 
+/// A KDBX KDF result cached only for the lifetime of an unlocked session or
+/// inside a platform-protected unlock blob. It intentionally exposes no
+/// `Debug` or `Clone` implementation.
+pub struct TransformedKey(Zeroizing<[u8; 32]>);
+
+impl TransformedKey {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 pub fn required_version(vault: &Vault) -> KdbxVersion {
     if custom_data_requires_41(&vault.meta_custom_data_blocks, &vault.meta_custom_data)
         || vault.custom_icons.iter().any(|icon| {
@@ -418,11 +433,116 @@ pub fn inspect_kdbx_header(bytes: &[u8]) -> Result<KdbxHeaderSummary> {
     }
 }
 
+pub fn derive_transformed_key(
+    bytes: &[u8],
+    composite_key: &CompositeKey,
+) -> Result<TransformedKey> {
+    derive_transformed_key_with_policy(
+        bytes,
+        composite_key,
+        &ExternalKdfPolicy::Mobile,
+        ExternalKdfConfirmation::Unconfirmed,
+    )
+}
+
+pub fn derive_transformed_key_with_policy(
+    bytes: &[u8],
+    composite_key: &CompositeKey,
+    policy: &dyn KdfPolicyEvaluator,
+    confirmation: ExternalKdfConfirmation,
+) -> Result<TransformedKey> {
+    if !matches!(
+        detect_file_version(bytes)?,
+        KdbxVersion::V4_0 | KdbxVersion::V4_1
+    ) {
+        return Err(KdbxError::UnsupportedVersion);
+    }
+
+    let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
+    let mut cursor = Cursor::new(&bytes[header_len..]);
+    let stored_header_hash = cursor.read_exact(32)?;
+    if sha256_bytes(&bytes[..header_len]).as_slice() != stored_header_hash {
+        return Err(KdbxError::HeaderHashMismatch);
+    }
+
+    let parameters = ExternalKdfParameters::decode_kdbx4(&header.kdf_parameters)?;
+    enforce_external_kdf_policy(&parameters, policy, confirmation)?;
+    let kdf = parameters.into_profile();
+    let raw_key = Zeroizing::new(composite_key.raw_key()?);
+    Ok(TransformedKey::from_bytes(kdf.derive_key(&*raw_key)?))
+}
+
+pub fn load_kdbx_with_transformed_key(bytes: &[u8], transformed: &TransformedKey) -> Result<Vault> {
+    if !matches!(
+        detect_file_version(bytes)?,
+        KdbxVersion::V4_0 | KdbxVersion::V4_1
+    ) {
+        return Err(KdbxError::UnsupportedVersion);
+    }
+
+    let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
+    let mut cursor = Cursor::new(&bytes[header_len..]);
+    let stored_header_hash = cursor.read_exact(32)?.to_vec();
+    let stored_header_hmac = cursor.read_exact(32)?.to_vec();
+    let payload_bytes = cursor.read_remaining().to_vec();
+
+    let header_bytes = &bytes[..header_len];
+    if sha256_bytes(header_bytes).as_slice() != stored_header_hash.as_slice() {
+        return Err(KdbxError::HeaderHashMismatch);
+    }
+
+    let encryption_key = sha256_seeded(&header.master_seed, transformed.as_bytes());
+    let mac_seed = mac_seed(&header.master_seed, transformed.as_bytes());
+    if header_hmac(&mac_seed, header_bytes)?.as_slice() != stored_header_hmac.as_slice() {
+        return Err(KdbxError::HeaderHmacMismatch);
+    }
+
+    let encrypted_payload = decode_block_stream(&mac_seed, &payload_bytes)?;
+    let payload = decrypt_payload(
+        header.cipher,
+        &encryption_key,
+        &header.encryption_iv,
+        &encrypted_payload,
+    )?;
+    let payload = match header.compression {
+        Compression::None => payload,
+        Compression::Gzip => gzip_decompress(&payload)?,
+    };
+
+    let (inner_algorithm, inner_key, binaries, consumed) = parse_inner_header(&payload)?;
+    parse_xml(
+        &payload[consumed..],
+        &header,
+        inner_algorithm,
+        &inner_key,
+        &binaries,
+    )
+}
+
 pub fn save_kdbx(
     vault: &Vault,
     composite_key: &CompositeKey,
     profile: &SaveProfile,
 ) -> Result<Vec<u8>> {
+    let (header, kdf) = prepare_save(vault, profile)?;
+    let raw_key = Zeroizing::new(composite_key.raw_key()?);
+    let transformed = TransformedKey::from_bytes(kdf.derive_key(&*raw_key)?);
+    encode_kdbx_with_transformed_key(vault, profile, header, &transformed)
+}
+
+pub fn save_kdbx_with_transformed_key(
+    vault: &Vault,
+    transformed: &TransformedKey,
+    profile: &SaveProfile,
+) -> Result<Vec<u8>> {
+    if profile.kdf.is_some() || vault.kdf_parameters.is_none() {
+        return Err(KdbxError::InvalidValue);
+    }
+    let (header, _) = prepare_save(vault, profile)?;
+    encode_kdbx_with_transformed_key(vault, profile, header, transformed)
+}
+
+fn prepare_save(vault: &Vault, profile: &SaveProfile) -> Result<(KdbxHeader, KdfProfile)> {
     if !matches!(profile.version, KdbxVersion::V4_0 | KdbxVersion::V4_1) {
         return Err(KdbxError::UnsupportedVersion);
     }
@@ -442,11 +562,17 @@ pub fn save_kdbx(
             .public_custom_data
             .insert(key.clone(), VariantValue::Bytes(value.clone()));
     }
+    Ok((header, kdf))
+}
 
-    let raw_key = composite_key.raw_key()?;
-    let transformed = kdf.derive_key(&raw_key)?;
-    let encryption_key = sha256_seeded(&header.master_seed, &transformed);
-    let mac_seed = mac_seed(&header.master_seed, &transformed);
+fn encode_kdbx_with_transformed_key(
+    vault: &Vault,
+    profile: &SaveProfile,
+    header: KdbxHeader,
+    transformed: &TransformedKey,
+) -> Result<Vec<u8>> {
+    let encryption_key = sha256_seeded(&header.master_seed, transformed.as_bytes());
+    let mac_seed = mac_seed(&header.master_seed, transformed.as_bytes());
 
     let mut binaries = Vec::new();
     let attachment_refs = collect_attachment_refs(vault, &mut binaries)?;
@@ -514,44 +640,9 @@ fn load_kdbx4(
     policy: &dyn KdfPolicyEvaluator,
     confirmation: ExternalKdfConfirmation,
 ) -> Result<Vault> {
-    let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
-    let mut cursor = Cursor::new(&bytes[header_len..]);
-    let stored_header_hash = cursor.read_exact(32)?.to_vec();
-    let stored_header_hmac = cursor.read_exact(32)?.to_vec();
-    let payload_bytes = cursor.read_remaining().to_vec();
-
-    let header_bytes = &bytes[..header_len];
-    if sha256_bytes(header_bytes).as_slice() != stored_header_hash.as_slice() {
-        return Err(KdbxError::HeaderHashMismatch);
-    }
-
-    let parameters = ExternalKdfParameters::decode_kdbx4(&header.kdf_parameters)?;
-    enforce_external_kdf_policy(&parameters, policy, confirmation)?;
-    let kdf = parameters.into_profile();
-    let raw_key = composite_key.raw_key()?;
-    let transformed = kdf.derive_key(&raw_key)?;
-    let encryption_key = sha256_seeded(&header.master_seed, &transformed);
-    let mac_seed = mac_seed(&header.master_seed, &transformed);
-
-    if header_hmac(&mac_seed, header_bytes)?.as_slice() != stored_header_hmac.as_slice() {
-        return Err(KdbxError::HeaderHmacMismatch);
-    }
-
-    let encrypted_payload = decode_block_stream(&mac_seed, &payload_bytes)?;
-    let payload = decrypt_payload(
-        header.cipher,
-        &encryption_key,
-        &header.encryption_iv,
-        &encrypted_payload,
-    )?;
-    let payload = match header.compression {
-        Compression::None => payload,
-        Compression::Gzip => gzip_decompress(&payload)?,
-    };
-
-    let (inner_algorithm, inner_key, binaries, consumed) = parse_inner_header(&payload)?;
-    let xml_bytes = &payload[consumed..];
-    parse_xml(xml_bytes, &header, inner_algorithm, &inner_key, &binaries)
+    let transformed =
+        derive_transformed_key_with_policy(bytes, composite_key, policy, confirmation)?;
+    load_kdbx_with_transformed_key(bytes, &transformed)
 }
 
 fn load_kdbx3(
@@ -9414,6 +9505,74 @@ mod compatibility_tests {
         };
         let (_, inner_key, _, _) = parse_inner_header(&payload)?;
         Ok(inner_key)
+    }
+}
+
+#[cfg(test)]
+mod transformed_key_tests {
+    use super::{
+        Compression, KdbxCipher, KdbxError, KdbxVersion, SaveKdf, SaveProfile,
+        derive_transformed_key, load_kdbx_with_transformed_key, save_kdbx,
+        save_kdbx_with_transformed_key,
+    };
+    use vaultkern_crypto::CompositeKey;
+    use vaultkern_model::Vault;
+
+    fn fast_profile() -> SaveProfile {
+        SaveProfile {
+            version: KdbxVersion::V4_1,
+            cipher: KdbxCipher::Aes256,
+            compression: Compression::None,
+            kdf: Some(SaveKdf::AesKdbx4 { rounds: 16 }),
+        }
+    }
+
+    #[test]
+    fn transformed_key_cache_is_validated_by_file_hmac_and_refreshes_on_miss() {
+        let mut key = CompositeKey::default();
+        key.add_password("correct horse battery staple");
+        let first = save_kdbx(&Vault::empty("first"), &key, &fast_profile()).unwrap();
+        let second = save_kdbx(&Vault::empty("second"), &key, &fast_profile()).unwrap();
+
+        let cached = derive_transformed_key(&first, &key).unwrap();
+        let opened = load_kdbx_with_transformed_key(&first, &cached).unwrap();
+        assert_eq!(opened.name, "first");
+
+        assert!(matches!(
+            load_kdbx_with_transformed_key(&second, &cached),
+            Err(KdbxError::HeaderHmacMismatch)
+        ));
+
+        let refreshed = derive_transformed_key(&second, &key).unwrap();
+        let opened = load_kdbx_with_transformed_key(&second, &refreshed).unwrap();
+        assert_eq!(opened.name, "second");
+    }
+
+    #[test]
+    fn ordinary_save_reuses_loaded_kdf_and_the_session_transformed_key() {
+        let mut key = CompositeKey::default();
+        key.add_password("save password");
+        let initial = save_kdbx(&Vault::empty("before"), &key, &fast_profile()).unwrap();
+        let transformed = derive_transformed_key(&initial, &key).unwrap();
+        let mut vault = load_kdbx_with_transformed_key(&initial, &transformed).unwrap();
+        vault.name = "after".into();
+
+        let saved = save_kdbx_with_transformed_key(
+            &vault,
+            &transformed,
+            &SaveProfile {
+                kdf: None,
+                ..fast_profile()
+            },
+        )
+        .unwrap();
+
+        let reopened = load_kdbx_with_transformed_key(&saved, &transformed).unwrap();
+        assert_eq!(reopened.name, "after");
+
+        let error =
+            save_kdbx_with_transformed_key(&vault, &transformed, &fast_profile()).unwrap_err();
+        assert!(matches!(error, KdbxError::InvalidValue));
     }
 }
 

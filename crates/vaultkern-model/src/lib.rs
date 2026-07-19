@@ -12,10 +12,14 @@ use vaultkern_crypto::{OtpAlgorithm, generate_totp};
 use zeroize::{Zeroize, Zeroizing};
 
 mod canonical_serialization;
+mod three_way_patch;
 
 pub use canonical_serialization::{
     CANONICAL_ENTRY_SCHEMA_VERSION_V1, CANONICAL_SERIALIZATION_MAGIC, CanonicalSerializationError,
     canonical_entry_bytes_v1, canonical_entry_content_hash_v1,
+};
+pub use three_way_patch::{
+    ThreeWayPatchError, ThreeWayPatchReport, ThreeWayPatchResult, three_way_field_patch,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -1579,20 +1583,6 @@ impl Vault {
         collect_search(&self.root, &needle, &mut matches);
         matches
     }
-
-    pub fn merge_from(&mut self, other: &Vault) -> MergeReport {
-        let mut report = MergeReport::default();
-        let mut content_pool = AttachmentContentPool::new();
-        normalize_group_attachment_content(&mut self.root, &mut content_pool);
-        merge_group(&mut self.root, &other.root, &mut content_pool, &mut report);
-        report
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct MergeReport {
-    pub merged_entries: usize,
-    pub history_snapshots_added: usize,
 }
 
 fn collect_search<'a>(group: &'a Group, needle: &str, matches: &mut Vec<&'a Entry>) {
@@ -1621,77 +1611,6 @@ fn collect_search<'a>(group: &'a Group, needle: &str, matches: &mut Vec<&'a Entr
 
     for child in &group.children {
         collect_search(child, needle, matches);
-    }
-}
-
-fn merge_group(
-    target: &mut Group,
-    source: &Group,
-    content_pool: &mut AttachmentContentPool,
-    report: &mut MergeReport,
-) {
-    for incoming_entry in &source.entries {
-        if let Some(index) = target
-            .entries
-            .iter()
-            .position(|entry| entry.id == incoming_entry.id)
-        {
-            let existing = &mut target.entries[index];
-            if incoming_entry.modified_at > existing.modified_at {
-                let mut snapshot = existing.clone();
-                prepare_entry_history_snapshot(&mut snapshot);
-                let mut merged = incoming_entry.clone();
-                merged.history.push(snapshot);
-                normalize_entry_attachment_content(&mut merged, content_pool);
-                *existing = merged;
-                report.merged_entries += 1;
-                report.history_snapshots_added += 1;
-            }
-        } else {
-            let mut incoming_entry = incoming_entry.clone();
-            normalize_entry_attachment_content(&mut incoming_entry, content_pool);
-            target.entries.push(incoming_entry);
-            report.merged_entries += 1;
-        }
-    }
-
-    for incoming_group in &source.children {
-        if let Some(index) = target
-            .children
-            .iter()
-            .position(|group| group.id == incoming_group.id)
-        {
-            merge_group(
-                &mut target.children[index],
-                incoming_group,
-                content_pool,
-                report,
-            );
-        } else {
-            let mut incoming_group = incoming_group.clone();
-            normalize_group_attachment_content(&mut incoming_group, content_pool);
-            target.children.push(incoming_group);
-        }
-    }
-}
-
-fn normalize_group_attachment_content(group: &mut Group, content_pool: &mut AttachmentContentPool) {
-    for entry in &mut group.entries {
-        normalize_entry_attachment_content(entry, content_pool);
-    }
-    for child in &mut group.children {
-        normalize_group_attachment_content(child, content_pool);
-    }
-}
-
-fn normalize_entry_attachment_content(entry: &mut Entry, content_pool: &mut AttachmentContentPool) {
-    for attachment in entry.attachments.values_mut() {
-        if let Ok(content) = content_pool.intern_content(&attachment.data) {
-            attachment.data = content;
-        }
-    }
-    for history in &mut entry.history {
-        normalize_entry_attachment_content(history, content_pool);
     }
 }
 
@@ -1758,9 +1677,9 @@ fn decode_hex_byte(high: u8, low: u8) -> Option<u8> {
 mod tests {
     use super::{
         Attachment, AttachmentContent, AttachmentContentId, AttachmentContentPool, CustomField,
-        Entry, Group, MaterializedPersistentValue, ModelError, OpaqueXmlAnchor, OpaqueXmlFragment,
-        PasskeyRecord, TotpAlgorithm, TotpSpec, Vault, is_totp_persistent_attribute_key,
-        materialize_entry_persistent_attributes, totp_from_persistent_attributes,
+        Entry, Group, MaterializedPersistentValue, ModelError, PasskeyRecord, TotpAlgorithm,
+        TotpSpec, Vault, is_totp_persistent_attribute_key, materialize_entry_persistent_attributes,
+        totp_from_persistent_attributes,
     };
     use std::collections::BTreeMap;
     use std::sync::{
@@ -2649,139 +2568,6 @@ mod tests {
         assert_eq!(vault.search("alice").len(), 1);
         assert_eq!(vault.search("work").len(), 1);
         assert!(vault.search("missing").is_empty());
-    }
-
-    #[test]
-    fn merge_prefers_newer_entry_and_preserves_history() {
-        let mut local = Vault::empty("Local");
-        let mut base = Entry::new("Shared");
-        base.id = uuid::Uuid::nil();
-        base.password = "old-secret".into();
-        base.modified_at = 10;
-        base.raw_state.node_order = vec!["Times".into(), "History".into()];
-        base.raw_state.has_history_node = true;
-        base.opaque_xml.push(OpaqueXmlFragment {
-            xml: "<AfterHistory />".into(),
-            after: Some(OpaqueXmlAnchor {
-                element_name: "History".into(),
-                occurrence: 1,
-            }),
-        });
-        base.attachments.insert(
-            "large.bin".into(),
-            Attachment::new("large.bin", vec![0x3c; 1024 * 1024], false),
-        );
-        local.root.entries.push(base.clone());
-
-        let mut incoming = Vault::empty("Incoming");
-        let mut updated = base;
-        updated.password = "new-secret".into();
-        updated.modified_at = 20;
-        incoming.root.entries.push(updated);
-
-        let report = local.merge_from(&incoming);
-        let merged = local.root.entries.first().expect("merged entry");
-
-        assert_eq!(merged.password, "new-secret");
-        assert_eq!(merged.history.len(), 1);
-        assert_eq!(merged.history[0].password, "old-secret");
-        assert!(!merged.history[0].raw_state.has_history_node);
-        assert_eq!(merged.history[0].raw_state.node_order, ["Times"]);
-        assert_eq!(
-            merged.history[0].opaque_xml[0].after,
-            Some(OpaqueXmlAnchor {
-                element_name: "Times".into(),
-                occurrence: 1,
-            })
-        );
-        assert!(
-            merged.attachments["large.bin"]
-                .data
-                .ptr_eq(&merged.history[0].attachments["large.bin"].data)
-        );
-        assert_eq!(report.merged_entries, 1);
-        assert_eq!(report.history_snapshots_added, 1);
-    }
-
-    #[test]
-    fn merge_normalizes_independently_owned_attachment_content() {
-        let mut local = Vault::empty("Local");
-        let mut local_entry = Entry::new("Shared");
-        local_entry.id = uuid::Uuid::nil();
-        local_entry.modified_at = 10;
-        local_entry.attachments.insert(
-            "shared.bin".into(),
-            Attachment::new("shared.bin", b"same bytes".to_vec(), false),
-        );
-        local.root.entries.push(local_entry);
-
-        let mut incoming = Vault::empty("Incoming");
-        let mut incoming_entry = Entry::new("Shared");
-        incoming_entry.id = uuid::Uuid::nil();
-        incoming_entry.modified_at = 20;
-        incoming_entry.attachments.insert(
-            "shared.bin".into(),
-            Attachment::new("shared.bin", b"same bytes".to_vec(), true),
-        );
-        incoming.root.entries.push(incoming_entry);
-
-        assert!(
-            !local.root.entries[0].attachments["shared.bin"]
-                .data
-                .ptr_eq(&incoming.root.entries[0].attachments["shared.bin"].data)
-        );
-
-        local.merge_from(&incoming);
-        let merged = &local.root.entries[0];
-        assert!(
-            merged.attachments["shared.bin"]
-                .data
-                .ptr_eq(&merged.history[0].attachments["shared.bin"].data)
-        );
-        assert!(merged.attachments["shared.bin"].protect_in_memory);
-        assert!(!merged.history[0].attachments["shared.bin"].protect_in_memory);
-    }
-
-    #[test]
-    fn merge_preserves_incoming_history_when_newer_entry_wins() {
-        let mut local = Vault::empty("Local");
-        let mut base = Entry::new("Shared");
-        base.id = uuid::Uuid::nil();
-        base.password = "local-current".into();
-        base.modified_at = 20;
-        let mut local_history = base.clone();
-        local_history.password = "local-history".into();
-        local_history.modified_at = 10;
-        local_history.history.clear();
-        base.history.push(local_history);
-        local.root.entries.push(base.clone());
-
-        let mut incoming = Vault::empty("Incoming");
-        let mut updated = base;
-        updated.password = "remote-current".into();
-        updated.modified_at = 40;
-        updated.history.clear();
-        let mut remote_history = updated.clone();
-        remote_history.password = "remote-history".into();
-        remote_history.modified_at = 30;
-        remote_history.history.clear();
-        updated.history.push(remote_history);
-        incoming.root.entries.push(updated);
-
-        let report = local.merge_from(&incoming);
-        let merged = local.root.entries.first().expect("merged entry");
-
-        assert_eq!(merged.password, "remote-current");
-        assert_eq!(
-            merged
-                .history
-                .iter()
-                .map(|entry| entry.password.as_str())
-                .collect::<Vec<_>>(),
-            vec!["remote-history", "local-current"]
-        );
-        assert_eq!(report.merged_entries, 1);
-        assert_eq!(report.history_snapshots_added, 1);
     }
 
     #[test]

@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use url::form_urlencoded::byte_serialize;
-use vaultkern_core::{SaveProfile, Vault};
+use vaultkern_core::{SaveProfile, TransformedKey, Vault};
 use vaultkern_runtime_protocol::{SessionStateDto, VaultSourceStatusDto};
 
 use crate::providers::local_file::VaultSourceFingerprint;
+use crate::unlock::MasterCredentialShape;
 
 #[derive(Debug, Clone, Default)]
 struct SessionState {
@@ -62,21 +64,19 @@ pub(crate) struct LoadedVault {
     pub(crate) name: String,
     pub(crate) bytes: Vec<u8>,
     pub(crate) baseline_fingerprint: VaultSourceFingerprint,
-    pub(crate) password: Option<String>,
-    pub(crate) key_file_path: Option<String>,
+    pub(crate) credential_shape: MasterCredentialShape,
     pub(crate) save_profile: SaveProfile,
     pub(crate) autosave_delay_seconds: Option<u32>,
     pub(crate) vault: Option<Vault>,
+    pub(crate) transformed_key: Option<Arc<TransformedKey>>,
     pub(crate) source_status: Option<VaultSourceStatusDto>,
     pub(crate) source_account_label: Option<String>,
-    pub(crate) quick_unlock_refresh_pending: bool,
 }
 
 impl LoadedVault {
     fn clear_unlock_secrets(&mut self) {
-        self.password = None;
-        self.key_file_path = None;
         self.vault = None;
+        self.transformed_key = None;
     }
 }
 
@@ -108,13 +108,16 @@ impl VaultSource {
 pub(crate) struct VaultSession {
     state: SessionState,
     loaded: BTreeMap<String, LoadedVault>,
+    preloaded_for_unlock: Option<String>,
 }
 
 impl VaultSession {
     pub(crate) fn set_current_vault(&mut self, vault_ref_id: String) {
         self.state.set_current_vault(vault_ref_id);
+        self.preloaded_for_unlock = None;
     }
 
+    #[cfg(test)]
     pub(crate) fn unlock(&mut self, vault_id: String, current_vault_ref_id: Option<String>) {
         self.state.unlock(vault_id, current_vault_ref_id);
     }
@@ -124,10 +127,12 @@ impl VaultSession {
             loaded.clear_unlock_secrets();
         }
         self.state.lock();
+        self.preloaded_for_unlock = None;
     }
 
     pub(crate) fn clear_current_vault(&mut self) {
         self.state.clear_current_vault();
+        self.preloaded_for_unlock = None;
     }
 
     pub(crate) fn current_vault_ref_id(&self) -> Option<&str> {
@@ -150,6 +155,18 @@ impl VaultSession {
         self.loaded.contains_key(vault_id)
     }
 
+    pub(crate) fn mark_preloaded_for_unlock(&mut self, vault_id: String) {
+        self.preloaded_for_unlock = Some(vault_id);
+    }
+
+    pub(crate) fn is_preloaded_for_unlock(&self, vault_id: &str) -> bool {
+        self.preloaded_for_unlock.as_deref() == Some(vault_id)
+    }
+
+    pub(crate) fn loaded_vault_ids(&self) -> impl Iterator<Item = &str> {
+        self.loaded.keys().map(String::as_str)
+    }
+
     pub(crate) fn find_loaded(&self, vault_id: &str) -> Option<&LoadedVault> {
         self.loaded.get(vault_id)
     }
@@ -157,13 +174,63 @@ impl VaultSession {
     pub(crate) fn find_loaded_mut(&mut self, vault_id: &str) -> Option<&mut LoadedVault> {
         self.loaded.get_mut(vault_id)
     }
+
+    pub(crate) fn finish_unlock(
+        &mut self,
+        vault_id: &str,
+        vault: Vault,
+        transformed_key: TransformedKey,
+        credential_shape: MasterCredentialShape,
+        current_vault_ref_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        let loaded = self
+            .loaded
+            .get_mut(vault_id)
+            .ok_or_else(|| anyhow::anyhow!("vault not opened: {vault_id}"))?;
+        loaded.bytes.clear();
+        loaded.vault = Some(vault);
+        loaded.transformed_key = Some(Arc::new(transformed_key));
+        loaded.credential_shape = credential_shape;
+        self.preloaded_for_unlock = None;
+        self.state.unlock(vault_id.to_owned(), current_vault_ref_id);
+        Ok(())
+    }
+
+    pub(crate) fn finish_unlock_from_blob(
+        &mut self,
+        vault_id: &str,
+        vault: Vault,
+        transformed_key: TransformedKey,
+        credential_shape: MasterCredentialShape,
+        current_vault_ref_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        let loaded = self
+            .loaded
+            .get_mut(vault_id)
+            .ok_or_else(|| anyhow::anyhow!("vault not opened: {vault_id}"))?;
+        loaded.bytes.clear();
+        loaded.vault = Some(vault);
+        loaded.transformed_key = Some(Arc::new(transformed_key));
+        loaded.credential_shape = credential_shape;
+        self.preloaded_for_unlock = None;
+        self.state.unlock(vault_id.to_owned(), current_vault_ref_id);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transformed_key(&self, vault_id: &str) -> Option<&TransformedKey> {
+        self.loaded
+            .get(vault_id)
+            .and_then(|loaded| loaded.transformed_key.as_deref())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{LoadedVault, VaultSession, VaultSource, onedrive_remote_id, onedrive_vault_id};
     use crate::providers::local_file::VaultSourceFingerprint;
-    use vaultkern_core::{SaveProfile, Vault};
+    use crate::unlock::MasterCredentialShape;
+    use vaultkern_core::{SaveProfile, TransformedKey, Vault};
     use vaultkern_runtime_protocol::VaultSourceStatusDto;
 
     enum Transition {
@@ -186,7 +253,7 @@ mod tests {
         autosave_delay_seconds: Option<u32>,
         source_status: Option<VaultSourceStatusDto>,
         source_account_label: Option<String>,
-        quick_unlock_refresh_pending: bool,
+        credential_shape: MasterCredentialShape,
     }
 
     fn retained_state(loaded: &LoadedVault) -> RetainedLoadedVaultState {
@@ -195,14 +262,13 @@ mod tests {
             name,
             bytes,
             baseline_fingerprint,
-            password: _,
-            key_file_path: _,
+            credential_shape,
             save_profile,
             autosave_delay_seconds,
             vault: _,
+            transformed_key: _,
             source_status,
             source_account_label,
-            quick_unlock_refresh_pending,
         } = loaded;
 
         RetainedLoadedVaultState {
@@ -214,7 +280,7 @@ mod tests {
             autosave_delay_seconds: *autosave_delay_seconds,
             source_status: source_status.clone(),
             source_account_label: source_account_label.clone(),
-            quick_unlock_refresh_pending: *quick_unlock_refresh_pending,
+            credential_shape: *credential_shape,
         }
     }
 
@@ -311,11 +377,14 @@ mod tests {
                 size_bytes: 2,
                 modified_at: Some(u64::from(marker)),
             },
-            password: Some(format!("password-{marker}")),
-            key_file_path: Some(format!("/tmp/key-{marker}")),
+            credential_shape: MasterCredentialShape {
+                has_password: true,
+                has_key_file: true,
+            },
             save_profile: SaveProfile::recommended(),
             autosave_delay_seconds: Some(u32::from(marker)),
             vault: Some(Vault::empty(name)),
+            transformed_key: None,
             source_status: Some(VaultSourceStatusDto {
                 source_kind: "local".into(),
                 remote_state: format!("state-{marker}"),
@@ -324,7 +393,6 @@ mod tests {
                 last_error: None,
             }),
             source_account_label: Some(format!("account-{marker}")),
-            quick_unlock_refresh_pending: true,
         }
     }
 
@@ -344,29 +412,33 @@ mod tests {
         session.unlock("vault-b".into(), Some("ref-b".into()));
         assert!(session.find_loaded("vault-a").unwrap().vault.is_some());
         assert!(session.find_loaded("vault-b").unwrap().vault.is_some());
-        assert_eq!(
-            session.find_loaded("vault-a").unwrap().password.as_deref(),
-            Some("password-1")
-        );
-        assert_eq!(
-            session.find_loaded("vault-b").unwrap().password.as_deref(),
-            Some("password-2")
-        );
-        assert_eq!(
+        assert!(
             session
                 .find_loaded("vault-a")
                 .unwrap()
-                .key_file_path
-                .as_deref(),
-            Some("/tmp/key-1")
+                .credential_shape
+                .has_password
         );
-        assert_eq!(
+        assert!(
+            session
+                .find_loaded("vault-a")
+                .unwrap()
+                .credential_shape
+                .has_key_file
+        );
+        assert!(
             session
                 .find_loaded("vault-b")
                 .unwrap()
-                .key_file_path
-                .as_deref(),
-            Some("/tmp/key-2")
+                .credential_shape
+                .has_password
+        );
+        assert!(
+            session
+                .find_loaded("vault-b")
+                .unwrap()
+                .credential_shape
+                .has_key_file
         );
         let retained = ["vault-a", "vault-b"].map(|vault_id| {
             (
@@ -382,8 +454,36 @@ mod tests {
             let loaded = session.find_loaded(vault_id).unwrap();
             assert_eq!(retained_state(loaded), expected);
             assert!(loaded.vault.is_none());
-            assert!(loaded.password.is_none());
-            assert!(loaded.key_file_path.is_none());
         }
+    }
+
+    #[test]
+    fn finish_unlock_discards_file_bytes_and_lock_drops_session_key_material() {
+        let mut session = VaultSession::default();
+        session.insert_loaded("vault-a".into(), loaded_vault("first", 1));
+        let credential_shape = MasterCredentialShape {
+            has_password: true,
+            has_key_file: false,
+        };
+
+        session
+            .finish_unlock(
+                "vault-a",
+                Vault::empty("unlocked"),
+                TransformedKey::from_bytes([0x33; 32]),
+                credential_shape,
+                Some("ref-a".into()),
+            )
+            .unwrap();
+
+        assert!(session.find_loaded("vault-a").unwrap().bytes.is_empty());
+        assert!(session.transformed_key("vault-a").is_some());
+        assert_eq!(
+            session.find_loaded("vault-a").unwrap().credential_shape,
+            credential_shape
+        );
+
+        session.lock_all();
+        assert!(session.transformed_key("vault-a").is_none());
     }
 }

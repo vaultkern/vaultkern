@@ -4,7 +4,9 @@ use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(any(windows, test))]
+use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
@@ -212,6 +214,7 @@ impl ExclusiveFileLock {
         Ok(Self { file })
     }
 
+    #[cfg(any(windows, test))]
     pub(crate) fn acquire_with_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
         let started = Instant::now();
         let file = open_validated_lock_file(path)?;
@@ -236,6 +239,7 @@ impl ExclusiveFileLock {
     }
 }
 
+#[cfg(any(windows, test))]
 fn lock_timeout_error(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::WouldBlock,
@@ -281,7 +285,7 @@ fn open_validated_lock_file(path: &Path) -> io::Result<File> {
             ));
         }
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        return Ok(file);
+        Ok(file)
     }
     #[cfg(windows)]
     {
@@ -306,7 +310,7 @@ fn open_validated_lock_file(path: &Path) -> io::Result<File> {
                 "durable lock path is not a private regular file",
             ));
         }
-        return Ok(file);
+        Ok(file)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -422,10 +426,10 @@ pub(crate) fn path_file_identity(
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return Ok(DurableFileIdentity {
+        Ok(DurableFileIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
-        });
+        })
     }
     #[cfg(not(any(unix, windows)))]
     Ok(DurableFileIdentity {
@@ -758,195 +762,6 @@ pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
     sync_directory(parent)
 }
 
-pub(crate) fn rename_missing_target_durable(
-    source: &Path,
-    target: &Path,
-    expected_source_identity: DurableFileIdentity,
-) -> Result<(), PublishError> {
-    rename_missing_target_durable_inner(
-        source,
-        target,
-        expected_source_identity,
-        &mut || Ok(()),
-        &mut sync_parent,
-    )
-}
-
-fn rename_missing_target_durable_inner(
-    source: &Path,
-    target: &Path,
-    expected_source_identity: DurableFileIdentity,
-    before_rename: &mut dyn FnMut() -> io::Result<()>,
-    sync_parent: &mut dyn FnMut(&Path) -> io::Result<()>,
-) -> Result<(), PublishError> {
-    if source.parent() != target.parent() {
-        return Err(PublishError {
-            published: false,
-            target_conflict: false,
-            source: io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "durable rename requires source and target in the same directory",
-            ),
-        });
-    }
-    verify_target_expectation(
-        source,
-        TargetExpectation::Identity(expected_source_identity),
-    )
-    .map_err(|source| PublishError {
-        published: false,
-        target_conflict: false,
-        source,
-    })?;
-    verify_single_link(source).map_err(|source| PublishError {
-        published: false,
-        target_conflict: false,
-        source,
-    })?;
-    verify_target_expectation(target, TargetExpectation::Missing).map_err(|source| {
-        PublishError {
-            published: false,
-            target_conflict: source.kind() == io::ErrorKind::AlreadyExists,
-            source,
-        }
-    })?;
-    before_rename().map_err(|source| PublishError {
-        published: false,
-        target_conflict: false,
-        source,
-    })?;
-    rename_missing_target(source, target).map_err(|source| PublishError {
-        published: false,
-        target_conflict: source.kind() == io::ErrorKind::AlreadyExists,
-        source,
-    })?;
-    verify_target_expectation(
-        target,
-        TargetExpectation::Identity(expected_source_identity),
-    )
-    .map_err(|source| PublishError {
-        published: true,
-        target_conflict: false,
-        source,
-    })?;
-    verify_single_link(target).map_err(|source| PublishError {
-        published: true,
-        target_conflict: false,
-        source,
-    })?;
-    sync_parent(target).map_err(|source| PublishError {
-        published: true,
-        target_conflict: false,
-        source,
-    })
-}
-
-#[cfg(unix)]
-fn verify_single_link(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    if fs::symlink_metadata(path)?.nlink() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "durable publish source has a hardlink alias",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn verify_single_link(path: &Path) -> io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    let file = options.open(path)?;
-    if windows_file_information(&file)?.nNumberOfLinks != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "durable publish source has a hardlink alias",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn verify_single_link(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn rename_missing_target(source: &Path, target: &Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
-    let target = CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            target.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_vendor = "apple")]
-fn rename_missing_target(source: &Path, target: &Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
-    let target = CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
-    let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn rename_missing_target(source: &Path, target: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
-
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
-    let result = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
-    target_vendor = "apple",
-    windows
-)))]
-fn rename_missing_target(_source: &Path, _target: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "durable no-replace rename is unavailable on this platform",
-    ))
-}
-
 pub(crate) fn create_dir_all_durable(path: &Path) -> io::Result<()> {
     use std::path::Component;
 
@@ -1026,7 +841,7 @@ fn validate_trusted_directory_component(metadata: &Metadata) -> io::Result<()> {
         ));
     }
     let mode = metadata.mode();
-    if mode & 0o022 != 0 && mode & libc::S_ISVTX as u32 == 0 {
+    if mode & 0o022 != 0 && mode & libc::S_ISVTX == 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "private durable directory ancestry is writable without sticky protection",
@@ -1614,140 +1429,6 @@ mod tests {
             0o600
         );
         temp.discard().unwrap();
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn no_replace_publish_rejects_hardlinked_source() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("segment");
-        let alias = dir.path().join("alias");
-        let target = dir.path().join("segment.sealed");
-        fs::write(&source, b"journal bytes").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-        fs::hard_link(&source, &alias).unwrap();
-
-        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
-
-        assert!(!error.published);
-        assert_eq!(error.source.kind(), io::ErrorKind::Unsupported);
-        assert!(source.exists());
-        assert!(!target.exists());
-        assert_eq!(fs::read(&alias).unwrap(), b"journal bytes");
-    }
-
-    #[test]
-    fn no_replace_publish_rejects_existing_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("segment");
-        let target = dir.path().join("segment.sealed");
-        fs::write(&source, b"journal bytes").unwrap();
-        fs::write(&target, b"winner").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-
-        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
-
-        assert!(!error.published);
-        assert!(error.target_conflict);
-        assert_eq!(fs::read(&source).unwrap(), b"journal bytes");
-        assert_eq!(fs::read(&target).unwrap(), b"winner");
-    }
-
-    #[test]
-    fn no_replace_publish_rejects_cross_directory_target() {
-        let source_dir = tempfile::tempdir().unwrap();
-        let target_dir = tempfile::tempdir().unwrap();
-        let source = source_dir.path().join("segment");
-        let target = target_dir.path().join("segment.sealed");
-        fs::write(&source, b"journal bytes").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-
-        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
-
-        assert!(!error.published);
-        assert_eq!(error.source.kind(), io::ErrorKind::InvalidInput);
-        assert!(source.exists());
-        assert!(!target.exists());
-    }
-
-    #[test]
-    fn no_replace_publish_rejects_changed_source_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("segment");
-        let replacement = dir.path().join("replacement");
-        let target = dir.path().join("segment.sealed");
-        fs::write(&source, b"original").unwrap();
-        fs::write(&replacement, b"replacement").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-        fs::remove_file(&source).unwrap();
-        fs::rename(&replacement, &source).unwrap();
-
-        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
-
-        assert!(!error.published);
-        assert_eq!(error.source.kind(), io::ErrorKind::WouldBlock);
-        assert_eq!(fs::read(&source).unwrap(), b"replacement");
-        assert!(!target.exists());
-    }
-
-    #[test]
-    fn no_replace_publish_never_clobbers_target_appearing_after_precheck() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("segment");
-        let target = dir.path().join("segment.sealed");
-        fs::write(&source, b"journal bytes").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-        let mut create_target = || {
-            fs::write(&target, b"winner")?;
-            Ok(())
-        };
-        let mut sync_parent = super::sync_parent;
-
-        let error = super::rename_missing_target_durable_inner(
-            &source,
-            &target,
-            identity,
-            &mut create_target,
-            &mut sync_parent,
-        )
-        .unwrap_err();
-
-        assert!(!error.published);
-        assert!(error.target_conflict);
-        assert_eq!(fs::read(&source).unwrap(), b"journal bytes");
-        assert_eq!(fs::read(&target).unwrap(), b"winner");
-    }
-
-    #[test]
-    fn no_replace_publish_reports_parent_sync_failure_after_publication() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("segment");
-        let target = dir.path().join("segment.sealed");
-        fs::write(&source, b"journal bytes").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-        let mut before_rename = || Ok(());
-        let mut fail_parent_sync =
-            |_: &std::path::Path| Err(io::Error::other("injected parent sync failure"));
-
-        let error = super::rename_missing_target_durable_inner(
-            &source,
-            &target,
-            identity,
-            &mut before_rename,
-            &mut fail_parent_sync,
-        )
-        .unwrap_err();
-
-        assert!(error.published);
-        assert!(!error.target_conflict);
-        assert!(!source.exists());
-        assert_eq!(fs::read(&target).unwrap(), b"journal bytes");
     }
 
     #[cfg(windows)]
