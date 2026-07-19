@@ -115,6 +115,9 @@ pub fn three_way_field_patch(
     let entries = merge_entries(&base_flat, &local_flat, &remote_flat, &groups, &mut report)?;
     let root = rebuild_tree(base_flat.root_id, &groups, &entries, &mut BTreeSet::new())?;
     let mut vault = merge_meta(base, local, remote, &mut report);
+    vault
+        .deleted_objects
+        .retain(|deleted| !groups.contains_key(&deleted.id) && !entries.contains_key(&deleted.id));
     vault.root = root;
     normalize_group_attachment_content(&mut vault.root);
     Ok(ThreeWayPatchResult { vault, report })

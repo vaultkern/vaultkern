@@ -417,6 +417,22 @@ pub(crate) fn is_secure_storage_cancelled(error: &anyhow::Error) -> bool {
     })
 }
 
+#[cfg(any(windows, test))]
+fn verify_or_recreate_hello_key<T>(
+    verify: impl FnOnce() -> Result<T>,
+    recreate: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    match verify() {
+        Ok(value) => Ok(value),
+        Err(error) if is_secure_storage_cancelled(&error) => Err(error),
+        Err(verification_error) => recreate().with_context(|| {
+            format!(
+                "failed to replace an invalidated Windows Hello key after verification failed: {verification_error:#}"
+            )
+        }),
+    }
+}
+
 #[allow(dead_code)]
 pub trait SecureStorageProvider {
     fn set_parent_window_handle(&mut self, _parent_window: Option<usize>) {}
@@ -517,27 +533,14 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
     }
 
     fn authorize_store_user_presence(&self) -> Result<()> {
-        with_hello_key(
-            &self.wrapping_key_name()?,
-            true,
-            self.parent_window,
-            |key, created| {
-                if created {
-                    return Ok(());
-                }
-                let mut challenge = [0u8; 32];
-                fill_random(&mut challenge)?;
-                let wrapped_challenge = ncrypt_encrypt_pkcs1(key, &challenge)?;
-                require_fresh_hello_gesture(
-                    key,
-                    "Verify with Windows Hello to enable quick unlock for this VaultKern vault",
-                )?;
-                let unwrapped = Zeroizing::new(ncrypt_decrypt_pkcs1(key, &wrapped_challenge)?);
-                if unwrapped.as_slice() != challenge {
-                    anyhow::bail!("Windows Hello quick unlock key verification failed");
-                }
-                Ok(())
+        let key_name = self.wrapping_key_name()?;
+        verify_or_recreate_hello_key(
+            || {
+                with_hello_key(&key_name, true, self.parent_window, |key, created| {
+                    verify_hello_key_for_enrollment(key, created)
+                })
             },
+            || recreate_hello_key(&key_name, self.parent_window),
         )
     }
 
@@ -642,6 +645,28 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
 }
 
 #[cfg(windows)]
+fn verify_hello_key_for_enrollment(
+    key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+    created: bool,
+) -> Result<()> {
+    if created {
+        return Ok(());
+    }
+    let mut challenge = [0u8; 32];
+    fill_random(&mut challenge)?;
+    let wrapped_challenge = ncrypt_encrypt_pkcs1(key, &challenge)?;
+    require_fresh_hello_gesture(
+        key,
+        "Verify with Windows Hello to enable quick unlock for this VaultKern vault",
+    )?;
+    let unwrapped = Zeroizing::new(ncrypt_decrypt_pkcs1(key, &wrapped_challenge)?);
+    if unwrapped.as_slice() != challenge {
+        anyhow::bail!("Windows Hello quick unlock key verification failed");
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn fill_random(bytes: &mut [u8]) -> Result<()> {
     use windows_sys::Win32::Security::Cryptography::{
         BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
@@ -720,6 +745,44 @@ fn with_hello_key<T>(
     let _key = NcryptHandle(key);
 
     operation(key, created)
+}
+
+#[cfg(windows)]
+fn recreate_hello_key(key_name: &[u16], parent_window: Option<usize>) -> Result<()> {
+    use windows_sys::Win32::Security::Cryptography::{
+        NCRYPT_OVERWRITE_KEY_FLAG, NCRYPT_PROV_HANDLE, NCRYPT_RSA_ALGORITHM,
+        NCryptCreatePersistedKey, NCryptFinalizeKey, NCryptOpenStorageProvider,
+    };
+
+    let mut provider: NCRYPT_PROV_HANDLE = 0;
+    let provider_name = wide_null(quick_unlock_key_storage_provider_name());
+    check_ncrypt(
+        unsafe { NCryptOpenStorageProvider(&mut provider, provider_name.as_ptr(), 0) },
+        "failed to open Microsoft Passport key storage provider",
+    )?;
+    let _provider = NcryptHandle(provider);
+
+    let mut key = 0;
+    check_ncrypt(
+        unsafe {
+            NCryptCreatePersistedKey(
+                provider,
+                &mut key,
+                NCRYPT_RSA_ALGORITHM,
+                key_name.as_ptr(),
+                0,
+                NCRYPT_OVERWRITE_KEY_FLAG,
+            )
+        },
+        "failed to replace invalidated quick unlock Windows Hello key",
+    )?;
+    let _key = NcryptHandle(key);
+    set_hello_parent_window(key, parent_window)?;
+    configure_hello_key(key)?;
+    check_ncrypt(
+        unsafe { NCryptFinalizeKey(key, 0) },
+        "failed to finalize replacement quick unlock Windows Hello key",
+    )
 }
 
 #[cfg(windows)]
@@ -1156,17 +1219,52 @@ impl SecureStorageProvider for FailingDeleteSecureStorageProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_quick_unlock_envelope, publish_quick_unlock_record, publish_quick_unlock_record_with,
+        SecureStorageError, is_quick_unlock_envelope, is_secure_storage_cancelled,
+        publish_quick_unlock_record, publish_quick_unlock_record_with,
         quick_unlock_gesture_required, quick_unlock_key_storage_provider_name,
         quick_unlock_ngc_cache_type, quick_unlock_persistent_key_name,
         quick_unlock_record_lock_path, quick_unlock_replacement_outcome_is_unknown,
-        quick_unlock_storage_dir,
+        quick_unlock_storage_dir, verify_or_recreate_hello_key,
     };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock,
     };
     use crate::state_paths::{extension_state_dir, runtime_state_dir};
     use std::time::Duration;
+
+    #[test]
+    fn hello_reenrollment_recreates_an_invalidated_persisted_key() {
+        let recreated = std::cell::Cell::new(false);
+
+        let result = verify_or_recreate_hello_key(
+            || anyhow::bail!("persisted Hello key was invalidated"),
+            || {
+                recreated.set(true);
+                Ok("replacement key")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, "replacement key");
+        assert!(recreated.get());
+    }
+
+    #[test]
+    fn hello_reenrollment_does_not_replace_a_key_when_the_user_cancels() {
+        let recreated = std::cell::Cell::new(false);
+
+        let error = verify_or_recreate_hello_key(
+            || Err::<(), _>(SecureStorageError::cancelled("Windows Hello was cancelled").into()),
+            || {
+                recreated.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(is_secure_storage_cancelled(&error));
+        assert!(!recreated.get());
+    }
 
     #[test]
     fn quick_unlock_record_publication_creates_and_atomically_replaces_complete_bytes() {

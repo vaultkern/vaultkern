@@ -476,7 +476,9 @@ impl Runtime {
             account_label,
             bytes,
         );
+        let cache_dir = cache_dir.as_ref();
         runtime.remote_cache = RemoteVaultCache::new_at(cache_dir);
+        runtime.synced_bases = SyncedBaseStore::new_at(cache_dir.join("synced-bases"));
         runtime
     }
 
@@ -771,9 +773,14 @@ impl Runtime {
                     }
                 };
 
-                self.synced_bases
-                    .store(&vault_id, &bytes)
-                    .with_context(|| format!("failed to store synced base: {vault_id}"))?;
+                if !source_status
+                    .as_ref()
+                    .is_some_and(|status| status.remote_state == "pending_sync")
+                {
+                    self.synced_bases
+                        .store(&vault_id, &bytes)
+                        .with_context(|| format!("failed to store synced base: {vault_id}"))?;
+                }
 
                 self.vault_session.insert_loaded(
                     vault_id.clone(),
@@ -2043,7 +2050,22 @@ impl Runtime {
             (entry_id, rollback)
         };
 
-        if let Err(save_error) = self.save_vault(&vault_id) {
+        let save_error = match self.save_vault(&vault_id) {
+            Ok(RuntimeResponse::SaveVaultResult(result))
+                if result.status != SaveVaultStatusDto::ConflictCopy =>
+            {
+                None
+            }
+            Ok(RuntimeResponse::SaveVaultResult(result)) => Some(anyhow::anyhow!(
+                "platform passkey registration was saved only to conflict copy: {}",
+                result.conflict_copy_path.as_deref().unwrap_or("unknown")
+            )),
+            Ok(response) => Some(anyhow::anyhow!(
+                "platform passkey registration received an unexpected save response: {response:?}"
+            )),
+            Err(error) => Some(error),
+        };
+        if let Some(save_error) = save_error {
             return match self.restore_passkey_registration_rollback(rollback) {
                 Ok(()) => Err(save_error),
                 Err(rollback_error) => Err(save_error).context(format!(
@@ -9253,6 +9275,28 @@ mod tests {
             .expect_err("pre-publish save failure must fail registration");
 
         assert!(error.to_string().contains("failed to write vault"));
+        assert!(runtime.list_entries(&opened.vault_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn platform_plugin_registration_fails_when_save_is_diverted_to_a_conflict_copy() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let mut foreign_generation = std::fs::read(&opened.vault_id).unwrap();
+        foreign_generation.push(0);
+        std::fs::write(&opened.vault_id, foreign_generation).unwrap();
+
+        let error = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                user_name: "alice@example.com".into(),
+                user_handle: b"platform-user-conflict".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .expect_err("a conflict copy must not complete WebAuthn registration");
+
+        assert!(error.to_string().contains("conflict copy"));
         assert!(runtime.list_entries(&opened.vault_id).unwrap().is_empty());
     }
 

@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 #[cfg(windows)]
 use tauri::{Manager, State};
 #[cfg(windows)]
-use vaultkern_windows::{PasskeyPluginServer, RuntimeBridge};
+use vaultkern_windows::{
+    PasskeyPluginServer, RuntimeBridge, launch_requests_visible_window,
+    should_refresh_platform_passkeys,
+};
 
 #[cfg(windows)]
 #[tauri::command]
@@ -14,6 +17,10 @@ async fn runtime_send(
     bridge: State<'_, RuntimeBridge>,
     passkey_plugin: State<'_, PasskeyPluginServer>,
 ) -> Result<Value, String> {
+    let command_type = message
+        .pointer("/command/type")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let bridge = bridge.inner().clone();
     let response = match tauri::async_runtime::spawn_blocking(move || bridge.request(message)).await
     {
@@ -24,9 +31,7 @@ async fn runtime_send(
             "message": format!("runtime task failed: {error}")
         }),
     };
-    if response.get("type").and_then(Value::as_str) == Some("session_state")
-        && response.get("unlocked").and_then(Value::as_bool) == Some(true)
-    {
+    if should_refresh_platform_passkeys(command_type.as_deref(), &response) {
         if let Err(error) = passkey_plugin.sync_credentials() {
             eprintln!("passkey credential cache refresh failed: {error}");
         }
@@ -41,29 +46,23 @@ fn main() {
     let bridge = RuntimeBridge::new();
     let plugin_bridge = bridge.clone();
     let window_bridge = bridge.clone();
-    let plugin_activated = std::env::args_os().any(|argument| argument == "-PluginActivated");
+    let forwarded_bridge = bridge.clone();
+    let show_window_on_start =
+        launch_requests_visible_window(&std::env::args().collect::<Vec<_>>());
     tauri::Builder::default()
         .manage(bridge)
+        .plugin(tauri_plugin_single_instance::init(
+            move |app, arguments, _cwd| {
+                if launch_requests_visible_window(&arguments) {
+                    if let Err(error) = show_main_window(app, &forwarded_bridge) {
+                        eprintln!("failed to activate the existing VaultKern window: {error}");
+                    }
+                }
+            },
+        ))
         .setup(move |app| {
-            if !plugin_activated {
-                let window = app
-                    .get_webview_window("main")
-                    .ok_or_else(|| std::io::Error::other("VaultKern main window is unavailable"))?;
-                let parent_window = window
-                    .hwnd()
-                    .map_err(|error| {
-                        std::io::Error::other(format!(
-                            "failed to resolve VaultKern main window handle: {error}"
-                        ))
-                    })?
-                    .0 as usize;
-                window_bridge
-                    .set_parent_window_handle(Some(parent_window))
-                    .map_err(|error| {
-                        std::io::Error::other(format!(
-                            "failed to configure Windows Hello parent window: {error}"
-                        ))
-                    })?;
+            if show_window_on_start {
+                show_main_window(app.handle(), &window_bridge).map_err(std::io::Error::other)?;
             }
             let plugin = PasskeyPluginServer::start(plugin_bridge.clone());
             if let Some(error) = plugin.start_error() {
@@ -76,18 +75,28 @@ fn main() {
                 }
             }
             app.manage(plugin);
-            if plugin_activated {
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Err(error) = window.hide() {
-                        eprintln!("failed to hide plugin activation window: {error}");
-                    }
-                }
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![runtime_send])
         .run(tauri::generate_context!())
         .expect("failed to run VaultKern");
+}
+
+#[cfg(windows)]
+fn show_main_window(app: &tauri::AppHandle, bridge: &RuntimeBridge) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "VaultKern main window is unavailable".to_owned())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.unminimize().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+    let parent_window = window
+        .hwnd()
+        .map_err(|error| format!("failed to resolve VaultKern main window handle: {error}"))?
+        .0 as usize;
+    bridge
+        .set_parent_window_handle(Some(parent_window))
+        .map_err(|error| format!("failed to configure Windows Hello parent window: {error}"))
 }
 
 #[cfg(all(windows, debug_assertions))]

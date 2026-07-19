@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use vaultkern_model::{
-    Attachment, CustomField, Entry, Group, OpaqueXmlFragment, PasskeyRecord, TotpSpec, Vault,
-    three_way_field_patch,
+    Attachment, CustomField, DeletedObject, Entry, Group, OpaqueXmlFragment, PasskeyRecord,
+    TotpSpec, Vault, three_way_field_patch,
 };
 
 fn base_vault() -> (Vault, Uuid) {
@@ -206,11 +206,22 @@ fn edit_beats_delete_but_untouched_peer_allows_delete() {
     edited.modified_at = 20;
     let mut remote_delete = base.clone();
     remote_delete.root.entries.clear();
+    remote_delete.deleted_objects.push(DeletedObject {
+        id: entry_id,
+        deleted_at: 30,
+    });
 
     let restored = three_way_field_patch(&base, &local_edit, &remote_delete).unwrap();
     assert_eq!(
         entry(&restored.vault.root, entry_id).unwrap().title,
         "Edited locally"
+    );
+    assert!(
+        restored
+            .vault
+            .deleted_objects
+            .iter()
+            .all(|deleted| deleted.id != entry_id)
     );
 
     let mut local_delete = base.clone();

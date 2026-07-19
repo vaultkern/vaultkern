@@ -19,6 +19,7 @@ vaultkern-runtime-protocol = { path = "../../../crates/vaultkern-runtime-protoco
 
 [target.'cfg(windows)'.dependencies]
 tauri = { version = "=2.11.5" }
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"

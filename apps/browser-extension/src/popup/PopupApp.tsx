@@ -57,7 +57,9 @@ export interface PopupClientLike {
   lockSession(): Promise<SessionStateLike>;
   unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
-  enableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
+  enableQuickUnlockForCurrentVault(
+    credentials: UnlockCredentials
+  ): Promise<SessionStateLike>;
   unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
   listGroups(vaultId: string): Promise<GroupTree>;
   listEntries(vaultId: string): Promise<EntrySummary[]>;
@@ -469,6 +471,7 @@ export function PopupApp({
 
   async function enableQuickUnlockAfterPasswordUnlock(
     unlockedSession: SessionStateLike,
+    credentials: UnlockCredentials,
     settingsForUnlock = extensionSettingsRef.current
   ) {
     if (!settingsForUnlock.quickUnlockEnabled) {
@@ -514,7 +517,7 @@ export function PopupApp({
     }
 
     try {
-      const nextSession = await client.enableQuickUnlockForCurrentVault();
+      const nextSession = await client.enableQuickUnlockForCurrentVault(credentials);
       const vaults = await client.listRecentVaults();
       setRecentVaults(limitRecentVaults(vaults, settingsForUnlock.recentVaultLimit));
       setRecentVaultsError(null);
@@ -1055,6 +1058,10 @@ export function PopupApp({
         shouldEnableQuickUnlock
           ? await enableQuickUnlockAfterPasswordUnlock(
               unlockedSession,
+              {
+                password: unlockPassword,
+                keyFilePath: unlockKeyFilePath
+              },
               settingsForUnlock
             )
           : unlockedSession;

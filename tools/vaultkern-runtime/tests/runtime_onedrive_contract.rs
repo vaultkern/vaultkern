@@ -737,6 +737,11 @@ fn runtime_retries_pending_cache_by_merging_changed_remote_before_upload() {
         })
         .unwrap();
 
+    runtime.lock_session();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+
     let mut remote_changed = core.load_database(&initial_bytes, &key()).unwrap().vault;
     create_entry(&core, &mut remote_changed, "Remote", "bob", 20);
     let remote_changed_bytes = core

@@ -8,12 +8,14 @@ use vaultkern_runtime::{
 };
 
 use crate::RuntimeBridge;
+use crate::plugin_operation_state::{PluginOperationId, PluginOperationState};
 
 const S_OK: i32 = 0;
 const E_FAIL: i32 = 0x8000_4005_u32 as i32;
 const E_INVALIDARG: i32 = 0x8007_0057_u32 as i32;
 const NTE_EXISTS: i32 = 0x8009_000f_u32 as i32;
 const NTE_NOT_FOUND: i32 = 0x8009_0011_u32 as i32;
+const HRESULT_ERROR_BUSY: i32 = 0x8007_00aa_u32 as i32;
 const MAX_WIDE_STRING_UNITS: usize = 4096;
 const MAX_CREDENTIAL_LIST_ITEMS: usize = 1024;
 const MAX_FFI_BYTES: usize = 1024 * 1024;
@@ -91,6 +93,10 @@ struct VkPluginCallbacks {
         *const VkGetAssertionInput,
         *mut VkGetAssertionOutput,
     ) -> i32,
+    begin_operation: extern "system" fn(*mut c_void, VkBytes) -> i32,
+    is_operation_cancelled: extern "system" fn(*mut c_void, VkBytes) -> i32,
+    cancel_operation: extern "system" fn(*mut c_void, VkBytes) -> i32,
+    end_operation: extern "system" fn(*mut c_void, VkBytes),
     free_bytes: extern "system" fn(*mut c_void, VkOwnedBytes),
 }
 
@@ -109,6 +115,7 @@ unsafe extern "system" {
 
 struct CallbackContext {
     bridge: RuntimeBridge,
+    operations: PluginOperationState,
 }
 
 pub struct PasskeyPluginServer {
@@ -119,13 +126,20 @@ pub struct PasskeyPluginServer {
 
 impl PasskeyPluginServer {
     pub fn start(bridge: RuntimeBridge) -> Self {
-        let mut context = Box::new(CallbackContext { bridge });
+        let mut context = Box::new(CallbackContext {
+            bridge,
+            operations: PluginOperationState::default(),
+        });
         let callbacks = VkPluginCallbacks {
-            version: 1,
+            version: 2,
             context: (&mut *context as *mut CallbackContext).cast(),
             is_unlocked: is_unlocked_callback,
             make_credential: make_credential_callback,
             get_assertion: get_assertion_callback,
+            begin_operation: begin_operation_callback,
+            is_operation_cancelled: is_operation_cancelled_callback,
+            cancel_operation: cancel_operation_callback,
+            end_operation: end_operation_callback,
             free_bytes: free_bytes_callback,
         };
         let mut registration_cookie = 0;
@@ -185,6 +199,66 @@ impl PasskeyPluginServer {
             None => Ok(()),
         }
     }
+}
+
+extern "system" fn begin_operation_callback(context: *mut c_void, id: VkBytes) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Some(context) = callback_context(context) else {
+            return E_INVALIDARG;
+        };
+        let id = match operation_id(id) {
+            Ok(id) => id,
+            Err(status) => return status,
+        };
+        if context.operations.begin(id) {
+            S_OK
+        } else {
+            HRESULT_ERROR_BUSY
+        }
+    }))
+    .unwrap_or(E_FAIL)
+}
+
+extern "system" fn is_operation_cancelled_callback(context: *mut c_void, id: VkBytes) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Some(context) = callback_context(context) else {
+            return 1;
+        };
+        let Ok(id) = operation_id(id) else {
+            return 1;
+        };
+        i32::from(context.operations.is_cancelled(id))
+    }))
+    .unwrap_or(1)
+}
+
+extern "system" fn cancel_operation_callback(context: *mut c_void, id: VkBytes) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Some(context) = callback_context(context) else {
+            return E_INVALIDARG;
+        };
+        let id = match operation_id(id) {
+            Ok(id) => id,
+            Err(status) => return status,
+        };
+        if context.operations.cancel(id) {
+            S_OK
+        } else {
+            NTE_NOT_FOUND
+        }
+    }))
+    .unwrap_or(E_FAIL)
+}
+
+extern "system" fn end_operation_callback(context: *mut c_void, id: VkBytes) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Some(context) = callback_context(context) else {
+            return;
+        };
+        if let Ok(id) = operation_id(id) {
+            context.operations.end(id);
+        }
+    }));
 }
 
 impl Drop for PasskeyPluginServer {
@@ -446,6 +520,15 @@ unsafe fn byte_vec(bytes: VkBytes) -> Result<Vec<u8>, i32> {
         return Ok(Vec::new());
     }
     Ok(unsafe { slice::from_raw_parts(bytes.data, length) }.to_vec())
+}
+
+unsafe fn operation_id(bytes: VkBytes) -> Result<PluginOperationId, i32> {
+    if bytes.len as usize != std::mem::size_of::<PluginOperationId>() || bytes.data.is_null() {
+        return Err(E_INVALIDARG);
+    }
+    unsafe { slice::from_raw_parts(bytes.data, bytes.len as usize) }
+        .try_into()
+        .map_err(|_| E_INVALIDARG)
 }
 
 unsafe fn byte_vec_list(pointer: *const VkBytes, count: u32) -> Result<Vec<Vec<u8>>, i32> {

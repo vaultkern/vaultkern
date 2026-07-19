@@ -66,6 +66,12 @@ typedef int32_t (VK_CALL *VkGetAssertionCallback)(
     void* context,
     const VkGetAssertionInput* input,
     VkGetAssertionOutput* output);
+typedef int32_t (VK_CALL *VkBeginOperationCallback)(void* context, VkBytes transaction_id);
+typedef int32_t (VK_CALL *VkIsOperationCancelledCallback)(
+    void* context,
+    VkBytes transaction_id);
+typedef int32_t (VK_CALL *VkCancelOperationCallback)(void* context, VkBytes transaction_id);
+typedef void (VK_CALL *VkEndOperationCallback)(void* context, VkBytes transaction_id);
 typedef void (VK_CALL *VkFreeBytesCallback)(void* context, VkOwnedBytes bytes);
 
 typedef struct VkPluginCallbacks {
@@ -74,6 +80,10 @@ typedef struct VkPluginCallbacks {
     VkIsUnlockedCallback is_unlocked;
     VkMakeCredentialCallback make_credential;
     VkGetAssertionCallback get_assertion;
+    VkBeginOperationCallback begin_operation;
+    VkIsOperationCancelledCallback is_operation_cancelled;
+    VkCancelOperationCallback cancel_operation;
+    VkEndOperationCallback end_operation;
     VkFreeBytesCallback free_bytes;
 } VkPluginCallbacks;
 

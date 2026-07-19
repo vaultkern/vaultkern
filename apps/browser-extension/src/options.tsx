@@ -208,6 +208,13 @@ function OptionsApp() {
   async function syncQuickUnlockPreferenceToCurrentVault(enabled: boolean) {
     setQuickUnlockError(null);
 
+    // Enrolling quick unlock must bind the credential material from the
+    // successful unlock. The options page never has that material, so it only
+    // records the preference and lets the next popup unlock perform enrollment.
+    if (enabled) {
+      return;
+    }
+
     let currentSession = session;
     let currentVaults = recentVaults;
     let currentVault = findCurrentVaultReference(currentSession, currentVaults);
@@ -226,9 +233,7 @@ function OptionsApp() {
     setQuickUnlockBusy(true);
 
     try {
-      const nextSession = enabled
-        ? await client.enableQuickUnlockForCurrentVault()
-        : await client.disableQuickUnlockForCurrentVault();
+      const nextSession = await client.disableQuickUnlockForCurrentVault();
       setSession(nextSession);
       setRecentVaults(await client.listRecentVaults());
     } catch (quickUnlockFailure) {

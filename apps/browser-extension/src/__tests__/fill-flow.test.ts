@@ -2122,7 +2122,10 @@ describe("PopupShell fill flow", () => {
         password: "demo-password",
         keyFilePath: ""
       });
-      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledWith({
+        password: "demo-password",
+        keyFilePath: ""
+      });
     });
   });
 

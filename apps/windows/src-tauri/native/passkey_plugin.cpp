@@ -392,6 +392,45 @@ private:
     VkOwnedBytes bytes_;
 };
 
+class PluginOperation final {
+public:
+    PluginOperation(const VkPluginCallbacks& callbacks, const GUID& transaction_id) noexcept
+        : callbacks_(callbacks), transaction_id_(transaction_id) {
+        status_ = callbacks_.begin_operation(callbacks_.context, TransactionBytes());
+        active_ = SUCCEEDED(status_);
+    }
+    PluginOperation(const PluginOperation&) = delete;
+    PluginOperation& operator=(const PluginOperation&) = delete;
+    ~PluginOperation() {
+        if (active_) {
+            callbacks_.end_operation(callbacks_.context, TransactionBytes());
+        }
+    }
+
+    HRESULT status() const noexcept { return status_; }
+
+    HRESULT CheckCancelled() const noexcept {
+        if (!active_) {
+            return status_;
+        }
+        return callbacks_.is_operation_cancelled(callbacks_.context, TransactionBytes())
+            ? NTE_USER_CANCELLED
+            : S_OK;
+    }
+
+private:
+    VkBytes TransactionBytes() const noexcept {
+        return {
+            reinterpret_cast<const uint8_t*>(&transaction_id_),
+            static_cast<uint32_t>(sizeof(transaction_id_))};
+    }
+
+    VkPluginCallbacks callbacks_;
+    GUID transaction_id_{};
+    HRESULT status_{E_FAIL};
+    bool active_{false};
+};
+
 HRESULT AddCredentialMetadata(
     const VkOwnedBytes& credential_id,
     PCWSTR rp_id,
@@ -479,6 +518,13 @@ public:
         if (FAILED(result)) {
             return result;
         }
+        PluginOperation operation(callbacks_, request->transactionId);
+        if (FAILED(operation.status())) {
+            return operation.status();
+        }
+        if (FAILED(result = operation.CheckCancelled())) {
+            return result;
+        }
 
         using Decode = HRESULT(WINAPI*)(
             DWORD,
@@ -534,12 +580,18 @@ public:
         if (algorithm == 0) {
             return NTE_NOT_SUPPORTED;
         }
+        if (FAILED(result = operation.CheckCancelled())) {
+            return result;
+        }
 
         result = PerformHelloVerification(
             request,
             decoded->pUserInformation->pwszName);
         Trace("make", "hello-uv", result);
         if (FAILED(result)) {
+            return result;
+        }
+        if (FAILED(result = operation.CheckCancelled())) {
             return result;
         }
 
@@ -568,6 +620,9 @@ public:
                 excluded.empty() ? nullptr : excluded.data(),
                 static_cast<uint32_t>(excluded.size())};
             VkMakeCredentialOutput output{};
+            if (FAILED(result = operation.CheckCancelled())) {
+                return result;
+            }
             result = callbacks_.make_credential(callbacks_.context, &input, &output);
             Trace("make", "rust-callback", result);
             if (FAILED(result)) {
@@ -575,6 +630,9 @@ public:
             }
             RustBytes credential_id(callbacks_, output.credential_id);
             RustBytes authenticator_data(callbacks_, output.authenticator_data);
+            if (FAILED(result = operation.CheckCancelled())) {
+                return result;
+            }
             if (!credential_id.data() || credential_id.size() == 0 ||
                 !authenticator_data.data() || authenticator_data.size() == 0) {
                 return E_FAIL;
@@ -624,6 +682,13 @@ public:
         HRESULT result = VerifyPlatformRequest(request);
         Trace("get", "verify-platform-request", result);
         if (FAILED(result)) {
+            return result;
+        }
+        PluginOperation operation(callbacks_, request->transactionId);
+        if (FAILED(operation.status())) {
+            return operation.status();
+        }
+        if (FAILED(result = operation.CheckCancelled())) {
             return result;
         }
 
@@ -688,6 +753,9 @@ public:
         if (FAILED(result)) {
             return result;
         }
+        if (FAILED(result = operation.CheckCancelled())) {
+            return result;
+        }
 
         try {
             VkGetAssertionInput input{
@@ -696,6 +764,9 @@ public:
                 static_cast<uint32_t>(allowed.size()),
                 {decoded->pbClientDataHash, decoded->cbClientDataHash}};
             VkGetAssertionOutput output{};
+            if (FAILED(result = operation.CheckCancelled())) {
+                return result;
+            }
             result = callbacks_.get_assertion(callbacks_.context, &input, &output);
             Trace("get", "rust-callback", result);
             if (FAILED(result)) {
@@ -705,6 +776,9 @@ public:
             RustBytes authenticator_data(callbacks_, output.authenticator_data);
             RustBytes signature(callbacks_, output.signature_der);
             RustBytes user_handle(callbacks_, output.user_handle);
+            if (FAILED(result = operation.CheckCancelled())) {
+                return result;
+            }
             if (!credential_id.data() || credential_id.size() == 0 ||
                 !authenticator_data.data() || authenticator_data.size() == 0 ||
                 !signature.data() || signature.size() == 0 ||
@@ -750,7 +824,15 @@ public:
 
     HRESULT STDMETHODCALLTYPE CancelOperation(
         PCWEBAUTHN_PLUGIN_CANCEL_OPERATION_REQUEST request) noexcept override {
-        return request ? S_OK : E_INVALIDARG;
+        if (!request) {
+            return E_INVALIDARG;
+        }
+        VkBytes transaction_id{
+            reinterpret_cast<const uint8_t*>(&request->transactionId),
+            static_cast<uint32_t>(sizeof(request->transactionId))};
+        HRESULT result = callbacks_.cancel_operation(callbacks_.context, transaction_id);
+        Trace("cancel", "transaction", result);
+        return result;
     }
 
     HRESULT STDMETHODCALLTYPE GetLockStatus(
@@ -856,9 +938,11 @@ std::vector<BYTE> AuthenticatorInfo() {
 extern "C" int32_t VK_CALL vaultkern_plugin_start(
     const VkPluginCallbacks* callbacks,
     uint32_t* registration_cookie) {
-    if (!callbacks || !registration_cookie || callbacks->version != 1 ||
+    if (!callbacks || !registration_cookie || callbacks->version != 2 ||
         !callbacks->context || !callbacks->is_unlocked ||
         !callbacks->make_credential || !callbacks->get_assertion ||
+        !callbacks->begin_operation || !callbacks->is_operation_cancelled ||
+        !callbacks->cancel_operation || !callbacks->end_operation ||
         !callbacks->free_bytes) {
         return E_INVALIDARG;
     }
