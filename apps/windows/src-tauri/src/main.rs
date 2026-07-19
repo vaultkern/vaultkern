@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(windows)]
 use serde_json::{Value, json};
 #[cfg(windows)]
@@ -38,10 +40,31 @@ fn main() {
     configure_webview_debugging();
     let bridge = RuntimeBridge::new();
     let plugin_bridge = bridge.clone();
+    let window_bridge = bridge.clone();
     let plugin_activated = std::env::args_os().any(|argument| argument == "-PluginActivated");
     tauri::Builder::default()
         .manage(bridge)
         .setup(move |app| {
+            if !plugin_activated {
+                let window = app
+                    .get_webview_window("main")
+                    .ok_or_else(|| std::io::Error::other("VaultKern main window is unavailable"))?;
+                let parent_window = window
+                    .hwnd()
+                    .map_err(|error| {
+                        std::io::Error::other(format!(
+                            "failed to resolve VaultKern main window handle: {error}"
+                        ))
+                    })?
+                    .0 as usize;
+                window_bridge
+                    .set_parent_window_handle(Some(parent_window))
+                    .map_err(|error| {
+                        std::io::Error::other(format!(
+                            "failed to configure Windows Hello parent window: {error}"
+                        ))
+                    })?;
+            }
             let plugin = PasskeyPluginServer::start(plugin_bridge.clone());
             if let Some(error) = plugin.start_error() {
                 eprintln!("passkey COM server unavailable: {error}");

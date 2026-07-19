@@ -38,6 +38,11 @@ pub enum KdbxError {
     UnexpectedEof,
     #[error("invalid value")]
     InvalidValue,
+    #[error("invalid XML model at {location}: {rule}")]
+    InvalidXmlModel {
+        location: String,
+        rule: &'static str,
+    },
     #[error("header hash mismatch")]
     HeaderHashMismatch,
     #[error("header hmac mismatch")]
@@ -75,6 +80,64 @@ pub enum KdbxError {
 }
 
 pub type Result<T> = std::result::Result<T, KdbxError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KdbxLoadStage {
+    Header,
+    HeaderAuthentication,
+    PayloadBlocks,
+    Decryption,
+    Decompression,
+    InnerHeader,
+    XmlDocument,
+    XmlShape,
+    XmlProjection,
+}
+
+impl std::fmt::Display for KdbxLoadStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Header => "file header",
+            Self::HeaderAuthentication => "header authentication",
+            Self::PayloadBlocks => "payload block authentication",
+            Self::Decryption => "payload decryption",
+            Self::Decompression => "payload decompression",
+            Self::InnerHeader => "inner header",
+            Self::XmlDocument => "XML document parsing",
+            Self::XmlShape => "XML model validation",
+            Self::XmlProjection => "vault model projection",
+        })
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("KDBX load failed during {stage}: {source}")]
+pub struct KdbxLoadDiagnostic {
+    pub stage: KdbxLoadStage,
+    #[source]
+    pub source: KdbxError,
+}
+
+fn load_stage<T>(
+    stage: KdbxLoadStage,
+    result: Result<T>,
+) -> std::result::Result<T, KdbxLoadDiagnostic> {
+    result.map_err(|source| KdbxLoadDiagnostic { stage, source })
+}
+
+fn invalid_xml_model(location: impl Into<String>, rule: &'static str) -> KdbxError {
+    KdbxError::InvalidXmlModel {
+        location: location.into(),
+        rule,
+    }
+}
+
+fn normalize_xml_model_error(error: KdbxError) -> KdbxError {
+    match error {
+        KdbxError::InvalidXmlModel { .. } => KdbxError::InvalidValue,
+        error => error,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KdbxVersion {
@@ -473,49 +536,88 @@ pub fn derive_transformed_key_with_policy(
 }
 
 pub fn load_kdbx_with_transformed_key(bytes: &[u8], transformed: &TransformedKey) -> Result<Vault> {
-    if !matches!(
-        detect_file_version(bytes)?,
-        KdbxVersion::V4_0 | KdbxVersion::V4_1
-    ) {
-        return Err(KdbxError::UnsupportedVersion);
-    }
+    load_kdbx_with_transformed_key_diagnostic(bytes, transformed)
+        .map_err(|error| normalize_xml_model_error(error.source))
+}
 
-    let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
-    let mut cursor = Cursor::new(&bytes[header_len..]);
-    let stored_header_hash = cursor.read_exact(32)?.to_vec();
-    let stored_header_hmac = cursor.read_exact(32)?.to_vec();
-    let payload_bytes = cursor.read_remaining().to_vec();
+pub fn load_kdbx_with_transformed_key_diagnostic(
+    bytes: &[u8],
+    transformed: &TransformedKey,
+) -> std::result::Result<Vault, KdbxLoadDiagnostic> {
+    let (header, header_len, stored_header_hash, stored_header_hmac, payload_bytes) = load_stage(
+        KdbxLoadStage::Header,
+        (|| {
+            if !matches!(
+                detect_file_version(bytes)?,
+                KdbxVersion::V4_0 | KdbxVersion::V4_1
+            ) {
+                return Err(KdbxError::UnsupportedVersion);
+            }
+
+            let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
+            let mut cursor = Cursor::new(&bytes[header_len..]);
+            let stored_header_hash = cursor.read_exact(32)?.to_vec();
+            let stored_header_hmac = cursor.read_exact(32)?.to_vec();
+            let payload_bytes = cursor.read_remaining().to_vec();
+            Ok((
+                header,
+                header_len,
+                stored_header_hash,
+                stored_header_hmac,
+                payload_bytes,
+            ))
+        })(),
+    )?;
 
     let header_bytes = &bytes[..header_len];
-    if sha256_bytes(header_bytes).as_slice() != stored_header_hash.as_slice() {
-        return Err(KdbxError::HeaderHashMismatch);
-    }
+    load_stage(
+        KdbxLoadStage::HeaderAuthentication,
+        (|| {
+            if sha256_bytes(header_bytes).as_slice() != stored_header_hash.as_slice() {
+                return Err(KdbxError::HeaderHashMismatch);
+            }
+
+            let mac_seed = mac_seed(&header.master_seed, transformed.as_bytes());
+            if header_hmac(&mac_seed, header_bytes)?.as_slice() != stored_header_hmac.as_slice() {
+                return Err(KdbxError::HeaderHmacMismatch);
+            }
+            Ok(())
+        })(),
+    )?;
 
     let encryption_key = sha256_seeded(&header.master_seed, transformed.as_bytes());
     let mac_seed = mac_seed(&header.master_seed, transformed.as_bytes());
-    if header_hmac(&mac_seed, header_bytes)?.as_slice() != stored_header_hmac.as_slice() {
-        return Err(KdbxError::HeaderHmacMismatch);
-    }
-
-    let encrypted_payload = decode_block_stream(&mac_seed, &payload_bytes)?;
-    let payload = decrypt_payload(
-        header.cipher,
-        &encryption_key,
-        &header.encryption_iv,
-        &encrypted_payload,
+    let encrypted_payload = load_stage(
+        KdbxLoadStage::PayloadBlocks,
+        decode_block_stream(&mac_seed, &payload_bytes),
     )?;
-    let payload = match header.compression {
-        Compression::None => payload,
-        Compression::Gzip => gzip_decompress(&payload)?,
-    };
+    let payload = load_stage(
+        KdbxLoadStage::Decryption,
+        decrypt_payload(
+            header.cipher,
+            &encryption_key,
+            &header.encryption_iv,
+            &encrypted_payload,
+        ),
+    )?;
+    let payload = load_stage(
+        KdbxLoadStage::Decompression,
+        match header.compression {
+            Compression::None => Ok(payload),
+            Compression::Gzip => gzip_decompress(&payload),
+        },
+    )?;
 
-    let (inner_algorithm, inner_key, binaries, consumed) = parse_inner_header(&payload)?;
-    parse_xml(
-        &payload[consumed..],
-        &header,
-        inner_algorithm,
-        &inner_key,
-        &binaries,
+    let (inner_algorithm, inner_key, binaries, consumed) =
+        load_stage(KdbxLoadStage::InnerHeader, parse_inner_header(&payload))?;
+    let root = load_stage(
+        KdbxLoadStage::XmlDocument,
+        parse_xml_document(&payload[consumed..]),
+    )?;
+    load_stage(KdbxLoadStage::XmlShape, validate_xml_model_shape(&root))?;
+    load_stage(
+        KdbxLoadStage::XmlProjection,
+        project_xml(root, &header, inner_algorithm, &inner_key, &binaries),
     )
 }
 
@@ -2102,12 +2204,21 @@ fn protect_xml_string(string: &mut Element, protected: &mut ProtectedStream) -> 
 
 fn validate_xml_model_shape(root: &Element) -> Result<()> {
     if root.name != "KeePassFile" {
-        return Err(KdbxError::InvalidValue);
+        return Err(invalid_xml_model(
+            "KeePassFile",
+            "unexpected document element",
+        ));
     }
-    validate_only_element_children(root, &["Meta", "Root"])?;
-    validate_child_multiplicity(root, &["Meta", "Root"], &["Meta", "Root"])?;
-    let meta = root.get_child("Meta").ok_or(KdbxError::InvalidValue)?;
-    let root_node = root.get_child("Root").ok_or(KdbxError::InvalidValue)?;
+    validate_only_element_children(root, &["Meta", "Root"])
+        .map_err(|_| invalid_xml_model("KeePassFile", "unexpected child element"))?;
+    validate_child_multiplicity(root, &["Meta", "Root"], &["Meta", "Root"])
+        .map_err(|_| invalid_xml_model("KeePassFile", "missing or duplicate required child"))?;
+    let meta = root
+        .get_child("Meta")
+        .ok_or_else(|| invalid_xml_model("KeePassFile/Meta", "missing required child"))?;
+    let root_node = root
+        .get_child("Root")
+        .ok_or_else(|| invalid_xml_model("KeePassFile/Root", "missing required child"))?;
     validate_meta_shape(meta)?;
     validate_root_shape(root_node)
 }
@@ -2115,7 +2226,6 @@ fn validate_xml_model_shape(root: &Element) -> Result<()> {
 fn validate_meta_shape(meta: &Element) -> Result<()> {
     const SINGLETONS: &[&str] = &[
         "Generator",
-        "SettingsChanged",
         "DatabaseName",
         "DatabaseNameChanged",
         "HeaderHash",
@@ -2142,12 +2252,20 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
         "HistoryMaxItems",
         "HistoryMaxSize",
     ];
-    validate_child_multiplicity(meta, SINGLETONS, &[])?;
+    if let Some(name) = first_duplicate_child(meta, SINGLETONS) {
+        return Err(invalid_xml_model(
+            format!("Meta/{name}"),
+            "duplicate singleton child",
+        ));
+    }
+    validate_child_multiplicity(meta, SINGLETONS, &[])
+        .map_err(|_| invalid_xml_model("Meta", "duplicate singleton child"))?;
     validate_known_scalar_children(
         meta,
         SINGLETONS,
         &["MemoryProtection", "CustomIcons", "Binaries"],
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "scalar field contains a child element"))?;
     for child in element_children(meta) {
         match child.name.as_str() {
             "MemoryProtection" => {
@@ -2159,8 +2277,15 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
                     "ProtectNotes",
                     "AutoEnableVisualHiding",
                 ];
-                validate_only_singletons(child, FIELDS, &[])?;
-                validate_known_scalar_children(child, FIELDS, &[])?;
+                validate_only_singletons(child, FIELDS, &[]).map_err(|_| {
+                    invalid_xml_model("Meta/MemoryProtection", "unexpected or duplicate child")
+                })?;
+                validate_known_scalar_children(child, FIELDS, &[]).map_err(|_| {
+                    invalid_xml_model(
+                        "Meta/MemoryProtection",
+                        "scalar field contains a child element",
+                    )
+                })?;
             }
             "CustomIcons" => validate_custom_icons_shape(child)?,
             "Binaries" => validate_legacy_binaries_shape(child)?,
@@ -2180,7 +2305,8 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
                 "AutoEnableVisualHiding",
             ],
             |value| parse_bool_text_strict(value).is_some(),
-        )?;
+        )
+        .map_err(|_| invalid_xml_model("Meta/MemoryProtection", "invalid boolean field"))?;
     }
     validate_typed_children(
         meta,
@@ -2194,17 +2320,20 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
             "MasterKeyChanged",
         ],
         |value| parse_datetime_i64(value).is_some(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "invalid timestamp field"))?;
     validate_typed_children(
         meta,
         &["RecycleBinEnabled", "MasterKeyChangeForceOnce"],
         |value| parse_bool_text_strict(value).is_some(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "invalid boolean field"))?;
     validate_typed_children(
         meta,
         &["MaintenanceHistoryDays", "HistoryMaxItems"],
         |value| value.trim().parse::<i32>().is_ok(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "invalid 32-bit integer field"))?;
     validate_typed_children(
         meta,
         &[
@@ -2213,7 +2342,8 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
             "HistoryMaxSize",
         ],
         |value| value.trim().parse::<i64>().is_ok(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "invalid 64-bit integer field"))?;
     validate_typed_children(
         meta,
         &[
@@ -2223,13 +2353,17 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
             "LastTopVisibleGroup",
         ],
         |value| parse_optional_uuid(value).is_ok(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "invalid UUID field"))?;
     Ok(())
 }
 
 fn validate_root_shape(root: &Element) -> Result<()> {
-    validate_child_multiplicity(root, &["Group", "DeletedObjects"], &["Group"])?;
-    let group = root.get_child("Group").ok_or(KdbxError::InvalidValue)?;
+    validate_child_multiplicity(root, &["Group", "DeletedObjects"], &["Group"])
+        .map_err(|_| invalid_xml_model("Root", "missing or duplicate singleton child"))?;
+    let group = root
+        .get_child("Group")
+        .ok_or_else(|| invalid_xml_model("Root/Group", "missing required child"))?;
     validate_group_shape(group)?;
     if let Some(deleted) = root.get_child("DeletedObjects") {
         validate_deleted_objects_shape(deleted)?;
@@ -2253,8 +2387,10 @@ fn validate_group_shape(group: &Element) -> Result<()> {
         "LastTopVisibleEntry",
         "PreviousParentGroup",
     ];
-    validate_child_multiplicity(group, SINGLETONS, &["UUID"])?;
-    validate_known_scalar_children(group, SINGLETONS, &["Times"])?;
+    validate_child_multiplicity(group, SINGLETONS, &["UUID"])
+        .map_err(|_| invalid_xml_model("Group", "missing or duplicate singleton child"))?;
+    validate_known_scalar_children(group, SINGLETONS, &["Times"])
+        .map_err(|_| invalid_xml_model("Group", "scalar field contains a child element"))?;
     for child in element_children(group) {
         match child.name.as_str() {
             "Times" => validate_times_shape(child)?,
@@ -2266,10 +2402,12 @@ fn validate_group_shape(group: &Element) -> Result<()> {
     }
     validate_typed_children(group, &["UUID"], |value| {
         decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Group/UUID", "invalid or nil UUID"))?;
     validate_typed_children(group, &["IconID"], |value| {
         value.trim().parse::<u32>().is_ok()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Group/IconID", "invalid unsigned integer"))?;
     validate_typed_children(
         group,
         &[
@@ -2278,13 +2416,16 @@ fn validate_group_shape(group: &Element) -> Result<()> {
             "PreviousParentGroup",
         ],
         |value| parse_optional_uuid(value).is_ok(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Group", "invalid optional UUID field"))?;
     validate_typed_children(group, &["IsExpanded"], |value| {
         parse_bool_text_strict(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Group/IsExpanded", "invalid boolean"))?;
     validate_typed_children(group, &["EnableAutoType", "EnableSearching"], |value| {
         parse_nullable_bool_strict(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Group", "invalid nullable boolean field"))?;
     Ok(())
 }
 
@@ -2303,43 +2444,76 @@ fn validate_entry_shape(entry: &Element) -> Result<()> {
         "AutoType",
         "History",
     ];
-    validate_child_multiplicity(entry, SINGLETONS, &["UUID"])?;
-    validate_known_scalar_children(entry, SINGLETONS, &["Times", "AutoType", "History"])?;
+    validate_child_multiplicity(entry, SINGLETONS, &["UUID"])
+        .map_err(|_| invalid_xml_model("Entry", "missing or duplicate singleton child"))?;
+    validate_known_scalar_children(entry, SINGLETONS, &["Times", "AutoType", "History"])
+        .map_err(|_| invalid_xml_model("Entry", "scalar field contains a child element"))?;
     let mut string_keys = BTreeSet::new();
     let mut binary_names = BTreeSet::new();
     for child in element_children(entry) {
         match child.name.as_str() {
             "Times" => validate_times_shape(child)?,
             "String" => {
-                validate_only_singletons(child, &["Key", "Value"], &["Key", "Value"])?;
-                validate_known_scalar_children(child, &["Key", "Value"], &[])?;
-                let key = child_text(child, "Key").ok_or(KdbxError::InvalidValue)?;
+                validate_only_singletons(child, &["Key", "Value"], &["Key", "Value"]).map_err(
+                    |_| {
+                        invalid_xml_model("Entry/String", "missing, duplicate, or unexpected child")
+                    },
+                )?;
+                validate_known_scalar_children(child, &["Key", "Value"], &[]).map_err(|_| {
+                    invalid_xml_model("Entry/String", "Key or Value contains a child element")
+                })?;
+                let key = child_text(child, "Key")
+                    .ok_or_else(|| invalid_xml_model("Entry/String/Key", "missing field key"))?;
                 if !string_keys.insert(key) {
-                    return Err(KdbxError::InvalidValue);
+                    return Err(invalid_xml_model("Entry/String", "duplicate field key"));
                 }
-                let value = child.get_child("Value").ok_or(KdbxError::InvalidValue)?;
-                validate_bool_attribute_if_present(value, "Protected")?;
+                let value = child
+                    .get_child("Value")
+                    .ok_or_else(|| invalid_xml_model("Entry/String/Value", "missing value"))?;
+                validate_bool_attribute_if_present(value, "Protected").map_err(|_| {
+                    invalid_xml_model("Entry/String/Value@Protected", "invalid boolean")
+                })?;
             }
             "Binary" => {
-                validate_only_singletons(child, &["Key", "Value"], &["Key", "Value"])?;
-                validate_known_scalar_children(child, &["Key", "Value"], &[])?;
-                let name = child_text(child, "Key").ok_or(KdbxError::InvalidValue)?;
+                validate_only_singletons(child, &["Key", "Value"], &["Key", "Value"]).map_err(
+                    |_| {
+                        invalid_xml_model("Entry/Binary", "missing, duplicate, or unexpected child")
+                    },
+                )?;
+                validate_known_scalar_children(child, &["Key", "Value"], &[]).map_err(|_| {
+                    invalid_xml_model("Entry/Binary", "Key or Value contains a child element")
+                })?;
+                let name = child_text(child, "Key")
+                    .ok_or_else(|| invalid_xml_model("Entry/Binary/Key", "missing name"))?;
                 if !binary_names.insert(name) {
-                    return Err(KdbxError::InvalidValue);
+                    return Err(invalid_xml_model(
+                        "Entry/Binary",
+                        "duplicate attachment name",
+                    ));
                 }
-                let value = child.get_child("Value").ok_or(KdbxError::InvalidValue)?;
-                validate_bool_attribute_if_present(value, "Protected")?;
-                validate_bool_attribute_if_present(value, "Compressed")?;
+                let value = child
+                    .get_child("Value")
+                    .ok_or_else(|| invalid_xml_model("Entry/Binary/Value", "missing value"))?;
+                validate_bool_attribute_if_present(value, "Protected").map_err(|_| {
+                    invalid_xml_model("Entry/Binary/Value@Protected", "invalid boolean")
+                })?;
+                validate_bool_attribute_if_present(value, "Compressed").map_err(|_| {
+                    invalid_xml_model("Entry/Binary/Value@Compressed", "invalid boolean")
+                })?;
                 if let Some(reference) = value.attributes.get("Ref")
                     && reference.trim().parse::<usize>().is_err()
                 {
-                    return Err(KdbxError::InvalidValue);
+                    return Err(invalid_xml_model(
+                        "Entry/Binary/Value@Ref",
+                        "invalid attachment index",
+                    ));
                 }
             }
             "AutoType" => validate_auto_type_shape(child)?,
             "CustomData" => validate_custom_data_shape(child)?,
             "History" => {
-                validate_only_element_children(child, &["Entry"])?;
+                validate_only_element_children(child, &["Entry"])
+                    .map_err(|_| invalid_xml_model("Entry/History", "unexpected child element"))?;
                 for history_entry in element_children(child) {
                     validate_entry_shape(history_entry)?;
                 }
@@ -2349,16 +2523,20 @@ fn validate_entry_shape(entry: &Element) -> Result<()> {
     }
     validate_typed_children(entry, &["UUID"], |value| {
         decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry/UUID", "invalid or nil UUID"))?;
     validate_typed_children(entry, &["IconID"], |value| {
         value.trim().is_empty() || value.trim().parse::<u32>().is_ok()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry/IconID", "invalid unsigned integer"))?;
     validate_typed_children(entry, &["CustomIconUUID", "PreviousParentGroup"], |value| {
         parse_optional_uuid(value).is_ok()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry", "invalid optional UUID field"))?;
     validate_typed_children(entry, &["QualityCheck"], |value| {
         parse_bool_text_strict(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry/QualityCheck", "invalid boolean"))?;
     Ok(())
 }
 
@@ -2372,105 +2550,190 @@ fn validate_times_shape(times: &Element) -> Result<()> {
         "UsageCount",
         "LocationChanged",
     ];
-    validate_only_singletons(times, FIELDS, &[])?;
-    validate_known_scalar_children(times, FIELDS, &[])?;
+    validate_only_singletons(times, FIELDS, &[])
+        .map_err(|_| invalid_xml_model("Times", "unexpected or duplicate child"))?;
+    validate_known_scalar_children(times, FIELDS, &[])
+        .map_err(|_| invalid_xml_model("Times", "scalar field contains a child element"))?;
     validate_typed_children(times, &["CreationTime", "LastModificationTime"], |value| {
         parse_datetime_value(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Times", "invalid required timestamp"))?;
     validate_typed_children(times, &["LastAccessTime", "LocationChanged"], |value| {
         value.trim().is_empty() || parse_datetime_value(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Times", "invalid optional timestamp"))?;
     validate_typed_children(times, &["ExpiryTime"], |value| {
         value.trim().is_empty() || parse_datetime_i64(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Times/ExpiryTime", "invalid timestamp"))?;
     validate_typed_children(times, &["Expires"], |value| {
         parse_bool_text_strict(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Times/Expires", "invalid boolean"))?;
     validate_typed_children(times, &["UsageCount"], |value| {
         value.trim().is_empty() || value.trim().parse::<u64>().is_ok()
     })
+    .map_err(|_| invalid_xml_model("Times/UsageCount", "invalid unsigned integer"))
 }
 
 fn validate_auto_type_shape(auto_type: &Element) -> Result<()> {
     const FIELDS: &[&str] = &["Enabled", "DataTransferObfuscation", "DefaultSequence"];
-    validate_child_multiplicity(auto_type, FIELDS, &[])?;
-    validate_known_scalar_children(auto_type, FIELDS, &[])?;
+    validate_child_multiplicity(auto_type, FIELDS, &[])
+        .map_err(|_| invalid_xml_model("Entry/AutoType", "duplicate singleton child"))?;
+    validate_known_scalar_children(auto_type, FIELDS, &[]).map_err(|_| {
+        invalid_xml_model("Entry/AutoType", "scalar field contains a child element")
+    })?;
     for child in element_children(auto_type) {
         match child.name.as_str() {
             "Enabled" | "DataTransferObfuscation" | "DefaultSequence" => {}
             "Association" => {
                 const ASSOCIATION_FIELDS: &[&str] = &["Window", "KeystrokeSequence"];
-                validate_only_singletons(child, ASSOCIATION_FIELDS, &[])?;
-                validate_known_scalar_children(child, ASSOCIATION_FIELDS, &[])?;
+                validate_only_singletons(child, ASSOCIATION_FIELDS, &[]).map_err(|_| {
+                    invalid_xml_model(
+                        "Entry/AutoType/Association",
+                        "unexpected or duplicate child",
+                    )
+                })?;
+                validate_known_scalar_children(child, ASSOCIATION_FIELDS, &[]).map_err(|_| {
+                    invalid_xml_model(
+                        "Entry/AutoType/Association",
+                        "scalar field contains a child element",
+                    )
+                })?;
             }
-            _ => return Err(KdbxError::InvalidValue),
+            _ => {
+                return Err(invalid_xml_model(
+                    "Entry/AutoType",
+                    "unexpected child element",
+                ));
+            }
         }
     }
     validate_typed_children(auto_type, &["Enabled"], |value| {
         parse_nullable_bool_strict(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry/AutoType/Enabled", "invalid nullable boolean"))?;
     validate_typed_children(auto_type, &["DataTransferObfuscation"], |value| {
         value.trim().is_empty() || value.trim().parse::<i32>().is_ok()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry/AutoType/DataTransferObfuscation", "invalid integer"))?;
     Ok(())
 }
 
 fn validate_custom_data_shape(custom_data: &Element) -> Result<()> {
-    validate_only_element_children(custom_data, &["Item"])?;
+    validate_only_element_children(custom_data, &["Item"])
+        .map_err(|_| invalid_xml_model("CustomData", "unexpected child element"))?;
     for item in element_children(custom_data) {
         const FIELDS: &[&str] = &["Key", "Value", "LastModificationTime"];
-        validate_only_singletons(item, FIELDS, &["Key"])?;
-        validate_known_scalar_children(item, FIELDS, &[])?;
+        validate_only_singletons(item, FIELDS, &["Key"]).map_err(|_| {
+            invalid_xml_model("CustomData/Item", "missing, duplicate, or unexpected child")
+        })?;
+        validate_known_scalar_children(item, FIELDS, &[]).map_err(|_| {
+            invalid_xml_model("CustomData/Item", "scalar field contains a child element")
+        })?;
         validate_typed_children(item, &["LastModificationTime"], |value| {
             parse_datetime_i64(value).is_some()
+        })
+        .map_err(|_| {
+            invalid_xml_model("CustomData/Item/LastModificationTime", "invalid timestamp")
         })?;
     }
     Ok(())
 }
 
 fn validate_custom_icons_shape(custom_icons: &Element) -> Result<()> {
-    validate_only_element_children(custom_icons, &["Icon"])?;
+    validate_only_element_children(custom_icons, &["Icon"])
+        .map_err(|_| invalid_xml_model("Meta/CustomIcons", "unexpected child element"))?;
     for icon in element_children(custom_icons) {
         const FIELDS: &[&str] = &["UUID", "Data", "Name", "LastModificationTime"];
-        validate_only_singletons(icon, FIELDS, &["UUID", "Data"])?;
-        validate_known_scalar_children(icon, FIELDS, &[])?;
+        validate_only_singletons(icon, FIELDS, &["UUID", "Data"]).map_err(|_| {
+            invalid_xml_model(
+                "Meta/CustomIcons/Icon",
+                "missing, duplicate, or unexpected child",
+            )
+        })?;
+        validate_known_scalar_children(icon, FIELDS, &[]).map_err(|_| {
+            invalid_xml_model(
+                "Meta/CustomIcons/Icon",
+                "scalar field contains a child element",
+            )
+        })?;
         validate_typed_children(icon, &["UUID"], |value| {
             decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
-        })?;
+        })
+        .map_err(|_| invalid_xml_model("Meta/CustomIcons/Icon/UUID", "invalid or nil UUID"))?;
         validate_typed_children(icon, &["Data"], |value| {
             STANDARD.decode(value.trim().as_bytes()).is_ok()
-        })?;
+        })
+        .map_err(|_| invalid_xml_model("Meta/CustomIcons/Icon/Data", "invalid base64"))?;
         validate_typed_children(icon, &["LastModificationTime"], |value| {
             parse_datetime_i64(value).is_some()
+        })
+        .map_err(|_| {
+            invalid_xml_model(
+                "Meta/CustomIcons/Icon/LastModificationTime",
+                "invalid timestamp",
+            )
         })?;
     }
     Ok(())
 }
 
 fn validate_legacy_binaries_shape(binaries: &Element) -> Result<()> {
-    validate_only_element_children(binaries, &["Binary"])?;
+    validate_only_element_children(binaries, &["Binary"])
+        .map_err(|_| invalid_xml_model("Meta/Binaries", "unexpected child element"))?;
     let mut ids = BTreeSet::new();
     for binary in element_children(binaries) {
-        validate_scalar_element(binary)?;
-        let id = binary.attributes.get("ID").ok_or(KdbxError::InvalidValue)?;
+        validate_scalar_element(binary)
+            .map_err(|_| invalid_xml_model("Meta/Binaries/Binary", "contains a child element"))?;
+        let id = binary
+            .attributes
+            .get("ID")
+            .ok_or_else(|| invalid_xml_model("Meta/Binaries/Binary@ID", "missing binary ID"))?;
         if !ids.insert(id.as_str()) {
-            return Err(KdbxError::InvalidValue);
+            return Err(invalid_xml_model(
+                "Meta/Binaries/Binary@ID",
+                "duplicate binary ID",
+            ));
         }
     }
     Ok(())
 }
 
 fn validate_deleted_objects_shape(deleted: &Element) -> Result<()> {
-    validate_only_element_children(deleted, &["DeletedObject"])?;
+    validate_only_element_children(deleted, &["DeletedObject"])
+        .map_err(|_| invalid_xml_model("Root/DeletedObjects", "unexpected child element"))?;
     for object in element_children(deleted) {
         const FIELDS: &[&str] = &["UUID", "DeletionTime"];
-        validate_only_singletons(object, FIELDS, FIELDS)?;
-        validate_known_scalar_children(object, FIELDS, &[])?;
+        validate_only_singletons(object, FIELDS, FIELDS).map_err(|_| {
+            invalid_xml_model(
+                "Root/DeletedObjects/DeletedObject",
+                "missing, duplicate, or unexpected child",
+            )
+        })?;
+        validate_known_scalar_children(object, FIELDS, &[]).map_err(|_| {
+            invalid_xml_model(
+                "Root/DeletedObjects/DeletedObject",
+                "scalar field contains a child element",
+            )
+        })?;
         validate_typed_children(object, &["UUID"], |value| {
             decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
+        })
+        .map_err(|_| {
+            invalid_xml_model(
+                "Root/DeletedObjects/DeletedObject/UUID",
+                "invalid or nil UUID",
+            )
         })?;
         validate_typed_children(object, &["DeletionTime"], |value| {
             parse_datetime_i64(value).is_some()
+        })
+        .map_err(|_| {
+            invalid_xml_model(
+                "Root/DeletedObjects/DeletedObject/DeletionTime",
+                "invalid timestamp",
+            )
         })?;
     }
     Ok(())
@@ -2510,6 +2773,15 @@ fn validate_child_multiplicity(
         return Err(KdbxError::InvalidValue);
     }
     Ok(())
+}
+
+fn first_duplicate_child<'a>(element: &Element, names: &'a [&'a str]) -> Option<&'a str> {
+    names.iter().copied().find(|name| {
+        element_children(element)
+            .filter(|child| child.name == *name)
+            .nth(1)
+            .is_some()
+    })
 }
 
 fn validate_known_scalar_children(
@@ -2566,21 +2838,21 @@ fn element_children(element: &Element) -> impl Iterator<Item = &Element> {
     })
 }
 
-fn parse_xml(
-    bytes: &[u8],
+fn parse_xml_document(bytes: &[u8]) -> Result<Element> {
+    Element::parse(IoCursor::new(strip_utf8_bom(bytes)))
+        .map_err(|error| KdbxError::Xml(error.to_string()))
+}
+
+fn project_xml(
+    root: Element,
     header: &KdbxHeader,
     inner_algorithm: u32,
     inner_key: &[u8],
     binaries: &[InnerBinary],
 ) -> Result<Vault> {
-    let root = Element::parse(IoCursor::new(strip_utf8_bom(bytes)))
-        .map_err(|error| KdbxError::Xml(error.to_string()))?;
-    validate_xml_model_shape(&root)?;
     let meta = child(&root, "Meta")?;
     let generator = child_text(&meta, "Generator");
-    let settings_changed = child_text(&meta, "SettingsChanged")
-        .as_deref()
-        .and_then(parse_optional_datetime);
+    let settings_changed = latest_child_datetime(&meta, "SettingsChanged");
     let name = child_text(&meta, "DatabaseName").unwrap_or_default();
     let database_name_changed = child_text(&meta, "DatabaseNameChanged")
         .as_deref()
@@ -2667,6 +2939,12 @@ fn parse_xml(
         entry_templates_group_raw: None,
     };
     let mut meta_opaque_xml = collect_meta_opaque_xml(&meta)?;
+    collapse_duplicate_node_occurrences(
+        &mut meta_custom_data_blocks,
+        &mut meta_opaque_xml,
+        &mut meta_raw_state.node_order,
+        "SettingsChanged",
+    )?;
     let mut collapsed_optional_nodes = Vec::new();
     for (element_name, value_is_none) in [
         ("Generator", generator.is_none()),
@@ -2756,7 +3034,7 @@ fn parse_kdbx3_xml(
     let xml_bytes = strip_utf8_bom(bytes);
     let root = Element::parse(IoCursor::new(xml_bytes))
         .map_err(|error| KdbxError::Xml(error.to_string()))?;
-    validate_xml_model_shape(&root)?;
+    validate_xml_model_shape(&root).map_err(normalize_xml_model_error)?;
     let meta = child(&root, "Meta")?;
 
     if let Some(header_hash) = child_text(&meta, "HeaderHash")
@@ -2772,9 +3050,7 @@ fn parse_kdbx3_xml(
 
     let name = child_text(&meta, "DatabaseName").unwrap_or_default();
     let generator = child_text(&meta, "Generator");
-    let settings_changed = child_text(&meta, "SettingsChanged")
-        .as_deref()
-        .and_then(parse_optional_datetime);
+    let settings_changed = latest_child_datetime(&meta, "SettingsChanged");
     let database_name_changed = child_text(&meta, "DatabaseNameChanged")
         .as_deref()
         .and_then(parse_optional_datetime);
@@ -2869,6 +3145,12 @@ fn parse_kdbx3_xml(
     let group = parse_group(&root_group, &binaries, &mut content_pool, &mut protected)?;
     let deleted_objects = parse_deleted_objects(&root)?;
     let mut meta_opaque_xml = collect_meta_opaque_xml(&meta)?;
+    collapse_duplicate_node_occurrences(
+        &mut meta_custom_data_blocks,
+        &mut meta_opaque_xml,
+        &mut meta_raw_state.node_order,
+        "SettingsChanged",
+    )?;
     let mut collapsed_optional_nodes = Vec::new();
     for (element_name, value_is_none) in [
         ("Generator", generator.is_none()),
@@ -2945,6 +3227,45 @@ fn retarget_legacy_meta_anchors(
     node_order: &mut Vec<String>,
 ) -> Result<()> {
     retarget_removed_scope_nodes(blocks, opaque, node_order, &["HeaderHash", "Binaries"])
+}
+
+fn collapse_duplicate_node_occurrences(
+    blocks: &mut [CustomDataBlock],
+    opaque: &mut [OpaqueXmlFragment],
+    node_order: &mut Vec<String>,
+    element_name: &str,
+) -> Result<()> {
+    let original_order = node_order.clone();
+    for anchor in blocks
+        .iter_mut()
+        .map(|block| &mut block.after)
+        .chain(opaque.iter_mut().map(|fragment| &mut fragment.after))
+    {
+        let Some(current) = anchor.as_ref() else {
+            continue;
+        };
+        if current.element_name != element_name || current.occurrence <= 1 {
+            continue;
+        }
+        let mut mapped = predecessor_anchor(&original_order, current)?;
+        while let Some(candidate) = mapped.as_ref()
+            && candidate.element_name == element_name
+            && candidate.occurrence > 1
+        {
+            mapped = predecessor_anchor(&original_order, candidate)?;
+        }
+        *anchor = mapped;
+    }
+    let mut seen = false;
+    node_order.retain(|name| {
+        if name != element_name {
+            return true;
+        }
+        let keep = !seen;
+        seen = true;
+        keep
+    });
+    Ok(())
 }
 
 fn retarget_removed_scope_nodes(
@@ -4498,6 +4819,14 @@ fn child_text(element: &Element, name: &str) -> Option<String> {
     child_optional(element, name).and_then(|child| child.get_text().map(|text| text.to_string()))
 }
 
+fn latest_child_datetime(element: &Element, name: &str) -> Option<i64> {
+    element_children(element)
+        .filter(|child| child.name == name)
+        .filter_map(|child| child.get_text())
+        .filter_map(|value| parse_optional_datetime(&value))
+        .max()
+}
+
 fn child_text_preserve_empty(element: &Element, name: &str) -> Option<String> {
     child_optional(element, name).map(|child| {
         child
@@ -5941,10 +6270,11 @@ mod compatibility_tests {
     use std::collections::BTreeMap;
 
     use super::{
-        Compression, KdbxCipher, KdbxError, KdbxHeader, KdbxVersion, ProtectedStream, SaveKdf,
-        SaveProfile, binary_index_for_content_id, child_text, collect_attachment_refs,
-        decode_block_stream, decrypt_payload, encode_block_stream, entry_ref_key, gzip_compress,
-        gzip_decompress, header_hmac, kdf_from_variant_dict, load_kdbx, mac_seed,
+        Compression, KdbxCipher, KdbxError, KdbxHeader, KdbxLoadStage, KdbxVersion,
+        ProtectedStream, SaveKdf, SaveProfile, binary_index_for_content_id, child_text,
+        collect_attachment_refs, decode_block_stream, decrypt_payload, derive_transformed_key,
+        encode_block_stream, entry_ref_key, gzip_compress, gzip_decompress, header_hmac,
+        kdf_from_variant_dict, load_kdbx, load_kdbx_with_transformed_key_diagnostic, mac_seed,
         parse_inner_header, parse_kdbx3_binaries, required_version, save_kdbx, sha256_seeded,
         text_element, validate_xml_model_shape,
     };
@@ -6684,6 +7014,129 @@ mod compatibility_tests {
                 "duplicate {case} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn diagnostic_loader_reports_xml_shape_without_exposing_field_values() {
+        const SECRET_TITLE: &str = "diagnostic-secret-title";
+
+        let mut vault = Vault::empty("diagnostic fixture");
+        vault.root.entries.push(Entry::new(SECRET_TITLE));
+        let key = test_key("diagnostic-xml-shape");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save fixture");
+        let malformed = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            let title = entry
+                .children
+                .iter()
+                .find_map(|child| match child {
+                    XMLNode::Element(field)
+                        if field.name == "String"
+                            && child_text(field, "Key").as_deref() == Some("Title") =>
+                    {
+                        Some(field.clone())
+                    }
+                    _ => None,
+                })
+                .expect("Title field");
+            entry.children.push(XMLNode::Element(title));
+        })
+        .expect("duplicate String key");
+        let transformed = derive_transformed_key(&malformed, &key).expect("derive transformed key");
+
+        let error = load_kdbx_with_transformed_key_diagnostic(&malformed, &transformed)
+            .expect_err("malformed XML must fail");
+
+        assert_eq!(error.stage, KdbxLoadStage::XmlShape);
+        assert!(error.to_string().contains("XML model validation"));
+        assert!(error.to_string().contains("Entry/String"));
+        assert!(error.to_string().contains("duplicate field key"));
+        assert!(!error.to_string().contains(SECRET_TITLE));
+    }
+
+    #[test]
+    fn diagnostic_loader_names_duplicate_meta_element_without_exposing_its_value() {
+        const SECRET_DATABASE_NAME: &str = "diagnostic-secret-database-name";
+
+        let vault = Vault::empty(SECRET_DATABASE_NAME);
+        let key = test_key("diagnostic-meta-singleton");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save fixture");
+        let malformed = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let meta = root.get_mut_child("Meta").expect("Meta");
+            let database_name = meta
+                .get_child("DatabaseName")
+                .expect("DatabaseName")
+                .clone();
+            meta.children.push(XMLNode::Element(database_name));
+        })
+        .expect("duplicate DatabaseName");
+        let transformed = derive_transformed_key(&malformed, &key).expect("derive transformed key");
+
+        let error = load_kdbx_with_transformed_key_diagnostic(&malformed, &transformed)
+            .expect_err("duplicate Meta singleton must fail");
+
+        assert_eq!(error.stage, KdbxLoadStage::XmlShape);
+        assert!(error.to_string().contains("Meta/DatabaseName"));
+        assert!(error.to_string().contains("duplicate singleton child"));
+        assert!(!error.to_string().contains(SECRET_DATABASE_NAME));
+    }
+
+    #[test]
+    fn loader_migrates_duplicate_settings_changed_to_latest_single_value() {
+        let mut vault = Vault::empty("duplicate SettingsChanged migration");
+        vault.settings_changed = Some(100);
+        let key = test_key("duplicate-settings-changed");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save fixture");
+        let duplicated = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let meta = root.get_mut_child("Meta").expect("Meta");
+            let mut newer = meta
+                .get_child("SettingsChanged")
+                .expect("SettingsChanged")
+                .clone();
+            newer.children = vec![XMLNode::Text("200".into())];
+            meta.children.push(XMLNode::Element(newer));
+            meta.children.push(XMLNode::Element(
+                Element::parse(b"<FutureMeta>opaque</FutureMeta>".as_slice())
+                    .expect("future Meta element"),
+            ));
+            meta.children.push(XMLNode::Element(
+                Element::parse(
+                    b"<CustomData><Item><Key>migration-key</Key><Value>migration-value</Value></Item></CustomData>"
+                        .as_slice(),
+                )
+                .expect("CustomData block"),
+            ));
+        })
+        .expect("duplicate SettingsChanged");
+
+        let loaded = load_kdbx(&duplicated, &key).expect("migrate duplicate SettingsChanged");
+        assert_eq!(loaded.settings_changed, Some(200));
+        assert_eq!(
+            loaded.meta_custom_data.get("migration-key"),
+            Some(&"migration-value".to_string())
+        );
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("save migrated vault");
+        let rewritten_xml = extract_kdbx4_xml(&rewritten, &key).expect("extract rewritten XML");
+        let rewritten_root = Element::parse(rewritten_xml.as_bytes()).expect("parse rewritten XML");
+        let settings_changed_count = rewritten_root
+            .get_child("Meta")
+            .expect("Meta")
+            .children
+            .iter()
+            .filter(|child| {
+                matches!(child, XMLNode::Element(element) if element.name == "SettingsChanged")
+            })
+            .count();
+        assert_eq!(settings_changed_count, 1);
+        assert!(
+            rewritten_root
+                .get_child("Meta")
+                .expect("Meta")
+                .get_child("FutureMeta")
+                .is_some(),
+            "opaque Meta element was lost during migration"
+        );
     }
 
     #[test]

@@ -18,9 +18,9 @@ use vaultkern_core::{
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
     ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher, KdbxError, KdbxVersion, KeepassCore,
     PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec, TransformedKey, Vault,
-    derive_transformed_key_with_policy, load_kdbx_with_transformed_key, parse_key_file_bytes,
-    required_version, retained_or_recommended_save_kdf, save_kdbx_with_transformed_key,
-    three_way_field_patch,
+    derive_transformed_key_with_policy, load_kdbx_with_transformed_key,
+    load_kdbx_with_transformed_key_diagnostic, parse_key_file_bytes, required_version,
+    retained_or_recommended_save_kdf, save_kdbx_with_transformed_key, three_way_field_patch,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
@@ -392,6 +392,10 @@ impl Runtime {
     pub fn set_test_unix_time_ms(&mut self, unix_time_ms: u64) {
         self.fixed_unix_time = Some(unix_time_ms / 1000);
         self.fixed_unix_time_ms = Some(unix_time_ms);
+    }
+
+    pub fn set_parent_window_handle(&mut self, parent_window: Option<usize>) {
+        self.secure_storage.set_parent_window_handle(parent_window);
     }
 
     pub fn for_tests_with_passkey_credential_ids(credential_ids: Vec<String>) -> Self {
@@ -917,7 +921,7 @@ impl Runtime {
             let transformed_key =
                 derive_transformed_key_with_policy(&loaded.bytes, &key, &policy, confirmation)
                     .with_context(|| format!("failed to derive vault key: {vault_id}"))?;
-            let vault = load_kdbx_with_transformed_key(&loaded.bytes, &transformed_key)
+            let vault = load_kdbx_with_transformed_key_diagnostic(&loaded.bytes, &transformed_key)
                 .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
             let inspection = self
                 .core
@@ -1026,8 +1030,12 @@ impl Runtime {
             .active_vault_id()
             .context("current vault is locked")?
             .to_owned();
-        self.biometric
-            .authorize("Enable quick unlock for this vault")?;
+        if self.secure_storage.store_requires_user_presence() {
+            self.secure_storage.authorize_store_user_presence()?;
+        } else {
+            self.biometric
+                .authorize("Enable quick unlock for this vault")?;
+        }
         let master_credential = master_credential_from_parts(password, key_file_path)?;
         let file_bytes = match self.read_current_snapshot(&active_vault_id, None) {
             Ok(snapshot) => snapshot
@@ -8571,8 +8579,132 @@ mod tests {
             true
         }
 
+        fn store_requires_user_presence(&self) -> bool {
+            true
+        }
+
         fn delete(&self, key: &str) -> Result<()> {
             self.values.borrow_mut().remove(key);
+            Ok(())
+        }
+    }
+
+    struct LoadPresenceOnlySecureStorageProvider {
+        values: RefCell<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl LoadPresenceOnlySecureStorageProvider {
+        fn new() -> Self {
+            Self {
+                values: RefCell::new(BTreeMap::new()),
+            }
+        }
+    }
+
+    impl SecureStorageProvider for LoadPresenceOnlySecureStorageProvider {
+        fn store(&self, key: &str, value: &[u8]) -> Result<()> {
+            self.values
+                .borrow_mut()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(self.values.borrow().get(key).cloned())
+        }
+
+        fn contains(&self, key: &str) -> Result<bool> {
+            Ok(self.values.borrow().contains_key(key))
+        }
+
+        fn load_requires_user_presence(&self) -> bool {
+            true
+        }
+
+        fn delete(&self, key: &str) -> Result<()> {
+            self.values.borrow_mut().remove(key);
+            Ok(())
+        }
+    }
+
+    struct EarlyAuthorizingSecureStorageProvider {
+        authorizations: std::rc::Rc<std::cell::Cell<usize>>,
+        stores: std::rc::Rc<std::cell::Cell<usize>>,
+        values: RefCell<BTreeMap<String, Vec<u8>>>,
+    }
+
+    impl EarlyAuthorizingSecureStorageProvider {
+        fn new(
+            authorizations: std::rc::Rc<std::cell::Cell<usize>>,
+            stores: std::rc::Rc<std::cell::Cell<usize>>,
+        ) -> Self {
+            Self {
+                authorizations,
+                stores,
+                values: RefCell::new(BTreeMap::new()),
+            }
+        }
+    }
+
+    impl SecureStorageProvider for EarlyAuthorizingSecureStorageProvider {
+        fn authorize_store_user_presence(&self) -> Result<()> {
+            self.authorizations
+                .set(self.authorizations.get().saturating_add(1));
+            Ok(())
+        }
+
+        fn store(&self, key: &str, value: &[u8]) -> Result<()> {
+            self.stores.set(self.stores.get().saturating_add(1));
+            self.values
+                .borrow_mut()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(self.values.borrow().get(key).cloned())
+        }
+
+        fn contains(&self, key: &str) -> Result<bool> {
+            Ok(self.values.borrow().contains_key(key))
+        }
+
+        fn store_requires_user_presence(&self) -> bool {
+            true
+        }
+
+        fn load_requires_user_presence(&self) -> bool {
+            true
+        }
+
+        fn delete(&self, key: &str) -> Result<()> {
+            self.values.borrow_mut().remove(key);
+            Ok(())
+        }
+    }
+
+    struct ParentWindowRecordingSecureStorageProvider {
+        parent_window: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+    }
+
+    impl SecureStorageProvider for ParentWindowRecordingSecureStorageProvider {
+        fn set_parent_window_handle(&mut self, parent_window: Option<usize>) {
+            self.parent_window.set(parent_window);
+        }
+
+        fn store(&self, _key: &str, _value: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        fn contains(&self, _key: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn delete(&self, _key: &str) -> Result<()> {
             Ok(())
         }
     }
@@ -13637,7 +13769,8 @@ mod tests {
     }
 
     #[test]
-    fn quick_unlock_avoids_duplicate_authorization_when_storage_enforces_presence() {
+    fn quick_unlock_enrollment_and_unlock_avoid_external_authorization_when_storage_enforces_presence()
+     {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
@@ -13668,10 +13801,62 @@ mod tests {
 
         runtime.unlock_current_vault_with_quick_unlock().unwrap();
 
+        assert!(authorizations.borrow().is_empty());
+    }
+
+    #[test]
+    fn quick_unlock_enrollment_uses_external_authorization_when_only_load_enforces_presence() {
+        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.biometric = Box::new(CountingBiometricProvider {
+            authorizations: authorizations.clone(),
+        });
+        runtime.secure_storage = Box::new(LoadPresenceOnlySecureStorageProvider::new());
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+
+        runtime
+            .enroll_quick_unlock_for_current_vault(Some("demo-password"), None)
+            .unwrap();
+
         assert_eq!(
             authorizations.borrow().as_slice(),
             ["Enable quick unlock for this vault".to_owned()]
         );
+    }
+
+    #[test]
+    fn quick_unlock_platform_authorization_precedes_credential_validation_and_blob_write() {
+        let authorizations = std::rc::Rc::new(std::cell::Cell::new(0));
+        let stores = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut runtime = Runtime::for_tests();
+        runtime.biometric = Box::new(CountingBiometricProvider::default());
+        runtime.secure_storage = Box::new(EarlyAuthorizingSecureStorageProvider::new(
+            authorizations.clone(),
+            stores.clone(),
+        ));
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+
+        runtime
+            .enroll_quick_unlock_for_current_vault(Some("wrong-password"), None)
+            .expect_err("wrong credentials must not be enrolled");
+
+        assert_eq!(authorizations.get(), 1);
+        assert_eq!(stores.get(), 0);
+    }
+
+    #[test]
+    fn native_parent_window_handle_is_forwarded_to_secure_storage() {
+        let parent_window = std::rc::Rc::new(std::cell::Cell::new(None));
+        let mut runtime = Runtime::for_tests();
+        runtime.secure_storage = Box::new(ParentWindowRecordingSecureStorageProvider {
+            parent_window: parent_window.clone(),
+        });
+
+        runtime.set_parent_window_handle(Some(0x1234));
+        assert_eq!(parent_window.get(), Some(0x1234));
+
+        runtime.set_parent_window_handle(None);
+        assert_eq!(parent_window.get(), None);
     }
 
     #[test]

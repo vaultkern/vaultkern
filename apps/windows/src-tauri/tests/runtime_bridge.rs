@@ -4,6 +4,25 @@ use vaultkern_runtime::{PlatformPasskeyAssertionInput, PlatformPasskeyRegistrati
 use vaultkern_windows::RuntimeBridge;
 
 #[test]
+fn windows_app_binary_declares_gui_subsystem() {
+    let main_rs = include_str!("../src/main.rs");
+
+    assert!(main_rs.contains(r#"#![cfg_attr(windows, windows_subsystem = "windows")]"#));
+}
+
+#[test]
+fn bridge_forwards_native_parent_window_handle_without_using_the_runtime_protocol() {
+    let bridge = RuntimeBridge::new_for_tests();
+
+    bridge
+        .set_parent_window_handle(Some(0x1234))
+        .expect("set parent window");
+    bridge
+        .set_parent_window_handle(None)
+        .expect("clear parent window");
+}
+
+#[test]
 fn runtime_bridge_serves_protocol_envelopes_from_its_runtime_thread() {
     let bridge = RuntimeBridge::new_for_tests();
 

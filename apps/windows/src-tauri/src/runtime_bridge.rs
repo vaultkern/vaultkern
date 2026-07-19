@@ -14,6 +14,10 @@ pub struct RuntimeBridge {
 }
 
 enum RuntimeRequest {
+    SetParentWindowHandle {
+        parent_window: Option<usize>,
+        response: Sender<()>,
+    },
     Protocol {
         command: RuntimeCommand,
         response: Sender<Value>,
@@ -51,6 +55,13 @@ impl RuntimeBridge {
                 let mut runtime = factory();
                 while let Ok(request) = receiver.recv() {
                     match request {
+                        RuntimeRequest::SetParentWindowHandle {
+                            parent_window,
+                            response,
+                        } => {
+                            runtime.set_parent_window_handle(parent_window);
+                            let _ = response.send(());
+                        }
                         RuntimeRequest::Protocol { command, response } => {
                             let value = match catch_unwind(AssertUnwindSafe(|| {
                                 runtime.handle(command)
@@ -136,6 +147,19 @@ impl RuntimeBridge {
                 "the in-process runtime stopped responding",
             )
         })
+    }
+
+    pub fn set_parent_window_handle(&self, parent_window: Option<usize>) -> Result<(), String> {
+        let (response, receiver) = mpsc::channel();
+        self.requests
+            .send(RuntimeRequest::SetParentWindowHandle {
+                parent_window,
+                response,
+            })
+            .map_err(|_| "the in-process runtime is unavailable".to_owned())?;
+        receiver
+            .recv()
+            .map_err(|_| "the in-process runtime stopped responding".to_owned())
     }
 
     pub fn platform_passkey_is_unlocked(&self) -> bool {

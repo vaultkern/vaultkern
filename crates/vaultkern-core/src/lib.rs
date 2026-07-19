@@ -6,12 +6,12 @@ pub use vaultkern_crypto::{CompositeKey, CryptoError, KdfProfile, parse_key_file
 pub use vaultkern_kdbx::{
     Compression, ExternalKdfAlgorithm, ExternalKdfConfirmation, ExternalKdfDecision,
     ExternalKdfParameter, ExternalKdfParameters, ExternalKdfPolicy, ExternalKdfRequest,
-    ExternalKdfResource, KdbxCipher, KdbxError, KdbxHeader, KdbxHeaderSummary, KdbxVersion,
-    KdfPolicyEvaluator, SaveKdf, SaveProfile, TransformedKey, VariantDictionary, VariantValue,
-    derive_transformed_key, derive_transformed_key_with_policy, inspect_kdbx_header,
-    is_xml_10_text, load_kdbx as load_kdbx_bytes, load_kdbx_with_policy,
-    load_kdbx_with_transformed_key, required_version, retained_or_recommended_save_kdf,
-    save_kdbx as save_kdbx_bytes, save_kdbx_with_transformed_key,
+    ExternalKdfResource, KdbxCipher, KdbxError, KdbxHeader, KdbxHeaderSummary, KdbxLoadDiagnostic,
+    KdbxLoadStage, KdbxVersion, KdfPolicyEvaluator, SaveKdf, SaveProfile, TransformedKey,
+    VariantDictionary, VariantValue, derive_transformed_key, derive_transformed_key_with_policy,
+    inspect_kdbx_header, is_xml_10_text, load_kdbx as load_kdbx_bytes, load_kdbx_with_policy,
+    load_kdbx_with_transformed_key, load_kdbx_with_transformed_key_diagnostic, required_version,
+    retained_or_recommended_save_kdf, save_kdbx as save_kdbx_bytes, save_kdbx_with_transformed_key,
 };
 use vaultkern_model::Attachment as ModelAttachment;
 pub use vaultkern_model::{

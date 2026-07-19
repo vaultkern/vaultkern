@@ -23,6 +23,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 #[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
+use zeroize::Zeroizing;
 
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
@@ -417,9 +419,17 @@ pub(crate) fn is_secure_storage_cancelled(error: &anyhow::Error) -> bool {
 
 #[allow(dead_code)]
 pub trait SecureStorageProvider {
+    fn set_parent_window_handle(&mut self, _parent_window: Option<usize>) {}
+
+    fn authorize_store_user_presence(&self) -> Result<()> {
+        Ok(())
+    }
     fn store(&self, key: &str, value: &[u8]) -> Result<()>;
     fn load(&self, key: &str) -> Result<Option<Vec<u8>>>;
     fn contains(&self, key: &str) -> Result<bool>;
+    fn store_requires_user_presence(&self) -> bool {
+        false
+    }
     fn load_requires_user_presence(&self) -> bool {
         false
     }
@@ -476,12 +486,16 @@ pub(crate) fn quick_unlock_storage_dir(extension_id: Option<&str>) -> PathBuf {
 #[cfg(windows)]
 pub(crate) struct WindowsHelloSecureStorageProvider {
     dir: PathBuf,
+    parent_window: Option<usize>,
 }
 
 #[cfg(windows)]
 impl WindowsHelloSecureStorageProvider {
     pub(crate) fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            parent_window: None,
+        }
     }
 
     fn path_for(&self, key: &str) -> PathBuf {
@@ -498,6 +512,35 @@ impl WindowsHelloSecureStorageProvider {
 
 #[cfg(windows)]
 impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
+    fn set_parent_window_handle(&mut self, parent_window: Option<usize>) {
+        self.parent_window = parent_window.filter(|handle| *handle != 0);
+    }
+
+    fn authorize_store_user_presence(&self) -> Result<()> {
+        with_hello_key(
+            &self.wrapping_key_name()?,
+            true,
+            self.parent_window,
+            |key, created| {
+                if created {
+                    return Ok(());
+                }
+                let mut challenge = [0u8; 32];
+                fill_random(&mut challenge)?;
+                let wrapped_challenge = ncrypt_encrypt_pkcs1(key, &challenge)?;
+                require_fresh_hello_gesture(
+                    key,
+                    "Verify with Windows Hello to enable quick unlock for this VaultKern vault",
+                )?;
+                let unwrapped = Zeroizing::new(ncrypt_decrypt_pkcs1(key, &wrapped_challenge)?);
+                if unwrapped.as_slice() != challenge {
+                    anyhow::bail!("Windows Hello quick unlock key verification failed");
+                }
+                Ok(())
+            },
+        )
+    }
+
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
         let mut data_key = [0u8; 32];
         let mut nonce = [0u8; 12];
@@ -509,9 +552,12 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
         let ciphertext = cipher
             .encrypt(Nonce::from_slice(&nonce), value)
             .map_err(|_| anyhow::anyhow!("failed to encrypt quick unlock credentials"))?;
-        let wrapped_key = with_hello_key(&self.wrapping_key_name()?, true, |key| {
-            ncrypt_encrypt_pkcs1(key, &data_key)
-        })?;
+        let wrapped_key = with_hello_key(
+            &self.wrapping_key_name()?,
+            false,
+            self.parent_window,
+            |key, _created| ncrypt_encrypt_pkcs1(key, &data_key),
+        )?;
         let envelope = QuickUnlockEnvelope {
             version: QUICK_UNLOCK_ENVELOPE_VERSION,
             scheme: QUICK_UNLOCK_ENVELOPE_SCHEME.into(),
@@ -550,10 +596,18 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
             anyhow::bail!("quick unlock credential envelope has an invalid nonce");
         }
 
-        let data_key = with_hello_key(&self.wrapping_key_name()?, false, |key| {
-            require_fresh_hello_gesture(key)?;
-            ncrypt_decrypt_pkcs1(key, &wrapped_key)
-        })?;
+        let data_key = with_hello_key(
+            &self.wrapping_key_name()?,
+            false,
+            self.parent_window,
+            |key, _created| {
+                require_fresh_hello_gesture(
+                    key,
+                    "Verify with Windows Hello to unlock this VaultKern vault",
+                )?;
+                ncrypt_decrypt_pkcs1(key, &wrapped_key)
+            },
+        )?;
         let cipher = Aes256Gcm::new_from_slice(&data_key)
             .map_err(|_| anyhow::anyhow!("failed to initialize quick unlock cipher"))?;
         let plaintext = cipher
@@ -568,6 +622,10 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
             return Ok(false);
         }
         Ok(is_quick_unlock_envelope(&fs::read(path)?))
+    }
+
+    fn store_requires_user_presence(&self) -> bool {
+        true
     }
 
     fn load_requires_user_presence(&self) -> bool {
@@ -610,7 +668,11 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
 fn with_hello_key<T>(
     key_name: &[u16],
     create_if_missing: bool,
-    operation: impl FnOnce(windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE) -> Result<T>,
+    parent_window: Option<usize>,
+    operation: impl FnOnce(
+        windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+        bool,
+    ) -> Result<T>,
 ) -> Result<T> {
     use windows_sys::Win32::Security::Cryptography::{
         NCRYPT_PROV_HANDLE, NCRYPT_RSA_ALGORITHM, NCryptCreatePersistedKey, NCryptFinalizeKey,
@@ -626,6 +688,7 @@ fn with_hello_key<T>(
     let _provider = NcryptHandle(provider);
 
     let mut key = 0;
+    let mut created = false;
     let open_status = unsafe { NCryptOpenKey(provider, &mut key, key_name.as_ptr(), 0, 0) };
     if open_status != 0 {
         if !create_if_missing {
@@ -644,15 +707,47 @@ fn with_hello_key<T>(
             },
             "failed to create quick unlock Windows Hello key",
         )?;
+        set_hello_parent_window(key, parent_window)?;
         configure_hello_key(key)?;
         check_ncrypt(
             unsafe { NCryptFinalizeKey(key, 0) },
             "failed to finalize quick unlock Windows Hello key",
         )?;
+        created = true;
+    } else {
+        set_hello_parent_window(key, parent_window)?;
     }
     let _key = NcryptHandle(key);
 
-    operation(key)
+    operation(key, created)
+}
+
+#[cfg(windows)]
+fn set_hello_parent_window(
+    key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+    parent_window: Option<usize>,
+) -> Result<()> {
+    use windows_sys::Win32::Security::Cryptography::{
+        NCRYPT_WINDOW_HANDLE_PROPERTY, NCryptSetProperty,
+    };
+
+    let Some(parent_window) = parent_window else {
+        return Ok(());
+    };
+    let window_handle = parent_window as windows_sys::Win32::Foundation::HWND;
+    let window_handle_bytes = bytes_of(&window_handle);
+    check_ncrypt(
+        unsafe {
+            NCryptSetProperty(
+                key,
+                NCRYPT_WINDOW_HANDLE_PROPERTY,
+                window_handle_bytes.as_ptr(),
+                u32::try_from(window_handle_bytes.len())?,
+                0,
+            )
+        },
+        "failed to set the Windows Hello parent window",
+    )
 }
 
 #[cfg(windows)]
@@ -723,6 +818,7 @@ fn configure_hello_key(
 #[cfg(windows)]
 fn require_fresh_hello_gesture(
     key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+    context: &str,
 ) -> Result<()> {
     use windows_sys::Win32::Security::Cryptography::{
         NCRYPT_USE_CONTEXT_PROPERTY, NCryptSetProperty,
@@ -743,7 +839,7 @@ fn require_fresh_hello_gesture(
         },
         "failed to require a fresh Windows Hello gesture",
     )?;
-    let context = wide_null("Verify with Windows Hello to unlock this VaultKern vault");
+    let context = wide_null(context);
     check_ncrypt(
         unsafe {
             NCryptSetProperty(
