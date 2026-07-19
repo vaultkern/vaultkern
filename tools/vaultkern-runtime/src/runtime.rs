@@ -395,6 +395,7 @@ impl Runtime {
     }
 
     pub fn set_parent_window_handle(&mut self, parent_window: Option<usize>) {
+        self.biometric.set_parent_window_handle(parent_window);
         self.secure_storage.set_parent_window_handle(parent_window);
     }
 
@@ -3325,6 +3326,15 @@ impl Runtime {
         self.get_entry_detail(vault_id, entry_id)
     }
 
+    pub fn handle_browser_command(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
+        if browser_command_requires_fresh_verification(&command) {
+            self.biometric
+                .authorize("Allow browser access to VaultKern secrets or security settings")
+                .context("fresh browser request verification failed")?;
+        }
+        self.handle(command)
+    }
+
     pub fn handle(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
         match command {
             RuntimeCommand::GetSessionState => {
@@ -6028,6 +6038,29 @@ impl Runtime {
     }
 }
 
+fn browser_command_requires_fresh_verification(command: &RuntimeCommand) -> bool {
+    match command {
+        RuntimeCommand::UpdateDatabaseSettings { update, .. } => {
+            update.credentials.is_some() || update.encryption.is_some()
+        }
+        RuntimeCommand::CreateEntry { .. }
+        | RuntimeCommand::UpdateEntryFields { .. }
+        | RuntimeCommand::CompareAndUpdateEntryFields { .. }
+        | RuntimeCommand::ClearEntryTotp { .. }
+        | RuntimeCommand::SetEntryPasskey { .. }
+        | RuntimeCommand::ClearEntryPasskey { .. }
+        | RuntimeCommand::GetEntryDetail { .. }
+        | RuntimeCommand::GetEntryHistoryDetail { .. }
+        | RuntimeCommand::GetEntryAttachmentContent { .. }
+        | RuntimeCommand::AddEntryAttachment { .. }
+        | RuntimeCommand::UpdateEntryAttachmentMetadata { .. }
+        | RuntimeCommand::ReplaceEntryAttachmentContent { .. }
+        | RuntimeCommand::DeleteEntryAttachment { .. }
+        | RuntimeCommand::DisableQuickUnlockForCurrentVault => true,
+        _ => false,
+    }
+}
+
 #[allow(dead_code)]
 fn _keep_protocol_types_linked(
     _groups: GroupTreeDto,
@@ -8240,6 +8273,115 @@ mod tests {
     };
 
     #[test]
+    fn browser_secret_reads_and_security_policy_changes_require_fresh_verification() {
+        assert!(browser_command_requires_fresh_verification(
+            &RuntimeCommand::GetEntryDetail {
+                vault_id: "vault".into(),
+                entry_id: "entry".into(),
+            }
+        ));
+        assert!(browser_command_requires_fresh_verification(
+            &RuntimeCommand::GetEntryAttachmentContent {
+                vault_id: "vault".into(),
+                entry_id: "entry".into(),
+                name: "secret.bin".into(),
+            }
+        ));
+        assert!(browser_command_requires_fresh_verification(
+            &RuntimeCommand::DisableQuickUnlockForCurrentVault
+        ));
+        assert!(browser_command_requires_fresh_verification(
+            &RuntimeCommand::UpdateDatabaseSettings {
+                vault_id: "vault".into(),
+                update: DatabaseSettingsUpdateDto {
+                    credentials: Some(DatabaseCredentialsUpdateDto {
+                        new_password: Some("new password".into()),
+                        remove_password: false,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_metadata_queries_and_commands_with_internal_verification_do_not_double_prompt() {
+        assert!(!browser_command_requires_fresh_verification(
+            &RuntimeCommand::ListEntries {
+                vault_id: "vault".into(),
+            }
+        ));
+        assert!(!browser_command_requires_fresh_verification(
+            &RuntimeCommand::UpdateDatabaseSettings {
+                vault_id: "vault".into(),
+                update: DatabaseSettingsUpdateDto {
+                    metadata: Some(DatabaseMetadataSettingsDto {
+                        name: "renamed".into(),
+                        description: None,
+                        default_username: None,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            }
+        ));
+        assert!(!browser_command_requires_fresh_verification(
+            &RuntimeCommand::EnableQuickUnlockForCurrentVault {
+                password: None,
+                key_file_path: None,
+            }
+        ));
+        assert!(!browser_command_requires_fresh_verification(
+            &RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
+        ));
+        assert!(!browser_command_requires_fresh_verification(
+            &RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token: "ceremony".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+                vault_id: "vault".into(),
+                method: PasskeyUserVerificationMethodDto::QuickUnlock,
+                password: None,
+            }
+        ));
+        assert!(!browser_command_requires_fresh_verification(
+            &RuntimeCommand::SavePasskeyRegistration {
+                ceremony_token: "ceremony".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                vault_id: "vault".into(),
+            }
+        ));
+        assert!(!browser_command_requires_fresh_verification(
+            &RuntimeCommand::CommitPasskeyRegistration {
+                ceremony_token: "ceremony".into(),
+                expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                vault_id: "vault".into(),
+                entry_id: "entry".into(),
+                credential_id: "credential".into(),
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_runtime_entrypoint_authorizes_before_dispatching_a_secret_read() {
+        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.biometric = Box::new(CountingBiometricProvider {
+            authorizations: authorizations.clone(),
+        });
+
+        runtime
+            .handle_browser_command(RuntimeCommand::GetEntryDetail {
+                vault_id: "missing-vault".into(),
+                entry_id: "missing-entry".into(),
+            })
+            .expect("query errors remain protocol responses after verification");
+
+        assert_eq!(
+            authorizations.borrow().as_slice(),
+            ["Allow browser access to VaultKern secrets or security settings"]
+        );
+    }
+
+    #[test]
     fn external_open_uses_desktop_unconfirmed_kdf_policy() {
         assert_eq!(
             Runtime::external_open_kdf_policy(),
@@ -8727,6 +8869,24 @@ mod tests {
         }
 
         fn delete(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ParentWindowRecordingBiometricProvider {
+        parent_window: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+    }
+
+    impl BiometricProvider for ParentWindowRecordingBiometricProvider {
+        fn set_parent_window_handle(&mut self, parent_window: Option<usize>) {
+            self.parent_window.set(parent_window);
+        }
+
+        fn supports_quick_unlock(&self) -> bool {
+            true
+        }
+
+        fn authorize(&self, _reason: &str) -> Result<()> {
             Ok(())
         }
     }
@@ -13889,18 +14049,24 @@ mod tests {
     }
 
     #[test]
-    fn native_parent_window_handle_is_forwarded_to_secure_storage() {
-        let parent_window = std::rc::Rc::new(std::cell::Cell::new(None));
+    fn native_parent_window_handle_is_forwarded_to_all_hello_providers() {
+        let secure_storage_parent = std::rc::Rc::new(std::cell::Cell::new(None));
+        let biometric_parent = std::rc::Rc::new(std::cell::Cell::new(None));
         let mut runtime = Runtime::for_tests();
         runtime.secure_storage = Box::new(ParentWindowRecordingSecureStorageProvider {
-            parent_window: parent_window.clone(),
+            parent_window: secure_storage_parent.clone(),
+        });
+        runtime.biometric = Box::new(ParentWindowRecordingBiometricProvider {
+            parent_window: biometric_parent.clone(),
         });
 
         runtime.set_parent_window_handle(Some(0x1234));
-        assert_eq!(parent_window.get(), Some(0x1234));
+        assert_eq!(secure_storage_parent.get(), Some(0x1234));
+        assert_eq!(biometric_parent.get(), Some(0x1234));
 
         runtime.set_parent_window_handle(None);
-        assert_eq!(parent_window.get(), None);
+        assert_eq!(secure_storage_parent.get(), None);
+        assert_eq!(biometric_parent.get(), None);
     }
 
     #[test]

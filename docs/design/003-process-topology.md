@@ -38,10 +38,7 @@ system credential extensions, and the UI layers.
    Commands that release secrets or change policy require fresh interactive
    verification regardless of channel trust. A peer failing the signature
    requirement is refused — no degraded mode.
-5. **Windows interim** (until the plugin-authenticator phase): browser
-   extension + per-port native host on the shared core, every KDBX write
-   through the writer lock. This row disappears in the target state.
-6. **Protocol**: clients consume DTOs only. Handshake negotiates
+5. **Protocol**: clients consume DTOs only. Handshake negotiates
    `{protocol_version, capabilities}`; changes are additive within a major
    version. Runtime modularization precedes UniFFI — the FFI exposes module
    interfaces, not a god file.
@@ -53,7 +50,6 @@ system credential extensions, and the UI layers.
 | resident app | vault | **sole writer** | consumes |
 | Apple appex | cached copy + own outbox items | never | appends |
 | browser extension / shim | via protocol only | never | never |
-| Windows native host (interim) | vault | under the writer lock | n/a |
 
 The OS writer lock serializes local file access; the remote copy is
 serialized by the sync layer's ETag CAS (007). The two compose and do not

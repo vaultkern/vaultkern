@@ -2,6 +2,7 @@ use anyhow::Result;
 
 #[allow(dead_code)]
 pub trait BiometricProvider {
+    fn set_parent_window_handle(&mut self, _parent_window: Option<usize>) {}
     fn supports_quick_unlock(&self) -> bool;
     fn authorize(&self, reason: &str) -> Result<()>;
 }
@@ -19,10 +20,17 @@ impl BiometricProvider for UnsupportedBiometricProvider {
 }
 
 #[cfg(windows)]
-pub struct WindowsHelloBiometricProvider;
+#[derive(Default)]
+pub struct WindowsHelloBiometricProvider {
+    parent_window: Option<usize>,
+}
 
 #[cfg(windows)]
 impl BiometricProvider for WindowsHelloBiometricProvider {
+    fn set_parent_window_handle(&mut self, parent_window: Option<usize>) {
+        self.parent_window = parent_window.filter(|handle| *handle != 0);
+    }
+
     fn supports_quick_unlock(&self) -> bool {
         use windows::Security::Credentials::UI::{
             UserConsentVerifier, UserConsentVerifierAvailability,
@@ -40,8 +48,23 @@ impl BiometricProvider for WindowsHelloBiometricProvider {
         };
         use windows::core::HSTRING;
 
-        let result = UserConsentVerifier::RequestVerificationAsync(&HSTRING::from(reason))
-            .and_then(|operation| operation.join())?;
+        let reason = HSTRING::from(reason);
+        let operation = if let Some(parent_window) = self.parent_window {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
+
+            let interop =
+                windows::core::factory::<UserConsentVerifier, IUserConsentVerifierInterop>()?;
+            unsafe {
+                interop.RequestVerificationForWindowAsync(
+                    HWND(parent_window as *mut std::ffi::c_void),
+                    &reason,
+                )?
+            }
+        } else {
+            UserConsentVerifier::RequestVerificationAsync(&reason)?
+        };
+        let result = operation.join()?;
         if result == UserConsentVerificationResult::Verified {
             Ok(())
         } else {
@@ -53,7 +76,7 @@ impl BiometricProvider for WindowsHelloBiometricProvider {
 pub(crate) fn default_biometric_provider() -> Box<dyn BiometricProvider> {
     #[cfg(windows)]
     {
-        Box::new(WindowsHelloBiometricProvider)
+        Box::new(WindowsHelloBiometricProvider::default())
     }
     #[cfg(not(windows))]
     {

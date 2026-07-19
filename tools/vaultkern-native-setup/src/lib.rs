@@ -247,7 +247,7 @@ struct NativeHostManifestDocument {
 pub fn render_native_host_manifest(runtime_path: &str, extension_origin: &str) -> String {
     let manifest = NativeHostManifest {
         name: HOST_NAME,
-        description: "VaultKern runtime native host",
+        description: "VaultKern resident app IPC shim",
         path: runtime_path,
         type_field: "stdio",
         allowed_origins: [extension_origin],
@@ -626,7 +626,7 @@ mod tests {
 
         assert_eq!(
             manifest,
-            r#"{"name":"com.vaultkern.runtime","description":"VaultKern runtime native host","path":"C:\\VaultKern\\vaultkern-runtime.exe","type":"stdio","allowed_origins":["chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/"]}"#
+            r#"{"name":"com.vaultkern.runtime","description":"VaultKern resident app IPC shim","path":"C:\\VaultKern\\vaultkern-runtime.exe","type":"stdio","allowed_origins":["chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/"]}"#
         );
     }
 

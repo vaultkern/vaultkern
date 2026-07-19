@@ -4,6 +4,8 @@ mod match_fill;
 pub mod native_host;
 mod passkey;
 mod providers;
+#[cfg(any(windows, test))]
+pub mod resident_ipc;
 mod runtime;
 mod session;
 mod state_paths;

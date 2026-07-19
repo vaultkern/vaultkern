@@ -6,7 +6,8 @@ use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeCommand, Run
 
 use crate::Runtime;
 
-const MAX_NATIVE_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_NATIVE_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
 
 pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
     configure_stdio_for_native_messaging()?;
@@ -24,7 +25,7 @@ fn run_loop_with_io(
     stdin: &mut impl Read,
     stdout: &mut impl Write,
 ) -> Result<()> {
-    run_loop_with_io_with_limit(runtime, stdin, stdout, MAX_NATIVE_MESSAGE_BYTES)
+    run_loop_with_io_with_limit(runtime, stdin, stdout, MAX_NATIVE_REQUEST_BYTES)
 }
 
 fn run_loop_with_io_with_limit(
@@ -179,7 +180,7 @@ pub(crate) fn format_error_chain(error: &anyhow::Error) -> String {
 }
 
 #[derive(Debug, PartialEq)]
-enum NativeMessage<T> {
+pub(crate) enum NativeMessage<T> {
     Eof,
     Message(T),
     DecodeError {
@@ -192,7 +193,7 @@ enum NativeMessage<T> {
     },
 }
 
-fn read_native_message_or_eof_with_limit<T: serde::de::DeserializeOwned>(
+pub(crate) fn read_native_message_or_eof_with_limit<T: serde::de::DeserializeOwned>(
     reader: &mut impl Read,
     max_message_bytes: usize,
 ) -> Result<NativeMessage<T>> {
@@ -270,9 +271,23 @@ fn write_native_message(
     response: &RuntimeResponse,
     request_id: Option<&str>,
 ) -> Result<()> {
-    let payload =
+    let mut payload =
         encode_native_response(response, request_id).context("failed to encode native message")?;
-    let length = (payload.len() as u32).to_le_bytes();
+    if payload.len() > MAX_NATIVE_RESPONSE_BYTES {
+        let oversized = RuntimeResponse::Error(ErrorDto {
+            code: "response_too_large".into(),
+            message: "native response exceeds Chrome's 1 MiB limit".into(),
+        });
+        payload = encode_native_response(&oversized, request_id)
+            .context("failed to encode oversized native response error")?;
+        if payload.len() > MAX_NATIVE_RESPONSE_BYTES {
+            payload = encode_native_response(&oversized, None)
+                .context("failed to encode uncorrelated oversized native response error")?;
+        }
+    }
+    let length = u32::try_from(payload.len())
+        .context("native response length overflow")?
+        .to_le_bytes();
     writer
         .write_all(&length)
         .context("failed to write message length")?;
@@ -299,12 +314,12 @@ fn encode_native_response(response: &RuntimeResponse, request_id: Option<&str>) 
 }
 
 #[cfg(not(windows))]
-fn configure_stdio_for_native_messaging() -> Result<()> {
+pub(crate) fn configure_stdio_for_native_messaging() -> Result<()> {
     Ok(())
 }
 
 #[cfg(windows)]
-fn configure_stdio_for_native_messaging() -> Result<()> {
+pub(crate) fn configure_stdio_for_native_messaging() -> Result<()> {
     const STDIN_FILENO: i32 = 0;
     const STDOUT_FILENO: i32 = 1;
     const O_BINARY: i32 = 0x8000;
@@ -337,10 +352,11 @@ mod tests {
     };
 
     use super::{
-        NativeMessage, claim_autofill_source_commit_crash_marker, command_response_from_result,
-        configure_stdio_for_native_messaging, format_error_chain, handle_command_response,
-        is_committed_autofill_source_response, read_native_message_or_eof_with_limit,
-        run_loop_with_io, run_loop_with_io_with_limit,
+        MAX_NATIVE_RESPONSE_BYTES, NativeMessage, claim_autofill_source_commit_crash_marker,
+        command_response_from_result, configure_stdio_for_native_messaging, format_error_chain,
+        handle_command_response, is_committed_autofill_source_response,
+        read_native_message_or_eof_with_limit, run_loop_with_io, run_loop_with_io_with_limit,
+        write_native_message,
     };
     use crate::Runtime;
 
@@ -442,6 +458,33 @@ mod tests {
             .expect("clean EOF should shut down without an error");
 
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn native_responses_over_chromes_one_mebibyte_limit_become_correlated_errors() {
+        let response = RuntimeResponse::EntryAttachmentContent(
+            vaultkern_runtime_protocol::EntryAttachmentContentDto {
+                name: "oversized.bin".into(),
+                data_base64: "A".repeat(1024 * 1024),
+                protect_in_memory: false,
+            },
+        );
+        let mut output = Vec::new();
+
+        write_native_message(&mut output, &response, Some("native-large-1"))
+            .expect("oversized response should have a recoverable native response");
+        assert!(output.len() <= 4 + MAX_NATIVE_RESPONSE_BYTES);
+
+        let mut output = std::io::Cursor::new(output);
+        let value =
+            read_native_message_or_eof_with_limit::<serde_json::Value>(&mut output, 1024 * 1024)
+                .expect("read native response");
+        let NativeMessage::Message(value) = value else {
+            panic!("expected a native response");
+        };
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["code"], "response_too_large");
+        assert_eq!(value["requestId"], "native-large-1");
     }
 
     #[test]

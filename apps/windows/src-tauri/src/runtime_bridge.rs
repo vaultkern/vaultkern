@@ -1,5 +1,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::time::Duration;
 
 use serde_json::Value;
 use vaultkern_runtime::{
@@ -20,6 +23,9 @@ enum RuntimeRequest {
     },
     Protocol {
         command: RuntimeCommand,
+        cancelled: Arc<AtomicBool>,
+        browser_client: bool,
+        parent_window: Option<usize>,
         response: Sender<Value>,
     },
     PlatformPasskeyIsUnlocked {
@@ -53,27 +59,56 @@ impl RuntimeBridge {
             .name("vaultkern-runtime".to_owned())
             .spawn(move || {
                 let mut runtime = factory();
+                let mut default_parent_window = None;
                 while let Ok(request) = receiver.recv() {
                     match request {
                         RuntimeRequest::SetParentWindowHandle {
                             parent_window,
                             response,
                         } => {
+                            default_parent_window = parent_window;
                             runtime.set_parent_window_handle(parent_window);
                             let _ = response.send(());
                         }
-                        RuntimeRequest::Protocol { command, response } => {
-                            let value = match catch_unwind(AssertUnwindSafe(|| {
-                                runtime.handle(command)
-                            })) {
-                                Ok(Ok(response)) => response_value(response),
-                                Ok(Err(error)) => {
-                                    error_value("runtime_error", format!("{error:#}"))
+                        RuntimeRequest::Protocol {
+                            command,
+                            cancelled,
+                            browser_client,
+                            parent_window,
+                            response,
+                        } => {
+                            let value = if cancelled.load(Ordering::Acquire) {
+                                cancelled_value()
+                            } else {
+                                let request_parent_window =
+                                    browser_client.then_some(parent_window).flatten();
+                                if let Some(parent_window) = request_parent_window {
+                                    runtime.set_parent_window_handle(Some(parent_window));
                                 }
-                                Err(_) => error_value(
-                                    "runtime_panic",
-                                    "the in-process runtime recovered from an unexpected failure",
-                                ),
+                                let value = match catch_unwind(AssertUnwindSafe(|| {
+                                    if browser_client {
+                                        runtime.handle_browser_command(command)
+                                    } else {
+                                        runtime.handle(command)
+                                    }
+                                })) {
+                                    Ok(Ok(response)) => response_value(response),
+                                    Ok(Err(error)) => {
+                                        error_value("runtime_error", format!("{error:#}"))
+                                    }
+                                    Err(_) => error_value(
+                                        "runtime_panic",
+                                        "the in-process runtime recovered from an unexpected failure",
+                                    ),
+                                };
+                                if request_parent_window.is_some() {
+                                    runtime.set_parent_window_handle(default_parent_window);
+                                }
+                                if cancelled.load(Ordering::Acquire) {
+                                    cancelled_value()
+                                } else {
+                                    value
+                                }
                             };
                             let _ = response.send(value);
                         }
@@ -110,6 +145,32 @@ impl RuntimeBridge {
     }
 
     pub fn request(&self, message: Value) -> Value {
+        self.request_cancellable(message, Arc::new(AtomicBool::new(false)))
+    }
+
+    pub fn request_cancellable(&self, message: Value, cancelled: Arc<AtomicBool>) -> Value {
+        self.request_with_client(message, cancelled, false, None)
+    }
+
+    pub fn request_browser_cancellable(
+        &self,
+        message: Value,
+        cancelled: Arc<AtomicBool>,
+        parent_window: Option<usize>,
+    ) -> Value {
+        self.request_with_client(message, cancelled, true, parent_window)
+    }
+
+    fn request_with_client(
+        &self,
+        message: Value,
+        cancelled: Arc<AtomicBool>,
+        browser_client: bool,
+        parent_window: Option<usize>,
+    ) -> Value {
+        if cancelled.load(Ordering::Acquire) {
+            return cancelled_value();
+        }
         let envelope = match serde_json::from_value::<ProtocolEnvelope>(message) {
             Ok(envelope) if envelope.version == 1 => envelope,
             Ok(envelope) => {
@@ -127,10 +188,14 @@ impl RuntimeBridge {
         };
 
         let (response, receiver) = mpsc::channel();
+        let wait_cancelled = cancelled.clone();
         if self
             .requests
             .send(RuntimeRequest::Protocol {
                 command: envelope.command,
+                cancelled,
+                browser_client,
+                parent_window,
                 response,
             })
             .is_err()
@@ -141,12 +206,21 @@ impl RuntimeBridge {
             );
         }
 
-        receiver.recv().unwrap_or_else(|_| {
-            error_value(
-                "runtime_unavailable",
-                "the in-process runtime stopped responding",
-            )
-        })
+        loop {
+            if wait_cancelled.load(Ordering::Acquire) {
+                return cancelled_value();
+            }
+            match receiver.recv_timeout(Duration::from_millis(25)) {
+                Ok(value) => return value,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return error_value(
+                        "runtime_unavailable",
+                        "the in-process runtime stopped responding",
+                    );
+                }
+            }
+        }
     }
 
     pub fn set_parent_window_handle(&self, parent_window: Option<usize>) -> Result<(), String> {
@@ -248,4 +322,62 @@ fn error_value(code: impl Into<String>, message: impl Into<String>) -> Value {
         message: message.into(),
     }))
     .expect("runtime error responses are serializable")
+}
+
+fn cancelled_value() -> Value {
+    error_value("request_cancelled", "the runtime request was cancelled")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use serde_json::json;
+
+    use super::RuntimeBridge;
+
+    #[test]
+    fn cancelled_protocol_request_is_not_dispatched_to_the_runtime() {
+        let bridge = RuntimeBridge::new_for_tests();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        cancelled.store(true, Ordering::Release);
+
+        let response = bridge.request_cancellable(
+            json!({
+                "version": 1,
+                "command": { "type": "get_session_state" }
+            }),
+            cancelled,
+        );
+
+        assert_eq!(response["type"], "error");
+        assert_eq!(response["code"], "request_cancelled");
+    }
+
+    #[test]
+    fn browser_secret_request_uses_the_fresh_verification_runtime_entrypoint() {
+        let bridge = RuntimeBridge::new_for_tests();
+        let response = bridge.request_browser_cancellable(
+            json!({
+                "version": 1,
+                "command": {
+                    "type": "get_entry_detail",
+                    "vault_id": "missing-vault",
+                    "entry_id": "missing-entry"
+                }
+            }),
+            Arc::new(AtomicBool::new(false)),
+            Some(0x1234),
+        );
+
+        assert_eq!(response["type"], "error");
+        assert_eq!(response["code"], "runtime_error");
+        assert!(
+            response["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("fresh browser request verification failed")
+        );
+    }
 }

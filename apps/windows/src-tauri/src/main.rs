@@ -3,7 +3,11 @@
 #[cfg(windows)]
 use serde_json::{Value, json};
 #[cfg(windows)]
+use std::sync::Arc;
+#[cfg(windows)]
 use tauri::{Manager, State};
+#[cfg(windows)]
+use vaultkern_runtime::resident_ipc::start_windows_resident_ipc_server;
 #[cfg(windows)]
 use vaultkern_windows::{
     PasskeyPluginServer, RuntimeBridge, launch_requests_visible_window,
@@ -61,6 +65,8 @@ fn main() {
             },
         ))
         .setup(move |app| {
+            configure_main_window_parent(app.handle(), &window_bridge)
+                .map_err(std::io::Error::other)?;
             if show_window_on_start {
                 show_main_window(app.handle(), &window_bridge).map_err(std::io::Error::other)?;
             }
@@ -74,7 +80,26 @@ fn main() {
                     Err(error) => eprintln!("passkey provider registration failed: {error}"),
                 }
             }
+            let ipc_plugin = plugin.handle();
             app.manage(plugin);
+            let ipc_bridge = plugin_bridge.clone();
+            let ipc_handler = Arc::new(move |message: Value, cancelled, parent_window| {
+                let command_type = message
+                    .pointer("/command/type")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let response =
+                    ipc_bridge.request_browser_cancellable(message, cancelled, parent_window);
+                if should_refresh_platform_passkeys(command_type.as_deref(), &response) {
+                    if let Err(error) = ipc_plugin.sync_credentials() {
+                        eprintln!("passkey credential cache refresh failed: {error}");
+                    }
+                }
+                response
+            });
+            let ipc_server =
+                start_windows_resident_ipc_server(ipc_handler).map_err(std::io::Error::other)?;
+            app.manage(ipc_server);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![runtime_send])
@@ -90,6 +115,17 @@ fn show_main_window(app: &tauri::AppHandle, bridge: &RuntimeBridge) -> Result<()
     window.show().map_err(|error| error.to_string())?;
     window.unminimize().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
+    configure_main_window_parent(app, bridge)
+}
+
+#[cfg(windows)]
+fn configure_main_window_parent(
+    app: &tauri::AppHandle,
+    bridge: &RuntimeBridge,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "VaultKern main window is unavailable".to_owned())?;
     let parent_window = window
         .hwnd()
         .map_err(|error| format!("failed to resolve VaultKern main window handle: {error}"))?

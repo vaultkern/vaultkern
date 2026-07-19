@@ -22,7 +22,7 @@ hatch, not an interoperability contract.
 | D4 | Sync is file-level over user storage (OneDrive first), serialized by ETag/fingerprint CAS. Concurrent edits resolve by a base-copy three-way field patch; anything the patch cannot represent falls back to a recoverable conflict copy — never merge algebra or canonical hashes | 007 |
 | D5 | The Rust core is the sole product substance (UniFFI); protocol DTOs are the single behavioral spec and FFI vocabulary, additive within a major version. Vault key-hierarchy material never appears in any DTO; entry secrets are zeroized in core-owned buffers, redacted in Debug/logs; secret-bearing DTOs do not derive Clone (one legacy exception, `EntryPasskeyDto`, is removed when that code is next touched). UI renders DTOs and holds no business state | 003 |
 | D6 | Platform floors: iOS 17+ / macOS 14+ / Android 14+ / Windows 11 (plugin-authenticator phase). No compatibility branches below | — |
-| D7 | UI stacks: SwiftUI (one codebase for macOS+iOS), Compose (Android), web UI (browser extension + Windows interim) | — |
+| D7 | UI stacks: SwiftUI (one codebase for macOS+iOS), Compose (Android), web UI (browser extension + Windows resident shell) | — |
 | D8 | Apple platforms use the data-protection keychain with access groups; the legacy file keychain, SecTrustedApplication, and SecAccessCreate remain banned | 002 |
 | D9 | KDF parameters of externally created files are capped at open; extension processes never run a KDF | 002 |
 | D10 | Pre-release: storage, unlock, and state formats ship without migration paths — re-enroll / re-save. The window closes at the first public release | — |

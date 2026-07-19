@@ -90,4 +90,4 @@ mod tests {
 #[cfg(windows)]
 mod passkey_plugin;
 #[cfg(windows)]
-pub use passkey_plugin::PasskeyPluginServer;
+pub use passkey_plugin::{PasskeyPluginHandle, PasskeyPluginServer};

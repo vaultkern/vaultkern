@@ -2,6 +2,8 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use vaultkern_runtime::{
     PlatformPasskeyAssertionInput, PlatformPasskeyCredential, PlatformPasskeyRegistrationInput,
@@ -119,9 +121,20 @@ struct CallbackContext {
 }
 
 pub struct PasskeyPluginServer {
-    context: Box<CallbackContext>,
+    shared: Arc<PasskeyPluginShared>,
     registration_cookie: u32,
+}
+
+#[derive(Clone)]
+pub struct PasskeyPluginHandle {
+    shared: Arc<PasskeyPluginShared>,
+}
+
+struct PasskeyPluginShared {
+    context: Box<CallbackContext>,
     start_error: Option<String>,
+    sync_lock: Mutex<()>,
+    active: AtomicBool,
 }
 
 impl PasskeyPluginServer {
@@ -146,9 +159,19 @@ impl PasskeyPluginServer {
         let status = unsafe { vaultkern_plugin_start(&callbacks, &mut registration_cookie) };
         let start_error = failed(status).then(|| hresult_message("register COM class", status));
         Self {
-            context,
+            shared: Arc::new(PasskeyPluginShared {
+                context,
+                start_error,
+                sync_lock: Mutex::new(()),
+                active: AtomicBool::new(!failed(status) && registration_cookie != 0),
+            }),
             registration_cookie,
-            start_error,
+        }
+    }
+
+    pub fn handle(&self) -> PasskeyPluginHandle {
+        PasskeyPluginHandle {
+            shared: self.shared.clone(),
         }
     }
 
@@ -163,42 +186,61 @@ impl PasskeyPluginServer {
     }
 
     pub fn sync_credentials(&self) -> Result<usize, String> {
-        self.ensure_started()?;
-        let credentials = self.context.bridge.list_platform_passkey_credentials()?;
-        let backings = credentials
-            .iter()
-            .map(CredentialBacking::new)
-            .collect::<Vec<_>>();
-        let native = backings
-            .iter()
-            .map(CredentialBacking::native)
-            .collect::<Vec<_>>();
-        let status = unsafe {
-            vaultkern_plugin_sync_credentials(
-                if native.is_empty() {
-                    ptr::null()
-                } else {
-                    native.as_ptr()
-                },
-                native.len() as u32,
-            )
-        };
-        if failed(status) {
-            return Err(hresult_message("sync plugin credential cache", status));
-        }
-        Ok(native.len())
+        sync_credentials(&self.shared)
     }
 
     pub fn start_error(&self) -> Option<&str> {
-        self.start_error.as_deref()
+        self.shared.start_error.as_deref()
     }
 
     fn ensure_started(&self) -> Result<(), String> {
-        match &self.start_error {
+        match &self.shared.start_error {
             Some(error) => Err(error.clone()),
             None => Ok(()),
         }
     }
+}
+
+impl PasskeyPluginHandle {
+    pub fn sync_credentials(&self) -> Result<usize, String> {
+        sync_credentials(&self.shared)
+    }
+}
+
+fn sync_credentials(shared: &PasskeyPluginShared) -> Result<usize, String> {
+    let _sync = shared
+        .sync_lock
+        .lock()
+        .map_err(|_| "passkey credential cache synchronization is unavailable".to_owned())?;
+    if !shared.active.load(Ordering::Acquire) {
+        return Err("passkey COM server is no longer active".to_owned());
+    }
+    if let Some(error) = &shared.start_error {
+        return Err(error.clone());
+    }
+    let credentials = shared.context.bridge.list_platform_passkey_credentials()?;
+    let backings = credentials
+        .iter()
+        .map(CredentialBacking::new)
+        .collect::<Vec<_>>();
+    let native = backings
+        .iter()
+        .map(CredentialBacking::native)
+        .collect::<Vec<_>>();
+    let status = unsafe {
+        vaultkern_plugin_sync_credentials(
+            if native.is_empty() {
+                ptr::null()
+            } else {
+                native.as_ptr()
+            },
+            native.len() as u32,
+        )
+    };
+    if failed(status) {
+        return Err(hresult_message("sync plugin credential cache", status));
+    }
+    Ok(native.len())
 }
 
 extern "system" fn begin_operation_callback(context: *mut c_void, id: VkBytes) -> i32 {
@@ -263,6 +305,12 @@ extern "system" fn end_operation_callback(context: *mut c_void, id: VkBytes) {
 
 impl Drop for PasskeyPluginServer {
     fn drop(&mut self) {
+        let _sync = self
+            .shared
+            .sync_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.shared.active.store(false, Ordering::Release);
         if self.registration_cookie != 0 {
             unsafe {
                 let _ = vaultkern_plugin_stop(self.registration_cookie);

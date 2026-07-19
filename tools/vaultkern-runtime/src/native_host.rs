@@ -13,7 +13,11 @@ struct NativeHostManifest<'a> {
 pub fn render_manifest(binary_path: &str, extension_origin: &str) -> String {
     let manifest = NativeHostManifest {
         name: "com.vaultkern.runtime",
-        description: "VaultKern runtime native host",
+        description: if cfg!(windows) {
+            "VaultKern resident app IPC shim"
+        } else {
+            "VaultKern runtime native host"
+        },
         path: binary_path,
         type_field: "stdio",
         allowed_origins: [extension_origin],

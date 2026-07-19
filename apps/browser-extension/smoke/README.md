@@ -84,22 +84,25 @@ Stable Windows manifest and runtime paths:
 %LOCALAPPDATA%\vaultkern-runtime\vaultkern-runtime.exe
 ```
 
-The browser native host isolates runtime state by extension id. For the current Chrome smoke extension, recent/current vault state, remote cache state, and OneDrive refresh tokens are stored under:
+Start the VaultKern Windows app before testing the extension. On Windows the installed native host is a stateless shim: it authenticates the resident app over a per-user named pipe and forwards protocol requests to the app's single in-process runtime. It does not fall back to a per-port runtime when the app is unavailable.
+If the app is not running, the first request returns `resident_unavailable`; start the app and retry.
+
+Recent/current vault state, remote cache state, and the Hello/DPAPI-protected OneDrive refresh token are owned by the resident app under:
 
 ```text
-C:\Users\<user>\AppData\Local\vaultkern-runtime\extensions\kblgblkjghklighdgmejjfondchkjcgf\
+C:\Users\<user>\AppData\Local\vaultkern-runtime\
 ```
 
-Older user-level state files may still exist, but a browser native host launched with an origin no longer shares them:
+Retired per-extension state directories may still exist after upgrading, but the Windows shim no longer reads or writes them:
 
 ```text
-C:\Users\<user>\AppData\Local\vaultkern-runtime\vault-references.json
+C:\Users\<user>\AppData\Local\vaultkern-runtime\extensions\<extension-id>\
 ```
 
 The manifest should contain:
 
 ```json
-{"name":"com.vaultkern.runtime","description":"VaultKern runtime native host","path":"C:\\Users\\<user>\\AppData\\Local\\vaultkern-runtime\\vaultkern-runtime.exe","type":"stdio","allowed_origins":["chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/"]}
+{"name":"com.vaultkern.runtime","description":"VaultKern resident app IPC shim","path":"C:\\Users\\<user>\\AppData\\Local\\vaultkern-runtime\\vaultkern-runtime.exe","type":"stdio","allowed_origins":["chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/"]}
 ```
 
 Open:
@@ -111,6 +114,7 @@ http://localhost:4174/basic-login.html
 Expected result:
 
 - the popup shows fillable entries for the current site context
+- selecting a credential requests fresh Windows Hello verification before entry secrets are released to the extension
 - clicking fill writes the username into `#vaultkern-smoke-username`
 - clicking fill writes the password into `#vaultkern-smoke-password`
 - clicking the page's `Sign in` button shows `submitted:<username>:<password length>` at the bottom of the page

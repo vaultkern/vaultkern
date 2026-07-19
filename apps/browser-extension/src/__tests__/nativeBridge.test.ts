@@ -146,6 +146,32 @@ describe("createNativeMessagingBridge", () => {
     await expect(second).resolves.toEqual({ type: "second_response" });
   });
 
+  it("forwards the effective timeout to the resident IPC shim", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 1_234,
+      interactiveTimeoutMs: 56_789
+    });
+
+    void bridge.send({ version: 1, command: { type: "get_session_state" } });
+
+    expect(port.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requestTimeoutMs: 1_234 })
+    );
+    port.emitMessage({ type: "session_state", unlocked: false });
+
+    void bridge.send({
+      version: 1,
+      command: { type: "unlock_current_vault_with_quick_unlock" }
+    });
+
+    expect(port.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requestTimeoutMs: 56_789 })
+    );
+    port.emitMessage({ type: "session_state", unlocked: true });
+  });
+
   it("accepts untagged success responses from a legacy native host", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);

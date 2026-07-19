@@ -128,12 +128,16 @@ function commandTypeFromMessage(message: unknown) {
   return typeof command.type === "string" ? command.type : null;
 }
 
-function attachRequestId(message: unknown, requestId: string) {
+function attachRequestId(
+  message: unknown,
+  requestId: string,
+  requestTimeoutMs: number
+) {
   if (typeof message === "object" && message !== null && !Array.isArray(message)) {
-    return { ...message, requestId };
+    return { ...message, requestId, requestTimeoutMs };
   }
 
-  return { requestId, payload: message };
+  return { requestId, requestTimeoutMs, payload: message };
 }
 
 function requestIdFromResponse(response: unknown) {
@@ -464,9 +468,10 @@ export function createNativeMessagingBridge(
           interruptActivePreload();
         }
         const requestId = `native-${++nextRequestId}`;
+        const requestTimeoutMs = timeoutForMessage(message);
         enqueueRequest({
           message,
-          wireMessage: attachRequestId(message, requestId),
+          wireMessage: attachRequestId(message, requestId, requestTimeoutMs),
           requestId,
           resolve,
           reject,
