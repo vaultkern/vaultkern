@@ -680,6 +680,9 @@ fn write_native_value(
             "native response exceeds Chrome's 1 MiB limit",
         );
         payload = encode_native_value(&error, request_id)?;
+        if payload.len() > MAX_NATIVE_RESPONSE_BYTES {
+            payload = encode_native_value(&error, None)?;
+        }
     }
     let length = u32::try_from(payload.len()).context("native response length overflow")?;
     writer.write_all(&length.to_le_bytes())?;
@@ -1281,6 +1284,34 @@ mod tests {
         assert_eq!(response["type"], "error");
         assert_eq!(response["code"], "resident_unavailable");
         assert_eq!(response["requestId"], "native-startup-1");
+    }
+
+    #[test]
+    fn oversized_request_id_cannot_make_the_recoverable_error_exceed_chromes_limit() {
+        let request_id = "r".repeat(MAX_NATIVE_RESPONSE_BYTES);
+        let mut output = Vec::new();
+
+        write_native_value(
+            &mut output,
+            &runtime_error_value("invalid_request", "invalid request ID"),
+            Some(&request_id),
+        )
+        .expect("write bounded native error");
+
+        assert!(output.len() <= 4 + MAX_NATIVE_RESPONSE_BYTES);
+        let mut output = Cursor::new(output);
+        let mut length = [0_u8; 4];
+        output
+            .read_exact(&mut length)
+            .expect("read response length");
+        let mut payload = vec![0_u8; u32::from_le_bytes(length) as usize];
+        output
+            .read_exact(&mut payload)
+            .expect("read response payload");
+        let response: Value = serde_json::from_slice(&payload).expect("decode native response");
+        assert_eq!(response["type"], "error");
+        assert_eq!(response["code"], "response_too_large");
+        assert!(response.get("requestId").is_none());
     }
 
     #[test]

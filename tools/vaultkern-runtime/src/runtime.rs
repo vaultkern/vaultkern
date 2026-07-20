@@ -6772,9 +6772,11 @@ fn browser_command_requires_fresh_verification(command: &RuntimeCommand) -> bool
         RuntimeCommand::CreateEntry { .. }
         | RuntimeCommand::UpdateEntryFields { .. }
         | RuntimeCommand::CompareAndUpdateEntryFields { .. }
+        | RuntimeCommand::PersistAutofillMutation { .. }
         | RuntimeCommand::ClearEntryTotp { .. }
         | RuntimeCommand::SetEntryPasskey { .. }
         | RuntimeCommand::ClearEntryPasskey { .. }
+        | RuntimeCommand::DeleteEntry { .. }
         | RuntimeCommand::GetEntryDetail { .. }
         | RuntimeCommand::GetEntryHistoryDetail { .. }
         | RuntimeCommand::GetEntryAttachmentContent { .. }
@@ -9023,7 +9025,7 @@ mod tests {
     };
 
     #[test]
-    fn browser_secret_reads_and_security_policy_changes_require_fresh_verification() {
+    fn browser_secret_access_mutations_and_security_policy_changes_require_fresh_verification() {
         assert!(browser_command_requires_fresh_verification(
             &RuntimeCommand::GetEntryDetail {
                 vault_id: "vault".into(),
@@ -9050,6 +9052,33 @@ mod tests {
                     }),
                     ..DatabaseSettingsUpdateDto::default()
                 },
+            }
+        ));
+        assert!(browser_command_requires_fresh_verification(
+            &RuntimeCommand::PersistAutofillMutation {
+                transaction_id: "transaction".into(),
+                operation_id: "operation".into(),
+                vault_id: "vault".into(),
+                plan: AutofillPersistPlanDto::Create {
+                    parent_group_id: "group".into(),
+                    planned_entry_id: "entry".into(),
+                    expected_matching_entry_ids: Vec::new(),
+                    desired_fields: EntryFieldsDto {
+                        title: "Example".into(),
+                        username: "alice".into(),
+                        password: "secret".into(),
+                        url: "https://example.com".into(),
+                        notes: String::new(),
+                        totp_uri: None,
+                        custom_fields: Vec::new(),
+                    },
+                },
+            }
+        ));
+        assert!(browser_command_requires_fresh_verification(
+            &RuntimeCommand::DeleteEntry {
+                vault_id: "vault".into(),
+                entry_id: "entry".into(),
             }
         ));
     }

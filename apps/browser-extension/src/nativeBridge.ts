@@ -185,6 +185,48 @@ function shouldCancelActivePreload(
   return isStartupCommand(nextMessage);
 }
 
+// Keep this timeout classification aligned with
+// browser_command_requires_fresh_verification in the Rust runtime.
+const FRESH_VERIFICATION_COMMANDS = new Set([
+  "create_entry",
+  "update_entry_fields",
+  "compare_and_update_entry_fields",
+  "persist_autofill_mutation",
+  "clear_entry_totp",
+  "set_entry_passkey",
+  "clear_entry_passkey",
+  "delete_entry",
+  "get_entry_detail",
+  "get_entry_history_detail",
+  "get_entry_attachment_content",
+  "add_entry_attachment",
+  "update_entry_attachment_metadata",
+  "replace_entry_attachment_content",
+  "delete_entry_attachment",
+  "disable_quick_unlock_for_current_vault"
+]);
+
+function commandRequiresFreshVerification(command: Record<string, unknown>) {
+  if (
+    typeof command.type === "string" &&
+    FRESH_VERIFICATION_COMMANDS.has(command.type)
+  ) {
+    return true;
+  }
+
+  if (
+    command.type !== "update_database_settings" ||
+    typeof command.update !== "object" ||
+    command.update === null ||
+    Array.isArray(command.update)
+  ) {
+    return false;
+  }
+
+  const update = command.update as Record<string, unknown>;
+  return update.credentials != null || update.encryption != null;
+}
+
 export function createNativeMessagingBridge(
   connectNative: (hostName: string) => NativePort,
   hostName: string,
@@ -210,8 +252,9 @@ export function createNativeMessagingBridge(
       typeof (message as { command?: unknown }).command === "object" &&
       (message as { command?: unknown }).command !== null
     ) {
-      const command = (message as { command: { type?: unknown; path?: unknown } }).command;
+      const command = (message as { command: Record<string, unknown> }).command;
       if (
+        commandRequiresFreshVerification(command) ||
         (command.type === "add_local_vault_reference" && command.path === undefined) ||
         command.type === "unlock_current_vault" ||
         command.type === "unlock_current_vault_with_password" ||

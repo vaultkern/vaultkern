@@ -172,6 +172,78 @@ describe("createNativeMessagingBridge", () => {
     port.emitMessage({ type: "session_state", unlocked: true });
   });
 
+  it("forwards the interactive timeout for browser commands that require fresh verification", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 1_234,
+      interactiveTimeoutMs: 56_789
+    });
+    const commandTypes = [
+      "create_entry",
+      "update_entry_fields",
+      "compare_and_update_entry_fields",
+      "persist_autofill_mutation",
+      "clear_entry_totp",
+      "set_entry_passkey",
+      "clear_entry_passkey",
+      "delete_entry",
+      "get_entry_detail",
+      "get_entry_history_detail",
+      "get_entry_attachment_content",
+      "add_entry_attachment",
+      "update_entry_attachment_metadata",
+      "replace_entry_attachment_content",
+      "delete_entry_attachment",
+      "disable_quick_unlock_for_current_vault"
+    ];
+
+    for (const type of commandTypes) {
+      const request = bridge.send({ version: 1, command: { type } });
+      expect(port.postMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({ requestTimeoutMs: 56_789 })
+      );
+      port.emitMessage({ type: "error", code: "test", message: "test response" });
+      await expect(request).resolves.toMatchObject({ code: "test" });
+    }
+
+    for (const update of [{ credentials: {} }, { encryption: {} }]) {
+      const request = bridge.send({
+        version: 1,
+        command: { type: "update_database_settings", update }
+      });
+      expect(port.postMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({ requestTimeoutMs: 56_789 })
+      );
+      port.emitMessage({ type: "error", code: "test", message: "test response" });
+      await expect(request).resolves.toMatchObject({ code: "test" });
+    }
+  });
+
+  it("keeps the default timeout for database metadata updates", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 1_234,
+      interactiveTimeoutMs: 56_789
+    });
+
+    const request = bridge.send({
+      version: 1,
+      command: {
+        type: "update_database_settings",
+        vault_id: "vault-1",
+        update: { metadata: { name: "Renamed" } }
+      }
+    });
+
+    expect(port.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requestTimeoutMs: 1_234 })
+    );
+    port.emitMessage({ type: "saved" });
+    await expect(request).resolves.toEqual({ type: "saved" });
+  });
+
   it("accepts untagged success responses from a legacy native host", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
