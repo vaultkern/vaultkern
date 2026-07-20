@@ -386,6 +386,7 @@ export function App({
   const [entryActionBusy, setEntryActionBusy] = useState(false);
   const [saveAndContinueBusy, setSaveAndContinueBusy] = useState(false);
   const saveDraftInFlight = useRef<Promise<boolean> | null>(null);
+  const entryDraftBaseline = useRef<EntryDetail | null>(null);
   const saveAndContinueInFlight = useRef(false);
   const [showEntryListWithDetail, setShowEntryListWithDetail] = useState(false);
   const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
@@ -552,6 +553,7 @@ export function App({
   }
 
   function resetEditorState(nextMode: EntryEditorMode = "view") {
+    entryDraftBaseline.current = null;
     setEditorMode(nextMode);
     setDraft(null);
     setPendingEntrySave(null);
@@ -1800,6 +1802,25 @@ export function App({
   ]);
 
   useEffect(() => {
+    if (editorMode !== "edit" || !entryDetail) {
+      return;
+    }
+    const baseline = entryDraftBaseline.current;
+    if (!baseline || baseline.id !== entryDetail.id) {
+      entryDraftBaseline.current = entryDetail;
+      return;
+    }
+    if (baseline === entryDetail) {
+      return;
+    }
+
+    entryDraftBaseline.current = entryDetail;
+    setDraft((current) =>
+      current ? rebaseEntryDraft(baseline, current, entryDetail) : current
+    );
+  }, [editorMode, entryDetail]);
+
+  useEffect(() => {
     if (!session?.activeVaultId) {
       setDatabaseName(null);
       return;
@@ -2245,6 +2266,7 @@ export function App({
                   return;
                 }
 
+                entryDraftBaseline.current = entryDetail;
                 setDraft(entryToDraft(entryDetail));
                 setShowEntryListWithDetail(true);
                 setEditorMode("edit");
@@ -2573,6 +2595,98 @@ function entryToDraft(entry: EntryDetail): EntryDraft {
     totpUri: entry.totpUri ?? null,
     customFields: entry.customFields?.map((field) => ({ ...field })) ?? []
   };
+}
+
+function rebaseEntryDraft(
+  previousEntry: EntryDetail,
+  current: EntryDraft,
+  nextEntry: EntryDetail
+): EntryDraft {
+  const previous = entryToDraft(previousEntry);
+  const next = entryToDraft(nextEntry);
+  return {
+    title: current.title === previous.title ? next.title : current.title,
+    username:
+      current.username === previous.username ? next.username : current.username,
+    password:
+      current.password === previous.password ? next.password : current.password,
+    url: current.url === previous.url ? next.url : current.url,
+    notes: current.notes === previous.notes ? next.notes : current.notes,
+    totpUri:
+      (current.totpUri ?? null) === (previous.totpUri ?? null)
+        ? next.totpUri
+        : current.totpUri,
+    customFields: rebaseCustomFields(
+      previous.customFields,
+      current.customFields,
+      next.customFields
+    )
+  };
+}
+
+function rebaseCustomFields(
+  previous: EntryDraft["customFields"],
+  current: EntryDraft["customFields"],
+  next: EntryDraft["customFields"]
+): EntryDraft["customFields"] {
+  const previousByKey = uniqueCustomFieldsByKey(previous);
+  const currentByKey = uniqueCustomFieldsByKey(current);
+  const nextByKey = uniqueCustomFieldsByKey(next);
+  if (!previousByKey || !currentByKey || !nextByKey) {
+    return current.map((field) => ({ ...field }));
+  }
+
+  const deletedLocally = new Set(
+    previous
+      .filter((field) => !currentByKey.has(field.key))
+      .map((field) => field.key)
+  );
+  const rebased = next
+    .filter((field) => !deletedLocally.has(field.key))
+    .map((field) => ({ ...field }));
+  const rebasedIndexes = new Map(
+    rebased.map((field, index) => [field.key, index] as const)
+  );
+
+  for (const field of current) {
+    const previousField = previousByKey.get(field.key);
+    if (previousField && customFieldMatches(field, previousField)) {
+      continue;
+    }
+    const localField = { ...field };
+    const rebasedIndex = rebasedIndexes.get(field.key);
+    if (rebasedIndex === undefined) {
+      rebasedIndexes.set(field.key, rebased.length);
+      rebased.push(localField);
+    } else {
+      rebased[rebasedIndex] = localField;
+    }
+  }
+  return rebased;
+}
+
+function uniqueCustomFieldsByKey(
+  fields: EntryDraft["customFields"]
+): Map<string, EntryDraft["customFields"][number]> | null {
+  const byKey = new Map<string, EntryDraft["customFields"][number]>();
+  for (const field of fields) {
+    if (byKey.has(field.key)) {
+      return null;
+    }
+    byKey.set(field.key, field);
+  }
+  return byKey;
+}
+
+function customFieldMatches(
+  left: EntryDraft["customFields"][number],
+  right: EntryDraft["customFields"][number]
+): boolean {
+  return (
+    left.key === right.key &&
+    left.value === right.value &&
+    left.protected === right.protected
+  );
 }
 
 function draftMatchesEntry(draft: EntryDraft, entry: EntryDetail): boolean {
