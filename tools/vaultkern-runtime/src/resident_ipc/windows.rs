@@ -12,8 +12,8 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{Value, json};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError,
-    HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    CloseHandle, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -171,9 +171,20 @@ fn run_server_listener(
 ) {
     loop {
         if let Err(error) = connect_server_pipe(&pipe) {
-            if !shutdown.load(Ordering::Acquire) {
-                eprintln!("resident IPC accept failed: {error:#}");
+            if shutdown.load(Ordering::Acquire) {
+                return;
             }
+            if error
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error)
+                == Some(ERROR_NO_DATA as i32)
+            {
+                unsafe {
+                    DisconnectNamedPipe(pipe.handle());
+                }
+                continue;
+            }
+            eprintln!("resident IPC accept failed: {error:#}");
             return;
         }
         if shutdown.load(Ordering::Acquire) {
@@ -783,22 +794,9 @@ fn connect_server_pipe(pipe: &Pipe) -> Result<()> {
 
 fn open_client_pipe(pipe_name: &[u16]) -> Result<Pipe> {
     let flags = SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION | SECURITY_EFFECTIVE_ONLY;
-    let mut handle = unsafe {
-        CreateFileW(
-            pipe_name.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
-            0,
-            null(),
-            OPEN_EXISTING,
-            flags,
-            null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE && unsafe { GetLastError() } == ERROR_PIPE_BUSY {
-        if unsafe { WaitNamedPipeW(pipe_name.as_ptr(), PIPE_CONNECT_WAIT_MS) } == 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        handle = unsafe {
+    let deadline = Instant::now() + Duration::from_millis(PIPE_CONNECT_WAIT_MS.into());
+    loop {
+        let handle = unsafe {
             CreateFileW(
                 pipe_name.as_ptr(),
                 GENERIC_READ | GENERIC_WRITE,
@@ -809,8 +807,25 @@ fn open_client_pipe(pipe_name: &[u16]) -> Result<Pipe> {
                 null_mut(),
             )
         };
+        if handle != INVALID_HANDLE_VALUE && !handle.is_null() {
+            return Pipe::from_created(handle).context("open resident IPC pipe");
+        }
+
+        let error = unsafe { GetLastError() };
+        if error != ERROR_PIPE_BUSY {
+            return Err(std::io::Error::from_raw_os_error(error as i32))
+                .context("CreateFileW for resident IPC pipe failed");
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::from_raw_os_error(error as i32))
+                .context("CreateFileW for resident IPC pipe timed out");
+        }
+        let wait_ms = remaining.as_millis().clamp(1, u32::MAX as u128) as u32;
+        unsafe {
+            WaitNamedPipeW(pipe_name.as_ptr(), wait_ms);
+        }
     }
-    Pipe::from_created(handle).context("CreateFileW for resident IPC pipe failed")
 }
 
 fn verify_pipe_client(pipe: &Pipe, expected_sid: &[u8]) -> Result<()> {
@@ -1352,6 +1367,26 @@ mod tests {
         .expect("start resident IPC server");
         let identity = ProcessIdentity::current().expect("current identity");
         let pipe_name = wide_nul(&format!("{PIPE_PREFIX}{}", identity.sid_string));
+        let client_count = 16;
+        let start = Arc::new(std::sync::Barrier::new(client_count + 1));
+        let clients = (0..client_count)
+            .map(|_| {
+                let pipe_name = pipe_name.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    open_client_pipe(&pipe_name).map(drop)
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        for client in clients {
+            client
+                .join()
+                .expect("concurrent native shim thread")
+                .expect("concurrent native shim connection");
+        }
+
         let pipe = open_client_pipe(&pipe_name).expect("connect resident IPC client");
         verify_pipe_server(&pipe, &identity.sid).expect("verify resident IPC server");
         perform_client_handshake(&pipe, EXTENSION_ORIGIN, None).expect("negotiate resident IPC");
