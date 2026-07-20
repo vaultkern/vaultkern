@@ -9,6 +9,7 @@
 
 #include "passkey_plugin.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -43,29 +44,79 @@ constexpr wchar_t kHelloDisplayHint[] = L"Verify this VaultKern passkey operatio
 struct CachedCredential {
     std::vector<BYTE> credential_id;
     std::wstring rp_id;
+    std::wstring rp_name;
+    std::vector<BYTE> user_id;
     std::wstring user_name;
+    std::wstring user_display_name;
 };
 
 std::mutex g_credential_cache_mutex;
+std::mutex g_credential_metadata_mutex;
 std::vector<CachedCredential> g_credential_cache;
 
 void CacheCredential(
     const BYTE* credential_id,
     DWORD credential_id_size,
     PCWSTR rp_id,
-    PCWSTR user_name) {
+    PCWSTR rp_name,
+    const BYTE* user_id,
+    DWORD user_id_size,
+    PCWSTR user_name,
+    PCWSTR user_display_name) {
     CachedCredential cached{
         {credential_id, credential_id + credential_id_size},
         rp_id,
-        user_name};
+        rp_name,
+        {user_id, user_id + user_id_size},
+        user_name,
+        user_display_name};
     std::lock_guard<std::mutex> lock(g_credential_cache_mutex);
-    for (auto& credential : g_credential_cache) {
-        if (credential.credential_id == cached.credential_id) {
-            credential = std::move(cached);
-            return;
+    g_credential_cache.erase(
+        std::remove_if(
+            g_credential_cache.begin(),
+            g_credential_cache.end(),
+            [&cached](const CachedCredential& credential) {
+                return credential.credential_id == cached.credential_id ||
+                    (credential.rp_id == cached.rp_id &&
+                     credential.user_id == cached.user_id);
+            }),
+        g_credential_cache.end());
+    g_credential_cache.push_back(std::move(cached));
+}
+
+std::vector<CachedCredential> SupersededCredentials(
+    const BYTE* credential_id,
+    DWORD credential_id_size,
+    PCWSTR rp_id,
+    const BYTE* user_id,
+    DWORD user_id_size) {
+    std::vector<BYTE> next_credential_id(
+        credential_id,
+        credential_id + credential_id_size);
+    std::vector<BYTE> account_user_id(user_id, user_id + user_id_size);
+    std::vector<CachedCredential> superseded;
+    std::lock_guard<std::mutex> lock(g_credential_cache_mutex);
+    for (const auto& credential : g_credential_cache) {
+        if (credential.rp_id == rp_id &&
+            credential.user_id == account_user_id &&
+            credential.credential_id != next_credential_id) {
+            superseded.push_back(credential);
         }
     }
-    g_credential_cache.push_back(std::move(cached));
+    return superseded;
+}
+
+WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS NativeCredential(
+    const CachedCredential& credential) noexcept {
+    return {
+        static_cast<DWORD>(credential.credential_id.size()),
+        credential.credential_id.data(),
+        credential.rp_id.c_str(),
+        credential.rp_name.c_str(),
+        static_cast<DWORD>(credential.user_id.size()),
+        credential.user_id.data(),
+        credential.user_name.c_str(),
+        credential.user_display_name.c_str()};
 }
 
 void ReplaceCredentialCache(std::vector<CachedCredential> credentials) {
@@ -445,10 +496,44 @@ HRESULT AddCredentialMetadata(
         REFCLSID,
         DWORD,
         PCWEBAUTHN_PLUGIN_CREDENTIAL_DETAILS);
+    using RemoveCredentials = HRESULT(WINAPI*)(
+        REFCLSID,
+        DWORD,
+        PCWEBAUTHN_PLUGIN_CREDENTIAL_DETAILS);
     auto add =
         WebAuthnFunction<AddCredentials>("WebAuthNPluginAuthenticatorAddCredentials");
-    if (!add) {
+    auto remove = WebAuthnFunction<RemoveCredentials>(
+        "WebAuthNPluginAuthenticatorRemoveCredentials");
+    if (!add || !remove) {
         return E_NOTIMPL;
+    }
+    std::lock_guard<std::mutex> metadata_lock(g_credential_metadata_mutex);
+    std::vector<CachedCredential> superseded;
+    std::vector<WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS> superseded_details;
+    try {
+        superseded = SupersededCredentials(
+            credential_id.data,
+            credential_id.len,
+            rp_id,
+            user_id,
+            user_id_size);
+        superseded_details.reserve(superseded.size());
+        for (const auto& credential : superseded) {
+            superseded_details.push_back(NativeCredential(credential));
+        }
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    } catch (...) {
+        return E_FAIL;
+    }
+    if (!superseded_details.empty()) {
+        const HRESULT remove_result = remove(
+            kPluginClsid,
+            static_cast<DWORD>(superseded_details.size()),
+            superseded_details.data());
+        if (FAILED(remove_result)) {
+            return remove_result;
+        }
     }
     WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS details{
         credential_id.len,
@@ -466,7 +551,11 @@ HRESULT AddCredentialMetadata(
                 credential_id.data,
                 credential_id.len,
                 rp_id,
-                user_name);
+                rp_name ? rp_name : rp_id,
+                user_id,
+                user_id_size,
+                user_name,
+                user_display_name ? user_display_name : user_name);
         } catch (const std::bad_alloc&) {
             return E_OUTOFMEMORY;
         } catch (...) {
@@ -1067,6 +1156,7 @@ extern "C" int32_t VK_CALL vaultkern_plugin_remove_registered(void) {
     if (!remove) {
         return E_NOTIMPL;
     }
+    std::lock_guard<std::mutex> metadata_lock(g_credential_metadata_mutex);
     HRESULT result = remove(kPluginClsid);
     if (result == NTE_NOT_FOUND) {
         result = S_OK;
@@ -1095,6 +1185,7 @@ extern "C" int32_t VK_CALL vaultkern_plugin_sync_credentials(
     if (!remove_all || !add) {
         return E_NOTIMPL;
     }
+    std::lock_guard<std::mutex> metadata_lock(g_credential_metadata_mutex);
     HRESULT result = remove_all(kPluginClsid);
     if (FAILED(result)) {
         return result;
@@ -1129,7 +1220,11 @@ extern "C" int32_t VK_CALL vaultkern_plugin_sync_credentials(
                 {credential.credential_id.data,
                  credential.credential_id.data + credential.credential_id.len},
                 reinterpret_cast<PCWSTR>(credential.rp_id),
-                reinterpret_cast<PCWSTR>(credential.user_name)});
+                reinterpret_cast<PCWSTR>(credential.rp_name),
+                {credential.user_handle.data,
+                 credential.user_handle.data + credential.user_handle.len},
+                reinterpret_cast<PCWSTR>(credential.user_name),
+                reinterpret_cast<PCWSTR>(credential.user_display_name)});
         }
         result = add(
             kPluginClsid,
@@ -1144,4 +1239,40 @@ extern "C" int32_t VK_CALL vaultkern_plugin_sync_credentials(
     } catch (...) {
         return E_FAIL;
     }
+}
+
+extern "C" int32_t VK_CALL
+vaultkern_plugin_test_replaces_cached_account_credential(void) {
+    const BYTE old_credential_id[]{0x01};
+    const BYTE new_credential_id[]{0x02};
+    const BYTE user_id[]{0x0a};
+    ReplaceCredentialCache({});
+    CacheCredential(
+        old_credential_id,
+        ARRAYSIZE(old_credential_id),
+        L"example.com",
+        L"Example",
+        user_id,
+        ARRAYSIZE(user_id),
+        L"old-name",
+        L"Old Name");
+    CacheCredential(
+        new_credential_id,
+        ARRAYSIZE(new_credential_id),
+        L"example.com",
+        L"Example",
+        user_id,
+        ARRAYSIZE(user_id),
+        L"new-name",
+        L"New Name");
+    SelectedCredential selected;
+    const HRESULT result = SelectCredential(L"example.com", {}, selected);
+    ReplaceCredentialCache({});
+    if (FAILED(result)) {
+        return result;
+    }
+    return selected.credential_id ==
+            std::vector<BYTE>(new_credential_id, new_credential_id + ARRAYSIZE(new_credential_id))
+        ? S_OK
+        : E_FAIL;
 }
