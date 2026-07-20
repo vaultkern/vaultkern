@@ -1898,7 +1898,13 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [client, entryDetail?.id, selectedEntryId, session?.activeVaultId]);
+  }, [
+    client,
+    entryDetail?.id,
+    selectedEntryId,
+    session?.activeVaultId,
+    workspaceReloadKey
+  ]);
 
   if (!session) {
     if (sessionError) {

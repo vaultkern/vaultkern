@@ -2880,6 +2880,7 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
   expect(screen.getByText("Vault changed on disk. Merged and saved.")).toBeInTheDocument();
   expect(screen.getByText("Remote Winner")).toBeInTheDocument();
   expect(client.getEntryDetail).toHaveBeenCalledTimes(2);
+  expect(client.listEntryHistory).toHaveBeenCalledTimes(2);
 
   await act(async () => {
     vi.advanceTimersByTime(3000);
