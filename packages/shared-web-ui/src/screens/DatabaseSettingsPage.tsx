@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import type {
   DatabaseEncryptionSettings,
@@ -49,12 +49,18 @@ export function DatabaseSettingsPage({
 }) {
   const text = useText();
   const [draft, setDraft] = useState<Draft>(() => createDraft(settings));
+  const draftBaseline = useRef(settings);
 
   useEffect(() => {
     if (settings) {
-      setDraft(createDraft(settings));
+      setDraft((current) =>
+        pendingSave
+          ? createDraft(settings)
+          : rebaseDraft(draftBaseline.current, current, settings)
+      );
+      draftBaseline.current = settings;
     }
-  }, [settings]);
+  }, [pendingSave, settings]);
 
   useLayoutEffect(() => {
     onDraftChange?.(
@@ -340,6 +346,24 @@ function createUpdate(settings: DatabaseSettings, draft: Draft): DatabaseSetting
     encryption,
     autosaveDelaySeconds: parseOptionalInteger(draft.autosaveDelaySeconds) ?? 0
   };
+}
+
+function rebaseDraft(
+  previousSettings: DatabaseSettings | null,
+  current: Draft,
+  nextSettings: DatabaseSettings
+): Draft {
+  const next = createDraft(nextSettings);
+  if (!previousSettings) {
+    return next;
+  }
+  const previous = createDraft(previousSettings);
+  return Object.fromEntries(
+    (Object.keys(next) as Array<keyof Draft>).map((key) => [
+      key,
+      current[key] === previous[key] ? next[key] : current[key]
+    ])
+  ) as Draft;
 }
 
 function draftsMatch(left: Draft, right: Draft): boolean {
