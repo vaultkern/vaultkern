@@ -5009,16 +5009,25 @@ impl Runtime {
         vault: Vault,
         bytes: Vec<u8>,
         fingerprint: VaultSourceFingerprint,
-        source_status: Option<VaultSourceStatusDto>,
+        mut source_status: Option<VaultSourceStatusDto>,
     ) -> Result<()> {
         let save_profile = self.inspected_save_profile(&bytes)?;
         let synced = source_status
             .as_ref()
             .is_none_or(|status| status.remote_state == "online");
-        if synced {
-            self.synced_bases
-                .store(vault_id, &bytes)
-                .with_context(|| format!("failed to store synced base: {vault_id}"))?;
+        let base_warning = synced
+            .then(|| self.synced_bases.store(vault_id, &bytes).err())
+            .flatten()
+            .map(|error| format!("failed to store synced base for {vault_id}: {error}"));
+        if let Some(warning) = base_warning {
+            if let Some(status) = source_status.as_mut() {
+                status.last_error = Some(match status.last_error.take() {
+                    Some(previous) => format!("{previous}; {warning}"),
+                    None => warning,
+                });
+            } else {
+                self.record_local_save_warnings(vec![warning]);
+            }
         }
         let loaded = self
             .vault_session
@@ -9940,6 +9949,56 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn committed_onedrive_save_survives_synced_base_write_failure() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_100);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        create_demo_entry(&mut runtime, &vault_id);
+        runtime.synced_bases.fail_next_store_for_tests();
+
+        let response = runtime
+            .save_vault(&vault_id)
+            .expect("the remote KDBX commit already succeeded");
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+        assert!(
+            runtime
+                .session_state()
+                .source_status
+                .and_then(|status| status.last_error)
+                .is_some_and(|error| error.contains("failed to store synced base"))
+        );
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        assert_eq!(
+            KeepassCore::new()
+                .load_kdbx(
+                    &runtime
+                        .read_test_onedrive_item_bytes("drive-1", "item-1")
+                        .unwrap(),
+                    &key,
+                )
+                .unwrap()
+                .root
+                .entries
+                .len(),
+            1
+        );
+        assert!(matches!(
+            runtime.save_vault(&vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
     }
 
     struct RejectingWarningWriter;
