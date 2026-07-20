@@ -413,6 +413,7 @@ export function App({
     null
   );
   const [extensionSettingsSaving, setExtensionSettingsSaving] = useState(false);
+  const extensionSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
   const [extensionSettingsDraft, setExtensionSettingsDraft] =
     useState<ExtensionSettings | null>(null);
   const [extensionSettingsDraftDirty, setExtensionSettingsDraftDirty] =
@@ -465,7 +466,22 @@ export function App({
     setRecentVaults(sortedVaults);
   }
 
-  async function saveExtensionSettings(nextSettings: ExtensionSettings) {
+  function saveExtensionSettings(nextSettings: ExtensionSettings) {
+    if (extensionSettingsSaveInFlight.current) {
+      return extensionSettingsSaveInFlight.current;
+    }
+
+    const operation = persistExtensionSettings(nextSettings);
+    extensionSettingsSaveInFlight.current = operation;
+    void operation.finally(() => {
+      if (extensionSettingsSaveInFlight.current === operation) {
+        extensionSettingsSaveInFlight.current = null;
+      }
+    });
+    return operation;
+  }
+
+  async function persistExtensionSettings(nextSettings: ExtensionSettings) {
     setExtensionSettingsSaving(true);
     setExtensionSettingsError(null);
 

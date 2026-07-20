@@ -473,6 +473,42 @@ it("confirms before leaving unsaved extension settings", async () => {
   expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
 });
 
+it("coalesces save-and-continue with an extension settings save already in flight", async () => {
+  const settingsStore = createSettingsStore();
+  const save = createDeferred<void>();
+  settingsStore.save = vi.fn(() => save.promise);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    }),
+    listRecentVaults: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+  fireEvent.change(await screen.findByLabelText("Recent Databases"), {
+    target: { value: "4" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+  await screen.findByRole("button", { name: "Saving..." });
+
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(settingsStore.save).toHaveBeenCalledTimes(1);
+
+  save.resolve();
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  expect(settingsStore.save).toHaveBeenCalledTimes(1);
+});
+
 it("does not save quick unlock as enabled when the host does not support it", async () => {
   const settingsStore = createSettingsStore();
   const client = {
