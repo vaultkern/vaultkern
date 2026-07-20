@@ -584,7 +584,6 @@ fn merge_entry(
     field!(password);
     field!(url);
     field!(notes);
-    field!(field_protection);
     field!(tags);
     field!(foreground_color);
     field!(background_color);
@@ -600,6 +599,42 @@ fn merge_entry(
     field!(raw_state);
     field!(opaque_xml);
     field!(custom_data_blocks);
+
+    merged.field_protection.protect_title = merge_value(
+        &base.field_protection.protect_title,
+        &local.field_protection.protect_title,
+        &remote.field_protection.protect_title,
+        prefer_local,
+        &mut state,
+    );
+    merged.field_protection.protect_username = merge_value(
+        &base.field_protection.protect_username,
+        &local.field_protection.protect_username,
+        &remote.field_protection.protect_username,
+        prefer_local,
+        &mut state,
+    );
+    merged.field_protection.protect_password = merge_value(
+        &base.field_protection.protect_password,
+        &local.field_protection.protect_password,
+        &remote.field_protection.protect_password,
+        prefer_local,
+        &mut state,
+    );
+    merged.field_protection.protect_url = merge_value(
+        &base.field_protection.protect_url,
+        &local.field_protection.protect_url,
+        &remote.field_protection.protect_url,
+        prefer_local,
+        &mut state,
+    );
+    merged.field_protection.protect_notes = merge_value(
+        &base.field_protection.protect_notes,
+        &local.field_protection.protect_notes,
+        &remote.field_protection.protect_notes,
+        prefer_local,
+        &mut state,
+    );
 
     let (icon_id, custom_icon_id) = merge_value(
         &(base.icon_id, base.custom_icon_id),

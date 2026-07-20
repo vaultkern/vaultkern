@@ -87,6 +87,25 @@ fn independent_entry_fields_and_keyed_units_are_rebased_onto_remote() {
 }
 
 #[test]
+fn independent_standard_field_protection_changes_are_rebased_per_field() {
+    let (base, entry_id) = base_vault();
+    let mut local = base.clone();
+    let local_entry = entry_mut(&mut local.root, entry_id).unwrap();
+    local_entry.field_protection.protect_title = true;
+    local_entry.modified_at = 20;
+
+    let mut remote = base.clone();
+    let remote_entry = entry_mut(&mut remote.root, entry_id).unwrap();
+    remote_entry.field_protection.protect_password = false;
+    remote_entry.modified_at = 30;
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    let merged = entry(&patched.vault.root, entry_id).unwrap();
+    assert!(merged.field_protection.protect_title);
+    assert!(!merged.field_protection.protect_password);
+}
+
+#[test]
 fn totp_and_passkey_are_independent_whole_units() {
     let (mut base, entry_id) = base_vault();
     let base_entry = entry_mut(&mut base.root, entry_id).unwrap();
