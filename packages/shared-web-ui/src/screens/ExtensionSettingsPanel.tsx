@@ -33,7 +33,7 @@ export function ExtensionSettingsPanel({
   quickUnlockError = null,
   onEnrollQuickUnlock,
   onSave,
-  onDraftChange,
+  onDraftChange
 }: ExtensionSettingsPanelProps) {
   const text = useText();
   const [draft, setDraft] = useState(() => toDraft(settings));
@@ -54,10 +54,7 @@ export function ExtensionSettingsPanel({
 
   useLayoutEffect(() => {
     const nextSettings = settingsFromDraft(draft, quickUnlockAvailable);
-    onDraftChange?.(
-      nextSettings,
-      !extensionSettingsMatch(nextSettings, settings),
-    );
+    onDraftChange?.(nextSettings, !extensionSettingsMatch(nextSettings, settings));
   }, [draft, onDraftChange, quickUnlockAvailable, settings]);
 
   return (
@@ -72,9 +69,7 @@ export function ExtensionSettingsPanel({
         <div>
           <h2 style={headingStyle}>{text("Extension Settings")}</h2>
           <p style={descriptionStyle}>
-            {text(
-              "Local extension preferences. These are not stored in the KDBX database.",
-            )}
+            {text("Local extension preferences. These are not stored in the KDBX database.")}
           </p>
         </div>
         <button type="submit" disabled={saving} style={primaryButtonStyle}>
@@ -83,185 +78,171 @@ export function ExtensionSettingsPanel({
       </div>
 
       <fieldset disabled={saving} style={settingsFieldsetStyle}>
-        <div style={gridStyle}>
-          <label style={fieldStyle}>
-            {text("Recent Databases")}
-            <input
-              aria-label={text("Recent Databases")}
-              type="number"
-              min={1}
-              max={50}
-              value={draft.recentVaultLimit}
-              onChange={(event) =>
-                setDraft({ ...draft, recentVaultLimit: event.target.value })
-              }
-              style={inputStyle}
-            />
-          </label>
-          <label style={fieldStyle}>
-            {text("Idle Lock Minutes")}
-            <input
-              aria-label={text("Idle Lock Minutes")}
-              type="number"
-              min={0}
-              max={240}
-              value={draft.idleLockMinutes}
-              onChange={(event) =>
-                setDraft({ ...draft, idleLockMinutes: event.target.value })
-              }
-              style={inputStyle}
-            />
-          </label>
-          <label style={fieldStyle}>
-            {text("Clear Clipboard Seconds")}
-            <input
-              aria-label={text("Clear Clipboard Seconds")}
-              type="number"
-              min={0}
-              max={3600}
-              value={draft.clearClipboardSeconds}
-              onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  clearClipboardSeconds: event.target.value,
-                })
-              }
-              style={inputStyle}
-            />
-          </label>
-          <div style={fieldStyle}>
-            {text("Language")}
-            <div
-              style={segmentedStyle}
-              role="group"
-              aria-label={text("Language")}
-            >
-              <button
-                type="button"
-                onClick={() => setDraft({ ...draft, language: "en" })}
-                style={segmentStyle(draft.language === "en")}
-              >
-                English
-              </button>
-              <button
-                type="button"
-                onClick={() => setDraft({ ...draft, language: "zh-CN" })}
-                style={segmentStyle(draft.language === "zh-CN")}
-              >
-                中文
-              </button>
-            </div>
-          </div>
-          <label style={checkboxFieldStyle}>
-            <input
-              aria-label={text("VaultKern passkey provider")}
-              type="checkbox"
-              checked={draft.passkeyProviderEnabled}
-              onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  passkeyProviderEnabled: event.target.checked,
-                })
-              }
-            />
-            {text("VaultKern passkey provider")}
-          </label>
-          <label style={checkboxFieldStyle}>
-            <input
-              aria-label={text("Page-load autofill")}
-              type="checkbox"
-              checked={draft.autofillOnPageLoadEnabled}
-              onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  autofillOnPageLoadEnabled: event.target.checked,
-                })
-              }
-            />
-            {text("Page-load autofill")}
-          </label>
-        </div>
-        <label style={toggleRowStyle}>
+      <div style={gridStyle}>
+        <label style={fieldStyle}>
+          {text("Recent Databases")}
           <input
-            aria-label={text("Quick Unlock")}
-            type="checkbox"
-            checked={quickUnlockAvailable && draft.quickUnlockEnabled}
-            disabled={quickUnlockBusy || !quickUnlockAvailable}
-            onChange={(event) => {
-              setDraft({ ...draft, quickUnlockEnabled: event.target.checked });
-            }}
+            aria-label={text("Recent Databases")}
+            type="number"
+            min={1}
+            max={50}
+            value={draft.recentVaultLimit}
+            onChange={(event) =>
+              setDraft({ ...draft, recentVaultLimit: event.target.value })
+            }
+            style={inputStyle}
           />
-          <span>{text("Quick Unlock")}</span>
         </label>
-        {quickUnlockAvailable &&
-        quickUnlockEnabled &&
-        draft.quickUnlockEnabled &&
-        !quickUnlockEnrolled ? (
-          <div style={enrollmentStyle}>
-            <p style={noteStyle}>
-              {quickUnlockVaultUnlocked
-                ? text(
-                    "Enter the current master credentials once. VaultKern does not retain them after enrollment.",
-                  )
-                : text("Unlock this vault before enrolling Windows Hello.")}
-            </p>
-            {quickUnlockVaultUnlocked ? (
-              <>
-                <div style={gridStyle}>
-                  <label style={fieldStyle}>
-                    {text("Quick Unlock Master Password")}
-                    <input
-                      aria-label={text("Quick Unlock Master Password")}
-                      type="password"
-                      value={quickUnlockPassword}
-                      onChange={(event) =>
-                        setQuickUnlockPassword(event.target.value)
-                      }
-                      style={inputStyle}
-                    />
-                  </label>
-                  <label style={fieldStyle}>
-                    {text("Quick Unlock Key File Path")}
-                    <input
-                      aria-label={text("Quick Unlock Key File Path")}
-                      type="text"
-                      value={quickUnlockKeyFilePath}
-                      onChange={(event) =>
-                        setQuickUnlockKeyFilePath(event.target.value)
-                      }
-                      style={inputStyle}
-                    />
-                  </label>
-                </div>
-                <button
-                  type="button"
-                  disabled={
-                    quickUnlockBusy ||
-                    (!quickUnlockPassword.trim() &&
-                      !quickUnlockKeyFilePath.trim())
-                  }
-                  style={primaryButtonStyle}
-                  onClick={() => {
-                    void onEnrollQuickUnlock?.({
-                      password: quickUnlockPassword,
-                      keyFilePath: quickUnlockKeyFilePath,
-                    });
-                  }}
-                >
-                  {quickUnlockBusy
-                    ? text("Enrolling...")
-                    : text("Enable Windows Hello")}
-                </button>
-              </>
-            ) : null}
+        <label style={fieldStyle}>
+          {text("Idle Lock Minutes")}
+          <input
+            aria-label={text("Idle Lock Minutes")}
+            type="number"
+            min={0}
+            max={240}
+            value={draft.idleLockMinutes}
+            onChange={(event) =>
+              setDraft({ ...draft, idleLockMinutes: event.target.value })
+            }
+            style={inputStyle}
+          />
+        </label>
+        <label style={fieldStyle}>
+          {text("Clear Clipboard Seconds")}
+          <input
+            aria-label={text("Clear Clipboard Seconds")}
+            type="number"
+            min={0}
+            max={3600}
+            value={draft.clearClipboardSeconds}
+            onChange={(event) =>
+              setDraft({ ...draft, clearClipboardSeconds: event.target.value })
+            }
+            style={inputStyle}
+          />
+        </label>
+        <div style={fieldStyle}>
+          {text("Language")}
+          <div style={segmentedStyle} role="group" aria-label={text("Language")}>
+            <button
+              type="button"
+              onClick={() => setDraft({ ...draft, language: "en" })}
+              style={segmentStyle(draft.language === "en")}
+            >
+              English
+            </button>
+            <button
+              type="button"
+              onClick={() => setDraft({ ...draft, language: "zh-CN" })}
+              style={segmentStyle(draft.language === "zh-CN")}
+            >
+              中文
+            </button>
           </div>
-        ) : null}
+        </div>
+        <label style={checkboxFieldStyle}>
+          <input
+            aria-label={text("VaultKern passkey provider")}
+            type="checkbox"
+            checked={draft.passkeyProviderEnabled}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                passkeyProviderEnabled: event.target.checked
+              })
+            }
+          />
+          {text("VaultKern passkey provider")}
+        </label>
+        <label style={checkboxFieldStyle}>
+          <input
+            aria-label={text("Page-load autofill")}
+            type="checkbox"
+            checked={draft.autofillOnPageLoadEnabled}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                autofillOnPageLoadEnabled: event.target.checked
+              })
+            }
+          />
+          {text("Page-load autofill")}
+        </label>
+      </div>
+      <label style={toggleRowStyle}>
+        <input
+          aria-label={text("Quick Unlock")}
+          type="checkbox"
+          checked={quickUnlockAvailable && draft.quickUnlockEnabled}
+          disabled={quickUnlockBusy || !quickUnlockAvailable}
+          onChange={(event) => {
+            setDraft({ ...draft, quickUnlockEnabled: event.target.checked });
+          }}
+        />
+        <span>{text("Quick Unlock")}</span>
+      </label>
+      {quickUnlockAvailable &&
+      quickUnlockEnabled &&
+      draft.quickUnlockEnabled &&
+      !quickUnlockEnrolled ? (
+        <div style={enrollmentStyle}>
+          <p style={noteStyle}>
+            {quickUnlockVaultUnlocked
+              ? text(
+                  "Enter the current master credentials once. VaultKern does not retain them after enrollment."
+                )
+              : text("Unlock this vault before enrolling Windows Hello.")}
+          </p>
+          {quickUnlockVaultUnlocked ? (
+            <>
+              <div style={gridStyle}>
+                <label style={fieldStyle}>
+                  {text("Quick Unlock Master Password")}
+                  <input
+                    aria-label={text("Quick Unlock Master Password")}
+                    type="password"
+                    value={quickUnlockPassword}
+                    onChange={(event) => setQuickUnlockPassword(event.target.value)}
+                    style={inputStyle}
+                  />
+                </label>
+                <label style={fieldStyle}>
+                  {text("Quick Unlock Key File Path")}
+                  <input
+                    aria-label={text("Quick Unlock Key File Path")}
+                    type="text"
+                    value={quickUnlockKeyFilePath}
+                    onChange={(event) => setQuickUnlockKeyFilePath(event.target.value)}
+                    style={inputStyle}
+                  />
+                </label>
+              </div>
+              <button
+                type="button"
+                disabled={
+                  quickUnlockBusy ||
+                  (!quickUnlockPassword.trim() && !quickUnlockKeyFilePath.trim())
+                }
+                style={primaryButtonStyle}
+                onClick={() => {
+                  void onEnrollQuickUnlock?.({
+                    password: quickUnlockPassword,
+                    keyFilePath: quickUnlockKeyFilePath
+                  });
+                }}
+              >
+                {quickUnlockBusy
+                  ? text("Enrolling...")
+                  : text("Enable Windows Hello")}
+              </button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
       </fieldset>
       {quickUnlockError ? <div role="alert">{quickUnlockError}</div> : null}
       <p style={noteStyle}>
-        {text(
-          "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.",
-        )}
+        {text("Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.")}
       </p>
       {error ? <div role="alert">{error}</div> : null}
     </form>
@@ -276,13 +257,13 @@ function toDraft(settings: ExtensionSettings) {
     clearClipboardSeconds: String(settings.clearClipboardSeconds),
     autofillOnPageLoadEnabled: settings.autofillOnPageLoadEnabled,
     passkeyProviderEnabled: settings.passkeyProviderEnabled,
-    quickUnlockEnabled: settings.quickUnlockEnabled,
+    quickUnlockEnabled: settings.quickUnlockEnabled
   };
 }
 
 function settingsFromDraft(
   draft: ReturnType<typeof toDraft>,
-  quickUnlockAvailable: boolean,
+  quickUnlockAvailable: boolean
 ): ExtensionSettings {
   return {
     recentVaultLimit: parseBoundedInteger(draft.recentVaultLimit, 1, 50, 10),
@@ -292,20 +273,20 @@ function settingsFromDraft(
       draft.clearClipboardSeconds,
       0,
       3600,
-      30,
+      30
     ),
     autofillOnPageLoadEnabled: draft.autofillOnPageLoadEnabled,
     passkeyProviderEnabled: draft.passkeyProviderEnabled,
-    quickUnlockEnabled: quickUnlockAvailable && draft.quickUnlockEnabled,
+    quickUnlockEnabled: quickUnlockAvailable && draft.quickUnlockEnabled
   };
 }
 
 function extensionSettingsMatch(
   left: ExtensionSettings,
-  right: ExtensionSettings,
+  right: ExtensionSettings
 ): boolean {
   return (Object.keys(left) as Array<keyof ExtensionSettings>).every(
-    (key) => left[key] === right[key],
+    (key) => left[key] === right[key]
   );
 }
 
@@ -313,7 +294,7 @@ function parseBoundedInteger(
   value: string,
   min: number,
   max: number,
-  fallback: number,
+  fallback: number
 ) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) {
@@ -329,7 +310,7 @@ const panelStyle: CSSProperties = {
   borderRadius: archiveTheme.radius.panel,
   padding: archiveTheme.spacing.lg,
   background: archiveTheme.colors.surface,
-  boxShadow: archiveTheme.shadow.panel,
+  boxShadow: archiveTheme.shadow.panel
 };
 
 const titleRowStyle: CSSProperties = {
@@ -337,7 +318,7 @@ const titleRowStyle: CSSProperties = {
   flexWrap: "wrap",
   alignItems: "start",
   justifyContent: "space-between",
-  gap: archiveTheme.spacing.md,
+  gap: archiveTheme.spacing.md
 };
 
 const settingsFieldsetStyle: CSSProperties = {
@@ -346,33 +327,33 @@ const settingsFieldsetStyle: CSSProperties = {
   minWidth: 0,
   margin: 0,
   padding: 0,
-  border: 0,
+  border: 0
 };
 
 const headingStyle: CSSProperties = {
   margin: 0,
   fontFamily: archiveTheme.font.display,
   fontSize: "1.5rem",
-  fontWeight: 600,
+  fontWeight: 600
 };
 
 const descriptionStyle: CSSProperties = {
   margin: `${archiveTheme.spacing.xs} 0 0`,
   color: archiveTheme.colors.textMuted,
-  lineHeight: 1.5,
+  lineHeight: 1.5
 };
 
 const gridStyle: CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
-  gap: archiveTheme.spacing.md,
+  gap: archiveTheme.spacing.md
 };
 
 const fieldStyle: CSSProperties = {
   display: "grid",
   gap: archiveTheme.spacing.xs,
   color: archiveTheme.colors.text,
-  fontFamily: archiveTheme.font.body,
+  fontFamily: archiveTheme.font.body
 };
 
 const checkboxFieldStyle: CSSProperties = {
@@ -381,7 +362,7 @@ const checkboxFieldStyle: CSSProperties = {
   gap: archiveTheme.spacing.sm,
   minHeight: "44px",
   color: archiveTheme.colors.text,
-  fontFamily: archiveTheme.font.body,
+  fontFamily: archiveTheme.font.body
 };
 
 const toggleRowStyle: CSSProperties = {
@@ -389,7 +370,7 @@ const toggleRowStyle: CSSProperties = {
   alignItems: "center",
   gap: archiveTheme.spacing.sm,
   color: archiveTheme.colors.text,
-  fontFamily: archiveTheme.font.body,
+  fontFamily: archiveTheme.font.body
 };
 
 const inputStyle: CSSProperties = {
@@ -400,13 +381,13 @@ const inputStyle: CSSProperties = {
   padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
   background: archiveTheme.colors.surfaceMuted,
   color: archiveTheme.colors.text,
-  fontFamily: archiveTheme.font.body,
+  fontFamily: archiveTheme.font.body
 };
 
 const segmentedStyle: CSSProperties = {
   display: "flex",
   gap: archiveTheme.spacing.xs,
-  flexWrap: "wrap",
+  flexWrap: "wrap"
 };
 
 function segmentStyle(active: boolean): CSSProperties {
@@ -414,11 +395,9 @@ function segmentStyle(active: boolean): CSSProperties {
     border: `1px solid ${active ? archiveTheme.colors.accentStrong : archiveTheme.colors.line}`,
     borderRadius: archiveTheme.radius.pill,
     padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
-    background: active
-      ? archiveTheme.colors.accentStrong
-      : archiveTheme.colors.surfaceMuted,
+    background: active ? archiveTheme.colors.accentStrong : archiveTheme.colors.surfaceMuted,
     color: active ? "#fffaf2" : archiveTheme.colors.text,
-    cursor: "pointer",
+    cursor: "pointer"
   };
 }
 
@@ -428,13 +407,13 @@ const primaryButtonStyle: CSSProperties = {
   padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
   background: archiveTheme.colors.accentStrong,
   color: "#fffaf2",
-  cursor: "pointer",
+  cursor: "pointer"
 };
 
 const noteStyle: CSSProperties = {
   margin: 0,
   color: archiveTheme.colors.textMuted,
-  lineHeight: 1.5,
+  lineHeight: 1.5
 };
 
 const enrollmentStyle: CSSProperties = {
@@ -443,5 +422,5 @@ const enrollmentStyle: CSSProperties = {
   padding: archiveTheme.spacing.md,
   border: `1px solid ${archiveTheme.colors.line}`,
   borderRadius: archiveTheme.radius.field,
-  background: archiveTheme.colors.surfaceMuted,
+  background: archiveTheme.colors.surfaceMuted
 };
