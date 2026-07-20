@@ -45,6 +45,14 @@ enum RuntimeRequest {
         input: PlatformPasskeyAssertionInput,
         response: Sender<Result<PlatformPasskeyAssertionOutput, String>>,
     },
+    #[cfg(test)]
+    TestMutation {
+        cancelled: Arc<AtomicBool>,
+        started: Sender<()>,
+        release: mpsc::Receiver<()>,
+        committed: Arc<AtomicBool>,
+        response: Sender<Value>,
+    },
 }
 
 impl RuntimeBridge {
@@ -152,6 +160,24 @@ impl RuntimeBridge {
                             });
                             let _ = response.send(result);
                         }
+                        #[cfg(test)]
+                        RuntimeRequest::TestMutation {
+                            cancelled,
+                            started,
+                            release,
+                            committed,
+                            response,
+                        } => {
+                            let _ = started.send(());
+                            let _ = release.recv();
+                            committed.store(true, Ordering::Release);
+                            let value = if cancelled.load(Ordering::Acquire) {
+                                cancelled_value()
+                            } else {
+                                serde_json::json!({ "type": "test_mutation_committed" })
+                            };
+                            let _ = response.send(value);
+                        }
                     }
                 }
             })
@@ -222,21 +248,7 @@ impl RuntimeBridge {
             );
         }
 
-        loop {
-            if wait_cancelled.load(Ordering::Acquire) {
-                return cancelled_value();
-            }
-            match receiver.recv_timeout(Duration::from_millis(25)) {
-                Ok(value) => return value,
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
-                    return error_value(
-                        "runtime_unavailable",
-                        "the in-process runtime stopped responding",
-                    );
-                }
-            }
-        }
+        wait_for_runtime_response(receiver, wait_cancelled)
     }
 
     pub fn set_parent_window_handle(&self, parent_window: Option<usize>) -> Result<(), String> {
@@ -312,6 +324,34 @@ impl RuntimeBridge {
             .recv()
             .map_err(|_| "the in-process runtime stopped responding".to_owned())?
     }
+
+    #[cfg(test)]
+    fn request_test_mutation_cancellable(
+        &self,
+        cancelled: Arc<AtomicBool>,
+        started: Sender<()>,
+        release: mpsc::Receiver<()>,
+        committed: Arc<AtomicBool>,
+    ) -> Value {
+        let (response, receiver) = mpsc::channel();
+        if self
+            .requests
+            .send(RuntimeRequest::TestMutation {
+                cancelled: cancelled.clone(),
+                started,
+                release,
+                committed,
+                response,
+            })
+            .is_err()
+        {
+            return error_value(
+                "runtime_unavailable",
+                "the in-process runtime is unavailable",
+            );
+        }
+        wait_for_runtime_response(receiver, cancelled)
+    }
 }
 
 impl Default for RuntimeBridge {
@@ -352,6 +392,24 @@ fn cancelled_value() -> Value {
     error_value("request_cancelled", "the runtime request was cancelled")
 }
 
+fn wait_for_runtime_response(receiver: mpsc::Receiver<Value>, cancelled: Arc<AtomicBool>) -> Value {
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return cancelled_value();
+        }
+        match receiver.recv_timeout(Duration::from_millis(25)) {
+            Ok(value) => return value,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return error_value(
+                    "runtime_unavailable",
+                    "the in-process runtime stopped responding",
+                );
+            }
+        }
+    }
+}
+
 fn protocol_parent_window_override(
     browser_client: bool,
     parent_window: Option<usize>,
@@ -361,8 +419,9 @@ fn protocol_parent_window_override(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
 
     use serde_json::json;
 
@@ -420,5 +479,51 @@ mod tests {
                 .unwrap_or_default()
                 .contains("fresh browser request verification failed")
         );
+    }
+
+    #[test]
+    fn sync_snapshot_cannot_overtake_a_mutation_after_the_caller_is_cancelled() {
+        let bridge = RuntimeBridge::new_for_tests();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let committed = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mutation_bridge = bridge.clone();
+        let mutation_cancelled = cancelled.clone();
+        let mutation_committed = committed.clone();
+        let mutation = std::thread::spawn(move || {
+            mutation_bridge.request_test_mutation_cancellable(
+                mutation_cancelled,
+                started_tx,
+                release_rx,
+                mutation_committed,
+            )
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("mutation reached the runtime thread");
+        cancelled.store(true, Ordering::Release);
+        let response = mutation.join().expect("cancelled mutation caller");
+        assert_eq!(response["code"], "request_cancelled");
+
+        let sync_bridge = bridge.clone();
+        let sync_committed = committed.clone();
+        let (sync_tx, sync_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = sync_bridge.list_platform_passkey_credentials_for_sync();
+            let _ = sync_tx.send((result, sync_committed.load(Ordering::Acquire)));
+        });
+        assert!(
+            sync_rx.recv_timeout(Duration::from_millis(75)).is_err(),
+            "the sync request must remain queued behind the active mutation"
+        );
+
+        release_tx.send(()).expect("release mutation");
+        let (result, committed_before_sync_returned) = sync_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("sync completes after mutation");
+        result.expect("sync snapshot");
+        assert!(committed_before_sync_returned);
     }
 }

@@ -46,6 +46,8 @@ use crate::command_loop::{
     configure_stdio_for_native_messaging, read_native_message_or_eof_with_limit,
 };
 
+mod peer_auth;
+
 const PIPE_PREFIX: &str = r"\\.\pipe\VaultKern.Resident.";
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const PIPE_CONNECT_WAIT_MS: u32 = 5_000;
@@ -58,8 +60,17 @@ pub struct WindowsResidentIpcServer {
     listener: Option<JoinHandle<()>>,
 }
 
+type PipeClientAuthenticator = Arc<dyn Fn(&Pipe, &[u8]) -> Result<()> + Send + Sync + 'static>;
+
 pub fn start_windows_resident_ipc_server(
     handler: ResidentIpcRequestHandler,
+) -> Result<WindowsResidentIpcServer> {
+    start_windows_resident_ipc_server_with_authenticator(handler, Arc::new(verify_pipe_client))
+}
+
+fn start_windows_resident_ipc_server_with_authenticator(
+    handler: ResidentIpcRequestHandler,
+    client_authenticator: PipeClientAuthenticator,
 ) -> Result<WindowsResidentIpcServer> {
     let identity = ProcessIdentity::current().context("resolve resident IPC server identity")?;
     let pipe_name = wide_nul(&format!("{PIPE_PREFIX}{}", identity.sid_string));
@@ -79,6 +90,7 @@ pub fn start_windows_resident_ipc_server(
                 listener_sid,
                 listener_shutdown,
                 handler,
+                client_authenticator,
             );
         })
         .context("start resident IPC listener")?;
@@ -105,6 +117,11 @@ pub fn run_windows_native_messaging_shim(
     parent_window: Option<usize>,
 ) -> Result<()> {
     configure_stdio_for_native_messaging()?;
+    if let Err(error) = peer_auth::authenticate_native_messaging_channel() {
+        let message = "VaultKern could not authenticate the native-messaging browser channel";
+        let _ = write_startup_failure("browser_authentication_failed", message);
+        return Err(error).context(message);
+    }
     let identity = ProcessIdentity::current().context("resolve native shim identity")?;
     let pipe_name = wide_nul(&format!("{PIPE_PREFIX}{}", identity.sid_string));
     let pipe = match open_client_pipe(&pipe_name) {
@@ -168,6 +185,7 @@ fn run_server_listener(
     expected_sid: Vec<u8>,
     shutdown: Arc<AtomicBool>,
     handler: ResidentIpcRequestHandler,
+    client_authenticator: PipeClientAuthenticator,
 ) {
     loop {
         if let Err(error) = connect_server_pipe(&pipe) {
@@ -196,12 +214,16 @@ fn run_server_listener(
                 let connection = pipe;
                 let connection_sid = expected_sid.clone();
                 let connection_handler = handler.clone();
+                let connection_authenticator = client_authenticator.clone();
                 let _ = std::thread::Builder::new()
                     .name("vaultkern-resident-ipc-client".into())
                     .spawn(move || {
-                        if let Err(error) =
-                            serve_connection(connection, &connection_sid, connection_handler)
-                        {
+                        if let Err(error) = serve_connection(
+                            connection,
+                            &connection_sid,
+                            connection_handler,
+                            connection_authenticator,
+                        ) {
                             eprintln!("resident IPC client closed: {error:#}");
                         }
                     });
@@ -219,8 +241,9 @@ fn serve_connection(
     pipe: Pipe,
     expected_sid: &[u8],
     handler: ResidentIpcRequestHandler,
+    client_authenticator: PipeClientAuthenticator,
 ) -> Result<()> {
-    verify_pipe_client(&pipe, expected_sid).context("authenticate resident IPC client")?;
+    client_authenticator(&pipe, expected_sid).context("authenticate resident IPC client")?;
     let pipe = Arc::new(pipe);
     let mut reader = PipeFrameReader::new(pipe.clone());
     let writer = Arc::new(Mutex::new(PipeWriter(pipe)));
@@ -829,21 +852,43 @@ fn open_client_pipe(pipe_name: &[u16]) -> Result<Pipe> {
 }
 
 fn verify_pipe_client(pipe: &Pipe, expected_sid: &[u8]) -> Result<()> {
+    let process_id = pipe_client_process_id(pipe)?;
+    verify_process_sid(process_id, expected_sid)?;
+    peer_auth::authenticate_native_shim_process(process_id)
+}
+
+#[cfg(test)]
+fn verify_pipe_client_sid_only(pipe: &Pipe, expected_sid: &[u8]) -> Result<()> {
+    verify_process_sid(pipe_client_process_id(pipe)?, expected_sid)
+}
+
+fn pipe_client_process_id(pipe: &Pipe) -> Result<u32> {
     let mut process_id = 0;
     check_win32(
         unsafe { GetNamedPipeClientProcessId(pipe.handle(), &mut process_id) },
         "GetNamedPipeClientProcessId",
     )?;
-    verify_process_sid(process_id, expected_sid)
+    Ok(process_id)
 }
 
 fn verify_pipe_server(pipe: &Pipe, expected_sid: &[u8]) -> Result<()> {
+    let process_id = pipe_server_process_id(pipe)?;
+    verify_process_sid(process_id, expected_sid)?;
+    peer_auth::authenticate_resident_server_process(process_id)
+}
+
+#[cfg(test)]
+fn verify_pipe_server_sid_only(pipe: &Pipe, expected_sid: &[u8]) -> Result<()> {
+    verify_process_sid(pipe_server_process_id(pipe)?, expected_sid)
+}
+
+fn pipe_server_process_id(pipe: &Pipe) -> Result<u32> {
     let mut process_id = 0;
     check_win32(
         unsafe { GetNamedPipeServerProcessId(pipe.handle(), &mut process_id) },
         "GetNamedPipeServerProcessId",
     )?;
-    verify_process_sid(process_id, expected_sid)
+    Ok(process_id)
 }
 
 fn verify_process_sid(process_id: u32, expected_sid: &[u8]) -> Result<()> {
@@ -1285,6 +1330,7 @@ mod tests {
     use crate::resident_ipc::read_frame;
 
     const EXTENSION_ORIGIN: &str = "chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/";
+    static PIPE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn request_parent_tracks_the_foreground_window_in_the_same_browser_process() {
@@ -1365,38 +1411,42 @@ mod tests {
 
     #[test]
     fn authenticated_pipe_round_trips_and_honors_cancellation_and_timeout() {
+        let _pipe_test = PIPE_TEST_LOCK.lock().expect("lock resident pipe test");
         let observed_cancellations = Arc::new(AtomicUsize::new(0));
         let handler_cancellations = observed_cancellations.clone();
-        let server = start_windows_resident_ipc_server(Arc::new(
-            move |message, cancelled, _parent_window| match message["command"]["type"].as_str() {
-                Some("get_session_state") => {
-                    json!({ "type": "session_state", "unlocked": false })
-                }
-                Some("echo_blob") => json!({
-                    "type": "blob_echo",
-                    "payload": message["command"]["payload"].clone(),
-                }),
-                Some("consume_blob") => json!({
-                    "type": "blob_length",
-                    "length": message["command"]["payload"]
-                        .as_str()
-                        .map(str::len)
-                        .unwrap_or_default(),
-                }),
-                Some("oversized_response") => json!({
-                    "type": "oversized_response",
-                    "payload": "A".repeat(MAX_NATIVE_RESPONSE_BYTES),
-                }),
-                Some("block_until_cancelled") => {
-                    while !cancelled.load(Ordering::Acquire) {
-                        std::thread::sleep(Duration::from_millis(5));
+        let server = start_windows_resident_ipc_server_with_authenticator(
+            Arc::new(move |message, cancelled, _parent_window| {
+                match message["command"]["type"].as_str() {
+                    Some("get_session_state") => {
+                        json!({ "type": "session_state", "unlocked": false })
                     }
-                    handler_cancellations.fetch_add(1, Ordering::AcqRel);
-                    json!({ "type": "saved" })
+                    Some("echo_blob") => json!({
+                        "type": "blob_echo",
+                        "payload": message["command"]["payload"].clone(),
+                    }),
+                    Some("consume_blob") => json!({
+                        "type": "blob_length",
+                        "length": message["command"]["payload"]
+                            .as_str()
+                            .map(str::len)
+                            .unwrap_or_default(),
+                    }),
+                    Some("oversized_response") => json!({
+                        "type": "oversized_response",
+                        "payload": "A".repeat(MAX_NATIVE_RESPONSE_BYTES),
+                    }),
+                    Some("block_until_cancelled") => {
+                        while !cancelled.load(Ordering::Acquire) {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        handler_cancellations.fetch_add(1, Ordering::AcqRel);
+                        json!({ "type": "saved" })
+                    }
+                    command => panic!("unexpected test command: {command:?}"),
                 }
-                command => panic!("unexpected test command: {command:?}"),
-            },
-        ))
+            }),
+            Arc::new(verify_pipe_client_sid_only),
+        )
         .expect("start resident IPC server");
         let identity = ProcessIdentity::current().expect("current identity");
         let pipe_name = wide_nul(&format!("{PIPE_PREFIX}{}", identity.sid_string));
@@ -1421,7 +1471,15 @@ mod tests {
         }
 
         let pipe = open_client_pipe(&pipe_name).expect("connect resident IPC client");
-        verify_pipe_server(&pipe, &identity.sid).expect("verify resident IPC server");
+        let error = verify_pipe_server(&pipe, &identity.sid)
+            .expect_err("an unpackaged same-user pipe server must be rejected in production");
+        assert!(
+            error.to_string().contains("package identity")
+                || error.to_string().contains("executable name"),
+            "unexpected authentication error: {error:#}"
+        );
+        verify_pipe_server_sid_only(&pipe, &identity.sid)
+            .expect("verify resident IPC server SID for transport test");
         perform_client_handshake(&pipe, EXTENSION_ORIGIN, None).expect("negotiate resident IPC");
         let pipe = Arc::new(pipe);
         let mut writer = PipeWriter(pipe.clone());
