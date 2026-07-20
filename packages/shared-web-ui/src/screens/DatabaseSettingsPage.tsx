@@ -34,12 +34,14 @@ export function DatabaseSettingsPage({
   settings,
   loading,
   saving,
+  pendingSave,
   error,
   onSave
 }: {
   settings: DatabaseSettings | null;
   loading: boolean;
   saving: boolean;
+  pendingSave?: boolean;
   error: string | null;
   onSave: (update: DatabaseSettingsUpdate) => void;
 }) {
@@ -111,11 +113,16 @@ export function DatabaseSettingsPage({
           <h1 style={pageTitleStyle}>{settings.metadata.name}</h1>
         </div>
         <button type="submit" disabled={saving} style={primaryButtonStyle}>
-          {saving ? text("Saving...") : text("Save settings")}
+          {saving
+            ? text("Saving...")
+            : pendingSave
+              ? text("Retry save")
+              : text("Save settings")}
         </button>
       </div>
       {error ? <div role="alert">{error}</div> : null}
 
+      <fieldset disabled={saving || pendingSave} style={settingsFieldsetStyle}>
       <section style={sectionStyle}>
         <h2 style={sectionTitleStyle}>{text("Database Metadata")}</h2>
         <Field label={text("Database Name")}>
@@ -286,7 +293,7 @@ export function DatabaseSettingsPage({
           </>
         )}
       </section>
-
+      </fieldset>
     </form>
   );
 }
@@ -365,6 +372,14 @@ const pageStyle = {
   display: "grid",
   gap: archiveTheme.spacing.lg,
   alignContent: "start"
+};
+
+const settingsFieldsetStyle = {
+  display: "contents",
+  minWidth: 0,
+  margin: 0,
+  padding: 0,
+  border: 0
 };
 
 const headerStyle = {

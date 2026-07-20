@@ -1181,6 +1181,61 @@ it("loads database settings and preserves a conflict-copy warning after saving",
   expect(screen.queryByText("Database settings saved.")).not.toBeInTheDocument();
 });
 
+it("retries a failed database settings save without updating settings again", async () => {
+  const updateDatabaseSettings = vi.fn(async () => ({
+    type: "database_settings" as const,
+    metadata: { name: "Engineering", description: null, defaultUsername: null },
+    publicMetadata: { displayName: null, color: null, icon: null },
+    history: { maxItemsPerEntry: null, maxTotalSizeBytes: null },
+    recycleBin: { enabled: true },
+    encryption: {
+      compression: "gzip",
+      cipher: "aes256",
+      kdf: {
+        algorithm: "argon2id",
+        transformRounds: null,
+        iterations: 2,
+        memoryKib: 65536,
+        parallelism: 1
+      }
+    },
+    autosaveDelaySeconds: 0,
+    hasPassword: true
+  }));
+  const saveVault = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("simulated settings save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    updateDatabaseSettings,
+    saveVault
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Engineering" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+  expect(await screen.findByText("simulated settings save failure")).toBeInTheDocument();
+  expect(updateDatabaseSettings).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
+  expect(updateDatabaseSettings).toHaveBeenCalledTimes(1);
+});
+
 it("hides password actions until the authenticated credential flow exists", async () => {
   const client = {
     ...createVaultSelectionMethods(),

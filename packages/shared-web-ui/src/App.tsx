@@ -164,6 +164,7 @@ type PendingAction =
   | { type: "search"; value: string }
   | { type: "open-stats" }
   | { type: "open-database-settings" }
+  | { type: "close-database-settings" }
   | { type: "open-extension-settings" };
 
 type DialogState =
@@ -348,6 +349,8 @@ export function App({
   const [databaseSettings, setDatabaseSettings] = useState<DatabaseSettings | null>(null);
   const [databaseSettingsError, setDatabaseSettingsError] = useState<string | null>(null);
   const [databaseSettingsBusy, setDatabaseSettingsBusy] = useState(false);
+  const [pendingDatabaseSettingsVaultId, setPendingDatabaseSettingsVaultId] =
+    useState<string | null>(null);
   const [databaseName, setDatabaseName] = useState<string | null>(null);
   const [groupTree, setGroupTree] = useState<GroupTree | null>(null);
   const [groupsError, setGroupsError] = useState<string | null>(null);
@@ -732,13 +735,15 @@ export function App({
 
   const pendingDetailSave = pendingAttachmentSave || pendingPasskeySave;
   const hasPendingEntrySave = Boolean(pendingEntrySave || pendingDetailSave);
+  const hasPendingDurableSave =
+    hasPendingEntrySave || Boolean(pendingDatabaseSettingsVaultId);
   const draftDirty =
     editorMode === "create-pending"
       ? hasDraftChangesFromEmpty(draft)
       : editorMode === "edit" && entryDetail && draft
         ? !draftMatchesEntry(draft, entryDetail)
         : false;
-  const dirty = hasPendingEntrySave || draftDirty;
+  const dirty = hasPendingDurableSave || draftDirty;
 
   function performAction(action: PendingAction) {
     switch (action.type) {
@@ -802,6 +807,9 @@ export function App({
         setShowStatsPage(false);
         setShowExtensionSettingsPage(false);
         setShowDatabaseSettingsPage(true);
+        break;
+      case "close-database-settings":
+        setShowDatabaseSettingsPage(false);
         break;
       case "open-extension-settings":
         setShowEntryListWithDetail(false);
@@ -895,8 +903,13 @@ export function App({
   }
 
   async function handleSaveAndContinue(action: PendingAction) {
-    let saved = pendingDetailSave ? await retryPendingDetailSave() : true;
-    if (saved && (draftDirty || !pendingDetailSave)) {
+    const hadPendingDatabaseSettings = Boolean(pendingDatabaseSettingsVaultId);
+    let saved = hadPendingDatabaseSettings
+      ? await retryPendingDatabaseSettingsSave()
+      : pendingDetailSave
+        ? await retryPendingDetailSave()
+        : true;
+    if (saved && !hadPendingDatabaseSettings && (draftDirty || !pendingDetailSave)) {
       saved = await saveDraft();
     }
 
@@ -1181,14 +1194,17 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
     setDatabaseSettingsBusy(true);
     setDatabaseSettingsError(null);
 
     try {
-      const settings = await client.updateDatabaseSettings(session.activeVaultId, update);
+      const settings = await client.updateDatabaseSettings(vaultId, update);
       setDatabaseSettings(settings);
       setDatabaseName(settings.metadata.name);
-      const saveResult = await client.saveVault(session.activeVaultId);
+      setPendingDatabaseSettingsVaultId(vaultId);
+      const saveResult = await client.saveVault(vaultId);
+      setPendingDatabaseSettingsVaultId(null);
       handleSaveResult(saveResult);
       setWorkspaceReloadKey((current) => current + 1);
       if (!saveResult || saveResult.status === "saved") {
@@ -1201,6 +1217,36 @@ export function App({
           translate(extensionSettings.language, "Failed to save database settings")
         )
       );
+    } finally {
+      setDatabaseSettingsBusy(false);
+    }
+  }
+
+  async function retryPendingDatabaseSettingsSave() {
+    if (!pendingDatabaseSettingsVaultId) {
+      return false;
+    }
+
+    setDatabaseSettingsBusy(true);
+    setDatabaseSettingsError(null);
+
+    try {
+      const saveResult = await client.saveVault(pendingDatabaseSettingsVaultId);
+      handleSaveResult(saveResult);
+      setPendingDatabaseSettingsVaultId(null);
+      setWorkspaceReloadKey((current) => current + 1);
+      if (!saveResult || saveResult.status === "saved") {
+        setSaveTip(translate(extensionSettings.language, "Database settings saved."));
+      }
+      return true;
+    } catch (settingsError) {
+      setDatabaseSettingsError(
+        errorMessage(
+          settingsError,
+          translate(extensionSettings.language, "Failed to save database settings")
+        )
+      );
+      return false;
     } finally {
       setDatabaseSettingsBusy(false);
     }
@@ -2115,7 +2161,7 @@ export function App({
               <div style={{ display: "grid", gap: archiveTheme.spacing.lg }}>
                 <button
                   type="button"
-                  onClick={() => setShowDatabaseSettingsPage(false)}
+                  onClick={() => requestAction({ type: "close-database-settings" })}
                   style={{
                     justifySelf: "start",
                     border: `1px solid ${archiveTheme.colors.line}`,
@@ -2133,9 +2179,12 @@ export function App({
                   settings={databaseSettings}
                   loading={databaseSettingsBusy && !databaseSettings}
                   saving={databaseSettingsBusy && Boolean(databaseSettings)}
+                  pendingSave={Boolean(pendingDatabaseSettingsVaultId)}
                   error={databaseSettingsError}
                   onSave={(update) => {
-                    void handleSaveDatabaseSettings(update);
+                    void (pendingDatabaseSettingsVaultId
+                      ? retryPendingDatabaseSettingsSave()
+                      : handleSaveDatabaseSettings(update));
                   }}
                 />
               </div>
@@ -2149,8 +2198,10 @@ export function App({
           title={translate(extensionSettings.language, "You have unsaved changes")}
           description={translate(
             extensionSettings.language,
-            hasPendingEntrySave
-              ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+            pendingDatabaseSettingsVaultId
+              ? "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
+              : hasPendingEntrySave
+                ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
               : "Save before leaving this entry, discard your edits, or continue editing."
           )}
           actions={[
@@ -2161,7 +2212,7 @@ export function App({
                 void handleSaveAndContinue(dialogState.action);
               }
             },
-            ...(hasPendingEntrySave
+            ...(hasPendingDurableSave
               ? []
               : [
                   {

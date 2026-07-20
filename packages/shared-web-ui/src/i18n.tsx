@@ -174,6 +174,7 @@ type TranslationKey =
   | "You have unsaved changes"
   | "Save before leaving this entry, discard your edits, or continue editing."
   | "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+  | "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
   | "Discard changes"
   | "Continue editing"
   | "Delete this entry permanently?"
@@ -391,6 +392,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "You have unsaved changes": "有未保存的更改",
   "Save before leaving this entry, discard your edits, or continue editing.": "离开条目前保存、丢弃更改，或继续编辑。",
   "This entry changed in the current session but is not durable yet. Retry saving before leaving it.": "条目已在当前会话中更改，但尚未持久保存。请在离开前重试保存。",
+  "The database settings changed in this session but are not durable yet. Retry saving before leaving settings.": "数据库设置已在当前会话中更改，但尚未持久保存。请在离开设置页前重试保存。",
   "Discard changes": "丢弃更改",
   "Continue editing": "继续编辑",
   "Delete this entry permanently?": "永久删除此条目？",
