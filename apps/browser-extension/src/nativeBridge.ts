@@ -149,6 +149,19 @@ function requestIdFromResponse(response: unknown) {
   return typeof requestId === "string" ? requestId : null;
 }
 
+function isNativeErrorResponse(response: unknown) {
+  return (
+    typeof response === "object" &&
+    response !== null &&
+    "type" in response &&
+    (response as { type?: unknown }).type === "error" &&
+    "code" in response &&
+    typeof (response as { code?: unknown }).code === "string" &&
+    "message" in response &&
+    typeof (response as { message?: unknown }).message === "string"
+  );
+}
+
 function stripResponseRequestId(response: unknown) {
   if (typeof response !== "object" || response === null || !("requestId" in response)) {
     return response;
@@ -381,18 +394,10 @@ export function createNativeMessagingBridge(
 
     const request = activeRequest;
     const responseRequestId = requestIdFromResponse(response);
-    if (responseRequestId !== request.requestId) {
-      if (responseRequestId === null) {
-        emitEvent({
-          event: "response",
-          commandType: commandTypeFromMessage(request.message)
-        });
-        activeRequest = null;
-        clearRequestTimeout(request);
-        request.resolve(response);
-        flushQueue();
-        return;
-      }
+    if (
+      responseRequestId !== request.requestId &&
+      !(responseRequestId === null && isNativeErrorResponse(response))
+    ) {
       return;
     }
     emitEvent({

@@ -244,7 +244,7 @@ describe("createNativeMessagingBridge", () => {
     await expect(request).resolves.toEqual({ type: "saved" });
   });
 
-  it("accepts untagged success responses from a legacy native host", async () => {
+  it("does not bind an untagged success response to the active request", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -256,17 +256,21 @@ describe("createNativeMessagingBridge", () => {
     const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
 
     const first = bridge.send({ version: 1, command: { type: "first" } });
-    const second = bridge.send({ version: 1, command: { type: "second" } });
+    let settled = false;
+    void first.finally(() => {
+      settled = true;
+    });
 
-    port.emitRawMessage({ type: "first_response" });
+    port.emitRawMessage({ type: "stale_response" });
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    expect(port.disconnect).not.toHaveBeenCalled();
+    expect(port.postMessage).toHaveBeenCalledTimes(1);
+
+    port.emitMessage({ type: "first_response" });
 
     await expect(first).resolves.toEqual({ type: "first_response" });
-    expect(port.disconnect).not.toHaveBeenCalled();
-    expect(port.postMessage).toHaveBeenCalledTimes(2);
-
-    port.emitMessage({ type: "second_response" });
-
-    await expect(second).resolves.toEqual({ type: "second_response" });
   });
 
   it("ignores native responses whose request id does not match the active request", async () => {
