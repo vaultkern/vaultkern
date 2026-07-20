@@ -511,6 +511,17 @@ fn rebase_sibling_order(
     if order.len() != final_ids.len() || selected != *final_ids {
         return Err(ThreeWayPatchError::SiblingOrderChange { parent, object });
     }
+    let positions = order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect::<BTreeMap<_, _>>();
+    if local_order.windows(2).any(|pair| {
+        (prefer_local.contains(&pair[0]) || prefer_local.contains(&pair[1]))
+            && positions[&pair[0]] >= positions[&pair[1]]
+    }) {
+        return Err(ThreeWayPatchError::SiblingOrderChange { parent, object });
+    }
     Ok(order)
 }
 

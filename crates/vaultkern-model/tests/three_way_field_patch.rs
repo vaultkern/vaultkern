@@ -505,3 +505,23 @@ fn local_group_move_keeps_its_destination_insertion_order() {
         vec!["First", "Moved", "Second"]
     );
 }
+
+#[test]
+fn local_move_and_remote_destination_reorder_fall_back() {
+    let mut base = Vault::empty("Shared");
+    let mut source = Group::new("Source");
+    source.entries.push(Entry::new("Moved"));
+    let mut destination = Group::new("Destination");
+    destination.entries = vec![Entry::new("First"), Entry::new("Second")];
+    base.root.children = vec![source, destination];
+
+    let mut local = base.clone();
+    let mut moved = local.root.children[0].entries.remove(0);
+    moved.location_changed_at = Some(20);
+    local.root.children[1].entries.insert(1, moved);
+
+    let mut remote = base.clone();
+    remote.root.children[1].entries.swap(0, 1);
+
+    assert!(three_way_field_patch(&base, &local, &remote).is_err());
+}
