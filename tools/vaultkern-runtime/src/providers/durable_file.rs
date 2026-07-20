@@ -972,6 +972,7 @@ pub(crate) fn publish_temp(
     after_replace: DurableFaultPoint,
     parent_sync: DurableFaultPoint,
 ) -> Result<(), PublishError> {
+    let target_must_be_missing = matches!(&target_expectation, TargetExpectation::Missing);
     if let Err(source) = faults
         .check(DurableFaultPoint::BeforeTempPublishValidation)
         .and_then(|_| temp.verify_for_publish())
@@ -1003,7 +1004,15 @@ pub(crate) fn publish_temp(
     // handle must be closed for the duration of the path-based replacement.
     #[cfg(windows)]
     temp.close_before_replace();
-    if let Err(error) = replace_file(temp.path(), target, backup) {
+    let publish_result = if target_must_be_missing {
+        publish_file_no_replace(temp.path(), target)
+    } else {
+        replace_file(temp.path(), target, backup)
+    };
+    if let Err(error) = publish_result {
+        let target_conflict = target_must_be_missing
+            && !error.published
+            && error.source.kind() == io::ErrorKind::AlreadyExists;
         if error.published {
             drop(temp);
         } else {
@@ -1011,7 +1020,7 @@ pub(crate) fn publish_temp(
         }
         return Err(PublishError {
             published: error.published,
-            target_conflict: false,
+            target_conflict,
             source: error.source,
         });
     }
@@ -1074,6 +1083,41 @@ pub(crate) fn publish_temp(
         source,
     })?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn publish_file_no_replace(temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    fs::hard_link(temp, target).map_err(|source| ReplaceError {
+        published: false,
+        source,
+    })?;
+    fs::remove_file(temp).map_err(|source| ReplaceError {
+        published: true,
+        source,
+    })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn publish_file_no_replace(temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let target = wide(target);
+    let temp = wide(temp);
+    let result = unsafe { MoveFileExW(temp.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if result == 0 {
+        Err(ReplaceError {
+            published: false,
+            source: io::Error::last_os_error(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn verify_target_expectation(target: &Path, expectation: TargetExpectation) -> io::Result<()> {

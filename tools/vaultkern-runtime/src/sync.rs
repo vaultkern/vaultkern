@@ -227,8 +227,11 @@ fn durable_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SyncedBaseStore, write_local_conflict_copy};
-    use crate::providers::durable_file::ExclusiveFileLock;
+    use super::{BASE_WRITE_POINTS, SyncedBaseStore, write_local_conflict_copy};
+    use crate::providers::durable_file::{
+        DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, TargetExpectation,
+        publish_temp, write_verified_temp,
+    };
 
     #[test]
     fn synced_base_round_trip_survives_atomic_replacement() {
@@ -297,5 +300,60 @@ mod tests {
         );
         assert_eq!(std::fs::read(&copy).unwrap(), b"local-edits");
         assert_eq!(std::fs::read(&source).unwrap(), b"remote-head");
+    }
+
+    #[test]
+    fn missing_target_publish_never_replaces_a_concurrent_generation() {
+        const WRITERS: usize = 32;
+        let dir = tempfile::tempdir().unwrap();
+        let target = std::sync::Arc::new(dir.path().join("conflict.kdbx"));
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+        let mut handles = Vec::with_capacity(WRITERS);
+
+        for writer in 0..WRITERS {
+            let bytes = format!("writer-{writer}");
+            let temp = write_verified_temp(
+                target.as_ref(),
+                bytes.as_bytes(),
+                &DurableFaultInjector::default(),
+                BASE_WRITE_POINTS,
+            )
+            .unwrap();
+            let target = std::sync::Arc::clone(&target);
+            let ready = std::sync::Arc::clone(&ready);
+            handles.push(std::thread::spawn(move || {
+                let faults = DurableFaultInjector::run_once(
+                    DurableFaultPoint::BeforeGenerationPublish,
+                    move || {
+                        ready.wait();
+                    },
+                );
+                publish_temp(
+                    temp,
+                    target.as_ref(),
+                    TargetExpectation::Missing,
+                    None,
+                    &faults,
+                    DurableFaultPoint::BeforeGenerationPublish,
+                    DurableFaultPoint::GenerationPublished,
+                    DurableFaultPoint::GenerationParentSynced,
+                )
+            }));
+        }
+
+        let mut published = 0;
+        for handle in handles {
+            match handle.join().unwrap() {
+                Ok(()) => published += 1,
+                Err(error) => {
+                    assert!(!error.published, "losing generation was already published");
+                    assert!(
+                        error.target_conflict,
+                        "losing generation was not a conflict"
+                    );
+                }
+            }
+        }
+        assert_eq!(published, 1);
     }
 }
