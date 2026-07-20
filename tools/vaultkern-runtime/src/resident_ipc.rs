@@ -179,7 +179,7 @@ pub(crate) fn negotiate_client_hello(hello: ClientHello) -> Result<ServerHello> 
         );
     }
     validate_capabilities(&hello.capabilities)?;
-    validate_configured_browser_origin(&hello.client_origin)?;
+    validate_browser_origin(&hello.client_origin)?;
 
     Ok(ServerHello {
         protocol_version: RESIDENT_IPC_PROTOCOL_VERSION,
@@ -191,13 +191,18 @@ pub(crate) fn validate_configured_browser_origin(browser_origin: &str) -> Result
     validate_browser_origin_for_extension(browser_origin, configured_extension_id())
 }
 
+fn validate_browser_origin(browser_origin: &str) -> Result<()> {
+    if extension_id_from_browser_origin(browser_origin).is_none() {
+        anyhow::bail!("invalid browser extension origin");
+    }
+    Ok(())
+}
+
 fn validate_browser_origin_for_extension(
     browser_origin: &str,
     expected_extension_id: Option<&str>,
 ) -> Result<()> {
-    if extension_id_from_browser_origin(browser_origin).is_none() {
-        anyhow::bail!("invalid browser extension origin");
-    }
+    validate_browser_origin(browser_origin)?;
     let expected_extension_id = expected_extension_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -385,19 +390,19 @@ mod tests {
                 .to_string()
                 .contains("invalid browser extension origin")
         );
-
-        let mut hello = valid_hello();
-        hello.client_origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/".into();
-        assert!(
-            negotiate_client_hello(hello)
-                .unwrap_err()
-                .to_string()
-                .contains("configured extension")
-        );
     }
 
     #[test]
-    fn valid_but_different_extension_origin_is_rejected() {
+    fn handshake_accepts_a_valid_origin_from_the_authenticated_shim() {
+        let mut hello = valid_hello();
+        hello.client_origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/".into();
+
+        negotiate_client_hello(hello)
+            .expect("the resident trusts the authenticated shim to pin the extension ID");
+    }
+
+    #[test]
+    fn shim_rejects_a_valid_but_different_extension_origin() {
         let error = validate_browser_origin_for_extension(
             "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
             Some("kblgblkjghklighdgmejjfondchkjcgf"),

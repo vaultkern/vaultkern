@@ -98,6 +98,10 @@ struct RegisteredPackageEvidence {
     install_root: String,
 }
 
+fn package_registration_is_signed(evidence: &RegisteredPackageEvidence) -> bool {
+    evidence.signature_kind != 0 && !evidence.is_development_mode
+}
+
 pub(super) fn authenticate_resident_server_process(process_id: u32) -> Result<()> {
     let identity = resident_server_identity_for_process(process_id)?;
     authenticate_resident_server_identity(&identity)?;
@@ -299,7 +303,7 @@ fn resident_server_identity_for_process(process_id: u32) -> Result<ResidentServe
         .map(|package| registered_package_evidence(&package.full_name))
         .transpose()?;
     let package_signer = match package_evidence.as_ref() {
-        Some(evidence) if evidence.signature_kind != 0 && !evidence.is_development_mode => Some(
+        Some(evidence) if package_registration_is_signed(evidence) => Some(
             authenticode_identity_for_file(
                 &Path::new(&evidence.install_root).join("AppxSignature.p7x"),
             )
@@ -979,15 +983,27 @@ mod tests {
     }
 
     #[test]
-    fn package_manager_identifies_the_current_loose_registration_as_development_only() {
-        let Ok(evidence) =
-            registered_package_evidence("VaultKern.Windows_0.1.0.0_x64__bf7at9bmb1e94")
-        else {
-            return;
+    fn package_registration_policy_requires_a_signed_non_development_install() {
+        let signed = RegisteredPackageEvidence {
+            signature_kind: 1,
+            is_development_mode: false,
+            install_root: r"C:\\Program Files\\WindowsApps\\VaultKern.Windows".into(),
         };
+        assert!(package_registration_is_signed(&signed));
 
-        assert_eq!(evidence.signature_kind, 0);
-        assert!(evidence.is_development_mode);
+        let unsigned = RegisteredPackageEvidence {
+            signature_kind: 0,
+            is_development_mode: false,
+            install_root: signed.install_root.clone(),
+        };
+        assert!(!package_registration_is_signed(&unsigned));
+
+        let development = RegisteredPackageEvidence {
+            signature_kind: 1,
+            is_development_mode: true,
+            install_root: signed.install_root,
+        };
+        assert!(!package_registration_is_signed(&development));
     }
 
     #[test]
