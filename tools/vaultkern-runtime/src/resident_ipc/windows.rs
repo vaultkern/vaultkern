@@ -858,19 +858,40 @@ fn resolve_request_parent_window(
     requested_parent_window: Option<usize>,
     expected_sid: &[u8],
 ) -> Option<usize> {
-    requested_parent_window
-        .filter(|window| window_belongs_to_sid(*window, expected_sid))
-        .or_else(|| {
-            let window = unsafe { GetForegroundWindow() } as usize;
-            (window != 0 && window_belongs_to_sid(window, expected_sid)).then_some(window)
-        })
+    let requested =
+        requested_parent_window.and_then(|window| window_identity_for_sid(window, expected_sid));
+    let foreground =
+        window_identity_for_sid(unsafe { GetForegroundWindow() } as usize, expected_sid);
+    select_request_parent_window(requested, foreground)
 }
 
-fn window_belongs_to_sid(window: usize, expected_sid: &[u8]) -> bool {
+fn window_identity_for_sid(window: usize, expected_sid: &[u8]) -> Option<(usize, u32)> {
+    if window == 0 {
+        return None;
+    }
     let mut process_id = 0;
     let thread_id =
         unsafe { GetWindowThreadProcessId(window as *mut std::ffi::c_void, &mut process_id) };
-    thread_id != 0 && process_id != 0 && verify_process_sid(process_id, expected_sid).is_ok()
+    if thread_id == 0 || process_id == 0 || verify_process_sid(process_id, expected_sid).is_err() {
+        return None;
+    }
+    Some((window, process_id))
+}
+
+fn select_request_parent_window(
+    requested: Option<(usize, u32)>,
+    foreground: Option<(usize, u32)>,
+) -> Option<usize> {
+    match (requested, foreground) {
+        (Some((_, requested_process)), Some((foreground_window, foreground_process)))
+            if requested_process == foreground_process =>
+        {
+            Some(foreground_window)
+        }
+        (Some((requested_window, _)), _) => Some(requested_window),
+        (None, Some((foreground_window, _))) => Some(foreground_window),
+        (None, None) => None,
+    }
 }
 
 struct ProcessIdentity {
@@ -1264,6 +1285,18 @@ mod tests {
     use crate::resident_ipc::read_frame;
 
     const EXTENSION_ORIGIN: &str = "chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/";
+
+    #[test]
+    fn request_parent_tracks_the_foreground_window_in_the_same_browser_process() {
+        assert_eq!(
+            select_request_parent_window(Some((0x1000, 41)), Some((0x2000, 41))),
+            Some(0x2000)
+        );
+        assert_eq!(
+            select_request_parent_window(Some((0x1000, 41)), Some((0x3000, 99))),
+            Some(0x1000)
+        );
+    }
 
     #[test]
     fn unavailable_resident_app_returns_a_correlated_native_error() {
