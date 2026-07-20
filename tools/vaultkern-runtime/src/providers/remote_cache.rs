@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,8 @@ use crate::providers::durable_file::{
 };
 use crate::providers::local_file::VaultSourceFingerprint;
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
+
+const REMOTE_CACHE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteCacheKey {
@@ -162,6 +165,7 @@ impl std::error::Error for PendingRemoteCacheChainError {}
 pub struct RemoteVaultCache {
     root: PathBuf,
     faults: DurableFaultInjector,
+    lock_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +308,7 @@ impl RemoteVaultCache {
         Self {
             root: default_cache_dir(),
             faults: DurableFaultInjector::default(),
+            lock_timeout: REMOTE_CACHE_LOCK_TIMEOUT,
         }
     }
 
@@ -311,6 +316,7 @@ impl RemoteVaultCache {
         Self {
             root: extension_state_dir(extension_id).join("remote-cache"),
             faults: DurableFaultInjector::default(),
+            lock_timeout: REMOTE_CACHE_LOCK_TIMEOUT,
         }
     }
 
@@ -318,6 +324,7 @@ impl RemoteVaultCache {
         Self {
             root: path.as_ref().to_path_buf(),
             faults: DurableFaultInjector::default(),
+            lock_timeout: REMOTE_CACHE_LOCK_TIMEOUT,
         }
     }
 
@@ -326,6 +333,16 @@ impl RemoteVaultCache {
         Self {
             root: path.as_ref().to_path_buf(),
             faults,
+            lock_timeout: REMOTE_CACHE_LOCK_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_at_with_lock_timeout(path: impl AsRef<Path>, lock_timeout: Duration) -> Self {
+        Self {
+            root: path.as_ref().to_path_buf(),
+            faults: DurableFaultInjector::default(),
+            lock_timeout,
         }
     }
 
@@ -350,12 +367,13 @@ impl RemoteVaultCache {
             )
         })?;
         let paths = self.paths(key);
-        let _lock = ExclusiveFileLock::acquire(&paths.lock_path).with_context(|| {
-            format!(
-                "failed to acquire remote vault cache lock: {}",
-                paths.lock_path.display()
-            )
-        })?;
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)
+            .with_context(|| {
+                format!(
+                    "failed to acquire remote vault cache lock: {}",
+                    paths.lock_path.display()
+                )
+            })?;
         Ok(match self.read_authenticated_locked(key) {
             AuthenticatedCacheRead::Missing => RemoteVaultCacheReadStatus::Missing,
             AuthenticatedCacheRead::Current(cached) => RemoteVaultCacheReadStatus::Current {
@@ -386,11 +404,10 @@ impl RemoteVaultCache {
             message: format!("{error:#}"),
         })?;
         let paths = self.paths(key);
-        let _lock = ExclusiveFileLock::acquire(&paths.lock_path).map_err(|error| {
-            PendingRemoteCacheChainError::Io {
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)
+            .map_err(|error| PendingRemoteCacheChainError::Io {
                 message: error.to_string(),
-            }
-        })?;
+            })?;
         let current = match self.read_authenticated_locked(key) {
             AuthenticatedCacheRead::Missing => return Err(PendingRemoteCacheChainError::Missing),
             AuthenticatedCacheRead::Degraded(_) => {
@@ -673,12 +690,13 @@ impl RemoteVaultCache {
                 self.root.display()
             )
         })?;
-        let _lock = ExclusiveFileLock::acquire(&paths.lock_path).with_context(|| {
-            format!(
-                "failed to acquire remote vault cache lock: {}",
-                paths.lock_path.display()
-            )
-        })?;
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)
+            .with_context(|| {
+                format!(
+                    "failed to acquire remote vault cache lock: {}",
+                    paths.lock_path.display()
+                )
+            })?;
         self.require_generic_pending_locked(key, expected_pending)?;
         let (value, entry) = source_write()?;
         if entry.pending_sync {
@@ -754,12 +772,13 @@ impl RemoteVaultCache {
                 self.root.display()
             )
         })?;
-        let _lock = ExclusiveFileLock::acquire(&paths.lock_path).with_context(|| {
-            format!(
-                "failed to acquire remote vault cache lock: {}",
-                paths.lock_path.display()
-            )
-        })?;
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)
+            .with_context(|| {
+                format!(
+                    "failed to acquire remote vault cache lock: {}",
+                    paths.lock_path.display()
+                )
+            })?;
 
         self.write_with_source_context_locked(
             key,
@@ -1109,12 +1128,13 @@ impl RemoteVaultCache {
                 self.root.display()
             )
         })?;
-        let _lock = ExclusiveFileLock::acquire(&paths.lock_path).with_context(|| {
-            format!(
-                "failed to acquire remote vault cache lock: {}",
-                paths.lock_path.display()
-            )
-        })?;
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)
+            .with_context(|| {
+                format!(
+                    "failed to acquire remote vault cache lock: {}",
+                    paths.lock_path.display()
+                )
+            })?;
         match self.read_authenticated_locked(key) {
             AuthenticatedCacheRead::Missing => {}
             AuthenticatedCacheRead::Current(current) if !current.entry.pending_sync => {}
@@ -1791,7 +1811,9 @@ mod tests {
         RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry, RemoteVaultCacheMetadata,
         RemoteVaultCacheReadStatus, cache_key_digest,
     };
-    use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint, sha256_hex};
+    use crate::providers::durable_file::{
+        DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, sha256_hex,
+    };
     use crate::providers::local_file::VaultSourceFingerprint;
     use serde_json::Value;
     use std::fs;
@@ -1827,6 +1849,35 @@ mod tests {
         assert_ne!(
             cache_key_digest(&RemoteCacheKey::new("provider:tenant", "item")),
             cache_key_digest(&RemoteCacheKey::new("provider", "tenant:item"))
+        );
+    }
+
+    #[test]
+    fn cache_lock_contention_returns_instead_of_waiting_for_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RemoteVaultCache::new_at_with_lock_timeout(
+            dir.path(),
+            std::time::Duration::from_millis(40),
+        );
+        cache.write(&key(), entry(b"current", 1, false)).unwrap();
+        let paths = cache.paths_for_tests(&key());
+        let held = ExclusiveFileLock::acquire(&paths.lock_path).unwrap();
+        let competing_cache = cache.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            result_tx.send(competing_cache.read_status(&key())).unwrap();
+        });
+
+        let result = result_rx.recv_timeout(std::time::Duration::from_millis(250));
+        drop(held);
+        handle.join().unwrap();
+
+        let error = result
+            .expect("cache contender waited indefinitely for the held lock")
+            .expect_err("cache contender unexpectedly acquired the held lock");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::WouldBlock
         );
     }
 
