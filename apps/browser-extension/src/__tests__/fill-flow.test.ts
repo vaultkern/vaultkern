@@ -4670,6 +4670,54 @@ describe("PopupShell fill flow", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows resident-app recovery help when the Windows app is not running", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        id: "test-extension-id"
+      },
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listRecentVaults.mockResolvedValue([
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Resident Vault",
+        sourceKind: "local",
+        sourceSummary: "resident.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready",
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]);
+    runtimeClientMocks.unlockCurrentVault.mockRejectedValue(
+      Object.assign(new Error("VaultKern resident app is unavailable"), {
+        code: "resident_unavailable"
+      })
+    );
+
+    const { PopupShell } = await import("../popupShell");
+
+    render(createElement(PopupShell));
+
+    await screen.findByText("Resident Vault");
+    fireEvent.change(screen.getByLabelText("Master Password"), {
+      target: { value: "demo-password" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+    expect(await screen.findByText("Start the VaultKern Windows app")).toBeInTheDocument();
+    expect(screen.getByText(/keep it running, then retry/i)).toBeInTheDocument();
+  });
+
   it("keeps business errors as plain unlock failures without install help", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {

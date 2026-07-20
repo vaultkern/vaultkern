@@ -33,6 +33,18 @@ function isErrorCode(error: unknown, code: string) {
 }
 
 export function renderNativeHostHelp(error: unknown) {
+  if (isErrorCode(error, "resident_unavailable")) {
+    return (
+      <div>
+        <h2>Start the VaultKern Windows app</h2>
+        <p>
+          The browser extension connects through the resident app on Windows.
+          Start VaultKern, keep it running, then retry unlocking.
+        </p>
+      </div>
+    );
+  }
+
   if (
     isErrorCode(error, "native_host_missing") ||
     isErrorCode(error, "native_permission_denied")
