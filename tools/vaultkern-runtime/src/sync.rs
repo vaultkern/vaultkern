@@ -18,28 +18,40 @@ const BASE_WRITE_POINTS: TempWriteFaultPoints = TempWriteFaultPoints {
 
 pub(crate) struct SyncedBaseStore {
     root: PathBuf,
+    #[cfg(test)]
+    fail_next_store: std::cell::Cell<bool>,
 }
 
 impl SyncedBaseStore {
     pub(crate) fn new_default() -> Self {
         Self {
             root: runtime_state_dir().join("synced-bases"),
+            #[cfg(test)]
+            fail_next_store: std::cell::Cell::new(false),
         }
     }
 
     pub(crate) fn new_for_extension_id(extension_id: &str) -> Self {
         Self {
             root: extension_state_dir(extension_id).join("synced-bases"),
+            #[cfg(test)]
+            fail_next_store: std::cell::Cell::new(false),
         }
     }
 
     pub(crate) fn new_at(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
+            #[cfg(test)]
+            fail_next_store: std::cell::Cell::new(false),
         }
     }
 
     pub(crate) fn store(&self, vault_id: &str, bytes: &[u8]) -> io::Result<()> {
+        #[cfg(test)]
+        if self.fail_next_store.replace(false) {
+            return Err(io::Error::other("injected synced-base write failure"));
+        }
         create_dir_all_durable(&self.root)?;
         let (target, lock_path) = self.paths(vault_id);
         let _lock = ExclusiveFileLock::acquire(&lock_path)?;
@@ -87,6 +99,11 @@ impl SyncedBaseStore {
                 sync_directory(&self.root)
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_store_for_tests(&self) {
+        self.fail_next_store.set(true);
     }
 
     fn paths(&self, vault_id: &str) -> (PathBuf, PathBuf) {

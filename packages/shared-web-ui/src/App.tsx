@@ -1067,9 +1067,12 @@ export function App({
       const settings = await client.updateDatabaseSettings(session.activeVaultId, update);
       setDatabaseSettings(settings);
       setDatabaseName(settings.metadata.name);
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      const saveResult = await client.saveVault(session.activeVaultId);
+      handleSaveResult(saveResult);
       setWorkspaceReloadKey((current) => current + 1);
-      setSaveTip(translate(extensionSettings.language, "Database settings saved."));
+      if (!saveResult || saveResult.status === "saved") {
+        setSaveTip(translate(extensionSettings.language, "Database settings saved."));
+      }
     } catch (settingsError) {
       setDatabaseSettingsError(
         errorMessage(

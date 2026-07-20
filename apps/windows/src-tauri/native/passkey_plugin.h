@@ -97,6 +97,8 @@ int32_t VK_CALL vaultkern_plugin_sync_credentials(
     const VkCredentialMetadata* credentials,
     uint32_t credential_count);
 
+int32_t VK_CALL vaultkern_plugin_test_replaces_cached_account_credential(void);
+
 #ifdef __cplusplus
 }
 #endif

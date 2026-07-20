@@ -20,3 +20,4 @@ pub use passkey::{
     PlatformPasskeyRegistrationInput, PlatformPasskeyRegistrationOutput,
 };
 pub use runtime::Runtime;
+pub use state_paths::is_supported_browser_origin;

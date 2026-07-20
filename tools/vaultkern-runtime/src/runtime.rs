@@ -16,11 +16,13 @@ use uuid::Uuid;
 use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, Compression, CustomDataItemInput, Entry,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher, KdbxError, KdbxVersion, KeepassCore,
-    PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec, TransformedKey, Vault,
-    derive_transformed_key_with_policy, load_kdbx_with_transformed_key,
-    load_kdbx_with_transformed_key_diagnostic, parse_key_file_bytes, required_version,
-    retained_or_recommended_save_kdf, save_kdbx_with_transformed_key, three_way_field_patch,
+    ExternalKdfConfirmation, ExternalKdfPolicy, GroupTimesUpdate, KdbxCipher, KdbxError,
+    KdbxVersion, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec,
+    TransformedKey, Vault, VaultBinTemplateMetadataUpdate, VaultIdentityMetadataUpdate,
+    VaultLifecycleMetadataUpdate, VaultMetadataUpdate, derive_transformed_key_with_policy,
+    load_kdbx_with_transformed_key, load_kdbx_with_transformed_key_diagnostic,
+    parse_key_file_bytes, required_version, retained_or_recommended_save_kdf,
+    save_kdbx_with_transformed_key, three_way_field_patch,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
@@ -904,10 +906,7 @@ impl Runtime {
                 let storage_key = quick_unlock_storage_key(&vault.vault_ref_id);
                 vault.supports_quick_unlock = match self.secure_storage.contains(&storage_key) {
                     Ok(contains) => contains,
-                    Err(_) => {
-                        let _ = self.secure_storage.delete(&storage_key);
-                        false
-                    }
+                    Err(_) => false,
                 };
             }
         }
@@ -1596,6 +1595,9 @@ impl Runtime {
                 "master credential changes require a fresh authenticated credential-update flow"
             );
         }
+        let modified_at = self.current_unix_time();
+        let modified_at_i64 = i64::try_from(modified_at)
+            .context("current time is outside the KDBX timestamp domain")?;
         let settings = {
             let loaded = self
                 .vault_session
@@ -1619,14 +1621,75 @@ impl Runtime {
                 }
             }
 
+            let mut did_change_vault_settings = false;
+
             if let Some(metadata) = update.metadata {
-                vault.name = metadata.name.clone();
-                vault.root.title = metadata.name;
-                vault.description = empty_string_as_none(metadata.description);
-                vault.default_username = empty_string_as_none(metadata.default_username);
+                let mut candidate = vault.clone();
+                let old_name = candidate.name.clone();
+                let old_description = candidate.description.clone();
+                let old_default_username = candidate.default_username.clone();
+                let old_root_title = candidate.root.title.clone();
+                let name = metadata.name;
+                let identity_update = VaultIdentityMetadataUpdate {
+                    name: Some(name.clone()),
+                    generator: candidate.generator.clone(),
+                    database_name_changed: candidate.database_name_changed,
+                    description_changed: candidate.description_changed,
+                    default_username_changed: candidate.default_username_changed,
+                };
+                self.core
+                    .update_vault_identity_metadata(&mut candidate, identity_update)?;
+                self.core.update_vault_metadata(
+                    &mut candidate,
+                    VaultMetadataUpdate {
+                        description: Some(metadata.description.unwrap_or_default()),
+                        default_username: Some(metadata.default_username.unwrap_or_default()),
+                        ..VaultMetadataUpdate::default()
+                    },
+                )?;
+                candidate.root.title = name;
+
+                let name_changed = candidate.name != old_name;
+                let description_changed = candidate.description != old_description;
+                let default_username_changed = candidate.default_username != old_default_username;
+                let root_title_changed = candidate.root.title != old_root_title;
+                if name_changed || description_changed || default_username_changed {
+                    let identity_update = VaultIdentityMetadataUpdate {
+                        name: Some(candidate.name.clone()),
+                        generator: candidate.generator.clone(),
+                        database_name_changed: name_changed
+                            .then_some(modified_at_i64)
+                            .or(candidate.database_name_changed),
+                        description_changed: description_changed
+                            .then_some(modified_at_i64)
+                            .or(candidate.description_changed),
+                        default_username_changed: default_username_changed
+                            .then_some(modified_at_i64)
+                            .or(candidate.default_username_changed),
+                    };
+                    self.core
+                        .update_vault_identity_metadata(&mut candidate, identity_update)?;
+                }
+                if root_title_changed {
+                    let root_id = candidate.root.id.to_string();
+                    self.core.update_group_times(
+                        &mut candidate,
+                        &root_id,
+                        GroupTimesUpdate {
+                            modified_at: Some(Some(modified_at)),
+                            ..GroupTimesUpdate::default()
+                        },
+                    )?;
+                }
+                did_change_vault_settings |= name_changed
+                    || description_changed
+                    || default_username_changed
+                    || root_title_changed;
+                *vault = candidate;
             }
 
             if let Some(public_metadata) = update.public_metadata {
+                let previous = vault.public_custom_data.clone();
                 upsert_optional_public_string(
                     vault,
                     "display-name",
@@ -1634,16 +1697,45 @@ impl Runtime {
                 );
                 upsert_optional_public_string(vault, "color", public_metadata.color.as_deref());
                 upsert_optional_public_string(vault, "icon", public_metadata.icon.as_deref());
+                did_change_vault_settings |= vault.public_custom_data != previous;
             }
 
             if let Some(history) = update.history {
+                let previous = (vault.history_max_items, vault.history_max_size);
                 vault.history_max_items = history.max_items_per_entry;
                 vault.history_max_size = history.max_total_size_bytes;
                 enforce_history_limits(vault);
+                did_change_vault_settings |=
+                    (vault.history_max_items, vault.history_max_size) != previous;
             }
 
             if let Some(recycle_bin) = update.recycle_bin {
-                vault.recycle_bin_enabled = Some(recycle_bin.enabled);
+                let enabled = Some(recycle_bin.enabled);
+                if vault.recycle_bin_enabled != enabled {
+                    self.core.update_vault_bin_template_metadata(
+                        vault,
+                        VaultBinTemplateMetadataUpdate {
+                            recycle_bin_enabled: Some(enabled),
+                            recycle_bin_changed: Some(Some(modified_at_i64)),
+                            ..VaultBinTemplateMetadataUpdate::default()
+                        },
+                    )?;
+                    did_change_vault_settings = true;
+                }
+            }
+
+            if did_change_vault_settings {
+                self.core.update_vault_lifecycle_metadata(
+                    vault,
+                    VaultLifecycleMetadataUpdate {
+                        settings_changed: Some(modified_at_i64),
+                        maintenance_history_days: vault.maintenance_history_days,
+                        master_key_changed: vault.master_key_changed,
+                        master_key_change_rec: vault.master_key_change_rec,
+                        master_key_change_force: vault.master_key_change_force,
+                        master_key_change_force_once: vault.master_key_change_force_once,
+                    },
+                )?;
             }
 
             if let Some(encryption) = update.encryption {
@@ -2204,6 +2296,17 @@ impl Runtime {
             };
         }
 
+        let retained_credential_id = URL_SAFE_NO_PAD.encode(&credential.credential_id);
+        let retained_vault = self.loaded_vault(&vault_id)?;
+        find_unique_passkey_by_credential_id_and_relying_party(
+            &retained_vault.root,
+            retained_vault.recycle_bin_group,
+            retained_vault.recycle_bin_enabled.unwrap_or(true),
+            &retained_credential_id,
+            Some(&credential.relying_party),
+        )
+        .context("platform passkey registration was not retained after the durable save")?;
+
         Ok(PlatformPasskeyRegistrationOutput {
             entry_id,
             credential,
@@ -2236,17 +2339,17 @@ impl Runtime {
                 }
             },
         );
-        let mut matching_credential_ids = std::collections::HashSet::new();
-        if matches
-            .iter()
-            .any(|passkey| !matching_credential_ids.insert(passkey.credential_id.as_str()))
-        {
-            anyhow::bail!("multiple platform passkey credentials share a credential id");
-        }
-        let passkey = matches
+        let selected = matches
             .first()
             .copied()
             .context("platform passkey credential not found")?;
+        let passkey = find_unique_passkey_by_credential_id_and_relying_party(
+            &vault.root,
+            vault.recycle_bin_group,
+            vault.recycle_bin_enabled.unwrap_or(true),
+            &selected.credential_id,
+            Some(&input.relying_party),
+        )?;
         let credential_id = URL_SAFE_NO_PAD
             .decode(&passkey.credential_id)
             .context("stored platform passkey credential id was not base64url")?;
@@ -5041,16 +5144,25 @@ impl Runtime {
         vault: Vault,
         bytes: Vec<u8>,
         fingerprint: VaultSourceFingerprint,
-        source_status: Option<VaultSourceStatusDto>,
+        mut source_status: Option<VaultSourceStatusDto>,
     ) -> Result<()> {
         let save_profile = self.inspected_save_profile(&bytes)?;
         let synced = source_status
             .as_ref()
             .is_none_or(|status| status.remote_state == "online");
-        if synced {
-            self.synced_bases
-                .store(vault_id, &bytes)
-                .with_context(|| format!("failed to store synced base: {vault_id}"))?;
+        let base_warning = synced
+            .then(|| self.synced_bases.store(vault_id, &bytes).err())
+            .flatten()
+            .map(|error| format!("failed to store synced base for {vault_id}: {error}"));
+        if let Some(warning) = base_warning {
+            if let Some(status) = source_status.as_mut() {
+                status.last_error = Some(match status.last_error.take() {
+                    Some(previous) => format!("{previous}; {warning}"),
+                    None => warning,
+                });
+            } else {
+                self.record_local_save_warnings(vec![warning]);
+            }
         }
         let loaded = self
             .vault_session
@@ -5192,16 +5304,20 @@ impl Runtime {
                 return Err(error).with_context(|| format!("failed to write vault: {vault_id}"));
             }
         };
-        self.synced_bases
-            .store(vault_id, &bytes)
-            .with_context(|| format!("failed to store synced base: {vault_id}"))?;
-        let loaded = self
-            .vault_session
-            .find_loaded_mut(vault_id)
-            .with_context(|| format!("vault not opened: {vault_id}"))?;
-        loaded.bytes = Vec::new();
-        loaded.baseline_fingerprint = next_fingerprint;
-        loaded.requires_source_migration = false;
+        {
+            let loaded = self
+                .vault_session
+                .find_loaded_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            loaded.bytes = Vec::new();
+            loaded.baseline_fingerprint = next_fingerprint;
+            loaded.requires_source_migration = false;
+        }
+        if let Err(error) = self.synced_bases.store(vault_id, &bytes) {
+            self.record_local_save_warnings(vec![format!(
+                "failed to store synced base for {vault_id}: {error}"
+            )]);
+        }
         Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
             status: SaveVaultStatusDto::Saved,
             merge_summary: None,
@@ -8257,16 +8373,6 @@ fn upsert_optional_public_string(vault: &mut Vault, key: &str, value: Option<&st
     }
 }
 
-fn empty_string_as_none(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        if value.trim().is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    })
-}
-
 fn touch_entry_modified_at(
     core: &KeepassCore,
     vault: &mut Vault,
@@ -9381,6 +9487,54 @@ mod tests {
     }
 
     #[test]
+    fn database_settings_updates_advance_three_way_merge_timestamps() {
+        let mut runtime = Runtime::for_tests_at(200);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let base = runtime.loaded_vault(&opened.vault_id).unwrap().clone();
+
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    metadata: Some(DatabaseMetadataSettingsDto {
+                        name: "Local name".into(),
+                        description: Some("Local description".into()),
+                        default_username: Some("local-user".into()),
+                    }),
+                    public_metadata: Some(DatabasePublicMetadataSettingsDto {
+                        display_name: Some("Local display name".into()),
+                        color: Some("#112233".into()),
+                        icon: Some("database".into()),
+                    }),
+                    history: Some(DatabaseHistorySettingsDto {
+                        max_items_per_entry: Some(10),
+                        max_total_size_bytes: Some(1_000_000),
+                    }),
+                    recycle_bin: Some(DatabaseRecycleBinSettingsDto { enabled: false }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+
+        let local = runtime.loaded_vault(&opened.vault_id).unwrap().clone();
+        assert_eq!(local.database_name_changed, Some(200));
+        assert_eq!(local.description_changed, Some(200));
+        assert_eq!(local.default_username_changed, Some(200));
+        assert_eq!(local.settings_changed, Some(200));
+        assert_eq!(local.recycle_bin_changed, Some(200));
+        assert_eq!(
+            local.root.times.as_ref().map(|times| times.modified_at),
+            Some(200)
+        );
+
+        let mut remote = base.clone();
+        remote.name = "Earlier remote name".into();
+        remote.database_name_changed = Some(100);
+        let merged = three_way_field_patch(&base, &local, &remote).unwrap();
+        assert_eq!(merged.vault.name, "Local name");
+    }
+
+    #[test]
     fn unlock_adopts_loaded_cipher_compression_and_kdf_settings() {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
@@ -10083,7 +10237,7 @@ mod tests {
     }
 
     #[test]
-    fn save_command_reports_post_publish_failure_as_outcome_unknown() {
+    fn save_command_reconciles_a_visible_post_publish_generation() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         create_demo_entry(&mut runtime, &opened.vault_id);
@@ -10093,13 +10247,26 @@ mod tests {
             .handle(RuntimeCommand::SaveVault {
                 vault_id: opened.vault_id.clone(),
             })
-            .expect("post-publish failures must be command responses");
+            .expect("a visible published generation should be reconciled");
 
-        let RuntimeResponse::Error(error) = response else {
-            panic!("expected unknown local save outcome, got {response:?}");
-        };
-        assert_eq!(error.code, "persist_outcome_unknown");
-        assert!(error.message.contains("durability is unknown"));
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        assert_eq!(
+            KeepassCore::new()
+                .load_kdbx(&std::fs::read(&opened.path).unwrap(), &key)
+                .unwrap()
+                .root
+                .entries
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -10124,6 +10291,103 @@ mod tests {
         ));
         assert_eq!(runtime.local_save_warnings.len(), 1);
         assert!(runtime.local_save_warnings[0].contains("retained durable backup"));
+    }
+
+    #[test]
+    fn committed_local_save_survives_synced_base_write_failure() {
+        let mut runtime = Runtime::for_tests();
+        let (dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        let blocked_root = dir.path().join("blocked-synced-base-root");
+        std::fs::write(&blocked_root, b"not a directory").unwrap();
+        runtime.synced_bases = SyncedBaseStore::new_at(blocked_root.join("bases"));
+
+        let response = runtime
+            .save_vault(&opened.vault_id)
+            .expect("the primary KDBX commit already succeeded");
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+        assert!(
+            runtime
+                .local_save_warnings
+                .iter()
+                .any(|warning| warning.contains("failed to store synced base"))
+        );
+        assert!(matches!(
+            runtime.save_vault(&opened.vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        assert_eq!(
+            KeepassCore::new()
+                .load_kdbx(&std::fs::read(&opened.path).unwrap(), &key)
+                .unwrap()
+                .root
+                .entries
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn committed_onedrive_save_survives_synced_base_write_failure() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_100);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        create_demo_entry(&mut runtime, &vault_id);
+        runtime.synced_bases.fail_next_store_for_tests();
+
+        let response = runtime
+            .save_vault(&vault_id)
+            .expect("the remote KDBX commit already succeeded");
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+        assert!(
+            runtime
+                .session_state()
+                .source_status
+                .and_then(|status| status.last_error)
+                .is_some_and(|error| error.contains("failed to store synced base"))
+        );
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        assert_eq!(
+            KeepassCore::new()
+                .load_kdbx(
+                    &runtime
+                        .read_test_onedrive_item_bytes("drive-1", "item-1")
+                        .unwrap(),
+                    &key,
+                )
+                .unwrap()
+                .root
+                .entries
+                .len(),
+            1
+        );
+        assert!(matches!(
+            runtime.save_vault(&vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
     }
 
     struct RejectingWarningWriter;
@@ -10326,6 +10590,140 @@ mod tests {
     }
 
     #[test]
+    fn platform_plugin_registration_reconciles_a_visible_post_publish_generation() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        arm_local_write_fault(&mut runtime, DurableFaultPoint::TargetReplaced);
+
+        let registration = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                user_name: "alice@example.com".into(),
+                user_handle: b"platform-user-ambiguous".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .expect("the visible published credential should complete registration");
+
+        drop(runtime);
+        let mut reopened = Runtime::for_tests();
+        let handle = reopened.open_local_vault(&opened.vault_id).unwrap();
+        reopened
+            .unlock_vault(&handle.vault_id, Some("demo-password"), None)
+            .unwrap();
+        let detail = reopened
+            .get_entry_detail(&handle.vault_id, &registration.entry_id)
+            .unwrap();
+        assert_eq!(
+            detail.passkey.unwrap().credential_id,
+            URL_SAFE_NO_PAD.encode(registration.credential.credential_id)
+        );
+    }
+
+    #[test]
+    fn platform_registration_fails_if_a_concurrent_merge_drops_its_credential() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let base_passkey = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "alice@example.com",
+                user_handle: b"shared-user",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            b"base-credential".to_vec(),
+        )
+        .unwrap()
+        .passkey;
+        let mut base = Vault::empty("Cloud Vault");
+        let entry = Entry::new("Example account");
+        let entry_id = entry.id.to_string();
+        base.root.entries.push(entry);
+        core.set_entry_passkey(&mut base, &entry_id, base_passkey)
+            .unwrap();
+        base.root.entries[0].modified_at = 10;
+        let base_bytes = core
+            .save_kdbx(&base, &key, SaveProfile::recommended())
+            .unwrap();
+        let transformed_key = derive_transformed_key_with_policy(
+            &base_bytes,
+            &key,
+            &ExternalKdfPolicy::Desktop,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
+        .unwrap();
+
+        let remote_passkey = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "alice@example.com",
+                user_handle: b"shared-user",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            b"remote-credential".to_vec(),
+        )
+        .unwrap()
+        .passkey;
+        let mut remote = load_kdbx_with_transformed_key(&base_bytes, &transformed_key).unwrap();
+        core.set_entry_passkey(&mut remote, &entry_id, remote_passkey)
+            .unwrap();
+        remote.root.entries[0].modified_at = 300;
+        let remote_bytes = save_kdbx_with_history_limits_transformed(
+            &mut remote,
+            &transformed_key,
+            SaveProfile {
+                kdf: None,
+                ..SaveProfile::recommended()
+            },
+        )
+        .unwrap();
+
+        let local_credential_id = b"local-credential".to_vec();
+        let generated_id = URL_SAFE_NO_PAD.encode(&local_credential_id);
+        let mut runtime = Runtime::for_tests_at_with_onedrive_item(
+            200,
+            "drive-1",
+            "item-1",
+            "Cloud Vault.kdbx",
+            "alice@example.com",
+            base_bytes,
+        );
+        runtime.passkey_credential_id_generator = Box::new(move || generated_id.clone());
+        runtime
+            .add_onedrive_vault_reference("drive-1", "item-1")
+            .unwrap();
+        runtime
+            .unlock_current_vault_with_password("demo-password")
+            .unwrap();
+        runtime.queue_test_onedrive_precondition_failure(Some(remote_bytes));
+
+        let result = runtime.register_platform_passkey(PlatformPasskeyRegistrationInput {
+            relying_party: "example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_handle: b"shared-user".to_vec(),
+            public_key_algorithm: -7,
+            user_verified: true,
+        });
+
+        let credentials = runtime.list_platform_passkey_credentials().unwrap();
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].credential_id, b"remote-credential");
+        assert_ne!(credentials[0].credential_id, local_credential_id);
+        let error =
+            result.expect_err("a credential discarded by the merge must not complete registration");
+        assert!(
+            error
+                .to_string()
+                .contains("platform passkey registration was not retained"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn platform_plugin_registration_fails_when_save_is_diverted_to_a_conflict_copy() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
@@ -10399,61 +10797,58 @@ mod tests {
     }
 
     #[test]
-    fn platform_plugin_rejects_duplicate_matching_credential_ids() {
+    fn platform_plugin_rejects_duplicate_credential_ids_for_the_same_relying_party() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        let first = runtime
-            .register_platform_passkey(PlatformPasskeyRegistrationInput {
-                relying_party: "example.com".into(),
-                user_name: "alice@example.com".into(),
-                user_handle: b"user-a".to_vec(),
-                public_key_algorithm: -7,
-                user_verified: true,
-            })
-            .unwrap();
-        let duplicate = create_platform_registration_with_credential_id(
+        let credential_id = b"duplicate-platform-credential".to_vec();
+        let first = create_platform_registration_with_credential_id(
             PlatformPasskeyRegistrationRequest {
                 relying_party: "example.com",
-                user_name: "mallory@example.com",
+                user_name: "alice@example.com",
+                user_handle: b"user-a",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            credential_id.clone(),
+        )
+        .unwrap()
+        .passkey;
+        let second = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "bob@example.com",
                 user_handle: b"user-b",
                 public_key_algorithm: -7,
                 user_verified: true,
             },
-            first.credential.credential_id.clone(),
+            credential_id.clone(),
         )
-        .unwrap();
-        let duplicate_entry = create_demo_entry(&mut runtime, &opened.vault_id);
-        let duplicate = duplicate.passkey;
-        runtime
-            .set_entry_passkey(
-                &opened.vault_id,
-                &duplicate_entry.id,
-                EntryPasskeyDto {
-                    username: duplicate.username,
-                    credential_id: duplicate.credential_id,
-                    generated_user_id: duplicate.generated_user_id,
-                    private_key_pem: duplicate.private_key_pem,
-                    relying_party: duplicate.relying_party,
-                    user_handle: duplicate.user_handle,
-                    backup_eligible: duplicate.backup_eligible,
-                    backup_state: duplicate.backup_state,
-                },
-            )
+        .unwrap()
+        .passkey;
+        let loaded = runtime
+            .vault_session
+            .find_loaded_mut(&opened.vault_id)
             .unwrap();
+        let vault = loaded.vault.as_mut().unwrap();
+        let mut first_entry = Entry::new("First duplicate");
+        first_entry.passkey = Some(first);
+        let mut second_entry = Entry::new("Second duplicate");
+        second_entry.passkey = Some(second);
+        vault.root.entries.extend([first_entry, second_entry]);
 
         let error = runtime
             .create_platform_passkey_assertion(PlatformPasskeyAssertionInput {
                 relying_party: "example.com".into(),
-                allowed_credential_ids: vec![first.credential.credential_id],
-                client_data_hash: vec![0x72; 32],
+                allowed_credential_ids: vec![credential_id],
+                client_data_hash: vec![0x51; 32],
                 user_verified: true,
             })
-            .expect_err("duplicate credential IDs must not select an arbitrary private key");
+            .expect_err("an ambiguous credential id must not select an arbitrary private key");
 
         assert!(
             error
                 .to_string()
-                .contains("multiple platform passkey credentials")
+                .contains("multiple passkey credentials found for credential id")
         );
     }
 
@@ -15507,7 +15902,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_recent_vaults_treats_quick_unlock_probe_failures_as_disabled() {
+    fn listing_recent_vaults_preserves_quick_unlock_after_probe_failures() {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
@@ -15528,12 +15923,22 @@ mod tests {
         runtime
             .enroll_quick_unlock_for_current_vault(Some("demo-password"), None)
             .unwrap();
+        let storage_key = quick_unlock_storage_key(
+            runtime
+                .vault_session
+                .current_vault_ref_id()
+                .expect("current vault reference"),
+        );
         runtime.lock_session();
 
         let listed = runtime.list_recent_vaults().unwrap();
 
         assert_eq!(listed.vaults.len(), 1);
         assert!(!listed.vaults[0].supports_quick_unlock);
+        assert!(
+            runtime.secure_storage.load(&storage_key).unwrap().is_some(),
+            "a read-only availability probe must not delete enrolled credentials"
+        );
     }
 
     #[test]

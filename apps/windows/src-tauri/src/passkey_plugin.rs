@@ -116,6 +116,8 @@ unsafe extern "system" {
         credentials: *const VkCredentialMetadata,
         credential_count: u32,
     ) -> i32;
+    #[cfg(test)]
+    fn vaultkern_plugin_test_replaces_cached_account_credential() -> i32;
 }
 
 struct CallbackContext {
@@ -720,7 +722,10 @@ fn hresult_message(operation: &str, status: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{VkOwnedBytes, free_owned_bytes, owned_bytes};
+    use super::{
+        S_OK, VkOwnedBytes, free_owned_bytes, owned_bytes,
+        vaultkern_plugin_test_replaces_cached_account_credential,
+    };
 
     #[test]
     fn owned_ffi_bytes_round_trip_through_the_matching_deallocator() {
@@ -734,5 +739,13 @@ mod tests {
                 len: 0,
             });
         }
+    }
+
+    #[test]
+    fn replacing_an_account_credential_evicts_the_old_cached_id() {
+        assert_eq!(
+            unsafe { vaultkern_plugin_test_replaces_cached_account_credential() },
+            S_OK
+        );
     }
 }

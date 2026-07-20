@@ -41,9 +41,13 @@ pub(crate) fn extension_id_from_browser_origin(origin: &str) -> Option<&str> {
     Some(extension_id)
 }
 
+pub fn is_supported_browser_origin(origin: &str) -> bool {
+    extension_id_from_browser_origin(origin).is_some()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::extension_id_from_browser_origin;
+    use super::{extension_id_from_browser_origin, is_supported_browser_origin};
 
     #[test]
     fn parses_extension_id_from_browser_origin() {
@@ -73,5 +77,8 @@ mod tests {
             extension_id_from_browser_origin("chrome-extension://UpperCase/"),
             None
         );
+        assert!(!is_supported_browser_origin(
+            "chrome-extension://UpperCase/"
+        ));
     }
 }
