@@ -53,6 +53,10 @@ export function createDesktopSettingsStore(
       const previousEnabled = storedPasskeyProviderSetting(storage);
       const applied = await applyPasskeyProviderSetting(normalized.passkeyProviderEnabled);
       if (typeof applied === "boolean" && applied !== normalized.passkeyProviderEnabled) {
+        await restoreEffectivePasskeyProviderSetting(
+          applyPasskeyProviderSetting,
+          applied
+        );
         throw new Error(
           normalized.passkeyProviderEnabled
             ? "Windows did not enable the passkey provider"
@@ -101,9 +105,29 @@ async function applyInitialPasskeyProviderSetting(
 ): Promise<boolean> {
   try {
     const applied = await apply(enabled);
-    return typeof applied === "boolean" ? applied : enabled;
+    if (typeof applied === "boolean") {
+      if (applied !== enabled) {
+        await restoreEffectivePasskeyProviderSetting(apply, applied);
+      }
+      return applied;
+    }
+    return enabled;
   } catch (error) {
     console.error("failed to apply the saved passkey-provider setting", error);
     return false;
+  }
+}
+
+async function restoreEffectivePasskeyProviderSetting(
+  apply: (enabled: boolean) => Promise<unknown>,
+  enabled: boolean
+): Promise<void> {
+  try {
+    await apply(enabled);
+  } catch (error) {
+    console.error(
+      "failed to align the passkey-provider callback with the Windows state",
+      error
+    );
   }
 }

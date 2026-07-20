@@ -81,11 +81,15 @@ it("does not report the passkey provider as enabled when Windows returns false",
   ).load();
 
   expect(settings.passkeyProviderEnabled).toBe(false);
-  expect(applyPasskeyProviderSetting).toHaveBeenCalledWith(true);
+  expect(applyPasskeyProviderSetting.mock.calls).toEqual([[true], [false]]);
 });
 
 it("does not persist an enabled provider preference when Windows returns false", async () => {
-  const applyPasskeyProviderSetting = vi.fn(async () => false);
+  let callbackEnabled = false;
+  const applyPasskeyProviderSetting = vi.fn(async (enabled: boolean) => {
+    callbackEnabled = enabled;
+    return false;
+  });
   const storage = {
     getItem: vi.fn(() => JSON.stringify(DEFAULT_EXTENSION_SETTINGS)),
     setItem: vi.fn(),
@@ -101,6 +105,8 @@ it("does not persist an enabled provider preference when Windows returns false",
   ).rejects.toThrow("Windows did not enable the passkey provider");
 
   expect(storage.setItem).not.toHaveBeenCalled();
+  expect(applyPasskeyProviderSetting.mock.calls).toEqual([[true], [false]]);
+  expect(callbackEnabled).toBe(false);
 });
 
 it("accepts a false Windows result when disabling the provider", async () => {
