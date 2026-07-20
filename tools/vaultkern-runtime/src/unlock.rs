@@ -5,7 +5,9 @@ use vaultkern_core::{
 };
 use zeroize::Zeroizing;
 
-use crate::providers::secure_storage::{SecureStorageProvider, is_secure_storage_cancelled};
+use crate::providers::secure_storage::{
+    SecureStorageProvider, is_secure_storage_cancelled, is_secure_storage_invalidated,
+};
 
 const UNLOCK_BLOB_MAGIC: &[u8; 8] = b"VKUBLOB1";
 const PASSWORD_PRESENT: u8 = 1;
@@ -227,12 +229,13 @@ fn unlock_from_blob_with_cache_policy(
         Err(error) if is_secure_storage_cancelled(&error) => {
             return Ok(UnlockAttempt::Cancelled);
         }
-        Err(_) => {
+        Err(error) if is_secure_storage_invalidated(&error) => {
             storage
                 .delete(storage_key)
                 .context("failed to delete invalidated unlock blob")?;
             return Ok(UnlockAttempt::NotEnrolled);
         }
+        Err(error) => return Err(error).context("failed to load unlock blob"),
     };
     if encoded.is_empty() {
         storage
@@ -347,6 +350,7 @@ mod tests {
         None,
         Cancelled,
         Invalidated,
+        Transient,
     }
 
     struct FailingLoadStore {
@@ -377,7 +381,12 @@ mod tests {
                 LoadFailure::Cancelled => {
                     Err(SecureStorageError::cancelled("user cancelled").into())
                 }
-                LoadFailure::Invalidated => anyhow::bail!("Hello key was invalidated"),
+                LoadFailure::Invalidated => {
+                    Err(SecureStorageError::record_invalidated("Hello key was invalidated").into())
+                }
+                LoadFailure::Transient => {
+                    anyhow::bail!("Microsoft Passport KSP is temporarily unavailable")
+                }
             }
         }
 
@@ -609,5 +618,25 @@ mod tests {
         ));
         assert_eq!(store.deletes.get(), 1);
         assert!(store.value.borrow().is_none());
+    }
+
+    #[test]
+    fn transient_secure_storage_failures_preserve_the_unlock_blob() {
+        let password = b"transient state password";
+        let bytes = file("transient state", password);
+        let master = MasterCredential::new(Some(password), None).unwrap();
+        let transformed = derive_transformed_key(&bytes, &master.to_composite_key()).unwrap();
+        let encoded = UnlockBlob::new(master, transformed).encode().unwrap();
+        let store = FailingLoadStore::with_blob(encoded.to_vec());
+        store.failure.set(LoadFailure::Transient);
+
+        let error = match unlock_from_blob(&store, "vault-a", &bytes, true) {
+            Err(error) => error,
+            Ok(_) => panic!("a transient secure-storage failure must be retryable"),
+        };
+
+        assert!(format!("{error:#}").contains("temporarily unavailable"));
+        assert_eq!(store.deletes.get(), 0);
+        assert!(store.value.borrow().is_some());
     }
 }

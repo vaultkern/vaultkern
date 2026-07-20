@@ -400,6 +400,8 @@ enum SecureStorageErrorKind {
     Cancelled,
     #[cfg(any(windows, test))]
     HelloKeyInvalidated,
+    #[cfg(any(windows, test))]
+    RecordInvalidated,
 }
 
 impl SecureStorageError {
@@ -415,6 +417,14 @@ impl SecureStorageError {
     fn hello_key_invalidated(message: impl Into<String>) -> Self {
         Self {
             kind: SecureStorageErrorKind::HelloKeyInvalidated,
+            message: message.into(),
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn record_invalidated(message: impl Into<String>) -> Self {
+        Self {
+            kind: SecureStorageErrorKind::RecordInvalidated,
             message: message.into(),
         }
     }
@@ -434,6 +444,28 @@ pub(crate) fn is_secure_storage_cancelled(error: &anyhow::Error) -> bool {
             .downcast_ref::<SecureStorageError>()
             .is_some_and(|error| error.kind == SecureStorageErrorKind::Cancelled)
     })
+}
+
+pub(crate) fn is_secure_storage_invalidated(error: &anyhow::Error) -> bool {
+    #[cfg(any(windows, test))]
+    {
+        return error.chain().any(|cause| {
+            cause
+                .downcast_ref::<SecureStorageError>()
+                .is_some_and(|error| {
+                    matches!(
+                        error.kind,
+                        SecureStorageErrorKind::HelloKeyInvalidated
+                            | SecureStorageErrorKind::RecordInvalidated
+                    )
+                })
+        });
+    }
+    #[cfg(not(any(windows, test)))]
+    {
+        let _ = error;
+        false
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -613,24 +645,43 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
             return Ok(None);
         }
         let bytes = fs::read(path)?;
-        let envelope: QuickUnlockEnvelope = serde_json::from_slice(&bytes)
-            .context("quick unlock credentials use an unsupported legacy format")?;
+        let envelope: QuickUnlockEnvelope = serde_json::from_slice(&bytes).map_err(|error| {
+            SecureStorageError::record_invalidated(format!(
+                "quick unlock credentials use an unsupported legacy format: {error}"
+            ))
+        })?;
         if envelope.version != QUICK_UNLOCK_ENVELOPE_VERSION
             || envelope.scheme != QUICK_UNLOCK_ENVELOPE_SCHEME
         {
-            anyhow::bail!("quick unlock credentials use an unsupported envelope");
+            return Err(SecureStorageError::record_invalidated(
+                "quick unlock credentials use an unsupported envelope",
+            )
+            .into());
         }
         let wrapped_key = BASE64_STANDARD
             .decode(envelope.wrapped_key)
-            .context("failed to decode wrapped quick unlock key")?;
-        let nonce = BASE64_STANDARD
-            .decode(envelope.nonce)
-            .context("failed to decode quick unlock nonce")?;
+            .map_err(|error| {
+                SecureStorageError::record_invalidated(format!(
+                    "failed to decode wrapped quick unlock key: {error}"
+                ))
+            })?;
+        let nonce = BASE64_STANDARD.decode(envelope.nonce).map_err(|error| {
+            SecureStorageError::record_invalidated(format!(
+                "failed to decode quick unlock nonce: {error}"
+            ))
+        })?;
         let ciphertext = BASE64_STANDARD
             .decode(envelope.ciphertext)
-            .context("failed to decode encrypted quick unlock credentials")?;
+            .map_err(|error| {
+                SecureStorageError::record_invalidated(format!(
+                    "failed to decode encrypted quick unlock credentials: {error}"
+                ))
+            })?;
         if nonce.len() != 12 {
-            anyhow::bail!("quick unlock credential envelope has an invalid nonce");
+            return Err(SecureStorageError::record_invalidated(
+                "quick unlock credential envelope has an invalid nonce",
+            )
+            .into());
         }
 
         let data_key = with_hello_key(
@@ -645,11 +696,16 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
                 ncrypt_decrypt_pkcs1(key, &wrapped_key)
             },
         )?;
-        let cipher = Aes256Gcm::new_from_slice(&data_key)
-            .map_err(|_| anyhow::anyhow!("failed to initialize quick unlock cipher"))?;
+        let cipher = Aes256Gcm::new_from_slice(&data_key).map_err(|_| {
+            SecureStorageError::record_invalidated(
+                "decrypted quick unlock data key has an invalid length",
+            )
+        })?;
         let plaintext = cipher
             .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
-            .map_err(|_| anyhow::anyhow!("failed to decrypt quick unlock credentials"))?;
+            .map_err(|_| {
+                SecureStorageError::record_invalidated("failed to decrypt quick unlock credentials")
+            })?;
         Ok(Some(plaintext))
     }
 
