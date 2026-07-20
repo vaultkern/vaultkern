@@ -50,6 +50,10 @@ const QUICK_UNLOCK_GESTURE_REQUIRED: u32 = 1;
 const QUICK_UNLOCK_RECORD_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(any(windows, test))]
 const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
+#[cfg(any(windows, test))]
+const NTE_BAD_KEY_STATE: u32 = 0x8009_000b;
+#[cfg(any(windows, test))]
+const NTE_NO_KEY: u32 = 0x8009_000d;
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 #[derive(Deserialize, Serialize)]
@@ -387,15 +391,30 @@ fn quick_unlock_target_expectation(path: &Path) -> Result<TargetExpectation> {
 
 #[derive(Debug)]
 pub(crate) struct SecureStorageError {
-    cancelled: bool,
+    kind: SecureStorageErrorKind,
     message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecureStorageErrorKind {
+    Cancelled,
+    #[cfg(any(windows, test))]
+    HelloKeyInvalidated,
 }
 
 impl SecureStorageError {
     #[cfg(any(windows, test))]
     pub(crate) fn cancelled(message: impl Into<String>) -> Self {
         Self {
-            cancelled: true,
+            kind: SecureStorageErrorKind::Cancelled,
+            message: message.into(),
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    fn hello_key_invalidated(message: impl Into<String>) -> Self {
+        Self {
+            kind: SecureStorageErrorKind::HelloKeyInvalidated,
             message: message.into(),
         }
     }
@@ -413,8 +432,22 @@ pub(crate) fn is_secure_storage_cancelled(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<SecureStorageError>()
-            .is_some_and(|error| error.cancelled)
+            .is_some_and(|error| error.kind == SecureStorageErrorKind::Cancelled)
     })
+}
+
+#[cfg(any(windows, test))]
+fn is_hello_key_invalidated(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<SecureStorageError>()
+            .is_some_and(|error| error.kind == SecureStorageErrorKind::HelloKeyInvalidated)
+    })
+}
+
+#[cfg(any(windows, test))]
+fn is_hello_key_invalidated_status(status: u32) -> bool {
+    matches!(status, NTE_BAD_KEY_STATE | NTE_NO_KEY)
 }
 
 #[cfg(any(windows, test))]
@@ -424,12 +457,13 @@ fn verify_or_recreate_hello_key<T>(
 ) -> Result<T> {
     match verify() {
         Ok(value) => Ok(value),
-        Err(error) if is_secure_storage_cancelled(&error) => Err(error),
-        Err(verification_error) => recreate().with_context(|| {
+        Err(verification_error) if is_hello_key_invalidated(&verification_error) => recreate()
+            .with_context(|| {
             format!(
                 "failed to replace an invalidated Windows Hello key after verification failed: {verification_error:#}"
             )
         }),
+        Err(error) => Err(error),
     }
 }
 
@@ -1098,6 +1132,12 @@ fn check_ncrypt(status: windows_sys::core::HRESULT, message: &str) -> Result<()>
         Ok(())
     } else if matches!(status as u32, 0x8009_0036 | 0x8007_04c7) {
         Err(SecureStorageError::cancelled(format!("{message}: 0x{:08x}", status as u32)).into())
+    } else if is_hello_key_invalidated_status(status as u32) {
+        Err(SecureStorageError::hello_key_invalidated(format!(
+            "{message}: 0x{:08x}",
+            status as u32
+        ))
+        .into())
     } else {
         anyhow::bail!("{message}: 0x{:08x}", status as u32)
     }
@@ -1237,7 +1277,14 @@ mod tests {
         let recreated = std::cell::Cell::new(false);
 
         let result = verify_or_recreate_hello_key(
-            || anyhow::bail!("persisted Hello key was invalidated"),
+            || {
+                Err::<_, anyhow::Error>(
+                    SecureStorageError::hello_key_invalidated(
+                        "persisted Hello key was invalidated",
+                    )
+                    .into(),
+                )
+            },
             || {
                 recreated.set(true);
                 Ok("replacement key")
@@ -1247,6 +1294,23 @@ mod tests {
 
         assert_eq!(result, "replacement key");
         assert!(recreated.get());
+    }
+
+    #[test]
+    fn hello_reenrollment_does_not_replace_a_key_after_a_transient_verification_failure() {
+        let recreated = std::cell::Cell::new(false);
+
+        let error = verify_or_recreate_hello_key(
+            || anyhow::bail!("Microsoft Passport KSP is temporarily unavailable"),
+            || {
+                recreated.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("temporarily unavailable"));
+        assert!(!recreated.get());
     }
 
     #[test]
@@ -1264,6 +1328,16 @@ mod tests {
 
         assert!(is_secure_storage_cancelled(&error));
         assert!(!recreated.get());
+    }
+
+    #[test]
+    fn only_definitive_hello_key_failures_trigger_reenrollment() {
+        assert!(super::is_hello_key_invalidated_status(
+            super::NTE_BAD_KEY_STATE
+        ));
+        assert!(super::is_hello_key_invalidated_status(super::NTE_NO_KEY));
+        assert!(!super::is_hello_key_invalidated_status(0x8009_0010));
+        assert!(!super::is_hello_key_invalidated_status(0x8009_0030));
     }
 
     #[test]

@@ -390,3 +390,23 @@ fn concurrent_unknown_xml_changes_fall_back_instead_of_dropping_luggage() {
 
     assert!(three_way_field_patch(&base, &local, &remote).is_err());
 }
+
+#[test]
+fn local_sibling_reordering_falls_back_instead_of_being_silently_dropped() {
+    let (mut base, _) = base_vault();
+    base.root.entries.push(Entry::new("Second account"));
+    let mut local = base.clone();
+    local.root.entries.swap(0, 1);
+
+    assert!(three_way_field_patch(&base, &local, &base).is_err());
+}
+
+#[test]
+fn local_group_reordering_uses_the_same_conflict_copy_fallback() {
+    let mut base = Vault::empty("Shared");
+    base.root.children = vec![Group::new("First"), Group::new("Second")];
+    let mut local = base.clone();
+    local.root.children.swap(0, 1);
+
+    assert!(three_way_field_patch(&base, &local, &base).is_err());
+}

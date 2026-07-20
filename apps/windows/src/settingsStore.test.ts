@@ -42,6 +42,29 @@ it("applies the passkey-provider preference when settings load and save", async 
   expect(applyPasskeyProviderSetting).toHaveBeenLastCalledWith(true);
 });
 
+it("does not report the passkey provider as enabled when startup activation fails", async () => {
+  window.localStorage.setItem(
+    "vaultkern.desktop.settings.v1",
+    JSON.stringify({
+      ...DEFAULT_EXTENSION_SETTINGS,
+      passkeyProviderEnabled: true
+    })
+  );
+  const applyPasskeyProviderSetting = vi.fn(async () => {
+    throw new Error("plugin authenticator is unavailable");
+  });
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+  const settings = await createDesktopSettingsStore(
+    window.localStorage,
+    applyPasskeyProviderSetting
+  ).load();
+
+  expect(settings.passkeyProviderEnabled).toBe(false);
+  expect(applyPasskeyProviderSetting).toHaveBeenCalledWith(true);
+  consoleError.mockRestore();
+});
+
 it("rolls back the provider when persisting its setting fails", async () => {
   const applyPasskeyProviderSetting = vi.fn(async (_enabled: boolean) => undefined);
   const storage = {

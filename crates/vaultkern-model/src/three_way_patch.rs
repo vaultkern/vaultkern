@@ -45,6 +45,8 @@ pub enum ThreeWayPatchError {
         id: Option<Uuid>,
         field: &'static str,
     },
+    #[error("local {object} sibling order change cannot be patched in group {parent}")]
+    SiblingOrderChange { parent: Uuid, object: &'static str },
 }
 
 #[derive(Clone)]
@@ -65,6 +67,11 @@ struct FlatVault {
     root_id: Uuid,
     entries: BTreeMap<Uuid, FlatEntry>,
     groups: BTreeMap<Uuid, FlatGroup>,
+}
+
+struct SiblingOrders {
+    entries: BTreeMap<Uuid, Vec<Uuid>>,
+    groups: BTreeMap<Uuid, Vec<Uuid>>,
 }
 
 #[derive(Default)]
@@ -108,6 +115,7 @@ pub fn three_way_field_patch(
         &local_flat,
         &remote_flat,
     )?;
+    ensure_local_sibling_order_representable(&base_flat, &local_flat, &remote_flat)?;
 
     let mut report = ThreeWayPatchReport::default();
     let groups = merge_groups(&base_flat, &local_flat, &remote_flat, &mut report)?;
@@ -217,6 +225,95 @@ fn ensure_fidelity_field<T: Eq>(
         return Err(ThreeWayPatchError::FidelityConflict { object, id, field });
     }
     Ok(())
+}
+
+fn ensure_local_sibling_order_representable(
+    base: &FlatVault,
+    local: &FlatVault,
+    remote: &FlatVault,
+) -> Result<(), ThreeWayPatchError> {
+    let base_orders = sibling_orders(base);
+    let local_orders = sibling_orders(local);
+    let remote_orders = sibling_orders(remote);
+    for parent in base.groups.keys().copied() {
+        ensure_local_sibling_order(
+            parent,
+            "entry",
+            base_orders.entries.get(&parent).map(Vec::as_slice),
+            local_orders.entries.get(&parent).map(Vec::as_slice),
+            remote_orders.entries.get(&parent).map(Vec::as_slice),
+        )?;
+        ensure_local_sibling_order(
+            parent,
+            "group",
+            base_orders.groups.get(&parent).map(Vec::as_slice),
+            local_orders.groups.get(&parent).map(Vec::as_slice),
+            remote_orders.groups.get(&parent).map(Vec::as_slice),
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_local_sibling_order(
+    parent: Uuid,
+    object: &'static str,
+    base: Option<&[Uuid]>,
+    local: Option<&[Uuid]>,
+    remote: Option<&[Uuid]>,
+) -> Result<(), ThreeWayPatchError> {
+    let base = base.unwrap_or_default();
+    let local = local.unwrap_or_default();
+    let remote = remote.unwrap_or_default();
+    let local_ids = local.iter().copied().collect::<BTreeSet<_>>();
+    let remote_ids = remote.iter().copied().collect::<BTreeSet<_>>();
+    let shared = base
+        .iter()
+        .copied()
+        .filter(|id| local_ids.contains(id) && remote_ids.contains(id))
+        .collect::<BTreeSet<_>>();
+    let retain_shared = |order: &[Uuid]| {
+        order
+            .iter()
+            .copied()
+            .filter(|id| shared.contains(id))
+            .collect::<Vec<_>>()
+    };
+    let base = retain_shared(base);
+    let local = retain_shared(local);
+    let remote = retain_shared(remote);
+    if local != base && local != remote {
+        return Err(ThreeWayPatchError::SiblingOrderChange { parent, object });
+    }
+    Ok(())
+}
+
+fn sibling_orders(flat: &FlatVault) -> SiblingOrders {
+    let mut entries = BTreeMap::<Uuid, Vec<(usize, Uuid)>>::new();
+    for (id, entry) in &flat.entries {
+        entries
+            .entry(entry.parent)
+            .or_default()
+            .push((entry.order, *id));
+    }
+    let mut groups = BTreeMap::<Uuid, Vec<(usize, Uuid)>>::new();
+    for (id, group) in &flat.groups {
+        if let Some(parent) = group.parent {
+            groups.entry(parent).or_default().push((group.order, *id));
+        }
+    }
+    let sorted_ids = |orders: BTreeMap<Uuid, Vec<(usize, Uuid)>>| {
+        orders
+            .into_iter()
+            .map(|(parent, mut siblings)| {
+                siblings.sort_unstable();
+                (parent, siblings.into_iter().map(|(_, id)| id).collect())
+            })
+            .collect()
+    };
+    SiblingOrders {
+        entries: sorted_ids(entries),
+        groups: sorted_ids(groups),
+    }
 }
 
 fn validate_group_hierarchy(

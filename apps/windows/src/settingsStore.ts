@@ -17,29 +17,35 @@ export function createDesktopSettingsStore(
     async load() {
       const value = storage.getItem(SETTINGS_KEY);
       if (value === null) {
-        await applyInitialPasskeyProviderSetting(
+        const applied = await applyInitialPasskeyProviderSetting(
           applyPasskeyProviderSetting,
           DEFAULT_EXTENSION_SETTINGS.passkeyProviderEnabled
         );
-        return DEFAULT_EXTENSION_SETTINGS;
+        return applied
+          ? DEFAULT_EXTENSION_SETTINGS
+          : { ...DEFAULT_EXTENSION_SETTINGS, passkeyProviderEnabled: false };
       }
 
       try {
         const settings = normalizeExtensionSettings(
           JSON.parse(value) as Partial<ExtensionSettings>
         );
-        await applyInitialPasskeyProviderSetting(
+        const applied = await applyInitialPasskeyProviderSetting(
           applyPasskeyProviderSetting,
           settings.passkeyProviderEnabled
         );
-        return settings;
+        return applied
+          ? settings
+          : { ...settings, passkeyProviderEnabled: false };
       } catch {
         storage.removeItem(SETTINGS_KEY);
-        await applyInitialPasskeyProviderSetting(
+        const applied = await applyInitialPasskeyProviderSetting(
           applyPasskeyProviderSetting,
           DEFAULT_EXTENSION_SETTINGS.passkeyProviderEnabled
         );
-        return DEFAULT_EXTENSION_SETTINGS;
+        return applied
+          ? DEFAULT_EXTENSION_SETTINGS
+          : { ...DEFAULT_EXTENSION_SETTINGS, passkeyProviderEnabled: false };
       }
     },
     async save(settings) {
@@ -85,10 +91,12 @@ function storedPasskeyProviderSetting(
 async function applyInitialPasskeyProviderSetting(
   apply: (enabled: boolean) => Promise<unknown>,
   enabled: boolean
-) {
+): Promise<boolean> {
   try {
     await apply(enabled);
+    return true;
   } catch (error) {
     console.error("failed to apply the saved passkey-provider setting", error);
+    return false;
   }
 }
