@@ -7,9 +7,13 @@ use windows_sys::Win32::Foundation::{
     APPMODEL_ERROR_NO_PACKAGE, CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Cryptography::{
-    CERT_NAME_ATTR_TYPE, CERT_SHA256_HASH_PROP_ID, CERT_X500_NAME_STR,
-    CertGetCertificateContextProperty, CertGetNameStringW, CertNameToStrW, PKCS_7_ASN_ENCODING,
-    X509_ASN_ENCODING, szOID_ORGANIZATION_NAME,
+    CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL, CERT_CHAIN_DISABLE_AUTH_ROOT_AUTO_UPDATE, CERT_CHAIN_PARA,
+    CERT_CHAIN_POLICY_AUTHENTICODE, CERT_CHAIN_POLICY_IGNORE_ALL_NOT_TIME_VALID_FLAGS,
+    CERT_CHAIN_POLICY_PARA, CERT_CHAIN_POLICY_STATUS, CERT_CONTEXT, CERT_NAME_ATTR_TYPE,
+    CERT_SHA256_HASH_PROP_ID, CERT_X500_NAME_STR, CertFreeCertificateChain,
+    CertGetCertificateChain, CertGetCertificateContextProperty, CertGetNameStringW, CertNameToStrW,
+    CertVerifyCertificateChainPolicy, HCERTCHAINENGINE, PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
+    szOID_ORGANIZATION_NAME,
 };
 use windows_sys::Win32::Security::WinTrust::{
     WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
@@ -27,7 +31,7 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::Shell::{
-    FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, SHGetKnownFolderPath,
+    FOLDERID_LocalAppData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, SHGetKnownFolderPath,
 };
 
 const RESIDENT_EXECUTABLE_NAME: &str = "vaultkern-windows.exe";
@@ -41,6 +45,7 @@ struct AuthenticodeIdentity {
     subject: String,
     organization: Option<String>,
     sha256_thumbprint: String,
+    machine_chain_trusted: bool,
 }
 
 #[derive(Debug)]
@@ -245,6 +250,9 @@ fn authenticate_browser_identity(
     {
         anyhow::bail!("resident IPC browser publisher is not trusted");
     }
+    if !browser.signer.machine_chain_trusted {
+        anyhow::bail!("resident IPC browser signer is not trusted by LocalMachine");
+    }
     Ok(())
 }
 
@@ -357,6 +365,7 @@ fn trusted_browser_executable_paths() -> Result<Vec<String>> {
     let roots = [
         known_folder_path(&FOLDERID_ProgramFiles, "Program Files")?,
         known_folder_path(&FOLDERID_ProgramFilesX86, "Program Files (x86)")?,
+        known_folder_path(&FOLDERID_LocalAppData, "Local AppData")?,
     ];
     let relative_paths = [
         Path::new("Google")
@@ -389,7 +398,7 @@ fn trusted_browser_executable_paths() -> Result<Vec<String>> {
         }
     }
     if trusted.is_empty() {
-        anyhow::bail!("no trusted machine-wide Chrome or Edge installation was found");
+        anyhow::bail!("no trusted Chrome or Edge installation was found");
     }
     Ok(trusted)
 }
@@ -641,11 +650,74 @@ unsafe fn authenticode_identity_from_state(state: HANDLE) -> Result<Authenticode
     let subject = certificate_subject(&cert_info.Subject)?;
     let organization = certificate_name_attribute(certificate, szOID_ORGANIZATION_NAME);
     let sha256_thumbprint = certificate_sha256_thumbprint(certificate)?;
+    let machine_chain_trusted = certificate_has_local_machine_authenticode_chain(certificate)?;
     Ok(AuthenticodeIdentity {
         subject,
         organization,
         sha256_thumbprint,
+        machine_chain_trusted,
     })
+}
+
+fn certificate_has_local_machine_authenticode_chain(
+    certificate: *const CERT_CONTEXT,
+) -> Result<bool> {
+    const HCCE_LOCAL_MACHINE: HCERTCHAINENGINE = 1_usize as HCERTCHAINENGINE;
+
+    let chain_parameters = CERT_CHAIN_PARA {
+        cbSize: size_of::<CERT_CHAIN_PARA>() as u32,
+        ..Default::default()
+    };
+    let mut chain = null_mut();
+    check_win32(
+        unsafe {
+            CertGetCertificateChain(
+                HCCE_LOCAL_MACHINE,
+                certificate,
+                null_mut(),
+                (*certificate).hCertStore,
+                &chain_parameters,
+                CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL | CERT_CHAIN_DISABLE_AUTH_ROOT_AUTO_UPDATE,
+                null_mut(),
+                &mut chain,
+            )
+        },
+        "CertGetCertificateChain(LocalMachine)",
+    )?;
+    let chain = CertificateChainGuard(chain);
+    let policy_parameters = CERT_CHAIN_POLICY_PARA {
+        cbSize: size_of::<CERT_CHAIN_POLICY_PARA>() as u32,
+        dwFlags: CERT_CHAIN_POLICY_IGNORE_ALL_NOT_TIME_VALID_FLAGS,
+        ..Default::default()
+    };
+    let mut policy_status = CERT_CHAIN_POLICY_STATUS {
+        cbSize: size_of::<CERT_CHAIN_POLICY_STATUS>() as u32,
+        ..Default::default()
+    };
+    check_win32(
+        unsafe {
+            CertVerifyCertificateChainPolicy(
+                CERT_CHAIN_POLICY_AUTHENTICODE,
+                chain.0,
+                &policy_parameters,
+                &mut policy_status,
+            )
+        },
+        "CertVerifyCertificateChainPolicy(AuthentiCode, LocalMachine)",
+    )?;
+    Ok(policy_status.dwError == 0)
+}
+
+struct CertificateChainGuard(*mut windows_sys::Win32::Security::Cryptography::CERT_CHAIN_CONTEXT);
+
+impl Drop for CertificateChainGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                CertFreeCertificateChain(self.0);
+            }
+        }
+    }
 }
 
 fn certificate_subject(
@@ -804,9 +876,11 @@ mod tests {
     use super::*;
 
     const TEST_CHROME_PATH: &str = r"C:\Program Files\Google\Chrome\Application\chrome.exe";
+    const TEST_USER_CHROME_PATH: &str =
+        r"C:\Users\alice\AppData\Local\Google\Chrome\Application\chrome.exe";
 
     fn trusted_test_browser_paths() -> Vec<String> {
-        vec![TEST_CHROME_PATH.into()]
+        vec![TEST_CHROME_PATH.into(), TEST_USER_CHROME_PATH.into()]
     }
 
     fn google_browser(path: &str) -> BrowserParentIdentity {
@@ -817,6 +891,7 @@ mod tests {
                 subject: "CN=Google LLC, O=Google LLC".into(),
                 organization: Some("Google LLC".into()),
                 sha256_thumbprint: "33".repeat(32),
+                machine_chain_trusted: true,
             },
         }
     }
@@ -826,6 +901,7 @@ mod tests {
             subject: RESIDENT_PACKAGE_PUBLISHER.into(),
             organization: Some("VaultKern Development".into()),
             sha256_thumbprint: thumbprint_byte.repeat(32),
+            machine_chain_trusted: false,
         }
     }
 
@@ -947,6 +1023,8 @@ mod tests {
 
     #[test]
     fn wintrust_browser_publisher_evidence_matches_the_explicit_allowlist() {
+        let trusted_paths = trusted_browser_executable_paths()
+            .expect("resolve OS known-folder browser install paths");
         for (path, expected_organization) in [
             (
                 r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -968,6 +1046,27 @@ mod tests {
                 Some(expected_organization)
             );
             assert!(valid_sha256_thumbprint(&identity));
+            assert!(
+                identity.machine_chain_trusted,
+                "installed browser signer must chain to LocalMachine trust: {}",
+                path.display()
+            );
+            let canonical_path = canonical_windows_path(
+                path.to_str()
+                    .expect("installed browser path is valid UTF-8"),
+            )
+            .expect("canonicalize installed browser path");
+            let browser = BrowserParentIdentity {
+                executable_name: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("browser executable name")
+                    .into(),
+                executable_path: canonical_path,
+                signer: identity,
+            };
+            authenticate_browser_identity(&browser, &trusted_paths)
+                .expect("installed browser satisfies native-messaging policy");
         }
     }
 
@@ -1025,6 +1124,7 @@ mod tests {
                 subject: "CN=Attacker, O=Attacker Ltd".into(),
                 organization: Some("Attacker Ltd".into()),
                 sha256_thumbprint: "33".repeat(32),
+                machine_chain_trusted: true,
             },
         };
 
@@ -1034,13 +1134,17 @@ mod tests {
     }
 
     #[test]
-    fn per_user_browser_path_cannot_authenticate_as_native_messaging_parent() {
-        let browser =
-            google_browser(r"C:\Users\alice\AppData\Local\Google\Chrome\Application\chrome.exe");
+    fn per_user_browser_requires_a_local_machine_trusted_publisher_chain() {
+        let mut browser = google_browser(TEST_USER_CHROME_PATH);
+        browser.signer.machine_chain_trusted = false;
 
         let error = authenticate_browser_identity(&browser, &trusted_test_browser_paths())
-            .expect_err("a per-user browser install must not authenticate the native shim");
-        assert!(error.to_string().contains("browser install path"));
+            .expect_err("CurrentUser-only trust must not authenticate a per-user browser");
+        assert!(error.to_string().contains("LocalMachine"));
+
+        browser.signer.machine_chain_trusted = true;
+        authenticate_browser_identity(&browser, &trusted_test_browser_paths())
+            .expect("a machine-trusted per-user browser remains supported");
     }
 
     #[test]
