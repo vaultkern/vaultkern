@@ -165,7 +165,8 @@ type PendingAction =
   | { type: "open-stats" }
   | { type: "open-database-settings" }
   | { type: "close-database-settings" }
-  | { type: "open-extension-settings" };
+  | { type: "open-extension-settings" }
+  | { type: "close-extension-settings" };
 
 type DialogState =
   | { type: "unsaved"; action: PendingAction }
@@ -408,6 +409,10 @@ export function App({
     null
   );
   const [extensionSettingsSaving, setExtensionSettingsSaving] = useState(false);
+  const [extensionSettingsDraft, setExtensionSettingsDraft] =
+    useState<ExtensionSettings | null>(null);
+  const [extensionSettingsDraftDirty, setExtensionSettingsDraftDirty] =
+    useState(false);
   const [quickUnlockBusy, setQuickUnlockBusy] = useState(false);
   const [quickUnlockError, setQuickUnlockError] = useState<string | null>(null);
   const quickUnlockAutoSyncAttempt = useRef<string | null>(null);
@@ -415,6 +420,13 @@ export function App({
     (update: DatabaseSettingsUpdate | null, dirty: boolean) => {
       setDatabaseSettingsDraftUpdate(update);
       setDatabaseSettingsDraftDirty(dirty);
+    },
+    []
+  );
+  const handleExtensionSettingsDraftChange = useCallback(
+    (settings: ExtensionSettings, dirty: boolean) => {
+      setExtensionSettingsDraft(settings);
+      setExtensionSettingsDraftDirty(dirty);
     },
     []
   );
@@ -462,6 +474,7 @@ export function App({
         normalizedSettings.quickUnlockEnabled,
         normalizedSettings
       );
+      return true;
     } catch (saveFailure) {
       setExtensionSettingsError(
         errorMessage(
@@ -469,6 +482,7 @@ export function App({
           translate(extensionSettings.language, "Failed to save extension settings")
         )
       );
+      return false;
     } finally {
       setExtensionSettingsSaving(false);
     }
@@ -528,6 +542,11 @@ export function App({
   function resetDatabaseSettingsDraftState() {
     setDatabaseSettingsDraftUpdate(null);
     setDatabaseSettingsDraftDirty(false);
+  }
+
+  function resetExtensionSettingsDraftState() {
+    setExtensionSettingsDraft(null);
+    setExtensionSettingsDraftDirty(false);
   }
 
   function clearDetailSelection() {
@@ -761,7 +780,8 @@ export function App({
   const dirty =
     hasPendingDurableSave ||
     draftDirty ||
-    (showDatabaseSettingsPage && databaseSettingsDraftDirty);
+    (showDatabaseSettingsPage && databaseSettingsDraftDirty) ||
+    (showExtensionSettingsPage && extensionSettingsDraftDirty);
 
   function performAction(action: PendingAction) {
     switch (action.type) {
@@ -816,6 +836,7 @@ export function App({
         setShowEntryListWithDetail(false);
         resetEditorState();
         resetDatabaseSettingsDraftState();
+        resetExtensionSettingsDraftState();
         setShowDatabaseSettingsPage(false);
         setShowExtensionSettingsPage(false);
         setShowStatsPage(true);
@@ -824,6 +845,7 @@ export function App({
         setShowEntryListWithDetail(false);
         resetEditorState();
         resetDatabaseSettingsDraftState();
+        resetExtensionSettingsDraftState();
         setShowStatsPage(false);
         setShowExtensionSettingsPage(false);
         setShowDatabaseSettingsPage(true);
@@ -836,9 +858,14 @@ export function App({
         setShowEntryListWithDetail(false);
         resetEditorState();
         resetDatabaseSettingsDraftState();
+        resetExtensionSettingsDraftState();
         setShowStatsPage(false);
         setShowDatabaseSettingsPage(false);
         setShowExtensionSettingsPage(true);
+        break;
+      case "close-extension-settings":
+        resetExtensionSettingsDraftState();
+        setShowExtensionSettingsPage(false);
         break;
     }
   }
@@ -931,20 +958,78 @@ export function App({
     );
     const handledDatabaseSettings =
       hadPendingDatabaseSettings || hadDatabaseSettingsDraft;
+    const hadExtensionSettingsDraft = Boolean(
+      showExtensionSettingsPage && extensionSettingsDraftDirty && extensionSettingsDraft
+    );
     let saved = hadPendingDatabaseSettings
       ? await retryPendingDatabaseSettingsSave()
       : hadDatabaseSettingsDraft
         ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate!)
-      : pendingDetailSave
-        ? await retryPendingDetailSave()
-        : true;
-    if (saved && !handledDatabaseSettings && (draftDirty || !pendingDetailSave)) {
+        : hadExtensionSettingsDraft
+          ? await saveExtensionSettings(extensionSettingsDraft!)
+          : pendingDetailSave
+            ? await retryPendingDetailSave()
+            : true;
+    if (
+      saved &&
+      !handledDatabaseSettings &&
+      !hadExtensionSettingsDraft &&
+      (draftDirty || !pendingDetailSave)
+    ) {
       saved = await saveDraft();
     }
 
     if (saved) {
       performAction(action);
     }
+  }
+
+  function renderUnsavedChangesDialog() {
+    if (dialogState?.type !== "unsaved") {
+      return null;
+    }
+
+    return (
+      <ConfirmationDialog
+        title={translate(extensionSettings.language, "You have unsaved changes")}
+        description={translate(
+          extensionSettings.language,
+          pendingDatabaseSettingsVaultId
+            ? "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
+            : showDatabaseSettingsPage && databaseSettingsDraftDirty
+              ? "Save your database settings before leaving, discard your edits, or continue editing."
+              : showExtensionSettingsPage && extensionSettingsDraftDirty
+                ? "Save your extension settings before leaving, discard your edits, or continue editing."
+                : hasPendingEntrySave
+                  ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+                  : "Save before leaving this entry, discard your edits, or continue editing."
+        )}
+        actions={[
+          {
+            label: translate(extensionSettings.language, "Save changes"),
+            variant: "primary",
+            onClick: () => {
+              void handleSaveAndContinue(dialogState.action);
+            }
+          },
+          ...(hasPendingDurableSave
+            ? []
+            : [
+                {
+                  label: translate(extensionSettings.language, "Discard changes"),
+                  onClick: () => {
+                    resetEditorState();
+                    performAction(dialogState.action);
+                  }
+                }
+              ]),
+          {
+            label: translate(extensionSettings.language, "Continue editing"),
+            onClick: () => setDialogState(null)
+          }
+        ]}
+      />
+    );
   }
 
   async function handleDeleteEntry(entryId: string) {
@@ -1767,11 +1852,11 @@ export function App({
   if (showExtensionSettingsPage) {
     return (
       <I18nProvider language={extensionSettings.language}>
-        <div style={messageShellStyle}>
+        <div aria-hidden={dialogState !== null} style={messageShellStyle}>
           <div style={settingsPageShellStyle}>
             <button
               type="button"
-              onClick={() => setShowExtensionSettingsPage(false)}
+              onClick={() => requestAction({ type: "close-extension-settings" })}
               style={backButtonStyle}
             >
               {translate(extensionSettings.language, "Back")}
@@ -1796,9 +1881,11 @@ export function App({
               onSave={(settings) => {
                 void saveExtensionSettings(settings);
               }}
+              onDraftChange={handleExtensionSettingsDraftChange}
             />
           </div>
         </div>
+        {renderUnsavedChangesDialog()}
       </I18nProvider>
     );
   }
@@ -1836,7 +1923,9 @@ export function App({
               setOneDriveBrowserPath([]);
               setShowSetup(false);
             }}
-            onOpenExtensionSettings={() => setShowExtensionSettingsPage(true)}
+            onOpenExtensionSettings={() =>
+              requestAction({ type: "open-extension-settings" })
+            }
             addLocalVaultBusy={setupAddBusy}
             addLocalVaultError={setupAddError}
             addLocalVaultErrorCause={setupAddErrorCause}
@@ -1920,7 +2009,7 @@ export function App({
         }}
         quickUnlockSupported={Boolean(session.supportsBiometricUnlock)}
         onOpenSetup={() => setShowSetup(true)}
-        onOpenExtensionSettings={() => setShowExtensionSettingsPage(true)}
+        onOpenExtensionSettings={() => requestAction({ type: "open-extension-settings" })}
         error={unlockError}
         errorCause={unlockErrorCause}
         busy={unlockBusy}
@@ -2225,45 +2314,7 @@ export function App({
           showEntryListWithDetail={showEntryListWithDetail || editorMode !== "view"}
         />
       </div>
-      {dialogState?.type === "unsaved" ? (
-        <ConfirmationDialog
-          title={translate(extensionSettings.language, "You have unsaved changes")}
-          description={translate(
-            extensionSettings.language,
-            pendingDatabaseSettingsVaultId
-              ? "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
-              : showDatabaseSettingsPage && databaseSettingsDraftDirty
-                ? "Save your database settings before leaving, discard your edits, or continue editing."
-              : hasPendingEntrySave
-                ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
-              : "Save before leaving this entry, discard your edits, or continue editing."
-          )}
-          actions={[
-            {
-              label: translate(extensionSettings.language, "Save changes"),
-              variant: "primary",
-              onClick: () => {
-                void handleSaveAndContinue(dialogState.action);
-              }
-            },
-            ...(hasPendingDurableSave
-              ? []
-              : [
-                  {
-                    label: translate(extensionSettings.language, "Discard changes"),
-                    onClick: () => {
-                      resetEditorState();
-                      performAction(dialogState.action);
-                    }
-                  }
-                ]),
-            {
-              label: translate(extensionSettings.language, "Continue editing"),
-              onClick: () => setDialogState(null)
-            }
-          ]}
-        />
-      ) : null}
+      {renderUnsavedChangesDialog()}
       {dialogState?.type === "delete-entry" ? (
         <ConfirmationDialog
           title={translate(extensionSettings.language, "Delete this entry permanently?")}
