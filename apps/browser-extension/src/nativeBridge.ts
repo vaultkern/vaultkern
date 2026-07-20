@@ -149,10 +149,11 @@ function requestIdFromResponse(response: unknown) {
   return typeof requestId === "string" ? requestId : null;
 }
 
-function isNativeErrorResponse(response: unknown) {
+function isUntaggedNativeErrorResponse(response: unknown) {
   return (
     typeof response === "object" &&
     response !== null &&
+    !("requestId" in response) &&
     "type" in response &&
     (response as { type?: unknown }).type === "error" &&
     "code" in response &&
@@ -396,7 +397,7 @@ export function createNativeMessagingBridge(
     const responseRequestId = requestIdFromResponse(response);
     if (
       responseRequestId !== request.requestId &&
-      !(responseRequestId === null && isNativeErrorResponse(response))
+      !(responseRequestId === null && isUntaggedNativeErrorResponse(response))
     ) {
       return;
     }

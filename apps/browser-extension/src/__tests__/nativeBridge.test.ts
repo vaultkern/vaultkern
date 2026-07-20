@@ -296,6 +296,30 @@ describe("createNativeMessagingBridge", () => {
     await expect(first).resolves.toEqual({ type: "first_response" });
   });
 
+  it("does not treat an invalid request id as an untagged native error", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    const request = bridge.send({ version: 1, command: { type: "first" } });
+    let settled = false;
+    void request.finally(() => {
+      settled = true;
+    });
+
+    port.emitRawMessage({
+      requestId: 7,
+      type: "error",
+      code: "stale_error",
+      message: "response belongs to an unknown request"
+    });
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    port.emitMessage({ type: "first_response" });
+    await expect(request).resolves.toEqual({ type: "first_response" });
+  });
+
   it("settles an uncorrelated native error response against the active request and continues", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
