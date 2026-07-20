@@ -556,6 +556,52 @@ fn runtime_updates_database_settings_without_retaining_master_credentials() {
 }
 
 #[test]
+fn runtime_clears_loaded_optional_database_metadata() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+    let mut initial = Vault::empty("settings-clear");
+    initial.description = Some("remove this description".into());
+    initial.default_username = Some("remove-this-user".into());
+    let bytes = core
+        .save_kdbx(&initial, &key, SaveProfile::recommended())
+        .expect("create vault with optional metadata");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("settings-clear.kdbx");
+    std::fs::write(&path, bytes).expect("write vault");
+
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("open vault");
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .expect("unlock vault");
+    runtime
+        .update_database_settings(
+            &handle.vault_id,
+            DatabaseSettingsUpdateDto {
+                metadata: Some(DatabaseMetadataSettingsDto {
+                    name: "settings-clear".into(),
+                    description: None,
+                    default_username: None,
+                }),
+                ..DatabaseSettingsUpdateDto::default()
+            },
+        )
+        .expect("clear optional metadata");
+    runtime.save_vault(&handle.vault_id).expect("save vault");
+
+    let saved = std::fs::read(path).expect("read saved vault");
+    let reloaded = core
+        .load_database(&saved, &key)
+        .expect("reload cleared vault");
+    assert_eq!(reloaded.vault.description, None);
+    assert_eq!(reloaded.vault.default_username, None);
+}
+
+#[test]
 fn runtime_rejects_password_removal_without_a_fresh_authenticated_flow() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();

@@ -18,7 +18,7 @@ use vaultkern_core::{
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
     ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher, KdbxError, KdbxVersion, KeepassCore,
     PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec, TransformedKey, Vault,
-    derive_transformed_key_with_policy, load_kdbx_with_transformed_key,
+    VaultMetadataUpdate, derive_transformed_key_with_policy, load_kdbx_with_transformed_key,
     load_kdbx_with_transformed_key_diagnostic, parse_key_file_bytes, required_version,
     retained_or_recommended_save_kdf, save_kdbx_with_transformed_key, three_way_field_patch,
 };
@@ -1619,10 +1619,18 @@ impl Runtime {
             }
 
             if let Some(metadata) = update.metadata {
+                self.core.update_vault_metadata(
+                    vault,
+                    VaultMetadataUpdate {
+                        description: Some(metadata.description.clone().unwrap_or_default()),
+                        default_username: Some(
+                            metadata.default_username.clone().unwrap_or_default(),
+                        ),
+                        ..VaultMetadataUpdate::default()
+                    },
+                )?;
                 vault.name = metadata.name.clone();
                 vault.root.title = metadata.name;
-                vault.description = empty_string_as_none(metadata.description);
-                vault.default_username = empty_string_as_none(metadata.default_username);
             }
 
             if let Some(public_metadata) = update.public_metadata {
@@ -8218,16 +8226,6 @@ fn upsert_optional_public_string(vault: &mut Vault, key: &str, value: Option<&st
             vault.public_custom_data.remove(key);
         }
     }
-}
-
-fn empty_string_as_none(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        if value.trim().is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    })
 }
 
 fn touch_entry_modified_at(
