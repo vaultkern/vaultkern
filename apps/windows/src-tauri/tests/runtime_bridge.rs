@@ -11,6 +11,15 @@ fn windows_app_binary_declares_gui_subsystem() {
 }
 
 #[test]
+fn closing_the_window_keeps_the_resident_process_available() {
+    let main_rs = include_str!("../src/main.rs");
+
+    assert!(main_rs.contains(".on_window_event("));
+    assert!(main_rs.contains("api.prevent_close()"));
+    assert!(main_rs.contains("window.hide()"));
+}
+
+#[test]
 fn bridge_forwards_native_parent_window_handle_without_using_the_runtime_protocol() {
     let bridge = RuntimeBridge::new_for_tests();
 

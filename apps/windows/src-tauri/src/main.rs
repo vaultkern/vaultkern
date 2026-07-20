@@ -105,6 +105,17 @@ fn main() {
             app.manage(ipc_server);
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Err(error) = window.hide() {
+                    eprintln!("failed to hide the resident VaultKern window: {error}");
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             runtime_send,
             set_passkey_provider_enabled
