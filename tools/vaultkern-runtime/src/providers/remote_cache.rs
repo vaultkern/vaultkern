@@ -9,9 +9,9 @@ use sha2::{Digest, Sha256};
 
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, TargetExpectation,
-    TempWriteFaultPoints, create_dir_all_durable, opened_file_identity, path_file_identity,
-    publish_temp, remove_if_exists, sha256_hex, sync_directory, sync_parent, unique_sibling_path,
-    write_verified_temp,
+    TempWriteFaultPoints, create_dir_all_durable, durable_path, opened_file_identity,
+    path_file_identity, publish_temp, remove_if_exists, sha256_hex, sync_directory, sync_parent,
+    unique_sibling_path, write_verified_temp,
 };
 use crate::providers::local_file::VaultSourceFingerprint;
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
@@ -306,7 +306,7 @@ enum AuthenticatedCacheRead {
 impl RemoteVaultCache {
     pub fn new_default() -> Self {
         Self {
-            root: default_cache_dir(),
+            root: durable_path(&default_cache_dir()),
             faults: DurableFaultInjector::default(),
             lock_timeout: REMOTE_CACHE_LOCK_TIMEOUT,
         }
@@ -314,7 +314,7 @@ impl RemoteVaultCache {
 
     pub fn new_for_extension_id(extension_id: &str) -> Self {
         Self {
-            root: extension_state_dir(extension_id).join("remote-cache"),
+            root: durable_path(&extension_state_dir(extension_id).join("remote-cache")),
             faults: DurableFaultInjector::default(),
             lock_timeout: REMOTE_CACHE_LOCK_TIMEOUT,
         }
@@ -322,7 +322,7 @@ impl RemoteVaultCache {
 
     pub fn new_at(path: impl AsRef<Path>) -> Self {
         Self {
-            root: path.as_ref().to_path_buf(),
+            root: durable_path(path.as_ref()),
             faults: DurableFaultInjector::default(),
             lock_timeout: REMOTE_CACHE_LOCK_TIMEOUT,
         }
@@ -331,7 +331,7 @@ impl RemoteVaultCache {
     #[cfg(test)]
     pub(crate) fn new_at_with_faults(path: impl AsRef<Path>, faults: DurableFaultInjector) -> Self {
         Self {
-            root: path.as_ref().to_path_buf(),
+            root: durable_path(path.as_ref()),
             faults,
             lock_timeout: REMOTE_CACHE_LOCK_TIMEOUT,
         }
@@ -340,7 +340,7 @@ impl RemoteVaultCache {
     #[cfg(test)]
     fn new_at_with_lock_timeout(path: impl AsRef<Path>, lock_timeout: Duration) -> Self {
         Self {
-            root: path.as_ref().to_path_buf(),
+            root: durable_path(path.as_ref()),
             faults: DurableFaultInjector::default(),
             lock_timeout,
         }
@@ -2038,20 +2038,48 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn newly_created_cache_root_is_owner_only() {
+    fn newly_created_cache_root_roundtrips() {
+        #[cfg(unix)]
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("nested").join("remote-cache");
-        RemoteVaultCache::new_at(&root)
-            .write(&key(), entry(b"private", 1, false))
-            .unwrap();
+        let cache = RemoteVaultCache::new_at(&root);
+        cache.write(&key(), entry(b"private", 1, false)).unwrap();
+        assert_eq!(cache.read(&key()).unwrap().unwrap().bytes, b"private");
 
-        let metadata = fs::metadata(&root).unwrap();
-        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        #[cfg(unix)]
+        {
+            let metadata = fs::metadata(&root).unwrap();
+            assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_verbatim_cache_root_supports_long_durable_names() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        let parent = tempfile::tempdir().unwrap();
+        let wide = parent.path().as_os_str().encode_wide().collect::<Vec<_>>();
+        let verbatim_prefix = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        let ordinary_parent = if wide.starts_with(&verbatim_prefix) {
+            PathBuf::from(OsString::from_wide(&wide[verbatim_prefix.len()..]))
+        } else {
+            parent.path().to_path_buf()
+        };
+        let root = ordinary_parent.join(format!(
+            "vaultkern-runtime-test-remote-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let cache = RemoteVaultCache::new_at(&root);
+
+        cache.write(&key(), entry(b"long-path", 1, false)).unwrap();
+
+        assert_eq!(cache.read(&key()).unwrap().unwrap().bytes, b"long-path");
     }
 
     #[cfg(unix)]
