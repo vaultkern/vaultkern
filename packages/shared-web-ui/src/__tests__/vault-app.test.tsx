@@ -1360,6 +1360,51 @@ it("coalesces save-and-continue with a database settings save already in flight"
   expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1);
 });
 
+it("coalesces save retry with database settings persistence already in flight", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const currentSettings = await vaultMethods.getDatabaseSettings();
+  vaultMethods.updateDatabaseSettings.mockResolvedValue({
+    ...currentSettings,
+    metadata: { ...currentSettings.metadata, name: "Engineering" }
+  });
+  const save = createDeferred<void>();
+  vaultMethods.saveVault.mockImplementation(() => save.promise);
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Engineering" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1));
+
+  fireEvent.click(screen.getByRole("button", { name: "Statistics" }));
+  expect(
+    await screen.findByText(
+      "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
+    )
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
+  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1);
+
+  save.resolve();
+
+  expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
+  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1);
+});
+
 it("hides password actions until the authenticated credential flow exists", async () => {
   const client = {
     ...createVaultSelectionMethods(),

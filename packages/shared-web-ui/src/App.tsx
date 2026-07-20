@@ -1336,19 +1336,23 @@ export function App({
     );
   }
 
-  function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
+  function runDatabaseSettingsSave(operation: () => Promise<boolean>) {
     if (databaseSettingsSaveInFlight.current) {
       return databaseSettingsSaveInFlight.current;
     }
 
-    const operation = saveDatabaseSettings(update);
-    databaseSettingsSaveInFlight.current = operation;
-    void operation.finally(() => {
-      if (databaseSettingsSaveInFlight.current === operation) {
+    const promise = operation();
+    databaseSettingsSaveInFlight.current = promise;
+    void promise.finally(() => {
+      if (databaseSettingsSaveInFlight.current === promise) {
         databaseSettingsSaveInFlight.current = null;
       }
     });
-    return operation;
+    return promise;
+  }
+
+  function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
+    return runDatabaseSettingsSave(() => saveDatabaseSettings(update));
   }
 
   async function saveDatabaseSettings(update: DatabaseSettingsUpdate) {
@@ -1386,7 +1390,11 @@ export function App({
     }
   }
 
-  async function retryPendingDatabaseSettingsSave() {
+  function retryPendingDatabaseSettingsSave() {
+    return runDatabaseSettingsSave(savePendingDatabaseSettings);
+  }
+
+  async function savePendingDatabaseSettings() {
     if (!pendingDatabaseSettingsVaultId) {
       return false;
     }
