@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import type {
   DatabaseEncryptionSettings,
@@ -36,7 +36,8 @@ export function DatabaseSettingsPage({
   saving,
   pendingSave,
   error,
-  onSave
+  onSave,
+  onDraftChange
 }: {
   settings: DatabaseSettings | null;
   loading: boolean;
@@ -44,6 +45,7 @@ export function DatabaseSettingsPage({
   pendingSave?: boolean;
   error: string | null;
   onSave: (update: DatabaseSettingsUpdate) => void;
+  onDraftChange?: (update: DatabaseSettingsUpdate | null, dirty: boolean) => void;
 }) {
   const text = useText();
   const [draft, setDraft] = useState<Draft>(() => createDraft(settings));
@@ -54,6 +56,13 @@ export function DatabaseSettingsPage({
     }
   }, [settings]);
 
+  useLayoutEffect(() => {
+    onDraftChange?.(
+      settings ? createUpdate(settings, draft) : null,
+      settings ? !draftsMatch(draft, createDraft(settings)) : false
+    );
+  }, [draft, onDraftChange, settings]);
+
   function submit(event: FormEvent) {
     event.preventDefault();
 
@@ -61,34 +70,7 @@ export function DatabaseSettingsPage({
       return;
     }
 
-    const kdf: DatabaseKdfSettings = settings.encryption.kdf;
-    const encryption: DatabaseEncryptionSettings = {
-      compression: draft.compression,
-      cipher: draft.cipher,
-      kdf
-    };
-
-    onSave({
-      metadata: {
-        name: draft.name,
-        description: nullableText(draft.description),
-        defaultUsername: nullableText(draft.defaultUsername)
-      },
-      publicMetadata: {
-        displayName: nullableText(draft.publicDisplayName),
-        color: nullableText(draft.publicColor),
-        icon: nullableText(draft.publicIcon)
-      },
-      history: {
-        maxItemsPerEntry: parseOptionalInteger(draft.historyMaxItems),
-        maxTotalSizeBytes: miBToBytes(draft.historyMaxSizeMiB)
-      },
-      recycleBin: {
-        enabled: draft.recycleBinEnabled
-      },
-      encryption,
-      autosaveDelaySeconds: parseOptionalInteger(draft.autosaveDelaySeconds) ?? 0
-    });
+    onSave(createUpdate(settings, draft));
   }
 
   if (loading) {
@@ -327,6 +309,43 @@ function createDraft(settings: DatabaseSettings | null): Draft {
     argon2MemoryMiB: optionalKiBAsMiB(settings?.encryption.kdf.memoryKib),
     argon2Parallelism: optionalNumber(settings?.encryption.kdf.parallelism)
   };
+}
+
+function createUpdate(settings: DatabaseSettings, draft: Draft): DatabaseSettingsUpdate {
+  const kdf: DatabaseKdfSettings = settings.encryption.kdf;
+  const encryption: DatabaseEncryptionSettings = {
+    compression: draft.compression,
+    cipher: draft.cipher,
+    kdf
+  };
+
+  return {
+    metadata: {
+      name: draft.name,
+      description: nullableText(draft.description),
+      defaultUsername: nullableText(draft.defaultUsername)
+    },
+    publicMetadata: {
+      displayName: nullableText(draft.publicDisplayName),
+      color: nullableText(draft.publicColor),
+      icon: nullableText(draft.publicIcon)
+    },
+    history: {
+      maxItemsPerEntry: parseOptionalInteger(draft.historyMaxItems),
+      maxTotalSizeBytes: miBToBytes(draft.historyMaxSizeMiB)
+    },
+    recycleBin: {
+      enabled: draft.recycleBinEnabled
+    },
+    encryption,
+    autosaveDelaySeconds: parseOptionalInteger(draft.autosaveDelaySeconds) ?? 0
+  };
+}
+
+function draftsMatch(left: Draft, right: Draft): boolean {
+  return (Object.keys(left) as Array<keyof Draft>).every(
+    (key) => left[key] === right[key]
+  );
 }
 
 function optionalNumber(value: number | null | undefined): string {

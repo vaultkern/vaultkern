@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type {
@@ -351,6 +351,9 @@ export function App({
   const [databaseSettingsBusy, setDatabaseSettingsBusy] = useState(false);
   const [pendingDatabaseSettingsVaultId, setPendingDatabaseSettingsVaultId] =
     useState<string | null>(null);
+  const [databaseSettingsDraftUpdate, setDatabaseSettingsDraftUpdate] =
+    useState<DatabaseSettingsUpdate | null>(null);
+  const [databaseSettingsDraftDirty, setDatabaseSettingsDraftDirty] = useState(false);
   const [databaseName, setDatabaseName] = useState<string | null>(null);
   const [groupTree, setGroupTree] = useState<GroupTree | null>(null);
   const [groupsError, setGroupsError] = useState<string | null>(null);
@@ -408,6 +411,13 @@ export function App({
   const [quickUnlockBusy, setQuickUnlockBusy] = useState(false);
   const [quickUnlockError, setQuickUnlockError] = useState<string | null>(null);
   const quickUnlockAutoSyncAttempt = useRef<string | null>(null);
+  const handleDatabaseSettingsDraftChange = useCallback(
+    (update: DatabaseSettingsUpdate | null, dirty: boolean) => {
+      setDatabaseSettingsDraftUpdate(update);
+      setDatabaseSettingsDraftDirty(dirty);
+    },
+    []
+  );
 
   async function reloadLockedState() {
     const [nextSession, nextRecentVaults] = await Promise.all([
@@ -513,6 +523,11 @@ export function App({
     setPendingEntrySave(null);
     setEntryActionError(null);
     setDialogState(null);
+  }
+
+  function resetDatabaseSettingsDraftState() {
+    setDatabaseSettingsDraftUpdate(null);
+    setDatabaseSettingsDraftDirty(false);
   }
 
   function clearDetailSelection() {
@@ -743,7 +758,10 @@ export function App({
       : editorMode === "edit" && entryDetail && draft
         ? !draftMatchesEntry(draft, entryDetail)
         : false;
-  const dirty = hasPendingDurableSave || draftDirty;
+  const dirty =
+    hasPendingDurableSave ||
+    draftDirty ||
+    (showDatabaseSettingsPage && databaseSettingsDraftDirty);
 
   function performAction(action: PendingAction) {
     switch (action.type) {
@@ -797,6 +815,7 @@ export function App({
       case "open-stats":
         setShowEntryListWithDetail(false);
         resetEditorState();
+        resetDatabaseSettingsDraftState();
         setShowDatabaseSettingsPage(false);
         setShowExtensionSettingsPage(false);
         setShowStatsPage(true);
@@ -804,16 +823,19 @@ export function App({
       case "open-database-settings":
         setShowEntryListWithDetail(false);
         resetEditorState();
+        resetDatabaseSettingsDraftState();
         setShowStatsPage(false);
         setShowExtensionSettingsPage(false);
         setShowDatabaseSettingsPage(true);
         break;
       case "close-database-settings":
+        resetDatabaseSettingsDraftState();
         setShowDatabaseSettingsPage(false);
         break;
       case "open-extension-settings":
         setShowEntryListWithDetail(false);
         resetEditorState();
+        resetDatabaseSettingsDraftState();
         setShowStatsPage(false);
         setShowDatabaseSettingsPage(false);
         setShowExtensionSettingsPage(true);
@@ -904,12 +926,19 @@ export function App({
 
   async function handleSaveAndContinue(action: PendingAction) {
     const hadPendingDatabaseSettings = Boolean(pendingDatabaseSettingsVaultId);
+    const hadDatabaseSettingsDraft = Boolean(
+      showDatabaseSettingsPage && databaseSettingsDraftDirty && databaseSettingsDraftUpdate
+    );
+    const handledDatabaseSettings =
+      hadPendingDatabaseSettings || hadDatabaseSettingsDraft;
     let saved = hadPendingDatabaseSettings
       ? await retryPendingDatabaseSettingsSave()
+      : hadDatabaseSettingsDraft
+        ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate!)
       : pendingDetailSave
         ? await retryPendingDetailSave()
         : true;
-    if (saved && !hadPendingDatabaseSettings && (draftDirty || !pendingDetailSave)) {
+    if (saved && !handledDatabaseSettings && (draftDirty || !pendingDetailSave)) {
       saved = await saveDraft();
     }
 
@@ -1191,7 +1220,7 @@ export function App({
 
   async function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
     if (!session?.activeVaultId) {
-      return;
+      return false;
     }
 
     const vaultId = session.activeVaultId;
@@ -1210,6 +1239,7 @@ export function App({
       if (!saveResult || saveResult.status === "saved") {
         setSaveTip(translate(extensionSettings.language, "Database settings saved."));
       }
+      return true;
     } catch (settingsError) {
       setDatabaseSettingsError(
         errorMessage(
@@ -1217,6 +1247,7 @@ export function App({
           translate(extensionSettings.language, "Failed to save database settings")
         )
       );
+      return false;
     } finally {
       setDatabaseSettingsBusy(false);
     }
@@ -2186,6 +2217,7 @@ export function App({
                       ? retryPendingDatabaseSettingsSave()
                       : handleSaveDatabaseSettings(update));
                   }}
+                  onDraftChange={handleDatabaseSettingsDraftChange}
                 />
               </div>
             ) : undefined
@@ -2200,6 +2232,8 @@ export function App({
             extensionSettings.language,
             pendingDatabaseSettingsVaultId
               ? "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
+              : showDatabaseSettingsPage && databaseSettingsDraftDirty
+                ? "Save your database settings before leaving, discard your edits, or continue editing."
               : hasPendingEntrySave
                 ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
               : "Save before leaving this entry, discard your edits, or continue editing."

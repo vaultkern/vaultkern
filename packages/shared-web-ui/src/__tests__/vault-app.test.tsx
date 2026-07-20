@@ -1236,6 +1236,53 @@ it("retries a failed database settings save without updating settings again", as
   expect(updateDatabaseSettings).toHaveBeenCalledTimes(1);
 });
 
+it("confirms before leaving unsaved database settings", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const updatedSettings = {
+    ...(await vaultMethods.getDatabaseSettings()),
+    metadata: { name: "Engineering", description: null, defaultUsername: null }
+  };
+  vaultMethods.updateDatabaseSettings.mockResolvedValue(updatedSettings);
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Engineering" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Back to archive" }));
+
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Discard changes" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  expect(screen.getByLabelText("Database Name")).toHaveValue("Engineering");
+
+  fireEvent.click(screen.getByRole("button", { name: "Back to archive" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Save changes" }));
+
+  await waitFor(() => {
+    expect(client.updateDatabaseSettings).toHaveBeenCalledWith(
+      "vault-1",
+      expect.objectContaining({
+        metadata: { name: "Engineering", description: null, defaultUsername: null }
+      })
+    );
+  });
+  expect(client.saveVault).toHaveBeenCalledWith("vault-1");
+  await waitFor(() => {
+    expect(screen.queryByLabelText("Database Name")).not.toBeInTheDocument();
+  });
+});
+
 it("hides password actions until the authenticated credential flow exists", async () => {
   const client = {
     ...createVaultSelectionMethods(),
