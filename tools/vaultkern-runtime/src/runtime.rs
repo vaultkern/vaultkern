@@ -2298,6 +2298,17 @@ impl Runtime {
             };
         }
 
+        let retained_credential_id = URL_SAFE_NO_PAD.encode(&credential.credential_id);
+        let retained_vault = self.loaded_vault(&vault_id)?;
+        find_unique_passkey_by_credential_id_and_relying_party(
+            &retained_vault.root,
+            retained_vault.recycle_bin_group,
+            retained_vault.recycle_bin_enabled.unwrap_or(true),
+            &retained_credential_id,
+            Some(&credential.relying_party),
+        )
+        .context("platform passkey registration was not retained after the durable save")?;
+
         Ok(PlatformPasskeyRegistrationOutput {
             entry_id,
             credential,
@@ -10368,6 +10379,109 @@ mod tests {
         assert_eq!(
             detail.passkey.unwrap().credential_id,
             URL_SAFE_NO_PAD.encode(registration.credential.credential_id)
+        );
+    }
+
+    #[test]
+    fn platform_registration_fails_if_a_concurrent_merge_drops_its_credential() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+
+        let base_passkey = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "alice@example.com",
+                user_handle: b"shared-user",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            b"base-credential".to_vec(),
+        )
+        .unwrap()
+        .passkey;
+        let mut base = Vault::empty("Cloud Vault");
+        let entry = Entry::new("Example account");
+        let entry_id = entry.id.to_string();
+        base.root.entries.push(entry);
+        core.set_entry_passkey(&mut base, &entry_id, base_passkey)
+            .unwrap();
+        base.root.entries[0].modified_at = 10;
+        let base_bytes = core
+            .save_kdbx(&base, &key, SaveProfile::recommended())
+            .unwrap();
+        let transformed_key = derive_transformed_key_with_policy(
+            &base_bytes,
+            &key,
+            &ExternalKdfPolicy::Desktop,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
+        .unwrap();
+
+        let remote_passkey = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "alice@example.com",
+                user_handle: b"shared-user",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            b"remote-credential".to_vec(),
+        )
+        .unwrap()
+        .passkey;
+        let mut remote = load_kdbx_with_transformed_key(&base_bytes, &transformed_key).unwrap();
+        core.set_entry_passkey(&mut remote, &entry_id, remote_passkey)
+            .unwrap();
+        remote.root.entries[0].modified_at = 300;
+        let remote_bytes = save_kdbx_with_history_limits_transformed(
+            &mut remote,
+            &transformed_key,
+            SaveProfile {
+                kdf: None,
+                ..SaveProfile::recommended()
+            },
+        )
+        .unwrap();
+
+        let local_credential_id = b"local-credential".to_vec();
+        let generated_id = URL_SAFE_NO_PAD.encode(&local_credential_id);
+        let mut runtime = Runtime::for_tests_at_with_onedrive_item(
+            200,
+            "drive-1",
+            "item-1",
+            "Cloud Vault.kdbx",
+            "alice@example.com",
+            base_bytes,
+        );
+        runtime.passkey_credential_id_generator = Box::new(move || generated_id.clone());
+        runtime
+            .add_onedrive_vault_reference("drive-1", "item-1")
+            .unwrap();
+        runtime
+            .unlock_current_vault_with_password("demo-password")
+            .unwrap();
+        runtime.queue_test_onedrive_precondition_failure(Some(remote_bytes));
+
+        let result = runtime.register_platform_passkey(PlatformPasskeyRegistrationInput {
+            relying_party: "example.com".into(),
+            user_name: "alice@example.com".into(),
+            user_handle: b"shared-user".to_vec(),
+            public_key_algorithm: -7,
+            user_verified: true,
+        });
+
+        let credentials = runtime.list_platform_passkey_credentials().unwrap();
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].credential_id, b"remote-credential");
+        assert_ne!(credentials[0].credential_id, local_credential_id);
+        let error =
+            result.expect_err("a credential discarded by the merge must not complete registration");
+        assert!(
+            error
+                .to_string()
+                .contains("platform passkey registration was not retained"),
+            "{error:#}"
         );
     }
 
