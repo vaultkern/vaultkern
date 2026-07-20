@@ -1779,7 +1779,9 @@ export function App({
       })
       .catch((loadError) => {
         if (!cancelled) {
-          setEntryDetail(null);
+          if (!forceSourceReload) {
+            setEntryDetail(null);
+          }
           setDetailError(
             errorMessage(
               loadError,

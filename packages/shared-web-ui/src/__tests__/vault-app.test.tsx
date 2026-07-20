@@ -3327,6 +3327,73 @@ it("keeps the unsaved-entry guard while source detail is reloading", async () =>
   });
 });
 
+it("keeps the unsaved-entry guard when source detail reload fails", async () => {
+  const initialDetail = {
+    id: "entry-shared",
+    title: "Cached Entry",
+    username: "cached-user",
+    password: "secret-123",
+    url: "https://remote.example",
+    notes: "cached note",
+    totp: null,
+    totpUri: null,
+    customFields: []
+  };
+  const getEntryDetail = vi
+    .fn()
+    .mockResolvedValueOnce(initialDetail)
+    .mockRejectedValue(new Error("simulated source detail reload failure"));
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      sourceStatus: {
+        sourceKind: "onedrive",
+        remoteState: "cache",
+        lastSyncAt: null,
+        cachedAt: 1776500030,
+        lastError: "OneDrive unavailable"
+      }
+    }),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-shared",
+        title: "Cached Entry",
+        username: "cached-user",
+        url: "https://remote.example",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail,
+    retryVaultSourceSync: vi.fn(async () => ({
+      type: "vault_source_status" as const,
+      sourceKind: "onedrive",
+      remoteState: "online",
+      lastSyncAt: 1776500060,
+      cachedAt: 1776500030,
+      lastError: null
+    }))
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Cached Entry" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Title"), {
+    target: { value: "Unsaved Local Draft" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
+  expect(
+    await screen.findByText("simulated source detail reload failure")
+  ).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+});
+
 it("shows remote cache info without failure copy before sync is retried", async () => {
   const client = {
     ...createVaultSelectionMethods(),
