@@ -181,6 +181,24 @@ function isPreloadCommand(message: unknown) {
   return commandTypeFromMessage(message) === "preload_current_vault";
 }
 
+const STARTUP_OVERTAKEABLE_COMMANDS = new Set([
+  "preload_current_vault",
+  "list_groups",
+  "list_entries",
+  "get_entry_detail",
+  "list_entry_history",
+  "get_entry_history_detail",
+  "get_entry_attachment_content",
+  "get_database_settings",
+  "find_fill_candidates",
+  "find_exact_matching_entry_ids"
+]);
+
+function canStartupOvertake(message: unknown) {
+  const type = commandTypeFromMessage(message);
+  return type !== null && STARTUP_OVERTAKEABLE_COMMANDS.has(type);
+}
+
 function preloadCanceledError() {
   return new NativeMessagingError(
     "native_port_disconnected",
@@ -376,16 +394,16 @@ export function createNativeMessagingBridge(
       return;
     }
 
-    const firstNonStartupIndex = queuedRequests.findIndex(
-      (queuedRequest) => !isStartupCommand(queuedRequest.message)
-    );
-
-    if (firstNonStartupIndex === -1) {
-      queuedRequests.push(request);
-      return;
+    let insertionIndex = queuedRequests.length;
+    for (let index = queuedRequests.length - 1; index >= 0; index -= 1) {
+      if (!canStartupOvertake(queuedRequests[index].message)) {
+        insertionIndex = index + 1;
+        break;
+      }
+      insertionIndex = index;
     }
 
-    queuedRequests.splice(firstNonStartupIndex, 0, request);
+    queuedRequests.splice(insertionIndex, 0, request);
   }
 
   function onNativeMessage(attachedPort: NativePort, response: unknown) {

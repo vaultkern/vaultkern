@@ -1154,6 +1154,55 @@ describe("createNativeMessagingBridge", () => {
     });
   });
 
+  it("does not let startup reads overtake an already queued mutation", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    const activeRead = bridge.send({
+      version: 1,
+      command: { type: "list_entries", vault_id: "vault-1" }
+    });
+    const save = bridge.send({
+      version: 1,
+      command: { type: "save_vault", vault_id: "vault-1" }
+    });
+    const session = bridge.send({
+      version: 1,
+      command: { type: "get_session_state" }
+    });
+
+    port.emitMessage({ type: "entry_list", entries: [] });
+
+    await expect(activeRead).resolves.toEqual({ type: "entry_list", entries: [] });
+    expect(port.postMessage).toHaveBeenCalledTimes(2);
+    expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      version: 1,
+      command: { type: "save_vault", vault_id: "vault-1" }
+    }));
+
+    port.emitMessage({ type: "save_vault_result", status: "saved" });
+    await expect(save).resolves.toEqual({ type: "save_vault_result", status: "saved" });
+
+    expect(port.postMessage).toHaveBeenCalledTimes(3);
+    expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      version: 1,
+      command: { type: "get_session_state" }
+    }));
+
+    port.emitMessage({ type: "session_state", unlocked: true, activeVaultId: "vault-1" });
+    await expect(session).resolves.toMatchObject({
+      type: "session_state",
+      activeVaultId: "vault-1"
+    });
+  });
+
   it("keeps an active native port alive when a startup session request arrives during a read", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
