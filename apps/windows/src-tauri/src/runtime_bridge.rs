@@ -84,9 +84,9 @@ impl RuntimeBridge {
                                 cancelled_value()
                             } else {
                                 let request_parent_window =
-                                    browser_client.then_some(parent_window).flatten();
+                                    protocol_parent_window_override(browser_client, parent_window);
                                 if let Some(parent_window) = request_parent_window {
-                                    runtime.set_parent_window_handle(Some(parent_window));
+                                    runtime.set_parent_window_handle(parent_window);
                                 }
                                 let value = match catch_unwind(AssertUnwindSafe(|| {
                                     if browser_client {
@@ -349,6 +349,13 @@ fn cancelled_value() -> Value {
     error_value("request_cancelled", "the runtime request was cancelled")
 }
 
+fn protocol_parent_window_override(
+    browser_client: bool,
+    parent_window: Option<usize>,
+) -> Option<Option<usize>> {
+    browser_client.then_some(parent_window)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -356,7 +363,17 @@ mod tests {
 
     use serde_json::json;
 
-    use super::RuntimeBridge;
+    use super::{RuntimeBridge, protocol_parent_window_override};
+
+    #[test]
+    fn headless_browser_request_explicitly_clears_the_resident_window_parent() {
+        assert_eq!(
+            protocol_parent_window_override(true, Some(0x1234)),
+            Some(Some(0x1234))
+        );
+        assert_eq!(protocol_parent_window_override(true, None), Some(None));
+        assert_eq!(protocol_parent_window_override(false, None), None);
+    }
 
     #[test]
     fn cancelled_protocol_request_is_not_dispatched_to_the_runtime() {
