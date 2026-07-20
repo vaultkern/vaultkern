@@ -2125,11 +2125,11 @@ impl Runtime {
             vault.recycle_bin_enabled.unwrap_or(true),
             &mut |passkey| passkeys.push(passkey),
         );
-        passkeys
+        Ok(passkeys
             .into_iter()
             .filter(|passkey| passkey.user_handle.is_some())
-            .map(platform_passkey_credential)
-            .collect()
+            .filter_map(|passkey| platform_passkey_credential(passkey).ok())
+            .collect())
     }
 
     pub fn register_platform_passkey(
@@ -10343,6 +10343,51 @@ mod tests {
         let credentials = runtime
             .list_platform_passkey_credentials()
             .expect("non-discoverable KPEX entries must not poison platform sync");
+
+        assert_eq!(credentials, vec![registration.credential]);
+    }
+
+    #[test]
+    fn platform_credential_sync_skips_malformed_kpex_entries() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let registration = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                user_name: "alice@example.com".into(),
+                user_handle: b"platform-user".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .unwrap();
+        let malformed = create_demo_entry(&mut runtime, &opened.vault_id);
+        let loaded = runtime
+            .vault_session
+            .find_loaded_mut(&opened.vault_id)
+            .expect("loaded vault");
+        let entry = loaded
+            .vault
+            .as_mut()
+            .expect("unlocked vault")
+            .root
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id.to_string() == malformed.id)
+            .expect("malformed fixture entry");
+        entry.passkey = Some(PasskeyRecord {
+            username: "broken@example.net".into(),
+            credential_id: "not base64url!".into(),
+            generated_user_id: None,
+            private_key_pem: "malformed fixture key".into(),
+            relying_party: "example.net".into(),
+            user_handle: Some(URL_SAFE_NO_PAD.encode(b"broken-user")),
+            backup_eligible: false,
+            backup_state: false,
+        });
+
+        let credentials = runtime
+            .list_platform_passkey_credentials()
+            .expect("a malformed KPEX entry must not poison platform sync");
 
         assert_eq!(credentials, vec![registration.credential]);
     }
