@@ -633,7 +633,6 @@ export function App({
       const sourceStatus = await client.retryVaultSourceSync(session.activeVaultId);
       setSession((current) => (current ? { ...current, sourceStatus } : current));
       if (sourceStatus.remoteState === "online") {
-        setEntryDetail(null);
         setWorkspaceReloadKey((current) => current + 1);
         setSourceDetailReloadKey((current) => current + 1);
         setSaveTip(translate(extensionSettings.language, "Remote sync restored."));
