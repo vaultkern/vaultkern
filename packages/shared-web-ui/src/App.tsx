@@ -384,6 +384,7 @@ export function App({
   const [dialogState, setDialogState] = useState<DialogState | null>(null);
   const [entryActionBusy, setEntryActionBusy] = useState(false);
   const [saveAndContinueBusy, setSaveAndContinueBusy] = useState(false);
+  const saveDraftInFlight = useRef<Promise<boolean> | null>(null);
   const saveAndContinueInFlight = useRef(false);
   const [showEntryListWithDetail, setShowEntryListWithDetail] = useState(false);
   const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
@@ -893,7 +894,22 @@ export function App({
     requestAction({ type: "search", value });
   }
 
-  async function saveDraft() {
+  function saveDraft() {
+    if (saveDraftInFlight.current) {
+      return saveDraftInFlight.current;
+    }
+
+    const operation = saveDraftOnce();
+    saveDraftInFlight.current = operation;
+    void operation.finally(() => {
+      if (saveDraftInFlight.current === operation) {
+        saveDraftInFlight.current = null;
+      }
+    });
+    return operation;
+  }
+
+  async function saveDraftOnce() {
     if (!session?.activeVaultId || !draft) {
       return false;
     }

@@ -2542,6 +2542,97 @@ it("shows an animated saving indicator while entry changes are being saved", asy
   });
 });
 
+it("coalesces save-and-continue with an entry save already in flight", async () => {
+  const update = createDeferred<{
+    type: "entry_detail";
+    id: string;
+    title: string;
+    username: string;
+    password: string;
+    url: string;
+    notes: string;
+    totp: null;
+    totpUri: null;
+    customFields: [];
+  }>();
+  const updateEntryFields = vi.fn(() => update.promise);
+  const saveVault = vi.fn(async () => undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret-123",
+      url: "https://example.com",
+      notes: "demo note",
+      totp: null,
+      totpUri: null,
+      customFields: []
+    })),
+    updateEntryFields,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Title"), {
+    target: { value: "Edited Title" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await screen.findByRole("button", { name: "Saving..." });
+
+  fireEvent.click(screen.getByRole("button", { name: "Statistics" }));
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(updateEntryFields).toHaveBeenCalledTimes(1);
+
+  update.resolve({
+    type: "entry_detail",
+    id: "entry-1",
+    title: "Edited Title",
+    username: "alice",
+    password: "secret-123",
+    url: "https://example.com",
+    notes: "demo note",
+    totp: null,
+    totpUri: null,
+    customFields: []
+  });
+
+  expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
+  expect(updateEntryFields).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+});
+
 it("shows an auto-dismiss tip when save merges a changed source", async () => {
   const saveVault = vi.fn(async () => ({
     type: "save_vault_result" as const,
