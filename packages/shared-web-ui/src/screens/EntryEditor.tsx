@@ -37,6 +37,7 @@ export function EntryEditor({
   draft,
   dirty,
   busy,
+  pendingSave,
   historyItems,
   historyDetail,
   historyError,
@@ -53,6 +54,7 @@ export function EntryEditor({
   onSelectHistoryItem,
   onSetPasskey,
   onClearPasskey,
+  onRetrySave,
   onSave,
   onCancel,
   onDelete
@@ -62,6 +64,7 @@ export function EntryEditor({
   draft: EntryDraftLike | null;
   dirty: boolean;
   busy?: boolean;
+  pendingSave?: boolean;
   historyItems?: EntryHistoryItem[];
   historyDetail?: EntryHistoryDetail | null;
   historyError?: string | null;
@@ -86,6 +89,7 @@ export function EntryEditor({
   onSelectHistoryItem?: (historyIndex: number) => void;
   onSetPasskey?: (passkey: EntryPasskey) => void;
   onClearPasskey?: () => void;
+  onRetrySave?: () => void;
   onSave: () => void;
   onCancel: () => void;
   onDelete?: () => void;
@@ -202,7 +206,12 @@ export function EntryEditor({
             }}
           >
             {mode === "view" && entry && onStartEdit ? (
-              <button type="button" onClick={onStartEdit} style={secondaryActionStyle}>
+              <button
+                type="button"
+                onClick={onStartEdit}
+                disabled={busy || pendingSave}
+                style={secondaryActionStyle}
+              >
                 {text("Edit")}
               </button>
             ) : null}
@@ -241,7 +250,12 @@ export function EntryEditor({
               </>
             ) : null}
             {mode === "view" && entry && onDelete ? (
-              <button type="button" onClick={onDelete} style={dangerActionStyle}>
+              <button
+                type="button"
+                onClick={onDelete}
+                disabled={busy || pendingSave}
+                style={dangerActionStyle}
+              >
                 {text("Delete Entry")}
               </button>
             ) : null}
@@ -353,8 +367,10 @@ export function EntryEditor({
           entry={entry}
           text={text}
           busy={busy}
+          pendingSave={pendingSave}
           onSetPasskey={onSetPasskey}
           onClearPasskey={onClearPasskey}
+          onRetrySave={onRetrySave}
         />
       ) : null}
       {mode === "view" && entry ? (
@@ -696,14 +712,18 @@ function PasskeySection({
   entry,
   text,
   busy,
+  pendingSave,
   onSetPasskey,
-  onClearPasskey
+  onClearPasskey,
+  onRetrySave
 }: {
   entry: EntryDetail;
   text: ReturnType<typeof useText>;
   busy?: boolean;
+  pendingSave?: boolean;
   onSetPasskey?: (passkey: EntryPasskey) => void;
   onClearPasskey?: () => void;
+  onRetrySave?: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<EntryPasskey>(() =>
@@ -858,28 +878,41 @@ function PasskeySection({
       <div style={sectionHeaderStyle}>
         <h3 style={sectionTitleStyle}>{text("Passkey")}</h3>
         <div style={inlineActionsStyle}>
-          <button
-            type="button"
-            onClick={() => {
-              setDraft(passkey ?? emptyPasskey());
-              setRevealedDraftFields(new Set());
-              setEditing((current) => !current);
-            }}
-            disabled={busy}
-            style={secondaryActionStyle}
-          >
-            {passkey ? text("Edit passkey") : text("Add passkey")}
-          </button>
-          {passkey ? (
+          {pendingSave ? (
             <button
               type="button"
-              onClick={() => onClearPasskey?.()}
+              onClick={() => onRetrySave?.()}
               disabled={busy}
-              style={dangerSmallButtonStyle}
+              style={primaryActionStyle}
             >
-              {text("Clear passkey")}
+              {text("Retry save")}
             </button>
-          ) : null}
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setDraft(passkey ?? emptyPasskey());
+                  setRevealedDraftFields(new Set());
+                  setEditing((current) => !current);
+                }}
+                disabled={busy}
+                style={secondaryActionStyle}
+              >
+                {passkey ? text("Edit passkey") : text("Add passkey")}
+              </button>
+              {passkey ? (
+                <button
+                  type="button"
+                  onClick={() => onClearPasskey?.()}
+                  disabled={busy}
+                  style={dangerSmallButtonStyle}
+                >
+                  {text("Clear passkey")}
+                </button>
+              ) : null}
+            </>
+          )}
         </div>
       </div>
       {passkey ? (

@@ -1531,6 +1531,94 @@ it("manages an entry passkey from the detail pane", async () => {
   expect(await screen.findByText("No passkey.")).toBeInTheDocument();
 });
 
+it("retries a failed passkey save without clearing the passkey again", async () => {
+  const passkey = {
+    username: "alice@example.com",
+    credentialId: "credential-old",
+    generatedUserId: null,
+    privateKeyPem: "-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----",
+    relyingParty: "example.com",
+    userHandle: null,
+    backupEligible: true,
+    backupState: false
+  };
+  const clearEntryPasskey = vi.fn(async () => ({
+    type: "entry_detail" as const,
+    id: "entry-1",
+    title: "GitHub",
+    username: "alice",
+    password: "secret",
+    url: "https://github.com",
+    notes: "",
+    totp: null,
+    totpUri: null,
+    passkey: null,
+    customFields: [],
+    attachments: []
+  }));
+  const saveVault = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("simulated passkey save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "GitHub",
+        username: "alice",
+        url: "https://github.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn().mockResolvedValue({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "GitHub",
+      username: "alice",
+      password: "secret",
+      url: "https://github.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      passkey,
+      customFields: [],
+      attachments: []
+    }),
+    clearEntryPasskey,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "GitHub" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Clear passkey" }));
+
+  expect(await screen.findByText("simulated passkey save failure")).toBeInTheDocument();
+  expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
+  expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
+});
+
 it("renders localized passkey reveal labels without English password fragments", () => {
   render(
     <I18nProvider language="zh-CN">

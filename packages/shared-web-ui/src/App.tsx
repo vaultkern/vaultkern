@@ -362,6 +362,9 @@ export function App({
   const [pendingEntrySave, setPendingEntrySave] = useState<PendingEntrySave | null>(
     null
   );
+  const [pendingPasskeySave, setPendingPasskeySave] = useState<PendingEntrySave | null>(
+    null
+  );
   const [pendingEntryDelete, setPendingEntryDelete] =
     useState<PendingEntryDelete | null>(null);
   const [entryActionError, setEntryActionError] = useState<string | null>(null);
@@ -721,8 +724,9 @@ export function App({
     }
   }
 
+  const hasPendingEntrySave = Boolean(pendingEntrySave || pendingPasskeySave);
   const dirty =
-    Boolean(pendingEntrySave) ||
+    hasPendingEntrySave ||
     (editorMode === "create-pending"
       ? hasDraftChangesFromEmpty(draft)
       : editorMode === "edit" && entryDetail && draft
@@ -884,7 +888,9 @@ export function App({
   }
 
   async function handleSaveAndContinue(action: PendingAction) {
-    const saved = await saveDraft();
+    const saved = pendingPasskeySave
+      ? await retryPendingPasskeySave()
+      : await saveDraft();
 
     if (saved) {
       performAction(action);
@@ -936,17 +942,17 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
+    const entryId = selectedEntryId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      const detail = await client.setEntryPasskey(
-        session.activeVaultId,
-        selectedEntryId,
-        passkey
-      );
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      const detail = await client.setEntryPasskey(vaultId, entryId, passkey);
       setEntryDetail(detail);
+      setPendingPasskeySave({ vaultId, detail });
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingPasskeySave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (passkeyError) {
       setEntryActionError(
@@ -965,16 +971,17 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
+    const entryId = selectedEntryId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      const detail = await client.clearEntryPasskey(
-        session.activeVaultId,
-        selectedEntryId
-      );
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      const detail = await client.clearEntryPasskey(vaultId, entryId);
       setEntryDetail(detail);
+      setPendingPasskeySave({ vaultId, detail });
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingPasskeySave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (passkeyError) {
       setEntryActionError(
@@ -983,6 +990,32 @@ export function App({
           translate(extensionSettings.language, "Failed to save entry passkey")
         )
       );
+    } finally {
+      setEntryActionBusy(false);
+    }
+  }
+
+  async function retryPendingPasskeySave() {
+    if (!pendingPasskeySave) {
+      return false;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      handleSaveResult(await client.saveVault(pendingPasskeySave.vaultId));
+      setPendingPasskeySave(null);
+      setWorkspaceReloadKey((current) => current + 1);
+      return true;
+    } catch (passkeyError) {
+      setEntryActionError(
+        errorMessage(
+          passkeyError,
+          translate(extensionSettings.language, "Failed to save entry passkey")
+        )
+      );
+      return false;
     } finally {
       setEntryActionBusy(false);
     }
@@ -1910,13 +1943,14 @@ export function App({
               draft={draft}
               dirty={dirty}
               busy={entryActionBusy}
+              pendingSave={Boolean(pendingPasskeySave)}
               error={entryActionError ?? detailError}
               historyItems={historyItems}
               historyDetail={historyDetail}
               historyError={historyError}
               onBack={viewMode === "expanded" ? undefined : handleBackToEntries}
               onStartEdit={() => {
-                if (!entryDetail) {
+                if (!entryDetail || pendingPasskeySave) {
                   return;
                 }
 
@@ -1994,6 +2028,9 @@ export function App({
               onClearPasskey={() => {
                 void handleClearEntryPasskey();
               }}
+              onRetrySave={() => {
+                void retryPendingPasskeySave();
+              }}
               onSave={() => {
                 void saveDraft();
               }}
@@ -2068,7 +2105,7 @@ export function App({
           title={translate(extensionSettings.language, "You have unsaved changes")}
           description={translate(
             extensionSettings.language,
-            pendingEntrySave
+            hasPendingEntrySave
               ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
               : "Save before leaving this entry, discard your edits, or continue editing."
           )}
@@ -2080,7 +2117,7 @@ export function App({
                 void handleSaveAndContinue(dialogState.action);
               }
             },
-            ...(pendingEntrySave
+            ...(hasPendingEntrySave
               ? []
               : [
                   {
