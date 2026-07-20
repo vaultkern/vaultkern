@@ -38,8 +38,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindow
 
 use super::{
     PendingRequest, PendingRequests, RESIDENT_IPC_DEFAULT_TIMEOUT_MS, ResidentIpcFrame,
-    ResidentIpcRequestHandler, client_hello, negotiate_client_hello, validate_request,
-    validate_server_hello, write_frame,
+    ResidentIpcRequestHandler, client_hello, negotiate_client_hello,
+    validate_configured_browser_origin, validate_request, validate_server_hello, write_frame,
 };
 use crate::command_loop::{
     MAX_NATIVE_REQUEST_BYTES, MAX_NATIVE_RESPONSE_BYTES, NativeMessage,
@@ -117,6 +117,11 @@ pub fn run_windows_native_messaging_shim(
     parent_window: Option<usize>,
 ) -> Result<()> {
     configure_stdio_for_native_messaging()?;
+    if let Err(error) = validate_configured_browser_origin(browser_origin) {
+        let message = "VaultKern rejected the unconfigured browser extension";
+        let _ = write_startup_failure("browser_origin_rejected", message);
+        return Err(error).context(message);
+    }
     if let Err(error) = peer_auth::authenticate_native_messaging_channel() {
         let message = "VaultKern could not authenticate the native-messaging browser channel";
         let _ = write_startup_failure("browser_authentication_failed", message);

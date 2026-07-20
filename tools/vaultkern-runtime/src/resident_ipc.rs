@@ -179,14 +179,51 @@ pub(crate) fn negotiate_client_hello(hello: ClientHello) -> Result<ServerHello> 
         );
     }
     validate_capabilities(&hello.capabilities)?;
-    if extension_id_from_browser_origin(&hello.client_origin).is_none() {
-        anyhow::bail!("invalid browser extension origin");
-    }
+    validate_configured_browser_origin(&hello.client_origin)?;
 
     Ok(ServerHello {
         protocol_version: RESIDENT_IPC_PROTOCOL_VERSION,
         capabilities: resident_ipc_capabilities(),
     })
+}
+
+pub(crate) fn validate_configured_browser_origin(browser_origin: &str) -> Result<()> {
+    validate_browser_origin_for_extension(browser_origin, configured_extension_id())
+}
+
+fn validate_browser_origin_for_extension(
+    browser_origin: &str,
+    expected_extension_id: Option<&str>,
+) -> Result<()> {
+    if extension_id_from_browser_origin(browser_origin).is_none() {
+        anyhow::bail!("invalid browser extension origin");
+    }
+    let expected_extension_id = expected_extension_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("runtime has no build-time browser extension ID")?;
+    if expected_extension_id.len() != 32
+        || !expected_extension_id
+            .bytes()
+            .all(|byte| (b'a'..=b'p').contains(&byte))
+    {
+        anyhow::bail!("runtime build-time browser extension ID is invalid");
+    }
+    let expected_origin = format!("chrome-extension://{expected_extension_id}/");
+    if browser_origin != expected_origin {
+        anyhow::bail!("browser origin does not match the configured extension");
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn configured_extension_id() -> Option<&'static str> {
+    option_env!("VAULTKERN_DEFAULT_EXTENSION_ID")
+}
+
+#[cfg(test)]
+fn configured_extension_id() -> Option<&'static str> {
+    Some("kblgblkjghklighdgmejjfondchkjcgf")
 }
 
 pub(crate) fn validate_server_hello(hello: &ServerHello) -> Result<()> {
@@ -286,7 +323,8 @@ mod tests {
 
     use super::{
         ClientHello, PendingRequests, RESIDENT_IPC_MAX_FRAME_BYTES, RESIDENT_IPC_PROTOCOL_VERSION,
-        ResidentIpcFrame, negotiate_client_hello, read_frame_with_limit, write_frame,
+        ResidentIpcFrame, negotiate_client_hello, read_frame_with_limit,
+        validate_browser_origin_for_extension, write_frame,
     };
 
     const EXTENSION_ORIGIN: &str = "chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/";
@@ -346,6 +384,53 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("invalid browser extension origin")
+        );
+
+        let mut hello = valid_hello();
+        hello.client_origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/".into();
+        assert!(
+            negotiate_client_hello(hello)
+                .unwrap_err()
+                .to_string()
+                .contains("configured extension")
+        );
+    }
+
+    #[test]
+    fn valid_but_different_extension_origin_is_rejected() {
+        let error = validate_browser_origin_for_extension(
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+            Some("kblgblkjghklighdgmejjfondchkjcgf"),
+        )
+        .expect_err("a different valid extension ID must not authenticate");
+
+        assert!(error.to_string().contains("configured extension"));
+    }
+
+    #[test]
+    fn missing_build_time_extension_id_fails_closed() {
+        let error = validate_browser_origin_for_extension(EXTENSION_ORIGIN, None)
+            .expect_err("browser IPC must not run without a build-time extension ID");
+
+        assert!(
+            error
+                .to_string()
+                .contains("no build-time browser extension ID")
+        );
+    }
+
+    #[test]
+    fn invalid_build_time_extension_id_fails_closed() {
+        let error = validate_browser_origin_for_extension(
+            "chrome-extension://testextensionid/",
+            Some("testextensionid"),
+        )
+        .expect_err("a malformed build-time extension ID must not authenticate");
+
+        assert!(
+            error
+                .to_string()
+                .contains("build-time browser extension ID is invalid")
         );
     }
 
