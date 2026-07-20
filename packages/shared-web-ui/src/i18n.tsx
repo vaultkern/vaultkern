@@ -179,6 +179,7 @@ type TranslationKey =
   | "Delete this entry permanently?"
   | "This will remove the selected entry from the current vault."
   | "Delete permanently"
+  | "Retry save"
   | "Failed to save extension settings"
   | "Failed to update quick unlock"
   | "Failed to add local vault"
@@ -395,6 +396,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Delete this entry permanently?": "永久删除此条目？",
   "This will remove the selected entry from the current vault.": "这会从当前数据库中删除选中的条目。",
   "Delete permanently": "永久删除",
+  "Retry save": "重试保存",
   "Failed to save extension settings": "保存插件设置失败",
   "Failed to update quick unlock": "更新快速解锁失败",
   "Failed to add local vault": "添加本地数据库失败",

@@ -2831,6 +2831,70 @@ it("retries a failed create save without creating the entry again", async () => 
   expect(createEntry).toHaveBeenCalledTimes(1);
 });
 
+it("retries a failed delete save without deleting the entry again", async () => {
+  const deleteEntry = vi.fn(async () => undefined);
+  const saveVault = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("simulated delete save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      customFields: []
+    })),
+    deleteEntry,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Delete Entry" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Delete permanently" }));
+
+  expect(await screen.findByText("simulated delete save failure")).toBeInTheDocument();
+  expect(deleteEntry).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
+  expect(deleteEntry).toHaveBeenCalledTimes(1);
+});
+
 it("generates a password into the entry editor only after explicit use", async () => {
   const originalCrypto = globalThis.crypto;
   Object.defineProperty(globalThis, "crypto", {

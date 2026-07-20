@@ -175,6 +175,11 @@ interface PendingEntrySave {
   detail: EntryDetail;
 }
 
+interface PendingEntryDelete {
+  vaultId: string;
+  entryId: string;
+}
+
 const COMPACT_BREAKPOINT = 1180;
 const STACKED_BREAKPOINT = 760;
 
@@ -357,6 +362,8 @@ export function App({
   const [pendingEntrySave, setPendingEntrySave] = useState<PendingEntrySave | null>(
     null
   );
+  const [pendingEntryDelete, setPendingEntryDelete] =
+    useState<PendingEntryDelete | null>(null);
   const [entryActionError, setEntryActionError] = useState<string | null>(null);
   const [dialogState, setDialogState] = useState<DialogState | null>(null);
   const [entryActionBusy, setEntryActionBusy] = useState(false);
@@ -889,14 +896,26 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
+    let mutationApplied =
+      pendingEntryDelete?.vaultId === vaultId && pendingEntryDelete.entryId === entryId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      await client.deleteEntry(session.activeVaultId, entryId);
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      if (pendingEntryDelete && !mutationApplied) {
+        throw new Error("Another entry deletion is pending");
+      }
+      if (!mutationApplied) {
+        await client.deleteEntry(vaultId, entryId);
+        mutationApplied = true;
+        setPendingEntryDelete({ vaultId, entryId });
+      }
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingEntryDelete(null);
       clearDetailSelection();
       setWorkspaceReloadKey((current) => current + 1);
+      setDialogState(null);
     } catch (deleteError) {
       setEntryActionError(
         errorMessage(
@@ -904,9 +923,11 @@ export function App({
           translate(extensionSettings.language, "Failed to delete entry")
         )
       );
+      if (!mutationApplied) {
+        setDialogState(null);
+      }
     } finally {
       setEntryActionBusy(false);
-      setDialogState(null);
     }
   }
 
@@ -2090,16 +2111,25 @@ export function App({
           }
           actions={[
             {
-              label: translate(extensionSettings.language, "Delete permanently"),
-              variant: "danger",
+              label: translate(
+                extensionSettings.language,
+                pendingEntryDelete ? "Retry save" : "Delete permanently"
+              ),
+              variant: pendingEntryDelete ? "primary" : "danger",
+              disabled: entryActionBusy,
               onClick: () => {
                 void handleDeleteEntry(dialogState.entryId);
               }
             },
-            {
-              label: translate(extensionSettings.language, "Cancel"),
-              onClick: () => setDialogState(null)
-            }
+            ...(pendingEntryDelete
+              ? []
+              : [
+                  {
+                    label: translate(extensionSettings.language, "Cancel"),
+                    disabled: entryActionBusy,
+                    onClick: () => setDialogState(null)
+                  }
+                ])
           ]}
         />
       ) : null}
@@ -2308,6 +2338,7 @@ function ConfirmationDialog({
     label: string;
     onClick: () => void;
     variant?: "primary" | "danger" | "secondary";
+    disabled?: boolean;
   }>;
 }) {
   return (
@@ -2351,6 +2382,7 @@ function ConfirmationDialog({
               key={action.label}
               type="button"
               onClick={action.onClick}
+              disabled={action.disabled}
               style={dialogActionStyle(action.variant ?? "secondary")}
             >
               {action.label}
