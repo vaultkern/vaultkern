@@ -4,7 +4,6 @@ use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(any(windows, test))]
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -214,7 +213,6 @@ impl ExclusiveFileLock {
         Ok(Self { file })
     }
 
-    #[cfg(any(windows, test))]
     pub(crate) fn acquire_with_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
         let started = Instant::now();
         let file = open_validated_lock_file(path)?;
@@ -239,7 +237,6 @@ impl ExclusiveFileLock {
     }
 }
 
-#[cfg(any(windows, test))]
 fn lock_timeout_error(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::WouldBlock,

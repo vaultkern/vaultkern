@@ -11,7 +11,9 @@ use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
+
+const LOCAL_WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalFileSnapshot {
@@ -26,11 +28,22 @@ pub struct VaultSourceFingerprint {
     pub modified_at: Option<u64>,
 }
 
-#[derive(Default)]
 pub struct LocalFileVaultSourceProvider {
     write_faults: DurableFaultInjector,
+    writer_lock_timeout: Duration,
     #[cfg(test)]
     before_write: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl Default for LocalFileVaultSourceProvider {
+    fn default() -> Self {
+        Self {
+            write_faults: DurableFaultInjector::default(),
+            writer_lock_timeout: LOCAL_WRITER_LOCK_TIMEOUT,
+            #[cfg(test)]
+            before_write: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -92,6 +105,7 @@ impl LocalFileVaultSourceProvider {
     ) -> Self {
         Self {
             write_faults: DurableFaultInjector::default(),
+            writer_lock_timeout: LOCAL_WRITER_LOCK_TIMEOUT,
             before_write: Some(before_write),
         }
     }
@@ -100,7 +114,16 @@ impl LocalFileVaultSourceProvider {
     pub(crate) fn with_write_faults(write_faults: DurableFaultInjector) -> Self {
         Self {
             write_faults,
+            writer_lock_timeout: LOCAL_WRITER_LOCK_TIMEOUT,
             before_write: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_writer_lock_timeout(writer_lock_timeout: Duration) -> Self {
+        Self {
+            writer_lock_timeout,
+            ..Self::default()
         }
     }
 
@@ -117,7 +140,7 @@ impl LocalFileVaultSourceProvider {
     pub fn begin_write(&self, path: &str) -> io::Result<(LocalFileWriteTxn, LocalFileSnapshot)> {
         let target = fs::canonicalize(path)?;
         let lock_path = local_lock_path(&target)?;
-        let lock = ExclusiveFileLock::acquire(&lock_path)?;
+        let lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, self.writer_lock_timeout)?;
         cleanup_pre_publish_hardlink_backups(&target)?;
         let opened = read_opened_snapshot(&target, true)?;
         let OpenedSnapshot {
@@ -864,11 +887,14 @@ fn pick_local_vault_path() -> anyhow::Result<Option<String>> {
 mod tests {
     use super::{
         LocalFileCommitError, LocalFileVaultSourceProvider, VaultSourceFingerprint,
-        decode_picker_stdout,
+        decode_picker_stdout, local_lock_path,
     };
-    use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
+    use crate::providers::durable_file::{
+        DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock,
+    };
     use std::fs;
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     fn sidecar_artifacts(dir: &std::path::Path) -> Vec<String> {
         let mut names = fs::read_dir(dir)
@@ -1027,6 +1053,38 @@ mod tests {
 
         assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn writer_lock_contention_fails_fast_instead_of_waiting_for_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        fs::write(&path, b"generation-a").unwrap();
+        let provider =
+            LocalFileVaultSourceProvider::with_writer_lock_timeout(Duration::from_millis(100));
+        let baseline = provider.read_snapshot(path.to_str().unwrap()).unwrap();
+        let canonical = fs::canonicalize(&path).unwrap();
+        let holder = ExclusiveFileLock::acquire(&local_lock_path(&canonical).unwrap()).unwrap();
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _ = released.recv_timeout(Duration::from_secs(1));
+            drop(holder);
+        });
+
+        let started = Instant::now();
+        let result = provider.write_if_unchanged(
+            path.to_str().unwrap(),
+            &baseline.fingerprint,
+            b"generation-b",
+        );
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        holder.join().unwrap();
+        let error = result.expect_err("writer-lock contention must time out");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert!(elapsed < Duration::from_millis(750), "waited {elapsed:?}");
+        assert_eq!(fs::read(path).unwrap(), b"generation-a");
     }
 
     #[test]
