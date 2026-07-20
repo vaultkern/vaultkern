@@ -2423,7 +2423,9 @@ it("edits an entry only after explicit save and confirms unsaved navigation", as
   expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
   expect(updateEntryFields).not.toHaveBeenCalled();
 
-  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  const saveChanges = screen.getByRole("button", { name: "Save changes" });
+  fireEvent.click(saveChanges);
+  fireEvent.click(saveChanges);
 
   await waitFor(() => {
     expect(updateEntryFields).toHaveBeenCalledWith("vault-1", "entry-1", {
@@ -2450,6 +2452,8 @@ it("edits an entry only after explicit save and confirms unsaved navigation", as
   await waitFor(() => {
     expect(saveVault).toHaveBeenCalledWith("vault-1");
   });
+  expect(updateEntryFields).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
 });
 
 it("shows an animated saving indicator while entry changes are being saved", async () => {

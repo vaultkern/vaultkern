@@ -383,6 +383,8 @@ export function App({
   const [entryActionError, setEntryActionError] = useState<string | null>(null);
   const [dialogState, setDialogState] = useState<DialogState | null>(null);
   const [entryActionBusy, setEntryActionBusy] = useState(false);
+  const [saveAndContinueBusy, setSaveAndContinueBusy] = useState(false);
+  const saveAndContinueInFlight = useRef(false);
   const [showEntryListWithDetail, setShowEntryListWithDetail] = useState(false);
   const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
   const [sourceDetailReloadKey, setSourceDetailReloadKey] = useState(0);
@@ -952,35 +954,46 @@ export function App({
   }
 
   async function handleSaveAndContinue(action: PendingAction) {
-    const hadPendingDatabaseSettings = Boolean(pendingDatabaseSettingsVaultId);
-    const hadDatabaseSettingsDraft = Boolean(
-      showDatabaseSettingsPage && databaseSettingsDraftDirty && databaseSettingsDraftUpdate
-    );
-    const handledDatabaseSettings =
-      hadPendingDatabaseSettings || hadDatabaseSettingsDraft;
-    const hadExtensionSettingsDraft = Boolean(
-      showExtensionSettingsPage && extensionSettingsDraftDirty && extensionSettingsDraft
-    );
-    let saved = hadPendingDatabaseSettings
-      ? await retryPendingDatabaseSettingsSave()
-      : hadDatabaseSettingsDraft
-        ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate!)
-        : hadExtensionSettingsDraft
-          ? await saveExtensionSettings(extensionSettingsDraft!)
-          : pendingDetailSave
-            ? await retryPendingDetailSave()
-            : true;
-    if (
-      saved &&
-      !handledDatabaseSettings &&
-      !hadExtensionSettingsDraft &&
-      (draftDirty || !pendingDetailSave)
-    ) {
-      saved = await saveDraft();
+    if (saveAndContinueInFlight.current) {
+      return;
     }
+    saveAndContinueInFlight.current = true;
+    setSaveAndContinueBusy(true);
 
-    if (saved) {
-      performAction(action);
+    try {
+      const hadPendingDatabaseSettings = Boolean(pendingDatabaseSettingsVaultId);
+      const hadDatabaseSettingsDraft = Boolean(
+        showDatabaseSettingsPage && databaseSettingsDraftDirty && databaseSettingsDraftUpdate
+      );
+      const handledDatabaseSettings =
+        hadPendingDatabaseSettings || hadDatabaseSettingsDraft;
+      const hadExtensionSettingsDraft = Boolean(
+        showExtensionSettingsPage && extensionSettingsDraftDirty && extensionSettingsDraft
+      );
+      let saved = hadPendingDatabaseSettings
+        ? await retryPendingDatabaseSettingsSave()
+        : hadDatabaseSettingsDraft
+          ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate!)
+          : hadExtensionSettingsDraft
+            ? await saveExtensionSettings(extensionSettingsDraft!)
+            : pendingDetailSave
+              ? await retryPendingDetailSave()
+              : true;
+      if (
+        saved &&
+        !handledDatabaseSettings &&
+        !hadExtensionSettingsDraft &&
+        (draftDirty || !pendingDetailSave)
+      ) {
+        saved = await saveDraft();
+      }
+
+      if (saved) {
+        performAction(action);
+      }
+    } finally {
+      saveAndContinueInFlight.current = false;
+      setSaveAndContinueBusy(false);
     }
   }
 
@@ -1008,6 +1021,7 @@ export function App({
           {
             label: translate(extensionSettings.language, "Save changes"),
             variant: "primary",
+            disabled: saveAndContinueBusy,
             onClick: () => {
               void handleSaveAndContinue(dialogState.action);
             }
@@ -1017,6 +1031,7 @@ export function App({
             : [
                 {
                   label: translate(extensionSettings.language, "Discard changes"),
+                  disabled: saveAndContinueBusy,
                   onClick: () => {
                     resetEditorState();
                     performAction(dialogState.action);
@@ -1025,6 +1040,7 @@ export function App({
               ]),
           {
             label: translate(extensionSettings.language, "Continue editing"),
+            disabled: saveAndContinueBusy,
             onClick: () => setDialogState(null)
           }
         ]}
