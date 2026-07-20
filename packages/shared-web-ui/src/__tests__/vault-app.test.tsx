@@ -2799,7 +2799,7 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
   const updateEntryFields = vi.fn(async () => ({
     type: "entry_detail" as const,
     id: "entry-1",
-    title: "Merged Title",
+    title: "Local Title",
     username: "alice",
     password: "secret-123",
     url: "https://example.com",
@@ -2831,18 +2831,32 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
         groupId: "group-root"
       }
     ]),
-    getEntryDetail: vi.fn(async () => ({
-      type: "entry_detail" as const,
-      id: "entry-1",
-      title: "Example",
-      username: "alice",
-      password: "secret-123",
-      url: "https://example.com",
-      notes: "demo note",
-      totp: null,
-      totpUri: null,
-      customFields: []
-    })),
+    getEntryDetail: vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "entry_detail" as const,
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        password: "secret-123",
+        url: "https://example.com",
+        notes: "demo note",
+        totp: null,
+        totpUri: null,
+        customFields: []
+      })
+      .mockResolvedValueOnce({
+        type: "entry_detail" as const,
+        id: "entry-1",
+        title: "Remote Winner",
+        username: "alice",
+        password: "secret-123",
+        url: "https://example.com",
+        notes: "demo note",
+        totp: null,
+        totpUri: null,
+        customFields: []
+      }),
     updateEntryFields,
     saveVault
   };
@@ -2852,16 +2866,20 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "Example" }));
   fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
   fireEvent.change(screen.getByLabelText("Title"), {
-    target: { value: "Merged Title" }
+    target: { value: "Local Title" }
   });
   vi.useFakeTimers();
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
   await act(async () => {
     await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 
   expect(screen.getByText("Vault changed on disk. Merged and saved.")).toBeInTheDocument();
+  expect(screen.getByText("Remote Winner")).toBeInTheDocument();
+  expect(client.getEntryDetail).toHaveBeenCalledTimes(2);
 
   await act(async () => {
     vi.advanceTimersByTime(3000);

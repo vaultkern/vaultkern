@@ -585,6 +585,7 @@ export function App({
       setSaveTip(
         translate(extensionSettings.language, "Vault changed on disk. Merged and saved.")
       );
+      setSourceDetailReloadKey((current) => current + 1);
     } else if (result?.status === "saved_to_cache") {
       setSaveTip(
         translate(extensionSettings.language, "Saved to local cache. Remote sync pending.")
@@ -1761,7 +1762,9 @@ export function App({
       return;
     }
 
-    setEntryDetail(null);
+    if (!forceSourceReload) {
+      setEntryDetail(null);
+    }
     setDetailError(null);
 
     let cancelled = false;
