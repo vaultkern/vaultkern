@@ -822,19 +822,21 @@ fn with_hello_key<T>(
             },
             "failed to create quick unlock Windows Hello key",
         )?;
-        set_hello_parent_window(key, parent_window)?;
-        configure_hello_key(key)?;
-        check_ncrypt(
-            unsafe { NCryptFinalizeKey(key, 0) },
-            "failed to finalize quick unlock Windows Hello key",
-        )?;
         created = true;
-    } else {
-        set_hello_parent_window(key, parent_window)?;
     }
-    let _key = NcryptHandle(key);
 
-    operation(key, created)
+    with_owned_ncrypt_handle(key, |key| {
+        set_hello_parent_window(key, parent_window)?;
+        if created {
+            configure_hello_key(key)?;
+            check_ncrypt(
+                unsafe { NCryptFinalizeKey(key, 0) },
+                "failed to finalize quick unlock Windows Hello key",
+            )?;
+        }
+
+        operation(key, created)
+    })
 }
 
 #[cfg(windows)]
@@ -866,13 +868,14 @@ fn recreate_hello_key(key_name: &[u16], parent_window: Option<usize>) -> Result<
         },
         "failed to replace invalidated quick unlock Windows Hello key",
     )?;
-    let _key = NcryptHandle(key);
-    set_hello_parent_window(key, parent_window)?;
-    configure_hello_key(key)?;
-    check_ncrypt(
-        unsafe { NCryptFinalizeKey(key, 0) },
-        "failed to finalize replacement quick unlock Windows Hello key",
-    )
+    with_owned_ncrypt_handle(key, |key| {
+        set_hello_parent_window(key, parent_window)?;
+        configure_hello_key(key)?;
+        check_ncrypt(
+            unsafe { NCryptFinalizeKey(key, 0) },
+            "failed to finalize replacement quick unlock Windows Hello key",
+        )
+    })
 }
 
 #[cfg(windows)]
@@ -1168,6 +1171,43 @@ impl Drop for WindowsHandle {
     }
 }
 
+#[cfg(any(windows, test))]
+struct OwnedResource<H: Copy, C: FnMut(H)> {
+    handle: H,
+    close: C,
+}
+
+#[cfg(any(windows, test))]
+impl<H: Copy, C: FnMut(H)> Drop for OwnedResource<H, C> {
+    fn drop(&mut self) {
+        (self.close)(self.handle);
+    }
+}
+
+#[cfg(any(windows, test))]
+fn with_owned_resource<T, H: Copy, C: FnMut(H)>(
+    handle: H,
+    close: C,
+    operation: impl FnOnce(H) -> Result<T>,
+) -> Result<T> {
+    let _resource = OwnedResource { handle, close };
+    operation(handle)
+}
+
+#[cfg(windows)]
+fn with_owned_ncrypt_handle<T>(
+    handle: windows_sys::Win32::Security::Cryptography::NCRYPT_HANDLE,
+    operation: impl FnOnce(windows_sys::Win32::Security::Cryptography::NCRYPT_HANDLE) -> Result<T>,
+) -> Result<T> {
+    with_owned_resource(
+        handle,
+        |handle| unsafe {
+            windows_sys::Win32::Security::Cryptography::NCryptFreeObject(handle);
+        },
+        operation,
+    )
+}
+
 #[cfg(windows)]
 struct NcryptHandle(windows_sys::Win32::Security::Cryptography::NCRYPT_HANDLE);
 
@@ -1320,13 +1360,28 @@ mod tests {
         quick_unlock_gesture_required, quick_unlock_key_storage_provider_name,
         quick_unlock_ngc_cache_type, quick_unlock_persistent_key_name,
         quick_unlock_record_lock_path, quick_unlock_replacement_outcome_is_unknown,
-        quick_unlock_storage_dir, verify_or_recreate_hello_key,
+        quick_unlock_storage_dir, verify_or_recreate_hello_key, with_owned_resource,
     };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock,
     };
     use crate::state_paths::{extension_state_dir, runtime_state_dir};
     use std::time::Duration;
+
+    #[test]
+    fn owned_resource_closes_once_when_setup_fails() {
+        let closes = std::cell::Cell::new(0);
+
+        let error = with_owned_resource(
+            7usize,
+            |_| closes.set(closes.get() + 1),
+            |_| -> anyhow::Result<()> { anyhow::bail!("injected setup failure") },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("injected setup failure"));
+        assert_eq!(closes.get(), 1);
+    }
 
     #[test]
     fn hello_reenrollment_recreates_an_invalidated_persisted_key() {
