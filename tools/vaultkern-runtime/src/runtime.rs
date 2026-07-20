@@ -6563,6 +6563,16 @@ impl Runtime {
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
             (vault.clone(), loaded.save_profile.clone())
         };
+        let local_conflict_key = key.clone();
+        let serialize_live_conflict_copy = || {
+            Self::serialize_and_verify_vault_candidate(
+                local_vault.clone(),
+                &local_conflict_key,
+                local_save_profile.clone(),
+            )
+            .map(|(bytes, _)| bytes)
+            .context("failed to verify live pending conflict copy")
+        };
         let base_bytes = self
             .synced_bases
             .read(vault_id)
@@ -6586,13 +6596,14 @@ impl Runtime {
                     let Some((vault, refreshed_key)) =
                         self.refresh_transformed_key_from_unlock_blob(vault_id, &remote.bytes)?
                     else {
+                        let local_bytes = serialize_live_conflict_copy()?;
                         return self.upload_pending_onedrive_conflict_copy(
                             vault_id,
                             drive_id,
                             item_id,
                             cache_key,
                             &pending,
-                            &pending.bytes,
+                            &local_bytes,
                             "current OneDrive generation uses a different vault key",
                         );
                     };
@@ -6600,13 +6611,14 @@ impl Runtime {
                     vault
                 }
                 Err(error) => {
+                    let local_bytes = serialize_live_conflict_copy()?;
                     return self.upload_pending_onedrive_conflict_copy(
                         vault_id,
                         drive_id,
                         item_id,
                         cache_key,
                         &pending,
-                        &pending.bytes,
+                        &local_bytes,
                         &format!("current OneDrive generation cannot be parsed: {error}"),
                     );
                 }
@@ -6621,13 +6633,14 @@ impl Runtime {
             ) {
                 Ok(profile) => profile,
                 Err(error) => {
+                    let local_bytes = serialize_live_conflict_copy()?;
                     return self.upload_pending_onedrive_conflict_copy(
                         vault_id,
                         drive_id,
                         item_id,
                         cache_key,
                         &pending,
-                        &pending.bytes,
+                        &local_bytes,
                         &error.to_string(),
                     );
                 }
@@ -6635,13 +6648,14 @@ impl Runtime {
             let patched = match three_way_field_patch(&base_vault, &local_vault, &remote_vault) {
                 Ok(patched) => patched,
                 Err(error) => {
+                    let local_bytes = serialize_live_conflict_copy()?;
                     return self.upload_pending_onedrive_conflict_copy(
                         vault_id,
                         drive_id,
                         item_id,
                         cache_key,
                         &pending,
-                        &pending.bytes,
+                        &local_bytes,
                         &format!("pending changes cannot be represented: {error}"),
                     );
                 }
@@ -14698,6 +14712,92 @@ mod tests {
         );
         assert_eq!(
             entry_fields(&runtime.get_entry_detail(&vault_id, &entry.id).unwrap()),
+            live_fields
+        );
+    }
+
+    #[test]
+    fn generic_pending_conflict_copy_preserves_later_live_edits() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let mut runtime = demo_onedrive_runtime(1_700_000_058);
+        runtime.remote_cache = RemoteVaultCache::new_at(cache_dir.path());
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let target = create_demo_entry(&mut runtime, &vault_id);
+        runtime.save_vault(&vault_id).unwrap();
+
+        runtime
+            .vault_session
+            .find_loaded_mut(&vault_id)
+            .unwrap()
+            .save_profile
+            .compression = Compression::None;
+        runtime.queue_test_onedrive_ambiguous_write(false);
+        assert!(matches!(
+            runtime.save_vault(&vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::SavedToCache,
+                ..
+            })
+        ));
+
+        let live_fields = EntryFieldsDto {
+            username: "edited after pending cache".into(),
+            ..entry_fields(&target)
+        };
+        runtime
+            .update_entry_fields(
+                &vault_id,
+                &target.id,
+                live_fields.title.clone(),
+                live_fields.username.clone(),
+                live_fields.password.clone(),
+                live_fields.url.clone(),
+                live_fields.notes.clone(),
+                live_fields.totp_uri.clone(),
+                live_fields.custom_fields.clone(),
+            )
+            .unwrap();
+
+        let remote = runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap();
+        let transformed = transformed_key_from_loaded_vault(
+            runtime.vault_session.find_loaded(&vault_id).unwrap(),
+        )
+        .unwrap();
+        let mut remote_vault = load_kdbx_with_transformed_key(&remote, &transformed).unwrap();
+        let changed_remote = save_kdbx_with_history_limits_transformed(
+            &mut remote_vault,
+            &transformed,
+            SaveProfile {
+                cipher: KdbxCipher::ChaCha20,
+                kdf: None,
+                ..SaveProfile::recommended()
+            },
+        )
+        .unwrap();
+        runtime.replace_test_onedrive_item("drive-1", "item-1", changed_remote);
+
+        let status = runtime.retry_vault_source_sync(&vault_id).unwrap();
+
+        assert_eq!(status.remote_state, "pending_sync");
+        let conflict = runtime
+            .one_drive
+            .list_children(None)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.item_id.starts_with("vaultkern-conflict-"))
+            .expect("pending conflict copy");
+        let conflict_bytes = runtime
+            .read_test_onedrive_item_bytes(&conflict.drive_id, &conflict.item_id)
+            .unwrap();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let core = KeepassCore::new();
+        let conflict_vault = core.load_database(&conflict_bytes, &key).unwrap().vault;
+        assert_eq!(
+            entry_fields_for_vault(&runtime.core, &conflict_vault, &target.id).unwrap(),
             live_fields
         );
     }
