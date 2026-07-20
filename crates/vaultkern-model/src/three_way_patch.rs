@@ -118,9 +118,11 @@ pub fn three_way_field_patch(
     ensure_local_sibling_order_representable(&base_flat, &local_flat, &remote_flat)?;
 
     let mut report = ThreeWayPatchReport::default();
-    let groups = merge_groups(&base_flat, &local_flat, &remote_flat, &mut report)?;
+    let mut groups = merge_groups(&base_flat, &local_flat, &remote_flat, &mut report)?;
+    reconcile_group_sibling_orders(&base_flat, &local_flat, &remote_flat, &mut groups)?;
     validate_group_hierarchy(base_flat.root_id, &groups)?;
-    let entries = merge_entries(&base_flat, &local_flat, &remote_flat, &groups, &mut report)?;
+    let mut entries = merge_entries(&base_flat, &local_flat, &remote_flat, &groups, &mut report)?;
+    reconcile_entry_sibling_orders(&base_flat, &local_flat, &remote_flat, &mut entries)?;
     let root = rebuild_tree(base_flat.root_id, &groups, &entries, &mut BTreeSet::new())?;
     let mut vault = merge_meta(base, local, remote, &mut report);
     vault
@@ -316,6 +318,202 @@ fn sibling_orders(flat: &FlatVault) -> SiblingOrders {
     }
 }
 
+fn reconcile_entry_sibling_orders(
+    base: &FlatVault,
+    local: &FlatVault,
+    remote: &FlatVault,
+    merged: &mut BTreeMap<Uuid, FlatEntry>,
+) -> Result<(), ThreeWayPatchError> {
+    let parents = merged
+        .values()
+        .map(|entry| entry.parent)
+        .collect::<BTreeSet<_>>();
+    for parent in parents {
+        let final_ids = merged
+            .iter()
+            .filter_map(|(id, entry)| (entry.parent == parent).then_some(*id))
+            .collect::<BTreeSet<_>>();
+        let local_order = ordered_entry_ids(&local.entries, parent, &final_ids);
+        let remote_order = ordered_entry_ids(&remote.entries, parent, &final_ids);
+        let prefer_local = final_ids
+            .iter()
+            .copied()
+            .filter(|id| entry_order_prefers_local(*id, base, local, remote, merged))
+            .collect::<BTreeSet<_>>();
+        let order = rebase_sibling_order(
+            parent,
+            "entry",
+            &final_ids,
+            &local_order,
+            &remote_order,
+            &prefer_local,
+        )?;
+        for (index, id) in order.into_iter().enumerate() {
+            merged.get_mut(&id).expect("merged entry sibling").order = index;
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_group_sibling_orders(
+    base: &FlatVault,
+    local: &FlatVault,
+    remote: &FlatVault,
+    merged: &mut BTreeMap<Uuid, FlatGroup>,
+) -> Result<(), ThreeWayPatchError> {
+    let parents = merged
+        .values()
+        .filter_map(|group| group.parent)
+        .collect::<BTreeSet<_>>();
+    for parent in parents {
+        let final_ids = merged
+            .iter()
+            .filter_map(|(id, group)| (group.parent == Some(parent)).then_some(*id))
+            .collect::<BTreeSet<_>>();
+        let local_order = ordered_group_ids(&local.groups, parent, &final_ids);
+        let remote_order = ordered_group_ids(&remote.groups, parent, &final_ids);
+        let prefer_local = final_ids
+            .iter()
+            .copied()
+            .filter(|id| group_order_prefers_local(*id, base, local, remote, merged))
+            .collect::<BTreeSet<_>>();
+        let order = rebase_sibling_order(
+            parent,
+            "group",
+            &final_ids,
+            &local_order,
+            &remote_order,
+            &prefer_local,
+        )?;
+        for (index, id) in order.into_iter().enumerate() {
+            merged.get_mut(&id).expect("merged group sibling").order = index;
+        }
+    }
+    Ok(())
+}
+
+fn ordered_entry_ids(
+    entries: &BTreeMap<Uuid, FlatEntry>,
+    parent: Uuid,
+    include: &BTreeSet<Uuid>,
+) -> Vec<Uuid> {
+    let mut ordered = entries
+        .iter()
+        .filter_map(|(id, entry)| {
+            (entry.parent == parent && include.contains(id)).then_some((entry.order, *id))
+        })
+        .collect::<Vec<_>>();
+    ordered.sort_unstable();
+    ordered.into_iter().map(|(_, id)| id).collect()
+}
+
+fn ordered_group_ids(
+    groups: &BTreeMap<Uuid, FlatGroup>,
+    parent: Uuid,
+    include: &BTreeSet<Uuid>,
+) -> Vec<Uuid> {
+    let mut ordered = groups
+        .iter()
+        .filter_map(|(id, group)| {
+            (group.parent == Some(parent) && include.contains(id)).then_some((group.order, *id))
+        })
+        .collect::<Vec<_>>();
+    ordered.sort_unstable();
+    ordered.into_iter().map(|(_, id)| id).collect()
+}
+
+fn entry_order_prefers_local(
+    id: Uuid,
+    base: &FlatVault,
+    local: &FlatVault,
+    remote: &FlatVault,
+    merged: &BTreeMap<Uuid, FlatEntry>,
+) -> bool {
+    let (Some(local), Some(merged)) = (local.entries.get(&id), merged.get(&id)) else {
+        return false;
+    };
+    if local.parent != merged.parent {
+        return false;
+    }
+    let Some(remote) = remote.entries.get(&id) else {
+        return true;
+    };
+    let Some(base) = base.entries.get(&id) else {
+        return false;
+    };
+    merge_location(
+        base.parent,
+        local.parent,
+        remote.parent,
+        local.value.location_changed_at,
+        remote.value.location_changed_at,
+    )
+    .3
+}
+
+fn group_order_prefers_local(
+    id: Uuid,
+    base: &FlatVault,
+    local: &FlatVault,
+    remote: &FlatVault,
+    merged: &BTreeMap<Uuid, FlatGroup>,
+) -> bool {
+    let (Some(local_group), Some(merged_group)) = (local.groups.get(&id), merged.get(&id)) else {
+        return false;
+    };
+    if local_group.parent != merged_group.parent {
+        return false;
+    }
+    let Some(remote_group) = remote.groups.get(&id) else {
+        return true;
+    };
+    let Some(base_group) = base.groups.get(&id) else {
+        return false;
+    };
+    match (base_group.parent, local_group.parent, remote_group.parent) {
+        (Some(base_parent), Some(local_parent), Some(remote_parent)) => {
+            merge_location(
+                base_parent,
+                local_parent,
+                remote_parent,
+                group_location_changed_at(&local_group.value),
+                group_location_changed_at(&remote_group.value),
+            )
+            .3
+        }
+        _ => false,
+    }
+}
+
+fn rebase_sibling_order(
+    parent: Uuid,
+    object: &'static str,
+    final_ids: &BTreeSet<Uuid>,
+    local_order: &[Uuid],
+    remote_order: &[Uuid],
+    prefer_local: &BTreeSet<Uuid>,
+) -> Result<Vec<Uuid>, ThreeWayPatchError> {
+    let mut order = remote_order
+        .iter()
+        .copied()
+        .filter(|id| !prefer_local.contains(id))
+        .collect::<Vec<_>>();
+    let mut pending = Vec::new();
+    for id in local_order {
+        if prefer_local.contains(id) {
+            pending.push(*id);
+        } else if let Some(anchor) = order.iter().position(|candidate| candidate == id) {
+            order.splice(anchor..anchor, pending.drain(..));
+        }
+    }
+    order.extend(pending);
+    let selected = order.iter().copied().collect::<BTreeSet<_>>();
+    if order.len() != final_ids.len() || selected != *final_ids {
+        return Err(ThreeWayPatchError::SiblingOrderChange { parent, object });
+    }
+    Ok(order)
+}
+
 fn validate_group_hierarchy(
     root_id: Uuid,
     groups: &BTreeMap<Uuid, FlatGroup>,
@@ -435,21 +633,20 @@ fn merge_entries(
             (Some(base), Some(local), Some(remote)) => {
                 let (value, changed) =
                     merge_entry(&base.value, &local.value, &remote.value, report);
-                let (parent, location_changed_at, location_conflict) = merge_location(
-                    base.parent,
-                    local.parent,
-                    remote.parent,
-                    local.value.location_changed_at,
-                    remote.value.location_changed_at,
-                );
+                let (parent, location_changed_at, location_conflict, location_prefers_local) =
+                    merge_location(
+                        base.parent,
+                        local.parent,
+                        remote.parent,
+                        local.value.location_changed_at,
+                        remote.value.location_changed_at,
+                    );
                 let mut value = value;
                 value.location_changed_at = location_changed_at;
                 if location_conflict {
-                    let local_wins = local.value.location_changed_at.unwrap_or(0)
-                        > remote.value.location_changed_at.unwrap_or(0);
                     add_losing_history_snapshot(
                         &mut value,
-                        if local_wins {
+                        if location_prefers_local {
                             &remote.value
                         } else {
                             &local.value
@@ -463,7 +660,11 @@ fn merge_entries(
                 Some(FlatEntry {
                     value,
                     parent,
-                    order: remote.order,
+                    order: if location_prefers_local {
+                        local.order
+                    } else {
+                        remote.order
+                    },
                 })
             }
             (None, None, None) => unreachable!(),
@@ -516,18 +717,20 @@ fn merge_groups(
                     &remote_group.value,
                     local_timestamp > remote_timestamp,
                 );
-                let (parent, location_changed_at, _) =
+                let (parent, location_changed_at, _, location_prefers_local) =
                     match (base_group.parent, local_group.parent, remote_group.parent) {
-                        (None, None, None) => (None, group_location_changed_at(&value), false),
+                        (None, None, None) => {
+                            (None, group_location_changed_at(&value), false, false)
+                        }
                         (Some(base_parent), Some(local_parent), Some(remote_parent)) => {
-                            let (parent, changed_at, conflict) = merge_location(
+                            let (parent, changed_at, conflict, prefers_local) = merge_location(
                                 base_parent,
                                 local_parent,
                                 remote_parent,
                                 group_location_changed_at(&local_group.value),
                                 group_location_changed_at(&remote_group.value),
                             );
-                            (Some(parent), changed_at, conflict)
+                            (Some(parent), changed_at, conflict, prefers_local)
                         }
                         _ => return Err(ThreeWayPatchError::RootLineageMismatch),
                     };
@@ -538,7 +741,11 @@ fn merge_groups(
                 Some(FlatGroup {
                     value,
                     parent,
-                    order: remote_group.order,
+                    order: if location_prefers_local {
+                        local_group.order
+                    } else {
+                        remote_group.order
+                    },
                 })
             }
             (None, None, None) => unreachable!(),
@@ -960,14 +1167,15 @@ fn merge_location(
     remote: Uuid,
     local_changed_at: Option<u64>,
     remote_changed_at: Option<u64>,
-) -> (Uuid, Option<u64>, bool) {
+) -> (Uuid, Option<u64>, bool, bool) {
     if local == base {
-        return (remote, remote_changed_at, false);
+        return (remote, remote_changed_at, false, false);
     }
     if remote == base {
-        return (local, local_changed_at, false);
+        return (local, local_changed_at, false, true);
     }
     if local == remote {
+        let prefers_local = local_changed_at.unwrap_or(0) > remote_changed_at.unwrap_or(0);
         return (
             remote,
             Some(
@@ -976,12 +1184,13 @@ fn merge_location(
                     .max(remote_changed_at.unwrap_or(0)),
             ),
             false,
+            prefers_local,
         );
     }
     if local_changed_at.unwrap_or(0) > remote_changed_at.unwrap_or(0) {
-        (local, local_changed_at, true)
+        (local, local_changed_at, true, true)
     } else {
-        (remote, remote_changed_at, true)
+        (remote, remote_changed_at, true, false)
     }
 }
 

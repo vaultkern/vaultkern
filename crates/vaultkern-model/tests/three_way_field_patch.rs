@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use vaultkern_model::{
-    Attachment, CustomField, DeletedObject, Entry, Group, OpaqueXmlFragment, PasskeyRecord,
-    TotpSpec, Vault, three_way_field_patch,
+    Attachment, CustomField, DeletedObject, Entry, Group, GroupTimes, OpaqueXmlFragment,
+    PasskeyRecord, TotpSpec, Vault, three_way_field_patch,
 };
 
 fn base_vault() -> (Vault, Uuid) {
@@ -428,4 +428,80 @@ fn local_group_reordering_uses_the_same_conflict_copy_fallback() {
     local.root.children.swap(0, 1);
 
     assert!(three_way_field_patch(&base, &local, &base).is_err());
+}
+
+#[test]
+fn local_entry_move_keeps_its_destination_insertion_order() {
+    let mut base = Vault::empty("Shared");
+    let mut source = Group::new("Source");
+    let mut moved = Entry::new("Moved");
+    moved.id = Uuid::from_u128(1);
+    source.entries.push(moved);
+    let mut destination = Group::new("Destination");
+    let mut first = Entry::new("First");
+    first.id = Uuid::from_u128(2);
+    let mut second = Entry::new("Second");
+    second.id = Uuid::from_u128(3);
+    destination.entries = vec![first, second];
+    base.root.children = vec![source, destination];
+
+    let mut local = base.clone();
+    let mut moved = local.root.children[0].entries.remove(0);
+    moved.location_changed_at = Some(20);
+    local.root.children[1].entries.insert(1, moved);
+
+    let patched = three_way_field_patch(&base, &local, &base).unwrap();
+    let destination = patched
+        .vault
+        .root
+        .children
+        .iter()
+        .find(|group| group.title == "Destination")
+        .unwrap();
+    assert_eq!(
+        destination
+            .entries
+            .iter()
+            .map(|entry| entry.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["First", "Moved", "Second"]
+    );
+}
+
+#[test]
+fn local_group_move_keeps_its_destination_insertion_order() {
+    let mut base = Vault::empty("Shared");
+    let mut destination = Group::new("Destination");
+    destination.children = vec![Group::new("First"), Group::new("Second")];
+    base.root.children = vec![Group::new("Source"), destination, Group::new("Moved")];
+
+    let mut local = base.clone();
+    let mut moved = local.root.children.remove(2);
+    moved.times = Some(GroupTimes {
+        created_at: 0,
+        modified_at: 20,
+        expires: false,
+        expiry_time: None,
+        last_accessed_at: None,
+        usage_count: None,
+        location_changed_at: Some(20),
+    });
+    local.root.children[1].children.insert(1, moved);
+
+    let patched = three_way_field_patch(&base, &local, &base).unwrap();
+    let destination = patched
+        .vault
+        .root
+        .children
+        .iter()
+        .find(|group| group.title == "Destination")
+        .unwrap();
+    assert_eq!(
+        destination
+            .children
+            .iter()
+            .map(|group| group.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["First", "Moved", "Second"]
+    );
 }
