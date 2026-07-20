@@ -16,13 +16,12 @@ use uuid::Uuid;
 use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, Compression, CustomDataItemInput, Entry,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    ExternalKdfConfirmation, ExternalKdfPolicy, GroupTimesUpdate, KdbxCipher, KdbxError,
-    KdbxVersion, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec,
-    TransformedKey, Vault, VaultBinTemplateMetadataUpdate, VaultIdentityMetadataUpdate,
-    VaultLifecycleMetadataUpdate, VaultMetadataUpdate, derive_transformed_key_with_policy,
-    load_kdbx_with_transformed_key, load_kdbx_with_transformed_key_diagnostic,
-    parse_key_file_bytes, required_version, retained_or_recommended_save_kdf,
-    save_kdbx_with_transformed_key, three_way_field_patch,
+    ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher, KdbxError, KdbxVersion, KeepassCore,
+    PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec, TransformedKey, Vault,
+    VaultBinTemplateMetadataUpdate, VaultIdentityMetadataUpdate, VaultLifecycleMetadataUpdate,
+    VaultMetadataUpdate, derive_transformed_key_with_policy, load_kdbx_with_transformed_key,
+    load_kdbx_with_transformed_key_diagnostic, parse_key_file_bytes, required_version,
+    retained_or_recommended_save_kdf, save_kdbx_with_transformed_key, three_way_field_patch,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
@@ -1665,9 +1664,8 @@ impl Runtime {
                     self.core
                         .update_vault_identity_metadata(&mut candidate, identity_update)?;
                 }
-                did_change_vault_settings |= name_changed
-                    || description_changed
-                    || default_username_changed;
+                did_change_vault_settings |=
+                    name_changed || description_changed || default_username_changed;
                 *vault = candidate;
             }
 
@@ -9300,10 +9298,8 @@ mod tests {
         assert_eq!(local.default_username_changed, Some(200));
         assert_eq!(local.settings_changed, Some(200));
         assert_eq!(local.recycle_bin_changed, Some(200));
-        assert_eq!(
-            local.root.times.as_ref().map(|times| times.modified_at),
-            Some(200)
-        );
+        assert_eq!(local.root.title, base.root.title);
+        assert_eq!(local.root.times, base.root.times);
 
         let mut remote = base.clone();
         remote.name = "Earlier remote name".into();
