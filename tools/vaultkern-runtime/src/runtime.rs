@@ -905,10 +905,7 @@ impl Runtime {
                 let storage_key = quick_unlock_storage_key(&vault.vault_ref_id);
                 vault.supports_quick_unlock = match self.secure_storage.contains(&storage_key) {
                     Ok(contains) => contains,
-                    Err(_) => {
-                        let _ = self.secure_storage.delete(&storage_key);
-                        false
-                    }
+                    Err(_) => false,
                 };
             }
         }
@@ -15664,7 +15661,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_recent_vaults_treats_quick_unlock_probe_failures_as_disabled() {
+    fn listing_recent_vaults_preserves_quick_unlock_after_probe_failures() {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
@@ -15685,12 +15682,22 @@ mod tests {
         runtime
             .enroll_quick_unlock_for_current_vault(Some("demo-password"), None)
             .unwrap();
+        let storage_key = quick_unlock_storage_key(
+            runtime
+                .vault_session
+                .current_vault_ref_id()
+                .expect("current vault reference"),
+        );
         runtime.lock_session();
 
         let listed = runtime.list_recent_vaults().unwrap();
 
         assert_eq!(listed.vaults.len(), 1);
         assert!(!listed.vaults[0].supports_quick_unlock);
+        assert!(
+            runtime.secure_storage.load(&storage_key).unwrap().is_some(),
+            "a read-only availability probe must not delete enrolled credentials"
+        );
     }
 
     #[test]
