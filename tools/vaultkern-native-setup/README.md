@@ -11,7 +11,7 @@
 - Windows application manifest: `asInvoker`, so the `Setup` filename does not trigger installer elevation detection
 - Windows subsystem: GUI, so no extra console window is opened
 - Supported browsers: Chrome and Edge
-- Extension id: release packages can embed a stable id with the build-time `VAULTKERN_DEFAULT_EXTENSION_ID`; development, sideload, and E2E runs can use the first CLI argument, `VAULTKERN_EXTENSION_ID`, or the GUI field for the current extension id
+- Extension id: signed packages require and pin one build-time `VAULTKERN_DEFAULT_EXTENSION_ID`; the GUI and runtime cannot override it
 
 ## Packaging
 
@@ -20,12 +20,13 @@ Run from the repository root:
 ```bash
 export VAULTKERN_WINDOWS_SIGNING_THUMBPRINT="<package-signing-certificate-sha1>"
 export VAULTKERN_SIGNTOOL="/mnt/c/Program Files (x86)/Windows Kits/10/bin/<sdk-version>/x64/signtool.exe"
+export VAULTKERN_DEFAULT_EXTENSION_ID="<32-character-chromium-extension-id>"
 tools/vaultkern-native-setup/scripts/package_windows.sh
 ```
 
 The runtime shim must be signed by the same certificate as the installed
 VaultKern Windows package. Packaging stops before embedding the runtime when
-the thumbprint or `signtool` is missing, and verifies the Authenticode
+the pinned extension id, thumbprint, or `signtool` is missing, and verifies the Authenticode
 signature after signing. Set `VAULTKERN_WINDOWS_TIMESTAMP_URL` when the
 release signature should use an RFC 3161 timestamp server.
 
@@ -68,16 +69,16 @@ When `Register / Repair` is clicked, the setup utility extracts the embedded run
 %LOCALAPPDATA%\vaultkern-runtime\vaultkern-runtime.exe
 ```
 
-The manifest points to this stable runtime path and sets `allowed_origins` to the extension id shown in the GUI. For a future Chrome Web Store release, the packaging step should inject the production extension id with `VAULTKERN_DEFAULT_EXTENSION_ID`.
+The manifest points to this stable runtime path and sets `allowed_origins` to the extension id pinned into the signed setup and runtime. Both sides of the resident IPC handshake enforce the same exact origin, so changing the per-user manifest cannot authorize another extension.
 
-Development, sideload, and E2E validation can prefill the extension id with a CLI argument or environment variable:
+Development, sideload, and E2E validation use a separately built and signed package pinned to that build's stable extension id:
 
-```powershell
-VaultKernNativeSetup.exe <developer-extension-id>
-$env:VAULTKERN_EXTENSION_ID="<developer-extension-id>"; .\VaultKernNativeSetup.exe
+```bash
+VAULTKERN_DEFAULT_EXTENSION_ID="<developer-extension-id>" \
+  tools/vaultkern-native-setup/scripts/package_windows.sh
 ```
 
-When no build-time default id is present, the GUI requires the current extension id. Copy it from `chrome://extensions` or from the extension error page.
+Unsigned local builds without a build-time default may still accept a CLI argument, `VAULTKERN_EXTENSION_ID`, or the GUI field for isolated UI development, but the browser IPC path fails closed until a trusted id is embedded.
 
 `Unregister` removes the browser-specific `HKCU` registry value and removes the browser-specific manifest file written by this tool. It does not remove the runtime executable extracted under `%LOCALAPPDATA%`.
 

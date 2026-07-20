@@ -12,13 +12,24 @@ pub fn built_in_extension_id() -> Option<&'static str> {
 }
 
 pub fn resolve_extension_id(cli_arg: Option<&str>, env_value: Option<&str>) -> String {
+    resolve_extension_id_with_default(built_in_extension_id(), cli_arg, env_value)
+}
+
+fn resolve_extension_id_with_default(
+    built_in: Option<&str>,
+    cli_arg: Option<&str>,
+    env_value: Option<&str>,
+) -> String {
+    if let Some(extension_id) = built_in.and_then(non_empty_trimmed) {
+        return extension_id.to_string();
+    }
     if let Some(extension_id) = cli_arg.and_then(non_empty_trimmed) {
         return extension_id.to_string();
     }
     if let Some(extension_id) = env_value.and_then(non_empty_trimmed) {
         return extension_id.to_string();
     }
-    built_in_extension_id().unwrap_or("").to_string()
+    String::new()
 }
 
 fn non_empty_trimmed(value: &str) -> Option<&str> {
@@ -351,8 +362,8 @@ pub mod windows_setup {
 
     use crate::{
         BrowserDiagnosis, BrowserKind, BrowserRegistrationProbe, BrowserSetupConfig,
-        RegistrationStatus, browser_install_candidates_for_roots, install_runtime_payload,
-        runtime_install_path,
+        RegistrationStatus, browser_install_candidates_for_roots, built_in_extension_id,
+        install_runtime_payload, runtime_install_path,
     };
 
     const RUNTIME_PAYLOAD: &[u8] =
@@ -370,6 +381,7 @@ pub mod windows_setup {
     ) -> Result<BrowserSetupConfig, String> {
         let local_app_data = local_app_data_dir()?;
         let runtime_path = runtime_install_path(&local_app_data);
+        let extension_id = built_in_extension_id().unwrap_or(extension_id);
         Ok(BrowserSetupConfig::new(
             browser,
             extension_id,
@@ -417,6 +429,10 @@ pub mod windows_setup {
     pub fn register_browser(config: &BrowserSetupConfig) -> Result<(), String> {
         if config.extension_id().trim().is_empty() {
             return Err("extension id is required".into());
+        }
+        if built_in_extension_id().is_some_and(|extension_id| extension_id != config.extension_id())
+        {
+            return Err("this signed package is pinned to a different extension id".into());
         }
 
         install_embedded_runtime(config)?;
@@ -544,7 +560,7 @@ mod tests {
         BrowserKind, BrowserRegistrationProbe, BrowserSetupConfig, DEFAULT_EXTENSION_ID_ENV,
         RegistrationStatus, browser_install_candidates_for_roots, built_in_extension_id,
         install_runtime_payload, render_native_host_manifest, resolve_extension_id,
-        runtime_install_path,
+        resolve_extension_id_with_default, runtime_install_path,
     };
 
     #[test]
@@ -556,18 +572,32 @@ mod tests {
     }
 
     #[test]
-    fn extension_id_resolution_prefers_runtime_overrides_then_optional_built_in_default() {
+    fn signed_package_extension_id_cannot_be_overridden_at_runtime() {
         assert_eq!(
-            resolve_extension_id(Some(" cli-extension "), Some("env-extension")),
+            resolve_extension_id_with_default(
+                Some("pinned-extension"),
+                Some("cli-extension"),
+                Some("env-extension"),
+            ),
+            "pinned-extension"
+        );
+    }
+
+    #[test]
+    fn development_build_extension_id_prefers_cli_then_environment() {
+        assert_eq!(
+            resolve_extension_id_with_default(None, Some(" cli-extension "), Some("env-extension"),),
             "cli-extension"
         );
         assert_eq!(
-            resolve_extension_id(Some("   "), Some(" env-extension ")),
+            resolve_extension_id_with_default(None, Some("   "), Some(" env-extension ")),
             "env-extension"
         );
+        assert_eq!(resolve_extension_id_with_default(None, None, Some("")), "");
+
         assert_eq!(
-            resolve_extension_id(None, Some("")),
-            built_in_extension_id().unwrap_or("")
+            resolve_extension_id(Some("cli-extension"), Some("env-extension")),
+            built_in_extension_id().unwrap_or("cli-extension")
         );
     }
 
@@ -824,6 +854,16 @@ mod tests {
         assert!(script.contains(r#""${sign_tool}" sign"#));
         assert!(script.contains(r#""${sign_tool}" verify"#));
         assert!(script.contains("runtime signing certificate thumbprint is required"));
+    }
+
+    #[test]
+    fn package_script_requires_a_pinned_chromium_extension_id() {
+        let script = read_package_file("scripts/package_windows.sh");
+
+        assert!(script.contains("VAULTKERN_DEFAULT_EXTENSION_ID"));
+        assert!(script.contains("^[a-p]{32}$"));
+        assert!(script.contains("extension id is required"));
+        assert!(script.contains("export VAULTKERN_DEFAULT_EXTENSION_ID"));
     }
 
     #[test]

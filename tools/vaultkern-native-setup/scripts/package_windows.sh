@@ -6,11 +6,22 @@ repo_root="$(cd "${script_dir}/../../.." && pwd)"
 target_triple="x86_64-pc-windows-gnu"
 output_dir="${repo_root}/target/vaultkern-native-setup-windows"
 runtime_path="${repo_root}/target/${target_triple}/release/vaultkern-runtime.exe"
+extension_id="${VAULTKERN_DEFAULT_EXTENSION_ID:-}"
 signing_thumbprint="${VAULTKERN_WINDOWS_SIGNING_THUMBPRINT:-}"
 sign_tool="${VAULTKERN_SIGNTOOL:-signtool.exe}"
 timestamp_url="${VAULTKERN_WINDOWS_TIMESTAMP_URL:-}"
 
 cd "${repo_root}"
+
+if [[ -z "${extension_id}" ]]; then
+  printf 'pinned extension id is required; set VAULTKERN_DEFAULT_EXTENSION_ID\n' >&2
+  exit 1
+fi
+if [[ ! "${extension_id}" =~ ^[a-p]{32}$ ]]; then
+  printf 'VAULTKERN_DEFAULT_EXTENSION_ID must contain exactly 32 lowercase letters from a through p\n' >&2
+  exit 1
+fi
+export VAULTKERN_DEFAULT_EXTENSION_ID="${extension_id}"
 
 if [[ -z "${signing_thumbprint}" ]]; then
   printf 'runtime signing certificate thumbprint is required; set VAULTKERN_WINDOWS_SIGNING_THUMBPRINT\n' >&2

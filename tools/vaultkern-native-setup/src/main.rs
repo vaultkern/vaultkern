@@ -153,18 +153,20 @@ mod app {
                     );
                     ui.add_space(6.0);
 
+                    let pinned_extension_id = built_in_extension_id();
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.extension_id)
                             .desired_width(430.0)
-                            .hint_text("Chrome extension id"),
+                            .hint_text("Chrome extension id")
+                            .interactive(pinned_extension_id.is_none()),
                     );
                     if response.changed() {
                         self.refresh();
                     }
 
-                    let helper = if let Some(extension_id) = built_in_extension_id() {
+                    let helper = if let Some(extension_id) = pinned_extension_id {
                         format!(
-                            "This package was built with a default extension id ({extension_id}). Override it only for development, sideload, or E2E builds."
+                            "This signed package is pinned to extension id {extension_id}. Build a separate signed development package to use another id."
                         )
                     } else {
                         "Paste the current extension id from chrome://extensions or from the extension error page. Release packages can prefill this field with VAULTKERN_DEFAULT_EXTENSION_ID.".into()
