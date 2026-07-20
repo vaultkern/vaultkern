@@ -19,21 +19,20 @@ pub fn should_refresh_platform_passkeys(
     command_type: Option<&str>,
     response: &serde_json::Value,
 ) -> bool {
-    let response_type = response.get("type").and_then(serde_json::Value::as_str);
-    if response_type == Some("error") {
-        return false;
-    }
-    if response_type == Some("session_state") {
-        return true;
-    }
-
-    matches!(
+    let command_may_change_credentials = matches!(
         command_type,
         Some(
             "add_local_vault_reference"
                 | "add_onedrive_vault_reference"
                 | "open_local_vault"
+                | "set_current_vault"
                 | "delete_vault_reference"
+                | "unlock_current_vault_with_password"
+                | "unlock_current_vault"
+                | "unlock_current_vault_with_quick_unlock"
+                | "unlock_with_password"
+                | "unlock_vault"
+                | "lock_session"
                 | "retry_vault_source_sync"
                 | "set_entry_passkey"
                 | "clear_entry_passkey"
@@ -43,7 +42,18 @@ pub fn should_refresh_platform_passkeys(
                 | "delete_entry"
                 | "save_vault"
         )
-    )
+    );
+    let response_type = response.get("type").and_then(serde_json::Value::as_str);
+    if response_type == Some("error") {
+        return response.get("code").and_then(serde_json::Value::as_str)
+            == Some("request_cancelled")
+            && command_may_change_credentials;
+    }
+    if response_type == Some("session_state") {
+        return true;
+    }
+
+    command_may_change_credentials
 }
 
 #[cfg(test)]
@@ -86,6 +96,25 @@ mod tests {
         assert!(!should_refresh_platform_passkeys(
             Some("set_entry_passkey"),
             &json!({ "type": "error" })
+        ));
+    }
+
+    #[test]
+    fn cancelled_state_changes_reconcile_the_passkey_cache_after_runtime_completion() {
+        for command in ["lock_session", "set_entry_passkey"] {
+            assert!(should_refresh_platform_passkeys(
+                Some(command),
+                &json!({
+                    "type": "error",
+                    "code": "request_cancelled",
+                    "message": "the runtime request was cancelled"
+                })
+            ));
+        }
+
+        assert!(!should_refresh_platform_passkeys(
+            Some("set_entry_passkey"),
+            &json!({ "type": "error", "code": "runtime_error" })
         ));
     }
 
