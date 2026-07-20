@@ -6,7 +6,8 @@ fn main() {
             .cpp(true)
             .file("native/passkey_plugin.cpp")
             .include("native")
-            .flag_if_supported("/std:c++20");
+            .flag_if_supported("/std:c++20")
+            .flag_if_supported("/EHsc");
         if std::env::var("PROFILE").as_deref() == Ok("debug") {
             native.define("VAULTKERN_PLUGIN_DIAGNOSTICS", None);
         }

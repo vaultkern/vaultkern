@@ -120,6 +120,8 @@ unsafe extern "system" {
     ) -> i32;
     #[cfg(test)]
     fn vaultkern_plugin_test_replaces_cached_account_credential() -> i32;
+    #[cfg(test)]
+    fn vaultkern_plugin_test_can_select_second_matching_credential() -> i32;
 }
 
 struct CallbackContext {
@@ -677,6 +679,7 @@ mod tests {
     use super::{
         CallbackContext, NTE_NOT_FOUND, S_OK, VkOwnedBytes, free_owned_bytes, owned_bytes,
         release_context_callback, retain_context_callback, runtime_error_hresult,
+        vaultkern_plugin_test_can_select_second_matching_credential,
         vaultkern_plugin_test_replaces_cached_account_credential,
     };
     use crate::RuntimeBridge;
@@ -719,6 +722,14 @@ mod tests {
     fn replacing_an_account_credential_evicts_the_old_cached_id() {
         assert_eq!(
             unsafe { vaultkern_plugin_test_replaces_cached_account_credential() },
+            S_OK
+        );
+    }
+
+    #[test]
+    fn discoverable_account_selection_can_choose_a_nonfirst_credential() {
+        assert_eq!(
+            unsafe { vaultkern_plugin_test_can_select_second_matching_credential() },
             S_OK
         );
     }

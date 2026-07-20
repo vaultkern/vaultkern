@@ -102,6 +102,7 @@ int32_t VK_CALL vaultkern_plugin_sync_credentials(
     uint32_t credential_count);
 
 int32_t VK_CALL vaultkern_plugin_test_replaces_cached_account_credential(void);
+int32_t VK_CALL vaultkern_plugin_test_can_select_second_matching_credential(void);
 
 #ifdef __cplusplus
 }
