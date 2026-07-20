@@ -2236,6 +2236,13 @@ impl Runtime {
                 }
             },
         );
+        let mut matching_credential_ids = std::collections::HashSet::new();
+        if matches
+            .iter()
+            .any(|passkey| !matching_credential_ids.insert(passkey.credential_id.as_str()))
+        {
+            anyhow::bail!("multiple platform passkey credentials share a credential id");
+        }
         let passkey = matches
             .first()
             .copied()
@@ -10337,6 +10344,65 @@ mod tests {
             .unwrap();
         assert_eq!(selected.credential_id, second.credential.credential_id);
         assert_ne!(selected.credential_id, first.credential.credential_id);
+    }
+
+    #[test]
+    fn platform_plugin_rejects_duplicate_matching_credential_ids() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let first = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                user_name: "alice@example.com".into(),
+                user_handle: b"user-a".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .unwrap();
+        let duplicate = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "mallory@example.com",
+                user_handle: b"user-b",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            first.credential.credential_id.clone(),
+        )
+        .unwrap();
+        let duplicate_entry = create_demo_entry(&mut runtime, &opened.vault_id);
+        let duplicate = duplicate.passkey;
+        runtime
+            .set_entry_passkey(
+                &opened.vault_id,
+                &duplicate_entry.id,
+                EntryPasskeyDto {
+                    username: duplicate.username,
+                    credential_id: duplicate.credential_id,
+                    generated_user_id: duplicate.generated_user_id,
+                    private_key_pem: duplicate.private_key_pem,
+                    relying_party: duplicate.relying_party,
+                    user_handle: duplicate.user_handle,
+                    backup_eligible: duplicate.backup_eligible,
+                    backup_state: duplicate.backup_state,
+                },
+            )
+            .unwrap();
+
+        let error = runtime
+            .create_platform_passkey_assertion(PlatformPasskeyAssertionInput {
+                relying_party: "example.com".into(),
+                allowed_credential_ids: vec![first.credential.credential_id],
+                client_data_hash: vec![0x72; 32],
+                user_verified: true,
+            })
+            .expect_err("duplicate credential IDs must not select an arbitrary private key");
+
+        assert!(
+            error
+                .to_string()
+                .contains("multiple platform passkey credentials")
+        );
     }
 
     #[test]
