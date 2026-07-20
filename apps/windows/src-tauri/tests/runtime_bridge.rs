@@ -11,6 +11,28 @@ fn windows_app_binary_declares_gui_subsystem() {
 }
 
 #[test]
+fn native_registration_cancellation_boundary_precedes_the_durable_callback() {
+    let native = include_str!("../native/passkey_plugin.cpp");
+    let make_start = native
+        .find("HRESULT STDMETHODCALLTYPE MakeCredential(")
+        .expect("MakeCredential implementation");
+    let get_start = native[make_start..]
+        .find("HRESULT STDMETHODCALLTYPE GetAssertion(")
+        .map(|offset| make_start + offset)
+        .expect("GetAssertion implementation");
+    let make = &native[make_start..get_start];
+    let durable_callback = make
+        .find("callbacks_.make_credential")
+        .expect("durable registration callback");
+
+    assert!(make[..durable_callback].contains("operation.CheckCancelled()"));
+    assert!(
+        !make[durable_callback..].contains("operation.CheckCancelled()"),
+        "once the durable registration callback succeeds, late cancellation must not turn the committed ceremony into a failure"
+    );
+}
+
+#[test]
 fn bridge_forwards_native_parent_window_handle_without_using_the_runtime_protocol() {
     let bridge = RuntimeBridge::new_for_tests();
 

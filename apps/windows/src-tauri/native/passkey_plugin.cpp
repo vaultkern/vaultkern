@@ -724,9 +724,10 @@ public:
             }
             RustBytes credential_id(callbacks_, output.credential_id);
             RustBytes authenticator_data(callbacks_, output.authenticator_data);
-            if (FAILED(result = operation.CheckCancelled())) {
-                return result;
-            }
+            // The Rust callback is the durable registration commit point. A
+            // cancellation observed after it returns cannot roll that commit
+            // back, so complete the ceremony instead of reporting a failure
+            // for a credential that now exists in the vault.
             if (!credential_id.data() || credential_id.size() == 0 ||
                 !authenticator_data.data() || authenticator_data.size() == 0) {
                 return E_FAIL;
