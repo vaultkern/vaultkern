@@ -355,6 +355,7 @@ export function App({
   const [databaseSettingsDraftUpdate, setDatabaseSettingsDraftUpdate] =
     useState<DatabaseSettingsUpdate | null>(null);
   const [databaseSettingsDraftDirty, setDatabaseSettingsDraftDirty] = useState(false);
+  const databaseSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
   const [databaseName, setDatabaseName] = useState<string | null>(null);
   const [groupTree, setGroupTree] = useState<GroupTree | null>(null);
   const [groupsError, setGroupsError] = useState<string | null>(null);
@@ -1335,7 +1336,22 @@ export function App({
     );
   }
 
-  async function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
+  function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
+    if (databaseSettingsSaveInFlight.current) {
+      return databaseSettingsSaveInFlight.current;
+    }
+
+    const operation = saveDatabaseSettings(update);
+    databaseSettingsSaveInFlight.current = operation;
+    void operation.finally(() => {
+      if (databaseSettingsSaveInFlight.current === operation) {
+        databaseSettingsSaveInFlight.current = null;
+      }
+    });
+    return operation;
+  }
+
+  async function saveDatabaseSettings(update: DatabaseSettingsUpdate) {
     if (!session?.activeVaultId) {
       return false;
     }

@@ -1319,6 +1319,47 @@ it("confirms before leaving unsaved database settings", async () => {
   });
 });
 
+it("coalesces save-and-continue with a database settings save already in flight", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const currentSettings = await vaultMethods.getDatabaseSettings();
+  const update = createDeferred<typeof currentSettings>();
+  vaultMethods.updateDatabaseSettings.mockImplementation(() => update.promise);
+  vaultMethods.saveVault.mockResolvedValue(undefined);
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Engineering" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await screen.findByRole("button", { name: "Saving..." });
+
+  fireEvent.click(screen.getByRole("button", { name: "Statistics" }));
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
+
+  update.resolve({
+    ...currentSettings,
+    metadata: { ...currentSettings.metadata, name: "Engineering" }
+  });
+
+  expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
+  expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
+  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1);
+});
+
 it("hides password actions until the authenticated credential flow exists", async () => {
   const client = {
     ...createVaultSelectionMethods(),
