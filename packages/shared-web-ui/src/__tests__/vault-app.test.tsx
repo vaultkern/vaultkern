@@ -1450,6 +1450,64 @@ it("rebases an unsaved database settings draft after source sync", async () => {
   expect(screen.getByLabelText("Database Name")).toHaveValue("Local Draft");
 });
 
+it("keeps an unsaved database settings draft when source reload fails", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const initialSettings = await vaultMethods.getDatabaseSettings();
+  let sourceRestored = false;
+  vaultMethods.getDatabaseSettings.mockImplementation(async () => {
+    if (sourceRestored) {
+      throw new Error("simulated database settings reload failure");
+    }
+    return initialSettings;
+  });
+  vaultMethods.retryVaultSourceSync.mockImplementation(async () => {
+    sourceRestored = true;
+    return {
+      type: "vault_source_status" as const,
+      sourceKind: "onedrive",
+      remoteState: "online",
+      lastSyncAt: 1776500060,
+      cachedAt: 1776500030,
+      lastError: null
+    };
+  });
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      sourceStatus: {
+        type: "vault_source_status" as const,
+        sourceKind: "onedrive",
+        remoteState: "cache",
+        lastSyncAt: null,
+        cachedAt: 1776500030,
+        lastError: "OneDrive unavailable"
+      }
+    })
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Local Draft" }
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
+
+  expect(
+    await screen.findByText("simulated database settings reload failure")
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("Database Name")).toHaveValue("Local Draft");
+
+  fireEvent.click(screen.getByRole("button", { name: "Back to archive" }));
+
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+});
+
 it("coalesces save-and-continue with a database settings save already in flight", async () => {
   const vaultMethods = createVaultSelectionMethods();
   const currentSettings = await vaultMethods.getDatabaseSettings();

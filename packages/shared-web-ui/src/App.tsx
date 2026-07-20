@@ -1869,7 +1869,6 @@ export function App({
       })
       .catch((loadError) => {
         if (!cancelled) {
-          setDatabaseSettings(null);
           setDatabaseSettingsBusy(false);
           setDatabaseSettingsError(
             errorMessage(
