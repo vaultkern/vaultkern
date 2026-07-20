@@ -613,6 +613,46 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
+  it("uses the interactive timeout while unlocking an explicitly opened vault", async () => {
+    vi.useFakeTimers();
+
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 25,
+      interactiveTimeoutMs: 1_000
+    });
+
+    const request = bridge.send({
+      version: 1,
+      command: {
+        type: "unlock_vault",
+        vault_id: "vault-1",
+        password: "demo-password",
+        key_file_path: null
+      }
+    });
+
+    expect(port.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requestTimeoutMs: 1_000 })
+    );
+    await vi.advanceTimersByTimeAsync(25);
+    expect(port.disconnect).not.toHaveBeenCalled();
+
+    port.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    await expect(request).resolves.toMatchObject({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+
+    vi.useRealTimers();
+  });
+
   it("uses the interactive timeout while creating a passkey assertion", async () => {
     vi.useFakeTimers();
 
