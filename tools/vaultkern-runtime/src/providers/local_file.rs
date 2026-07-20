@@ -476,6 +476,7 @@ fn read_opened_snapshot(path: &Path, reject_hard_links: bool) -> io::Result<Open
     }
     let mut file = options.open(path)?;
     let before = file.metadata()?;
+    reject_unsafe_opened_link_count(&file, reject_hard_links)?;
     let before_identity = opened_file_identity(&file, &before)?;
     if !before.is_file() || before_identity != path_file_identity(path, &path_metadata)? {
         return Err(io::Error::new(
@@ -762,6 +763,34 @@ fn reject_unsafe_link_count(metadata: &Metadata, reject: bool) -> io::Result<()>
 
 #[cfg(not(unix))]
 fn reject_unsafe_link_count(_metadata: &Metadata, _reject: bool) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reject_unsafe_opened_link_count(file: &File, reject: bool) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    if !reject {
+        return Ok(());
+    }
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if information.nNumberOfLinks > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "local vault target has multiple hard links",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn reject_unsafe_opened_link_count(_file: &File, _reject: bool) -> io::Result<()> {
     Ok(())
 }
 
