@@ -33,6 +33,10 @@ pub enum ThreeWayPatchError {
     DuplicateEntry { side: &'static str, id: Uuid },
     #[error("duplicate group UUID in {side}: {id}")]
     DuplicateGroup { side: &'static str, id: Uuid },
+    #[error("duplicate custom icon UUID in {side}: {id}")]
+    DuplicateCustomIcon { side: &'static str, id: Uuid },
+    #[error("duplicate deleted-object UUID in {side}: {id}")]
+    DuplicateDeletedObject { side: &'static str, id: Uuid },
     #[error("concurrent object addition reused UUID: {id}")]
     ConcurrentObjectAddition { id: Uuid },
     #[error("patched object refers to missing parent group: {id}")]
@@ -107,6 +111,9 @@ pub fn three_way_field_patch(
     if base_flat.root_id != local_flat.root_id || base_flat.root_id != remote_flat.root_id {
         return Err(ThreeWayPatchError::RootLineageMismatch);
     }
+    ensure_unique_modeled_meta_ids(base, "base")?;
+    ensure_unique_modeled_meta_ids(local, "local")?;
+    ensure_unique_modeled_meta_ids(remote, "remote")?;
     ensure_fidelity_conflicts_representable(
         base,
         local,
@@ -131,6 +138,28 @@ pub fn three_way_field_patch(
     vault.root = root;
     normalize_group_attachment_content(&mut vault.root);
     Ok(ThreeWayPatchResult { vault, report })
+}
+
+fn ensure_unique_modeled_meta_ids(
+    vault: &Vault,
+    side: &'static str,
+) -> Result<(), ThreeWayPatchError> {
+    let mut ids = BTreeSet::new();
+    for icon in &vault.custom_icons {
+        if !ids.insert(icon.id) {
+            return Err(ThreeWayPatchError::DuplicateCustomIcon { side, id: icon.id });
+        }
+    }
+    ids.clear();
+    for deleted in &vault.deleted_objects {
+        if !ids.insert(deleted.id) {
+            return Err(ThreeWayPatchError::DuplicateDeletedObject {
+                side,
+                id: deleted.id,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn ensure_fidelity_conflicts_representable(

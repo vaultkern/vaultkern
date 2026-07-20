@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use vaultkern_model::{
-    Attachment, CustomField, DeletedObject, Entry, Group, GroupTimes, OpaqueXmlFragment,
-    PasskeyRecord, TotpSpec, Vault, three_way_field_patch,
+    Attachment, CustomField, CustomIcon, DeletedObject, Entry, Group, GroupTimes,
+    OpaqueXmlFragment, PasskeyRecord, TotpSpec, Vault, three_way_field_patch,
 };
 
 fn base_vault() -> (Vault, Uuid) {
@@ -103,6 +103,46 @@ fn independent_standard_field_protection_changes_are_rebased_per_field() {
     let merged = entry(&patched.vault.root, entry_id).unwrap();
     assert!(merged.field_protection.protect_title);
     assert!(!merged.field_protection.protect_password);
+}
+
+#[test]
+fn duplicate_modeled_meta_uuids_fall_back_instead_of_being_collapsed() {
+    let (base, entry_id) = base_vault();
+    let mut local = base.clone();
+    let local_entry = entry_mut(&mut local.root, entry_id).unwrap();
+    local_entry.password = "local-password".into();
+    local_entry.modified_at = 20;
+    let duplicate_id = Uuid::new_v4();
+
+    let mut remote = base.clone();
+    remote.custom_icons = vec![
+        CustomIcon {
+            id: duplicate_id,
+            data: vec![1],
+            name: Some("First".into()),
+            last_modified: Some(10),
+        },
+        CustomIcon {
+            id: duplicate_id,
+            data: vec![2],
+            name: Some("Second".into()),
+            last_modified: Some(20),
+        },
+    ];
+    assert!(three_way_field_patch(&base, &local, &remote).is_err());
+
+    let mut remote = base.clone();
+    remote.deleted_objects = vec![
+        DeletedObject {
+            id: duplicate_id,
+            deleted_at: 10,
+        },
+        DeletedObject {
+            id: duplicate_id,
+            deleted_at: 20,
+        },
+    ];
+    assert!(three_way_field_patch(&base, &local, &remote).is_err());
 }
 
 #[test]
