@@ -33,6 +33,38 @@ fn native_registration_cancellation_boundary_precedes_the_durable_callback() {
 }
 
 #[test]
+fn native_com_objects_retain_the_rust_callback_context() {
+    let native = include_str!("../native/passkey_plugin.cpp");
+    let authenticator_start = native
+        .find("class PluginAuthenticator final")
+        .expect("PluginAuthenticator implementation");
+    let factory_start = native[authenticator_start..]
+        .find("class PluginFactory final")
+        .map(|offset| authenticator_start + offset)
+        .expect("PluginFactory implementation");
+    let factory_end = native[factory_start..]
+        .find("std::vector<BYTE> AuthenticatorInfo()")
+        .map(|offset| factory_start + offset)
+        .expect("PluginFactory implementation end");
+    let authenticator = &native[authenticator_start..factory_start];
+    let factory = &native[factory_start..factory_end];
+
+    for (name, implementation) in [
+        ("PluginAuthenticator", authenticator),
+        ("PluginFactory", factory),
+    ] {
+        assert!(
+            implementation.contains("callbacks_.retain_context(callbacks_.context)"),
+            "{name} must retain the Rust callback context for its COM lifetime"
+        );
+        assert!(
+            implementation.contains("callbacks_.release_context(callbacks_.context)"),
+            "{name} must release the Rust callback context when its COM lifetime ends"
+        );
+    }
+}
+
+#[test]
 fn bridge_forwards_native_parent_window_handle_without_using_the_runtime_protocol() {
     let bridge = RuntimeBridge::new_for_tests();
 

@@ -86,6 +86,8 @@ struct VkCredentialMetadata {
 struct VkPluginCallbacks {
     version: u32,
     context: *mut c_void,
+    retain_context: extern "system" fn(*mut c_void),
+    release_context: extern "system" fn(*mut c_void),
     is_unlocked: extern "system" fn(*mut c_void) -> i32,
     make_credential: extern "system" fn(
         *mut c_void,
@@ -127,7 +129,7 @@ struct CallbackContext {
 }
 
 pub struct PasskeyPluginServer {
-    context: Box<CallbackContext>,
+    context: Arc<CallbackContext>,
     registration_cookie: u32,
     start_error: Option<String>,
     enabled: Arc<AtomicBool>,
@@ -136,14 +138,16 @@ pub struct PasskeyPluginServer {
 impl PasskeyPluginServer {
     pub fn start(bridge: RuntimeBridge) -> Self {
         let enabled = Arc::new(AtomicBool::new(false));
-        let mut context = Box::new(CallbackContext {
+        let context = Arc::new(CallbackContext {
             bridge,
             operations: PluginOperationState::default(),
             enabled: Arc::clone(&enabled),
         });
         let callbacks = VkPluginCallbacks {
-            version: 2,
-            context: (&mut *context as *mut CallbackContext).cast(),
+            version: 3,
+            context: Arc::as_ptr(&context).cast_mut().cast(),
+            retain_context: retain_context_callback,
+            release_context: release_context_callback,
             is_unlocked: is_unlocked_callback,
             make_credential: make_credential_callback,
             get_assertion: get_assertion_callback,
@@ -236,6 +240,22 @@ impl PasskeyPluginServer {
         match &self.start_error {
             Some(error) => Err(error.clone()),
             None => Ok(()),
+        }
+    }
+}
+
+extern "system" fn retain_context_callback(context: *mut c_void) {
+    if !context.is_null() {
+        unsafe {
+            Arc::increment_strong_count(context.cast::<CallbackContext>());
+        }
+    }
+}
+
+extern "system" fn release_context_callback(context: *mut c_void) {
+    if !context.is_null() {
+        unsafe {
+            Arc::decrement_strong_count(context.cast::<CallbackContext>());
         }
     }
 }
@@ -655,9 +675,31 @@ fn hresult_message(operation: &str, status: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        NTE_NOT_FOUND, S_OK, VkOwnedBytes, free_owned_bytes, owned_bytes, runtime_error_hresult,
+        CallbackContext, NTE_NOT_FOUND, S_OK, VkOwnedBytes, free_owned_bytes, owned_bytes,
+        release_context_callback, retain_context_callback, runtime_error_hresult,
         vaultkern_plugin_test_replaces_cached_account_credential,
     };
+    use crate::RuntimeBridge;
+    use crate::plugin_operation_state::PluginOperationState;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    #[test]
+    fn ffi_context_lease_keeps_the_runtime_context_alive() {
+        let context = Arc::new(CallbackContext {
+            bridge: RuntimeBridge::new_for_tests(),
+            operations: PluginOperationState::default(),
+            enabled: Arc::new(AtomicBool::new(false)),
+        });
+        let weak = Arc::downgrade(&context);
+        let raw = Arc::as_ptr(&context).cast_mut().cast();
+
+        retain_context_callback(raw);
+        drop(context);
+        assert_eq!(weak.strong_count(), 1);
+
+        release_context_callback(raw);
+        assert!(weak.upgrade().is_none());
+    }
 
     #[test]
     fn owned_ffi_bytes_round_trip_through_the_matching_deallocator() {

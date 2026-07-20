@@ -58,6 +58,8 @@ typedef struct VkCredentialMetadata {
 } VkCredentialMetadata;
 
 typedef int32_t (VK_CALL *VkIsUnlockedCallback)(void* context);
+typedef void (VK_CALL *VkRetainContextCallback)(void* context);
+typedef void (VK_CALL *VkReleaseContextCallback)(void* context);
 typedef int32_t (VK_CALL *VkMakeCredentialCallback)(
     void* context,
     const VkMakeCredentialInput* input,
@@ -77,6 +79,8 @@ typedef void (VK_CALL *VkFreeBytesCallback)(void* context, VkOwnedBytes bytes);
 typedef struct VkPluginCallbacks {
     uint32_t version;
     void* context;
+    VkRetainContextCallback retain_context;
+    VkReleaseContextCallback release_context;
     VkIsUnlockedCallback is_unlocked;
     VkMakeCredentialCallback make_credential;
     VkGetAssertionCallback get_assertion;

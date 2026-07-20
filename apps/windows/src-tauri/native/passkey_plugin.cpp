@@ -568,7 +568,9 @@ HRESULT AddCredentialMetadata(
 class PluginAuthenticator final : public IPluginAuthenticator {
 public:
     explicit PluginAuthenticator(const VkPluginCallbacks& callbacks) noexcept
-        : callbacks_(callbacks) {}
+        : callbacks_(callbacks) {
+        callbacks_.retain_context(callbacks_.context);
+    }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) noexcept override {
         if (!result) {
@@ -947,7 +949,9 @@ public:
     }
 
 private:
-    ~PluginAuthenticator() = default;
+    ~PluginAuthenticator() {
+        callbacks_.release_context(callbacks_.context);
+    }
     std::atomic<ULONG> references_{1};
     VkPluginCallbacks callbacks_;
 };
@@ -955,7 +959,9 @@ private:
 class PluginFactory final : public IClassFactory {
 public:
     explicit PluginFactory(const VkPluginCallbacks& callbacks) noexcept
-        : callbacks_(callbacks) {}
+        : callbacks_(callbacks) {
+        callbacks_.retain_context(callbacks_.context);
+    }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) noexcept override {
         if (!result) {
@@ -1008,7 +1014,9 @@ public:
     }
 
 private:
-    ~PluginFactory() = default;
+    ~PluginFactory() {
+        callbacks_.release_context(callbacks_.context);
+    }
     std::atomic<ULONG> references_{1};
     VkPluginCallbacks callbacks_;
 };
@@ -1039,8 +1047,9 @@ std::vector<BYTE> AuthenticatorInfo() {
 extern "C" int32_t VK_CALL vaultkern_plugin_start(
     const VkPluginCallbacks* callbacks,
     uint32_t* registration_cookie) {
-    if (!callbacks || !registration_cookie || callbacks->version != 2 ||
-        !callbacks->context || !callbacks->is_unlocked ||
+    if (!callbacks || !registration_cookie || callbacks->version != 3 ||
+        !callbacks->context || !callbacks->retain_context ||
+        !callbacks->release_context || !callbacks->is_unlocked ||
         !callbacks->make_credential || !callbacks->get_assertion ||
         !callbacks->begin_operation || !callbacks->is_operation_cancelled ||
         !callbacks->cancel_operation || !callbacks->end_operation ||
