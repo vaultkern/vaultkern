@@ -47,9 +47,11 @@ pub fn should_refresh_platform_passkeys(
     );
     let response_type = response.get("type").and_then(serde_json::Value::as_str);
     if response_type == Some("error") {
-        return response.get("code").and_then(serde_json::Value::as_str)
-            == Some("request_cancelled")
-            && command_may_change_credentials;
+        let outcome_unknown = matches!(
+            response.get("code").and_then(serde_json::Value::as_str),
+            Some("request_cancelled" | "runtime_panic")
+        );
+        return outcome_unknown && command_may_change_credentials;
     }
     if response_type == Some("session_state") {
         return true;
@@ -121,6 +123,18 @@ mod tests {
         assert!(!should_refresh_platform_passkeys(
             Some("set_entry_passkey"),
             &json!({ "type": "error", "code": "runtime_error" })
+        ));
+    }
+
+    #[test]
+    fn panicked_state_change_reconciles_the_passkey_cache_from_surviving_runtime_state() {
+        assert!(should_refresh_platform_passkeys(
+            Some("set_entry_passkey"),
+            &json!({
+                "type": "error",
+                "code": "runtime_panic",
+                "message": "the in-process runtime recovered from an unexpected failure"
+            })
         ));
     }
 
