@@ -37,6 +37,7 @@ export function EntryEditor({
   draft,
   dirty,
   busy,
+  pendingSave,
   historyItems,
   historyDetail,
   historyError,
@@ -53,6 +54,7 @@ export function EntryEditor({
   onSelectHistoryItem,
   onSetPasskey,
   onClearPasskey,
+  onRetrySave,
   onSave,
   onCancel,
   onDelete
@@ -62,6 +64,7 @@ export function EntryEditor({
   draft: EntryDraftLike | null;
   dirty: boolean;
   busy?: boolean;
+  pendingSave?: boolean;
   historyItems?: EntryHistoryItem[];
   historyDetail?: EntryHistoryDetail | null;
   historyError?: string | null;
@@ -86,6 +89,7 @@ export function EntryEditor({
   onSelectHistoryItem?: (historyIndex: number) => void;
   onSetPasskey?: (passkey: EntryPasskey) => void;
   onClearPasskey?: () => void;
+  onRetrySave?: () => void;
   onSave: () => void;
   onCancel: () => void;
   onDelete?: () => void;
@@ -202,7 +206,12 @@ export function EntryEditor({
             }}
           >
             {mode === "view" && entry && onStartEdit ? (
-              <button type="button" onClick={onStartEdit} style={secondaryActionStyle}>
+              <button
+                type="button"
+                onClick={onStartEdit}
+                disabled={busy || pendingSave}
+                style={secondaryActionStyle}
+              >
                 {text("Edit")}
               </button>
             ) : null}
@@ -235,13 +244,22 @@ export function EntryEditor({
                         style={saveSpinnerStyle}
                       />
                     ) : null}
-                    {busy ? text("Saving...") : text("Save changes")}
+                    {busy
+                      ? text("Saving...")
+                      : pendingSave
+                        ? text("Retry save")
+                        : text("Save changes")}
                   </span>
                 </button>
               </>
             ) : null}
             {mode === "view" && entry && onDelete ? (
-              <button type="button" onClick={onDelete} style={dangerActionStyle}>
+              <button
+                type="button"
+                onClick={onDelete}
+                disabled={busy || pendingSave}
+                style={dangerActionStyle}
+              >
                 {text("Delete Entry")}
               </button>
             ) : null}
@@ -353,8 +371,10 @@ export function EntryEditor({
           entry={entry}
           text={text}
           busy={busy}
+          pendingSave={pendingSave}
           onSetPasskey={onSetPasskey}
           onClearPasskey={onClearPasskey}
+          onRetrySave={onRetrySave}
         />
       ) : null}
       {mode === "view" && entry ? (
@@ -377,6 +397,7 @@ export function EntryEditor({
         <EditableAttachments
           attachments={entry.attachments ?? []}
           text={text}
+          disabled={busy || pendingSave}
           onAdd={onAddAttachment}
           onRename={onRenameAttachment}
           onReplace={onReplaceAttachment}
@@ -578,6 +599,7 @@ function EditableCustomFields({
 function EditableAttachments({
   attachments,
   text,
+  disabled,
   onAdd,
   onRename,
   onReplace,
@@ -585,6 +607,7 @@ function EditableAttachments({
 }: {
   attachments: EntryAttachment[];
   text: ReturnType<typeof useText>;
+  disabled?: boolean;
   onAdd?: (file: File, protectInMemory: boolean) => void;
   onRename?: (oldName: string, newName: string, protectInMemory: boolean) => void;
   onReplace?: (name: string, file: File) => void;
@@ -600,6 +623,7 @@ function EditableAttachments({
           <input
             type="checkbox"
             checked={protectNewAttachment}
+            disabled={disabled}
             onChange={(event) => setProtectNewAttachment(event.target.checked)}
           />
           {text("Protect new attachment")}
@@ -609,6 +633,7 @@ function EditableAttachments({
           <input
             aria-label={text("Add attachment file")}
             type="file"
+            disabled={disabled}
             style={hiddenFileInputStyle}
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -632,6 +657,7 @@ function EditableAttachments({
                   aria-label={`Rename ${attachment.name}`}
                   type="text"
                   defaultValue={attachment.name}
+                  disabled={disabled}
                   onBlur={(event) => {
                     const newName = event.target.value.trim();
                     if (newName && newName !== attachment.name) {
@@ -651,6 +677,7 @@ function EditableAttachments({
                   aria-label={`Protect ${attachment.name}`}
                   type="checkbox"
                   checked={attachment.protectInMemory}
+                  disabled={disabled}
                   onChange={(event) =>
                     onRename?.(
                       attachment.name,
@@ -666,6 +693,7 @@ function EditableAttachments({
                 <input
                   aria-label={`Replace ${attachment.name}`}
                   type="file"
+                  disabled={disabled}
                   style={hiddenFileInputStyle}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
@@ -680,6 +708,7 @@ function EditableAttachments({
                 type="button"
                 aria-label={`Remove ${attachment.name}`}
                 onClick={() => onDelete?.(attachment.name)}
+                disabled={disabled}
                 style={dangerSmallButtonStyle}
               >
                 {text("Remove")}
@@ -696,14 +725,18 @@ function PasskeySection({
   entry,
   text,
   busy,
+  pendingSave,
   onSetPasskey,
-  onClearPasskey
+  onClearPasskey,
+  onRetrySave
 }: {
   entry: EntryDetail;
   text: ReturnType<typeof useText>;
   busy?: boolean;
+  pendingSave?: boolean;
   onSetPasskey?: (passkey: EntryPasskey) => void;
   onClearPasskey?: () => void;
+  onRetrySave?: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<EntryPasskey>(() =>
@@ -858,28 +891,41 @@ function PasskeySection({
       <div style={sectionHeaderStyle}>
         <h3 style={sectionTitleStyle}>{text("Passkey")}</h3>
         <div style={inlineActionsStyle}>
-          <button
-            type="button"
-            onClick={() => {
-              setDraft(passkey ?? emptyPasskey());
-              setRevealedDraftFields(new Set());
-              setEditing((current) => !current);
-            }}
-            disabled={busy}
-            style={secondaryActionStyle}
-          >
-            {passkey ? text("Edit passkey") : text("Add passkey")}
-          </button>
-          {passkey ? (
+          {pendingSave ? (
             <button
               type="button"
-              onClick={() => onClearPasskey?.()}
+              onClick={() => onRetrySave?.()}
               disabled={busy}
-              style={dangerSmallButtonStyle}
+              style={primaryActionStyle}
             >
-              {text("Clear passkey")}
+              {text("Retry save")}
             </button>
-          ) : null}
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setDraft(passkey ?? emptyPasskey());
+                  setRevealedDraftFields(new Set());
+                  setEditing((current) => !current);
+                }}
+                disabled={busy}
+                style={secondaryActionStyle}
+              >
+                {passkey ? text("Edit passkey") : text("Add passkey")}
+              </button>
+              {passkey ? (
+                <button
+                  type="button"
+                  onClick={() => onClearPasskey?.()}
+                  disabled={busy}
+                  style={dangerSmallButtonStyle}
+                >
+                  {text("Clear passkey")}
+                </button>
+              ) : null}
+            </>
+          )}
         </div>
       </div>
       {passkey ? (

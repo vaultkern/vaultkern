@@ -20,6 +20,9 @@ const AUTH_DATA_FLAG_USER_VERIFIED: u8 = 0x04;
 const AUTH_DATA_FLAG_BACKUP_ELIGIBLE: u8 = 0x08;
 const AUTH_DATA_FLAG_BACKUP_STATE: u8 = 0x10;
 const AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA: u8 = 0x40;
+const WINDOWS_PLUGIN_AUTHENTICATOR_AAGUID: [u8; 16] = [
+    0xc8, 0xb2, 0xf4, 0xa1, 0x7d, 0x31, 0x4e, 0x59, 0x9a, 0x62, 0x0f, 0xd3, 0xb6, 0xe4, 0xc7, 0x21,
+];
 
 pub struct PasskeyAssertionRequest<'a> {
     pub relying_party: &'a str,
@@ -224,6 +227,7 @@ pub fn create_registration_with_credential_id(
         request.public_key_algorithm,
         request.user_verified,
         credential_id,
+        [0; 16],
     );
     let material = material?;
     let attestation_object = attestation_object(&material.authenticator_data);
@@ -262,6 +266,7 @@ pub fn create_platform_registration_with_credential_id(
         request.public_key_algorithm,
         request.user_verified,
         URL_SAFE_NO_PAD.encode(credential_id),
+        WINDOWS_PLUGIN_AUTHENTICATOR_AAGUID,
     )?;
     Ok(PlatformPasskeyRegistration {
         passkey: material.passkey,
@@ -319,6 +324,7 @@ fn create_registration_material(
     public_key_algorithm: i32,
     user_verified: bool,
     credential_id: String,
+    authenticator_aaguid: [u8; 16],
 ) -> Result<PasskeyRegistrationMaterial> {
     validate_public_key_algorithm(public_key_algorithm)?;
     validate_user_handle(user_handle_base64url)?;
@@ -347,6 +353,7 @@ fn create_registration_material(
         &credential_id_bytes,
         &public_key_cose,
         user_verified,
+        &authenticator_aaguid,
     );
     Ok(PasskeyRegistrationMaterial {
         passkey: PasskeyRecord {
@@ -635,6 +642,7 @@ fn attested_authenticator_data(
     credential_id: &[u8],
     public_key_cose: &[u8],
     user_verified: bool,
+    authenticator_aaguid: &[u8; 16],
 ) -> Vec<u8> {
     let mut auth_data = Vec::new();
     auth_data.extend_from_slice(&Sha256::digest(relying_party.as_bytes()));
@@ -651,7 +659,7 @@ fn attested_authenticator_data(
             | AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA,
     );
     auth_data.extend_from_slice(&0_u32.to_be_bytes());
-    auth_data.extend_from_slice(&[0; 16]);
+    auth_data.extend_from_slice(authenticator_aaguid);
     auth_data.extend_from_slice(&(credential_id.len() as u16).to_be_bytes());
     auth_data.extend_from_slice(credential_id);
     auth_data.extend_from_slice(public_key_cose);
@@ -1197,6 +1205,10 @@ mod tests {
             super::AUTH_DATA_FLAG_USER_PRESENT
                 | super::AUTH_DATA_FLAG_USER_VERIFIED
                 | super::AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA
+        );
+        assert_eq!(
+            &registration.authenticator_data[37..53],
+            super::WINDOWS_PLUGIN_AUTHENTICATOR_AAGUID
         );
         assert_eq!(
             &registration.authenticator_data[53..55],

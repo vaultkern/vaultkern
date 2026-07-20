@@ -20,6 +20,60 @@ fn closing_the_window_keeps_the_resident_process_available() {
 }
 
 #[test]
+fn native_registration_cancellation_boundary_precedes_the_durable_callback() {
+    let native = include_str!("../native/passkey_plugin.cpp");
+    let make_start = native
+        .find("HRESULT STDMETHODCALLTYPE MakeCredential(")
+        .expect("MakeCredential implementation");
+    let get_start = native[make_start..]
+        .find("HRESULT STDMETHODCALLTYPE GetAssertion(")
+        .map(|offset| make_start + offset)
+        .expect("GetAssertion implementation");
+    let make = &native[make_start..get_start];
+    let durable_callback = make
+        .find("callbacks_.make_credential")
+        .expect("durable registration callback");
+
+    assert!(make[..durable_callback].contains("operation.CheckCancelled()"));
+    assert!(
+        !make[durable_callback..].contains("operation.CheckCancelled()"),
+        "once the durable registration callback succeeds, late cancellation must not turn the committed ceremony into a failure"
+    );
+}
+
+#[test]
+fn native_com_objects_retain_the_rust_callback_context() {
+    let native = include_str!("../native/passkey_plugin.cpp");
+    let authenticator_start = native
+        .find("class PluginAuthenticator final")
+        .expect("PluginAuthenticator implementation");
+    let factory_start = native[authenticator_start..]
+        .find("class PluginFactory final")
+        .map(|offset| authenticator_start + offset)
+        .expect("PluginFactory implementation");
+    let factory_end = native[factory_start..]
+        .find("std::vector<BYTE> AuthenticatorInfo()")
+        .map(|offset| factory_start + offset)
+        .expect("PluginFactory implementation end");
+    let authenticator = &native[authenticator_start..factory_start];
+    let factory = &native[factory_start..factory_end];
+
+    for (name, implementation) in [
+        ("PluginAuthenticator", authenticator),
+        ("PluginFactory", factory),
+    ] {
+        assert!(
+            implementation.contains("callbacks_.retain_context(callbacks_.context)"),
+            "{name} must retain the Rust callback context for its COM lifetime"
+        );
+        assert!(
+            implementation.contains("callbacks_.release_context(callbacks_.context)"),
+            "{name} must release the Rust callback context when its COM lifetime ends"
+        );
+    }
+}
+
+#[test]
 fn bridge_forwards_native_parent_window_handle_without_using_the_runtime_protocol() {
     let bridge = RuntimeBridge::new_for_tests();
 
@@ -150,6 +204,13 @@ fn runtime_bridge_opens_edits_and_saves_a_real_local_vault() {
 
 #[test]
 fn runtime_bridge_runs_platform_passkeys_on_the_same_resident_runtime_thread() {
+    const PLUGIN_AAGUID: [u8; 16] = [
+        0xc8, 0xb2, 0xf4, 0xa1, 0x7d, 0x31, 0x4e, 0x59, 0x9a, 0x62, 0x0f, 0xd3, 0xb6, 0xe4, 0xc7,
+        0x21,
+    ];
+    assert!(
+        include_str!("../native/passkey_plugin.cpp").contains("C8B2F4A17D314E599A620FD3B6E4C721")
+    );
     let scratch = tempfile::tempdir().unwrap();
     let database_path = scratch.path().join("resident-passkeys.kdbx");
     let core = KeepassCore::new();
@@ -192,6 +253,7 @@ fn runtime_bridge_runs_platform_passkeys_on_the_same_resident_runtime_thread() {
             user_verified: true,
         })
         .expect("typed registration");
+    assert_eq!(&registration.authenticator_data[37..53], PLUGIN_AAGUID);
     let credentials = bridge
         .list_platform_passkey_credentials()
         .expect("typed credential list");

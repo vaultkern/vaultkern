@@ -484,8 +484,17 @@ export function createNativeMessagingBridge(
       requestPort.postMessage(request.wireMessage);
     } catch (error) {
       clearRequestTimeout(request);
+      if (activeRequest !== request) {
+        return;
+      }
+      const failedPort = port;
       activeRequest = null;
       detachPort();
+      try {
+        failedPort?.disconnect();
+      } catch {
+        // The failed post is already detached and will not reuse this port.
+      }
       const nativeError = toNativeMessagingError(error, "native_unknown");
       emitEvent({
         event: "post_error",

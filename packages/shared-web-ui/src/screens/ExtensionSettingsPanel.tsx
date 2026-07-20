@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import type { UnlockCredentials } from "@vaultkern/runtime-web-client";
 
@@ -18,6 +18,7 @@ interface ExtensionSettingsPanelProps {
   quickUnlockError?: string | null;
   onEnrollQuickUnlock?(credentials: UnlockCredentials): Promise<void>;
   onSave(settings: ExtensionSettings): void;
+  onDraftChange?(settings: ExtensionSettings, dirty: boolean): void;
 }
 
 export function ExtensionSettingsPanel({
@@ -31,7 +32,8 @@ export function ExtensionSettingsPanel({
   quickUnlockBusy = false,
   quickUnlockError = null,
   onEnrollQuickUnlock,
-  onSave
+  onSave,
+  onDraftChange
 }: ExtensionSettingsPanelProps) {
   const text = useText();
   const [draft, setDraft] = useState(() => toDraft(settings));
@@ -50,25 +52,17 @@ export function ExtensionSettingsPanel({
     }
   }, [quickUnlockEnrolled]);
 
+  useLayoutEffect(() => {
+    const nextSettings = settingsFromDraft(draft, quickUnlockAvailable);
+    onDraftChange?.(nextSettings, !extensionSettingsMatch(nextSettings, settings));
+  }, [draft, onDraftChange, quickUnlockAvailable, settings]);
+
   return (
     <form
       style={panelStyle}
       onSubmit={(event) => {
         event.preventDefault();
-        onSave({
-          recentVaultLimit: parseBoundedInteger(draft.recentVaultLimit, 1, 50, 10),
-          language: draft.language,
-          idleLockMinutes: parseBoundedInteger(draft.idleLockMinutes, 0, 240, 10),
-          clearClipboardSeconds: parseBoundedInteger(
-            draft.clearClipboardSeconds,
-            0,
-            3600,
-            30
-          ),
-          autofillOnPageLoadEnabled: draft.autofillOnPageLoadEnabled,
-          passkeyProviderEnabled: draft.passkeyProviderEnabled,
-          quickUnlockEnabled: quickUnlockAvailable && draft.quickUnlockEnabled
-        });
+        onSave(settingsFromDraft(draft, quickUnlockAvailable));
       }}
     >
       <div style={titleRowStyle}>
@@ -83,6 +77,7 @@ export function ExtensionSettingsPanel({
         </button>
       </div>
 
+      <fieldset disabled={saving} style={settingsFieldsetStyle}>
       <div style={gridStyle}>
         <label style={fieldStyle}>
           {text("Recent Databases")}
@@ -244,6 +239,7 @@ export function ExtensionSettingsPanel({
           ) : null}
         </div>
       ) : null}
+      </fieldset>
       {quickUnlockError ? <div role="alert">{quickUnlockError}</div> : null}
       <p style={noteStyle}>
         {text("Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.")}
@@ -263,6 +259,35 @@ function toDraft(settings: ExtensionSettings) {
     passkeyProviderEnabled: settings.passkeyProviderEnabled,
     quickUnlockEnabled: settings.quickUnlockEnabled
   };
+}
+
+function settingsFromDraft(
+  draft: ReturnType<typeof toDraft>,
+  quickUnlockAvailable: boolean
+): ExtensionSettings {
+  return {
+    recentVaultLimit: parseBoundedInteger(draft.recentVaultLimit, 1, 50, 10),
+    language: draft.language,
+    idleLockMinutes: parseBoundedInteger(draft.idleLockMinutes, 0, 240, 10),
+    clearClipboardSeconds: parseBoundedInteger(
+      draft.clearClipboardSeconds,
+      0,
+      3600,
+      30
+    ),
+    autofillOnPageLoadEnabled: draft.autofillOnPageLoadEnabled,
+    passkeyProviderEnabled: draft.passkeyProviderEnabled,
+    quickUnlockEnabled: quickUnlockAvailable && draft.quickUnlockEnabled
+  };
+}
+
+function extensionSettingsMatch(
+  left: ExtensionSettings,
+  right: ExtensionSettings
+): boolean {
+  return (Object.keys(left) as Array<keyof ExtensionSettings>).every(
+    (key) => left[key] === right[key]
+  );
 }
 
 function parseBoundedInteger(
@@ -294,6 +319,15 @@ const titleRowStyle: CSSProperties = {
   alignItems: "start",
   justifyContent: "space-between",
   gap: archiveTheme.spacing.md
+};
+
+const settingsFieldsetStyle: CSSProperties = {
+  display: "grid",
+  gap: archiveTheme.spacing.md,
+  minWidth: 0,
+  margin: 0,
+  padding: 0,
+  border: 0
 };
 
 const headingStyle: CSSProperties = {

@@ -437,6 +437,110 @@ it("opens extension settings while locked and saves local extension preferences"
   expect(screen.getByRole("heading", { name: "插件设置" })).toBeInTheDocument();
 });
 
+it("confirms before leaving unsaved extension settings", async () => {
+  const settingsStore = createSettingsStore();
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    }),
+    listRecentVaults: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+  fireEvent.change(await screen.findByLabelText("Recent Databases"), {
+    target: { value: "4" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  expect(screen.getByLabelText("Recent Databases")).toHaveValue(4);
+
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Save changes" }));
+
+  await waitFor(() => {
+    expect(settingsStore.save).toHaveBeenCalledWith(
+      expect.objectContaining({ recentVaultLimit: 4 })
+    );
+  });
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+});
+
+it("coalesces save-and-continue with an extension settings save already in flight", async () => {
+  const settingsStore = createSettingsStore();
+  const save = createDeferred<void>();
+  settingsStore.save = vi.fn(() => save.promise);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    }),
+    listRecentVaults: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+  fireEvent.change(await screen.findByLabelText("Recent Databases"), {
+    target: { value: "4" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+  await screen.findByRole("button", { name: "Saving..." });
+
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(settingsStore.save).toHaveBeenCalledTimes(1);
+
+  save.resolve();
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  expect(settingsStore.save).toHaveBeenCalledTimes(1);
+});
+
+it("freezes extension settings while their save is in flight", async () => {
+  const settingsStore = createSettingsStore();
+  const save = createDeferred<void>();
+  settingsStore.save = vi.fn(() => save.promise);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    }),
+    listRecentVaults: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+  const recentDatabases = await screen.findByLabelText("Recent Databases");
+  fireEvent.change(recentDatabases, { target: { value: "4" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  await screen.findByRole("button", { name: "Saving..." });
+  expect(recentDatabases).toBeDisabled();
+  expect(screen.getByRole("button", { name: "中文" })).toBeDisabled();
+  expect(screen.getByLabelText("VaultKern passkey provider")).toBeDisabled();
+
+  save.resolve();
+  await waitFor(() => expect(recentDatabases).not.toBeDisabled());
+  expect(recentDatabases).toHaveValue(4);
+});
+
 it("does not save quick unlock as enabled when the host does not support it", async () => {
   const settingsStore = createSettingsStore();
   const client = {
@@ -1181,6 +1285,315 @@ it("loads database settings and preserves a conflict-copy warning after saving",
   expect(screen.queryByText("Database settings saved.")).not.toBeInTheDocument();
 });
 
+it("retries a failed database settings save without updating settings again", async () => {
+  const updateDatabaseSettings = vi.fn(async () => ({
+    type: "database_settings" as const,
+    metadata: { name: "Engineering", description: null, defaultUsername: null },
+    publicMetadata: { displayName: null, color: null, icon: null },
+    history: { maxItemsPerEntry: null, maxTotalSizeBytes: null },
+    recycleBin: { enabled: true },
+    encryption: {
+      compression: "gzip",
+      cipher: "aes256",
+      kdf: {
+        algorithm: "argon2id",
+        transformRounds: null,
+        iterations: 2,
+        memoryKib: 65536,
+        parallelism: 1
+      }
+    },
+    autosaveDelaySeconds: 0,
+    hasPassword: true
+  }));
+  const saveVault = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("simulated settings save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    updateDatabaseSettings,
+    saveVault
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Engineering" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+  expect(await screen.findByText("simulated settings save failure")).toBeInTheDocument();
+  expect(updateDatabaseSettings).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
+  expect(updateDatabaseSettings).toHaveBeenCalledTimes(1);
+});
+
+it("confirms before leaving unsaved database settings", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const updatedSettings = {
+    ...(await vaultMethods.getDatabaseSettings()),
+    metadata: { name: "Engineering", description: null, defaultUsername: null }
+  };
+  vaultMethods.updateDatabaseSettings.mockResolvedValue(updatedSettings);
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Engineering" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Back to archive" }));
+
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Discard changes" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  expect(screen.getByLabelText("Database Name")).toHaveValue("Engineering");
+
+  fireEvent.click(screen.getByRole("button", { name: "Back to archive" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Save changes" }));
+
+  await waitFor(() => {
+    expect(client.updateDatabaseSettings).toHaveBeenCalledWith(
+      "vault-1",
+      expect.objectContaining({
+        metadata: { name: "Engineering", description: null, defaultUsername: null }
+      })
+    );
+  });
+  expect(client.saveVault).toHaveBeenCalledWith("vault-1");
+  await waitFor(() => {
+    expect(screen.queryByLabelText("Database Name")).not.toBeInTheDocument();
+  });
+});
+
+it("rebases an unsaved database settings draft after source sync", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const initialSettings = await vaultMethods.getDatabaseSettings();
+  let sourceRestored = false;
+  vaultMethods.getDatabaseSettings.mockImplementation(async () =>
+    sourceRestored
+      ? {
+          ...initialSettings,
+          metadata: {
+            ...initialSettings.metadata,
+            name: "Remote Archive",
+            description: "Changed on another device"
+          }
+        }
+      : initialSettings
+  );
+  vaultMethods.retryVaultSourceSync.mockImplementation(async () => {
+    sourceRestored = true;
+    return {
+      type: "vault_source_status" as const,
+      sourceKind: "onedrive",
+      remoteState: "online",
+      lastSyncAt: 1776500060,
+      cachedAt: 1776500030,
+      lastError: null
+    };
+  });
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      sourceStatus: {
+        type: "vault_source_status" as const,
+        sourceKind: "onedrive",
+        remoteState: "cache",
+        lastSyncAt: null,
+        cachedAt: 1776500030,
+        lastError: "OneDrive unavailable"
+      }
+    })
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Local Draft" }
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
+
+  await waitFor(() => {
+    expect(vaultMethods.retryVaultSourceSync).toHaveBeenCalledWith("vault-1");
+    expect(screen.getByLabelText("Description")).toHaveValue(
+      "Changed on another device"
+    );
+  });
+  expect(screen.getByLabelText("Database Name")).toHaveValue("Local Draft");
+});
+
+it("keeps an unsaved database settings draft when source reload fails", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const initialSettings = await vaultMethods.getDatabaseSettings();
+  let sourceRestored = false;
+  vaultMethods.getDatabaseSettings.mockImplementation(async () => {
+    if (sourceRestored) {
+      throw new Error("simulated database settings reload failure");
+    }
+    return initialSettings;
+  });
+  vaultMethods.retryVaultSourceSync.mockImplementation(async () => {
+    sourceRestored = true;
+    return {
+      type: "vault_source_status" as const,
+      sourceKind: "onedrive",
+      remoteState: "online",
+      lastSyncAt: 1776500060,
+      cachedAt: 1776500030,
+      lastError: null
+    };
+  });
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      sourceStatus: {
+        type: "vault_source_status" as const,
+        sourceKind: "onedrive",
+        remoteState: "cache",
+        lastSyncAt: null,
+        cachedAt: 1776500030,
+        lastError: "OneDrive unavailable"
+      }
+    })
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Local Draft" }
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
+
+  expect(
+    await screen.findByText("simulated database settings reload failure")
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("Database Name")).toHaveValue("Local Draft");
+
+  fireEvent.click(screen.getByRole("button", { name: "Back to archive" }));
+
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+});
+
+it("coalesces save-and-continue with a database settings save already in flight", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const currentSettings = await vaultMethods.getDatabaseSettings();
+  const update = createDeferred<typeof currentSettings>();
+  vaultMethods.updateDatabaseSettings.mockImplementation(() => update.promise);
+  vaultMethods.saveVault.mockResolvedValue(undefined);
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Engineering" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await screen.findByRole("button", { name: "Saving..." });
+
+  fireEvent.click(screen.getByRole("button", { name: "Statistics" }));
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
+
+  update.resolve({
+    ...currentSettings,
+    metadata: { ...currentSettings.metadata, name: "Engineering" }
+  });
+
+  expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
+  expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
+  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1);
+});
+
+it("coalesces save retry with database settings persistence already in flight", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const currentSettings = await vaultMethods.getDatabaseSettings();
+  vaultMethods.updateDatabaseSettings.mockResolvedValue({
+    ...currentSettings,
+    metadata: { ...currentSettings.metadata, name: "Engineering" }
+  });
+  const save = createDeferred<void>();
+  vaultMethods.saveVault.mockImplementation(() => save.promise);
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Engineering" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1));
+
+  fireEvent.click(screen.getByRole("button", { name: "Statistics" }));
+  expect(
+    await screen.findByText(
+      "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
+    )
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
+  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1);
+
+  save.resolve();
+
+  expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
+  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1);
+});
+
 it("hides password actions until the authenticated credential flow exists", async () => {
   const client = {
     ...createVaultSelectionMethods(),
@@ -1529,6 +1942,94 @@ it("manages an entry passkey from the detail pane", async () => {
   });
   expect(saveVault).toHaveBeenCalledTimes(2);
   expect(await screen.findByText("No passkey.")).toBeInTheDocument();
+});
+
+it("retries a failed passkey save without clearing the passkey again", async () => {
+  const passkey = {
+    username: "alice@example.com",
+    credentialId: "credential-old",
+    generatedUserId: null,
+    privateKeyPem: "-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----",
+    relyingParty: "example.com",
+    userHandle: null,
+    backupEligible: true,
+    backupState: false
+  };
+  const clearEntryPasskey = vi.fn(async () => ({
+    type: "entry_detail" as const,
+    id: "entry-1",
+    title: "GitHub",
+    username: "alice",
+    password: "secret",
+    url: "https://github.com",
+    notes: "",
+    totp: null,
+    totpUri: null,
+    passkey: null,
+    customFields: [],
+    attachments: []
+  }));
+  const saveVault = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("simulated passkey save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "GitHub",
+        username: "alice",
+        url: "https://github.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn().mockResolvedValue({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "GitHub",
+      username: "alice",
+      password: "secret",
+      url: "https://github.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      passkey,
+      customFields: [],
+      attachments: []
+    }),
+    clearEntryPasskey,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "GitHub" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Clear passkey" }));
+
+  expect(await screen.findByText("simulated passkey save failure")).toBeInTheDocument();
+  expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
+  expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
 });
 
 it("renders localized passkey reveal labels without English password fragments", () => {
@@ -2197,7 +2698,9 @@ it("edits an entry only after explicit save and confirms unsaved navigation", as
   expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
   expect(updateEntryFields).not.toHaveBeenCalled();
 
-  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  const saveChanges = screen.getByRole("button", { name: "Save changes" });
+  fireEvent.click(saveChanges);
+  fireEvent.click(saveChanges);
 
   await waitFor(() => {
     expect(updateEntryFields).toHaveBeenCalledWith("vault-1", "entry-1", {
@@ -2224,6 +2727,8 @@ it("edits an entry only after explicit save and confirms unsaved navigation", as
   await waitFor(() => {
     expect(saveVault).toHaveBeenCalledWith("vault-1");
   });
+  expect(updateEntryFields).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
 });
 
 it("shows an animated saving indicator while entry changes are being saved", async () => {
@@ -2312,31 +2817,28 @@ it("shows an animated saving indicator while entry changes are being saved", asy
   });
 });
 
-it("shows an auto-dismiss tip when save merges a changed source", async () => {
-  const saveVault = vi.fn(async () => ({
-    type: "save_vault_result" as const,
-    status: "merged" as const,
-    mergeSummary: {
-      mergedEntries: 1,
-      historySnapshotsAdded: 0
-    }
-  }));
-  const updateEntryFields = vi.fn(async () => ({
-    type: "entry_detail" as const,
-    id: "entry-1",
-    title: "Merged Title",
-    username: "alice",
-    password: "secret-123",
-    url: "https://example.com",
-    notes: "demo note",
-    totp: null,
-    totpUri: null,
-    customFields: []
-  }));
-
+it("coalesces save-and-continue with an entry save already in flight", async () => {
+  const update = createDeferred<{
+    type: "entry_detail";
+    id: string;
+    title: string;
+    username: string;
+    password: string;
+    url: string;
+    notes: string;
+    totp: null;
+    totpUri: null;
+    customFields: [];
+  }>();
+  const updateEntryFields = vi.fn(() => update.promise);
+  const saveVault = vi.fn(async () => undefined);
   const client = {
     ...createVaultSelectionMethods(),
-    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
     listGroups: vi.fn().mockResolvedValue({
       type: "group_tree" as const,
       root: {
@@ -2377,16 +2879,129 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "Example" }));
   fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
   fireEvent.change(screen.getByLabelText("Title"), {
-    target: { value: "Merged Title" }
+    target: { value: "Edited Title" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await screen.findByRole("button", { name: "Saving..." });
+
+  fireEvent.click(screen.getByRole("button", { name: "Statistics" }));
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(updateEntryFields).toHaveBeenCalledTimes(1);
+
+  update.resolve({
+    type: "entry_detail",
+    id: "entry-1",
+    title: "Edited Title",
+    username: "alice",
+    password: "secret-123",
+    url: "https://example.com",
+    notes: "demo note",
+    totp: null,
+    totpUri: null,
+    customFields: []
+  });
+
+  expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
+  expect(updateEntryFields).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+});
+
+it("shows an auto-dismiss tip when save merges a changed source", async () => {
+  const saveVault = vi.fn(async () => ({
+    type: "save_vault_result" as const,
+    status: "merged" as const,
+    mergeSummary: {
+      mergedEntries: 1,
+      historySnapshotsAdded: 0
+    }
+  }));
+  const updateEntryFields = vi.fn(async () => ({
+    type: "entry_detail" as const,
+    id: "entry-1",
+    title: "Local Title",
+    username: "alice",
+    password: "secret-123",
+    url: "https://example.com",
+    notes: "demo note",
+    totp: null,
+    totpUri: null,
+    customFields: []
+  }));
+
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "entry_detail" as const,
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        password: "secret-123",
+        url: "https://example.com",
+        notes: "demo note",
+        totp: null,
+        totpUri: null,
+        customFields: []
+      })
+      .mockResolvedValueOnce({
+        type: "entry_detail" as const,
+        id: "entry-1",
+        title: "Remote Winner",
+        username: "alice",
+        password: "secret-123",
+        url: "https://example.com",
+        notes: "demo note",
+        totp: null,
+        totpUri: null,
+        customFields: []
+      }),
+    updateEntryFields,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Title"), {
+    target: { value: "Local Title" }
   });
   vi.useFakeTimers();
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
   await act(async () => {
     await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 
   expect(screen.getByText("Vault changed on disk. Merged and saved.")).toBeInTheDocument();
+  expect(screen.getByText("Remote Winner")).toBeInTheDocument();
+  expect(client.getEntryDetail).toHaveBeenCalledTimes(2);
+  expect(client.listEntryHistory).toHaveBeenCalledTimes(2);
 
   await act(async () => {
     vi.advanceTimersByTime(3000);
@@ -2600,6 +3215,243 @@ it("shows remote cache warning and retries source sync", async () => {
   expect(screen.queryByText("cached note")).not.toBeInTheDocument();
 });
 
+it("rebases an unsaved entry draft after source sync", async () => {
+  let sourceRestored = false;
+  const initialDetail = {
+    id: "entry-shared",
+    title: "Cached Entry",
+    username: "cached-user",
+    password: "secret-123",
+    url: "https://remote.example",
+    notes: "cached note",
+    totp: null,
+    totpUri: null,
+    customFields: [
+      { key: "Local", value: "cached", protected: false },
+      { key: "Remote", value: "before", protected: false }
+    ]
+  };
+  const remoteDetail = {
+    ...initialDetail,
+    title: "Remote Title",
+    username: "remote-user",
+    notes: "remote note",
+    customFields: [
+      { key: "Local", value: "cached", protected: false },
+      { key: "Remote", value: "after", protected: false }
+    ]
+  };
+  const getEntryDetail = vi.fn(async () =>
+    sourceRestored ? remoteDetail : initialDetail
+  );
+  const retryVaultSourceSync = vi.fn(async () => {
+    sourceRestored = true;
+    return {
+      type: "vault_source_status" as const,
+      sourceKind: "onedrive",
+      remoteState: "online",
+      lastSyncAt: 1776500060,
+      cachedAt: 1776500030,
+      lastError: null
+    };
+  });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      sourceStatus: {
+        sourceKind: "onedrive",
+        remoteState: "cache",
+        lastSyncAt: null,
+        cachedAt: 1776500030,
+        lastError: "OneDrive unavailable"
+      }
+    }),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-shared",
+        title: sourceRestored ? "Remote Title" : "Cached Entry",
+        username: sourceRestored ? "remote-user" : "cached-user",
+        url: "https://remote.example",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail,
+    retryVaultSourceSync
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Cached Entry" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Title"), {
+    target: { value: "Local Draft" }
+  });
+  fireEvent.change(screen.getByLabelText("Local value"), {
+    target: { value: "local draft" }
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
+
+  await waitFor(() => {
+    expect(getEntryDetail).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText("Username")).toHaveValue("remote-user");
+  });
+  expect(screen.getByLabelText("Title")).toHaveValue("Local Draft");
+  expect(screen.getByLabelText("Notes")).toHaveValue("remote note");
+  expect(screen.getByLabelText("Local value")).toHaveValue("local draft");
+  expect(screen.getByLabelText("Remote value")).toHaveValue("after");
+});
+
+it("keeps the unsaved-entry guard while source detail is reloading", async () => {
+  const sourceDetailReload = createDeferred<{
+    id: string;
+    title: string;
+    username: string;
+    password: string;
+    url: string;
+    notes: string;
+    totp: null;
+    totpUri: null;
+    customFields: never[];
+  }>();
+  const initialDetail = {
+    id: "entry-shared",
+    title: "Cached Entry",
+    username: "cached-user",
+    password: "secret-123",
+    url: "https://remote.example",
+    notes: "cached note",
+    totp: null,
+    totpUri: null,
+    customFields: []
+  };
+  const getEntryDetail = vi
+    .fn()
+    .mockResolvedValueOnce(initialDetail)
+    .mockImplementationOnce(() => sourceDetailReload.promise);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      sourceStatus: {
+        sourceKind: "onedrive",
+        remoteState: "cache",
+        lastSyncAt: null,
+        cachedAt: 1776500030,
+        lastError: "OneDrive unavailable"
+      }
+    }),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-shared",
+        title: "Cached Entry",
+        username: "cached-user",
+        url: "https://remote.example",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail,
+    retryVaultSourceSync: vi.fn(async () => ({
+      type: "vault_source_status" as const,
+      sourceKind: "onedrive",
+      remoteState: "online",
+      lastSyncAt: 1776500060,
+      cachedAt: 1776500030,
+      lastError: null
+    }))
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Cached Entry" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Title"), {
+    target: { value: "Unsaved Local Draft" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
+  await waitFor(() => expect(getEntryDetail).toHaveBeenCalledTimes(2));
+
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  await act(async () => {
+    sourceDetailReload.resolve({ ...initialDetail, title: "Remote Entry" });
+    await Promise.resolve();
+  });
+});
+
+it("keeps the unsaved-entry guard when source detail reload fails", async () => {
+  const initialDetail = {
+    id: "entry-shared",
+    title: "Cached Entry",
+    username: "cached-user",
+    password: "secret-123",
+    url: "https://remote.example",
+    notes: "cached note",
+    totp: null,
+    totpUri: null,
+    customFields: []
+  };
+  const getEntryDetail = vi
+    .fn()
+    .mockResolvedValueOnce(initialDetail)
+    .mockRejectedValue(new Error("simulated source detail reload failure"));
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      sourceStatus: {
+        sourceKind: "onedrive",
+        remoteState: "cache",
+        lastSyncAt: null,
+        cachedAt: 1776500030,
+        lastError: "OneDrive unavailable"
+      }
+    }),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-shared",
+        title: "Cached Entry",
+        username: "cached-user",
+        url: "https://remote.example",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail,
+    retryVaultSourceSync: vi.fn(async () => ({
+      type: "vault_source_status" as const,
+      sourceKind: "onedrive",
+      remoteState: "online",
+      lastSyncAt: 1776500060,
+      cachedAt: 1776500030,
+      lastError: null
+    }))
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Cached Entry" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Title"), {
+    target: { value: "Unsaved Local Draft" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
+  expect(
+    await screen.findByText("simulated source detail reload failure")
+  ).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+});
+
 it("shows remote cache info without failure copy before sync is retried", async () => {
   const client = {
     ...createVaultSelectionMethods(),
@@ -2761,6 +3613,138 @@ it("creates a new entry and deletes it after explicit confirmation", async () =>
   await waitFor(() => {
     expect(saveVault).toHaveBeenCalledTimes(2);
   });
+});
+
+it("retries a failed create save without creating the entry again", async () => {
+  const createEntry = vi.fn(async () => ({
+    type: "entry_detail" as const,
+    id: "entry-new",
+    title: "Created once",
+    username: "",
+    password: "",
+    url: "",
+    notes: "",
+    totp: null,
+    totpUri: null,
+    customFields: []
+  }));
+  const saveVault = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("simulated durable save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn(),
+    createEntry,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(await screen.findByRole("button", { name: "New Entry" }));
+  fireEvent.change(await screen.findByLabelText("Title"), {
+    target: { value: "Created once" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(await screen.findByText("simulated durable save failure")).toBeInTheDocument();
+  expect(createEntry).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(
+    await screen.findByText(
+      "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+    )
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Discard changes" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
+  expect(createEntry).toHaveBeenCalledTimes(1);
+});
+
+it("retries a failed delete save without deleting the entry again", async () => {
+  const deleteEntry = vi.fn(async () => undefined);
+  const saveVault = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("simulated delete save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      customFields: []
+    })),
+    deleteEntry,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Delete Entry" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Delete permanently" }));
+
+  expect(await screen.findByText("simulated delete save failure")).toBeInTheDocument();
+  expect(deleteEntry).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
+  expect(deleteEntry).toHaveBeenCalledTimes(1);
 });
 
 it("generates a password into the entry editor only after explicit use", async () => {
@@ -2976,6 +3960,92 @@ it("manages entry attachments from the detail pane", async () => {
     );
   });
   expect(saveVault).toHaveBeenCalledTimes(3);
+});
+
+it("retries a failed attachment save without adding the attachment again", async () => {
+  const addEntryAttachment = vi.fn(async () => ({
+    type: "entry_detail" as const,
+    id: "entry-1",
+    title: "Example",
+    username: "alice",
+    password: "secret-123",
+    url: "https://example.com",
+    notes: "demo note",
+    totp: null,
+    totpUri: null,
+    customFields: [],
+    attachments: [
+      {
+        name: "added.txt",
+        size: 5,
+        protectInMemory: false
+      }
+    ]
+  }));
+  const saveVault = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("simulated attachment save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret-123",
+      url: "https://example.com",
+      notes: "demo note",
+      totp: null,
+      totpUri: null,
+      customFields: [],
+      attachments: []
+    })),
+    addEntryAttachment,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  const file = new File(["hello"], "added.txt", { type: "text/plain" });
+  fireEvent.change(screen.getByLabelText("Add attachment file"), {
+    target: { files: [file] }
+  });
+
+  expect(await screen.findByText("simulated attachment save failure")).toBeInTheDocument();
+  expect(addEntryAttachment).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
+  expect(addEntryAttachment).toHaveBeenCalledTimes(1);
 });
 
 it("shows read-only entry history details", async () => {

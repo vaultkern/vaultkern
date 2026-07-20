@@ -491,6 +491,52 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+#[cfg(windows)]
+pub(crate) fn durable_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let slash = b'\\' as u16;
+    let alternate_slash = b'/' as u16;
+    for value in &mut wide {
+        if *value == alternate_slash {
+            *value = slash;
+        }
+    }
+    let verbatim_prefix = [slash, slash, b'?' as u16, slash];
+    let device_prefix = [slash, slash, b'.' as u16, slash];
+    if wide.starts_with(&verbatim_prefix) || wide.starts_with(&device_prefix) {
+        return path.to_path_buf();
+    }
+
+    let prefixed = if wide.len() >= 3 && wide[1] == b':' as u16 && wide[2] == slash {
+        verbatim_prefix.into_iter().chain(wide).collect::<Vec<_>>()
+    } else if wide.starts_with(&[slash, slash]) {
+        [
+            slash,
+            slash,
+            b'?' as u16,
+            slash,
+            b'U' as u16,
+            b'N' as u16,
+            b'C' as u16,
+            slash,
+        ]
+        .into_iter()
+        .chain(wide.into_iter().skip(2))
+        .collect::<Vec<_>>()
+    } else {
+        return path.to_path_buf();
+    };
+    PathBuf::from(OsString::from_wide(&prefixed))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn durable_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 fn process_nonce() -> String {
     let mut random = [0_u8; 16];
     if fill_random(&mut random).is_err() {

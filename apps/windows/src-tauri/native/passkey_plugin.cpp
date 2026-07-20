@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <bcrypt.h>
+#include <commctrl.h>
 #include <ncrypt.h>
 #include <unknwn.h>
 #include <webauthn.h>
@@ -21,8 +22,10 @@
 #include <vector>
 
 #pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ncrypt.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace {
 
@@ -129,38 +132,137 @@ struct SelectedCredential {
     std::wstring user_name;
 };
 
+using CredentialChooser = HRESULT (*)(
+    HWND,
+    PCWSTR,
+    const std::vector<CachedCredential>&,
+    size_t&);
+
+HRESULT ChooseCredentialWithTaskDialog(
+    HWND parent,
+    PCWSTR rp_id,
+    const std::vector<CachedCredential>& credentials,
+    size_t& selected_index) {
+    constexpr int kFirstCredentialButton = 1000;
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
+    if (!InitCommonControlsEx(&controls)) {
+        const DWORD error = GetLastError();
+        return error == ERROR_SUCCESS ? E_FAIL : HRESULT_FROM_WIN32(error);
+    }
+
+    std::vector<std::wstring> labels;
+    labels.reserve(credentials.size());
+    for (const auto& credential : credentials) {
+        std::wstring label = credential.user_display_name.empty()
+            ? credential.user_name
+            : credential.user_display_name;
+        if (!credential.user_name.empty() && label != credential.user_name) {
+            label.append(L"\n");
+            label.append(credential.user_name);
+        }
+        labels.push_back(std::move(label));
+    }
+
+    std::vector<TASKDIALOG_BUTTON> buttons;
+    buttons.reserve(labels.size());
+    for (size_t index = 0; index < labels.size(); ++index) {
+        buttons.push_back({
+            kFirstCredentialButton + static_cast<int>(index),
+            labels[index].c_str()});
+    }
+
+    TASKDIALOGCONFIG config{};
+    config.cbSize = sizeof(config);
+    config.hwndParent = parent;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION |
+        TDF_POSITION_RELATIVE_TO_WINDOW |
+        TDF_USE_COMMAND_LINKS;
+    config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    config.pszWindowTitle = L"VaultKern";
+    config.pszMainInstruction = L"Choose a passkey account";
+    config.pszContent = rp_id;
+    config.cButtons = static_cast<UINT>(buttons.size());
+    config.pButtons = buttons.data();
+    config.nDefaultButton = kFirstCredentialButton;
+
+    int selected_button = 0;
+    const HRESULT result = TaskDialogIndirect(
+        &config,
+        &selected_button,
+        nullptr,
+        nullptr);
+    if (FAILED(result)) {
+        return result;
+    }
+    if (selected_button == IDCANCEL) {
+        return NTE_USER_CANCELLED;
+    }
+    const int selected_offset = selected_button - kFirstCredentialButton;
+    if (selected_offset < 0 ||
+        static_cast<size_t>(selected_offset) >= credentials.size()) {
+        return E_FAIL;
+    }
+    selected_index = static_cast<size_t>(selected_offset);
+    return S_OK;
+}
+
 HRESULT SelectCredential(
+    HWND parent,
     PCWSTR rp_id,
     const std::vector<VkBytes>& allowed,
-    SelectedCredential& selected) {
-    std::lock_guard<std::mutex> lock(g_credential_cache_mutex);
-    for (const auto& credential : g_credential_cache) {
-        if (credential.rp_id != rp_id) {
-            continue;
-        }
-        bool is_allowed = allowed.empty();
-        for (const auto& candidate : allowed) {
-            if (candidate.len == credential.credential_id.size() &&
-                candidate.data &&
-                memcmp(
-                    candidate.data,
-                    credential.credential_id.data(),
-                    candidate.len) == 0) {
-                is_allowed = true;
-                break;
+    SelectedCredential& selected,
+    CredentialChooser chooser = ChooseCredentialWithTaskDialog) noexcept {
+    try {
+        std::vector<CachedCredential> candidates;
+        {
+            std::lock_guard<std::mutex> lock(g_credential_cache_mutex);
+            for (const auto& credential : g_credential_cache) {
+                if (credential.rp_id != rp_id) {
+                    continue;
+                }
+                bool is_allowed = allowed.empty();
+                for (const auto& candidate : allowed) {
+                    if (candidate.len == credential.credential_id.size() &&
+                        candidate.data &&
+                        memcmp(
+                            candidate.data,
+                            credential.credential_id.data(),
+                            candidate.len) == 0) {
+                        is_allowed = true;
+                        break;
+                    }
+                }
+                if (is_allowed && !credential.user_name.empty()) {
+                    candidates.push_back(credential);
+                }
             }
         }
-        if (!is_allowed) {
-            continue;
+        if (candidates.empty()) {
+            return NTE_NOT_FOUND;
         }
-        if (credential.user_name.empty()) {
-            continue;
+
+        size_t selected_index = 0;
+        if (candidates.size() > 1) {
+            if (!chooser) {
+                return E_INVALIDARG;
+            }
+            const HRESULT result = chooser(parent, rp_id, candidates, selected_index);
+            if (FAILED(result)) {
+                return result;
+            }
         }
+        if (selected_index >= candidates.size()) {
+            return E_FAIL;
+        }
+        const auto& credential = candidates[selected_index];
         selected.credential_id = credential.credential_id;
         selected.user_name = credential.user_name;
         return S_OK;
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    } catch (...) {
+        return E_FAIL;
     }
-    return NTE_NOT_FOUND;
 }
 
 void Trace(const char* operation, const char* stage, HRESULT status) noexcept {
@@ -568,7 +670,9 @@ HRESULT AddCredentialMetadata(
 class PluginAuthenticator final : public IPluginAuthenticator {
 public:
     explicit PluginAuthenticator(const VkPluginCallbacks& callbacks) noexcept
-        : callbacks_(callbacks) {}
+        : callbacks_(callbacks) {
+        callbacks_.retain_context(callbacks_.context);
+    }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) noexcept override {
         if (!result) {
@@ -724,9 +828,10 @@ public:
             }
             RustBytes credential_id(callbacks_, output.credential_id);
             RustBytes authenticator_data(callbacks_, output.authenticator_data);
-            if (FAILED(result = operation.CheckCancelled())) {
-                return result;
-            }
+            // The Rust callback is the durable registration commit point. A
+            // cancellation observed after it returns cannot roll that commit
+            // back, so complete the ceremony instead of reporting a failure
+            // for a credential that now exists in the vault.
             if (!credential_id.data() || credential_id.size() == 0 ||
                 !authenticator_data.data() || authenticator_data.size() == 0) {
                 return E_FAIL;
@@ -839,9 +944,16 @@ public:
             return E_OUTOFMEMORY;
         }
         SelectedCredential selected;
-        result = SelectCredential(decoded->pwszRpId, allowed, selected);
+        result = SelectCredential(
+            request->hWnd,
+            decoded->pwszRpId,
+            allowed,
+            selected);
         Trace("get", "select-credential", result);
         if (FAILED(result)) {
+            return result;
+        }
+        if (FAILED(result = operation.CheckCancelled())) {
             return result;
         }
 
@@ -946,7 +1058,9 @@ public:
     }
 
 private:
-    ~PluginAuthenticator() = default;
+    ~PluginAuthenticator() {
+        callbacks_.release_context(callbacks_.context);
+    }
     std::atomic<ULONG> references_{1};
     VkPluginCallbacks callbacks_;
 };
@@ -954,7 +1068,9 @@ private:
 class PluginFactory final : public IClassFactory {
 public:
     explicit PluginFactory(const VkPluginCallbacks& callbacks) noexcept
-        : callbacks_(callbacks) {}
+        : callbacks_(callbacks) {
+        callbacks_.retain_context(callbacks_.context);
+    }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) noexcept override {
         if (!result) {
@@ -1007,7 +1123,9 @@ public:
     }
 
 private:
-    ~PluginFactory() = default;
+    ~PluginFactory() {
+        callbacks_.release_context(callbacks_.context);
+    }
     std::atomic<ULONG> references_{1};
     VkPluginCallbacks callbacks_;
 };
@@ -1038,8 +1156,9 @@ std::vector<BYTE> AuthenticatorInfo() {
 extern "C" int32_t VK_CALL vaultkern_plugin_start(
     const VkPluginCallbacks* callbacks,
     uint32_t* registration_cookie) {
-    if (!callbacks || !registration_cookie || callbacks->version != 2 ||
-        !callbacks->context || !callbacks->is_unlocked ||
+    if (!callbacks || !registration_cookie || callbacks->version != 3 ||
+        !callbacks->context || !callbacks->retain_context ||
+        !callbacks->release_context || !callbacks->is_unlocked ||
         !callbacks->make_credential || !callbacks->get_assertion ||
         !callbacks->begin_operation || !callbacks->is_operation_cancelled ||
         !callbacks->cancel_operation || !callbacks->end_operation ||
@@ -1266,13 +1385,71 @@ vaultkern_plugin_test_replaces_cached_account_credential(void) {
         L"new-name",
         L"New Name");
     SelectedCredential selected;
-    const HRESULT result = SelectCredential(L"example.com", {}, selected);
+    const HRESULT result = SelectCredential(
+        nullptr,
+        L"example.com",
+        {},
+        selected);
     ReplaceCredentialCache({});
     if (FAILED(result)) {
         return result;
     }
     return selected.credential_id ==
             std::vector<BYTE>(new_credential_id, new_credential_id + ARRAYSIZE(new_credential_id))
+        ? S_OK
+        : E_FAIL;
+}
+
+extern "C" int32_t VK_CALL
+vaultkern_plugin_test_can_select_second_matching_credential(void) {
+    const BYTE first_credential_id[]{0x01};
+    const BYTE second_credential_id[]{0x02};
+    const BYTE first_user_id[]{0x0a};
+    const BYTE second_user_id[]{0x0b};
+    ReplaceCredentialCache({});
+    CacheCredential(
+        first_credential_id,
+        ARRAYSIZE(first_credential_id),
+        L"example.com",
+        L"Example",
+        first_user_id,
+        ARRAYSIZE(first_user_id),
+        L"first@example.com",
+        L"First");
+    CacheCredential(
+        second_credential_id,
+        ARRAYSIZE(second_credential_id),
+        L"example.com",
+        L"Example",
+        second_user_id,
+        ARRAYSIZE(second_user_id),
+        L"second@example.com",
+        L"Second");
+    SelectedCredential selected;
+    auto choose_second = [](
+        HWND,
+        PCWSTR,
+        const std::vector<CachedCredential>& credentials,
+        size_t& selected_index) -> HRESULT {
+        if (credentials.size() < 2) {
+            return E_FAIL;
+        }
+        selected_index = 1;
+        return S_OK;
+    };
+    const HRESULT result = SelectCredential(
+        nullptr,
+        L"example.com",
+        {},
+        selected,
+        choose_second);
+    ReplaceCredentialCache({});
+    if (FAILED(result)) {
+        return result;
+    }
+    return selected.credential_id == std::vector<BYTE>(
+            second_credential_id,
+            second_credential_id + ARRAYSIZE(second_credential_id))
         ? S_OK
         : E_FAIL;
 }

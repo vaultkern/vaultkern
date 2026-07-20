@@ -16,13 +16,12 @@ use uuid::Uuid;
 use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, Compression, CustomDataItemInput, Entry,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    ExternalKdfConfirmation, ExternalKdfPolicy, GroupTimesUpdate, KdbxCipher, KdbxError,
-    KdbxVersion, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec,
-    TransformedKey, Vault, VaultBinTemplateMetadataUpdate, VaultIdentityMetadataUpdate,
-    VaultLifecycleMetadataUpdate, VaultMetadataUpdate, derive_transformed_key_with_policy,
-    load_kdbx_with_transformed_key, load_kdbx_with_transformed_key_diagnostic,
-    parse_key_file_bytes, required_version, retained_or_recommended_save_kdf,
-    save_kdbx_with_transformed_key, three_way_field_patch,
+    ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher, KdbxError, KdbxVersion, KeepassCore,
+    PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec, TransformedKey, Vault,
+    VaultBinTemplateMetadataUpdate, VaultIdentityMetadataUpdate, VaultLifecycleMetadataUpdate,
+    VaultMetadataUpdate, derive_transformed_key_with_policy, load_kdbx_with_transformed_key,
+    load_kdbx_with_transformed_key_diagnostic, parse_key_file_bytes, required_version,
+    retained_or_recommended_save_kdf, save_kdbx_with_transformed_key, three_way_field_patch,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
@@ -1628,7 +1627,6 @@ impl Runtime {
                 let old_name = candidate.name.clone();
                 let old_description = candidate.description.clone();
                 let old_default_username = candidate.default_username.clone();
-                let old_root_title = candidate.root.title.clone();
                 let name = metadata.name;
                 let identity_update = VaultIdentityMetadataUpdate {
                     name: Some(name.clone()),
@@ -1647,12 +1645,9 @@ impl Runtime {
                         ..VaultMetadataUpdate::default()
                     },
                 )?;
-                candidate.root.title = name;
-
                 let name_changed = candidate.name != old_name;
                 let description_changed = candidate.description != old_description;
                 let default_username_changed = candidate.default_username != old_default_username;
-                let root_title_changed = candidate.root.title != old_root_title;
                 if name_changed || description_changed || default_username_changed {
                     let identity_update = VaultIdentityMetadataUpdate {
                         name: Some(candidate.name.clone()),
@@ -1670,21 +1665,8 @@ impl Runtime {
                     self.core
                         .update_vault_identity_metadata(&mut candidate, identity_update)?;
                 }
-                if root_title_changed {
-                    let root_id = candidate.root.id.to_string();
-                    self.core.update_group_times(
-                        &mut candidate,
-                        &root_id,
-                        GroupTimesUpdate {
-                            modified_at: Some(Some(modified_at)),
-                            ..GroupTimesUpdate::default()
-                        },
-                    )?;
-                }
-                did_change_vault_settings |= name_changed
-                    || description_changed
-                    || default_username_changed
-                    || root_title_changed;
+                did_change_vault_settings |=
+                    name_changed || description_changed || default_username_changed;
                 *vault = candidate;
             }
 
@@ -2144,10 +2126,11 @@ impl Runtime {
             vault.recycle_bin_enabled.unwrap_or(true),
             &mut |passkey| passkeys.push(passkey),
         );
-        passkeys
+        Ok(passkeys
             .into_iter()
-            .map(platform_passkey_credential)
-            .collect()
+            .filter(|passkey| passkey.user_handle.is_some())
+            .filter_map(|passkey| platform_passkey_credential(passkey).ok())
+            .collect())
     }
 
     pub fn register_platform_passkey(
@@ -5368,9 +5351,19 @@ impl Runtime {
             .read(vault_id)
             .with_context(|| format!("failed to read synced base: {vault_id}"))?
             .with_context(|| format!("synced base is missing: {vault_id}"))?;
-        let base_vault = Self::load_session_database(&base_bytes, &key)
-            .context("failed to parse the synced OneDrive base")?
-            .vault;
+        let base_vault = match Self::load_session_database(&base_bytes, &key) {
+            Ok(database) => database.vault,
+            Err(KdbxError::HeaderHmacMismatch) => self
+                .unlock_historical_snapshot_from_unlock_blob(vault_id, &base_bytes)
+                .context("failed to unlock the historical synced OneDrive base")?
+                .context(
+                    "synced OneDrive base uses a historical KDF and quick unlock is unavailable",
+                )?
+                .0,
+            Err(error) => {
+                return Err(error).context("failed to parse the synced OneDrive base");
+            }
+        };
         let base_save_profile = self
             .inspected_save_profile(&base_bytes)
             .context("failed to inspect the synced OneDrive base")?;
@@ -6578,12 +6571,33 @@ impl Runtime {
         if !pending.pending_sync || pending.fingerprint != *pending_fingerprint {
             anyhow::bail!("pending remote cache generation changed before synchronization");
         }
-        let pending_vault = Self::load_session_database(&pending.bytes, &key)
+        let _pending_vault = Self::load_session_database(&pending.bytes, &key)
             .context("failed to parse pending remote vault")?
             .vault;
-        let pending_save_profile = self
+        let _pending_save_profile = self
             .inspected_save_profile(&pending.bytes)
             .context("failed to inspect pending remote vault")?;
+        let (local_vault, local_save_profile) = {
+            let loaded = self
+                .vault_session
+                .find_loaded(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_ref()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            (vault.clone(), loaded.save_profile.clone())
+        };
+        let local_conflict_key = key.clone();
+        let serialize_live_conflict_copy = || {
+            Self::serialize_and_verify_vault_candidate(
+                local_vault.clone(),
+                &local_conflict_key,
+                local_save_profile.clone(),
+            )
+            .map(|(bytes, _)| bytes)
+            .context("failed to verify live pending conflict copy")
+        };
         let base_bytes = self
             .synced_bases
             .read(vault_id)
@@ -6607,13 +6621,14 @@ impl Runtime {
                     let Some((vault, refreshed_key)) =
                         self.refresh_transformed_key_from_unlock_blob(vault_id, &remote.bytes)?
                     else {
+                        let local_bytes = serialize_live_conflict_copy()?;
                         return self.upload_pending_onedrive_conflict_copy(
                             vault_id,
                             drive_id,
                             item_id,
                             cache_key,
                             &pending,
-                            &pending.bytes,
+                            &local_bytes,
                             "current OneDrive generation uses a different vault key",
                         );
                     };
@@ -6621,13 +6636,14 @@ impl Runtime {
                     vault
                 }
                 Err(error) => {
+                    let local_bytes = serialize_live_conflict_copy()?;
                     return self.upload_pending_onedrive_conflict_copy(
                         vault_id,
                         drive_id,
                         item_id,
                         cache_key,
                         &pending,
-                        &pending.bytes,
+                        &local_bytes,
                         &format!("current OneDrive generation cannot be parsed: {error}"),
                     );
                 }
@@ -6637,32 +6653,34 @@ impl Runtime {
                 .context("failed to inspect current OneDrive generation during pending sync")?;
             let merged_save_profile = match Self::merge_save_profile(
                 &base_save_profile,
-                &pending_save_profile,
+                &local_save_profile,
                 &remote_save_profile,
             ) {
                 Ok(profile) => profile,
                 Err(error) => {
+                    let local_bytes = serialize_live_conflict_copy()?;
                     return self.upload_pending_onedrive_conflict_copy(
                         vault_id,
                         drive_id,
                         item_id,
                         cache_key,
                         &pending,
-                        &pending.bytes,
+                        &local_bytes,
                         &error.to_string(),
                     );
                 }
             };
-            let patched = match three_way_field_patch(&base_vault, &pending_vault, &remote_vault) {
+            let patched = match three_way_field_patch(&base_vault, &local_vault, &remote_vault) {
                 Ok(patched) => patched,
                 Err(error) => {
+                    let local_bytes = serialize_live_conflict_copy()?;
                     return self.upload_pending_onedrive_conflict_copy(
                         vault_id,
                         drive_id,
                         item_id,
                         cache_key,
                         &pending,
-                        &pending.bytes,
+                        &local_bytes,
                         &format!("pending changes cannot be represented: {error}"),
                     );
                 }
@@ -9522,10 +9540,8 @@ mod tests {
         assert_eq!(local.default_username_changed, Some(200));
         assert_eq!(local.settings_changed, Some(200));
         assert_eq!(local.recycle_bin_changed, Some(200));
-        assert_eq!(
-            local.root.times.as_ref().map(|times| times.modified_at),
-            Some(200)
-        );
+        assert_eq!(local.root.title, base.root.title);
+        assert_eq!(local.root.times, base.root.times);
 
         let mut remote = base.clone();
         remote.name = "Earlier remote name".into();
@@ -10390,6 +10406,67 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn onedrive_save_recovers_an_old_kdf_base_after_base_refresh_failure() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_100);
+        runtime.biometric = Box::new(TestBiometricProvider);
+        runtime.secure_storage = Box::new(MemorySecureStorageProvider::new());
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        runtime
+            .enroll_quick_unlock_for_current_vault(Some("demo-password"), None)
+            .unwrap();
+
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let current = runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap();
+        let remote = KeepassCore::new().load_kdbx(&current, &key).unwrap();
+        let mut rotated_profile = SaveProfile::recommended();
+        rotated_profile.kdf = Some(SaveKdf::AesKdbx4 { rounds: 1 });
+        let rotated = KeepassCore::new()
+            .save_kdbx(&remote, &key, rotated_profile)
+            .unwrap();
+        assert_ne!(
+            vaultkern_core::derive_transformed_key(&current, &key)
+                .unwrap()
+                .as_bytes(),
+            vaultkern_core::derive_transformed_key(&rotated, &key)
+                .unwrap()
+                .as_bytes(),
+            "the external save must actually rotate the KDF"
+        );
+        runtime.replace_test_onedrive_item("drive-1", "item-1", rotated);
+        runtime.synced_bases.fail_next_store_for_tests();
+
+        let adopted = runtime
+            .save_vault(&vault_id)
+            .expect("the rotated remote head should be adopted despite a base-cache failure");
+        assert!(matches!(
+            adopted,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                ..
+            })
+        ));
+        assert!(
+            runtime
+                .session_state()
+                .source_status
+                .and_then(|status| status.last_error)
+                .is_some_and(|error| error.contains("failed to store synced base"))
+        );
+        create_demo_entry(&mut runtime, &vault_id);
+
+        assert!(matches!(
+            runtime.save_vault(&vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+    }
+
     struct RejectingWarningWriter;
 
     impl std::io::Write for RejectingWarningWriter {
@@ -10567,6 +10644,89 @@ mod tests {
         );
         assert_eq!(assertion.user_handle, b"platform-user-1");
         assert_ne!(assertion.authenticator_data[32] & 0x04, 0);
+    }
+
+    #[test]
+    fn platform_credential_sync_skips_non_discoverable_kpex_entries() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let registration = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                user_name: "alice@example.com".into(),
+                user_handle: b"platform-user".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .unwrap();
+        let non_discoverable = create_demo_entry(&mut runtime, &opened.vault_id);
+        runtime
+            .set_entry_passkey(
+                &opened.vault_id,
+                &non_discoverable.id,
+                EntryPasskeyDto {
+                    username: "legacy@example.net".into(),
+                    credential_id: URL_SAFE_NO_PAD.encode(b"legacy-credential"),
+                    generated_user_id: None,
+                    private_key_pem: "legacy-private-key".into(),
+                    relying_party: "example.net".into(),
+                    user_handle: None,
+                    backup_eligible: false,
+                    backup_state: false,
+                },
+            )
+            .unwrap();
+
+        let credentials = runtime
+            .list_platform_passkey_credentials()
+            .expect("non-discoverable KPEX entries must not poison platform sync");
+
+        assert_eq!(credentials, vec![registration.credential]);
+    }
+
+    #[test]
+    fn platform_credential_sync_skips_malformed_kpex_entries() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let registration = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                user_name: "alice@example.com".into(),
+                user_handle: b"platform-user".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .unwrap();
+        let malformed = create_demo_entry(&mut runtime, &opened.vault_id);
+        let loaded = runtime
+            .vault_session
+            .find_loaded_mut(&opened.vault_id)
+            .expect("loaded vault");
+        let entry = loaded
+            .vault
+            .as_mut()
+            .expect("unlocked vault")
+            .root
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id.to_string() == malformed.id)
+            .expect("malformed fixture entry");
+        entry.passkey = Some(PasskeyRecord {
+            username: "broken@example.net".into(),
+            credential_id: "not base64url!".into(),
+            generated_user_id: None,
+            private_key_pem: "malformed fixture key".into(),
+            relying_party: "example.net".into(),
+            user_handle: Some(URL_SAFE_NO_PAD.encode(b"broken-user")),
+            backup_eligible: false,
+            backup_state: false,
+        });
+
+        let credentials = runtime
+            .list_platform_passkey_credentials()
+            .expect("a malformed KPEX entry must not poison platform sync");
+
+        assert_eq!(credentials, vec![registration.credential]);
     }
 
     #[test]
@@ -14719,6 +14879,167 @@ mod tests {
         assert_eq!(
             runtime.current_source_status().unwrap().remote_state,
             "pending_sync"
+        );
+    }
+
+    #[test]
+    fn generic_pending_retry_preserves_later_live_edits() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let mut runtime = demo_onedrive_runtime(1_700_000_058);
+        runtime.remote_cache = RemoteVaultCache::new_at(cache_dir.path());
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &vault_id);
+        runtime.save_vault(&vault_id).unwrap();
+
+        let pending_fields = EntryFieldsDto {
+            notes: "durable pending edit".into(),
+            ..entry_fields(&entry)
+        };
+        runtime
+            .update_entry_fields(
+                &vault_id,
+                &entry.id,
+                pending_fields.title.clone(),
+                pending_fields.username.clone(),
+                pending_fields.password.clone(),
+                pending_fields.url.clone(),
+                pending_fields.notes.clone(),
+                pending_fields.totp_uri.clone(),
+                pending_fields.custom_fields.clone(),
+            )
+            .unwrap();
+        runtime.queue_test_onedrive_ambiguous_write(false);
+        assert!(matches!(
+            runtime.save_vault(&vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::SavedToCache,
+                ..
+            })
+        ));
+
+        let live_fields = EntryFieldsDto {
+            username: "edited after pending cache".into(),
+            ..pending_fields
+        };
+        runtime
+            .update_entry_fields(
+                &vault_id,
+                &entry.id,
+                live_fields.title.clone(),
+                live_fields.username.clone(),
+                live_fields.password.clone(),
+                live_fields.url.clone(),
+                live_fields.notes.clone(),
+                live_fields.totp_uri.clone(),
+                live_fields.custom_fields.clone(),
+            )
+            .unwrap();
+
+        let status = runtime.retry_vault_source_sync(&vault_id).unwrap();
+
+        assert_eq!(status.remote_state, "online");
+        let remote = runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let durable = KeepassCore::new()
+            .load_database(&remote, &key)
+            .unwrap()
+            .vault;
+        assert_eq!(
+            entry_fields_for_vault(&runtime.core, &durable, &entry.id).unwrap(),
+            live_fields
+        );
+        assert_eq!(
+            entry_fields(&runtime.get_entry_detail(&vault_id, &entry.id).unwrap()),
+            live_fields
+        );
+    }
+
+    #[test]
+    fn generic_pending_conflict_copy_preserves_later_live_edits() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let mut runtime = demo_onedrive_runtime(1_700_000_058);
+        runtime.remote_cache = RemoteVaultCache::new_at(cache_dir.path());
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let target = create_demo_entry(&mut runtime, &vault_id);
+        runtime.save_vault(&vault_id).unwrap();
+
+        runtime
+            .vault_session
+            .find_loaded_mut(&vault_id)
+            .unwrap()
+            .save_profile
+            .compression = Compression::None;
+        runtime.queue_test_onedrive_ambiguous_write(false);
+        assert!(matches!(
+            runtime.save_vault(&vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::SavedToCache,
+                ..
+            })
+        ));
+
+        let live_fields = EntryFieldsDto {
+            username: "edited after pending cache".into(),
+            ..entry_fields(&target)
+        };
+        runtime
+            .update_entry_fields(
+                &vault_id,
+                &target.id,
+                live_fields.title.clone(),
+                live_fields.username.clone(),
+                live_fields.password.clone(),
+                live_fields.url.clone(),
+                live_fields.notes.clone(),
+                live_fields.totp_uri.clone(),
+                live_fields.custom_fields.clone(),
+            )
+            .unwrap();
+
+        let remote = runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap();
+        let transformed = transformed_key_from_loaded_vault(
+            runtime.vault_session.find_loaded(&vault_id).unwrap(),
+        )
+        .unwrap();
+        let mut remote_vault = load_kdbx_with_transformed_key(&remote, &transformed).unwrap();
+        let changed_remote = save_kdbx_with_history_limits_transformed(
+            &mut remote_vault,
+            &transformed,
+            SaveProfile {
+                cipher: KdbxCipher::ChaCha20,
+                kdf: None,
+                ..SaveProfile::recommended()
+            },
+        )
+        .unwrap();
+        runtime.replace_test_onedrive_item("drive-1", "item-1", changed_remote);
+
+        let status = runtime.retry_vault_source_sync(&vault_id).unwrap();
+
+        assert_eq!(status.remote_state, "pending_sync");
+        let conflict = runtime
+            .one_drive
+            .list_children(None)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.item_id.starts_with("vaultkern-conflict-"))
+            .expect("pending conflict copy");
+        let conflict_bytes = runtime
+            .read_test_onedrive_item_bytes(&conflict.drive_id, &conflict.item_id)
+            .unwrap();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let core = KeepassCore::new();
+        let conflict_vault = core.load_database(&conflict_bytes, &key).unwrap().vault;
+        assert_eq!(
+            entry_fields_for_vault(&runtime.core, &conflict_vault, &target.id).unwrap(),
+            live_fields
         );
     }
 

@@ -23,6 +23,8 @@ use crate::providers::durable_file::{ExclusiveFileLock, VerifiedTemp, unique_sib
 const TOKEN_FILE_NAME: &str = "onedrive-refresh-token.dpapi";
 #[cfg(any(windows, test))]
 const MAX_PROTECTED_REFRESH_TOKEN_BYTES: usize = 64 * 1024;
+#[cfg(any(windows, test))]
+const TOKEN_STORE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub(crate) trait OneDriveRefreshTokenStore {
     fn load(&self) -> Result<Option<Zeroizing<String>>>;
@@ -277,8 +279,16 @@ fn token_target_exists(path: &std::path::Path) -> Result<bool> {
 
 #[cfg(any(windows, test))]
 fn acquire_token_store_lock(path: &std::path::Path) -> Result<ExclusiveFileLock> {
+    acquire_token_store_lock_with_timeout(path, TOKEN_STORE_LOCK_TIMEOUT)
+}
+
+#[cfg(any(windows, test))]
+fn acquire_token_store_lock_with_timeout(
+    path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<ExclusiveFileLock> {
     let lock_path = token_lock_path(path)?;
-    ExclusiveFileLock::acquire(&lock_path).with_context(|| {
+    ExclusiveFileLock::acquire_with_timeout(&lock_path, timeout).with_context(|| {
         format!(
             "failed to acquire OneDrive refresh-token store lock: {}",
             lock_path.display()
@@ -1319,10 +1329,10 @@ mod tests {
     use super::OneDriveRefreshTokenStore;
     use super::{
         MAX_PROTECTED_REFRESH_TOKEN_BYTES, PrivateAclEntry, TokenSecurityContext,
-        acquire_token_store_lock, enforce_temp_metadata_or_discard, private_acl_entries_match,
-        production_for_extension_id, production_store, read_bounded_protected_payload,
-        token_backup_path, token_lock_path, validate_protected_payload_size,
-        validate_single_link_count, zeroize_plaintext_bytes,
+        acquire_token_store_lock, acquire_token_store_lock_with_timeout,
+        enforce_temp_metadata_or_discard, private_acl_entries_match, production_for_extension_id,
+        production_store, read_bounded_protected_payload, token_backup_path, token_lock_path,
+        validate_protected_payload_size, validate_single_link_count, zeroize_plaintext_bytes,
     };
     #[cfg(unix)]
     use super::{token_target_exists, validate_existing_directory_identity};
@@ -1526,6 +1536,34 @@ mod tests {
             .unwrap();
         drop(second);
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn token_store_lock_contention_returns_instead_of_waiting_for_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("onedrive-refresh-token.dpapi");
+        let held = acquire_token_store_lock(&target).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            sender
+                .send(acquire_token_store_lock_with_timeout(
+                    &target,
+                    std::time::Duration::from_millis(40),
+                ))
+                .unwrap();
+        });
+
+        let result = receiver.recv_timeout(std::time::Duration::from_millis(250));
+        drop(held);
+        thread.join().unwrap();
+
+        let error = result
+            .expect("token-store contender waited indefinitely for the held lock")
+            .expect_err("token-store contender unexpectedly acquired the held lock");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]

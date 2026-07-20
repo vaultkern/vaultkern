@@ -458,8 +458,10 @@ fn runtime_updates_database_settings_without_retaining_master_credentials() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("old-password");
+    let mut initial = Vault::empty("settings");
+    initial.root.title = "Root Group".into();
     let bytes = core
-        .save_kdbx(&Vault::empty("settings"), &key, SaveProfile::recommended())
+        .save_kdbx(&initial, &key, SaveProfile::recommended())
         .expect("create vault");
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -533,6 +535,7 @@ fn runtime_updates_database_settings_without_retaining_master_credentials() {
         .load_database(&saved, &key)
         .expect("reload with the original master credential");
     assert_eq!(reloaded.vault.name, "Engineering Vault");
+    assert_eq!(reloaded.vault.root.title, "Root Group");
     assert_eq!(
         reloaded.vault.description.as_deref(),
         Some("Database settings contract")

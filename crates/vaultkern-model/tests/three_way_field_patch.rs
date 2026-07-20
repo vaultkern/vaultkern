@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use vaultkern_model::{
-    Attachment, CustomField, DeletedObject, Entry, Group, OpaqueXmlFragment, PasskeyRecord,
-    TotpSpec, Vault, three_way_field_patch,
+    Attachment, CustomField, CustomIcon, DeletedObject, Entry, Group, GroupTimes,
+    OpaqueXmlFragment, PasskeyRecord, TotpSpec, Vault, three_way_field_patch,
 };
 
 fn base_vault() -> (Vault, Uuid) {
@@ -84,6 +84,65 @@ fn independent_entry_fields_and_keyed_units_are_rebased_onto_remote() {
     assert_eq!(merged.attributes["remote-field"].value, "remote");
     assert_eq!(merged.attachments["local.txt"].data.as_bytes(), b"local");
     assert_eq!(merged.attachments["remote.txt"].data.as_bytes(), b"remote");
+}
+
+#[test]
+fn independent_standard_field_protection_changes_are_rebased_per_field() {
+    let (base, entry_id) = base_vault();
+    let mut local = base.clone();
+    let local_entry = entry_mut(&mut local.root, entry_id).unwrap();
+    local_entry.field_protection.protect_title = true;
+    local_entry.modified_at = 20;
+
+    let mut remote = base.clone();
+    let remote_entry = entry_mut(&mut remote.root, entry_id).unwrap();
+    remote_entry.field_protection.protect_password = false;
+    remote_entry.modified_at = 30;
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    let merged = entry(&patched.vault.root, entry_id).unwrap();
+    assert!(merged.field_protection.protect_title);
+    assert!(!merged.field_protection.protect_password);
+}
+
+#[test]
+fn duplicate_modeled_meta_uuids_fall_back_instead_of_being_collapsed() {
+    let (base, entry_id) = base_vault();
+    let mut local = base.clone();
+    let local_entry = entry_mut(&mut local.root, entry_id).unwrap();
+    local_entry.password = "local-password".into();
+    local_entry.modified_at = 20;
+    let duplicate_id = Uuid::new_v4();
+
+    let mut remote = base.clone();
+    remote.custom_icons = vec![
+        CustomIcon {
+            id: duplicate_id,
+            data: vec![1],
+            name: Some("First".into()),
+            last_modified: Some(10),
+        },
+        CustomIcon {
+            id: duplicate_id,
+            data: vec![2],
+            name: Some("Second".into()),
+            last_modified: Some(20),
+        },
+    ];
+    assert!(three_way_field_patch(&base, &local, &remote).is_err());
+
+    let mut remote = base.clone();
+    remote.deleted_objects = vec![
+        DeletedObject {
+            id: duplicate_id,
+            deleted_at: 10,
+        },
+        DeletedObject {
+            id: duplicate_id,
+            deleted_at: 20,
+        },
+    ];
+    assert!(three_way_field_patch(&base, &local, &remote).is_err());
 }
 
 #[test]
@@ -409,4 +468,100 @@ fn local_group_reordering_uses_the_same_conflict_copy_fallback() {
     local.root.children.swap(0, 1);
 
     assert!(three_way_field_patch(&base, &local, &base).is_err());
+}
+
+#[test]
+fn local_entry_move_keeps_its_destination_insertion_order() {
+    let mut base = Vault::empty("Shared");
+    let mut source = Group::new("Source");
+    let mut moved = Entry::new("Moved");
+    moved.id = Uuid::from_u128(1);
+    source.entries.push(moved);
+    let mut destination = Group::new("Destination");
+    let mut first = Entry::new("First");
+    first.id = Uuid::from_u128(2);
+    let mut second = Entry::new("Second");
+    second.id = Uuid::from_u128(3);
+    destination.entries = vec![first, second];
+    base.root.children = vec![source, destination];
+
+    let mut local = base.clone();
+    let mut moved = local.root.children[0].entries.remove(0);
+    moved.location_changed_at = Some(20);
+    local.root.children[1].entries.insert(1, moved);
+
+    let patched = three_way_field_patch(&base, &local, &base).unwrap();
+    let destination = patched
+        .vault
+        .root
+        .children
+        .iter()
+        .find(|group| group.title == "Destination")
+        .unwrap();
+    assert_eq!(
+        destination
+            .entries
+            .iter()
+            .map(|entry| entry.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["First", "Moved", "Second"]
+    );
+}
+
+#[test]
+fn local_group_move_keeps_its_destination_insertion_order() {
+    let mut base = Vault::empty("Shared");
+    let mut destination = Group::new("Destination");
+    destination.children = vec![Group::new("First"), Group::new("Second")];
+    base.root.children = vec![Group::new("Source"), destination, Group::new("Moved")];
+
+    let mut local = base.clone();
+    let mut moved = local.root.children.remove(2);
+    moved.times = Some(GroupTimes {
+        created_at: 0,
+        modified_at: 20,
+        expires: false,
+        expiry_time: None,
+        last_accessed_at: None,
+        usage_count: None,
+        location_changed_at: Some(20),
+    });
+    local.root.children[1].children.insert(1, moved);
+
+    let patched = three_way_field_patch(&base, &local, &base).unwrap();
+    let destination = patched
+        .vault
+        .root
+        .children
+        .iter()
+        .find(|group| group.title == "Destination")
+        .unwrap();
+    assert_eq!(
+        destination
+            .children
+            .iter()
+            .map(|group| group.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["First", "Moved", "Second"]
+    );
+}
+
+#[test]
+fn local_move_and_remote_destination_reorder_fall_back() {
+    let mut base = Vault::empty("Shared");
+    let mut source = Group::new("Source");
+    source.entries.push(Entry::new("Moved"));
+    let mut destination = Group::new("Destination");
+    destination.entries = vec![Entry::new("First"), Entry::new("Second")];
+    base.root.children = vec![source, destination];
+
+    let mut local = base.clone();
+    let mut moved = local.root.children[0].entries.remove(0);
+    moved.location_changed_at = Some(20);
+    local.root.children[1].entries.insert(1, moved);
+
+    let mut remote = base.clone();
+    remote.root.children[1].entries.swap(0, 1);
+
+    assert!(three_way_field_patch(&base, &local, &remote).is_err());
 }

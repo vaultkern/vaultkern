@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type {
@@ -164,11 +164,27 @@ type PendingAction =
   | { type: "search"; value: string }
   | { type: "open-stats" }
   | { type: "open-database-settings" }
-  | { type: "open-extension-settings" };
+  | { type: "close-database-settings" }
+  | { type: "open-extension-settings" }
+  | { type: "close-extension-settings" };
 
 type DialogState =
   | { type: "unsaved"; action: PendingAction }
   | { type: "delete-entry"; entryId: string; title: string };
+
+interface PendingEntrySave {
+  vaultId: string;
+  detail: EntryDetail;
+}
+
+interface PendingEntryDelete {
+  vaultId: string;
+  entryId: string;
+}
+
+interface PendingAttachmentSave extends PendingEntrySave {
+  fallbackMessage: string;
+}
 
 const COMPACT_BREAKPOINT = 1180;
 const STACKED_BREAKPOINT = 760;
@@ -334,6 +350,12 @@ export function App({
   const [databaseSettings, setDatabaseSettings] = useState<DatabaseSettings | null>(null);
   const [databaseSettingsError, setDatabaseSettingsError] = useState<string | null>(null);
   const [databaseSettingsBusy, setDatabaseSettingsBusy] = useState(false);
+  const [pendingDatabaseSettingsVaultId, setPendingDatabaseSettingsVaultId] =
+    useState<string | null>(null);
+  const [databaseSettingsDraftUpdate, setDatabaseSettingsDraftUpdate] =
+    useState<DatabaseSettingsUpdate | null>(null);
+  const [databaseSettingsDraftDirty, setDatabaseSettingsDraftDirty] = useState(false);
+  const databaseSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
   const [databaseName, setDatabaseName] = useState<string | null>(null);
   const [groupTree, setGroupTree] = useState<GroupTree | null>(null);
   const [groupsError, setGroupsError] = useState<string | null>(null);
@@ -349,9 +371,23 @@ export function App({
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [editorMode, setEditorMode] = useState<EntryEditorMode>("view");
   const [draft, setDraft] = useState<EntryDraft | null>(null);
+  const [pendingEntrySave, setPendingEntrySave] = useState<PendingEntrySave | null>(
+    null
+  );
+  const [pendingPasskeySave, setPendingPasskeySave] = useState<PendingEntrySave | null>(
+    null
+  );
+  const [pendingAttachmentSave, setPendingAttachmentSave] =
+    useState<PendingAttachmentSave | null>(null);
+  const [pendingEntryDelete, setPendingEntryDelete] =
+    useState<PendingEntryDelete | null>(null);
   const [entryActionError, setEntryActionError] = useState<string | null>(null);
   const [dialogState, setDialogState] = useState<DialogState | null>(null);
   const [entryActionBusy, setEntryActionBusy] = useState(false);
+  const [saveAndContinueBusy, setSaveAndContinueBusy] = useState(false);
+  const saveDraftInFlight = useRef<Promise<boolean> | null>(null);
+  const entryDraftBaseline = useRef<EntryDetail | null>(null);
+  const saveAndContinueInFlight = useRef(false);
   const [showEntryListWithDetail, setShowEntryListWithDetail] = useState(false);
   const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
   const [sourceDetailReloadKey, setSourceDetailReloadKey] = useState(0);
@@ -378,9 +414,28 @@ export function App({
     null
   );
   const [extensionSettingsSaving, setExtensionSettingsSaving] = useState(false);
+  const extensionSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
+  const [extensionSettingsDraft, setExtensionSettingsDraft] =
+    useState<ExtensionSettings | null>(null);
+  const [extensionSettingsDraftDirty, setExtensionSettingsDraftDirty] =
+    useState(false);
   const [quickUnlockBusy, setQuickUnlockBusy] = useState(false);
   const [quickUnlockError, setQuickUnlockError] = useState<string | null>(null);
   const quickUnlockAutoSyncAttempt = useRef<string | null>(null);
+  const handleDatabaseSettingsDraftChange = useCallback(
+    (update: DatabaseSettingsUpdate | null, dirty: boolean) => {
+      setDatabaseSettingsDraftUpdate(update);
+      setDatabaseSettingsDraftDirty(dirty);
+    },
+    []
+  );
+  const handleExtensionSettingsDraftChange = useCallback(
+    (settings: ExtensionSettings, dirty: boolean) => {
+      setExtensionSettingsDraft(settings);
+      setExtensionSettingsDraftDirty(dirty);
+    },
+    []
+  );
 
   async function reloadLockedState() {
     const [nextSession, nextRecentVaults] = await Promise.all([
@@ -412,7 +467,22 @@ export function App({
     setRecentVaults(sortedVaults);
   }
 
-  async function saveExtensionSettings(nextSettings: ExtensionSettings) {
+  function saveExtensionSettings(nextSettings: ExtensionSettings) {
+    if (extensionSettingsSaveInFlight.current) {
+      return extensionSettingsSaveInFlight.current;
+    }
+
+    const operation = persistExtensionSettings(nextSettings);
+    extensionSettingsSaveInFlight.current = operation;
+    void operation.finally(() => {
+      if (extensionSettingsSaveInFlight.current === operation) {
+        extensionSettingsSaveInFlight.current = null;
+      }
+    });
+    return operation;
+  }
+
+  async function persistExtensionSettings(nextSettings: ExtensionSettings) {
     setExtensionSettingsSaving(true);
     setExtensionSettingsError(null);
 
@@ -425,6 +495,7 @@ export function App({
         normalizedSettings.quickUnlockEnabled,
         normalizedSettings
       );
+      return true;
     } catch (saveFailure) {
       setExtensionSettingsError(
         errorMessage(
@@ -432,6 +503,7 @@ export function App({
           translate(extensionSettings.language, "Failed to save extension settings")
         )
       );
+      return false;
     } finally {
       setExtensionSettingsSaving(false);
     }
@@ -481,10 +553,22 @@ export function App({
   }
 
   function resetEditorState(nextMode: EntryEditorMode = "view") {
+    entryDraftBaseline.current = null;
     setEditorMode(nextMode);
     setDraft(null);
+    setPendingEntrySave(null);
     setEntryActionError(null);
     setDialogState(null);
+  }
+
+  function resetDatabaseSettingsDraftState() {
+    setDatabaseSettingsDraftUpdate(null);
+    setDatabaseSettingsDraftDirty(false);
+  }
+
+  function resetExtensionSettingsDraftState() {
+    setExtensionSettingsDraft(null);
+    setExtensionSettingsDraftDirty(false);
   }
 
   function clearDetailSelection() {
@@ -503,6 +587,7 @@ export function App({
       setSaveTip(
         translate(extensionSettings.language, "Vault changed on disk. Merged and saved.")
       );
+      setSourceDetailReloadKey((current) => current + 1);
     } else if (result?.status === "saved_to_cache") {
       setSaveTip(
         translate(extensionSettings.language, "Saved to local cache. Remote sync pending.")
@@ -548,7 +633,6 @@ export function App({
       const sourceStatus = await client.retryVaultSourceSync(session.activeVaultId);
       setSession((current) => (current ? { ...current, sourceStatus } : current));
       if (sourceStatus.remoteState === "online") {
-        setEntryDetail(null);
         setWorkspaceReloadKey((current) => current + 1);
         setSourceDetailReloadKey((current) => current + 1);
         setSaveTip(translate(extensionSettings.language, "Remote sync restored."));
@@ -705,12 +789,21 @@ export function App({
     }
   }
 
-  const dirty =
+  const pendingDetailSave = pendingAttachmentSave || pendingPasskeySave;
+  const hasPendingEntrySave = Boolean(pendingEntrySave || pendingDetailSave);
+  const hasPendingDurableSave =
+    hasPendingEntrySave || Boolean(pendingDatabaseSettingsVaultId);
+  const draftDirty =
     editorMode === "create-pending"
       ? hasDraftChangesFromEmpty(draft)
       : editorMode === "edit" && entryDetail && draft
         ? !draftMatchesEntry(draft, entryDetail)
         : false;
+  const dirty =
+    hasPendingDurableSave ||
+    draftDirty ||
+    (showDatabaseSettingsPage && databaseSettingsDraftDirty) ||
+    (showExtensionSettingsPage && extensionSettingsDraftDirty);
 
   function performAction(action: PendingAction) {
     switch (action.type) {
@@ -764,6 +857,8 @@ export function App({
       case "open-stats":
         setShowEntryListWithDetail(false);
         resetEditorState();
+        resetDatabaseSettingsDraftState();
+        resetExtensionSettingsDraftState();
         setShowDatabaseSettingsPage(false);
         setShowExtensionSettingsPage(false);
         setShowStatsPage(true);
@@ -771,16 +866,28 @@ export function App({
       case "open-database-settings":
         setShowEntryListWithDetail(false);
         resetEditorState();
+        resetDatabaseSettingsDraftState();
+        resetExtensionSettingsDraftState();
         setShowStatsPage(false);
         setShowExtensionSettingsPage(false);
         setShowDatabaseSettingsPage(true);
         break;
+      case "close-database-settings":
+        resetDatabaseSettingsDraftState();
+        setShowDatabaseSettingsPage(false);
+        break;
       case "open-extension-settings":
         setShowEntryListWithDetail(false);
         resetEditorState();
+        resetDatabaseSettingsDraftState();
+        resetExtensionSettingsDraftState();
         setShowStatsPage(false);
         setShowDatabaseSettingsPage(false);
         setShowExtensionSettingsPage(true);
+        break;
+      case "close-extension-settings":
+        resetExtensionSettingsDraftState();
+        setShowExtensionSettingsPage(false);
         break;
     }
   }
@@ -806,35 +913,63 @@ export function App({
     requestAction({ type: "search", value });
   }
 
-  async function saveDraft() {
+  function saveDraft() {
+    if (saveDraftInFlight.current) {
+      return saveDraftInFlight.current;
+    }
+
+    const operation = saveDraftOnce();
+    saveDraftInFlight.current = operation;
+    void operation.finally(() => {
+      if (saveDraftInFlight.current === operation) {
+        saveDraftInFlight.current = null;
+      }
+    });
+    return operation;
+  }
+
+  async function saveDraftOnce() {
     if (!session?.activeVaultId || !draft) {
       return false;
     }
 
+    const vaultId = session.activeVaultId;
+    const wasCreating = editorMode === "create-pending";
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      if (editorMode === "create-pending") {
-        const detail = await client.createEntry(session.activeVaultId, {
+      let detail: EntryDetail;
+
+      if (pendingEntrySave) {
+        if (pendingEntrySave.vaultId !== vaultId) {
+          throw new Error("The pending entry belongs to another vault");
+        }
+
+        detail = pendingEntrySave.detail;
+        if (!draftMatchesEntry(draft, detail)) {
+          detail = await client.updateEntryFields(vaultId, detail.id, draft);
+          setPendingEntrySave({ vaultId, detail });
+        }
+      } else if (wasCreating) {
+        detail = await client.createEntry(vaultId, {
           parentGroupId: selectedGroupId ?? groupTree?.root.id ?? "",
           ...draft
         });
-        handleSaveResult(await client.saveVault(session.activeVaultId));
-        setEntryDetail(detail);
-        setSelectedEntryId(detail.id);
-        setShowEntryListWithDetail(true);
       } else if (editorMode === "edit" && selectedEntryId) {
-        const detail = await client.updateEntryFields(
-          session.activeVaultId,
-          selectedEntryId,
-          draft
-        );
-        handleSaveResult(await client.saveVault(session.activeVaultId));
-        setEntryDetail(detail);
-        setShowEntryListWithDetail(false);
+        detail = await client.updateEntryFields(vaultId, selectedEntryId, draft);
       } else {
         return false;
+      }
+
+      setPendingEntrySave({ vaultId, detail });
+      handleSaveResult(await client.saveVault(vaultId));
+      setEntryDetail(detail);
+      if (wasCreating) {
+        setSelectedEntryId(detail.id);
+        setShowEntryListWithDetail(true);
+      } else {
+        setShowEntryListWithDetail(false);
       }
 
       resetEditorState();
@@ -854,11 +989,98 @@ export function App({
   }
 
   async function handleSaveAndContinue(action: PendingAction) {
-    const saved = await saveDraft();
-
-    if (saved) {
-      performAction(action);
+    if (saveAndContinueInFlight.current) {
+      return;
     }
+    saveAndContinueInFlight.current = true;
+    setSaveAndContinueBusy(true);
+
+    try {
+      const hadPendingDatabaseSettings = Boolean(pendingDatabaseSettingsVaultId);
+      const hadDatabaseSettingsDraft = Boolean(
+        showDatabaseSettingsPage && databaseSettingsDraftDirty && databaseSettingsDraftUpdate
+      );
+      const handledDatabaseSettings =
+        hadPendingDatabaseSettings || hadDatabaseSettingsDraft;
+      const hadExtensionSettingsDraft = Boolean(
+        showExtensionSettingsPage && extensionSettingsDraftDirty && extensionSettingsDraft
+      );
+      let saved = hadPendingDatabaseSettings
+        ? await retryPendingDatabaseSettingsSave()
+        : hadDatabaseSettingsDraft
+          ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate!)
+          : hadExtensionSettingsDraft
+            ? await saveExtensionSettings(extensionSettingsDraft!)
+            : pendingDetailSave
+              ? await retryPendingDetailSave()
+              : true;
+      if (
+        saved &&
+        !handledDatabaseSettings &&
+        !hadExtensionSettingsDraft &&
+        (draftDirty || !pendingDetailSave)
+      ) {
+        saved = await saveDraft();
+      }
+
+      if (saved) {
+        performAction(action);
+      }
+    } finally {
+      saveAndContinueInFlight.current = false;
+      setSaveAndContinueBusy(false);
+    }
+  }
+
+  function renderUnsavedChangesDialog() {
+    if (dialogState?.type !== "unsaved") {
+      return null;
+    }
+
+    return (
+      <ConfirmationDialog
+        title={translate(extensionSettings.language, "You have unsaved changes")}
+        description={translate(
+          extensionSettings.language,
+          pendingDatabaseSettingsVaultId
+            ? "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
+            : showDatabaseSettingsPage && databaseSettingsDraftDirty
+              ? "Save your database settings before leaving, discard your edits, or continue editing."
+              : showExtensionSettingsPage && extensionSettingsDraftDirty
+                ? "Save your extension settings before leaving, discard your edits, or continue editing."
+                : hasPendingEntrySave
+                  ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+                  : "Save before leaving this entry, discard your edits, or continue editing."
+        )}
+        actions={[
+          {
+            label: translate(extensionSettings.language, "Save changes"),
+            variant: "primary",
+            disabled: saveAndContinueBusy,
+            onClick: () => {
+              void handleSaveAndContinue(dialogState.action);
+            }
+          },
+          ...(hasPendingDurableSave
+            ? []
+            : [
+                {
+                  label: translate(extensionSettings.language, "Discard changes"),
+                  disabled: saveAndContinueBusy,
+                  onClick: () => {
+                    resetEditorState();
+                    performAction(dialogState.action);
+                  }
+                }
+              ]),
+          {
+            label: translate(extensionSettings.language, "Continue editing"),
+            disabled: saveAndContinueBusy,
+            onClick: () => setDialogState(null)
+          }
+        ]}
+      />
+    );
   }
 
   async function handleDeleteEntry(entryId: string) {
@@ -866,14 +1088,26 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
+    let mutationApplied =
+      pendingEntryDelete?.vaultId === vaultId && pendingEntryDelete.entryId === entryId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      await client.deleteEntry(session.activeVaultId, entryId);
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      if (pendingEntryDelete && !mutationApplied) {
+        throw new Error("Another entry deletion is pending");
+      }
+      if (!mutationApplied) {
+        await client.deleteEntry(vaultId, entryId);
+        mutationApplied = true;
+        setPendingEntryDelete({ vaultId, entryId });
+      }
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingEntryDelete(null);
       clearDetailSelection();
       setWorkspaceReloadKey((current) => current + 1);
+      setDialogState(null);
     } catch (deleteError) {
       setEntryActionError(
         errorMessage(
@@ -881,9 +1115,11 @@ export function App({
           translate(extensionSettings.language, "Failed to delete entry")
         )
       );
+      if (!mutationApplied) {
+        setDialogState(null);
+      }
     } finally {
       setEntryActionBusy(false);
-      setDialogState(null);
     }
   }
 
@@ -892,17 +1128,17 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
+    const entryId = selectedEntryId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      const detail = await client.setEntryPasskey(
-        session.activeVaultId,
-        selectedEntryId,
-        passkey
-      );
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      const detail = await client.setEntryPasskey(vaultId, entryId, passkey);
       setEntryDetail(detail);
+      setPendingPasskeySave({ vaultId, detail });
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingPasskeySave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (passkeyError) {
       setEntryActionError(
@@ -921,16 +1157,17 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
+    const entryId = selectedEntryId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      const detail = await client.clearEntryPasskey(
-        session.activeVaultId,
-        selectedEntryId
-      );
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      const detail = await client.clearEntryPasskey(vaultId, entryId);
       setEntryDetail(detail);
+      setPendingPasskeySave({ vaultId, detail });
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingPasskeySave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (passkeyError) {
       setEntryActionError(
@@ -939,6 +1176,32 @@ export function App({
           translate(extensionSettings.language, "Failed to save entry passkey")
         )
       );
+    } finally {
+      setEntryActionBusy(false);
+    }
+  }
+
+  async function retryPendingPasskeySave() {
+    if (!pendingPasskeySave) {
+      return false;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      handleSaveResult(await client.saveVault(pendingPasskeySave.vaultId));
+      setPendingPasskeySave(null);
+      setWorkspaceReloadKey((current) => current + 1);
+      return true;
+    } catch (passkeyError) {
+      setEntryActionError(
+        errorMessage(
+          passkeyError,
+          translate(extensionSettings.language, "Failed to save entry passkey")
+        )
+      );
+      return false;
     } finally {
       setEntryActionBusy(false);
     }
@@ -976,19 +1239,55 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
       const detail = await operation();
-      handleSaveResult(await client.saveVault(session.activeVaultId));
       setEntryDetail(detail);
+      setPendingAttachmentSave({ vaultId, detail, fallbackMessage });
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingAttachmentSave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (attachmentError) {
       setEntryActionError(errorMessage(attachmentError, fallbackMessage));
     } finally {
       setEntryActionBusy(false);
     }
+  }
+
+  async function retryPendingAttachmentSave() {
+    if (!pendingAttachmentSave) {
+      return false;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      handleSaveResult(await client.saveVault(pendingAttachmentSave.vaultId));
+      setPendingAttachmentSave(null);
+      setWorkspaceReloadKey((current) => current + 1);
+      return true;
+    } catch (attachmentError) {
+      setEntryActionError(
+        errorMessage(attachmentError, pendingAttachmentSave.fallbackMessage)
+      );
+      return false;
+    } finally {
+      setEntryActionBusy(false);
+    }
+  }
+
+  async function retryPendingDetailSave() {
+    if (pendingAttachmentSave) {
+      return retryPendingAttachmentSave();
+    }
+    if (pendingPasskeySave) {
+      return retryPendingPasskeySave();
+    }
+    return false;
   }
 
   async function handleAddAttachment(file: File, protectInMemory: boolean) {
@@ -1055,24 +1354,47 @@ export function App({
     );
   }
 
-  async function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
-    if (!session?.activeVaultId) {
-      return;
+  function runDatabaseSettingsSave(operation: () => Promise<boolean>) {
+    if (databaseSettingsSaveInFlight.current) {
+      return databaseSettingsSaveInFlight.current;
     }
 
+    const promise = operation();
+    databaseSettingsSaveInFlight.current = promise;
+    void promise.finally(() => {
+      if (databaseSettingsSaveInFlight.current === promise) {
+        databaseSettingsSaveInFlight.current = null;
+      }
+    });
+    return promise;
+  }
+
+  function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
+    return runDatabaseSettingsSave(() => saveDatabaseSettings(update));
+  }
+
+  async function saveDatabaseSettings(update: DatabaseSettingsUpdate) {
+    if (!session?.activeVaultId) {
+      return false;
+    }
+
+    const vaultId = session.activeVaultId;
     setDatabaseSettingsBusy(true);
     setDatabaseSettingsError(null);
 
     try {
-      const settings = await client.updateDatabaseSettings(session.activeVaultId, update);
+      const settings = await client.updateDatabaseSettings(vaultId, update);
       setDatabaseSettings(settings);
       setDatabaseName(settings.metadata.name);
-      const saveResult = await client.saveVault(session.activeVaultId);
+      setPendingDatabaseSettingsVaultId(vaultId);
+      const saveResult = await client.saveVault(vaultId);
+      setPendingDatabaseSettingsVaultId(null);
       handleSaveResult(saveResult);
       setWorkspaceReloadKey((current) => current + 1);
       if (!saveResult || saveResult.status === "saved") {
         setSaveTip(translate(extensionSettings.language, "Database settings saved."));
       }
+      return true;
     } catch (settingsError) {
       setDatabaseSettingsError(
         errorMessage(
@@ -1080,6 +1402,41 @@ export function App({
           translate(extensionSettings.language, "Failed to save database settings")
         )
       );
+      return false;
+    } finally {
+      setDatabaseSettingsBusy(false);
+    }
+  }
+
+  function retryPendingDatabaseSettingsSave() {
+    return runDatabaseSettingsSave(savePendingDatabaseSettings);
+  }
+
+  async function savePendingDatabaseSettings() {
+    if (!pendingDatabaseSettingsVaultId) {
+      return false;
+    }
+
+    setDatabaseSettingsBusy(true);
+    setDatabaseSettingsError(null);
+
+    try {
+      const saveResult = await client.saveVault(pendingDatabaseSettingsVaultId);
+      handleSaveResult(saveResult);
+      setPendingDatabaseSettingsVaultId(null);
+      setWorkspaceReloadKey((current) => current + 1);
+      if (!saveResult || saveResult.status === "saved") {
+        setSaveTip(translate(extensionSettings.language, "Database settings saved."));
+      }
+      return true;
+    } catch (settingsError) {
+      setDatabaseSettingsError(
+        errorMessage(
+          settingsError,
+          translate(extensionSettings.language, "Failed to save database settings")
+        )
+      );
+      return false;
     } finally {
       setDatabaseSettingsBusy(false);
     }
@@ -1406,7 +1763,9 @@ export function App({
       return;
     }
 
-    setEntryDetail(null);
+    if (!forceSourceReload) {
+      setEntryDetail(null);
+    }
     setDetailError(null);
 
     let cancelled = false;
@@ -1420,7 +1779,9 @@ export function App({
       })
       .catch((loadError) => {
         if (!cancelled) {
-          setEntryDetail(null);
+          if (!forceSourceReload) {
+            setEntryDetail(null);
+          }
           setDetailError(
             errorMessage(
               loadError,
@@ -1440,6 +1801,25 @@ export function App({
     session?.activeVaultId,
     sourceDetailReloadKey
   ]);
+
+  useEffect(() => {
+    if (editorMode !== "edit" || !entryDetail) {
+      return;
+    }
+    const baseline = entryDraftBaseline.current;
+    if (!baseline || baseline.id !== entryDetail.id) {
+      entryDraftBaseline.current = entryDetail;
+      return;
+    }
+    if (baseline === entryDetail) {
+      return;
+    }
+
+    entryDraftBaseline.current = entryDetail;
+    setDraft((current) =>
+      current ? rebaseEntryDraft(baseline, current, entryDetail) : current
+    );
+  }, [editorMode, entryDetail]);
 
   useEffect(() => {
     if (!session?.activeVaultId) {
@@ -1489,7 +1869,6 @@ export function App({
       })
       .catch((loadError) => {
         if (!cancelled) {
-          setDatabaseSettings(null);
           setDatabaseSettingsBusy(false);
           setDatabaseSettingsError(
             errorMessage(
@@ -1540,7 +1919,13 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [client, entryDetail?.id, selectedEntryId, session?.activeVaultId]);
+  }, [
+    client,
+    entryDetail?.id,
+    selectedEntryId,
+    session?.activeVaultId,
+    workspaceReloadKey
+  ]);
 
   if (!session) {
     if (sessionError) {
@@ -1569,11 +1954,11 @@ export function App({
   if (showExtensionSettingsPage) {
     return (
       <I18nProvider language={extensionSettings.language}>
-        <div style={messageShellStyle}>
+        <div aria-hidden={dialogState !== null} style={messageShellStyle}>
           <div style={settingsPageShellStyle}>
             <button
               type="button"
-              onClick={() => setShowExtensionSettingsPage(false)}
+              onClick={() => requestAction({ type: "close-extension-settings" })}
               style={backButtonStyle}
             >
               {translate(extensionSettings.language, "Back")}
@@ -1598,9 +1983,11 @@ export function App({
               onSave={(settings) => {
                 void saveExtensionSettings(settings);
               }}
+              onDraftChange={handleExtensionSettingsDraftChange}
             />
           </div>
         </div>
+        {renderUnsavedChangesDialog()}
       </I18nProvider>
     );
   }
@@ -1638,7 +2025,9 @@ export function App({
               setOneDriveBrowserPath([]);
               setShowSetup(false);
             }}
-            onOpenExtensionSettings={() => setShowExtensionSettingsPage(true)}
+            onOpenExtensionSettings={() =>
+              requestAction({ type: "open-extension-settings" })
+            }
             addLocalVaultBusy={setupAddBusy}
             addLocalVaultError={setupAddError}
             addLocalVaultErrorCause={setupAddErrorCause}
@@ -1722,7 +2111,7 @@ export function App({
         }}
         quickUnlockSupported={Boolean(session.supportsBiometricUnlock)}
         onOpenSetup={() => setShowSetup(true)}
-        onOpenExtensionSettings={() => setShowExtensionSettingsPage(true)}
+        onOpenExtensionSettings={() => requestAction({ type: "open-extension-settings" })}
         error={unlockError}
         errorCause={unlockErrorCause}
         busy={unlockBusy}
@@ -1866,16 +2255,18 @@ export function App({
               draft={draft}
               dirty={dirty}
               busy={entryActionBusy}
+              pendingSave={Boolean(pendingDetailSave)}
               error={entryActionError ?? detailError}
               historyItems={historyItems}
               historyDetail={historyDetail}
               historyError={historyError}
               onBack={viewMode === "expanded" ? undefined : handleBackToEntries}
               onStartEdit={() => {
-                if (!entryDetail) {
+                if (!entryDetail || pendingDetailSave) {
                   return;
                 }
 
+                entryDraftBaseline.current = entryDetail;
                 setDraft(entryToDraft(entryDetail));
                 setShowEntryListWithDetail(true);
                 setEditorMode("edit");
@@ -1950,8 +2341,11 @@ export function App({
               onClearPasskey={() => {
                 void handleClearEntryPasskey();
               }}
+              onRetrySave={() => {
+                void retryPendingDetailSave();
+              }}
               onSave={() => {
-                void saveDraft();
+                void (pendingDetailSave ? retryPendingDetailSave() : saveDraft());
               }}
               onCancel={() => {
                 if (editorMode === "create-pending") {
@@ -1990,7 +2384,7 @@ export function App({
               <div style={{ display: "grid", gap: archiveTheme.spacing.lg }}>
                 <button
                   type="button"
-                  onClick={() => setShowDatabaseSettingsPage(false)}
+                  onClick={() => requestAction({ type: "close-database-settings" })}
                   style={{
                     justifySelf: "start",
                     border: `1px solid ${archiveTheme.colors.line}`,
@@ -2008,10 +2402,14 @@ export function App({
                   settings={databaseSettings}
                   loading={databaseSettingsBusy && !databaseSettings}
                   saving={databaseSettingsBusy && Boolean(databaseSettings)}
+                  pendingSave={Boolean(pendingDatabaseSettingsVaultId)}
                   error={databaseSettingsError}
                   onSave={(update) => {
-                    void handleSaveDatabaseSettings(update);
+                    void (pendingDatabaseSettingsVaultId
+                      ? retryPendingDatabaseSettingsSave()
+                      : handleSaveDatabaseSettings(update));
                   }}
+                  onDraftChange={handleDatabaseSettingsDraftChange}
                 />
               </div>
             ) : undefined
@@ -2019,35 +2417,7 @@ export function App({
           showEntryListWithDetail={showEntryListWithDetail || editorMode !== "view"}
         />
       </div>
-      {dialogState?.type === "unsaved" ? (
-        <ConfirmationDialog
-          title={translate(extensionSettings.language, "You have unsaved changes")}
-          description={translate(
-            extensionSettings.language,
-            "Save before leaving this entry, discard your edits, or continue editing."
-          )}
-          actions={[
-            {
-              label: translate(extensionSettings.language, "Save changes"),
-              variant: "primary",
-              onClick: () => {
-                void handleSaveAndContinue(dialogState.action);
-              }
-            },
-            {
-              label: translate(extensionSettings.language, "Discard changes"),
-              onClick: () => {
-                resetEditorState();
-                performAction(dialogState.action);
-              }
-            },
-            {
-              label: translate(extensionSettings.language, "Continue editing"),
-              onClick: () => setDialogState(null)
-            }
-          ]}
-        />
-      ) : null}
+      {renderUnsavedChangesDialog()}
       {dialogState?.type === "delete-entry" ? (
         <ConfirmationDialog
           title={translate(extensionSettings.language, "Delete this entry permanently?")}
@@ -2061,16 +2431,25 @@ export function App({
           }
           actions={[
             {
-              label: translate(extensionSettings.language, "Delete permanently"),
-              variant: "danger",
+              label: translate(
+                extensionSettings.language,
+                pendingEntryDelete ? "Retry save" : "Delete permanently"
+              ),
+              variant: pendingEntryDelete ? "primary" : "danger",
+              disabled: entryActionBusy,
               onClick: () => {
                 void handleDeleteEntry(dialogState.entryId);
               }
             },
-            {
-              label: translate(extensionSettings.language, "Cancel"),
-              onClick: () => setDialogState(null)
-            }
+            ...(pendingEntryDelete
+              ? []
+              : [
+                  {
+                    label: translate(extensionSettings.language, "Cancel"),
+                    disabled: entryActionBusy,
+                    onClick: () => setDialogState(null)
+                  }
+                ])
           ]}
         />
       ) : null}
@@ -2218,6 +2597,98 @@ function entryToDraft(entry: EntryDetail): EntryDraft {
   };
 }
 
+function rebaseEntryDraft(
+  previousEntry: EntryDetail,
+  current: EntryDraft,
+  nextEntry: EntryDetail
+): EntryDraft {
+  const previous = entryToDraft(previousEntry);
+  const next = entryToDraft(nextEntry);
+  return {
+    title: current.title === previous.title ? next.title : current.title,
+    username:
+      current.username === previous.username ? next.username : current.username,
+    password:
+      current.password === previous.password ? next.password : current.password,
+    url: current.url === previous.url ? next.url : current.url,
+    notes: current.notes === previous.notes ? next.notes : current.notes,
+    totpUri:
+      (current.totpUri ?? null) === (previous.totpUri ?? null)
+        ? next.totpUri
+        : current.totpUri,
+    customFields: rebaseCustomFields(
+      previous.customFields,
+      current.customFields,
+      next.customFields
+    )
+  };
+}
+
+function rebaseCustomFields(
+  previous: EntryDraft["customFields"],
+  current: EntryDraft["customFields"],
+  next: EntryDraft["customFields"]
+): EntryDraft["customFields"] {
+  const previousByKey = uniqueCustomFieldsByKey(previous);
+  const currentByKey = uniqueCustomFieldsByKey(current);
+  const nextByKey = uniqueCustomFieldsByKey(next);
+  if (!previousByKey || !currentByKey || !nextByKey) {
+    return current.map((field) => ({ ...field }));
+  }
+
+  const deletedLocally = new Set(
+    previous
+      .filter((field) => !currentByKey.has(field.key))
+      .map((field) => field.key)
+  );
+  const rebased = next
+    .filter((field) => !deletedLocally.has(field.key))
+    .map((field) => ({ ...field }));
+  const rebasedIndexes = new Map(
+    rebased.map((field, index) => [field.key, index] as const)
+  );
+
+  for (const field of current) {
+    const previousField = previousByKey.get(field.key);
+    if (previousField && customFieldMatches(field, previousField)) {
+      continue;
+    }
+    const localField = { ...field };
+    const rebasedIndex = rebasedIndexes.get(field.key);
+    if (rebasedIndex === undefined) {
+      rebasedIndexes.set(field.key, rebased.length);
+      rebased.push(localField);
+    } else {
+      rebased[rebasedIndex] = localField;
+    }
+  }
+  return rebased;
+}
+
+function uniqueCustomFieldsByKey(
+  fields: EntryDraft["customFields"]
+): Map<string, EntryDraft["customFields"][number]> | null {
+  const byKey = new Map<string, EntryDraft["customFields"][number]>();
+  for (const field of fields) {
+    if (byKey.has(field.key)) {
+      return null;
+    }
+    byKey.set(field.key, field);
+  }
+  return byKey;
+}
+
+function customFieldMatches(
+  left: EntryDraft["customFields"][number],
+  right: EntryDraft["customFields"][number]
+): boolean {
+  return (
+    left.key === right.key &&
+    left.value === right.value &&
+    left.protected === right.protected
+  );
+}
+
 function draftMatchesEntry(draft: EntryDraft, entry: EntryDetail): boolean {
   return (
     draft.title === entry.title &&
@@ -2279,6 +2750,7 @@ function ConfirmationDialog({
     label: string;
     onClick: () => void;
     variant?: "primary" | "danger" | "secondary";
+    disabled?: boolean;
   }>;
 }) {
   return (
@@ -2322,6 +2794,7 @@ function ConfirmationDialog({
               key={action.label}
               type="button"
               onClick={action.onClick}
+              disabled={action.disabled}
               style={dialogActionStyle(action.variant ?? "secondary")}
             >
               {action.label}

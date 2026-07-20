@@ -294,24 +294,24 @@ fn unlock_from_blob_with_cache_policy(
     };
 
     let credential_shape = blob.master_credential().shape();
-    let transformed_key = if refresh_cached_transformed_key {
+    let (transformed_key, cache_refreshed) = if refresh_cached_transformed_key {
         let (master_credential, _) = blob.into_parts();
         let refreshed_blob = UnlockBlob::new(master_credential, refreshed);
         let encoded = refreshed_blob.encode()?;
-        storage
-            .store(storage_key, &encoded)
-            .context("failed to refresh unlock blob atomically")?;
+        let cache_refreshed = storage.store(storage_key, &encoded).is_ok();
         let (_, transformed_key) = refreshed_blob.into_parts();
-        transformed_key
+        (transformed_key, cache_refreshed)
     } else {
-        refreshed
+        (refreshed, false)
     };
+    #[cfg(not(test))]
+    let _ = cache_refreshed;
     Ok(UnlockAttempt::Unlocked(UnlockedVault {
         vault,
         transformed_key,
         credential_shape,
         #[cfg(test)]
-        cache_refreshed: refresh_cached_transformed_key,
+        cache_refreshed,
     }))
 }
 
@@ -343,6 +343,7 @@ mod tests {
     struct CountingStore {
         value: RefCell<Option<Vec<u8>>>,
         stores: Cell<usize>,
+        fail_stores: Cell<bool>,
     }
 
     #[derive(Clone, Copy)]
@@ -403,6 +404,9 @@ mod tests {
 
     impl SecureStorageProvider for CountingStore {
         fn store(&self, _key: &str, value: &[u8]) -> anyhow::Result<()> {
+            if self.fail_stores.get() {
+                anyhow::bail!("injected unlock blob refresh failure");
+            }
             self.stores.set(self.stores.get() + 1);
             self.value.replace(Some(value.to_vec()));
             Ok(())
@@ -499,6 +503,33 @@ mod tests {
         };
         assert!(!warm.cache_refreshed);
         assert_eq!(store.stores.get(), 2);
+    }
+
+    #[test]
+    fn successful_unlock_survives_a_transient_cache_refresh_failure() {
+        let password = b"refresh failure password";
+        let first = file("first", password);
+        let second = file("second", password);
+        let master = MasterCredential::new(Some(password), None).unwrap();
+        let transformed = derive_transformed_key(&first, &master.to_composite_key()).unwrap();
+        let store = CountingStore::default();
+
+        enroll_unlock_blob(&store, "vault-a", &master, &transformed).unwrap();
+        let original_blob = store.value.borrow().clone().unwrap();
+        store.fail_stores.set(true);
+
+        let UnlockAttempt::Unlocked(unlocked) =
+            unlock_from_blob(&store, "vault-a", &second, true).unwrap()
+        else {
+            panic!("a verified vault should unlock even when cache refresh is unavailable");
+        };
+
+        assert_eq!(unlocked.vault.name, "second");
+        assert!(!unlocked.cache_refreshed);
+        assert_eq!(
+            store.value.borrow().as_deref(),
+            Some(original_blob.as_slice())
+        );
     }
 
     #[test]

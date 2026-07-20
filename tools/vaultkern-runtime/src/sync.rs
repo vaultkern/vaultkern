@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, TargetExpectation,
@@ -15,9 +16,11 @@ const BASE_WRITE_POINTS: TempWriteFaultPoints = TempWriteFaultPoints {
     synced: DurableFaultPoint::GenerationTempSynced,
     verified: DurableFaultPoint::GenerationReadbackVerified,
 };
+const SYNCED_BASE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) struct SyncedBaseStore {
     root: PathBuf,
+    lock_timeout: Duration,
     #[cfg(test)]
     fail_next_store: std::cell::Cell<bool>,
 }
@@ -26,6 +29,7 @@ impl SyncedBaseStore {
     pub(crate) fn new_default() -> Self {
         Self {
             root: runtime_state_dir().join("synced-bases"),
+            lock_timeout: SYNCED_BASE_LOCK_TIMEOUT,
             #[cfg(test)]
             fail_next_store: std::cell::Cell::new(false),
         }
@@ -34,6 +38,7 @@ impl SyncedBaseStore {
     pub(crate) fn new_for_extension_id(extension_id: &str) -> Self {
         Self {
             root: extension_state_dir(extension_id).join("synced-bases"),
+            lock_timeout: SYNCED_BASE_LOCK_TIMEOUT,
             #[cfg(test)]
             fail_next_store: std::cell::Cell::new(false),
         }
@@ -42,7 +47,17 @@ impl SyncedBaseStore {
     pub(crate) fn new_at(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
+            lock_timeout: SYNCED_BASE_LOCK_TIMEOUT,
             #[cfg(test)]
+            fail_next_store: std::cell::Cell::new(false),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_at_with_lock_timeout(root: impl AsRef<Path>, lock_timeout: Duration) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+            lock_timeout,
             fail_next_store: std::cell::Cell::new(false),
         }
     }
@@ -54,7 +69,7 @@ impl SyncedBaseStore {
         }
         create_dir_all_durable(&self.root)?;
         let (target, lock_path) = self.paths(vault_id);
-        let _lock = ExclusiveFileLock::acquire(&lock_path)?;
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, self.lock_timeout)?;
         durable_replace(&target, bytes)
     }
 
@@ -64,7 +79,7 @@ impl SyncedBaseStore {
         }
         create_dir_all_durable(&self.root)?;
         let (target, lock_path) = self.paths(vault_id);
-        let _lock = ExclusiveFileLock::acquire(&lock_path)?;
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, self.lock_timeout)?;
         match fs::symlink_metadata(&target) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
@@ -84,7 +99,7 @@ impl SyncedBaseStore {
         }
         create_dir_all_durable(&self.root)?;
         let (target, lock_path) = self.paths(vault_id);
-        let _lock = ExclusiveFileLock::acquire(&lock_path)?;
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, self.lock_timeout)?;
         match fs::symlink_metadata(&target) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -213,6 +228,7 @@ fn durable_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{SyncedBaseStore, write_local_conflict_copy};
+    use crate::providers::durable_file::ExclusiveFileLock;
 
     #[test]
     fn synced_base_round_trip_survives_atomic_replacement() {
@@ -233,6 +249,31 @@ mod tests {
     }
 
     #[test]
+    fn synced_base_lock_contention_returns_instead_of_waiting_for_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("bases");
+        let store = SyncedBaseStore::new_at(&root);
+        store.store("vault-a", b"base-one").unwrap();
+        let (_, lock_path) = store.paths("vault-a");
+        let held = ExclusiveFileLock::acquire(&lock_path).unwrap();
+        let competing =
+            SyncedBaseStore::new_at_with_lock_timeout(&root, std::time::Duration::from_millis(40));
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            result_tx.send(competing.read("vault-a")).unwrap();
+        });
+
+        let result = result_rx.recv_timeout(std::time::Duration::from_millis(250));
+        drop(held);
+        handle.join().unwrap();
+
+        let error = result
+            .expect("synced-base contender waited indefinitely for the held lock")
+            .expect_err("synced-base contender unexpectedly acquired the held lock");
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
     fn conflict_copy_is_a_durable_kdbx_sibling() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("personal.kdbx");
@@ -240,7 +281,10 @@ mod tests {
 
         let copy = write_local_conflict_copy(&source, b"local-edits", 1_784_439_300).unwrap();
 
-        assert_eq!(copy.parent(), source.parent());
+        assert_eq!(
+            copy.parent(),
+            std::fs::canonicalize(&source).unwrap().parent()
+        );
         assert_eq!(
             copy.extension().and_then(|value| value.to_str()),
             Some("kdbx")

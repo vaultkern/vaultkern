@@ -173,11 +173,16 @@ type TranslationKey =
   | "Statistics description"
   | "You have unsaved changes"
   | "Save before leaving this entry, discard your edits, or continue editing."
+  | "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+  | "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
+  | "Save your database settings before leaving, discard your edits, or continue editing."
+  | "Save your extension settings before leaving, discard your edits, or continue editing."
   | "Discard changes"
   | "Continue editing"
   | "Delete this entry permanently?"
   | "This will remove the selected entry from the current vault."
   | "Delete permanently"
+  | "Retry save"
   | "Failed to save extension settings"
   | "Failed to update quick unlock"
   | "Failed to add local vault"
@@ -388,11 +393,16 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Statistics description": "数据库统计会在分析功能接入共享管理器后显示。",
   "You have unsaved changes": "有未保存的更改",
   "Save before leaving this entry, discard your edits, or continue editing.": "离开条目前保存、丢弃更改，或继续编辑。",
+  "This entry changed in the current session but is not durable yet. Retry saving before leaving it.": "条目已在当前会话中更改，但尚未持久保存。请在离开前重试保存。",
+  "The database settings changed in this session but are not durable yet. Retry saving before leaving settings.": "数据库设置已在当前会话中更改，但尚未持久保存。请在离开设置页前重试保存。",
+  "Save your database settings before leaving, discard your edits, or continue editing.": "离开前保存数据库设置、丢弃更改，或继续编辑。",
+  "Save your extension settings before leaving, discard your edits, or continue editing.": "离开前保存扩展设置、丢弃更改，或继续编辑。",
   "Discard changes": "丢弃更改",
   "Continue editing": "继续编辑",
   "Delete this entry permanently?": "永久删除此条目？",
   "This will remove the selected entry from the current vault.": "这会从当前数据库中删除选中的条目。",
   "Delete permanently": "永久删除",
+  "Retry save": "重试保存",
   "Failed to save extension settings": "保存插件设置失败",
   "Failed to update quick unlock": "更新快速解锁失败",
   "Failed to add local vault": "添加本地数据库失败",
