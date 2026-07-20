@@ -2763,6 +2763,74 @@ it("creates a new entry and deletes it after explicit confirmation", async () =>
   });
 });
 
+it("retries a failed create save without creating the entry again", async () => {
+  const createEntry = vi.fn(async () => ({
+    type: "entry_detail" as const,
+    id: "entry-new",
+    title: "Created once",
+    username: "",
+    password: "",
+    url: "",
+    notes: "",
+    totp: null,
+    totpUri: null,
+    customFields: []
+  }));
+  const saveVault = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("simulated durable save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn(),
+    createEntry,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(await screen.findByRole("button", { name: "New Entry" }));
+  fireEvent.change(await screen.findByLabelText("Title"), {
+    target: { value: "Created once" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(await screen.findByText("simulated durable save failure")).toBeInTheDocument();
+  expect(createEntry).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(
+    await screen.findByText(
+      "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+    )
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Discard changes" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
+  expect(createEntry).toHaveBeenCalledTimes(1);
+});
+
 it("generates a password into the entry editor only after explicit use", async () => {
   const originalCrypto = globalThis.crypto;
   Object.defineProperty(globalThis, "crypto", {

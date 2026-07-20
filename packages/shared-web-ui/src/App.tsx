@@ -170,6 +170,11 @@ type DialogState =
   | { type: "unsaved"; action: PendingAction }
   | { type: "delete-entry"; entryId: string; title: string };
 
+interface PendingEntrySave {
+  vaultId: string;
+  detail: EntryDetail;
+}
+
 const COMPACT_BREAKPOINT = 1180;
 const STACKED_BREAKPOINT = 760;
 
@@ -349,6 +354,9 @@ export function App({
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [editorMode, setEditorMode] = useState<EntryEditorMode>("view");
   const [draft, setDraft] = useState<EntryDraft | null>(null);
+  const [pendingEntrySave, setPendingEntrySave] = useState<PendingEntrySave | null>(
+    null
+  );
   const [entryActionError, setEntryActionError] = useState<string | null>(null);
   const [dialogState, setDialogState] = useState<DialogState | null>(null);
   const [entryActionBusy, setEntryActionBusy] = useState(false);
@@ -483,6 +491,7 @@ export function App({
   function resetEditorState(nextMode: EntryEditorMode = "view") {
     setEditorMode(nextMode);
     setDraft(null);
+    setPendingEntrySave(null);
     setEntryActionError(null);
     setDialogState(null);
   }
@@ -706,11 +715,12 @@ export function App({
   }
 
   const dirty =
-    editorMode === "create-pending"
+    Boolean(pendingEntrySave) ||
+    (editorMode === "create-pending"
       ? hasDraftChangesFromEmpty(draft)
       : editorMode === "edit" && entryDetail && draft
         ? !draftMatchesEntry(draft, entryDetail)
-        : false;
+        : false);
 
   function performAction(action: PendingAction) {
     switch (action.type) {
@@ -811,30 +821,43 @@ export function App({
       return false;
     }
 
+    const vaultId = session.activeVaultId;
+    const wasCreating = editorMode === "create-pending";
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      if (editorMode === "create-pending") {
-        const detail = await client.createEntry(session.activeVaultId, {
+      let detail: EntryDetail;
+
+      if (pendingEntrySave) {
+        if (pendingEntrySave.vaultId !== vaultId) {
+          throw new Error("The pending entry belongs to another vault");
+        }
+
+        detail = pendingEntrySave.detail;
+        if (!draftMatchesEntry(draft, detail)) {
+          detail = await client.updateEntryFields(vaultId, detail.id, draft);
+          setPendingEntrySave({ vaultId, detail });
+        }
+      } else if (wasCreating) {
+        detail = await client.createEntry(vaultId, {
           parentGroupId: selectedGroupId ?? groupTree?.root.id ?? "",
           ...draft
         });
-        handleSaveResult(await client.saveVault(session.activeVaultId));
-        setEntryDetail(detail);
-        setSelectedEntryId(detail.id);
-        setShowEntryListWithDetail(true);
       } else if (editorMode === "edit" && selectedEntryId) {
-        const detail = await client.updateEntryFields(
-          session.activeVaultId,
-          selectedEntryId,
-          draft
-        );
-        handleSaveResult(await client.saveVault(session.activeVaultId));
-        setEntryDetail(detail);
-        setShowEntryListWithDetail(false);
+        detail = await client.updateEntryFields(vaultId, selectedEntryId, draft);
       } else {
         return false;
+      }
+
+      setPendingEntrySave({ vaultId, detail });
+      handleSaveResult(await client.saveVault(vaultId));
+      setEntryDetail(detail);
+      if (wasCreating) {
+        setSelectedEntryId(detail.id);
+        setShowEntryListWithDetail(true);
+      } else {
+        setShowEntryListWithDetail(false);
       }
 
       resetEditorState();
@@ -2024,7 +2047,9 @@ export function App({
           title={translate(extensionSettings.language, "You have unsaved changes")}
           description={translate(
             extensionSettings.language,
-            "Save before leaving this entry, discard your edits, or continue editing."
+            pendingEntrySave
+              ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+              : "Save before leaving this entry, discard your edits, or continue editing."
           )}
           actions={[
             {
@@ -2034,13 +2059,17 @@ export function App({
                 void handleSaveAndContinue(dialogState.action);
               }
             },
-            {
-              label: translate(extensionSettings.language, "Discard changes"),
-              onClick: () => {
-                resetEditorState();
-                performAction(dialogState.action);
-              }
-            },
+            ...(pendingEntrySave
+              ? []
+              : [
+                  {
+                    label: translate(extensionSettings.language, "Discard changes"),
+                    onClick: () => {
+                      resetEditorState();
+                      performAction(dialogState.action);
+                    }
+                  }
+                ]),
             {
               label: translate(extensionSettings.language, "Continue editing"),
               onClick: () => setDialogState(null)
