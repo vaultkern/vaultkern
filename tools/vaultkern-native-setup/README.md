@@ -18,8 +18,16 @@
 Run from the repository root:
 
 ```bash
+export VAULTKERN_WINDOWS_SIGNING_THUMBPRINT="<package-signing-certificate-sha1>"
+export VAULTKERN_SIGNTOOL="/mnt/c/Program Files (x86)/Windows Kits/10/bin/<sdk-version>/x64/signtool.exe"
 tools/vaultkern-native-setup/scripts/package_windows.sh
 ```
+
+The runtime shim must be signed by the same certificate as the installed
+VaultKern Windows package. Packaging stops before embedding the runtime when
+the thumbprint or `signtool` is missing, and verifies the Authenticode
+signature after signing. Set `VAULTKERN_WINDOWS_TIMESTAMP_URL` when the
+release signature should use an RFC 3161 timestamp server.
 
 Output directory:
 

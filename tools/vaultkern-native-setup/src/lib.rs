@@ -816,6 +816,17 @@ mod tests {
     }
 
     #[test]
+    fn package_script_refuses_to_embed_an_unsigned_runtime() {
+        let script = read_package_file("scripts/package_windows.sh");
+
+        assert!(script.contains("VAULTKERN_WINDOWS_SIGNING_THUMBPRINT"));
+        assert!(script.contains("VAULTKERN_SIGNTOOL"));
+        assert!(script.contains(r#""${sign_tool}" sign"#));
+        assert!(script.contains(r#""${sign_tool}" verify"#));
+        assert!(script.contains("runtime signing certificate thumbprint is required"));
+    }
+
+    #[test]
     fn build_script_tracks_runtime_payload_file_changes() {
         let build_rs = read_package_file("build.rs");
 
