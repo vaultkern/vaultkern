@@ -1,4 +1,4 @@
-use vaultkern_runtime::{Runtime, render_manifest, run_stdio_loop};
+use vaultkern_runtime::{Runtime, is_supported_browser_origin, render_manifest, run_stdio_loop};
 
 const USAGE: &str = "usage: vaultkern-runtime [--help] [--print-native-host-manifest <binary-path> <extension-origin>]";
 
@@ -58,7 +58,7 @@ fn classify_invocation(args: impl IntoIterator<Item = String>) -> Invocation {
             }
         }
         [origin, rest @ ..]
-            if is_browser_origin(origin)
+            if is_supported_browser_origin(origin)
                 && rest.iter().all(|arg| arg.starts_with("--parent-window=")) =>
         {
             Invocation::RunStdio {
@@ -69,10 +69,6 @@ fn classify_invocation(args: impl IntoIterator<Item = String>) -> Invocation {
     }
 }
 
-fn is_browser_origin(value: &str) -> bool {
-    value.starts_with("chrome-extension://")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Invocation, classify_invocation};
@@ -80,27 +76,34 @@ mod tests {
     #[test]
     fn browser_invocation_with_origin_and_parent_window_runs_stdio() {
         let invocation = classify_invocation([
-            "chrome-extension://test-extension-id/".to_string(),
+            "chrome-extension://testextensionid/".to_string(),
             "--parent-window=0".to_string(),
         ]);
 
         assert_eq!(
             invocation,
             Invocation::RunStdio {
-                browser_origin: Some("chrome-extension://test-extension-id/".to_string())
+                browser_origin: Some("chrome-extension://testextensionid/".to_string())
             }
         );
     }
 
     #[test]
     fn browser_invocation_with_origin_only_runs_stdio() {
-        let invocation = classify_invocation(["chrome-extension://test-extension-id/".to_string()]);
+        let invocation = classify_invocation(["chrome-extension://testextensionid/".to_string()]);
 
         assert_eq!(
             invocation,
             Invocation::RunStdio {
-                browser_origin: Some("chrome-extension://test-extension-id/".to_string())
+                browser_origin: Some("chrome-extension://testextensionid/".to_string())
             }
         );
+    }
+
+    #[test]
+    fn malformed_browser_origin_is_rejected_instead_of_using_resident_runtime() {
+        let invocation = classify_invocation(["chrome-extension://UpperCase/".to_string()]);
+
+        assert_eq!(invocation, Invocation::Invalid);
     }
 }
