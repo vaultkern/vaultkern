@@ -1119,25 +1119,26 @@ impl PipeFrameReader {
     }
 
     fn try_read_frame(&mut self) -> Result<Option<ResidentIpcFrame>> {
-        if let Some(frame) = self.try_decode_buffered_frame()? {
-            return Ok(Some(frame));
-        }
+        loop {
+            if let Some(frame) = self.try_decode_buffered_frame()? {
+                return Ok(Some(frame));
+            }
 
-        let available = pipe_available_bytes(&self.pipe)?;
-        if available == 0 {
-            return Ok(None);
+            let available = pipe_available_bytes(&self.pipe)?;
+            if available == 0 {
+                return Ok(None);
+            }
+            let chunk_length = available.min(PIPE_BUFFER_BYTES) as usize;
+            let mut chunk = vec![0_u8; chunk_length];
+            let read = PipeReader(self.pipe.clone())
+                .read(&mut chunk)
+                .context("read available resident IPC frame bytes")?;
+            if read == 0 {
+                anyhow::bail!("resident IPC pipe closed while reading a frame");
+            }
+            chunk.truncate(read);
+            self.buffered.extend_from_slice(&chunk);
         }
-        let chunk_length = available.min(PIPE_BUFFER_BYTES) as usize;
-        let mut chunk = vec![0_u8; chunk_length];
-        let read = PipeReader(self.pipe.clone())
-            .read(&mut chunk)
-            .context("read available resident IPC frame bytes")?;
-        if read == 0 {
-            anyhow::bail!("resident IPC pipe closed while reading a frame");
-        }
-        chunk.truncate(read);
-        self.buffered.extend_from_slice(&chunk);
-        self.try_decode_buffered_frame()
     }
 
     fn try_decode_buffered_frame(&mut self) -> Result<Option<ResidentIpcFrame>> {
@@ -1327,6 +1328,13 @@ mod tests {
                     "type": "blob_echo",
                     "payload": message["command"]["payload"].clone(),
                 }),
+                Some("consume_blob") => json!({
+                    "type": "blob_length",
+                    "length": message["command"]["payload"]
+                        .as_str()
+                        .map(str::len)
+                        .unwrap_or_default(),
+                }),
                 Some("oversized_response") => json!({
                     "type": "oversized_response",
                     "payload": "A".repeat(MAX_NATIVE_RESPONSE_BYTES),
@@ -1411,6 +1419,44 @@ mod tests {
             }
             _ => panic!("expected correlated large response"),
         }
+
+        let multi_buffer_blob = "B".repeat((PIPE_BUFFER_BYTES as usize) * 64);
+        let started = Instant::now();
+        write_frame(
+            &mut writer,
+            &ResidentIpcFrame::Request {
+                request_id: "native-multi-buffer-1".into(),
+                timeout_ms: 5_000,
+                message: json!({
+                    "version": 1,
+                    "command": {
+                        "type": "consume_blob",
+                        "payload": multi_buffer_blob,
+                    }
+                }),
+            },
+        )
+        .expect("send resident IPC request spanning many pipe buffers");
+        let response = read_frame(&mut reader)
+            .expect("read multi-buffer resident IPC response")
+            .expect("multi-buffer response before EOF");
+        match response {
+            ResidentIpcFrame::Response {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, "native-multi-buffer-1");
+                assert_eq!(
+                    message["length"].as_u64(),
+                    Some((PIPE_BUFFER_BYTES as u64) * 64)
+                );
+            }
+            _ => panic!("expected correlated multi-buffer response"),
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(1_200),
+            "resident IPC reader must drain available pipe buffers without one poll sleep per chunk"
+        );
 
         write_frame(
             &mut writer,
