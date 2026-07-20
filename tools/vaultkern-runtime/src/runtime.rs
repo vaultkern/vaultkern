@@ -1627,7 +1627,6 @@ impl Runtime {
                 let old_name = candidate.name.clone();
                 let old_description = candidate.description.clone();
                 let old_default_username = candidate.default_username.clone();
-                let old_root_title = candidate.root.title.clone();
                 let name = metadata.name;
                 let identity_update = VaultIdentityMetadataUpdate {
                     name: Some(name.clone()),
@@ -1646,12 +1645,9 @@ impl Runtime {
                         ..VaultMetadataUpdate::default()
                     },
                 )?;
-                candidate.root.title = name;
-
                 let name_changed = candidate.name != old_name;
                 let description_changed = candidate.description != old_description;
                 let default_username_changed = candidate.default_username != old_default_username;
-                let root_title_changed = candidate.root.title != old_root_title;
                 if name_changed || description_changed || default_username_changed {
                     let identity_update = VaultIdentityMetadataUpdate {
                         name: Some(candidate.name.clone()),
@@ -1669,21 +1665,9 @@ impl Runtime {
                     self.core
                         .update_vault_identity_metadata(&mut candidate, identity_update)?;
                 }
-                if root_title_changed {
-                    let root_id = candidate.root.id.to_string();
-                    self.core.update_group_times(
-                        &mut candidate,
-                        &root_id,
-                        GroupTimesUpdate {
-                            modified_at: Some(Some(modified_at)),
-                            ..GroupTimesUpdate::default()
-                        },
-                    )?;
-                }
                 did_change_vault_settings |= name_changed
                     || description_changed
-                    || default_username_changed
-                    || root_title_changed;
+                    || default_username_changed;
                 *vault = candidate;
             }
 
