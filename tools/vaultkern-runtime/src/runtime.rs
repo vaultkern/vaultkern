@@ -6546,12 +6546,23 @@ impl Runtime {
         if !pending.pending_sync || pending.fingerprint != *pending_fingerprint {
             anyhow::bail!("pending remote cache generation changed before synchronization");
         }
-        let pending_vault = Self::load_session_database(&pending.bytes, &key)
+        let _pending_vault = Self::load_session_database(&pending.bytes, &key)
             .context("failed to parse pending remote vault")?
             .vault;
-        let pending_save_profile = self
+        let _pending_save_profile = self
             .inspected_save_profile(&pending.bytes)
             .context("failed to inspect pending remote vault")?;
+        let (local_vault, local_save_profile) = {
+            let loaded = self
+                .vault_session
+                .find_loaded(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let vault = loaded
+                .vault
+                .as_ref()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            (vault.clone(), loaded.save_profile.clone())
+        };
         let base_bytes = self
             .synced_bases
             .read(vault_id)
@@ -6605,7 +6616,7 @@ impl Runtime {
                 .context("failed to inspect current OneDrive generation during pending sync")?;
             let merged_save_profile = match Self::merge_save_profile(
                 &base_save_profile,
-                &pending_save_profile,
+                &local_save_profile,
                 &remote_save_profile,
             ) {
                 Ok(profile) => profile,
@@ -6621,7 +6632,7 @@ impl Runtime {
                     );
                 }
             };
-            let patched = match three_way_field_patch(&base_vault, &pending_vault, &remote_vault) {
+            let patched = match three_way_field_patch(&base_vault, &local_vault, &remote_vault) {
                 Ok(patched) => patched,
                 Err(error) => {
                     return self.upload_pending_onedrive_conflict_copy(
@@ -14613,6 +14624,81 @@ mod tests {
         assert_eq!(
             runtime.current_source_status().unwrap().remote_state,
             "pending_sync"
+        );
+    }
+
+    #[test]
+    fn generic_pending_retry_preserves_later_live_edits() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let mut runtime = demo_onedrive_runtime(1_700_000_058);
+        runtime.remote_cache = RemoteVaultCache::new_at(cache_dir.path());
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &vault_id);
+        runtime.save_vault(&vault_id).unwrap();
+
+        let pending_fields = EntryFieldsDto {
+            notes: "durable pending edit".into(),
+            ..entry_fields(&entry)
+        };
+        runtime
+            .update_entry_fields(
+                &vault_id,
+                &entry.id,
+                pending_fields.title.clone(),
+                pending_fields.username.clone(),
+                pending_fields.password.clone(),
+                pending_fields.url.clone(),
+                pending_fields.notes.clone(),
+                pending_fields.totp_uri.clone(),
+                pending_fields.custom_fields.clone(),
+            )
+            .unwrap();
+        runtime.queue_test_onedrive_ambiguous_write(false);
+        assert!(matches!(
+            runtime.save_vault(&vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::SavedToCache,
+                ..
+            })
+        ));
+
+        let live_fields = EntryFieldsDto {
+            username: "edited after pending cache".into(),
+            ..pending_fields
+        };
+        runtime
+            .update_entry_fields(
+                &vault_id,
+                &entry.id,
+                live_fields.title.clone(),
+                live_fields.username.clone(),
+                live_fields.password.clone(),
+                live_fields.url.clone(),
+                live_fields.notes.clone(),
+                live_fields.totp_uri.clone(),
+                live_fields.custom_fields.clone(),
+            )
+            .unwrap();
+
+        let status = runtime.retry_vault_source_sync(&vault_id).unwrap();
+
+        assert_eq!(status.remote_state, "online");
+        let remote = runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let durable = KeepassCore::new()
+            .load_database(&remote, &key)
+            .unwrap()
+            .vault;
+        assert_eq!(
+            entry_fields_for_vault(&runtime.core, &durable, &entry.id).unwrap(),
+            live_fields
+        );
+        assert_eq!(
+            entry_fields(&runtime.get_entry_detail(&vault_id, &entry.id).unwrap()),
+            live_fields
         );
     }
 
