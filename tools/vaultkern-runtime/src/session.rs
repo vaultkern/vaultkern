@@ -66,6 +66,7 @@ pub(crate) struct LoadedVault {
     pub(crate) baseline_fingerprint: VaultSourceFingerprint,
     pub(crate) credential_shape: MasterCredentialShape,
     pub(crate) save_profile: SaveProfile,
+    pub(crate) requires_source_migration: bool,
     pub(crate) autosave_delay_seconds: Option<u32>,
     pub(crate) vault: Option<Vault>,
     pub(crate) transformed_key: Option<Arc<TransformedKey>>,
@@ -113,6 +114,9 @@ pub(crate) struct VaultSession {
 
 impl VaultSession {
     pub(crate) fn set_current_vault(&mut self, vault_ref_id: String) {
+        for loaded in self.loaded.values_mut() {
+            loaded.clear_unlock_secrets();
+        }
         self.state.set_current_vault(vault_ref_id);
         self.preloaded_for_unlock = None;
     }
@@ -151,10 +155,6 @@ impl VaultSession {
         self.loaded.insert(vault_id, loaded);
     }
 
-    pub(crate) fn contains_loaded(&self, vault_id: &str) -> bool {
-        self.loaded.contains_key(vault_id)
-    }
-
     pub(crate) fn mark_preloaded_for_unlock(&mut self, vault_id: String) {
         self.preloaded_for_unlock = Some(vault_id);
     }
@@ -175,6 +175,16 @@ impl VaultSession {
         self.loaded.get_mut(vault_id)
     }
 
+    pub(crate) fn remove_loaded(&mut self, vault_id: &str) {
+        self.loaded.remove(vault_id);
+        if self.preloaded_for_unlock.as_deref() == Some(vault_id) {
+            self.preloaded_for_unlock = None;
+        }
+        if self.state.active_vault_id() == Some(vault_id) {
+            self.state.lock();
+        }
+    }
+
     pub(crate) fn finish_unlock(
         &mut self,
         vault_id: &str,
@@ -187,7 +197,7 @@ impl VaultSession {
             .loaded
             .get_mut(vault_id)
             .ok_or_else(|| anyhow::anyhow!("vault not opened: {vault_id}"))?;
-        loaded.bytes.clear();
+        loaded.bytes = Vec::new();
         loaded.vault = Some(vault);
         loaded.transformed_key = Some(Arc::new(transformed_key));
         loaded.credential_shape = credential_shape;
@@ -208,7 +218,7 @@ impl VaultSession {
             .loaded
             .get_mut(vault_id)
             .ok_or_else(|| anyhow::anyhow!("vault not opened: {vault_id}"))?;
-        loaded.bytes.clear();
+        loaded.bytes = Vec::new();
         loaded.vault = Some(vault);
         loaded.transformed_key = Some(Arc::new(transformed_key));
         loaded.credential_shape = credential_shape;
@@ -250,6 +260,7 @@ mod tests {
         bytes: Vec<u8>,
         baseline_fingerprint: VaultSourceFingerprint,
         save_profile: SaveProfile,
+        requires_source_migration: bool,
         autosave_delay_seconds: Option<u32>,
         source_status: Option<VaultSourceStatusDto>,
         source_account_label: Option<String>,
@@ -264,6 +275,7 @@ mod tests {
             baseline_fingerprint,
             credential_shape,
             save_profile,
+            requires_source_migration,
             autosave_delay_seconds,
             vault: _,
             transformed_key: _,
@@ -277,6 +289,7 @@ mod tests {
             bytes: bytes.clone(),
             baseline_fingerprint: baseline_fingerprint.clone(),
             save_profile: save_profile.clone(),
+            requires_source_migration: *requires_source_migration,
             autosave_delay_seconds: *autosave_delay_seconds,
             source_status: source_status.clone(),
             source_account_label: source_account_label.clone(),
@@ -382,6 +395,7 @@ mod tests {
                 has_key_file: true,
             },
             save_profile: SaveProfile::recommended(),
+            requires_source_migration: false,
             autosave_delay_seconds: Some(u32::from(marker)),
             vault: Some(Vault::empty(name)),
             transformed_key: None,
@@ -410,8 +424,8 @@ mod tests {
 
         session.set_current_vault("ref-b".into());
         session.unlock("vault-b".into(), Some("ref-b".into()));
-        assert!(session.find_loaded("vault-a").unwrap().vault.is_some());
-        assert!(session.find_loaded("vault-b").unwrap().vault.is_some());
+        assert!(session.find_loaded("vault-a").unwrap().vault.is_none());
+        assert!(session.find_loaded("vault-b").unwrap().vault.is_none());
         assert!(
             session
                 .find_loaded("vault-a")
@@ -477,6 +491,7 @@ mod tests {
             .unwrap();
 
         assert!(session.find_loaded("vault-a").unwrap().bytes.is_empty());
+        assert_eq!(session.find_loaded("vault-a").unwrap().bytes.capacity(), 0);
         assert!(session.transformed_key("vault-a").is_some());
         assert_eq!(
             session.find_loaded("vault-a").unwrap().credential_shape,

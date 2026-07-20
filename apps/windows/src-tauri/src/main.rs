@@ -44,6 +44,15 @@ async fn runtime_send(
 }
 
 #[cfg(windows)]
+#[tauri::command]
+fn set_passkey_provider_enabled(
+    enabled: bool,
+    passkey_plugin: State<'_, PasskeyPluginServer>,
+) -> Result<bool, String> {
+    passkey_plugin.set_enabled(enabled)
+}
+
+#[cfg(windows)]
 fn main() {
     #[cfg(debug_assertions)]
     configure_webview_debugging();
@@ -73,12 +82,6 @@ fn main() {
             let plugin = PasskeyPluginServer::start(plugin_bridge.clone());
             if let Some(error) = plugin.start_error() {
                 eprintln!("passkey COM server unavailable: {error}");
-            } else {
-                match plugin.ensure_registered() {
-                    Ok(true) => {}
-                    Ok(false) => eprintln!("passkey provider is registered but disabled"),
-                    Err(error) => eprintln!("passkey provider registration failed: {error}"),
-                }
             }
             let ipc_plugin = plugin.handle();
             app.manage(plugin);
@@ -102,7 +105,10 @@ fn main() {
             app.manage(ipc_server);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![runtime_send])
+        .invoke_handler(tauri::generate_handler![
+            runtime_send,
+            set_passkey_provider_enabled
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run VaultKern");
 }

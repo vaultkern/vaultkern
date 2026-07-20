@@ -2,15 +2,17 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::slice;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use vaultkern_runtime::{
     PlatformPasskeyAssertionInput, PlatformPasskeyCredential, PlatformPasskeyRegistrationInput,
 };
 
-use crate::RuntimeBridge;
 use crate::plugin_operation_state::{PluginOperationId, PluginOperationState};
+use crate::{RuntimeBridge, plugin_callback_available};
 
 const S_OK: i32 = 0;
 const E_FAIL: i32 = 0x8000_4005_u32 as i32;
@@ -109,6 +111,7 @@ unsafe extern "system" {
     ) -> i32;
     fn vaultkern_plugin_stop(registration_cookie: u32) -> i32;
     fn vaultkern_plugin_ensure_registered(authenticator_state: *mut i32) -> i32;
+    fn vaultkern_plugin_remove_registered() -> i32;
     fn vaultkern_plugin_sync_credentials(
         credentials: *const VkCredentialMetadata,
         credential_count: u32,
@@ -118,6 +121,7 @@ unsafe extern "system" {
 struct CallbackContext {
     bridge: RuntimeBridge,
     operations: PluginOperationState,
+    enabled: Arc<AtomicBool>,
 }
 
 pub struct PasskeyPluginServer {
@@ -139,9 +143,11 @@ struct PasskeyPluginShared {
 
 impl PasskeyPluginServer {
     pub fn start(bridge: RuntimeBridge) -> Self {
+        let enabled = Arc::new(AtomicBool::new(false));
         let mut context = Box::new(CallbackContext {
             bridge,
             operations: PluginOperationState::default(),
+            enabled: Arc::clone(&enabled),
         });
         let callbacks = VkPluginCallbacks {
             version: 2,
@@ -175,14 +181,43 @@ impl PasskeyPluginServer {
         }
     }
 
-    pub fn ensure_registered(&self) -> Result<bool, String> {
-        self.ensure_started()?;
-        let mut state = 0;
-        let status = unsafe { vaultkern_plugin_ensure_registered(&mut state) };
-        if failed(status) {
-            return Err(hresult_message("register plugin authenticator", status));
+    pub fn set_enabled(&self, enabled: bool) -> Result<bool, String> {
+        let _sync = self
+            .shared
+            .sync_lock
+            .lock()
+            .map_err(|_| "passkey provider configuration is unavailable".to_owned())?;
+        if !self.shared.active.load(Ordering::Acquire) {
+            return Err("passkey COM server is no longer active".to_owned());
         }
-        Ok(state == 1)
+        let enabled_state = &self.shared.context.enabled;
+        if !enabled {
+            let was_enabled = enabled_state.swap(false, Ordering::AcqRel);
+            let status = unsafe { vaultkern_plugin_remove_registered() };
+            if failed(status) {
+                enabled_state.store(was_enabled, Ordering::Release);
+                return Err(hresult_message("unregister plugin authenticator", status));
+            }
+            return Ok(false);
+        }
+
+        let os_enabled = ensure_registered(&self.shared)?;
+        enabled_state.store(true, Ordering::Release);
+        if let Err(error) = sync_credentials_locked(&self.shared) {
+            enabled_state.store(false, Ordering::Release);
+            let _ = unsafe { vaultkern_plugin_remove_registered() };
+            return Err(error);
+        }
+        Ok(os_enabled)
+    }
+
+    pub fn ensure_registered(&self) -> Result<bool, String> {
+        let _sync = self
+            .shared
+            .sync_lock
+            .lock()
+            .map_err(|_| "passkey provider configuration is unavailable".to_owned())?;
+        ensure_registered(&self.shared)
     }
 
     pub fn sync_credentials(&self) -> Result<usize, String> {
@@ -191,13 +226,6 @@ impl PasskeyPluginServer {
 
     pub fn start_error(&self) -> Option<&str> {
         self.shared.start_error.as_deref()
-    }
-
-    fn ensure_started(&self) -> Result<(), String> {
-        match &self.shared.start_error {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
-        }
     }
 }
 
@@ -212,13 +240,21 @@ fn sync_credentials(shared: &PasskeyPluginShared) -> Result<usize, String> {
         .sync_lock
         .lock()
         .map_err(|_| "passkey credential cache synchronization is unavailable".to_owned())?;
+    sync_credentials_locked(shared)
+}
+
+fn sync_credentials_locked(shared: &PasskeyPluginShared) -> Result<usize, String> {
     if !shared.active.load(Ordering::Acquire) {
         return Err("passkey COM server is no longer active".to_owned());
     }
-    if let Some(error) = &shared.start_error {
-        return Err(error.clone());
+    if !shared.context.enabled.load(Ordering::Acquire) {
+        return Ok(0);
     }
-    let credentials = shared.context.bridge.list_platform_passkey_credentials()?;
+    ensure_started(shared)?;
+    let credentials = shared
+        .context
+        .bridge
+        .list_platform_passkey_credentials_for_sync()?;
     let backings = credentials
         .iter()
         .map(CredentialBacking::new)
@@ -241,6 +277,26 @@ fn sync_credentials(shared: &PasskeyPluginShared) -> Result<usize, String> {
         return Err(hresult_message("sync plugin credential cache", status));
     }
     Ok(native.len())
+}
+
+fn ensure_registered(shared: &PasskeyPluginShared) -> Result<bool, String> {
+    if !shared.active.load(Ordering::Acquire) {
+        return Err("passkey COM server is no longer active".to_owned());
+    }
+    ensure_started(shared)?;
+    let mut state = 0;
+    let status = unsafe { vaultkern_plugin_ensure_registered(&mut state) };
+    if failed(status) {
+        return Err(hresult_message("register plugin authenticator", status));
+    }
+    Ok(state == 1)
+}
+
+fn ensure_started(shared: &PasskeyPluginShared) -> Result<(), String> {
+    match &shared.start_error {
+        Some(error) => Err(error.clone()),
+        None => Ok(()),
+    }
 }
 
 extern "system" fn begin_operation_callback(context: *mut c_void, id: VkBytes) -> i32 {
@@ -310,6 +366,7 @@ impl Drop for PasskeyPluginServer {
             .sync_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        self.shared.context.enabled.store(false, Ordering::Release);
         self.shared.active.store(false, Ordering::Release);
         if self.registration_cookie != 0 {
             unsafe {
@@ -355,7 +412,7 @@ impl CredentialBacking {
 extern "system" fn is_unlocked_callback(context: *mut c_void) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         callback_context(context)
-            .is_some_and(|context| context.bridge.platform_passkey_is_unlocked())
+            .is_some_and(callback_available)
             .into()
     }))
     .unwrap_or(0)
@@ -377,6 +434,9 @@ extern "system" fn make_credential_callback(
         let Some(context) = callback_context(context) else {
             return E_INVALIDARG;
         };
+        if !callback_available(context) {
+            return NTE_NOT_FOUND;
+        }
         let Some(input) = input.as_ref() else {
             return E_INVALIDARG;
         };
@@ -463,6 +523,9 @@ extern "system" fn get_assertion_callback(
         let Some(context) = callback_context(context) else {
             return E_INVALIDARG;
         };
+        if !callback_available(context) {
+            return NTE_NOT_FOUND;
+        }
         let Some(input) = input.as_ref() else {
             return E_INVALIDARG;
         };
@@ -517,6 +580,13 @@ extern "system" fn get_assertion_callback(
         S_OK
     }))
     .unwrap_or(E_FAIL)
+}
+
+fn callback_available(context: &CallbackContext) -> bool {
+    plugin_callback_available(
+        context.enabled.load(Ordering::Acquire),
+        context.bridge.platform_passkey_is_unlocked(),
+    )
 }
 
 extern "system" fn free_bytes_callback(_context: *mut c_void, bytes: VkOwnedBytes) {

@@ -13,10 +13,14 @@ if (!rootElement) {
 }
 
 const client = new RuntimeClient(createTauriTransport(invoke));
+const settingsStore = createDesktopSettingsStore(
+  window.localStorage,
+  (enabled) => invoke("set_passkey_provider_enabled", { enabled })
+);
 
 createRoot(rootElement).render(
   <App
     client={client}
-    extensionSettingsStore={createDesktopSettingsStore(window.localStorage)}
+    extensionSettingsStore={settingsStore}
   />
 );

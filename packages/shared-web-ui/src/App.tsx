@@ -354,6 +354,8 @@ export function App({
   const [entryActionBusy, setEntryActionBusy] = useState(false);
   const [showEntryListWithDetail, setShowEntryListWithDetail] = useState(false);
   const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
+  const [sourceDetailReloadKey, setSourceDetailReloadKey] = useState(0);
+  const handledSourceDetailReloadKey = useRef(0);
   const [fillCandidates, setFillCandidates] = useState<EntrySummary[]>([]);
   const [fillError, setFillError] = useState<string | null>(null);
   const [recentVaults, setRecentVaults] = useState<VaultReference[]>([]);
@@ -546,6 +548,9 @@ export function App({
       const sourceStatus = await client.retryVaultSourceSync(session.activeVaultId);
       setSession((current) => (current ? { ...current, sourceStatus } : current));
       if (sourceStatus.remoteState === "online") {
+        setEntryDetail(null);
+        setWorkspaceReloadKey((current) => current + 1);
+        setSourceDetailReloadKey((current) => current + 1);
         setSaveTip(translate(extensionSettings.language, "Remote sync restored."));
       } else if (sourceStatus.lastError) {
         setSourceSyncError(sourceStatus.lastError);
@@ -1377,9 +1382,13 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [fillHooks, session?.activeVaultId]);
+  }, [fillHooks, session?.activeVaultId, workspaceReloadKey]);
 
   useEffect(() => {
+    const forceSourceReload =
+      handledSourceDetailReloadKey.current !== sourceDetailReloadKey;
+    handledSourceDetailReloadKey.current = sourceDetailReloadKey;
+
     if (!session?.activeVaultId || !selectedEntryId) {
       setEntryDetail(null);
       setDetailError(null);
@@ -1389,7 +1398,7 @@ export function App({
       return;
     }
 
-    if (entryDetail?.id === selectedEntryId) {
+    if (!forceSourceReload && entryDetail?.id === selectedEntryId) {
       setDetailError(null);
       return;
     }
@@ -1421,7 +1430,13 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [client, entryDetail?.id, selectedEntryId, session?.activeVaultId]);
+  }, [
+    client,
+    entryDetail?.id,
+    selectedEntryId,
+    session?.activeVaultId,
+    sourceDetailReloadKey
+  ]);
 
   useEffect(() => {
     if (!session?.activeVaultId) {
@@ -1485,7 +1500,7 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [client, session?.activeVaultId, showDatabaseSettingsPage]);
+  }, [client, session?.activeVaultId, showDatabaseSettingsPage, workspaceReloadKey]);
 
   useEffect(() => {
     if (!entryDetail || !session?.activeVaultId || !selectedEntryId) {

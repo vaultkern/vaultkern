@@ -92,6 +92,7 @@ int32_t VK_CALL vaultkern_plugin_start(
     uint32_t* registration_cookie);
 int32_t VK_CALL vaultkern_plugin_stop(uint32_t registration_cookie);
 int32_t VK_CALL vaultkern_plugin_ensure_registered(int32_t* authenticator_state);
+int32_t VK_CALL vaultkern_plugin_remove_registered(void);
 int32_t VK_CALL vaultkern_plugin_sync_credentials(
     const VkCredentialMetadata* credentials,
     uint32_t credential_count);

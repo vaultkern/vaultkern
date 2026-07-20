@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, TargetExpectation,
-    TempWriteFaultPoints, create_dir_all_durable, path_file_identity, publish_temp, sha256_hex,
-    write_verified_temp,
+    TempWriteFaultPoints, create_dir_all_durable, path_file_identity, publish_temp,
+    remove_if_exists, sha256_hex, sync_directory, write_verified_temp,
 };
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
@@ -66,6 +66,29 @@ impl SyncedBaseStore {
         }
     }
 
+    pub(crate) fn delete(&self, vault_id: &str) -> io::Result<()> {
+        if !self.root.exists() {
+            return Ok(());
+        }
+        create_dir_all_durable(&self.root)?;
+        let (target, lock_path) = self.paths(vault_id);
+        let _lock = ExclusiveFileLock::acquire(&lock_path)?;
+        match fs::symlink_metadata(&target) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "synced base is not a regular file",
+                ))
+            }
+            Ok(_) => {
+                remove_if_exists(&target)?;
+                sync_directory(&self.root)
+            }
+        }
+    }
+
     fn paths(&self, vault_id: &str) -> (PathBuf, PathBuf) {
         let digest = sha256_hex(vault_id.as_bytes());
         (
@@ -80,7 +103,19 @@ pub(crate) fn write_local_conflict_copy(
     bytes: &[u8],
     timestamp: u64,
 ) -> io::Result<PathBuf> {
-    let source_path = fs::canonicalize(source_path)?;
+    let source_path = match fs::canonicalize(source_path) {
+        Ok(source_path) => source_path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = source_path.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "vault path has no parent")
+            })?;
+            let file_name = source_path.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "vault path has no file name")
+            })?;
+            fs::canonicalize(parent)?.join(file_name)
+        }
+        Err(error) => return Err(error),
+    };
     let parent = source_path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "vault path has no parent"))?;

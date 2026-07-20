@@ -202,6 +202,25 @@ pub(crate) fn unlock_from_blob(
     file_bytes: &[u8],
     allow_kdf: bool,
 ) -> Result<UnlockAttempt> {
+    unlock_from_blob_with_cache_policy(storage, storage_key, file_bytes, allow_kdf, true)
+}
+
+pub(crate) fn unlock_historical_snapshot_from_blob(
+    storage: &dyn SecureStorageProvider,
+    storage_key: &str,
+    file_bytes: &[u8],
+    allow_kdf: bool,
+) -> Result<UnlockAttempt> {
+    unlock_from_blob_with_cache_policy(storage, storage_key, file_bytes, allow_kdf, false)
+}
+
+fn unlock_from_blob_with_cache_policy(
+    storage: &dyn SecureStorageProvider,
+    storage_key: &str,
+    file_bytes: &[u8],
+    allow_kdf: bool,
+    refresh_cached_transformed_key: bool,
+) -> Result<UnlockAttempt> {
     let encoded = match storage.load(storage_key) {
         Ok(Some(encoded)) => encoded,
         Ok(None) => return Ok(UnlockAttempt::NotEnrolled),
@@ -261,28 +280,35 @@ pub(crate) fn unlock_from_blob(
     let vault = match load_kdbx_with_transformed_key(file_bytes, &refreshed) {
         Ok(vault) => vault,
         Err(KdbxError::HeaderHmacMismatch) => {
-            storage
-                .delete(storage_key)
-                .context("failed to delete stale unlock blob")?;
+            if refresh_cached_transformed_key {
+                storage
+                    .delete(storage_key)
+                    .context("failed to delete stale unlock blob")?;
+            }
             return Ok(UnlockAttempt::CredentialRequired);
         }
         Err(error) => return Err(error.into()),
     };
 
-    let (master_credential, _) = blob.into_parts();
-    let credential_shape = master_credential.shape();
-    let refreshed_blob = UnlockBlob::new(master_credential, refreshed);
-    let encoded = refreshed_blob.encode()?;
-    storage
-        .store(storage_key, &encoded)
-        .context("failed to refresh unlock blob atomically")?;
-    let (_, transformed_key) = refreshed_blob.into_parts();
+    let credential_shape = blob.master_credential().shape();
+    let transformed_key = if refresh_cached_transformed_key {
+        let (master_credential, _) = blob.into_parts();
+        let refreshed_blob = UnlockBlob::new(master_credential, refreshed);
+        let encoded = refreshed_blob.encode()?;
+        storage
+            .store(storage_key, &encoded)
+            .context("failed to refresh unlock blob atomically")?;
+        let (_, transformed_key) = refreshed_blob.into_parts();
+        transformed_key
+    } else {
+        refreshed
+    };
     Ok(UnlockAttempt::Unlocked(UnlockedVault {
         vault,
         transformed_key,
         credential_shape,
         #[cfg(test)]
-        cache_refreshed: true,
+        cache_refreshed: refresh_cached_transformed_key,
     }))
 }
 
@@ -301,6 +327,7 @@ fn take<'a>(bytes: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8]>
 mod tests {
     use super::{
         MasterCredential, UnlockAttempt, UnlockBlob, enroll_unlock_blob, unlock_from_blob,
+        unlock_historical_snapshot_from_blob,
     };
     use crate::providers::secure_storage::{SecureStorageError, SecureStorageProvider};
     use std::cell::{Cell, RefCell};
@@ -463,6 +490,59 @@ mod tests {
         };
         assert!(!warm.cache_refreshed);
         assert_eq!(store.stores.get(), 2);
+    }
+
+    #[test]
+    fn historical_snapshot_unlock_does_not_replace_the_current_cached_key() {
+        let password = b"historical password";
+        let historical = file("historical", password);
+        let current = file("current", password);
+        let master = MasterCredential::new(Some(password), None).unwrap();
+        let current_key = derive_transformed_key(&current, &master.to_composite_key()).unwrap();
+        let store = CountingStore::default();
+        enroll_unlock_blob(&store, "vault-a", &master, &current_key).unwrap();
+
+        let UnlockAttempt::Unlocked(historical_unlock) =
+            unlock_historical_snapshot_from_blob(&store, "vault-a", &historical, true).unwrap()
+        else {
+            panic!("expected historical unlock");
+        };
+        assert_eq!(historical_unlock.vault.name, "historical");
+        assert!(!historical_unlock.cache_refreshed);
+        assert_eq!(store.stores.get(), 1);
+
+        let UnlockAttempt::Unlocked(current_unlock) =
+            unlock_from_blob(&store, "vault-a", &current, true).unwrap()
+        else {
+            panic!("expected current cached unlock");
+        };
+        assert_eq!(current_unlock.vault.name, "current");
+        assert!(!current_unlock.cache_refreshed);
+        assert_eq!(store.stores.get(), 1);
+    }
+
+    #[test]
+    fn rejected_historical_snapshot_does_not_delete_the_current_unlock_blob() {
+        let current_password = b"current password";
+        let current = file("current", current_password);
+        let unrelated = file("unrelated", b"different password");
+        let master = MasterCredential::new(Some(current_password), None).unwrap();
+        let current_key = derive_transformed_key(&current, &master.to_composite_key()).unwrap();
+        let store = CountingStore::default();
+        enroll_unlock_blob(&store, "vault-a", &master, &current_key).unwrap();
+
+        assert!(matches!(
+            unlock_historical_snapshot_from_blob(&store, "vault-a", &unrelated, true).unwrap(),
+            UnlockAttempt::CredentialRequired
+        ));
+        assert!(store.contains("vault-a").unwrap());
+
+        let UnlockAttempt::Unlocked(current_unlock) =
+            unlock_from_blob(&store, "vault-a", &current, true).unwrap()
+        else {
+            panic!("expected current cached unlock");
+        };
+        assert_eq!(current_unlock.vault.name, "current");
     }
 
     #[test]

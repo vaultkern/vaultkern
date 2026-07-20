@@ -22,9 +22,6 @@ type Draft = {
   recycleBinEnabled: boolean;
   compression: string;
   autosaveDelaySeconds: string;
-  credentialAction: "unchanged" | "change" | "remove";
-  newPassword: string;
-  confirmPassword: string;
   cipher: string;
   kdfAlgorithm: string;
   transformRounds: string;
@@ -58,26 +55,11 @@ export function DatabaseSettingsPage({
   function submit(event: FormEvent) {
     event.preventDefault();
 
-    if (draft.credentialAction === "change" && draft.newPassword !== draft.confirmPassword) {
+    if (!settings) {
       return;
     }
 
-    const kdf: DatabaseKdfSettings =
-      draft.kdfAlgorithm === "aes_kdbx4"
-        ? {
-            algorithm: "aes_kdbx4",
-            transformRounds: parseOptionalInteger(draft.transformRounds) ?? 100000,
-            iterations: null,
-            memoryKib: null,
-            parallelism: null
-          }
-        : {
-            algorithm: "argon2id",
-            transformRounds: null,
-            iterations: parseOptionalInteger(draft.argon2Iterations) ?? 2,
-            memoryKib: miBToBytesAsKiB(draft.argon2MemoryMiB) ?? 65536,
-            parallelism: parseOptionalInteger(draft.argon2Parallelism) ?? 1
-          };
+    const kdf: DatabaseKdfSettings = settings.encryption.kdf;
     const encryption: DatabaseEncryptionSettings = {
       compression: draft.compression,
       cipher: draft.cipher,
@@ -103,13 +85,7 @@ export function DatabaseSettingsPage({
         enabled: draft.recycleBinEnabled
       },
       encryption,
-      autosaveDelaySeconds: parseOptionalInteger(draft.autosaveDelaySeconds) ?? 0,
-      credentials:
-        draft.credentialAction === "change"
-          ? { newPassword: draft.newPassword, removePassword: false }
-          : draft.credentialAction === "remove"
-            ? { newPassword: null, removePassword: true }
-            : undefined
+      autosaveDelaySeconds: parseOptionalInteger(draft.autosaveDelaySeconds) ?? 0
     });
   }
 
@@ -264,10 +240,11 @@ export function DatabaseSettingsPage({
         <Field label={text("Key Derivation Function")}>
           <select
             value={draft.kdfAlgorithm}
-            onChange={(event) => setDraft({ ...draft, kdfAlgorithm: event.target.value })}
+            disabled
             style={inputStyle}
           >
             <option value="argon2id">Argon2id</option>
+            <option value="argon2d">Argon2d</option>
             <option value="aes_kdbx4">AES-KDF</option>
           </select>
         </Field>
@@ -276,9 +253,7 @@ export function DatabaseSettingsPage({
             <input
               inputMode="numeric"
               value={draft.transformRounds}
-              onChange={(event) =>
-                setDraft({ ...draft, transformRounds: event.target.value })
-              }
+              disabled
               style={inputStyle}
             />
           </Field>
@@ -288,9 +263,7 @@ export function DatabaseSettingsPage({
               <input
                 inputMode="numeric"
                 value={draft.argon2Iterations}
-                onChange={(event) =>
-                  setDraft({ ...draft, argon2Iterations: event.target.value })
-                }
+                disabled
                 style={inputStyle}
               />
             </Field>
@@ -298,9 +271,7 @@ export function DatabaseSettingsPage({
               <input
                 inputMode="numeric"
                 value={draft.argon2MemoryMiB}
-                onChange={(event) =>
-                  setDraft({ ...draft, argon2MemoryMiB: event.target.value })
-                }
+                disabled
                 style={inputStyle}
               />
             </Field>
@@ -308,9 +279,7 @@ export function DatabaseSettingsPage({
               <input
                 inputMode="numeric"
                 value={draft.argon2Parallelism}
-                onChange={(event) =>
-                  setDraft({ ...draft, argon2Parallelism: event.target.value })
-                }
+                disabled
                 style={inputStyle}
               />
             </Field>
@@ -318,75 +287,6 @@ export function DatabaseSettingsPage({
         )}
       </section>
 
-      <section style={sectionStyle}>
-        <h2 style={sectionTitleStyle}>{text("Credentials")}</h2>
-        <div style={credentialButtonRowStyle}>
-          <button
-            type="button"
-            onClick={() =>
-              setDraft({
-                ...draft,
-                credentialAction: "change",
-                newPassword: "",
-                confirmPassword: ""
-              })
-            }
-            style={draft.credentialAction === "change" ? primaryButtonStyle : backButtonStyle}
-          >
-            {settings.hasPassword ? text("Change password") : text("Add password")}
-          </button>
-          {settings.hasPassword ? (
-            <button
-              type="button"
-              onClick={() =>
-                setDraft({
-                  ...draft,
-                  credentialAction: "remove",
-                  newPassword: "",
-                  confirmPassword: ""
-                })
-              }
-              style={draft.credentialAction === "remove" ? dangerButtonStyle : backButtonStyle}
-            >
-              {text("Remove password")}
-            </button>
-          ) : null}
-        </div>
-        {draft.credentialAction === "change" ? (
-          <>
-            <Field label={text("New Master Password")}>
-              <input
-                type="password"
-                value={draft.newPassword}
-                onChange={(event) =>
-                  setDraft({ ...draft, newPassword: event.target.value })
-                }
-                style={inputStyle}
-              />
-            </Field>
-            <Field label={text("Confirm New Master Password")}>
-              <input
-                type="password"
-                value={draft.confirmPassword}
-                onChange={(event) =>
-                  setDraft({ ...draft, confirmPassword: event.target.value })
-                }
-                style={inputStyle}
-              />
-            </Field>
-            {draft.newPassword !== draft.confirmPassword ? (
-              <div role="alert" style={inlineErrorStyle}>
-                {text("Password confirmation does not match.")}
-              </div>
-            ) : null}
-          </>
-        ) : null}
-        {draft.credentialAction === "remove" ? (
-          <div style={panelTextStyle}>
-            {text("Saving will remove the current database password.")}
-          </div>
-        ) : null}
-      </section>
     </form>
   );
 }
@@ -413,9 +313,6 @@ function createDraft(settings: DatabaseSettings | null): Draft {
     recycleBinEnabled: settings?.recycleBin.enabled ?? true,
     compression: settings?.encryption.compression ?? "gzip",
     autosaveDelaySeconds: optionalNumber(settings?.autosaveDelaySeconds),
-    credentialAction: "unchanged",
-    newPassword: "",
-    confirmPassword: "",
     cipher: settings?.encryption.cipher ?? "aes256",
     kdfAlgorithm: settings?.encryption.kdf.algorithm ?? "argon2id",
     transformRounds: optionalNumber(settings?.encryption.kdf.transformRounds),
@@ -444,22 +341,25 @@ function parseOptionalInteger(value: string): number | null {
 }
 
 function optionalMiB(value: number | null | undefined): string {
-  return value === null || value === undefined ? "" : String(Math.round(value / 1048576));
+  return value === null || value === undefined ? "" : String(value / 1048576);
 }
 
 function optionalKiBAsMiB(value: number | null | undefined): string {
-  return value === null || value === undefined ? "" : String(Math.round(value / 1024));
+  return value === null || value === undefined ? "" : String(value / 1024);
 }
 
 function miBToBytes(value: string): number | null {
-  const parsed = parseOptionalInteger(value);
-  return parsed === null ? null : parsed * 1048576;
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  const bytes = Math.round(parsed * 1048576);
+  return Number.isFinite(parsed) && parsed >= 0 && Number.isSafeInteger(bytes)
+    ? bytes
+    : null;
 }
 
-function miBToBytesAsKiB(value: string): number | null {
-  const parsed = parseOptionalInteger(value);
-  return parsed === null ? null : parsed * 1024;
-}
 
 const pageStyle = {
   display: "grid",
@@ -542,15 +442,6 @@ const checkboxStyle = {
   fontFamily: archiveTheme.font.body
 };
 
-const backButtonStyle = {
-  border: `1px solid ${archiveTheme.colors.line}`,
-  borderRadius: archiveTheme.radius.pill,
-  padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
-  background: archiveTheme.colors.surfaceMuted,
-  color: archiveTheme.colors.text,
-  fontFamily: archiveTheme.font.body,
-  cursor: "pointer"
-};
 
 const primaryButtonStyle = {
   border: `1px solid ${archiveTheme.colors.accentStrong}`,
@@ -562,30 +453,8 @@ const primaryButtonStyle = {
   cursor: "pointer"
 };
 
-const dangerButtonStyle = {
-  border: `1px solid ${archiveTheme.colors.danger}`,
-  borderRadius: archiveTheme.radius.pill,
-  padding: `${archiveTheme.spacing.sm} ${archiveTheme.spacing.md}`,
-  background: "rgba(139, 61, 42, 0.12)",
-  color: archiveTheme.colors.danger,
-  fontFamily: archiveTheme.font.body,
-  cursor: "pointer"
-};
 
 const panelTextStyle = {
   color: archiveTheme.colors.text,
   fontFamily: archiveTheme.font.body
-};
-
-const credentialButtonRowStyle = {
-  display: "flex",
-  flexWrap: "wrap" as const,
-  gap: archiveTheme.spacing.sm,
-  alignItems: "center"
-};
-
-const inlineErrorStyle = {
-  color: archiveTheme.colors.danger,
-  fontFamily: archiveTheme.font.body,
-  alignSelf: "end"
 };

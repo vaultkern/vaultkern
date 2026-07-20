@@ -56,10 +56,104 @@ fn create_entry_in_root(
 }
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
+    if let Some(root) = std::env::var_os("VAULTKERN_EXTERNAL_FIXTURES") {
+        return std::path::PathBuf::from(root).join(name);
+    }
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("fixtures/kdbx")
         .join(name)
+}
+
+#[test]
+fn runtime_opens_legacy_kdbx2_and_kdbx3_and_migrates_them_on_save() {
+    for fixture in ["Format200.kdbx", "Format300.kdbx"] {
+        let source = fixture_path(fixture);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(fixture);
+        std::fs::copy(source, &path).unwrap();
+
+        let mut runtime = Runtime::for_tests();
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_with_password(&opened.vault_id, "a")
+            .unwrap_or_else(|error| panic!("{fixture} must stay on the password path: {error:#}"));
+        runtime.save_vault(&opened.vault_id).unwrap();
+
+        let migrated = std::fs::read(&path).unwrap();
+        let inspection = KeepassCore::new().inspect_database(&migrated).unwrap();
+        assert_eq!(
+            inspection.header.version,
+            vaultkern_core::KdbxVersion::V4_1,
+            "{fixture}"
+        );
+        let mut key = CompositeKey::default();
+        key.add_password("a");
+        KeepassCore::new()
+            .load_kdbx(&migrated, &key)
+            .unwrap_or_else(|error| panic!("migrated {fixture} must reopen: {error:#}"));
+    }
+}
+
+#[test]
+fn runtime_migrates_unchanged_legacy_onedrive_vault_on_save() {
+    let bytes = std::fs::read(fixture_path("Format300.kdbx")).unwrap();
+    let mut runtime = Runtime::for_tests_with_onedrive_item(
+        "drive-1",
+        "item-1",
+        "legacy.kdbx",
+        "alice@example.com",
+        bytes,
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("a")
+        .expect("KDBX 3 OneDrive vault unlock");
+    let vault_id = runtime
+        .session_state()
+        .active_vault_id
+        .expect("active OneDrive vault");
+
+    runtime.save_vault(&vault_id).unwrap();
+
+    let migrated = runtime
+        .read_test_onedrive_item_bytes("drive-1", "item-1")
+        .unwrap();
+    let inspection = KeepassCore::new().inspect_database(&migrated).unwrap();
+    assert_eq!(inspection.header.version, vaultkern_core::KdbxVersion::V4_1);
+    assert_eq!(runtime.test_onedrive_access_counts().writes, 1);
+}
+
+#[test]
+fn runtime_requires_legacy_migration_save_before_quick_unlock_enrollment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.kdbx");
+    std::fs::copy(fixture_path("Format300.kdbx"), &path).unwrap();
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime.unlock_with_password(&opened.vault_id, "a").unwrap();
+
+    let error = runtime
+        .enable_quick_unlock_for_current_vault(Some("a"), None)
+        .expect_err("legacy source must be saved before quick-unlock enrollment");
+
+    assert!(
+        error
+            .to_string()
+            .contains("save the migrated vault before enabling quick unlock"),
+        "{error:#}"
+    );
+
+    runtime.save_vault(&opened.vault_id).unwrap();
+    runtime
+        .enable_quick_unlock_for_current_vault(Some("a"), None)
+        .expect("saved migration can enroll quick unlock");
+    runtime.lock_session();
+    runtime
+        .unlock_current_vault_with_quick_unlock()
+        .expect("migrated vault can quick-unlock after enrollment");
 }
 
 #[test]

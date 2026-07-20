@@ -10,6 +10,11 @@ pub fn launch_requests_visible_window(arguments: &[String]) -> bool {
         .any(|argument| argument == "-PluginActivated")
 }
 
+#[cfg(any(windows, test))]
+pub(crate) fn plugin_callback_available(provider_enabled: bool, vault_unlocked: bool) -> bool {
+    provider_enabled && vault_unlocked
+}
+
 pub fn should_refresh_platform_passkeys(
     command_type: Option<&str>,
     response: &serde_json::Value,
@@ -18,19 +23,18 @@ pub fn should_refresh_platform_passkeys(
     if response_type == Some("error") {
         return false;
     }
-    if response_type == Some("session_state")
-        && response
-            .get("unlocked")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-    {
+    if response_type == Some("session_state") {
         return true;
     }
 
     matches!(
         command_type,
         Some(
-            "retry_vault_source_sync"
+            "add_local_vault_reference"
+                | "add_onedrive_vault_reference"
+                | "open_local_vault"
+                | "delete_vault_reference"
+                | "retry_vault_source_sync"
                 | "set_entry_passkey"
                 | "clear_entry_passkey"
                 | "save_passkey_registration"
@@ -44,7 +48,9 @@ pub fn should_refresh_platform_passkeys(
 
 #[cfg(test)]
 mod tests {
-    use super::{launch_requests_visible_window, should_refresh_platform_passkeys};
+    use super::{
+        launch_requests_visible_window, plugin_callback_available, should_refresh_platform_passkeys,
+    };
     use serde_json::json;
 
     #[test]
@@ -65,6 +71,18 @@ mod tests {
             Some("get_entry_detail"),
             &json!({ "type": "session_state", "unlocked": true })
         ));
+        assert!(should_refresh_platform_passkeys(
+            Some("lock_session"),
+            &json!({ "type": "session_state", "unlocked": false })
+        ));
+        assert!(should_refresh_platform_passkeys(
+            Some("delete_vault_reference"),
+            &json!({ "type": "vault_reference_list", "vaults": [] })
+        ));
+        assert!(should_refresh_platform_passkeys(
+            Some("add_local_vault_reference"),
+            &json!({ "type": "vault_reference" })
+        ));
         assert!(!should_refresh_platform_passkeys(
             Some("set_entry_passkey"),
             &json!({ "type": "error" })
@@ -84,6 +102,14 @@ mod tests {
             "vaultkern-windows.exe".into(),
             "--webview-debug-port=9222".into(),
         ]));
+    }
+
+    #[test]
+    fn provider_callbacks_require_both_the_preference_and_an_unlocked_vault() {
+        assert!(plugin_callback_available(true, true));
+        assert!(!plugin_callback_available(false, true));
+        assert!(!plugin_callback_available(true, false));
+        assert!(!plugin_callback_available(false, false));
     }
 }
 

@@ -852,7 +852,8 @@ it("renders database and entry workspace labels in Chinese when selected", async
   expect(screen.queryByRole("heading", { name: "插件设置" })).not.toBeInTheDocument();
   expect(screen.getByText("数据库元数据")).toBeInTheDocument();
   expect(screen.getByLabelText("数据库名称")).toBeInTheDocument();
-  expect(screen.getByText("凭据")).toBeInTheDocument();
+  expect(screen.getByText("保存与加密")).toBeInTheDocument();
+  expect(screen.queryByText("凭据")).not.toBeInTheDocument();
 });
 
 it("trims recent vaults when the local recent database limit is lower", async () => {
@@ -1052,11 +1053,11 @@ it("loads and saves database settings from the manager workspace", async () => {
         compression: "gzip",
         cipher: "aes256",
         kdf: {
-          algorithm: "aes_kdbx4",
-          transformRounds: 100000,
-          iterations: null,
-          memoryKib: null,
-          parallelism: null
+          algorithm: "argon2d",
+          transformRounds: null,
+          iterations: 3,
+          memoryKib: 65537,
+          parallelism: 2
         }
       },
       autosaveDelaySeconds: 20,
@@ -1083,11 +1084,11 @@ it("loads and saves database settings from the manager workspace", async () => {
         compression: "none",
         cipher: "chacha20",
         kdf: {
-          algorithm: "aes_kdbx4",
-          transformRounds: 12000,
-          iterations: null,
-          memoryKib: null,
-          parallelism: null
+          algorithm: "argon2d",
+          transformRounds: null,
+          iterations: 3,
+          memoryKib: 65537,
+          parallelism: 2
         }
       },
       autosaveDelaySeconds: 45,
@@ -1121,9 +1122,6 @@ it("loads and saves database settings from the manager workspace", async () => {
   fireEvent.change(screen.getByLabelText("History Items Per Entry"), {
     target: { value: "9" }
   });
-  fireEvent.change(screen.getByLabelText("History Total Size MiB"), {
-    target: { value: "2" }
-  });
   fireEvent.click(screen.getByLabelText("Enable recycle bin"));
   fireEvent.change(screen.getByLabelText("Compression"), {
     target: { value: "none" }
@@ -1131,19 +1129,13 @@ it("loads and saves database settings from the manager workspace", async () => {
   fireEvent.change(screen.getByLabelText("Cipher"), {
     target: { value: "chacha20" }
   });
-  fireEvent.change(screen.getByLabelText("Transform Rounds"), {
-    target: { value: "12000" }
-  });
+  expect(screen.getByLabelText("Key Derivation Function")).toBeDisabled();
+  expect(screen.getByLabelText("Argon2 Memory MiB")).toBeDisabled();
   fireEvent.change(screen.getByLabelText("Autosave Delay Seconds"), {
     target: { value: "45" }
   });
-  fireEvent.click(screen.getByRole("button", { name: "Change password" }));
-  fireEvent.change(screen.getByLabelText("New Master Password"), {
-    target: { value: "new-password" }
-  });
-  fireEvent.change(screen.getByLabelText("Confirm New Master Password"), {
-    target: { value: "new-password" }
-  });
+  expect(screen.queryByRole("button", { name: "Change password" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Remove password" })).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
@@ -1161,31 +1153,27 @@ it("loads and saves database settings from the manager workspace", async () => {
       },
       history: {
         maxItemsPerEntry: 9,
-        maxTotalSizeBytes: 2097152
+        maxTotalSizeBytes: 2048
       },
       recycleBin: { enabled: false },
       encryption: {
         compression: "none",
         cipher: "chacha20",
         kdf: {
-          algorithm: "aes_kdbx4",
-          transformRounds: 12000,
-          iterations: null,
-          memoryKib: null,
-          parallelism: null
+          algorithm: "argon2d",
+          transformRounds: null,
+          iterations: 3,
+          memoryKib: 65537,
+          parallelism: 2
         }
       },
-      autosaveDelaySeconds: 45,
-      credentials: {
-        newPassword: "new-password",
-        removePassword: false
-      }
+      autosaveDelaySeconds: 45
     });
   });
   expect(client.saveVault).toHaveBeenCalledWith("vault-1");
 });
 
-it("shows add password action when a database has no password", async () => {
+it("hides password actions until the authenticated credential flow exists", async () => {
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
@@ -1224,11 +1212,12 @@ it("shows add password action when a database has no password", async () => {
   await screen.findByText("No entries available.");
   expect(await screen.findByText("No Password Vault")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
-  expect(await screen.findByRole("button", { name: "Add password" })).toBeInTheDocument();
+  await screen.findByRole("heading", { name: "No Password Vault" });
+  expect(screen.queryByRole("button", { name: "Add password" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Remove password" })).not.toBeInTheDocument();
 });
 
-it("shows kdf-specific advanced encryption fields", async () => {
+it("shows the current kdf parameters as read-only", async () => {
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
@@ -1266,16 +1255,11 @@ it("shows kdf-specific advanced encryption fields", async () => {
   await screen.findByText("No entries available.");
   fireEvent.click(await screen.findByRole("button", { name: "Database Settings" }));
 
-  expect(await screen.findByLabelText("Argon2 Iterations")).toBeInTheDocument();
-  expect(screen.getByLabelText("Argon2 Memory MiB")).toBeInTheDocument();
+  expect(await screen.findByLabelText("Argon2 Iterations")).toBeDisabled();
+  expect(screen.getByLabelText("Argon2 Memory MiB")).toBeDisabled();
+  expect(screen.getByLabelText("Argon2 Parallelism")).toBeDisabled();
+  expect(screen.getByLabelText("Key Derivation Function")).toBeDisabled();
   expect(screen.queryByLabelText("Transform Rounds")).not.toBeInTheDocument();
-
-  fireEvent.change(screen.getByLabelText("Key Derivation Function"), {
-    target: { value: "aes_kdbx4" }
-  });
-
-  expect(screen.getByLabelText("Transform Rounds")).toBeInTheDocument();
-  expect(screen.queryByLabelText("Argon2 Iterations")).not.toBeInTheDocument();
 });
 
 it("shows custom fields, attachments, and protected field markers in entry detail", async () => {
@@ -2488,14 +2472,54 @@ it("shows a pending sync banner when save falls back to local cache", async () =
 });
 
 it("shows remote cache warning and retries source sync", async () => {
-  const retryVaultSourceSync = vi.fn(async () => ({
-    type: "vault_source_status" as const,
-    sourceKind: "onedrive",
-    remoteState: "online",
-    lastSyncAt: 1776500060,
-    cachedAt: 1776500030,
-    lastError: null
-  }));
+  let remoteRestored = false;
+  const retryVaultSourceSync = vi.fn(async () => {
+    remoteRestored = true;
+    return {
+      type: "vault_source_status" as const,
+      sourceKind: "onedrive",
+      remoteState: "online",
+      lastSyncAt: 1776500060,
+      cachedAt: 1776500030,
+      lastError: null
+    };
+  });
+  const listEntries = vi.fn(async () =>
+    [
+      {
+        id: "entry-shared",
+        title: remoteRestored ? "Remote Updated" : "Cached Entry",
+        username: remoteRestored ? "remote-user" : "cached-user",
+        url: "https://remote.example",
+        groupId: "group-root"
+      }
+    ]
+  );
+  const cachedDetail = createDeferred<{
+    id: string;
+    title: string;
+    username: string;
+    password: string;
+    url: string;
+    notes: string;
+    totp: null;
+    totpUri: null;
+    customFields: never[];
+  }>();
+  const remoteDetail = {
+    id: "entry-shared",
+    title: "Remote Updated",
+    username: "remote-user",
+    password: "secret-123",
+    url: "https://remote.example",
+    notes: "remote note",
+    totp: null,
+    totpUri: null,
+    customFields: []
+  };
+  const getEntryDetail = vi.fn(() =>
+    remoteRestored ? Promise.resolve(remoteDetail) : cachedDetail.promise
+  );
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -2520,7 +2544,8 @@ it("shows remote cache warning and retries source sync", async () => {
         children: []
       }
     })),
-    listEntries: vi.fn(async () => []),
+    listEntries,
+    getEntryDetail,
     retryVaultSourceSync
   };
 
@@ -2530,6 +2555,10 @@ it("shows remote cache warning and retries source sync", async () => {
     await screen.findByText("Using local cache. Remote sync failed.")
   ).toBeInTheDocument();
   expect(screen.getByText("OneDrive unavailable")).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "Cached Entry" }));
+  await waitFor(() => {
+    expect(getEntryDetail).toHaveBeenCalledTimes(1);
+  });
 
   fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
 
@@ -2541,6 +2570,26 @@ it("shows remote cache warning and retries source sync", async () => {
       screen.queryByText("Using local cache. Remote sync failed.")
     ).not.toBeInTheDocument();
   });
+  await waitFor(() => {
+    expect(listEntries).toHaveBeenCalledTimes(2);
+    expect(getEntryDetail).toHaveBeenCalledTimes(2);
+  });
+  expect(await screen.findByText("remote note")).toBeInTheDocument();
+  await act(async () => {
+    cachedDetail.resolve({
+      id: "entry-shared",
+      title: "Cached Entry",
+      username: "cached-user",
+      password: "secret-123",
+      url: "https://remote.example",
+      notes: "cached note",
+      totp: null,
+      totpUri: null,
+      customFields: []
+    });
+    await Promise.resolve();
+  });
+  expect(screen.queryByText("cached note")).not.toBeInTheDocument();
 });
 
 it("shows remote cache info without failure copy before sync is retried", async () => {
