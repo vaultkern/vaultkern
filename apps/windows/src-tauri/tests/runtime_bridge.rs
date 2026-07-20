@@ -195,6 +195,13 @@ fn runtime_bridge_opens_edits_and_saves_a_real_local_vault() {
 
 #[test]
 fn runtime_bridge_runs_platform_passkeys_on_the_same_resident_runtime_thread() {
+    const PLUGIN_AAGUID: [u8; 16] = [
+        0xc8, 0xb2, 0xf4, 0xa1, 0x7d, 0x31, 0x4e, 0x59, 0x9a, 0x62, 0x0f, 0xd3, 0xb6, 0xe4, 0xc7,
+        0x21,
+    ];
+    assert!(
+        include_str!("../native/passkey_plugin.cpp").contains("C8B2F4A17D314E599A620FD3B6E4C721")
+    );
     let scratch = tempfile::tempdir().unwrap();
     let database_path = scratch.path().join("resident-passkeys.kdbx");
     let core = KeepassCore::new();
@@ -237,6 +244,7 @@ fn runtime_bridge_runs_platform_passkeys_on_the_same_resident_runtime_thread() {
             user_verified: true,
         })
         .expect("typed registration");
+    assert_eq!(&registration.authenticator_data[37..53], PLUGIN_AAGUID);
     let credentials = bridge
         .list_platform_passkey_credentials()
         .expect("typed credential list");
