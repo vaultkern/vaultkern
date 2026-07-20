@@ -39,6 +39,7 @@ pub fn should_refresh_platform_passkeys(
                 | "save_passkey_registration"
                 | "abort_passkey_registration"
                 | "commit_passkey_registration"
+                | "reconcile_passkey_ceremony_ledger"
                 | "delete_entry"
                 | "save_vault"
         )
@@ -115,6 +116,29 @@ mod tests {
         assert!(!should_refresh_platform_passkeys(
             Some("set_entry_passkey"),
             &json!({ "type": "error", "code": "runtime_error" })
+        ));
+    }
+
+    #[test]
+    fn ledger_reconciliation_refreshes_credentials_after_saved_registration_rollback() {
+        assert!(should_refresh_platform_passkeys(
+            Some("reconcile_passkey_ceremony_ledger"),
+            &json!({
+                "type": "passkey_ceremony_reconciliation",
+                "reconciled": [{
+                    "ceremonyToken": "ceremony-1",
+                    "deliveryState": "not_delivered"
+                }]
+            })
+        ));
+
+        assert!(should_refresh_platform_passkeys(
+            Some("reconcile_passkey_ceremony_ledger"),
+            &json!({
+                "type": "error",
+                "code": "request_cancelled",
+                "message": "the runtime request was cancelled"
+            })
         ));
     }
 
