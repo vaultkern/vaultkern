@@ -611,15 +611,13 @@ mod tests {
             panic!("expected error response");
         };
         assert_eq!(error.code, "invalid_request");
-        assert!(
-            error
-                .message
-                .contains("failed to resolve vault path: /definitely/missing/demo.kdbx")
-        );
-        assert!(
-            error.message.contains("No such file")
-                || error.message.contains("cannot find the path")
-        );
+        let stable_context = "failed to resolve vault path: /definitely/missing/demo.kdbx";
+        let source_detail = error
+            .message
+            .strip_prefix(stable_context)
+            .and_then(|message| message.strip_prefix(": "))
+            .expect("serialized command error lost its stable context chain");
+        assert!(!source_detail.is_empty());
     }
 
     #[test]
@@ -640,13 +638,15 @@ mod tests {
 
     #[test]
     fn error_messages_include_context_chain() {
-        let error = std::fs::read("/definitely/missing/demo.kdbx")
-            .context("outer context")
-            .unwrap_err();
+        let error = Err::<(), _>(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "localized missing-file detail",
+        ))
+        .context("outer context")
+        .unwrap_err();
 
         let message = format_error_chain(&error);
 
-        assert!(message.contains("outer context"));
-        assert!(message.contains("No such file") || message.contains("cannot find the path"));
+        assert_eq!(message, "outer context: localized missing-file detail");
     }
 }
