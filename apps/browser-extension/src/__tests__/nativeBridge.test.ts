@@ -1031,6 +1031,65 @@ describe("createNativeMessagingBridge", () => {
     });
   });
 
+  it("defers an interrupted preload behind queued mutations and the startup read", async () => {
+    const firstPort = createPort();
+    const secondPort = createPort();
+    const connectNative = vi.fn(() =>
+      connectNative.mock.calls.length === 1 ? firstPort : secondPort
+    );
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    const preload = bridge.send({
+      version: 1,
+      command: { type: "preload_current_vault" }
+    });
+    const save = bridge.send({
+      version: 1,
+      command: { type: "save_vault", vault_id: "vault-1" }
+    });
+    const session = bridge.send({
+      version: 1,
+      command: { type: "get_session_state" }
+    });
+
+    expect(firstPort.disconnect).toHaveBeenCalledTimes(1);
+    expect(secondPort.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      version: 1,
+      command: { type: "save_vault", vault_id: "vault-1" }
+    }));
+
+    secondPort.emitMessage({ type: "save_vault_result", status: "saved" });
+    await expect(save).resolves.toEqual({ type: "save_vault_result", status: "saved" });
+    expect(secondPort.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      version: 1,
+      command: { type: "get_session_state" }
+    }));
+
+    secondPort.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    await expect(session).resolves.toMatchObject({
+      type: "session_state",
+      activeVaultId: "vault-1"
+    });
+    expect(secondPort.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      version: 1,
+      command: { type: "preload_current_vault" }
+    }));
+
+    secondPort.emitMessage({
+      type: "session_state",
+      unlocked: true,
+      activeVaultId: "vault-1"
+    });
+    await expect(preload).resolves.toMatchObject({
+      type: "session_state",
+      activeVaultId: "vault-1"
+    });
+  });
+
   it("drops queued preload before serving a new startup session request", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);

@@ -361,7 +361,7 @@ export function createNativeMessagingBridge(
     request.postMessageAttempts = 0;
     clearRequestTimeout(request);
     detachPort();
-    queuedRequests.unshift(request);
+    queuedRequests.push(request);
 
     try {
       requestPort?.disconnect();
