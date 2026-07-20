@@ -2472,14 +2472,54 @@ it("shows a pending sync banner when save falls back to local cache", async () =
 });
 
 it("shows remote cache warning and retries source sync", async () => {
-  const retryVaultSourceSync = vi.fn(async () => ({
-    type: "vault_source_status" as const,
-    sourceKind: "onedrive",
-    remoteState: "online",
-    lastSyncAt: 1776500060,
-    cachedAt: 1776500030,
-    lastError: null
-  }));
+  let remoteRestored = false;
+  const retryVaultSourceSync = vi.fn(async () => {
+    remoteRestored = true;
+    return {
+      type: "vault_source_status" as const,
+      sourceKind: "onedrive",
+      remoteState: "online",
+      lastSyncAt: 1776500060,
+      cachedAt: 1776500030,
+      lastError: null
+    };
+  });
+  const listEntries = vi.fn(async () =>
+    [
+      {
+        id: "entry-shared",
+        title: remoteRestored ? "Remote Updated" : "Cached Entry",
+        username: remoteRestored ? "remote-user" : "cached-user",
+        url: "https://remote.example",
+        groupId: "group-root"
+      }
+    ]
+  );
+  const cachedDetail = createDeferred<{
+    id: string;
+    title: string;
+    username: string;
+    password: string;
+    url: string;
+    notes: string;
+    totp: null;
+    totpUri: null;
+    customFields: never[];
+  }>();
+  const remoteDetail = {
+    id: "entry-shared",
+    title: "Remote Updated",
+    username: "remote-user",
+    password: "secret-123",
+    url: "https://remote.example",
+    notes: "remote note",
+    totp: null,
+    totpUri: null,
+    customFields: []
+  };
+  const getEntryDetail = vi.fn(() =>
+    remoteRestored ? Promise.resolve(remoteDetail) : cachedDetail.promise
+  );
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -2504,7 +2544,8 @@ it("shows remote cache warning and retries source sync", async () => {
         children: []
       }
     })),
-    listEntries: vi.fn(async () => []),
+    listEntries,
+    getEntryDetail,
     retryVaultSourceSync
   };
 
@@ -2514,6 +2555,10 @@ it("shows remote cache warning and retries source sync", async () => {
     await screen.findByText("Using local cache. Remote sync failed.")
   ).toBeInTheDocument();
   expect(screen.getByText("OneDrive unavailable")).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "Cached Entry" }));
+  await waitFor(() => {
+    expect(getEntryDetail).toHaveBeenCalledTimes(1);
+  });
 
   fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
 
@@ -2525,6 +2570,26 @@ it("shows remote cache warning and retries source sync", async () => {
       screen.queryByText("Using local cache. Remote sync failed.")
     ).not.toBeInTheDocument();
   });
+  await waitFor(() => {
+    expect(listEntries).toHaveBeenCalledTimes(2);
+    expect(getEntryDetail).toHaveBeenCalledTimes(2);
+  });
+  expect(await screen.findByText("remote note")).toBeInTheDocument();
+  await act(async () => {
+    cachedDetail.resolve({
+      id: "entry-shared",
+      title: "Cached Entry",
+      username: "cached-user",
+      password: "secret-123",
+      url: "https://remote.example",
+      notes: "cached note",
+      totp: null,
+      totpUri: null,
+      customFields: []
+    });
+    await Promise.resolve();
+  });
+  expect(screen.queryByText("cached note")).not.toBeInTheDocument();
 });
 
 it("shows remote cache info without failure copy before sync is retried", async () => {

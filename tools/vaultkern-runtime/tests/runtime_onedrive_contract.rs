@@ -1,8 +1,11 @@
 use vaultkern_core::{
-    CompositeKey, EntryCreate, EntryTimesUpdate, KeepassCore, SaveProfile, Vault,
+    CompositeKey, Compression, EntryCreate, EntryTimesUpdate, KdbxCipher, KdbxVersion, KeepassCore,
+    SaveKdf, SaveProfile, Vault,
 };
 use vaultkern_runtime::Runtime;
-use vaultkern_runtime_protocol::{RuntimeCommand, RuntimeResponse, SaveVaultStatusDto};
+use vaultkern_runtime_protocol::{
+    DatabaseSettingsUpdateDto, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
+};
 
 fn key() -> CompositeKey {
     let mut key = CompositeKey::default();
@@ -88,6 +91,51 @@ fn runtime_opens_unlocks_and_saves_onedrive_vault_reference() {
         RuntimeResponse::SaveVaultResult(result)
             if result.status == SaveVaultStatusDto::Saved && result.merge_summary.is_none()
     ));
+}
+
+#[test]
+fn runtime_persists_a_local_onedrive_encryption_profile_change() {
+    let core = KeepassCore::new();
+    let bytes = core
+        .save_kdbx(
+            &Vault::empty("Cloud Vault"),
+            &key(),
+            SaveProfile::recommended(),
+        )
+        .unwrap();
+    let mut runtime = Runtime::for_tests_with_onedrive_item(
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        bytes,
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+    let mut encryption = runtime.get_database_settings(&vault_id).unwrap().encryption;
+    encryption.compression = "none".into();
+    runtime
+        .update_database_settings(
+            &vault_id,
+            DatabaseSettingsUpdateDto {
+                encryption: Some(encryption),
+                ..DatabaseSettingsUpdateDto::default()
+            },
+        )
+        .unwrap();
+
+    runtime.save_vault(&vault_id).unwrap();
+
+    let saved = runtime
+        .read_test_onedrive_item_bytes("drive-1", "item-1")
+        .unwrap();
+    let header = vaultkern_core::KdbxHeader::decode(&saved).unwrap();
+    assert_eq!(header.compression, Compression::None);
 }
 
 #[test]
@@ -453,6 +501,90 @@ fn runtime_retry_sync_checks_metadata_without_downloading_unchanged_remote_vault
 }
 
 #[test]
+fn runtime_retry_sync_refreshes_quick_unlock_after_remote_kdf_rotation() {
+    let core = KeepassCore::new();
+    let mut initial = Vault::empty("Cloud Vault");
+    let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    runtime.insert_test_onedrive_item(
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes.clone(),
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    runtime
+        .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+
+    let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
+    core.update_entry_fields(
+        &mut remote,
+        &entry_id,
+        vaultkern_core::EntryUpdate {
+            title: None,
+            username: None,
+            password: None,
+            url: None,
+            notes: Some("remote-retry-after-kdf-rotation".into()),
+        },
+    )
+    .unwrap();
+    let remote_bytes = core
+        .save_kdbx(
+            &remote,
+            &key(),
+            SaveProfile {
+                version: KdbxVersion::V4_1,
+                cipher: KdbxCipher::ChaCha20,
+                compression: Compression::None,
+                kdf: Some(SaveKdf::AesKdbx4 { rounds: 10 }),
+            },
+        )
+        .unwrap();
+    runtime.replace_test_onedrive_item("drive-1", "item-1", remote_bytes);
+
+    let response = runtime
+        .handle(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::VaultSourceStatus(status)
+            if status.remote_state == "online" && status.last_error.is_none()
+    ));
+    assert_eq!(
+        runtime
+            .get_entry_detail(&vault_id, &entry_id)
+            .unwrap()
+            .notes,
+        "remote-retry-after-kdf-rotation"
+    );
+    runtime.save_vault(&vault_id).unwrap();
+    let saved = runtime
+        .read_test_onedrive_item_bytes("drive-1", "item-1")
+        .unwrap();
+    let saved_header = vaultkern_core::KdbxHeader::decode(&saved).unwrap();
+    assert_eq!(saved_header.cipher, KdbxCipher::ChaCha20);
+    assert_eq!(saved_header.compression, Compression::None);
+
+    runtime.lock_session();
+    runtime.unlock_current_vault_with_quick_unlock().unwrap();
+    assert!(runtime.session_state().unlocked);
+}
+
+#[test]
 fn runtime_updates_remote_cache_after_successful_save() {
     let core = KeepassCore::new();
     let mut initial = Vault::empty("Cloud Vault");
@@ -768,6 +900,214 @@ fn runtime_retries_pending_cache_by_merging_changed_remote_before_upload() {
     let entries = core.project_vault(&database.vault).root.entries;
     assert!(entries.iter().any(|entry| entry.title == "Pending Local"));
     assert!(entries.iter().any(|entry| entry.title == "Remote"));
+}
+
+#[test]
+fn runtime_retries_pending_cache_after_remote_kdf_rotation_with_quick_unlock() {
+    let core = KeepassCore::new();
+    let mut initial = Vault::empty("Cloud Vault");
+    let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    runtime.insert_test_onedrive_item(
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes.clone(),
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    runtime
+        .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+    runtime
+        .handle(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            title: "Account".into(),
+            username: "alice".into(),
+            password: "pending-password".into(),
+            url: "https://account.example".into(),
+            notes: String::new(),
+            totp_uri: None,
+            custom_fields: vec![],
+        })
+        .unwrap();
+    runtime.remove_test_onedrive_item("drive-1", "item-1");
+    let response = runtime
+        .handle(RuntimeCommand::SaveVault {
+            vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::SaveVaultResult(result)
+            if result.status == SaveVaultStatusDto::SavedToCache
+    ));
+
+    let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
+    core.update_entry_fields(
+        &mut remote,
+        &entry_id,
+        vaultkern_core::EntryUpdate {
+            title: None,
+            username: None,
+            password: None,
+            url: None,
+            notes: Some("remote-after-kdf-rotation".into()),
+        },
+    )
+    .unwrap();
+    let remote_bytes = core
+        .save_kdbx(
+            &remote,
+            &key(),
+            SaveProfile {
+                version: KdbxVersion::V4_1,
+                cipher: KdbxCipher::ChaCha20,
+                compression: Compression::None,
+                kdf: Some(SaveKdf::AesKdbx4 { rounds: 10 }),
+            },
+        )
+        .unwrap();
+    runtime.insert_test_onedrive_item(
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        remote_bytes,
+    );
+
+    let response = runtime
+        .handle(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::VaultSourceStatus(status)
+            if status.remote_state == "online" && status.last_error.is_none()
+    ));
+    let uploaded = runtime
+        .read_test_onedrive_item_bytes("drive-1", "item-1")
+        .unwrap();
+    let uploaded_header = vaultkern_core::KdbxHeader::decode(&uploaded).unwrap();
+    assert_eq!(uploaded_header.cipher, KdbxCipher::ChaCha20);
+    assert_eq!(uploaded_header.compression, Compression::None);
+    let vault = core.load_database(&uploaded, &key()).unwrap().vault;
+    let entry = core.project_entry_detail(&vault, &entry_id).unwrap();
+    assert_eq!(entry.password, "pending-password");
+    assert_eq!(entry.notes, "remote-after-kdf-rotation");
+
+    runtime.lock_session();
+    runtime.unlock_current_vault_with_quick_unlock().unwrap();
+    assert!(runtime.session_state().unlocked);
+}
+
+#[test]
+fn kdf_rotated_rebase_with_unknown_put_keeps_a_retryable_remote_base() {
+    let core = KeepassCore::new();
+    let mut initial = Vault::empty("Cloud Vault");
+    let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    runtime.insert_test_onedrive_item(
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes.clone(),
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    runtime
+        .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+    runtime
+        .handle(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            title: "Account".into(),
+            username: "alice".into(),
+            password: "local-before-unknown-put".into(),
+            url: "https://account.example".into(),
+            notes: String::new(),
+            totp_uri: None,
+            custom_fields: vec![],
+        })
+        .unwrap();
+
+    let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
+    core.update_entry_fields(
+        &mut remote,
+        &entry_id,
+        vaultkern_core::EntryUpdate {
+            title: None,
+            username: None,
+            password: None,
+            url: None,
+            notes: Some("remote-before-unknown-put".into()),
+        },
+    )
+    .unwrap();
+    let remote_bytes = core
+        .save_kdbx(
+            &remote,
+            &key(),
+            SaveProfile {
+                version: KdbxVersion::V4_1,
+                cipher: KdbxCipher::ChaCha20,
+                compression: Compression::None,
+                kdf: Some(SaveKdf::AesKdbx4 { rounds: 10 }),
+            },
+        )
+        .unwrap();
+    runtime.replace_test_onedrive_item("drive-1", "item-1", remote_bytes);
+    runtime.queue_test_onedrive_ambiguous_write(false);
+
+    let response = runtime
+        .handle(RuntimeCommand::SaveVault {
+            vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::SaveVaultResult(result)
+            if result.status == SaveVaultStatusDto::SavedToCache
+    ));
+
+    let response = runtime
+        .handle(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::VaultSourceStatus(status)
+            if status.remote_state == "online" && status.last_error.is_none()
+    ));
+    let uploaded = runtime
+        .read_test_onedrive_item_bytes("drive-1", "item-1")
+        .unwrap();
+    let vault = core.load_database(&uploaded, &key()).unwrap().vault;
+    let entry = core.project_entry_detail(&vault, &entry_id).unwrap();
+    assert_eq!(entry.password, "local-before-unknown-put");
+    assert_eq!(entry.notes, "remote-before-unknown-put");
 }
 
 #[test]
@@ -1226,6 +1566,89 @@ fn runtime_adopts_changed_remote_without_writing_when_local_is_untouched() {
 }
 
 #[test]
+fn runtime_adopts_untouched_remote_after_kdf_rotation_with_quick_unlock() {
+    let core = KeepassCore::new();
+    let mut initial = Vault::empty("Cloud Vault");
+    let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    runtime.insert_test_onedrive_item(
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes.clone(),
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    runtime
+        .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+
+    let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
+    core.update_entry_fields(
+        &mut remote,
+        &entry_id,
+        vaultkern_core::EntryUpdate {
+            title: None,
+            username: None,
+            password: None,
+            url: None,
+            notes: Some("remote-only-after-kdf-rotation".into()),
+        },
+    )
+    .unwrap();
+    let remote_bytes = core
+        .save_kdbx(
+            &remote,
+            &key(),
+            SaveProfile {
+                version: KdbxVersion::V4_1,
+                cipher: KdbxCipher::ChaCha20,
+                compression: Compression::None,
+                kdf: Some(SaveKdf::AesKdbx4 { rounds: 10 }),
+            },
+        )
+        .unwrap();
+    runtime.replace_test_onedrive_item("drive-1", "item-1", remote_bytes);
+    runtime.reset_test_onedrive_access_counts();
+
+    let response = runtime
+        .handle(RuntimeCommand::SaveVault {
+            vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::SaveVaultResult(result)
+            if result.status == SaveVaultStatusDto::Merged
+                && result.conflict_copy_path.is_none()
+    ));
+    assert_eq!(runtime.test_onedrive_access_counts().writes, 0);
+    assert_eq!(
+        runtime
+            .get_entry_detail(&vault_id, &entry_id)
+            .unwrap()
+            .notes,
+        "remote-only-after-kdf-rotation"
+    );
+    let encryption = runtime.get_database_settings(&vault_id).unwrap().encryption;
+    assert_eq!(encryption.cipher, "chacha20");
+    assert_eq!(encryption.compression, "none");
+
+    runtime.lock_session();
+    runtime.unlock_current_vault_with_quick_unlock().unwrap();
+    assert!(runtime.session_state().unlocked);
+}
+
+#[test]
 fn runtime_retries_etag_cas_with_a_fresh_three_way_patch() {
     let core = KeepassCore::new();
     let mut initial = Vault::empty("Cloud Vault");
@@ -1311,6 +1734,180 @@ fn runtime_retries_etag_cas_with_a_fresh_three_way_patch() {
     let entry = core.project_entry_detail(&vault, &entry_id).unwrap();
     assert_eq!(entry.password, "local-password");
     assert_eq!(entry.notes, "remote-notes");
+}
+
+#[test]
+fn runtime_refreshes_quick_unlock_after_remote_kdf_rotation_before_merging() {
+    let core = KeepassCore::new();
+    let mut initial = Vault::empty("Cloud Vault");
+    let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    runtime.set_test_unix_time(100);
+    runtime.insert_test_onedrive_item(
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes.clone(),
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    runtime
+        .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+    runtime
+        .handle(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            title: "Account".into(),
+            username: "alice".into(),
+            password: "local-password".into(),
+            url: "https://account.example".into(),
+            notes: String::new(),
+            totp_uri: None,
+            custom_fields: vec![],
+        })
+        .unwrap();
+
+    let mut rotated_remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
+    core.update_entry_fields(
+        &mut rotated_remote,
+        &entry_id,
+        vaultkern_core::EntryUpdate {
+            title: None,
+            username: None,
+            password: None,
+            url: None,
+            notes: Some("remote-after-kdf-rotation".into()),
+        },
+    )
+    .unwrap();
+    core.update_entry_times(
+        &mut rotated_remote,
+        &entry_id,
+        EntryTimesUpdate {
+            created_at: None,
+            modified_at: Some(30),
+            last_accessed_at: None,
+            usage_count: None,
+            location_changed_at: None,
+        },
+    )
+    .unwrap();
+    let rotated_remote_bytes = core
+        .save_kdbx(
+            &rotated_remote,
+            &key(),
+            SaveProfile {
+                version: KdbxVersion::V4_1,
+                cipher: KdbxCipher::ChaCha20,
+                compression: Compression::None,
+                kdf: Some(SaveKdf::AesKdbx4 { rounds: 10 }),
+            },
+        )
+        .unwrap();
+    runtime.replace_test_onedrive_item("drive-1", "item-1", rotated_remote_bytes);
+
+    let response = runtime
+        .handle(RuntimeCommand::SaveVault {
+            vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::SaveVaultResult(result)
+            if result.status == SaveVaultStatusDto::Merged
+    ));
+
+    let uploaded = runtime
+        .read_test_onedrive_item_bytes("drive-1", "item-1")
+        .unwrap();
+    let uploaded_header = vaultkern_core::KdbxHeader::decode(&uploaded).unwrap();
+    assert_eq!(uploaded_header.cipher, KdbxCipher::ChaCha20);
+    assert_eq!(uploaded_header.compression, Compression::None);
+    let vault = core.load_database(&uploaded, &key()).unwrap().vault;
+    let entry = core.project_entry_detail(&vault, &entry_id).unwrap();
+    assert_eq!(entry.password, "local-password");
+    assert_eq!(entry.notes, "remote-after-kdf-rotation");
+
+    runtime.lock_session();
+    runtime.unlock_current_vault_with_quick_unlock().unwrap();
+    assert!(runtime.session_state().unlocked);
+}
+
+#[test]
+fn remote_kdf_rotation_with_unrelated_lineage_keeps_conflict_copy_retriable() {
+    let core = KeepassCore::new();
+    let mut initial = Vault::empty("Cloud Vault");
+    let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    runtime.set_test_unix_time(100);
+    runtime.insert_test_onedrive_item(
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes,
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    runtime
+        .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+    runtime
+        .handle(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id,
+            title: "Local copy".into(),
+            username: "alice".into(),
+            password: "local-password".into(),
+            url: "https://local.example".into(),
+            notes: "keep me".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        })
+        .unwrap();
+
+    let unrelated = core
+        .save_kdbx(
+            &Vault::empty("Unrelated remote"),
+            &key(),
+            SaveProfile {
+                kdf: Some(SaveKdf::AesKdbx4 { rounds: 10 }),
+                ..SaveProfile::recommended()
+            },
+        )
+        .unwrap();
+    runtime.replace_test_onedrive_item("drive-1", "item-1", unrelated);
+
+    for _ in 0..2 {
+        let response = runtime
+            .handle(RuntimeCommand::SaveVault {
+                vault_id: vault_id.clone(),
+            })
+            .expect("conflict-copy retry must retain a key for the kept base");
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(result)
+                if result.status == SaveVaultStatusDto::ConflictCopy
+        ));
+    }
 }
 
 #[test]

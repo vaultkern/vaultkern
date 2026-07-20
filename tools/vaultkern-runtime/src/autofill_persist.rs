@@ -277,6 +277,9 @@ fn merge_autofill_candidate(
         &current_shell,
         "vault metadata",
     )?;
+    // KDF parameters describe the remote file generation, not a model edit.
+    // A rebased candidate must be serialized with the current remote generation.
+    candidate.kdf_parameters = current.kdf_parameters.clone();
     candidate.meta_custom_data = merge_unknown_meta_custom_data(baseline, local, current)?;
     // Start from the durable block layout. The receipt-ledger Core mutation
     // later reconciles it with the merged map before the candidate can be saved.
@@ -333,6 +336,7 @@ fn vault_shell(vault: &Vault) -> Vault {
     shell.deleted_objects.clear();
     shell.meta_custom_data.clear();
     shell.meta_custom_data_blocks.clear();
+    shell.kdf_parameters = None;
     shell
 }
 
