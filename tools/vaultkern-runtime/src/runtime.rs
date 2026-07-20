@@ -2235,10 +2235,17 @@ impl Runtime {
                 }
             },
         );
-        let passkey = matches
+        let selected = matches
             .first()
             .copied()
             .context("platform passkey credential not found")?;
+        let passkey = find_unique_passkey_by_credential_id_and_relying_party(
+            &vault.root,
+            vault.recycle_bin_group,
+            vault.recycle_bin_enabled.unwrap_or(true),
+            &selected.credential_id,
+            Some(&input.relying_party),
+        )?;
         let credential_id = URL_SAFE_NO_PAD
             .decode(&passkey.credential_id)
             .context("stored platform passkey credential id was not base64url")?;
@@ -10302,6 +10309,62 @@ mod tests {
             .unwrap();
         assert_eq!(selected.credential_id, second.credential.credential_id);
         assert_ne!(selected.credential_id, first.credential.credential_id);
+    }
+
+    #[test]
+    fn platform_plugin_rejects_duplicate_credential_ids_for_the_same_relying_party() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let credential_id = b"duplicate-platform-credential".to_vec();
+        let first = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "alice@example.com",
+                user_handle: b"user-a",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            credential_id.clone(),
+        )
+        .unwrap()
+        .passkey;
+        let second = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "bob@example.com",
+                user_handle: b"user-b",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            credential_id.clone(),
+        )
+        .unwrap()
+        .passkey;
+        let loaded = runtime
+            .vault_session
+            .find_loaded_mut(&opened.vault_id)
+            .unwrap();
+        let vault = loaded.vault.as_mut().unwrap();
+        let mut first_entry = Entry::new("First duplicate");
+        first_entry.passkey = Some(first);
+        let mut second_entry = Entry::new("Second duplicate");
+        second_entry.passkey = Some(second);
+        vault.root.entries.extend([first_entry, second_entry]);
+
+        let error = runtime
+            .create_platform_passkey_assertion(PlatformPasskeyAssertionInput {
+                relying_party: "example.com".into(),
+                allowed_credential_ids: vec![credential_id],
+                client_data_hash: vec![0x51; 32],
+                user_verified: true,
+            })
+            .expect_err("an ambiguous credential id must not select an arbitrary private key");
+
+        assert!(
+            error
+                .to_string()
+                .contains("multiple passkey credentials found for credential id")
+        );
     }
 
     #[test]
