@@ -46,6 +46,25 @@ export function renderNativeHostHelp(error: unknown) {
   }
 
   if (
+    isErrorCode(error, "resident_authentication_failed") ||
+    isErrorCode(error, "resident_connection_failed")
+  ) {
+    return (
+      <div>
+        <h2>Repair the VaultKern resident connection</h2>
+        <ol>
+          <li>Close and restart the VaultKern Windows app.</li>
+          <li>Reload the browser extension, then retry the operation.</li>
+          <li>
+            If it still fails, update or repair the app and native host
+            together so they use matching versions.
+          </li>
+        </ol>
+      </div>
+    );
+  }
+
+  if (
     isErrorCode(error, "native_host_missing") ||
     isErrorCode(error, "native_permission_denied")
   ) {
