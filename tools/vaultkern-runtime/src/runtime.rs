@@ -18,9 +18,10 @@ use vaultkern_core::{
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
     ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher, KdbxError, KdbxVersion, KeepassCore,
     PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec, TransformedKey, Vault,
-    VaultMetadataUpdate, derive_transformed_key_with_policy, load_kdbx_with_transformed_key,
-    load_kdbx_with_transformed_key_diagnostic, parse_key_file_bytes, required_version,
-    retained_or_recommended_save_kdf, save_kdbx_with_transformed_key, three_way_field_patch,
+    VaultIdentityMetadataUpdate, VaultMetadataUpdate, derive_transformed_key_with_policy,
+    load_kdbx_with_transformed_key, load_kdbx_with_transformed_key_diagnostic,
+    parse_key_file_bytes, required_version, retained_or_recommended_save_kdf,
+    save_kdbx_with_transformed_key, three_way_field_patch,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
@@ -1619,18 +1620,27 @@ impl Runtime {
             }
 
             if let Some(metadata) = update.metadata {
+                let mut candidate = vault.clone();
+                let name = metadata.name;
+                let identity_update = VaultIdentityMetadataUpdate {
+                    name: Some(name.clone()),
+                    generator: candidate.generator.clone(),
+                    database_name_changed: candidate.database_name_changed,
+                    description_changed: candidate.description_changed,
+                    default_username_changed: candidate.default_username_changed,
+                };
+                self.core
+                    .update_vault_identity_metadata(&mut candidate, identity_update)?;
                 self.core.update_vault_metadata(
-                    vault,
+                    &mut candidate,
                     VaultMetadataUpdate {
-                        description: Some(metadata.description.clone().unwrap_or_default()),
-                        default_username: Some(
-                            metadata.default_username.clone().unwrap_or_default(),
-                        ),
+                        description: Some(metadata.description.unwrap_or_default()),
+                        default_username: Some(metadata.default_username.unwrap_or_default()),
                         ..VaultMetadataUpdate::default()
                     },
                 )?;
-                vault.name = metadata.name.clone();
-                vault.root.title = metadata.name;
+                candidate.root.title = name;
+                *vault = candidate;
             }
 
             if let Some(public_metadata) = update.public_metadata {

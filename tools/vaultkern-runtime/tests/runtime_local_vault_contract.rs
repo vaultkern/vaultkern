@@ -602,6 +602,55 @@ fn runtime_clears_loaded_optional_database_metadata() {
 }
 
 #[test]
+fn runtime_rejects_invalid_database_name_without_partial_metadata_update() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+    let bytes = core
+        .save_kdbx(
+            &Vault::empty("settings-valid"),
+            &key,
+            SaveProfile::recommended(),
+        )
+        .expect("create vault");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("settings-valid.kdbx");
+    std::fs::write(&path, bytes).expect("write vault");
+
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("open vault");
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .expect("unlock vault");
+    runtime
+        .update_database_settings(
+            &handle.vault_id,
+            DatabaseSettingsUpdateDto {
+                metadata: Some(DatabaseMetadataSettingsDto {
+                    name: "invalid\u{1}name".into(),
+                    description: Some("must not be applied".into()),
+                    default_username: Some("must-not-be-applied".into()),
+                }),
+                ..DatabaseSettingsUpdateDto::default()
+            },
+        )
+        .expect_err("invalid XML text must be rejected before mutation");
+
+    let settings = runtime
+        .get_database_settings(&handle.vault_id)
+        .expect("read unchanged settings");
+    assert_eq!(settings.metadata.name, "settings-valid");
+    assert_eq!(settings.metadata.description, None);
+    assert_eq!(settings.metadata.default_username, None);
+    runtime
+        .save_vault(&handle.vault_id)
+        .expect("rejected settings must not poison later saves");
+}
+
+#[test]
 fn runtime_rejects_password_removal_without_a_fresh_authenticated_flow() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
