@@ -231,6 +231,7 @@ describe("createNativeMessagingBridge", () => {
     firstPort.postMessage.mockImplementation(() => {
       throw new Error("Native host has exited.");
     });
+    firstPort.disconnect.mockImplementation(() => firstPort.emitDisconnect());
     const secondPort = createPort();
     const connectNative = vi.fn(() =>
       connectNative.mock.calls.length === 1 ? firstPort : secondPort
@@ -249,6 +250,7 @@ describe("createNativeMessagingBridge", () => {
 
     expect(connectNative).toHaveBeenCalledTimes(2);
     expect(firstPort.postMessage).toHaveBeenCalledTimes(1);
+    expect(firstPort.disconnect).toHaveBeenCalledTimes(1);
     expect(secondPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "create_passkey_assertion" }
@@ -294,11 +296,44 @@ describe("createNativeMessagingBridge", () => {
     expect(firstPort.postMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("does not retry a post failure after a synchronous disconnect already settled it", async () => {
+    const firstPort = createPort();
+    firstPort.postMessage.mockImplementation(() => {
+      firstPort.emitDisconnect();
+      throw new Error("Native host has exited.");
+    });
+    const secondPort = createPort();
+    const connectNative = vi.fn(() =>
+      connectNative.mock.calls.length === 1 ? firstPort : secondPort
+    );
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        lastError: { message: "Native host has exited." }
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    await expect(
+      bridge.send({
+        version: 1,
+        command: { type: "create_passkey_assertion" }
+      })
+    ).rejects.toMatchObject({
+      code: "native_port_disconnected",
+      message: "Native host has exited."
+    });
+    expect(connectNative).toHaveBeenCalledTimes(1);
+    expect(secondPort.postMessage).not.toHaveBeenCalled();
+  });
+
   it("does not retry unclassified native post failures as stale ports", async () => {
     const port = createPort();
     port.postMessage.mockImplementation(() => {
       throw new Error("message serialization failed");
     });
+    port.disconnect.mockImplementation(() => port.emitDisconnect());
     const connectNative = vi.fn(() => port);
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -319,6 +354,7 @@ describe("createNativeMessagingBridge", () => {
     });
     expect(connectNative).toHaveBeenCalledTimes(1);
     expect(port.postMessage).toHaveBeenCalledTimes(1);
+    expect(port.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it("does not retry unrelated disconnected post failures as stale ports", async () => {
