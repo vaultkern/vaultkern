@@ -5160,16 +5160,20 @@ impl Runtime {
                 return Err(error).with_context(|| format!("failed to write vault: {vault_id}"));
             }
         };
-        self.synced_bases
-            .store(vault_id, &bytes)
-            .with_context(|| format!("failed to store synced base: {vault_id}"))?;
-        let loaded = self
-            .vault_session
-            .find_loaded_mut(vault_id)
-            .with_context(|| format!("vault not opened: {vault_id}"))?;
-        loaded.bytes = Vec::new();
-        loaded.baseline_fingerprint = next_fingerprint;
-        loaded.requires_source_migration = false;
+        {
+            let loaded = self
+                .vault_session
+                .find_loaded_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            loaded.bytes = Vec::new();
+            loaded.baseline_fingerprint = next_fingerprint;
+            loaded.requires_source_migration = false;
+        }
+        if let Err(error) = self.synced_bases.store(vault_id, &bytes) {
+            self.record_local_save_warnings(vec![format!(
+                "failed to store synced base for {vault_id}: {error}"
+            )]);
+        }
         Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
             status: SaveVaultStatusDto::Saved,
             merge_summary: None,
@@ -9889,6 +9893,53 @@ mod tests {
         ));
         assert_eq!(runtime.local_save_warnings.len(), 1);
         assert!(runtime.local_save_warnings[0].contains("retained durable backup"));
+    }
+
+    #[test]
+    fn committed_local_save_survives_synced_base_write_failure() {
+        let mut runtime = Runtime::for_tests();
+        let (dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        let blocked_root = dir.path().join("blocked-synced-base-root");
+        std::fs::write(&blocked_root, b"not a directory").unwrap();
+        runtime.synced_bases = SyncedBaseStore::new_at(blocked_root.join("bases"));
+
+        let response = runtime
+            .save_vault(&opened.vault_id)
+            .expect("the primary KDBX commit already succeeded");
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+        assert!(
+            runtime
+                .local_save_warnings
+                .iter()
+                .any(|warning| warning.contains("failed to store synced base"))
+        );
+        assert!(matches!(
+            runtime.save_vault(&opened.vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        assert_eq!(
+            KeepassCore::new()
+                .load_kdbx(&std::fs::read(&opened.path).unwrap(), &key)
+                .unwrap()
+                .root
+                .entries
+                .len(),
+            1
+        );
     }
 
     struct RejectingWarningWriter;
