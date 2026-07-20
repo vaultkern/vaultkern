@@ -16,9 +16,10 @@ use uuid::Uuid;
 use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, Compression, CustomDataItemInput, Entry,
     EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher, KdbxError, KdbxVersion, KeepassCore,
-    PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec, TransformedKey, Vault,
-    VaultIdentityMetadataUpdate, VaultMetadataUpdate, derive_transformed_key_with_policy,
+    ExternalKdfConfirmation, ExternalKdfPolicy, GroupTimesUpdate, KdbxCipher, KdbxError,
+    KdbxVersion, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec,
+    TransformedKey, Vault, VaultBinTemplateMetadataUpdate, VaultIdentityMetadataUpdate,
+    VaultLifecycleMetadataUpdate, VaultMetadataUpdate, derive_transformed_key_with_policy,
     load_kdbx_with_transformed_key, load_kdbx_with_transformed_key_diagnostic,
     parse_key_file_bytes, required_version, retained_or_recommended_save_kdf,
     save_kdbx_with_transformed_key, three_way_field_patch,
@@ -1596,6 +1597,9 @@ impl Runtime {
                 "master credential changes require a fresh authenticated credential-update flow"
             );
         }
+        let modified_at = self.current_unix_time();
+        let modified_at_i64 = i64::try_from(modified_at)
+            .context("current time is outside the KDBX timestamp domain")?;
         let settings = {
             let loaded = self
                 .vault_session
@@ -1619,8 +1623,14 @@ impl Runtime {
                 }
             }
 
+            let mut did_change_vault_settings = false;
+
             if let Some(metadata) = update.metadata {
                 let mut candidate = vault.clone();
+                let old_name = candidate.name.clone();
+                let old_description = candidate.description.clone();
+                let old_default_username = candidate.default_username.clone();
+                let old_root_title = candidate.root.title.clone();
                 let name = metadata.name;
                 let identity_update = VaultIdentityMetadataUpdate {
                     name: Some(name.clone()),
@@ -1640,10 +1650,48 @@ impl Runtime {
                     },
                 )?;
                 candidate.root.title = name;
+
+                let name_changed = candidate.name != old_name;
+                let description_changed = candidate.description != old_description;
+                let default_username_changed = candidate.default_username != old_default_username;
+                let root_title_changed = candidate.root.title != old_root_title;
+                if name_changed || description_changed || default_username_changed {
+                    let identity_update = VaultIdentityMetadataUpdate {
+                        name: Some(candidate.name.clone()),
+                        generator: candidate.generator.clone(),
+                        database_name_changed: name_changed
+                            .then_some(modified_at_i64)
+                            .or(candidate.database_name_changed),
+                        description_changed: description_changed
+                            .then_some(modified_at_i64)
+                            .or(candidate.description_changed),
+                        default_username_changed: default_username_changed
+                            .then_some(modified_at_i64)
+                            .or(candidate.default_username_changed),
+                    };
+                    self.core
+                        .update_vault_identity_metadata(&mut candidate, identity_update)?;
+                }
+                if root_title_changed {
+                    let root_id = candidate.root.id.to_string();
+                    self.core.update_group_times(
+                        &mut candidate,
+                        &root_id,
+                        GroupTimesUpdate {
+                            modified_at: Some(Some(modified_at)),
+                            ..GroupTimesUpdate::default()
+                        },
+                    )?;
+                }
+                did_change_vault_settings |= name_changed
+                    || description_changed
+                    || default_username_changed
+                    || root_title_changed;
                 *vault = candidate;
             }
 
             if let Some(public_metadata) = update.public_metadata {
+                let previous = vault.public_custom_data.clone();
                 upsert_optional_public_string(
                     vault,
                     "display-name",
@@ -1651,16 +1699,45 @@ impl Runtime {
                 );
                 upsert_optional_public_string(vault, "color", public_metadata.color.as_deref());
                 upsert_optional_public_string(vault, "icon", public_metadata.icon.as_deref());
+                did_change_vault_settings |= vault.public_custom_data != previous;
             }
 
             if let Some(history) = update.history {
+                let previous = (vault.history_max_items, vault.history_max_size);
                 vault.history_max_items = history.max_items_per_entry;
                 vault.history_max_size = history.max_total_size_bytes;
                 enforce_history_limits(vault);
+                did_change_vault_settings |=
+                    (vault.history_max_items, vault.history_max_size) != previous;
             }
 
             if let Some(recycle_bin) = update.recycle_bin {
-                vault.recycle_bin_enabled = Some(recycle_bin.enabled);
+                let enabled = Some(recycle_bin.enabled);
+                if vault.recycle_bin_enabled != enabled {
+                    self.core.update_vault_bin_template_metadata(
+                        vault,
+                        VaultBinTemplateMetadataUpdate {
+                            recycle_bin_enabled: Some(enabled),
+                            recycle_bin_changed: Some(Some(modified_at_i64)),
+                            ..VaultBinTemplateMetadataUpdate::default()
+                        },
+                    )?;
+                    did_change_vault_settings = true;
+                }
+            }
+
+            if did_change_vault_settings {
+                self.core.update_vault_lifecycle_metadata(
+                    vault,
+                    VaultLifecycleMetadataUpdate {
+                        settings_changed: Some(modified_at_i64),
+                        maintenance_history_days: vault.maintenance_history_days,
+                        master_key_changed: vault.master_key_changed,
+                        master_key_change_rec: vault.master_key_change_rec,
+                        master_key_change_force: vault.master_key_change_force,
+                        master_key_change_force_once: vault.master_key_change_force_once,
+                    },
+                )?;
             }
 
             if let Some(encryption) = update.encryption {
@@ -9192,6 +9269,54 @@ mod tests {
             retained_kdf(&runtime, &opened.vault_id),
             original_generation
         );
+    }
+
+    #[test]
+    fn database_settings_updates_advance_three_way_merge_timestamps() {
+        let mut runtime = Runtime::for_tests_at(200);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let base = runtime.loaded_vault(&opened.vault_id).unwrap().clone();
+
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    metadata: Some(DatabaseMetadataSettingsDto {
+                        name: "Local name".into(),
+                        description: Some("Local description".into()),
+                        default_username: Some("local-user".into()),
+                    }),
+                    public_metadata: Some(DatabasePublicMetadataSettingsDto {
+                        display_name: Some("Local display name".into()),
+                        color: Some("#112233".into()),
+                        icon: Some("database".into()),
+                    }),
+                    history: Some(DatabaseHistorySettingsDto {
+                        max_items_per_entry: Some(10),
+                        max_total_size_bytes: Some(1_000_000),
+                    }),
+                    recycle_bin: Some(DatabaseRecycleBinSettingsDto { enabled: false }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+
+        let local = runtime.loaded_vault(&opened.vault_id).unwrap().clone();
+        assert_eq!(local.database_name_changed, Some(200));
+        assert_eq!(local.description_changed, Some(200));
+        assert_eq!(local.default_username_changed, Some(200));
+        assert_eq!(local.settings_changed, Some(200));
+        assert_eq!(local.recycle_bin_changed, Some(200));
+        assert_eq!(
+            local.root.times.as_ref().map(|times| times.modified_at),
+            Some(200)
+        );
+
+        let mut remote = base.clone();
+        remote.name = "Earlier remote name".into();
+        remote.database_name_changed = Some(100);
+        let merged = three_way_field_patch(&base, &local, &remote).unwrap();
+        assert_eq!(merged.vault.name, "Local name");
     }
 
     #[test]
