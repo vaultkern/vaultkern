@@ -1016,7 +1016,7 @@ it("shows progress while unlocking a recent vault", async () => {
   expect(await screen.findByText("No entries available.")).toBeInTheDocument();
 });
 
-it("loads and saves database settings from the manager workspace", async () => {
+it("loads database settings and preserves a conflict-copy warning after saving", async () => {
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
@@ -1094,7 +1094,11 @@ it("loads and saves database settings from the manager workspace", async () => {
       autosaveDelaySeconds: 45,
       hasPassword: true
     }),
-    saveVault: vi.fn().mockResolvedValue({ type: "save_vault_result", status: "saved" })
+    saveVault: vi.fn().mockResolvedValue({
+      type: "save_vault_result",
+      status: "conflict_copy",
+      conflictCopyPath: "C:\\Vaults\\Archive.conflict.kdbx"
+    })
   };
 
   render(<App client={client as RuntimeClientLike} />);
@@ -1171,6 +1175,10 @@ it("loads and saves database settings from the manager workspace", async () => {
     });
   });
   expect(client.saveVault).toHaveBeenCalledWith("vault-1");
+  expect(
+    await screen.findByText(/Local edits were saved to a conflict copy:/)
+  ).toHaveTextContent("C:\\Vaults\\Archive.conflict.kdbx");
+  expect(screen.queryByText("Database settings saved.")).not.toBeInTheDocument();
 });
 
 it("hides password actions until the authenticated credential flow exists", async () => {

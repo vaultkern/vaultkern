@@ -9835,7 +9835,7 @@ mod tests {
     }
 
     #[test]
-    fn save_command_reports_post_publish_failure_as_outcome_unknown() {
+    fn save_command_reconciles_a_visible_post_publish_generation() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         create_demo_entry(&mut runtime, &opened.vault_id);
@@ -9845,13 +9845,26 @@ mod tests {
             .handle(RuntimeCommand::SaveVault {
                 vault_id: opened.vault_id.clone(),
             })
-            .expect("post-publish failures must be command responses");
+            .expect("a visible published generation should be reconciled");
 
-        let RuntimeResponse::Error(error) = response else {
-            panic!("expected unknown local save outcome, got {response:?}");
-        };
-        assert_eq!(error.code, "persist_outcome_unknown");
-        assert!(error.message.contains("durability is unknown"));
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        assert_eq!(
+            KeepassCore::new()
+                .load_kdbx(&std::fs::read(&opened.path).unwrap(), &key)
+                .unwrap()
+                .root
+                .entries
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -10075,6 +10088,37 @@ mod tests {
 
         assert!(error.to_string().contains("failed to write vault"));
         assert!(runtime.list_entries(&opened.vault_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn platform_plugin_registration_reconciles_a_visible_post_publish_generation() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        arm_local_write_fault(&mut runtime, DurableFaultPoint::TargetReplaced);
+
+        let registration = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                user_name: "alice@example.com".into(),
+                user_handle: b"platform-user-ambiguous".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .expect("the visible published credential should complete registration");
+
+        drop(runtime);
+        let mut reopened = Runtime::for_tests();
+        let handle = reopened.open_local_vault(&opened.vault_id).unwrap();
+        reopened
+            .unlock_vault(&handle.vault_id, Some("demo-password"), None)
+            .unwrap();
+        let detail = reopened
+            .get_entry_detail(&handle.vault_id, &registration.entry_id)
+            .unwrap();
+        assert_eq!(
+            detail.passkey.unwrap().credential_id,
+            URL_SAFE_NO_PAD.encode(registration.credential.credential_id)
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@ use super::durable_file::{
     DurableFaultInjector, DurableFaultPoint, DurableFileIdentity, ExclusiveFileLock,
     TargetExpectation, TempWriteFaultPoints, VerifiedTemp, opened_file_identity,
     path_file_identity, publish_temp, remove_if_exists, sha256_hex, sync_parent,
-    unique_sibling_path, write_verified_temp,
+    sync_published_target, unique_sibling_path, write_verified_temp,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
@@ -245,8 +245,21 @@ impl LocalFileWriteTxn {
         );
         if let Err(error) = publish_result {
             if error.published {
-                return Err(LocalFileCommitError::OutcomeUnknown {
-                    source: error.source,
+                return reconcile_published_commit(
+                    &self.target,
+                    &backup,
+                    self.initial_identity,
+                    &self.initial_fingerprint,
+                    bytes,
+                )
+                .map_err(|reconcile_error| LocalFileCommitError::OutcomeUnknown {
+                    source: io::Error::new(
+                        reconcile_error.kind(),
+                        format!(
+                            "{}; published-generation reconciliation failed: {reconcile_error}",
+                            error.source
+                        ),
+                    ),
                 });
             }
             let _ = remove_if_exists(&backup);
@@ -363,6 +376,47 @@ impl LocalFileWriteTxn {
             Ok(backup)
         }
     }
+}
+
+fn reconcile_published_commit(
+    target: &Path,
+    backup: &Path,
+    initial_identity: DurableFileIdentity,
+    initial_fingerprint: &VaultSourceFingerprint,
+    intended_bytes: &[u8],
+) -> io::Result<DurableCommit> {
+    verify_backup_generation(backup, initial_identity, initial_fingerprint)?;
+
+    let opened = read_opened_snapshot(target, false)?;
+    if opened.snapshot.bytes != intended_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "visible local vault does not match the intended published generation",
+        ));
+    }
+
+    sync_published_target(target)?;
+    sync_parent(target)?;
+
+    let mut warnings = Vec::new();
+    if let Err(source) = remove_if_exists(backup).and_then(|_| sync_parent(target)) {
+        warnings.push(format!(
+            "could not remove durable backup after reconciling published generation: {source}"
+        ));
+    }
+
+    let snapshot = read_opened_snapshot(target, false)?.snapshot;
+    if snapshot.bytes != intended_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "local vault changed while reconciling the published generation",
+        ));
+    }
+
+    Ok(DurableCommit {
+        fingerprint: snapshot.fingerprint,
+        warnings,
+    })
 }
 
 #[derive(Debug)]
@@ -843,6 +897,7 @@ mod tests {
         fs::write(temp, bytes).unwrap();
     }
 
+    #[cfg(unix)]
     fn write_current(path: &std::path::Path, bytes: &[u8]) {
         let provider = LocalFileVaultSourceProvider::default();
         let path = path.to_str().unwrap();
@@ -1007,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_sync_failure_reports_unknown_and_keeps_a_complete_backup() {
+    fn post_publish_faults_reconcile_the_visible_generation() {
         for point in [
             DurableFaultPoint::TargetReplaced,
             DurableFaultPoint::ParentSynced,
@@ -1018,22 +1073,23 @@ mod tests {
             let provider = LocalFileVaultSourceProvider::default();
             let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
 
-            let error = transaction
+            let committed = transaction
                 .commit_with_faults(
                     &snapshot.fingerprint,
                     b"new-generation",
                     &DurableFaultInjector::fail_once(point),
                 )
-                .expect_err("post-replace failure is outcome unknown");
+                .expect("a visible intended generation should reconcile");
 
-            assert!(matches!(error, LocalFileCommitError::OutcomeUnknown { .. }));
             assert_eq!(fs::read(&path).unwrap(), b"new-generation");
-            let backups = sidecar_artifacts(dir.path());
-            assert_eq!(backups.len(), 1);
             assert_eq!(
-                fs::read(dir.path().join(&backups[0])).unwrap(),
-                b"old-generation"
+                committed.fingerprint,
+                provider
+                    .read_snapshot(path.to_str().unwrap())
+                    .unwrap()
+                    .fingerprint
             );
+            assert!(sidecar_artifacts(dir.path()).is_empty());
         }
     }
 

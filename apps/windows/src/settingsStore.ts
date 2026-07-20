@@ -17,41 +17,48 @@ export function createDesktopSettingsStore(
     async load() {
       const value = storage.getItem(SETTINGS_KEY);
       if (value === null) {
-        const applied = await applyInitialPasskeyProviderSetting(
+        const providerEnabled = await applyInitialPasskeyProviderSetting(
           applyPasskeyProviderSetting,
           DEFAULT_EXTENSION_SETTINGS.passkeyProviderEnabled
         );
-        return applied
-          ? DEFAULT_EXTENSION_SETTINGS
-          : { ...DEFAULT_EXTENSION_SETTINGS, passkeyProviderEnabled: false };
+        return {
+          ...DEFAULT_EXTENSION_SETTINGS,
+          passkeyProviderEnabled: providerEnabled
+        };
       }
 
       try {
         const settings = normalizeExtensionSettings(
           JSON.parse(value) as Partial<ExtensionSettings>
         );
-        const applied = await applyInitialPasskeyProviderSetting(
+        const providerEnabled = await applyInitialPasskeyProviderSetting(
           applyPasskeyProviderSetting,
           settings.passkeyProviderEnabled
         );
-        return applied
-          ? settings
-          : { ...settings, passkeyProviderEnabled: false };
+        return { ...settings, passkeyProviderEnabled: providerEnabled };
       } catch {
         storage.removeItem(SETTINGS_KEY);
-        const applied = await applyInitialPasskeyProviderSetting(
+        const providerEnabled = await applyInitialPasskeyProviderSetting(
           applyPasskeyProviderSetting,
           DEFAULT_EXTENSION_SETTINGS.passkeyProviderEnabled
         );
-        return applied
-          ? DEFAULT_EXTENSION_SETTINGS
-          : { ...DEFAULT_EXTENSION_SETTINGS, passkeyProviderEnabled: false };
+        return {
+          ...DEFAULT_EXTENSION_SETTINGS,
+          passkeyProviderEnabled: providerEnabled
+        };
       }
     },
     async save(settings) {
       const normalized = normalizeExtensionSettings(settings);
       const previousEnabled = storedPasskeyProviderSetting(storage);
-      await applyPasskeyProviderSetting(normalized.passkeyProviderEnabled);
+      const applied = await applyPasskeyProviderSetting(normalized.passkeyProviderEnabled);
+      if (typeof applied === "boolean" && applied !== normalized.passkeyProviderEnabled) {
+        throw new Error(
+          normalized.passkeyProviderEnabled
+            ? "Windows did not enable the passkey provider"
+            : "Windows did not disable the passkey provider"
+        );
+      }
       try {
         storage.setItem(
           SETTINGS_KEY,
@@ -93,8 +100,8 @@ async function applyInitialPasskeyProviderSetting(
   enabled: boolean
 ): Promise<boolean> {
   try {
-    await apply(enabled);
-    return true;
+    const applied = await apply(enabled);
+    return typeof applied === "boolean" ? applied : enabled;
   } catch (error) {
     console.error("failed to apply the saved passkey-provider setting", error);
     return false;

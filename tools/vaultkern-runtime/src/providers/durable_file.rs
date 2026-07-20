@@ -1246,12 +1246,12 @@ fn windows_replace_failure_is_outcome_unknown(
 }
 
 #[cfg(not(windows))]
-fn sync_published_target(_target: &Path) -> io::Result<()> {
+pub(crate) fn sync_published_target(_target: &Path) -> io::Result<()> {
     Ok(())
 }
 
 #[cfg(windows)]
-fn sync_published_target(target: &Path) -> io::Result<()> {
+pub(crate) fn sync_published_target(target: &Path) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     let mut options = OpenOptions::new();

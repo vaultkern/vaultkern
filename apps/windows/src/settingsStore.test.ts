@@ -65,6 +65,72 @@ it("does not report the passkey provider as enabled when startup activation fail
   consoleError.mockRestore();
 });
 
+it("does not report the passkey provider as enabled when Windows returns false", async () => {
+  window.localStorage.setItem(
+    "vaultkern.desktop.settings.v1",
+    JSON.stringify({
+      ...DEFAULT_EXTENSION_SETTINGS,
+      passkeyProviderEnabled: true
+    })
+  );
+  const applyPasskeyProviderSetting = vi.fn(async () => false);
+
+  const settings = await createDesktopSettingsStore(
+    window.localStorage,
+    applyPasskeyProviderSetting
+  ).load();
+
+  expect(settings.passkeyProviderEnabled).toBe(false);
+  expect(applyPasskeyProviderSetting).toHaveBeenCalledWith(true);
+});
+
+it("does not persist an enabled provider preference when Windows returns false", async () => {
+  const applyPasskeyProviderSetting = vi.fn(async () => false);
+  const storage = {
+    getItem: vi.fn(() => JSON.stringify(DEFAULT_EXTENSION_SETTINGS)),
+    setItem: vi.fn(),
+    removeItem: vi.fn()
+  };
+  const store = createDesktopSettingsStore(storage, applyPasskeyProviderSetting);
+
+  await expect(
+    store.save({
+      ...DEFAULT_EXTENSION_SETTINGS,
+      passkeyProviderEnabled: true
+    })
+  ).rejects.toThrow("Windows did not enable the passkey provider");
+
+  expect(storage.setItem).not.toHaveBeenCalled();
+});
+
+it("accepts a false Windows result when disabling the provider", async () => {
+  const applyPasskeyProviderSetting = vi.fn(async () => false);
+  const storage = {
+    getItem: vi.fn(() =>
+      JSON.stringify({
+        ...DEFAULT_EXTENSION_SETTINGS,
+        passkeyProviderEnabled: true
+      })
+    ),
+    setItem: vi.fn(),
+    removeItem: vi.fn()
+  };
+  const store = createDesktopSettingsStore(storage, applyPasskeyProviderSetting);
+
+  await store.save({
+    ...DEFAULT_EXTENSION_SETTINGS,
+    passkeyProviderEnabled: false
+  });
+
+  expect(storage.setItem).toHaveBeenCalledWith(
+    "vaultkern.desktop.settings.v1",
+    JSON.stringify({
+      ...DEFAULT_EXTENSION_SETTINGS,
+      passkeyProviderEnabled: false
+    })
+  );
+});
+
 it("rolls back the provider when persisting its setting fails", async () => {
   const applyPasskeyProviderSetting = vi.fn(async (_enabled: boolean) => undefined);
   const storage = {
