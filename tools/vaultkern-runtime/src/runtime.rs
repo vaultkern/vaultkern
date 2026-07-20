@@ -3464,10 +3464,25 @@ impl Runtime {
     }
 
     pub fn handle_browser_command(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        self.handle_browser_command_cancellable(command, &cancelled)
+    }
+
+    pub fn handle_browser_command_cancellable(
+        &mut self,
+        command: RuntimeCommand,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<RuntimeResponse> {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            anyhow::bail!("browser request was cancelled");
+        }
         if browser_command_requires_fresh_verification(&command) {
             self.biometric
                 .authorize("Allow browser access to VaultKern secrets or security settings")
                 .context("fresh browser request verification failed")?;
+        }
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            anyhow::bail!("browser request was cancelled");
         }
         self.handle(command)
     }
@@ -9168,6 +9183,27 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_browser_request_stops_after_fresh_verification_before_dispatch() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut runtime = Runtime::for_tests();
+        runtime.biometric = Box::new(CancellingBiometricProvider {
+            cancelled: cancelled.clone(),
+        });
+
+        let error = runtime
+            .handle_browser_command_cancellable(
+                RuntimeCommand::GetEntryDetail {
+                    vault_id: "missing-vault".into(),
+                    entry_id: "missing-entry".into(),
+                },
+                cancelled.as_ref(),
+            )
+            .expect_err("cancellation during verification must stop command dispatch");
+
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
     fn external_open_uses_desktop_unconfirmed_kdf_policy() {
         assert_eq!(
             Runtime::external_open_kdf_policy(),
@@ -9713,6 +9749,22 @@ mod tests {
 
         fn authorize(&self, reason: &str) -> Result<()> {
             self.authorizations.borrow_mut().push(reason.to_owned());
+            Ok(())
+        }
+    }
+
+    struct CancellingBiometricProvider {
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl BiometricProvider for CancellingBiometricProvider {
+        fn supports_quick_unlock(&self) -> bool {
+            true
+        }
+
+        fn authorize(&self, _reason: &str) -> Result<()> {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
             Ok(())
         }
     }

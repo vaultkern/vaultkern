@@ -90,7 +90,10 @@ impl RuntimeBridge {
                                 }
                                 let value = match catch_unwind(AssertUnwindSafe(|| {
                                     if browser_client {
-                                        runtime.handle_browser_command(command)
+                                        runtime.handle_browser_command_cancellable(
+                                            command,
+                                            cancelled.as_ref(),
+                                        )
                                     } else {
                                         runtime.handle(command)
                                     }
