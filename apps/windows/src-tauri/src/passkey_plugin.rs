@@ -633,7 +633,7 @@ unsafe fn free_owned_bytes(bytes: VkOwnedBytes) {
 
 fn runtime_error_hresult(message: &str) -> i32 {
     if message.contains("not found")
-        || message.contains("multiple platform passkey credentials")
+        || message.contains("multiple passkey credentials found for credential id")
         || message.contains("active unlocked vault")
     {
         NTE_NOT_FOUND
@@ -655,7 +655,7 @@ fn hresult_message(operation: &str, status: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        S_OK, VkOwnedBytes, free_owned_bytes, owned_bytes,
+        NTE_NOT_FOUND, S_OK, VkOwnedBytes, free_owned_bytes, owned_bytes, runtime_error_hresult,
         vaultkern_plugin_test_replaces_cached_account_credential,
     };
 
@@ -678,6 +678,16 @@ mod tests {
         assert_eq!(
             unsafe { vaultkern_plugin_test_replaces_cached_account_credential() },
             S_OK
+        );
+    }
+
+    #[test]
+    fn ambiguous_runtime_credentials_are_reported_as_not_found() {
+        assert_eq!(
+            runtime_error_hresult(
+                "multiple passkey credentials found for credential id: duplicate-id"
+            ),
+            NTE_NOT_FOUND
         );
     }
 }
