@@ -69,7 +69,7 @@ When `Register / Repair` is clicked, the setup utility extracts the embedded run
 %LOCALAPPDATA%\vaultkern-runtime\vaultkern-runtime.exe
 ```
 
-The manifest points to this stable runtime path and sets `allowed_origins` to the extension id pinned into the signed setup and runtime. Both sides of the resident IPC handshake enforce the same exact origin, so changing the per-user manifest cannot authorize another extension.
+The manifest points to this stable runtime path and sets `allowed_origins` to the extension id pinned into the packaged shim. Before connecting, the shim authenticates the real browser channel and enforces that exact origin; the resident independently authenticates the signed shim and validates the forwarded origin's syntax. Changing the per-user manifest therefore cannot authorize another extension.
 
 Development, sideload, and E2E validation use a separately built and signed package pinned to that build's stable extension id:
 
