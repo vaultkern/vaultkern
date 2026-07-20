@@ -349,6 +349,36 @@ fn deleting_group_cannot_orphan_a_changed_descendant() {
 }
 
 #[test]
+fn renaming_group_during_remote_delete_preserves_unchanged_subtree() {
+    let (mut base, entry_id) = base_vault();
+    let mut nested = Group::new("Nested");
+    nested.entries = std::mem::take(&mut base.root.entries);
+    let nested_id = nested.id;
+    let mut folder = Group::new("Folder");
+    folder.children.push(nested);
+    let folder_id = folder.id;
+    base.root.children.push(folder);
+
+    let mut local = base.clone();
+    local.root.children[0].title = "Renamed locally".into();
+    let mut remote = base.clone();
+    remote.root.children.clear();
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    let restored = patched
+        .vault
+        .root
+        .children
+        .iter()
+        .find(|group| group.id == folder_id)
+        .expect("renamed group survives the delete/edit race");
+
+    assert_eq!(restored.title, "Renamed locally");
+    assert!(restored.children.iter().any(|group| group.id == nested_id));
+    assert!(entry(restored, entry_id).is_some());
+}
+
+#[test]
 fn history_is_a_union_and_meta_fields_patch_independently() {
     let (base, entry_id) = base_vault();
     let mut local = base.clone();
