@@ -2129,6 +2129,7 @@ impl Runtime {
         );
         passkeys
             .into_iter()
+            .filter(|passkey| passkey.user_handle.is_some())
             .map(platform_passkey_credential)
             .collect()
     }
@@ -10310,6 +10311,44 @@ mod tests {
         );
         assert_eq!(assertion.user_handle, b"platform-user-1");
         assert_ne!(assertion.authenticator_data[32] & 0x04, 0);
+    }
+
+    #[test]
+    fn platform_credential_sync_skips_non_discoverable_kpex_entries() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let registration = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                user_name: "alice@example.com".into(),
+                user_handle: b"platform-user".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .unwrap();
+        let non_discoverable = create_demo_entry(&mut runtime, &opened.vault_id);
+        runtime
+            .set_entry_passkey(
+                &opened.vault_id,
+                &non_discoverable.id,
+                EntryPasskeyDto {
+                    username: "legacy@example.net".into(),
+                    credential_id: URL_SAFE_NO_PAD.encode(b"legacy-credential"),
+                    generated_user_id: None,
+                    private_key_pem: "legacy-private-key".into(),
+                    relying_party: "example.net".into(),
+                    user_handle: None,
+                    backup_eligible: false,
+                    backup_state: false,
+                },
+            )
+            .unwrap();
+
+        let credentials = runtime
+            .list_platform_passkey_credentials()
+            .expect("non-discoverable KPEX entries must not poison platform sync");
+
+        assert_eq!(credentials, vec![registration.credential]);
     }
 
     #[test]
