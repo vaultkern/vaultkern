@@ -240,7 +240,10 @@ mod tests {
 
         let copy = write_local_conflict_copy(&source, b"local-edits", 1_784_439_300).unwrap();
 
-        assert_eq!(copy.parent(), source.parent());
+        assert_eq!(
+            copy.parent(),
+            std::fs::canonicalize(&source).unwrap().parent()
+        );
         assert_eq!(
             copy.extension().and_then(|value| value.to_str()),
             Some("kdbx")
