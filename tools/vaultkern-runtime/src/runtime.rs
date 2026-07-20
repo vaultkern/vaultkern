@@ -581,6 +581,7 @@ impl Runtime {
                     has_key_file: false,
                 },
                 save_profile: SaveProfile::recommended(),
+                requires_source_migration: false,
                 autosave_delay_seconds: None,
                 vault: None,
                 transformed_key: None,
@@ -794,6 +795,7 @@ impl Runtime {
                             has_key_file: false,
                         },
                         save_profile: SaveProfile::recommended(),
+                        requires_source_migration: false,
                         autosave_delay_seconds: None,
                         vault: None,
                         transformed_key: None,
@@ -822,8 +824,12 @@ impl Runtime {
         let source = self.references.source_for(&current_vault_ref_id)?;
 
         let vault_id = vault_id_for_stored_source(&source);
-        if self.vault_session.contains_loaded(&vault_id) {
-            self.vault_session.mark_preloaded_for_unlock(vault_id);
+        if self.vault_session.is_preloaded_for_unlock(&vault_id)
+            || self
+                .vault_session
+                .find_loaded(&vault_id)
+                .is_some_and(|loaded| loaded.vault.is_some())
+        {
             return Ok(());
         }
 
@@ -887,10 +893,18 @@ impl Runtime {
 
     pub fn delete_vault_reference(&mut self, vault_ref_id: &str) -> Result<VaultReferenceListDto> {
         let source = self.references.source_for(vault_ref_id).ok();
+        let vault_id = source.as_ref().map(vault_id_for_stored_source);
         if let Some(cache_key) = source.as_ref().and_then(remote_cache_key_for_stored_source) {
             self.remote_cache.delete(&cache_key)?;
         }
+        if let Some(source) = source.as_ref() {
+            self.synced_bases
+                .delete(&vault_id_for_stored_source(source))?;
+        }
         let deleted_current = self.references.delete(vault_ref_id)?;
+        if let Some(vault_id) = vault_id.as_deref() {
+            self.vault_session.remove_loaded(vault_id);
+        }
         let _ = self
             .secure_storage
             .delete(&quick_unlock_storage_key(vault_ref_id));
@@ -923,26 +937,76 @@ impl Runtime {
 
         let credential_shape = master_credential.shape();
         let key = master_credential.to_composite_key();
-        let (vault, transformed_key, save_profile, name) = {
+        let (vault, transformed_key, save_profile, name, migrated_base) = {
             let (policy, confirmation) = Self::external_open_kdf_policy();
-            let transformed_key =
-                derive_transformed_key_with_policy(&loaded.bytes, &key, &policy, confirmation)
-                    .with_context(|| format!("failed to derive vault key: {vault_id}"))?;
-            let vault = load_kdbx_with_transformed_key_diagnostic(&loaded.bytes, &transformed_key)
-                .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
             let inspection = self
                 .core
                 .inspect_database(&loaded.bytes)
                 .with_context(|| format!("failed to inspect vault: {vault_id}"))?;
-            let save_profile = SaveProfile {
-                version: inspection.save_target_version,
-                cipher: inspection.header.cipher,
-                compression: inspection.header.compression,
-                kdf: None,
-            };
-            let name = vault.name.clone();
-            (vault, transformed_key, save_profile, name)
+            if matches!(
+                inspection.header.version,
+                KdbxVersion::V2_0 | KdbxVersion::V3_0 | KdbxVersion::V3_1
+            ) {
+                let legacy = self
+                    .core
+                    .load_kdbx_with_policy(&loaded.bytes, &key, &policy, confirmation)
+                    .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
+                let migration_profile = SaveProfile {
+                    version: inspection.save_target_version,
+                    cipher: inspection.header.cipher,
+                    compression: inspection.header.compression,
+                    kdf: Some(SaveKdf::recommended()),
+                };
+                let migrated = self
+                    .core
+                    .save_kdbx(&legacy, &key, migration_profile.clone())
+                    .with_context(|| format!("failed to migrate legacy vault: {vault_id}"))?;
+                let transformed_key =
+                    derive_transformed_key_with_policy(&migrated, &key, &policy, confirmation)
+                        .with_context(|| {
+                            format!("failed to derive migrated vault key: {vault_id}")
+                        })?;
+                let vault = load_kdbx_with_transformed_key_diagnostic(&migrated, &transformed_key)
+                    .with_context(|| format!("failed to load migrated vault: {vault_id}"))?;
+                let name = vault.name.clone();
+                (
+                    vault,
+                    transformed_key,
+                    SaveProfile {
+                        kdf: None,
+                        ..migration_profile
+                    },
+                    name,
+                    Some(migrated),
+                )
+            } else {
+                let transformed_key =
+                    derive_transformed_key_with_policy(&loaded.bytes, &key, &policy, confirmation)
+                        .with_context(|| format!("failed to derive vault key: {vault_id}"))?;
+                let vault =
+                    load_kdbx_with_transformed_key_diagnostic(&loaded.bytes, &transformed_key)
+                        .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
+                let name = vault.name.clone();
+                (
+                    vault,
+                    transformed_key,
+                    SaveProfile {
+                        version: inspection.save_target_version,
+                        cipher: inspection.header.cipher,
+                        compression: inspection.header.compression,
+                        kdf: None,
+                    },
+                    name,
+                    None,
+                )
+            }
         };
+        let requires_source_migration = migrated_base.is_some();
+        if let Some(migrated_base) = migrated_base.as_deref() {
+            self.synced_bases
+                .store(vault_id, migrated_base)
+                .with_context(|| format!("failed to store migrated synced base: {vault_id}"))?;
+        }
         self.vault_session.finish_unlock(
             vault_id,
             vault,
@@ -955,6 +1019,7 @@ impl Runtime {
             .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded.save_profile = save_profile;
+        loaded.requires_source_migration = requires_source_migration;
         loaded.name = name;
         self.recent_unlock_user_verification = None;
         Ok(())
@@ -1037,6 +1102,13 @@ impl Runtime {
             .active_vault_id()
             .context("current vault is locked")?
             .to_owned();
+        if self
+            .vault_session
+            .find_loaded(&active_vault_id)
+            .is_some_and(|loaded| loaded.requires_source_migration)
+        {
+            anyhow::bail!("save the migrated vault before enabling quick unlock");
+        }
         if self.secure_storage.store_requires_user_presence() {
             self.secure_storage.authorize_store_user_presence()?;
         } else {
@@ -1183,7 +1255,10 @@ impl Runtime {
             };
         }
 
-        if loaded.credential_shape.has_password && !loaded.credential_shape.has_key_file {
+        if self.allow_unlock_kdf
+            && loaded.credential_shape.has_password
+            && !loaded.credential_shape.has_key_file
+        {
             methods.push(PasskeyUserVerificationMethodDto::MasterPassword);
         }
 
@@ -2106,11 +2181,10 @@ impl Runtime {
                 }
             },
         );
-        let passkey = match matches.as_slice() {
-            [] => anyhow::bail!("platform passkey credential not found"),
-            [passkey] => *passkey,
-            _ => anyhow::bail!("multiple platform passkey credentials matched the request"),
-        };
+        let passkey = matches
+            .first()
+            .copied()
+            .context("platform passkey credential not found")?;
         let credential_id = URL_SAFE_NO_PAD
             .decode(&passkey.credential_id)
             .context("stored platform passkey credential id was not base64url")?;
@@ -2993,7 +3067,8 @@ impl Runtime {
             let vault_id = rollback.vault_id.clone();
             self.restore_passkey_registration_rollback(rollback)?;
             if save_after_rollback {
-                self.save_vault(&vault_id)?;
+                let response = self.save_vault(&vault_id)?;
+                ensure_primary_passkey_save(&response)?;
             }
         }
         self.close_passkey_registration_rollback(ceremony_token, closed_phase)?;
@@ -3039,6 +3114,7 @@ impl Runtime {
         }
 
         let response = self.save_vault(vault_id)?;
+        ensure_primary_passkey_save(&response)?;
         let entry = self
             .passkey_ceremonies
             .get_mut(ceremony_token)
@@ -4136,7 +4212,7 @@ impl Runtime {
                 .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
             loaded.vault = Some(prepared.candidate);
-            loaded.bytes.clear();
+            loaded.bytes = Vec::new();
             loaded.baseline_fingerprint = chain.pending.fingerprint.clone();
             loaded.source_status = Some(VaultSourceStatusDto {
                 source_kind: cache_key.provider_kind.clone(),
@@ -4689,9 +4765,10 @@ impl Runtime {
             .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded.vault = Some(vault);
-        loaded.bytes.clear();
+        loaded.bytes = Vec::new();
         loaded.baseline_fingerprint = fingerprint;
         loaded.save_profile.kdf = None;
+        loaded.requires_source_migration = false;
         if let Some(source_status) = source_status {
             loaded.source_status = Some(source_status);
         }
@@ -4738,7 +4815,15 @@ impl Runtime {
 
     pub fn save_vault(&mut self, vault_id: &str) -> Result<RuntimeResponse> {
         self.ensure_generic_save_allowed(vault_id)?;
-        let (key, baseline_fingerprint, save_profile, source, display_name, account_label) = {
+        let (
+            key,
+            baseline_fingerprint,
+            save_profile,
+            source,
+            display_name,
+            account_label,
+            requires_source_migration,
+        ) = {
             let loaded = self
                 .vault_session
                 .find_loaded(vault_id)
@@ -4750,6 +4835,7 @@ impl Runtime {
                 loaded.source.clone(),
                 loaded.name.clone(),
                 loaded.source_account_label.clone(),
+                loaded.requires_source_migration,
             )
         };
         if let VaultSource::OneDriveItem { drive_id, item_id } = &source {
@@ -4762,28 +4848,27 @@ impl Runtime {
                 save_profile,
                 display_name,
                 account_label,
+                requires_source_migration,
             );
         }
         let VaultSource::LocalPath(source_path) = source else {
             unreachable!("OneDrive saves return through the CAS path")
         };
-        let current = self
-            .read_current_snapshot(vault_id, Some(&baseline_fingerprint))
-            .with_context(|| format!("failed to read current vault source: {vault_id}"))?;
+        let current = match self.read_current_snapshot(vault_id, Some(&baseline_fingerprint)) {
+            Ok(current) => current,
+            Err(error) if error_chain_has_io_kind(&error, std::io::ErrorKind::NotFound) => {
+                let bytes = self.save_loaded_vault_bytes(vault_id, &key, save_profile)?;
+                return self.local_conflict_copy_result(vault_id, &source_path, &bytes);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read current vault source: {vault_id}"));
+            }
+        };
 
         if current.fingerprint != baseline_fingerprint {
             let bytes = self.save_loaded_vault_bytes(vault_id, &key, save_profile)?;
-            let conflict_copy_path = write_local_conflict_copy(
-                Path::new(&source_path),
-                &bytes,
-                self.current_unix_time(),
-            )
-            .with_context(|| format!("failed to write conflict copy for: {vault_id}"))?;
-            return Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
-                merge_summary: None,
-                conflict_copy_path: Some(conflict_copy_path.to_string_lossy().into_owned()),
-            }));
+            return self.local_conflict_copy_result(vault_id, &source_path, &bytes);
         }
 
         let bytes = {
@@ -4803,6 +4888,14 @@ impl Runtime {
         let next_fingerprint = match self.write_local_source(vault_id, &bytes, &current.fingerprint)
         {
             Ok(fingerprint) => fingerprint,
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<LocalFileCommitError>(),
+                    Some(LocalFileCommitError::Conflict { .. })
+                ) =>
+            {
+                return self.local_conflict_copy_result(vault_id, &source_path, &bytes);
+            }
             Err(error) => {
                 return Err(error).with_context(|| format!("failed to write vault: {vault_id}"));
             }
@@ -4814,12 +4907,29 @@ impl Runtime {
             .vault_session
             .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
-        loaded.bytes.clear();
+        loaded.bytes = Vec::new();
         loaded.baseline_fingerprint = next_fingerprint;
+        loaded.requires_source_migration = false;
         Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
             status: SaveVaultStatusDto::Saved,
             merge_summary: None,
             conflict_copy_path: None,
+        }))
+    }
+
+    fn local_conflict_copy_result(
+        &self,
+        vault_id: &str,
+        source_path: &str,
+        bytes: &[u8],
+    ) -> Result<RuntimeResponse> {
+        let conflict_copy_path =
+            write_local_conflict_copy(Path::new(source_path), bytes, self.current_unix_time())
+                .with_context(|| format!("failed to write conflict copy for: {vault_id}"))?;
+        Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+            status: SaveVaultStatusDto::ConflictCopy,
+            merge_summary: None,
+            conflict_copy_path: Some(conflict_copy_path.to_string_lossy().into_owned()),
         }))
     }
 
@@ -4834,6 +4944,7 @@ impl Runtime {
         save_profile: SaveProfile,
         display_name: String,
         account_label: Option<String>,
+        requires_source_migration: bool,
     ) -> Result<RuntimeResponse> {
         const MAX_SOURCE_ATTEMPTS: usize = 3;
 
@@ -4852,7 +4963,7 @@ impl Runtime {
         let base_vault = Self::load_session_database(&base_bytes, key)
             .context("failed to parse the synced OneDrive base")?
             .vault;
-        if local_vault == base_vault {
+        if local_vault == base_vault && !requires_source_migration {
             return self.adopt_untouched_onedrive_head(
                 vault_id,
                 drive_id,
@@ -7701,6 +7812,30 @@ fn constant_time_bytes_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
+fn error_chain_has_io_kind(error: &anyhow::Error, kind: std::io::ErrorKind) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == kind)
+    })
+}
+
+fn ensure_primary_passkey_save(response: &RuntimeResponse) -> Result<()> {
+    let RuntimeResponse::SaveVaultResult(result) = response else {
+        anyhow::bail!("passkey mutation received an unexpected save response: {response:?}");
+    };
+    if result.status == SaveVaultStatusDto::ConflictCopy {
+        return Err(LocalFileCommitError::Conflict {
+            message: format!(
+                "passkey mutation was saved only to conflict copy: {}",
+                result.conflict_copy_path.as_deref().unwrap_or("unknown")
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn quick_unlock_storage_key(vault_ref_id: &str) -> String {
     let digest = Sha256::digest(vault_ref_id.as_bytes());
     let mut key = String::from("quick_unlock_");
@@ -8901,21 +9036,30 @@ mod tests {
     }
 
     #[test]
-    fn save_rejects_source_change_after_merge_snapshot() {
+    fn save_after_source_change_during_commit_writes_a_conflict_copy() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         create_demo_entry(&mut runtime, &opened.vault_id);
         let generation_b = arm_source_change_after_merge_snapshot(&mut runtime, &opened);
 
-        let error = runtime
+        let response = runtime
             .save_vault(&opened.vault_id)
-            .expect_err("source change after the merge snapshot must conflict");
+            .expect("source change after the merge snapshot must be recoverable");
 
-        assert!(matches!(
-            error.downcast_ref::<LocalFileCommitError>(),
-            Some(LocalFileCommitError::Conflict { .. })
-        ));
+        let RuntimeResponse::SaveVaultResult(result) = response else {
+            panic!("expected save result");
+        };
+        assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
         assert_eq!(std::fs::read(&opened.path).unwrap(), generation_b);
+        assert!(
+            Path::new(
+                result
+                    .conflict_copy_path
+                    .as_deref()
+                    .expect("conflict-copy path")
+            )
+            .exists()
+        );
     }
 
     #[test]
@@ -8955,6 +9099,30 @@ mod tests {
     }
 
     #[test]
+    fn save_after_source_deletion_writes_a_recoverable_conflict_copy() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        std::fs::remove_file(&opened.path).unwrap();
+
+        let response = runtime
+            .save_vault(&opened.vault_id)
+            .expect("missing source should take the recoverable conflict path");
+
+        let RuntimeResponse::SaveVaultResult(result) = response else {
+            panic!("expected save result");
+        };
+        assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        assert!(!Path::new(&opened.path).exists());
+        let conflict_path = result.conflict_copy_path.expect("conflict-copy path");
+        let conflict_bytes = std::fs::read(conflict_path).unwrap();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let conflict_vault = KeepassCore::new().load_kdbx(&conflict_bytes, &key).unwrap();
+        assert_eq!(conflict_vault.root.entries.len(), 1);
+    }
+
+    #[test]
     fn local_write_returns_the_commit_fingerprint() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
@@ -8974,7 +9142,7 @@ mod tests {
     }
 
     #[test]
-    fn save_command_reports_source_change_as_conflict() {
+    fn save_command_reports_source_change_as_a_conflict_copy() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         create_demo_entry(&mut runtime, &opened.vault_id);
@@ -8986,16 +9154,24 @@ mod tests {
             })
             .expect("source conflicts must be command responses");
 
-        let RuntimeResponse::Error(error) = response else {
-            panic!("expected source conflict response, got {response:?}");
+        let RuntimeResponse::SaveVaultResult(result) = response else {
+            panic!("expected conflict-copy response, got {response:?}");
         };
-        assert_eq!(error.code, "conflict");
-        assert!(error.message.contains("local vault write conflict"));
+        assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        assert!(
+            Path::new(
+                result
+                    .conflict_copy_path
+                    .as_deref()
+                    .expect("conflict-copy path")
+            )
+            .exists()
+        );
         assert_eq!(std::fs::read(&opened.path).unwrap(), generation_b);
     }
 
     #[test]
-    fn save_command_reports_source_deletion_as_conflict() {
+    fn save_command_reports_source_deletion_as_a_conflict_copy() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         create_demo_entry(&mut runtime, &opened.vault_id);
@@ -9007,11 +9183,19 @@ mod tests {
             })
             .expect("source deletion must be a command response");
 
-        let RuntimeResponse::Error(error) = response else {
-            panic!("expected source conflict response, got {response:?}");
+        let RuntimeResponse::SaveVaultResult(result) = response else {
+            panic!("expected conflict-copy response, got {response:?}");
         };
-        assert_eq!(error.code, "conflict");
-        assert!(error.message.contains("local vault write conflict"));
+        assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        assert!(
+            Path::new(
+                result
+                    .conflict_copy_path
+                    .as_deref()
+                    .expect("conflict-copy path")
+            )
+            .exists()
+        );
         assert!(!std::path::Path::new(&opened.path).exists());
     }
 
@@ -9301,7 +9485,7 @@ mod tests {
     }
 
     #[test]
-    fn platform_plugin_only_uses_the_current_unlocked_vault_and_unique_allow_list_match() {
+    fn platform_plugin_selects_one_matching_credential_for_discoverable_assertions() {
         let locked = Runtime::for_tests();
         let error = locked
             .list_platform_passkey_credentials()
@@ -9329,19 +9513,15 @@ mod tests {
             })
             .unwrap();
 
-        let ambiguous = runtime
+        let discoverable = runtime
             .create_platform_passkey_assertion(PlatformPasskeyAssertionInput {
                 relying_party: "example.com".into(),
                 allowed_credential_ids: Vec::new(),
                 client_data_hash: vec![0x72; 32],
                 user_verified: true,
             })
-            .expect_err("discoverable assertion with multiple matches needs selection");
-        assert!(
-            ambiguous
-                .to_string()
-                .contains("multiple platform passkey credentials")
-        );
+            .expect("the authenticator should select one discoverable credential");
+        assert_eq!(discoverable.credential_id, first.credential.credential_id);
 
         let selected = runtime
             .create_platform_passkey_assertion(PlatformPasskeyAssertionInput {
@@ -10053,6 +10233,7 @@ mod tests {
         let (_first_dir, first) = open_unlocked_demo_vault(&mut runtime);
         let entry = create_demo_entry(&mut runtime, &first.vault_id);
         let fields = entry_fields(&entry);
+        runtime.save_vault(&first.vault_id).unwrap();
         let (_second_dir, second) = open_unlocked_demo_vault(&mut runtime);
         assert_eq!(
             runtime.vault_session.active_vault_id(),
@@ -10074,6 +10255,10 @@ mod tests {
             panic!("expected active-vault conflict, got {update:?}");
         };
         assert_eq!(error.code, "conflict");
+        runtime.open_local_vault(&first.path).unwrap();
+        runtime
+            .unlock_with_password(&first.vault_id, "demo-password")
+            .unwrap();
         assert_eq!(
             runtime
                 .get_entry_detail(&first.vault_id, &entry.id)
@@ -13404,6 +13589,69 @@ mod tests {
                 }
             )
         );
+    }
+
+    #[test]
+    fn extension_runtime_does_not_offer_master_password_passkey_verification() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime.allow_unlock_kdf = false;
+
+        let response = runtime
+            .handle(RuntimeCommand::GetPasskeyUserVerificationCapability)
+            .unwrap();
+
+        assert_eq!(
+            response,
+            RuntimeResponse::PasskeyUserVerificationCapability(
+                PasskeyUserVerificationCapabilityDto {
+                    available: false,
+                    methods: vec![],
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn deleting_vault_reference_removes_its_synced_base_copy() {
+        let core = KeepassCore::new();
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let bytes = core
+            .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("personal.kdbx");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut runtime = Runtime::for_tests();
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_with_password(&opened.vault_id, "demo-password")
+            .unwrap();
+        let vault_ref_id = runtime
+            .session_state()
+            .current_vault_ref_id
+            .expect("opened vault reference");
+        assert!(
+            runtime
+                .synced_bases
+                .read(&opened.vault_id)
+                .unwrap()
+                .is_some()
+        );
+
+        runtime.delete_vault_reference(&vault_ref_id).unwrap();
+
+        assert!(
+            runtime
+                .synced_bases
+                .read(&opened.vault_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(runtime.list_entries(&opened.vault_id).is_err());
+        assert!(!runtime.session_state().unlocked);
     }
 
     #[test]

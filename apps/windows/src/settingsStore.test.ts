@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 import { DEFAULT_EXTENSION_SETTINGS } from "@vaultkern/shared-web-ui";
 
@@ -23,4 +23,42 @@ it("recovers from a corrupt desktop settings value", async () => {
   await expect(
     createDesktopSettingsStore(window.localStorage).load()
   ).resolves.toEqual(DEFAULT_EXTENSION_SETTINGS);
+});
+
+it("applies the passkey-provider preference when settings load and save", async () => {
+  const applyPasskeyProviderSetting = vi.fn(async (_enabled: boolean) => undefined);
+  const store = createDesktopSettingsStore(
+    window.localStorage,
+    applyPasskeyProviderSetting
+  );
+
+  await store.load();
+  expect(applyPasskeyProviderSetting).toHaveBeenLastCalledWith(false);
+
+  await store.save({
+    ...DEFAULT_EXTENSION_SETTINGS,
+    passkeyProviderEnabled: true
+  });
+  expect(applyPasskeyProviderSetting).toHaveBeenLastCalledWith(true);
+});
+
+it("rolls back the provider when persisting its setting fails", async () => {
+  const applyPasskeyProviderSetting = vi.fn(async (_enabled: boolean) => undefined);
+  const storage = {
+    getItem: vi.fn(() => JSON.stringify(DEFAULT_EXTENSION_SETTINGS)),
+    setItem: vi.fn(() => {
+      throw new Error("simulated local-storage failure");
+    }),
+    removeItem: vi.fn()
+  };
+  const store = createDesktopSettingsStore(storage, applyPasskeyProviderSetting);
+
+  await expect(
+    store.save({
+      ...DEFAULT_EXTENSION_SETTINGS,
+      passkeyProviderEnabled: true
+    })
+  ).rejects.toThrow("simulated local-storage failure");
+
+  expect(applyPasskeyProviderSetting.mock.calls).toEqual([[true], [false]]);
 });

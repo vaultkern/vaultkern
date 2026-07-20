@@ -1504,12 +1504,6 @@ fn runtime_rejects_passkey_assertion_when_ceremony_switches_vault_after_binding(
     runtime
         .unlock_with_password(&first_handle.vault_id, "demo-password")
         .unwrap();
-    let second_handle = runtime
-        .open_local_vault(second_path.to_str().unwrap())
-        .unwrap();
-    runtime
-        .unlock_with_password(&second_handle.vault_id, "demo-password")
-        .unwrap();
 
     runtime
         .handle(RuntimeCommand::RegisterPasskeyCeremony {
@@ -1545,6 +1539,12 @@ fn runtime_rejects_passkey_assertion_when_ceremony_switches_vault_after_binding(
             expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
             vault_id: first_handle.vault_id,
         })
+        .unwrap();
+    let second_handle = runtime
+        .open_local_vault(second_path.to_str().unwrap())
+        .unwrap();
+    runtime
+        .unlock_with_password(&second_handle.vault_id, "demo-password")
         .unwrap();
     runtime
         .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {

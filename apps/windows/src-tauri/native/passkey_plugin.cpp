@@ -73,12 +73,16 @@ void ReplaceCredentialCache(std::vector<CachedCredential> credentials) {
     g_credential_cache = std::move(credentials);
 }
 
-HRESULT SelectCredentialUsername(
+struct SelectedCredential {
+    std::vector<BYTE> credential_id;
+    std::wstring user_name;
+};
+
+HRESULT SelectCredential(
     PCWSTR rp_id,
     const std::vector<VkBytes>& allowed,
-    std::wstring& user_name) {
+    SelectedCredential& selected) {
     std::lock_guard<std::mutex> lock(g_credential_cache_mutex);
-    const CachedCredential* selected = nullptr;
     for (const auto& credential : g_credential_cache) {
         if (credential.rp_id != rp_id) {
             continue;
@@ -98,16 +102,14 @@ HRESULT SelectCredentialUsername(
         if (!is_allowed) {
             continue;
         }
-        if (selected) {
-            return NTE_NOT_FOUND;
+        if (credential.user_name.empty()) {
+            continue;
         }
-        selected = &credential;
+        selected.credential_id = credential.credential_id;
+        selected.user_name = credential.user_name;
+        return S_OK;
     }
-    if (!selected || selected->user_name.empty()) {
-        return NTE_NOT_FOUND;
-    }
-    user_name = selected->user_name;
-    return S_OK;
+    return NTE_NOT_FOUND;
 }
 
 void Trace(const char* operation, const char* stage, HRESULT status) noexcept {
@@ -518,6 +520,9 @@ public:
         if (FAILED(result)) {
             return result;
         }
+        if (!callbacks_.is_unlocked(callbacks_.context)) {
+            return NTE_NOT_FOUND;
+        }
         PluginOperation operation(callbacks_, request->transactionId);
         if (FAILED(operation.status())) {
             return operation.status();
@@ -684,6 +689,9 @@ public:
         if (FAILED(result)) {
             return result;
         }
+        if (!callbacks_.is_unlocked(callbacks_.context)) {
+            return NTE_NOT_FOUND;
+        }
         PluginOperation operation(callbacks_, request->transactionId);
         if (FAILED(operation.status())) {
             return operation.status();
@@ -741,14 +749,14 @@ public:
         } catch (const std::bad_alloc&) {
             return E_OUTOFMEMORY;
         }
-        std::wstring user_name;
-        result = SelectCredentialUsername(decoded->pwszRpId, allowed, user_name);
+        SelectedCredential selected;
+        result = SelectCredential(decoded->pwszRpId, allowed, selected);
         Trace("get", "select-credential", result);
         if (FAILED(result)) {
             return result;
         }
 
-        result = PerformHelloVerification(request, user_name.c_str());
+        result = PerformHelloVerification(request, selected.user_name.c_str());
         Trace("get", "hello-uv", result);
         if (FAILED(result)) {
             return result;
@@ -758,10 +766,13 @@ public:
         }
 
         try {
+            VkBytes selected_credential{
+                selected.credential_id.data(),
+                static_cast<uint32_t>(selected.credential_id.size())};
             VkGetAssertionInput input{
                 reinterpret_cast<const uint16_t*>(decoded->pwszRpId),
-                allowed.empty() ? nullptr : allowed.data(),
-                static_cast<uint32_t>(allowed.size()),
+                &selected_credential,
+                1,
                 {decoded->pbClientDataHash, decoded->cbClientDataHash}};
             VkGetAssertionOutput output{};
             if (FAILED(result = operation.CheckCancelled())) {
@@ -1046,6 +1057,22 @@ extern "C" int32_t VK_CALL vaultkern_plugin_ensure_registered(
     if (SUCCEEDED(result)) {
         (void)get_state(kPluginClsid, &state);
         *authenticator_state = state;
+    }
+    return result;
+}
+
+extern "C" int32_t VK_CALL vaultkern_plugin_remove_registered(void) {
+    using Remove = HRESULT(WINAPI*)(REFCLSID);
+    auto remove = WebAuthnFunction<Remove>("WebAuthNPluginRemoveAuthenticator");
+    if (!remove) {
+        return E_NOTIMPL;
+    }
+    HRESULT result = remove(kPluginClsid);
+    if (result == NTE_NOT_FOUND) {
+        result = S_OK;
+    }
+    if (SUCCEEDED(result)) {
+        ReplaceCredentialCache({});
     }
     return result;
 }

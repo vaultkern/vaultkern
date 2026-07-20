@@ -2,13 +2,17 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::slice;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use vaultkern_runtime::{
     PlatformPasskeyAssertionInput, PlatformPasskeyCredential, PlatformPasskeyRegistrationInput,
 };
 
-use crate::RuntimeBridge;
 use crate::plugin_operation_state::{PluginOperationId, PluginOperationState};
+use crate::{RuntimeBridge, plugin_callback_available};
 
 const S_OK: i32 = 0;
 const E_FAIL: i32 = 0x8000_4005_u32 as i32;
@@ -107,6 +111,7 @@ unsafe extern "system" {
     ) -> i32;
     fn vaultkern_plugin_stop(registration_cookie: u32) -> i32;
     fn vaultkern_plugin_ensure_registered(authenticator_state: *mut i32) -> i32;
+    fn vaultkern_plugin_remove_registered() -> i32;
     fn vaultkern_plugin_sync_credentials(
         credentials: *const VkCredentialMetadata,
         credential_count: u32,
@@ -116,19 +121,23 @@ unsafe extern "system" {
 struct CallbackContext {
     bridge: RuntimeBridge,
     operations: PluginOperationState,
+    enabled: Arc<AtomicBool>,
 }
 
 pub struct PasskeyPluginServer {
     context: Box<CallbackContext>,
     registration_cookie: u32,
     start_error: Option<String>,
+    enabled: Arc<AtomicBool>,
 }
 
 impl PasskeyPluginServer {
     pub fn start(bridge: RuntimeBridge) -> Self {
+        let enabled = Arc::new(AtomicBool::new(false));
         let mut context = Box::new(CallbackContext {
             bridge,
             operations: PluginOperationState::default(),
+            enabled: Arc::clone(&enabled),
         });
         let callbacks = VkPluginCallbacks {
             version: 2,
@@ -149,7 +158,29 @@ impl PasskeyPluginServer {
             context,
             registration_cookie,
             start_error,
+            enabled,
         }
+    }
+
+    pub fn set_enabled(&self, enabled: bool) -> Result<bool, String> {
+        if !enabled {
+            let was_enabled = self.enabled.swap(false, Ordering::AcqRel);
+            let status = unsafe { vaultkern_plugin_remove_registered() };
+            if failed(status) {
+                self.enabled.store(was_enabled, Ordering::Release);
+                return Err(hresult_message("unregister plugin authenticator", status));
+            }
+            return Ok(false);
+        }
+
+        let os_enabled = self.ensure_registered()?;
+        self.enabled.store(true, Ordering::Release);
+        if let Err(error) = self.sync_credentials() {
+            self.enabled.store(false, Ordering::Release);
+            let _ = unsafe { vaultkern_plugin_remove_registered() };
+            return Err(error);
+        }
+        Ok(os_enabled)
     }
 
     pub fn ensure_registered(&self) -> Result<bool, String> {
@@ -163,8 +194,14 @@ impl PasskeyPluginServer {
     }
 
     pub fn sync_credentials(&self) -> Result<usize, String> {
+        if !self.enabled.load(Ordering::Acquire) {
+            return Ok(0);
+        }
         self.ensure_started()?;
-        let credentials = self.context.bridge.list_platform_passkey_credentials()?;
+        let credentials = self
+            .context
+            .bridge
+            .list_platform_passkey_credentials_for_sync()?;
         let backings = credentials
             .iter()
             .map(CredentialBacking::new)
@@ -307,7 +344,7 @@ impl CredentialBacking {
 extern "system" fn is_unlocked_callback(context: *mut c_void) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         callback_context(context)
-            .is_some_and(|context| context.bridge.platform_passkey_is_unlocked())
+            .is_some_and(callback_available)
             .into()
     }))
     .unwrap_or(0)
@@ -329,6 +366,9 @@ extern "system" fn make_credential_callback(
         let Some(context) = callback_context(context) else {
             return E_INVALIDARG;
         };
+        if !callback_available(context) {
+            return NTE_NOT_FOUND;
+        }
         let Some(input) = input.as_ref() else {
             return E_INVALIDARG;
         };
@@ -415,6 +455,9 @@ extern "system" fn get_assertion_callback(
         let Some(context) = callback_context(context) else {
             return E_INVALIDARG;
         };
+        if !callback_available(context) {
+            return NTE_NOT_FOUND;
+        }
         let Some(input) = input.as_ref() else {
             return E_INVALIDARG;
         };
@@ -469,6 +512,13 @@ extern "system" fn get_assertion_callback(
         S_OK
     }))
     .unwrap_or(E_FAIL)
+}
+
+fn callback_available(context: &CallbackContext) -> bool {
+    plugin_callback_available(
+        context.enabled.load(Ordering::Acquire),
+        context.bridge.platform_passkey_is_unlocked(),
+    )
 }
 
 extern "system" fn free_bytes_callback(_context: *mut c_void, bytes: VkOwnedBytes) {
