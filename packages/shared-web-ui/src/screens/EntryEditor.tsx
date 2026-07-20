@@ -244,7 +244,11 @@ export function EntryEditor({
                         style={saveSpinnerStyle}
                       />
                     ) : null}
-                    {busy ? text("Saving...") : text("Save changes")}
+                    {busy
+                      ? text("Saving...")
+                      : pendingSave
+                        ? text("Retry save")
+                        : text("Save changes")}
                   </span>
                 </button>
               </>
@@ -393,6 +397,7 @@ export function EntryEditor({
         <EditableAttachments
           attachments={entry.attachments ?? []}
           text={text}
+          disabled={busy || pendingSave}
           onAdd={onAddAttachment}
           onRename={onRenameAttachment}
           onReplace={onReplaceAttachment}
@@ -594,6 +599,7 @@ function EditableCustomFields({
 function EditableAttachments({
   attachments,
   text,
+  disabled,
   onAdd,
   onRename,
   onReplace,
@@ -601,6 +607,7 @@ function EditableAttachments({
 }: {
   attachments: EntryAttachment[];
   text: ReturnType<typeof useText>;
+  disabled?: boolean;
   onAdd?: (file: File, protectInMemory: boolean) => void;
   onRename?: (oldName: string, newName: string, protectInMemory: boolean) => void;
   onReplace?: (name: string, file: File) => void;
@@ -616,6 +623,7 @@ function EditableAttachments({
           <input
             type="checkbox"
             checked={protectNewAttachment}
+            disabled={disabled}
             onChange={(event) => setProtectNewAttachment(event.target.checked)}
           />
           {text("Protect new attachment")}
@@ -625,6 +633,7 @@ function EditableAttachments({
           <input
             aria-label={text("Add attachment file")}
             type="file"
+            disabled={disabled}
             style={hiddenFileInputStyle}
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -648,6 +657,7 @@ function EditableAttachments({
                   aria-label={`Rename ${attachment.name}`}
                   type="text"
                   defaultValue={attachment.name}
+                  disabled={disabled}
                   onBlur={(event) => {
                     const newName = event.target.value.trim();
                     if (newName && newName !== attachment.name) {
@@ -667,6 +677,7 @@ function EditableAttachments({
                   aria-label={`Protect ${attachment.name}`}
                   type="checkbox"
                   checked={attachment.protectInMemory}
+                  disabled={disabled}
                   onChange={(event) =>
                     onRename?.(
                       attachment.name,
@@ -682,6 +693,7 @@ function EditableAttachments({
                 <input
                   aria-label={`Replace ${attachment.name}`}
                   type="file"
+                  disabled={disabled}
                   style={hiddenFileInputStyle}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
@@ -696,6 +708,7 @@ function EditableAttachments({
                 type="button"
                 aria-label={`Remove ${attachment.name}`}
                 onClick={() => onDelete?.(attachment.name)}
+                disabled={disabled}
                 style={dangerSmallButtonStyle}
               >
                 {text("Remove")}

@@ -3198,6 +3198,92 @@ it("manages entry attachments from the detail pane", async () => {
   expect(saveVault).toHaveBeenCalledTimes(3);
 });
 
+it("retries a failed attachment save without adding the attachment again", async () => {
+  const addEntryAttachment = vi.fn(async () => ({
+    type: "entry_detail" as const,
+    id: "entry-1",
+    title: "Example",
+    username: "alice",
+    password: "secret-123",
+    url: "https://example.com",
+    notes: "demo note",
+    totp: null,
+    totpUri: null,
+    customFields: [],
+    attachments: [
+      {
+        name: "added.txt",
+        size: 5,
+        protectInMemory: false
+      }
+    ]
+  }));
+  const saveVault = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("simulated attachment save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret-123",
+      url: "https://example.com",
+      notes: "demo note",
+      totp: null,
+      totpUri: null,
+      customFields: [],
+      attachments: []
+    })),
+    addEntryAttachment,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  const file = new File(["hello"], "added.txt", { type: "text/plain" });
+  fireEvent.change(screen.getByLabelText("Add attachment file"), {
+    target: { files: [file] }
+  });
+
+  expect(await screen.findByText("simulated attachment save failure")).toBeInTheDocument();
+  expect(addEntryAttachment).toHaveBeenCalledTimes(1);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
+  expect(addEntryAttachment).toHaveBeenCalledTimes(1);
+});
+
 it("shows read-only entry history details", async () => {
   const listEntryHistory = vi.fn(async () => [
     {

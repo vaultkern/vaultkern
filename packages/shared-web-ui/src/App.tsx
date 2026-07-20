@@ -180,6 +180,10 @@ interface PendingEntryDelete {
   entryId: string;
 }
 
+interface PendingAttachmentSave extends PendingEntrySave {
+  fallbackMessage: string;
+}
+
 const COMPACT_BREAKPOINT = 1180;
 const STACKED_BREAKPOINT = 760;
 
@@ -365,6 +369,8 @@ export function App({
   const [pendingPasskeySave, setPendingPasskeySave] = useState<PendingEntrySave | null>(
     null
   );
+  const [pendingAttachmentSave, setPendingAttachmentSave] =
+    useState<PendingAttachmentSave | null>(null);
   const [pendingEntryDelete, setPendingEntryDelete] =
     useState<PendingEntryDelete | null>(null);
   const [entryActionError, setEntryActionError] = useState<string | null>(null);
@@ -724,14 +730,15 @@ export function App({
     }
   }
 
-  const hasPendingEntrySave = Boolean(pendingEntrySave || pendingPasskeySave);
-  const dirty =
-    hasPendingEntrySave ||
-    (editorMode === "create-pending"
+  const pendingDetailSave = pendingAttachmentSave || pendingPasskeySave;
+  const hasPendingEntrySave = Boolean(pendingEntrySave || pendingDetailSave);
+  const draftDirty =
+    editorMode === "create-pending"
       ? hasDraftChangesFromEmpty(draft)
       : editorMode === "edit" && entryDetail && draft
         ? !draftMatchesEntry(draft, entryDetail)
-        : false);
+        : false;
+  const dirty = hasPendingEntrySave || draftDirty;
 
   function performAction(action: PendingAction) {
     switch (action.type) {
@@ -888,9 +895,10 @@ export function App({
   }
 
   async function handleSaveAndContinue(action: PendingAction) {
-    const saved = pendingPasskeySave
-      ? await retryPendingPasskeySave()
-      : await saveDraft();
+    let saved = pendingDetailSave ? await retryPendingDetailSave() : true;
+    if (saved && (draftDirty || !pendingDetailSave)) {
+      saved = await saveDraft();
+    }
 
     if (saved) {
       performAction(action);
@@ -1053,19 +1061,55 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
       const detail = await operation();
-      handleSaveResult(await client.saveVault(session.activeVaultId));
       setEntryDetail(detail);
+      setPendingAttachmentSave({ vaultId, detail, fallbackMessage });
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingAttachmentSave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (attachmentError) {
       setEntryActionError(errorMessage(attachmentError, fallbackMessage));
     } finally {
       setEntryActionBusy(false);
     }
+  }
+
+  async function retryPendingAttachmentSave() {
+    if (!pendingAttachmentSave) {
+      return false;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      handleSaveResult(await client.saveVault(pendingAttachmentSave.vaultId));
+      setPendingAttachmentSave(null);
+      setWorkspaceReloadKey((current) => current + 1);
+      return true;
+    } catch (attachmentError) {
+      setEntryActionError(
+        errorMessage(attachmentError, pendingAttachmentSave.fallbackMessage)
+      );
+      return false;
+    } finally {
+      setEntryActionBusy(false);
+    }
+  }
+
+  async function retryPendingDetailSave() {
+    if (pendingAttachmentSave) {
+      return retryPendingAttachmentSave();
+    }
+    if (pendingPasskeySave) {
+      return retryPendingPasskeySave();
+    }
+    return false;
   }
 
   async function handleAddAttachment(file: File, protectInMemory: boolean) {
@@ -1943,14 +1987,14 @@ export function App({
               draft={draft}
               dirty={dirty}
               busy={entryActionBusy}
-              pendingSave={Boolean(pendingPasskeySave)}
+              pendingSave={Boolean(pendingDetailSave)}
               error={entryActionError ?? detailError}
               historyItems={historyItems}
               historyDetail={historyDetail}
               historyError={historyError}
               onBack={viewMode === "expanded" ? undefined : handleBackToEntries}
               onStartEdit={() => {
-                if (!entryDetail || pendingPasskeySave) {
+                if (!entryDetail || pendingDetailSave) {
                   return;
                 }
 
@@ -2029,10 +2073,10 @@ export function App({
                 void handleClearEntryPasskey();
               }}
               onRetrySave={() => {
-                void retryPendingPasskeySave();
+                void retryPendingDetailSave();
               }}
               onSave={() => {
-                void saveDraft();
+                void (pendingDetailSave ? retryPendingDetailSave() : saveDraft());
               }}
               onCancel={() => {
                 if (editorMode === "create-pending") {
