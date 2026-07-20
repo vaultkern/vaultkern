@@ -5326,9 +5326,19 @@ impl Runtime {
             .read(vault_id)
             .with_context(|| format!("failed to read synced base: {vault_id}"))?
             .with_context(|| format!("synced base is missing: {vault_id}"))?;
-        let base_vault = Self::load_session_database(&base_bytes, &key)
-            .context("failed to parse the synced OneDrive base")?
-            .vault;
+        let base_vault = match Self::load_session_database(&base_bytes, &key) {
+            Ok(database) => database.vault,
+            Err(KdbxError::HeaderHmacMismatch) => self
+                .unlock_historical_snapshot_from_unlock_blob(vault_id, &base_bytes)
+                .context("failed to unlock the historical synced OneDrive base")?
+                .context(
+                    "synced OneDrive base uses a historical KDF and quick unlock is unavailable",
+                )?
+                .0,
+            Err(error) => {
+                return Err(error).context("failed to parse the synced OneDrive base");
+            }
+        };
         let base_save_profile = self
             .inspected_save_profile(&base_bytes)
             .context("failed to inspect the synced OneDrive base")?;
@@ -10121,6 +10131,67 @@ mod tests {
                 .len(),
             1
         );
+        assert!(matches!(
+            runtime.save_vault(&vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn onedrive_save_recovers_an_old_kdf_base_after_base_refresh_failure() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_100);
+        runtime.biometric = Box::new(TestBiometricProvider);
+        runtime.secure_storage = Box::new(MemorySecureStorageProvider::new());
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        runtime
+            .enroll_quick_unlock_for_current_vault(Some("demo-password"), None)
+            .unwrap();
+
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let current = runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap();
+        let remote = KeepassCore::new().load_kdbx(&current, &key).unwrap();
+        let mut rotated_profile = SaveProfile::recommended();
+        rotated_profile.kdf = Some(SaveKdf::AesKdbx4 { rounds: 1 });
+        let rotated = KeepassCore::new()
+            .save_kdbx(&remote, &key, rotated_profile)
+            .unwrap();
+        assert_ne!(
+            vaultkern_core::derive_transformed_key(&current, &key)
+                .unwrap()
+                .as_bytes(),
+            vaultkern_core::derive_transformed_key(&rotated, &key)
+                .unwrap()
+                .as_bytes(),
+            "the external save must actually rotate the KDF"
+        );
+        runtime.replace_test_onedrive_item("drive-1", "item-1", rotated);
+        runtime.synced_bases.fail_next_store_for_tests();
+
+        let adopted = runtime
+            .save_vault(&vault_id)
+            .expect("the rotated remote head should be adopted despite a base-cache failure");
+        assert!(matches!(
+            adopted,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                ..
+            })
+        ));
+        assert!(
+            runtime
+                .session_state()
+                .source_status
+                .and_then(|status| status.last_error)
+                .is_some_and(|error| error.contains("failed to store synced base"))
+        );
+        create_demo_entry(&mut runtime, &vault_id);
+
         assert!(matches!(
             runtime.save_vault(&vault_id).unwrap(),
             RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
