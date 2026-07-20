@@ -40,6 +40,7 @@ pub fn should_refresh_platform_passkeys(
                 | "abort_passkey_registration"
                 | "commit_passkey_registration"
                 | "reconcile_passkey_ceremony_ledger"
+                | "update_database_settings"
                 | "delete_entry"
                 | "save_vault"
         )
@@ -134,6 +135,26 @@ mod tests {
 
         assert!(should_refresh_platform_passkeys(
             Some("reconcile_passkey_ceremony_ledger"),
+            &json!({
+                "type": "error",
+                "code": "request_cancelled",
+                "message": "the runtime request was cancelled"
+            })
+        ));
+    }
+
+    #[test]
+    fn database_settings_refresh_credentials_when_recycle_bin_visibility_changes() {
+        assert!(should_refresh_platform_passkeys(
+            Some("update_database_settings"),
+            &json!({
+                "type": "database_settings",
+                "recycleBin": { "enabled": false }
+            })
+        ));
+
+        assert!(should_refresh_platform_passkeys(
+            Some("update_database_settings"),
             &json!({
                 "type": "error",
                 "code": "request_cancelled",
