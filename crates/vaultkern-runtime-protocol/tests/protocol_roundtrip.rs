@@ -8,7 +8,7 @@ use vaultkern_runtime_protocol::{
     EntryFieldsDto, EntryHistoryDetailDto, EntryHistoryItemDto, EntryHistoryListDto,
     EntryPasskeyDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto,
     MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
-    OneDriveItemListDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
+    OneDriveItemListDto, OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
     PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
     PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
     PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto,
@@ -31,6 +31,30 @@ fn protocol_envelope_serializes_open_local_vault_command() {
     assert!(json.contains("\"version\":1"));
     assert!(json.contains("\"open_local_vault\""));
     assert!(json.contains("/tmp/demo.kdbx"));
+}
+
+#[test]
+fn database_optional_setting_updates_distinguish_unchanged_clear_and_set() {
+    let unchanged = serde_json::to_value(DatabaseSettingsUpdateDto::default()).unwrap();
+    assert!(unchanged.get("autosaveDelaySeconds").is_none());
+
+    let clear: DatabaseSettingsUpdateDto =
+        serde_json::from_value(serde_json::json!({ "autosaveDelaySeconds": null })).unwrap();
+    assert_eq!(
+        clear.autosave_delay_seconds,
+        OptionalSettingUpdateDto::Clear
+    );
+    assert_eq!(
+        serde_json::to_value(&clear).unwrap()["autosaveDelaySeconds"],
+        serde_json::Value::Null
+    );
+
+    let set: DatabaseSettingsUpdateDto =
+        serde_json::from_value(serde_json::json!({ "autosaveDelaySeconds": 30 })).unwrap();
+    assert_eq!(
+        set.autosave_delay_seconds,
+        OptionalSettingUpdateDto::Set(30)
+    );
 }
 
 #[test]
@@ -95,7 +119,7 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
                 new_password: Some("new-secret".into()),
                 remove_password: false,
             }),
-            autosave_delay_seconds: Some(30),
+            autosave_delay_seconds: OptionalSettingUpdateDto::Set(30),
         },
     });
     let response = RuntimeResponse::DatabaseSettings(DatabaseSettingsDto {

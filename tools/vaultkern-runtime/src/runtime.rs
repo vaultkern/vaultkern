@@ -33,16 +33,16 @@ use vaultkern_runtime_protocol::{
     EntryDetailDto, EntryFieldProtectionDto, EntryFieldsDto, EntryHistoryDetailDto,
     EntryHistoryItemDto, EntryHistoryListDto, EntryIdListDto, EntryListDto, EntryPasskeyDto,
     EntrySummaryDto, ErrorDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto,
-    PasskeyAssertionDto, PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto,
-    PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
-    PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto,
-    PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto, PasskeyCredentialCandidateDto,
-    PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto,
-    PasskeyFrameKindDto, PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto,
-    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto,
-    PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-    SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
-    VaultSourceStatusDto,
+    OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
+    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
+    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
+    PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto,
+    PasskeyCredentialCandidateDto, PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto,
+    PasskeyCredentialStatusDto, PasskeyFrameKindDto, PasskeyRegistrationDto,
+    PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
+    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse,
+    SaveVaultResultDto, SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto,
+    VaultReferenceListDto, VaultSourceStatusDto,
 };
 
 use crate::autofill_persist::{
@@ -1760,8 +1760,12 @@ impl Runtime {
                 loaded.save_profile = requested;
             }
 
-            if let Some(autosave_delay_seconds) = update.autosave_delay_seconds {
-                loaded.autosave_delay_seconds = Some(autosave_delay_seconds);
+            match update.autosave_delay_seconds {
+                OptionalSettingUpdateDto::Unchanged => {}
+                OptionalSettingUpdateDto::Clear => loaded.autosave_delay_seconds = None,
+                OptionalSettingUpdateDto::Set(autosave_delay_seconds) => {
+                    loaded.autosave_delay_seconds = Some(autosave_delay_seconds);
+                }
             }
 
             database_settings_dto(
@@ -9650,6 +9654,37 @@ mod tests {
         let merged = three_way_field_patch(&base, &local, &remote).unwrap();
         assert_eq!(merged.vault.name, "Local name");
         assert_eq!(merged.vault.maintenance_history_days, Some(42));
+    }
+
+    #[test]
+    fn explicit_null_clears_the_autosave_delay() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    autosave_delay_seconds: OptionalSettingUpdateDto::Set(45),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .expect("set autosave delay");
+
+        let clear_update: DatabaseSettingsUpdateDto = serde_json::from_value(serde_json::json!({
+            "autosaveDelaySeconds": null
+        }))
+        .expect("deserialize an explicit clear");
+        runtime
+            .update_database_settings(&opened.vault_id, clear_update)
+            .expect("clear autosave delay");
+
+        assert_eq!(
+            runtime
+                .get_database_settings(&opened.vault_id)
+                .expect("read database settings")
+                .autosave_delay_seconds,
+            None
+        );
     }
 
     #[test]

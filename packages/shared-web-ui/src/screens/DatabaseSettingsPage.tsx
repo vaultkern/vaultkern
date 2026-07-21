@@ -319,7 +319,10 @@ function createDraft(settings: DatabaseSettings | null): Draft {
 
 function createUpdate(settings: DatabaseSettings, draft: Draft): DatabaseSettingsUpdate {
   const kdf: DatabaseKdfSettings = settings.encryption.kdf;
-  const autosaveDelaySeconds = parseOptionalInteger(draft.autosaveDelaySeconds);
+  const autosaveDelaySeconds = optionalIntegerFieldUpdate(
+    settings.autosaveDelaySeconds,
+    draft.autosaveDelaySeconds
+  );
   const encryption: DatabaseEncryptionSettings = {
     compression: draft.compression,
     cipher: draft.cipher,
@@ -345,8 +348,16 @@ function createUpdate(settings: DatabaseSettings, draft: Draft): DatabaseSetting
       enabled: draft.recycleBinEnabled
     },
     encryption,
-    ...(autosaveDelaySeconds === null ? {} : { autosaveDelaySeconds })
+    ...(autosaveDelaySeconds === undefined ? {} : { autosaveDelaySeconds })
   };
+}
+
+function optionalIntegerFieldUpdate(
+  current: number | null,
+  draft: string
+): number | null | undefined {
+  const desired = parseOptionalInteger(draft);
+  return desired === current ? undefined : desired;
 }
 
 function rebaseDraft(

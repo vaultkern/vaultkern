@@ -7,8 +7,8 @@ use vaultkern_runtime::Runtime;
 use vaultkern_runtime_protocol::{
     DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto,
     DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
-    DatabaseSettingsUpdateDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-    SaveVaultStatusDto,
+    DatabaseSettingsUpdateDto, OptionalSettingUpdateDto, RuntimeCommand, RuntimeResponse,
+    SaveVaultResultDto, SaveVaultStatusDto,
 };
 
 fn saved_response() -> RuntimeResponse {
@@ -509,7 +509,7 @@ fn runtime_updates_database_settings_without_retaining_master_credentials() {
                     kdf: retained_kdf.clone(),
                 }),
                 credentials: None,
-                autosave_delay_seconds: Some(45),
+                autosave_delay_seconds: OptionalSettingUpdateDto::Set(45),
             },
         )
         .expect("update settings");

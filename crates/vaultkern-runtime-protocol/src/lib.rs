@@ -466,8 +466,55 @@ pub struct DatabaseSettingsUpdateDto {
     pub encryption: Option<DatabaseEncryptionSettingsDto>,
     #[serde(default)]
     pub credentials: Option<DatabaseCredentialsUpdateDto>,
-    #[serde(default)]
-    pub autosave_delay_seconds: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "OptionalSettingUpdateDto::is_unchanged"
+    )]
+    pub autosave_delay_seconds: OptionalSettingUpdateDto<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum OptionalSettingUpdateDto<T> {
+    #[default]
+    Unchanged,
+    Clear,
+    Set(T),
+}
+
+impl<T> OptionalSettingUpdateDto<T> {
+    pub fn is_unchanged(&self) -> bool {
+        matches!(self, Self::Unchanged)
+    }
+}
+
+impl<T> Serialize for OptionalSettingUpdateDto<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Unchanged | Self::Clear => serializer.serialize_none(),
+            Self::Set(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for OptionalSettingUpdateDto<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            Some(value) => Self::Set(value),
+            None => Self::Clear,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

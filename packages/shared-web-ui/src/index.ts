@@ -7,7 +7,12 @@ export {
   createMemoryExtensionSettingsStore,
   normalizeExtensionSettings
 } from "./extensionSettings";
-export type { ExtensionSettings, ExtensionSettingsStore } from "./extensionSettings";
+export type {
+  ExtensionSettings,
+  ExtensionSettingsReconciliationContext,
+  ExtensionSettingsReconciliationReason,
+  ExtensionSettingsStore
+} from "./extensionSettings";
 export { I18nProvider, showMoreText, translate, useLanguage, useText } from "./i18n";
 export {
   DEFAULT_PASSWORD_GENERATOR_OPTIONS,

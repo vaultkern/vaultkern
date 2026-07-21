@@ -41,11 +41,12 @@ async fn runtime_send(
 
 #[cfg(windows)]
 #[tauri::command]
-fn set_passkey_provider_enabled(
+fn reconcile_settings(
     enabled: bool,
+    vault_unlocked: bool,
     passkey_plugin: State<'_, PasskeyPluginServer>,
 ) -> Result<bool, String> {
-    passkey_plugin.set_enabled(enabled)
+    passkey_plugin.reconcile_settings(enabled, vault_unlocked)
 }
 
 #[cfg(windows)]
@@ -95,10 +96,7 @@ fn main() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            runtime_send,
-            set_passkey_provider_enabled
-        ])
+        .invoke_handler(tauri::generate_handler![runtime_send, reconcile_settings])
         .run(tauri::generate_context!())
         .expect("failed to run VaultKern");
 }

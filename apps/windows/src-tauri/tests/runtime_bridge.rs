@@ -266,14 +266,12 @@ fn runtime_bridge_runs_platform_passkeys_on_the_same_resident_runtime_thread() {
 }
 
 #[test]
-fn locked_runtime_exposes_an_empty_passkey_sync_snapshot() {
+fn locked_runtime_never_exposes_an_empty_passkey_sync_snapshot() {
     let bridge = RuntimeBridge::new_for_tests();
 
     assert!(!bridge.platform_passkey_is_unlocked());
-    assert_eq!(
-        bridge
-            .list_platform_passkey_credentials_for_sync()
-            .expect("locked credential sync snapshot"),
-        Vec::new()
-    );
+    let error = bridge
+        .list_platform_passkey_credentials()
+        .expect_err("locked credential metadata must be skipped, not replaced with an empty list");
+    assert!(error.contains("locked"), "unexpected error: {error}");
 }

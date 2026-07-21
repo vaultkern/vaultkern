@@ -23,9 +23,6 @@ pub fn should_refresh_platform_passkeys(
     if response_type == Some("error") {
         return false;
     }
-    if response_type == Some("session_state") {
-        return true;
-    }
 
     matches!(
         command_type,
@@ -37,7 +34,6 @@ pub fn should_refresh_platform_passkeys(
                 | "retry_vault_source_sync"
                 | "set_entry_passkey"
                 | "clear_entry_passkey"
-                | "update_database_settings"
                 | "save_passkey_registration"
                 | "abort_passkey_registration"
                 | "commit_passkey_registration"
@@ -55,7 +51,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn passkey_cache_refreshes_after_unlock_and_passkey_metadata_mutations() {
+    fn transport_refreshes_passkey_cache_only_after_successful_metadata_mutations() {
         assert!(!should_refresh_platform_passkeys(
             Some("get_entry_detail"),
             &json!({ "type": "entry_detail" })
@@ -68,15 +64,15 @@ mod tests {
             Some("retry_vault_source_sync"),
             &json!({ "type": "vault_source_status" })
         ));
-        assert!(should_refresh_platform_passkeys(
+        assert!(!should_refresh_platform_passkeys(
             Some("update_database_settings"),
             &json!({ "type": "database_settings" })
         ));
-        assert!(should_refresh_platform_passkeys(
+        assert!(!should_refresh_platform_passkeys(
             Some("get_entry_detail"),
             &json!({ "type": "session_state", "unlocked": true })
         ));
-        assert!(should_refresh_platform_passkeys(
+        assert!(!should_refresh_platform_passkeys(
             Some("lock_session"),
             &json!({ "type": "session_state", "unlocked": false })
         ));

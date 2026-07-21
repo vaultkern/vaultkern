@@ -34,7 +34,11 @@ import {
   createMemoryExtensionSettingsStore,
   normalizeExtensionSettings
 } from "./extensionSettings";
-import type { ExtensionSettings, ExtensionSettingsStore } from "./extensionSettings";
+import type {
+  ExtensionSettings,
+  ExtensionSettingsReconciliationReason,
+  ExtensionSettingsStore
+} from "./extensionSettings";
 import { I18nProvider, deleteEntryDescription, translate } from "./i18n";
 import { DatabaseSettingsPage } from "./screens/DatabaseSettingsPage";
 import { ExtensionSettingsPanel } from "./screens/ExtensionSettingsPanel";
@@ -352,8 +356,7 @@ export function App({
   const [databaseSettingsBusy, setDatabaseSettingsBusy] = useState(false);
   const [pendingDatabaseSettingsVaultId, setPendingDatabaseSettingsVaultId] =
     useState<string | null>(null);
-  const [databaseSettingsDraftUpdate, setDatabaseSettingsDraftUpdate] =
-    useState<DatabaseSettingsUpdate | null>(null);
+  const databaseSettingsDraftUpdate = useRef<DatabaseSettingsUpdate | null>(null);
   const [databaseSettingsDraftDirty, setDatabaseSettingsDraftDirty] = useState(false);
   const databaseSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
   const [databaseName, setDatabaseName] = useState<string | null>(null);
@@ -415,23 +418,22 @@ export function App({
   );
   const [extensionSettingsSaving, setExtensionSettingsSaving] = useState(false);
   const extensionSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
-  const [extensionSettingsDraft, setExtensionSettingsDraft] =
-    useState<ExtensionSettings | null>(null);
+  const extensionSettingsDraft = useRef<ExtensionSettings | null>(null);
   const [extensionSettingsDraftDirty, setExtensionSettingsDraftDirty] =
     useState(false);
+  const [settingsDraftEpoch, setSettingsDraftEpoch] = useState(0);
   const [quickUnlockBusy, setQuickUnlockBusy] = useState(false);
   const [quickUnlockError, setQuickUnlockError] = useState<string | null>(null);
-  const quickUnlockAutoSyncAttempt = useRef<string | null>(null);
   const handleDatabaseSettingsDraftChange = useCallback(
     (update: DatabaseSettingsUpdate | null, dirty: boolean) => {
-      setDatabaseSettingsDraftUpdate(update);
+      databaseSettingsDraftUpdate.current = update;
       setDatabaseSettingsDraftDirty(dirty);
     },
     []
   );
   const handleExtensionSettingsDraftChange = useCallback(
     (settings: ExtensionSettings, dirty: boolean) => {
-      setExtensionSettingsDraft(settings);
+      extensionSettingsDraft.current = settings;
       setExtensionSettingsDraftDirty(dirty);
     },
     []
@@ -488,18 +490,9 @@ export function App({
 
     try {
       const normalizedSettings = normalizeExtensionSettings(nextSettings);
-      if (
-        !normalizedSettings.quickUnlockEnabled &&
-        !(await syncQuickUnlockPreferenceToCurrentVault(false, extensionSettings))
-      ) {
-        return false;
-      }
       await localExtensionSettingsStore.save(normalizedSettings);
       setExtensionSettings(normalizedSettings);
-      await applyRecentVaultLimit(await client.listRecentVaults(), normalizedSettings);
-      if (normalizedSettings.quickUnlockEnabled) {
-        await syncQuickUnlockPreferenceToCurrentVault(true, normalizedSettings);
-      }
+      void reconcileSavedSettings("settings-commit", session);
       return true;
     } catch (saveFailure) {
       setExtensionSettingsError(
@@ -514,40 +507,84 @@ export function App({
     }
   }
 
-  async function syncQuickUnlockPreferenceToCurrentVault(
-    enabled: boolean,
-    settingsForReload: ExtensionSettings,
+  async function reconcileSavedSettings(
+    reason: ExtensionSettingsReconciliationReason,
+    currentSession: SessionStateLike | null,
     credentials?: UnlockCredentials
-  ): Promise<boolean> {
+  ): Promise<void> {
     setQuickUnlockError(null);
-    const currentVault =
-      recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
-      recentVaults.find((vault) => vault.isCurrent) ??
-      null;
-
-    if (enabled && !credentials) {
-      return true;
+    let desired: ExtensionSettings;
+    try {
+      desired = normalizeExtensionSettings(await localExtensionSettingsStore.load());
+    } catch (loadFailure) {
+      console.error("failed to read desired settings for reconciliation", loadFailure);
+      return;
     }
 
-    if (!currentVault || currentVault.supportsQuickUnlock === enabled) {
-      return true;
+    try {
+      await localExtensionSettingsStore.reconcile?.({
+        reason,
+        vaultUnlocked: currentSession?.unlocked === true
+      });
+    } catch (platformFailure) {
+      console.error("platform settings reconciliation failed", platformFailure);
+    }
+
+    let vaults: VaultReference[];
+    try {
+      vaults = await client.listRecentVaults();
+    } catch (vaultListFailure) {
+      console.error("settings reconciliation could not list recent vaults", vaultListFailure);
+      return;
+    }
+    try {
+      await applyRecentVaultLimit(vaults, desired);
+    } catch (recentVaultFailure) {
+      console.error("settings reconciliation could not trim recent vaults", recentVaultFailure);
+    }
+
+    const currentVault =
+      vaults.find((vault) => vault.vaultRefId === currentSession?.currentVaultRefId) ??
+      vaults.find((vault) => vault.isCurrent) ??
+      null;
+    const enabled = desired.quickUnlockEnabled;
+    if (
+      !currentVault ||
+      currentVault.supportsQuickUnlock === enabled ||
+      (enabled && (!currentSession?.unlocked || !credentials))
+    ) {
+      return;
+    }
+    try {
+      const latestDesired = normalizeExtensionSettings(
+        await localExtensionSettingsStore.load()
+      );
+      if (latestDesired.quickUnlockEnabled !== enabled) {
+        return;
+      }
+    } catch (loadFailure) {
+      console.error(
+        "settings reconciliation could not confirm quick unlock state",
+        loadFailure
+      );
+      return;
     }
 
     setQuickUnlockBusy(true);
     try {
       let nextSession: SessionStateLike;
       if (enabled) {
-        // The early return above establishes credentials for enrollment.
-        // Keep this local binding so the async call retains that narrowing.
         const enrollmentCredentials = credentials;
-        if (!enrollmentCredentials) return false;
-        nextSession = await client.enableQuickUnlockForCurrentVault(enrollmentCredentials);
+        if (!enrollmentCredentials) {
+          return;
+        }
+        nextSession = await client.enableQuickUnlockForCurrentVault(
+          enrollmentCredentials
+        );
       } else {
         nextSession = await client.disableQuickUnlockForCurrentVault();
       }
       setSession(nextSession);
-      await applyRecentVaultLimit(await client.listRecentVaults(), settingsForReload);
-      return true;
     } catch (quickUnlockFailure) {
       setQuickUnlockError(
         errorMessage(
@@ -555,9 +592,16 @@ export function App({
           translate(extensionSettings.language, "Failed to update quick unlock")
         )
       );
-      return false;
     } finally {
       setQuickUnlockBusy(false);
+    }
+    try {
+      await applyRecentVaultLimit(await client.listRecentVaults(), desired);
+    } catch (vaultRefreshFailure) {
+      console.error(
+        "settings reconciliation could not refresh recent vaults",
+        vaultRefreshFailure
+      );
     }
   }
 
@@ -571,13 +615,20 @@ export function App({
   }
 
   function resetDatabaseSettingsDraftState() {
-    setDatabaseSettingsDraftUpdate(null);
+    databaseSettingsDraftUpdate.current = null;
     setDatabaseSettingsDraftDirty(false);
   }
 
   function resetExtensionSettingsDraftState() {
-    setExtensionSettingsDraft(null);
+    extensionSettingsDraft.current = null;
     setExtensionSettingsDraftDirty(false);
+  }
+
+  function discardAllDrafts() {
+    resetEditorState();
+    resetDatabaseSettingsDraftState();
+    resetExtensionSettingsDraftState();
+    setSettingsDraftEpoch((current) => current + 1);
   }
 
   function clearDetailSelection() {
@@ -1019,19 +1070,23 @@ export function App({
       const hadPendingDatabaseSettings = Boolean(pendingDatabaseSettingsVaultId);
       const pendingDelete = pendingEntryDelete;
       const hadDatabaseSettingsDraft = Boolean(
-        showDatabaseSettingsPage && databaseSettingsDraftDirty && databaseSettingsDraftUpdate
+        showDatabaseSettingsPage &&
+          databaseSettingsDraftDirty &&
+          databaseSettingsDraftUpdate.current
       );
       const handledDatabaseSettings =
         hadPendingDatabaseSettings || hadDatabaseSettingsDraft;
       const hadExtensionSettingsDraft = Boolean(
-        showExtensionSettingsPage && extensionSettingsDraftDirty && extensionSettingsDraft
+        showExtensionSettingsPage &&
+          extensionSettingsDraftDirty &&
+          extensionSettingsDraft.current
       );
       let saved = hadDatabaseSettingsDraft
-        ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate!)
+        ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate.current!)
         : hadPendingDatabaseSettings
           ? await retryPendingDatabaseSettingsSave()
           : hadExtensionSettingsDraft
-            ? await saveExtensionSettings(extensionSettingsDraft!)
+            ? await saveExtensionSettings(extensionSettingsDraft.current!)
             : pendingDelete
               ? await handleDeleteEntry(pendingDelete.entryId)
             : pendingDetailSave
@@ -1092,7 +1147,7 @@ export function App({
                   label: translate(extensionSettings.language, "Discard changes"),
                   disabled: saveAndContinueBusy,
                   onClick: () => {
-                    resetEditorState();
+                    discardAllDrafts();
                     performAction(dialogState.action);
                   }
                 }
@@ -1416,6 +1471,7 @@ export function App({
       const saveResult = await client.saveVault(vaultId);
       setPendingDatabaseSettingsVaultId(null);
       handleSaveResult(saveResult);
+      void reconcileSavedSettings("settings-commit", session);
       setWorkspaceReloadKey((current) => current + 1);
       if (!saveResult || saveResult.status === "saved") {
         setSaveTip(translate(extensionSettings.language, "Database settings saved."));
@@ -1450,6 +1506,7 @@ export function App({
       const saveResult = await client.saveVault(pendingDatabaseSettingsVaultId);
       handleSaveResult(saveResult);
       setPendingDatabaseSettingsVaultId(null);
+      void reconcileSavedSettings("settings-commit", session);
       setWorkspaceReloadKey((current) => current + 1);
       if (!saveResult || saveResult.status === "saved") {
         setSaveTip(translate(extensionSettings.language, "Database settings saved."));
@@ -1531,16 +1588,13 @@ export function App({
         if (!cancelled) {
           setExtensionSettings(normalizedSettings);
         }
-        const vaults = await client.listRecentVaults();
-        if (!cancelled) {
-          await applyRecentVaultLimit(vaults, normalizedSettings);
-        }
         return client.getSessionState();
       })
       .then((state) => {
         if (!cancelled) {
           setSession(state);
           setSessionErrorCause(null);
+          void reconcileSavedSettings("startup", state);
         }
       })
       .catch((loadError) => {
@@ -1615,45 +1669,6 @@ export function App({
       }
     };
   }, [client, extensionSettings.idleLockMinutes, idleLockBlocked, session?.unlocked]);
-
-  useEffect(() => {
-    if (quickUnlockBusy) {
-      return;
-    }
-
-    const currentVault =
-      recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
-      recentVaults.find((vault) => vault.isCurrent) ??
-      null;
-
-    if (
-      !currentVault ||
-      currentVault.supportsQuickUnlock === extensionSettings.quickUnlockEnabled ||
-      extensionSettings.quickUnlockEnabled
-    ) {
-      return;
-    }
-
-    const syncKey = `${currentVault.vaultRefId}:${
-      session?.unlocked === true ? "unlocked" : "locked"
-    }:${extensionSettings.quickUnlockEnabled ? "enable" : "disable"}`;
-    if (quickUnlockAutoSyncAttempt.current === syncKey) {
-      return;
-    }
-
-    quickUnlockAutoSyncAttempt.current = syncKey;
-    void syncQuickUnlockPreferenceToCurrentVault(
-      extensionSettings.quickUnlockEnabled,
-      extensionSettings
-    );
-  }, [
-    extensionSettings,
-    quickUnlockBusy,
-    recentVaults,
-    session?.currentVaultRefId,
-    session?.supportsBiometricUnlock,
-    session?.unlocked
-  ]);
 
   useEffect(() => {
     setSearchValue("");
@@ -2009,6 +2024,7 @@ export function App({
               {translate(extensionSettings.language, "Back")}
             </button>
             <ExtensionSettingsPanel
+              key={`extension-settings-${settingsDraftEpoch}`}
               settings={extensionSettings}
               saving={extensionSettingsSaving}
               error={extensionSettingsError}
@@ -2019,11 +2035,7 @@ export function App({
               quickUnlockBusy={quickUnlockBusy}
               quickUnlockError={quickUnlockError}
               onEnrollQuickUnlock={async (credentials) => {
-                await syncQuickUnlockPreferenceToCurrentVault(
-                  true,
-                  extensionSettings,
-                  credentials
-                );
+                await reconcileSavedSettings("manual", session, credentials);
               }}
               onSave={(settings) => {
                 void saveExtensionSettings(settings);
@@ -2092,7 +2104,7 @@ export function App({
           setUnlockErrorCause(null);
           const nextSession = await client.setCurrentVault(vaultRefId);
           setSession(nextSession);
-          await applyRecentVaultLimit(await client.listRecentVaults(), extensionSettings);
+          await reconcileSavedSettings("vault-selection", nextSession);
         }}
         onUnlock={async ({ password, keyFilePath }) => {
           setUnlockBusy(true);
@@ -2104,17 +2116,10 @@ export function App({
               keyFilePath
             });
             setSession(nextSession);
-            if (
-              extensionSettings.quickUnlockEnabled &&
-              nextSession.supportsBiometricUnlock === true &&
-              !currentVaultReference?.supportsQuickUnlock
-            ) {
-              await syncQuickUnlockPreferenceToCurrentVault(
-                true,
-                extensionSettings,
-                { password, keyFilePath }
-              );
-            }
+            await reconcileSavedSettings("unlock", nextSession, {
+              password,
+              keyFilePath
+            });
           } catch (unlockFailure) {
             setUnlockError(
               errorMessage(
@@ -2134,6 +2139,7 @@ export function App({
           try {
             const nextSession = await client.unlockCurrentVaultWithQuickUnlock();
             setSession(nextSession);
+            await reconcileSavedSettings("unlock", nextSession);
           } catch (unlockFailure) {
             setUnlockError(
               errorMessage(
@@ -2444,6 +2450,7 @@ export function App({
                   {translate(extensionSettings.language, "Back to archive")}
                 </button>
                 <DatabaseSettingsPage
+                  key={`database-settings-${settingsDraftEpoch}`}
                   settings={databaseSettings}
                   loading={databaseSettingsBusy && !databaseSettings}
                   saving={databaseSettingsBusy && Boolean(databaseSettings)}

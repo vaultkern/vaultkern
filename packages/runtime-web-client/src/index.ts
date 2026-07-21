@@ -54,7 +54,7 @@ export interface DatabaseSettingsUpdate {
   recycleBin?: DatabaseRecycleBinSettings;
   encryption?: DatabaseEncryptionSettings;
   credentials?: DatabaseCredentialsUpdate;
-  autosaveDelaySeconds?: number;
+  autosaveDelaySeconds?: number | null;
 }
 
 export interface DatabaseMetadataSettings {

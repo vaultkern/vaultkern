@@ -13,6 +13,19 @@ export interface ExtensionSettings {
 export interface ExtensionSettingsStore {
   load(): Promise<ExtensionSettings>;
   save(settings: ExtensionSettings): Promise<void>;
+  reconcile?(context: ExtensionSettingsReconciliationContext): Promise<void>;
+}
+
+export type ExtensionSettingsReconciliationReason =
+  | "startup"
+  | "settings-commit"
+  | "unlock"
+  | "vault-selection"
+  | "manual";
+
+export interface ExtensionSettingsReconciliationContext {
+  reason: ExtensionSettingsReconciliationReason;
+  vaultUnlocked: boolean;
 }
 
 export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings = {

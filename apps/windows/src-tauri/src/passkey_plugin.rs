@@ -170,7 +170,7 @@ impl PasskeyPluginServer {
         }
     }
 
-    pub fn set_enabled(&self, enabled: bool) -> Result<bool, String> {
+    fn reconcile_registration(&self, enabled: bool) -> Result<bool, String> {
         if !enabled {
             let was_enabled = self.enabled.swap(false, Ordering::AcqRel);
             let status = unsafe { vaultkern_plugin_remove_registered() };
@@ -183,10 +183,17 @@ impl PasskeyPluginServer {
 
         let os_enabled = self.ensure_registered()?;
         self.enabled.store(true, Ordering::Release);
-        if let Err(error) = self.sync_credentials() {
-            self.enabled.store(false, Ordering::Release);
-            let _ = unsafe { vaultkern_plugin_remove_registered() };
-            return Err(error);
+        Ok(os_enabled)
+    }
+
+    pub fn reconcile_settings(
+        &self,
+        provider_enabled: bool,
+        vault_unlocked: bool,
+    ) -> Result<bool, String> {
+        let os_enabled = self.reconcile_registration(provider_enabled)?;
+        if provider_enabled && vault_unlocked {
+            self.sync_credentials()?;
         }
         Ok(os_enabled)
     }
@@ -202,14 +209,13 @@ impl PasskeyPluginServer {
     }
 
     pub fn sync_credentials(&self) -> Result<usize, String> {
-        if !self.enabled.load(Ordering::Acquire) {
+        if !self.enabled.load(Ordering::Acquire)
+            || !self.context.bridge.platform_passkey_is_unlocked()
+        {
             return Ok(0);
         }
         self.ensure_started()?;
-        let credentials = self
-            .context
-            .bridge
-            .list_platform_passkey_credentials_for_sync()?;
+        let credentials = self.context.bridge.list_platform_passkey_credentials()?;
         let backings = credentials
             .iter()
             .map(CredentialBacking::new)

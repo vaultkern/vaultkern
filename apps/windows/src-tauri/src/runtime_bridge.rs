@@ -28,9 +28,6 @@ enum RuntimeRequest {
     ListPlatformPasskeyCredentials {
         response: Sender<Result<Vec<PlatformPasskeyCredential>, String>>,
     },
-    ListPlatformPasskeyCredentialsForSync {
-        response: Sender<Result<Vec<PlatformPasskeyCredential>, String>>,
-    },
     RegisterPlatformPasskey {
         input: PlatformPasskeyRegistrationInput,
         response: Sender<Result<PlatformPasskeyRegistrationOutput, String>>,
@@ -92,16 +89,6 @@ impl RuntimeBridge {
                         RuntimeRequest::ListPlatformPasskeyCredentials { response } => {
                             let result = catch_runtime_result(|| {
                                 runtime.list_platform_passkey_credentials()
-                            });
-                            let _ = response.send(result);
-                        }
-                        RuntimeRequest::ListPlatformPasskeyCredentialsForSync { response } => {
-                            let result = catch_runtime_result(|| {
-                                if runtime.platform_passkey_is_unlocked() {
-                                    runtime.list_platform_passkey_credentials()
-                                } else {
-                                    Ok(Vec::new())
-                                }
                             });
                             let _ = response.send(result);
                         }
@@ -204,14 +191,6 @@ impl RuntimeBridge {
         self.request_platform(|response| RuntimeRequest::ListPlatformPasskeyCredentials {
             response,
         })
-    }
-
-    pub fn list_platform_passkey_credentials_for_sync(
-        &self,
-    ) -> Result<Vec<PlatformPasskeyCredential>, String> {
-        self.request_platform(
-            |response| RuntimeRequest::ListPlatformPasskeyCredentialsForSync { response },
-        )
     }
 
     pub fn register_platform_passkey(

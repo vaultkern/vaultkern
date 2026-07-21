@@ -15,7 +15,11 @@ if (!rootElement) {
 const client = new RuntimeClient(createTauriTransport(invoke));
 const settingsStore = createDesktopSettingsStore(
   window.localStorage,
-  (enabled) => invoke("set_passkey_provider_enabled", { enabled })
+  (enabled, context) =>
+    invoke("reconcile_settings", {
+      enabled,
+      vaultUnlocked: context.vaultUnlocked
+    })
 );
 
 createRoot(rootElement).render(

@@ -144,6 +144,73 @@ function createSettingsStore(settings: Partial<ExtensionSettings> = {}): Extensi
   };
 }
 
+it("reconciles saved settings at startup and again after every unlock", async () => {
+  const settingsStore = createSettingsStore({ passkeyProviderEnabled: true });
+  settingsStore.reconcile = vi.fn(async () => undefined);
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    })),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    unlockCurrentVault: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    })),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  await waitFor(() => {
+    expect(settingsStore.reconcile).toHaveBeenCalledWith({
+      reason: "startup",
+      vaultUnlocked: false
+    });
+  });
+  vi.mocked(settingsStore.reconcile!).mockClear();
+
+  fireEvent.change(screen.getByLabelText("Master Password"), {
+    target: { value: "demo-password" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+
+  await waitFor(() => {
+    expect(settingsStore.reconcile).toHaveBeenCalledWith({
+      reason: "unlock",
+      vaultUnlocked: true
+    });
+  });
+});
+
 it("renders recent vaults and unlocks the current selection without a path field", async () => {
   const client = {
     ...createVaultSelectionMethods(),
@@ -677,7 +744,7 @@ it("toggles quick unlock for the current vault from extension settings", async (
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).not.toBeChecked();
 });
 
-it("does not persist quick unlock as disabled when vault revocation fails", async () => {
+it("persists desired quick unlock state when blob revocation reconciliation fails", async () => {
   const settingsStore = createSettingsStore({ quickUnlockEnabled: true });
   const recentVaults = [
     {
@@ -719,7 +786,110 @@ it("does not persist quick unlock as disabled when vault revocation fails", asyn
     await screen.findByText("simulated quick unlock revocation failure")
   ).toBeInTheDocument();
   expect(client.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
-  expect(settingsStore.save).not.toHaveBeenCalled();
+  expect(settingsStore.save).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(settingsStore.save).mock.invocationCallOrder[0]).toBeLessThan(
+    client.disableQuickUnlockForCurrentVault.mock.invocationCallOrder[0]!
+  );
+  expect((await settingsStore.load()).quickUnlockEnabled).toBe(false);
+  expect(recentVaults[0]?.supportsQuickUnlock).toBe(true);
+});
+
+it("leaves both desired quick unlock and its blob unchanged when settings persistence fails", async () => {
+  const settingsStore = createSettingsStore({ quickUnlockEnabled: true });
+  settingsStore.save = vi.fn(async () => {
+    throw new Error("simulated settings-store failure");
+  });
+  let blobPresent = true;
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: true,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    disableQuickUnlockForCurrentVault: vi.fn(async () => {
+      blobPresent = false;
+      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: false };
+      return {
+        unlocked: false,
+        activeVaultId: null,
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      };
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Quick Unlock" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  expect(await screen.findByText("simulated settings-store failure")).toBeInTheDocument();
+  expect((await settingsStore.load()).quickUnlockEnabled).toBe(true);
+  expect(blobPresent).toBe(true);
+  expect(client.disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+  expect(screen.getByRole("checkbox", { name: "Quick Unlock" })).not.toBeChecked();
+});
+
+it("does not apply a stale quick unlock revocation after desired state changes", async () => {
+  const settingsStore = createSettingsStore({ quickUnlockEnabled: false });
+  const vaultList = createDeferred<Awaited<ReturnType<RuntimeClientLike["listRecentVaults"]>>>();
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: true,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(() => vaultList.promise),
+    disableQuickUnlockForCurrentVault: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }))
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  await waitFor(() => expect(client.listRecentVaults).toHaveBeenCalledTimes(1));
+  await settingsStore.save({
+    ...DEFAULT_EXTENSION_SETTINGS,
+    quickUnlockEnabled: true
+  });
+  vaultList.resolve(recentVaults);
+
+  expect(await screen.findByText("Personal")).toBeInTheDocument();
+  expect(client.disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 });
 
 it("stores the quick unlock preference without enrolling a locked vault", async () => {
@@ -1574,6 +1744,60 @@ it("preserves a default autosave delay when saving unrelated database settings",
   );
 });
 
+it("persists clearing a previously set autosave delay and leaves the settings page clean", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const initialSettings = {
+    ...(await vaultMethods.getDatabaseSettings()),
+    autosaveDelaySeconds: 20
+  };
+  let currentSettings = initialSettings;
+  const updateDatabaseSettings = vi.fn(
+    async (_vaultId: string, update: DatabaseSettingsUpdate) => {
+      if (Object.prototype.hasOwnProperty.call(update, "autosaveDelaySeconds")) {
+        currentSettings = {
+          ...currentSettings,
+          autosaveDelaySeconds: update.autosaveDelaySeconds ?? null
+        };
+      }
+      return currentSettings;
+    }
+  );
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    getDatabaseSettings: vi.fn(async () => currentSettings),
+    updateDatabaseSettings,
+    saveVault: vi.fn(async () => ({
+      type: "save_vault_result" as const,
+      status: "saved" as const
+    }))
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  const autosaveDelay = await screen.findByLabelText("Autosave Delay Seconds");
+  expect(autosaveDelay).toHaveValue("20");
+  fireEvent.change(autosaveDelay, { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+  await waitFor(() => expect(updateDatabaseSettings).toHaveBeenCalledTimes(1));
+  expect(updateDatabaseSettings.mock.calls[0]?.[1]).toHaveProperty(
+    "autosaveDelaySeconds",
+    null
+  );
+  await waitFor(() => expect(autosaveDelay).toHaveValue(""));
+
+  fireEvent.click(screen.getByRole("button", { name: "Back to archive" }));
+  expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Autosave Delay Seconds")).not.toBeInTheDocument();
+});
+
 it("retries a failed database settings save without updating settings again", async () => {
   const updateDatabaseSettings = vi.fn(async () => ({
     type: "database_settings" as const,
@@ -1732,6 +1956,36 @@ it("confirms before leaving unsaved database settings", async () => {
   await waitFor(() => {
     expect(screen.queryByLabelText("Database Name")).not.toBeInTheDocument();
   });
+});
+
+it("discarding navigation resets the database settings draft and dirty state", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  const databaseName = await screen.findByLabelText("Database Name");
+  fireEvent.change(databaseName, { target: { value: "Discard me" } });
+
+  const search = screen.getByPlaceholderText("Search the archive");
+  fireEvent.change(search, { target: { value: "first" } });
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+
+  await waitFor(() => {
+    expect(screen.getByLabelText("Database Name")).toHaveValue("The Archive");
+  });
+  fireEvent.change(search, { target: { value: "second" } });
+  expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument();
 });
 
 it("rebases an unsaved database settings draft after source sync", async () => {

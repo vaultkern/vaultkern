@@ -4,6 +4,7 @@ import {
 } from "@vaultkern/shared-web-ui";
 import type {
   ExtensionSettings,
+  ExtensionSettingsReconciliationContext,
   ExtensionSettingsStore
 } from "@vaultkern/shared-web-ui";
 
@@ -11,123 +12,40 @@ const SETTINGS_KEY = "vaultkern.desktop.settings.v1";
 
 export function createDesktopSettingsStore(
   storage: Pick<Storage, "getItem" | "setItem" | "removeItem">,
-  applyPasskeyProviderSetting: (enabled: boolean) => Promise<unknown> = async () => undefined
+  reconcilePasskeyProviderSetting: (
+    enabled: boolean,
+    context: ExtensionSettingsReconciliationContext
+  ) => Promise<unknown> = async () => undefined
 ): ExtensionSettingsStore {
   return {
     async load() {
-      const value = storage.getItem(SETTINGS_KEY);
-      if (value === null) {
-        const providerEnabled = await applyInitialPasskeyProviderSetting(
-          applyPasskeyProviderSetting,
-          DEFAULT_EXTENSION_SETTINGS.passkeyProviderEnabled
-        );
-        return {
-          ...DEFAULT_EXTENSION_SETTINGS,
-          passkeyProviderEnabled: providerEnabled
-        };
-      }
-
-      try {
-        const settings = normalizeExtensionSettings(
-          JSON.parse(value) as Partial<ExtensionSettings>
-        );
-        const providerEnabled = await applyInitialPasskeyProviderSetting(
-          applyPasskeyProviderSetting,
-          settings.passkeyProviderEnabled
-        );
-        return { ...settings, passkeyProviderEnabled: providerEnabled };
-      } catch {
-        storage.removeItem(SETTINGS_KEY);
-        const providerEnabled = await applyInitialPasskeyProviderSetting(
-          applyPasskeyProviderSetting,
-          DEFAULT_EXTENSION_SETTINGS.passkeyProviderEnabled
-        );
-        return {
-          ...DEFAULT_EXTENSION_SETTINGS,
-          passkeyProviderEnabled: providerEnabled
-        };
-      }
+      return readDesktopSettings(storage);
     },
     async save(settings) {
       const normalized = normalizeExtensionSettings(settings);
-      const previousEnabled = storedPasskeyProviderSetting(storage);
-      const applied = await applyPasskeyProviderSetting(normalized.passkeyProviderEnabled);
-      if (typeof applied === "boolean" && applied !== normalized.passkeyProviderEnabled) {
-        await restoreEffectivePasskeyProviderSetting(
-          applyPasskeyProviderSetting,
-          applied
-        );
-        throw new Error(
-          normalized.passkeyProviderEnabled
-            ? "Windows did not enable the passkey provider"
-            : "Windows did not disable the passkey provider"
-        );
-      }
-      try {
-        storage.setItem(
-          SETTINGS_KEY,
-          JSON.stringify(normalized)
-        );
-      } catch (error) {
-        try {
-          await applyPasskeyProviderSetting(previousEnabled);
-        } catch (rollbackError) {
-          console.error(
-            "failed to roll back the passkey-provider setting after local persistence failed",
-            rollbackError
-          );
-        }
-        throw error;
-      }
+      storage.setItem(SETTINGS_KEY, JSON.stringify(normalized));
+    },
+    async reconcile(context) {
+      const desired = readDesktopSettings(storage);
+      await reconcilePasskeyProviderSetting(
+        desired.passkeyProviderEnabled,
+        context
+      );
     }
   };
 }
 
-function storedPasskeyProviderSetting(
-  storage: Pick<Storage, "getItem">
-): boolean {
+function readDesktopSettings(
+  storage: Pick<Storage, "getItem" | "removeItem">
+): ExtensionSettings {
   const value = storage.getItem(SETTINGS_KEY);
   if (value === null) {
-    return DEFAULT_EXTENSION_SETTINGS.passkeyProviderEnabled;
+    return DEFAULT_EXTENSION_SETTINGS;
   }
   try {
-    return normalizeExtensionSettings(
-      JSON.parse(value) as Partial<ExtensionSettings>
-    ).passkeyProviderEnabled;
+    return normalizeExtensionSettings(JSON.parse(value) as Partial<ExtensionSettings>);
   } catch {
-    return DEFAULT_EXTENSION_SETTINGS.passkeyProviderEnabled;
-  }
-}
-
-async function applyInitialPasskeyProviderSetting(
-  apply: (enabled: boolean) => Promise<unknown>,
-  enabled: boolean
-): Promise<boolean> {
-  try {
-    const applied = await apply(enabled);
-    if (typeof applied === "boolean") {
-      if (applied !== enabled) {
-        await restoreEffectivePasskeyProviderSetting(apply, applied);
-      }
-      return applied;
-    }
-    return enabled;
-  } catch (error) {
-    console.error("failed to apply the saved passkey-provider setting", error);
-    return false;
-  }
-}
-
-async function restoreEffectivePasskeyProviderSetting(
-  apply: (enabled: boolean) => Promise<unknown>,
-  enabled: boolean
-): Promise<void> {
-  try {
-    await apply(enabled);
-  } catch (error) {
-    console.error(
-      "failed to align the passkey-provider callback with the Windows state",
-      error
-    );
+    storage.removeItem(SETTINGS_KEY);
+    return DEFAULT_EXTENSION_SETTINGS;
   }
 }
