@@ -16,10 +16,7 @@ const client = new RuntimeClient(createTauriTransport(invoke));
 const settingsStore = createDesktopSettingsStore(
   () => invoke("load_desktop_settings"),
   (desired) => invoke("save_desktop_settings", { desired }),
-  (context) =>
-    invoke("reconcile_settings", {
-      vaultUnlocked: context.vaultUnlocked
-    })
+  (credentials) => invoke("queue_quick_unlock_enrollment", { credentials })
 );
 
 createRoot(rootElement).render(

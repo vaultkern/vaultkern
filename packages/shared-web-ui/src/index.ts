@@ -5,13 +5,15 @@ export { ExtensionSettingsPanel } from "./screens/ExtensionSettingsPanel";
 export {
   DEFAULT_EXTENSION_SETTINGS,
   createMemoryExtensionSettingsStore,
-  normalizeExtensionSettings
+  normalizeBrowserExtensionSettings,
+  normalizeExtensionSettings,
+  normalizeWindowsAppSettings
 } from "./extensionSettings";
 export type {
   ExtensionSettings,
-  ExtensionSettingsReconciliationContext,
   ExtensionSettingsReconciliationReason,
-  ExtensionSettingsStore
+  ExtensionSettingsStore,
+  SettingsSurface
 } from "./extensionSettings";
 export { I18nProvider, showMoreText, translate, useLanguage, useText } from "./i18n";
 export {

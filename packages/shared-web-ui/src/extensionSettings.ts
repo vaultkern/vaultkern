@@ -6,27 +6,31 @@ export interface ExtensionSettings {
   idleLockMinutes: number;
   clearClipboardSeconds: number;
   autofillOnPageLoadEnabled: boolean;
-  passkeyProviderEnabled: boolean;
+  browserPasskeyProxyEnabled: boolean;
+  windowsPasskeyProviderEnabled: boolean;
   quickUnlockEnabled: boolean;
 }
 
+export type SettingsSurface = "browser" | "windows";
+
 export interface ExtensionSettingsStore {
+  surface?: SettingsSurface;
+  nativeReconciliationOwned?: boolean;
+  queueQuickUnlockEnrollment?(credentials: {
+    password?: string | null;
+    keyFilePath?: string | null;
+  }): Promise<void>;
   load(): Promise<ExtensionSettings>;
   save(settings: ExtensionSettings): Promise<void>;
-  reconcile?(context: ExtensionSettingsReconciliationContext): Promise<void>;
 }
 
 export type ExtensionSettingsReconciliationReason =
   | "startup"
   | "settings-commit"
+  | "vault-save"
   | "unlock"
   | "vault-selection"
   | "manual";
-
-export interface ExtensionSettingsReconciliationContext {
-  reason: ExtensionSettingsReconciliationReason;
-  vaultUnlocked: boolean;
-}
 
 export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings = {
   recentVaultLimit: 10,
@@ -34,11 +38,13 @@ export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings = {
   idleLockMinutes: 10,
   clearClipboardSeconds: 30,
   autofillOnPageLoadEnabled: false,
-  passkeyProviderEnabled: false,
+  browserPasskeyProxyEnabled: false,
+  windowsPasskeyProviderEnabled: false,
   quickUnlockEnabled: false
 };
 
 export function normalizeExtensionSettings(value: unknown): ExtensionSettings {
+  const legacy = value as { passkeyProviderEnabled?: unknown } | null;
   const source =
     typeof value === "object" && value !== null
       ? (value as Partial<ExtensionSettings>)
@@ -50,8 +56,31 @@ export function normalizeExtensionSettings(value: unknown): ExtensionSettings {
     idleLockMinutes: clampInteger(source.idleLockMinutes, 0, 240, 10),
     clearClipboardSeconds: clampInteger(source.clearClipboardSeconds, 0, 3600, 30),
     autofillOnPageLoadEnabled: source.autofillOnPageLoadEnabled === true,
-    passkeyProviderEnabled: source.passkeyProviderEnabled === true,
+    browserPasskeyProxyEnabled:
+      source.browserPasskeyProxyEnabled === true ||
+      legacy?.passkeyProviderEnabled === true,
+    windowsPasskeyProviderEnabled:
+      source.windowsPasskeyProviderEnabled === true ||
+      legacy?.passkeyProviderEnabled === true,
     quickUnlockEnabled: source.quickUnlockEnabled === true
+  };
+}
+
+export function normalizeBrowserExtensionSettings(value: unknown): ExtensionSettings {
+  const normalized = normalizeExtensionSettings(value);
+  return {
+    ...normalized,
+    windowsPasskeyProviderEnabled: false,
+    quickUnlockEnabled: false
+  };
+}
+
+export function normalizeWindowsAppSettings(value: unknown): ExtensionSettings {
+  const normalized = normalizeExtensionSettings(value);
+  return {
+    ...normalized,
+    autofillOnPageLoadEnabled: false,
+    browserPasskeyProxyEnabled: false
   };
 }
 
@@ -61,6 +90,7 @@ export function createMemoryExtensionSettingsStore(
   let current = normalizeExtensionSettings(initial);
 
   return {
+    surface: "windows",
     async load() {
       return current;
     },

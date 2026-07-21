@@ -3,13 +3,14 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::slice;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
 use vaultkern_runtime::{
     PlatformPasskeyAssertionInput, PlatformPasskeyCredential, PlatformPasskeyRegistrationInput,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::plugin_operation_state::{PluginOperationId, PluginOperationState};
 use crate::{RuntimeBridge, plugin_callback_available};
@@ -40,6 +41,7 @@ struct VkOwnedBytes {
 
 #[repr(C)]
 struct VkMakeCredentialInput {
+    transaction_id: VkBytes,
     rp_id: *const u16,
     rp_name: *const u16,
     user_name: *const u16,
@@ -58,6 +60,7 @@ struct VkMakeCredentialOutput {
 
 #[repr(C)]
 struct VkGetAssertionInput {
+    transaction_id: VkBytes,
     rp_id: *const u16,
     allowed_credential_ids: *const VkBytes,
     allowed_credential_count: u32,
@@ -89,11 +92,13 @@ struct VkPluginCallbacks {
     retain_context: extern "system" fn(*mut c_void),
     release_context: extern "system" fn(*mut c_void),
     is_unlocked: extern "system" fn(*mut c_void) -> i32,
+    prepare_operation: extern "system" fn(*mut c_void, VkBytes, usize, *mut i32) -> i32,
     make_credential: extern "system" fn(
         *mut c_void,
         *const VkMakeCredentialInput,
         *mut VkMakeCredentialOutput,
     ) -> i32,
+    commit_registration: extern "system" fn(*mut c_void, VkBytes) -> i32,
     get_assertion: extern "system" fn(
         *mut c_void,
         *const VkGetAssertionInput,
@@ -118,6 +123,10 @@ unsafe extern "system" {
         credentials: *const VkCredentialMetadata,
         credential_count: u32,
     ) -> i32;
+    fn vaultkern_plugin_replace_runtime_credentials(
+        credentials: *const VkCredentialMetadata,
+        credential_count: u32,
+    ) -> i32;
     #[cfg(test)]
     fn vaultkern_plugin_test_replaces_cached_account_credential() -> i32;
     #[cfg(test)]
@@ -132,9 +141,14 @@ struct CallbackContext {
 
 pub struct PasskeyPluginServer {
     context: Arc<CallbackContext>,
-    registration_cookie: u32,
-    start_error: Option<String>,
+    native: Mutex<NativeServerState>,
     enabled: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct NativeServerState {
+    registration_cookie: u32,
+    last_start_error: Option<String>,
 }
 
 impl PasskeyPluginServer {
@@ -145,29 +159,13 @@ impl PasskeyPluginServer {
             operations: PluginOperationState::default(),
             enabled: Arc::clone(&enabled),
         });
-        let callbacks = VkPluginCallbacks {
-            version: 3,
-            context: Arc::as_ptr(&context).cast_mut().cast(),
-            retain_context: retain_context_callback,
-            release_context: release_context_callback,
-            is_unlocked: is_unlocked_callback,
-            make_credential: make_credential_callback,
-            get_assertion: get_assertion_callback,
-            begin_operation: begin_operation_callback,
-            is_operation_cancelled: is_operation_cancelled_callback,
-            cancel_operation: cancel_operation_callback,
-            end_operation: end_operation_callback,
-            free_bytes: free_bytes_callback,
-        };
-        let mut registration_cookie = 0;
-        let status = unsafe { vaultkern_plugin_start(&callbacks, &mut registration_cookie) };
-        let start_error = failed(status).then(|| hresult_message("register COM class", status));
-        Self {
+        let server = Self {
             context,
-            registration_cookie,
-            start_error,
+            native: Mutex::new(NativeServerState::default()),
             enabled,
-        }
+        };
+        let _ = server.ensure_started();
+        server
     }
 
     fn reconcile_registration(&self, enabled: bool) -> Result<bool, String> {
@@ -240,15 +238,47 @@ impl PasskeyPluginServer {
         Ok(native.len())
     }
 
-    pub fn start_error(&self) -> Option<&str> {
-        self.start_error.as_deref()
+    pub fn start_error(&self) -> Option<String> {
+        self.native
+            .lock()
+            .ok()
+            .and_then(|state| state.last_start_error.clone())
     }
 
     fn ensure_started(&self) -> Result<(), String> {
-        match &self.start_error {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
+        let mut native = self
+            .native
+            .lock()
+            .map_err(|_| "passkey COM server state is unavailable".to_owned())?;
+        if native.registration_cookie != 0 {
+            return Ok(());
         }
+        let callbacks = VkPluginCallbacks {
+            version: 6,
+            context: Arc::as_ptr(&self.context).cast_mut().cast(),
+            retain_context: retain_context_callback,
+            release_context: release_context_callback,
+            is_unlocked: is_unlocked_callback,
+            prepare_operation: prepare_operation_callback,
+            make_credential: make_credential_callback,
+            commit_registration: commit_registration_callback,
+            get_assertion: get_assertion_callback,
+            begin_operation: begin_operation_callback,
+            is_operation_cancelled: is_operation_cancelled_callback,
+            cancel_operation: cancel_operation_callback,
+            end_operation: end_operation_callback,
+            free_bytes: free_bytes_callback,
+        };
+        let mut registration_cookie = 0;
+        let status = unsafe { vaultkern_plugin_start(&callbacks, &mut registration_cookie) };
+        if failed(status) {
+            let error = hresult_message("register COM class", status);
+            native.last_start_error = Some(error.clone());
+            return Err(error);
+        }
+        native.registration_cookie = registration_cookie;
+        native.last_start_error = None;
+        Ok(())
     }
 }
 
@@ -324,15 +354,18 @@ extern "system" fn end_operation_callback(context: *mut c_void, id: VkBytes) {
         };
         if let Ok(id) = operation_id(id) {
             context.operations.end(id);
+            context.bridge.end_platform_passkey_operation(id.to_vec());
         }
     }));
 }
 
 impl Drop for PasskeyPluginServer {
     fn drop(&mut self) {
-        if self.registration_cookie != 0 {
-            unsafe {
-                let _ = vaultkern_plugin_stop(self.registration_cookie);
+        if let Ok(native) = self.native.get_mut() {
+            if native.registration_cookie != 0 {
+                unsafe {
+                    let _ = vaultkern_plugin_stop(native.registration_cookie);
+                }
             }
         }
     }
@@ -371,6 +404,25 @@ impl CredentialBacking {
     }
 }
 
+impl Zeroize for CredentialBacking {
+    fn zeroize(&mut self) {
+        self.credential_id.zeroize();
+        self.rp_id.zeroize();
+        self.rp_name.zeroize();
+        self.user_handle.zeroize();
+        self.user_name.zeroize();
+        self.user_display_name.zeroize();
+    }
+}
+
+impl Drop for CredentialBacking {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for CredentialBacking {}
+
 extern "system" fn is_unlocked_callback(context: *mut c_void) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         callback_context(context)
@@ -378,6 +430,60 @@ extern "system" fn is_unlocked_callback(context: *mut c_void) -> i32 {
             .into()
     }))
     .unwrap_or(0)
+}
+
+extern "system" fn prepare_operation_callback(
+    context: *mut c_void,
+    transaction_id: VkBytes,
+    parent_window: usize,
+    fresh_user_verification: *mut i32,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Some(fresh_user_verification) = fresh_user_verification.as_mut() else {
+            return E_INVALIDARG;
+        };
+        *fresh_user_verification = 0;
+        let Some(context) = callback_context(context) else {
+            return E_INVALIDARG;
+        };
+        if !context.enabled.load(Ordering::Acquire) {
+            return NTE_NOT_FOUND;
+        }
+        let operation_id = match operation_id(transaction_id) {
+            Ok(id) => id,
+            Err(status) => return status,
+        };
+        let (credentials, unlocked_for_operation) =
+            match context.bridge.prepare_platform_passkey_operation(
+                operation_id.to_vec(),
+                (parent_window != 0).then_some(parent_window),
+            ) {
+                Ok(result) => result,
+                Err(error) => return runtime_error_hresult(&error),
+            };
+        let backings = credentials
+            .iter()
+            .map(CredentialBacking::new)
+            .collect::<Vec<_>>();
+        let native = backings
+            .iter()
+            .map(CredentialBacking::native)
+            .collect::<Vec<_>>();
+        let status = vaultkern_plugin_replace_runtime_credentials(
+            if native.is_empty() {
+                ptr::null()
+            } else {
+                native.as_ptr()
+            },
+            native.len() as u32,
+        );
+        if failed(status) {
+            return status;
+        }
+        *fresh_user_verification = i32::from(unlocked_for_operation);
+        S_OK
+    }))
+    .unwrap_or(E_FAIL)
 }
 
 extern "system" fn make_credential_callback(
@@ -401,6 +507,10 @@ extern "system" fn make_credential_callback(
         }
         let Some(input) = input.as_ref() else {
             return E_INVALIDARG;
+        };
+        let operation_id = match operation_id(input.transaction_id) {
+            Ok(id) => id,
+            Err(status) => return status,
         };
         let rp_id = match wide_string(input.rp_id) {
             Ok(value) => value,
@@ -444,21 +554,21 @@ extern "system" fn make_credential_callback(
             }
         }
 
-        let registration =
-            match context
-                .bridge
-                .register_platform_passkey(PlatformPasskeyRegistrationInput {
-                    relying_party: rp_id,
-                    relying_party_name: rp_name,
-                    user_name,
-                    user_display_name,
-                    user_handle,
-                    public_key_algorithm: input.public_key_algorithm,
-                    user_verified: true,
-                }) {
-                Ok(registration) => registration,
-                Err(error) => return runtime_error_hresult(&error),
-            };
+        let registration = match context.bridge.register_platform_passkey(
+            operation_id.to_vec(),
+            PlatformPasskeyRegistrationInput {
+                relying_party: rp_id,
+                relying_party_name: rp_name,
+                user_name,
+                user_display_name,
+                user_handle,
+                public_key_algorithm: input.public_key_algorithm,
+                user_verified: true,
+            },
+        ) {
+            Ok(registration) => registration,
+            Err(error) => return runtime_error_hresult(&error),
+        };
         let credential_id = match owned_bytes(registration.credential.credential_id) {
             Ok(bytes) => bytes,
             Err(status) => return status,
@@ -473,6 +583,29 @@ extern "system" fn make_credential_callback(
         (*output).credential_id = credential_id;
         (*output).authenticator_data = authenticator_data;
         S_OK
+    }))
+    .unwrap_or(E_FAIL)
+}
+
+extern "system" fn commit_registration_callback(
+    context: *mut c_void,
+    transaction_id: VkBytes,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Some(context) = callback_context(context) else {
+            return E_INVALIDARG;
+        };
+        let operation_id = match operation_id(transaction_id) {
+            Ok(id) => id,
+            Err(status) => return status,
+        };
+        match context
+            .bridge
+            .commit_platform_passkey_registration(operation_id.to_vec())
+        {
+            Ok(()) => S_OK,
+            Err(error) => runtime_error_hresult(&error),
+        }
     }))
     .unwrap_or(E_FAIL)
 }
@@ -501,6 +634,10 @@ extern "system" fn get_assertion_callback(
         let Some(input) = input.as_ref() else {
             return E_INVALIDARG;
         };
+        let operation_id = match operation_id(input.transaction_id) {
+            Ok(id) => id,
+            Err(status) => return status,
+        };
         let relying_party = match wide_string(input.rp_id) {
             Ok(value) => value,
             Err(status) => return status,
@@ -514,18 +651,18 @@ extern "system" fn get_assertion_callback(
             Ok(value) => value,
             Err(status) => return status,
         };
-        let assertion =
-            match context
-                .bridge
-                .create_platform_passkey_assertion(PlatformPasskeyAssertionInput {
-                    relying_party,
-                    allowed_credential_ids,
-                    client_data_hash,
-                    user_verified: true,
-                }) {
-                Ok(assertion) => assertion,
-                Err(error) => return runtime_error_hresult(&error),
-            };
+        let assertion = match context.bridge.create_platform_passkey_assertion(
+            operation_id.to_vec(),
+            PlatformPasskeyAssertionInput {
+                relying_party,
+                allowed_credential_ids,
+                client_data_hash,
+                user_verified: true,
+            },
+        ) {
+            Ok(assertion) => assertion,
+            Err(error) => return runtime_error_hresult(&error),
+        };
 
         let values = [
             assertion.credential_id,
@@ -663,9 +800,20 @@ unsafe fn free_owned_bytes(bytes: VkOwnedBytes) {
     if bytes.data.is_null() {
         return;
     }
+    unsafe {
+        zeroize_owned_bytes(bytes);
+    }
     let slice = ptr::slice_from_raw_parts_mut(bytes.data, bytes.len as usize);
     unsafe {
         drop(Box::from_raw(slice));
+    }
+}
+
+unsafe fn zeroize_owned_bytes(bytes: VkOwnedBytes) {
+    if !bytes.data.is_null() {
+        unsafe {
+            slice::from_raw_parts_mut(bytes.data, bytes.len as usize).zeroize();
+        }
     }
 }
 
@@ -693,18 +841,20 @@ fn hresult_message(operation: &str, status: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CallbackContext, NTE_NOT_FOUND, S_OK, VkBytes, VkMakeCredentialInput,
-        VkMakeCredentialOutput, VkOwnedBytes, empty_owned_bytes, free_owned_bytes,
+        CallbackContext, CredentialBacking, NTE_NOT_FOUND, S_OK, VkBytes, VkMakeCredentialInput,
+        VkMakeCredentialOutput, VkOwnedBytes, borrowed_bytes, empty_owned_bytes, free_owned_bytes,
         make_credential_callback, nul_terminated_wide, owned_bytes, release_context_callback,
         retain_context_callback, runtime_error_hresult,
         vaultkern_plugin_test_can_select_second_matching_credential,
-        vaultkern_plugin_test_replaces_cached_account_credential,
+        vaultkern_plugin_test_replaces_cached_account_credential, zeroize_owned_bytes,
     };
     use crate::RuntimeBridge;
     use crate::plugin_operation_state::PluginOperationState;
     use serde_json::json;
     use std::sync::{Arc, Mutex, atomic::AtomicBool};
     use vaultkern_core::{CompositeKey, KeepassCore, SaveProfile, Vault};
+    use vaultkern_runtime::PlatformPasskeyCredential;
+    use zeroize::Zeroize;
 
     static NATIVE_CREDENTIAL_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -732,12 +882,35 @@ mod tests {
         assert_eq!(bytes.len, 4);
         unsafe {
             assert_eq!(std::slice::from_raw_parts(bytes.data, 4), &[1, 2, 3, 4]);
+            zeroize_owned_bytes(bytes);
+            assert_eq!(std::slice::from_raw_parts(bytes.data, 4), &[0, 0, 0, 0]);
             free_owned_bytes(bytes);
             free_owned_bytes(VkOwnedBytes {
                 data: std::ptr::null_mut(),
                 len: 0,
             });
         }
+    }
+
+    #[test]
+    fn credential_metadata_backing_zeroizes_all_native_buffers() {
+        let mut backing = CredentialBacking::new(&PlatformPasskeyCredential {
+            credential_id: vec![1, 2, 3],
+            relying_party: "example.com".into(),
+            relying_party_name: "Example".into(),
+            user_handle: vec![4, 5, 6],
+            user_name: "alice@example.com".into(),
+            user_display_name: "Alice".into(),
+        });
+
+        backing.zeroize();
+
+        assert!(backing.credential_id.is_empty());
+        assert!(backing.rp_id.is_empty());
+        assert!(backing.rp_name.is_empty());
+        assert!(backing.user_handle.is_empty());
+        assert!(backing.user_name.is_empty());
+        assert!(backing.user_display_name.is_empty());
     }
 
     #[test]
@@ -803,7 +976,12 @@ mod tests {
         let user_name = nul_terminated_wide("alice@example.com");
         let user_display_name = nul_terminated_wide("Alice Example");
         let user_handle = b"native-display-user";
+        let operation_id = [7_u8; 16];
+        bridge
+            .prepare_platform_passkey_operation(operation_id.to_vec(), None)
+            .expect("prepare verified platform operation");
         let input = VkMakeCredentialInput {
+            transaction_id: borrowed_bytes(&operation_id),
             rp_id: rp_id.as_ptr(),
             rp_name: rp_name.as_ptr(),
             user_name: user_name.as_ptr(),
@@ -835,6 +1013,7 @@ mod tests {
         assert_eq!(credentials.len(), 1);
         assert_eq!(credentials[0].relying_party_name, "Example Incorporated");
         assert_eq!(credentials[0].user_display_name, "Alice Example");
+        bridge.end_platform_passkey_operation(operation_id.to_vec());
     }
 
     #[test]

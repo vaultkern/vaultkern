@@ -3,8 +3,8 @@ mod desktop_settings;
 mod plugin_operation_state;
 mod runtime_bridge;
 
-pub use desktop_settings::{DesktopSettingsStore, DesktopSettingsStoreError};
-pub use runtime_bridge::RuntimeBridge;
+pub use desktop_settings::{DesktopDesiredState, DesktopSettingsStore, DesktopSettingsStoreError};
+pub use runtime_bridge::{RuntimeBridge, SettingsReconciliationRequest};
 
 pub fn launch_requests_visible_window(arguments: &[String]) -> bool {
     !arguments
@@ -17,106 +17,9 @@ pub(crate) fn plugin_callback_available(provider_enabled: bool, vault_unlocked: 
     provider_enabled && vault_unlocked
 }
 
-pub fn should_refresh_platform_passkeys(
-    command_type: Option<&str>,
-    response: &serde_json::Value,
-) -> bool {
-    let response_type = response.get("type").and_then(serde_json::Value::as_str);
-    if response_type == Some("error") {
-        return false;
-    }
-
-    matches!(
-        command_type,
-        Some(
-            "add_local_vault_reference"
-                | "add_one_drive_vault_reference"
-                | "open_local_vault"
-                | "delete_vault_reference"
-                | "retry_vault_source_sync"
-                | "set_entry_passkey"
-                | "clear_entry_passkey"
-                | "save_passkey_registration"
-                | "abort_passkey_registration"
-                | "commit_passkey_registration"
-                | "delete_entry"
-                | "save_vault"
-        )
-    )
-}
-
-pub fn platform_passkey_refresh_command_type(
-    command: &vaultkern_runtime_protocol::RuntimeCommand,
-) -> Option<&'static str> {
-    use vaultkern_runtime_protocol::RuntimeCommand;
-
-    match command {
-        RuntimeCommand::AddLocalVaultReference { .. } => Some("add_local_vault_reference"),
-        RuntimeCommand::AddOneDriveVaultReference { .. } => Some("add_one_drive_vault_reference"),
-        RuntimeCommand::OpenLocalVault { .. } => Some("open_local_vault"),
-        RuntimeCommand::DeleteVaultReference { .. } => Some("delete_vault_reference"),
-        RuntimeCommand::RetryVaultSourceSync { .. } => Some("retry_vault_source_sync"),
-        RuntimeCommand::SetEntryPasskey { .. } => Some("set_entry_passkey"),
-        RuntimeCommand::ClearEntryPasskey { .. } => Some("clear_entry_passkey"),
-        RuntimeCommand::SavePasskeyRegistration { .. } => Some("save_passkey_registration"),
-        RuntimeCommand::AbortPasskeyRegistration { .. } => Some("abort_passkey_registration"),
-        RuntimeCommand::CommitPasskeyRegistration { .. } => Some("commit_passkey_registration"),
-        RuntimeCommand::DeleteEntry { .. } => Some("delete_entry"),
-        RuntimeCommand::SaveVault { .. } => Some("save_vault"),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        launch_requests_visible_window, plugin_callback_available, should_refresh_platform_passkeys,
-    };
-    use serde_json::json;
-
-    #[test]
-    fn transport_refreshes_passkey_cache_only_after_successful_metadata_mutations() {
-        assert!(!should_refresh_platform_passkeys(
-            Some("get_entry_detail"),
-            &json!({ "type": "entry_detail" })
-        ));
-        assert!(should_refresh_platform_passkeys(
-            Some("set_entry_passkey"),
-            &json!({ "type": "entry_detail" })
-        ));
-        assert!(should_refresh_platform_passkeys(
-            Some("retry_vault_source_sync"),
-            &json!({ "type": "vault_source_status" })
-        ));
-        assert!(!should_refresh_platform_passkeys(
-            Some("update_database_settings"),
-            &json!({ "type": "database_settings_commit_result" })
-        ));
-        assert!(!should_refresh_platform_passkeys(
-            Some("get_entry_detail"),
-            &json!({ "type": "session_state", "unlocked": true })
-        ));
-        assert!(!should_refresh_platform_passkeys(
-            Some("lock_session"),
-            &json!({ "type": "session_state", "unlocked": false })
-        ));
-        assert!(should_refresh_platform_passkeys(
-            Some("delete_vault_reference"),
-            &json!({ "type": "vault_reference_list", "vaults": [] })
-        ));
-        assert!(should_refresh_platform_passkeys(
-            Some("add_local_vault_reference"),
-            &json!({ "type": "vault_reference" })
-        ));
-        assert!(should_refresh_platform_passkeys(
-            Some("add_one_drive_vault_reference"),
-            &json!({ "type": "vault_reference" })
-        ));
-        assert!(!should_refresh_platform_passkeys(
-            Some("set_entry_passkey"),
-            &json!({ "type": "error" })
-        ));
-    }
+    use super::{launch_requests_visible_window, plugin_callback_available};
 
     #[test]
     fn only_com_plugin_activation_starts_with_the_main_window_hidden() {
@@ -155,6 +58,103 @@ mod tests {
         assert!(!plugin_callback_available(false, true));
         assert!(!plugin_callback_available(true, false));
         assert!(!plugin_callback_available(false, false));
+    }
+
+    #[test]
+    fn main_window_capability_explicitly_allows_only_the_resident_app_commands() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let permissions = capability["permissions"].as_array().unwrap();
+        let identifiers = permissions
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+
+        for command in [
+            "allow-runtime-send",
+            "allow-load-desktop-settings",
+            "allow-save-desktop-settings",
+            "allow-queue-quick-unlock-enrollment",
+        ] {
+            assert!(
+                identifiers.contains(&command),
+                "main capability does not allow {command}"
+            );
+        }
+        assert!(!identifiers.contains(&"allow-reconcile-settings"));
+
+        let build = include_str!("../build.rs");
+        assert!(build.contains("\"queue_quick_unlock_enrollment\""));
+        assert!(!build.contains("\"reconcile_settings\""));
+    }
+
+    #[test]
+    fn native_startup_reconciliation_includes_quick_unlock_without_the_webview() {
+        let main = include_str!("main.rs");
+        let reconciliation_start = main
+            .find("fn reconcile_desktop_settings(")
+            .expect("desktop reconciliation entry point");
+        let reconciliation_end = main[reconciliation_start..]
+            .find("#[tauri::command]")
+            .map(|offset| reconciliation_start + offset)
+            .expect("next command after reconciliation");
+        let reconciliation = &main[reconciliation_start..reconciliation_end];
+
+        assert!(
+            reconciliation.contains("reconcile_quick_unlock"),
+            "native reconciliation must converge unlock-blob presence before the WebView starts"
+        );
+        assert!(
+            reconciliation.find("reconcile_quick_unlock").unwrap()
+                < reconciliation
+                    .find("passkey_plugin.reconcile_settings")
+                    .unwrap(),
+            "one-shot unlock credentials must be consumed before slower provider metadata work"
+        );
+        let desired_state_failure = reconciliation
+            .find("Err(error) =>")
+            .expect("desired-state load failure branch");
+        let failure = &reconciliation[desired_state_failure..];
+        assert!(
+            failure.find("drop(quick_unlock_credentials)").unwrap()
+                < failure.find("completion.send(Err(error.clone()))").unwrap(),
+            "settings-load failure must wipe the credential handoff before acknowledging unlock"
+        );
+    }
+
+    #[test]
+    fn runtime_transport_never_runs_credential_reconciliation_inline() {
+        let main = include_str!("main.rs");
+        let send_start = main.find("async fn runtime_send(").expect("runtime_send");
+        let send_end = main[send_start..]
+            .find("#[tauri::command]")
+            .map(|offset| send_start + offset)
+            .expect("next command after runtime_send");
+        let runtime_send = &main[send_start..send_end];
+
+        assert!(
+            !runtime_send.contains("sync_credentials"),
+            "durable command responses must not wait on OS metadata reconciliation"
+        );
+    }
+
+    #[test]
+    fn successful_settings_commit_schedules_the_single_reconciliation_entry_point() {
+        let main = include_str!("main.rs");
+        let save_start = main
+            .find("fn save_desktop_settings(")
+            .expect("save_desktop_settings");
+        let save_end = main[save_start..]
+            .find("fn main()")
+            .map(|offset| save_start + offset)
+            .expect("save_desktop_settings end");
+        let save = &main[save_start..save_end];
+
+        assert!(
+            save.find("settings.save(&desired)").unwrap()
+                < save.find("bridge.schedule_reconciliation()").unwrap(),
+            "desired state must commit before reconciliation is scheduled"
+        );
     }
 }
 

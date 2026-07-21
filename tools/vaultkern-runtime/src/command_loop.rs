@@ -8,8 +8,10 @@ use zeroize::Zeroizing;
 use crate::Runtime;
 
 const MAX_NATIVE_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_NATIVE_REQUEST_ID_BYTES: usize = 256;
 
 pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
+    install_redacted_panic_hook();
     configure_stdio_for_native_messaging()?;
 
     let stdin = std::io::stdin();
@@ -18,6 +20,24 @@ pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
     let mut stdout = stdout.lock();
 
     run_loop_with_io(runtime, &mut stdin, &mut stdout)
+}
+
+pub fn install_redacted_panic_hook() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        std::panic::set_hook(Box::new(|panic| {
+            if let Some(location) = panic.location() {
+                eprintln!(
+                    "VaultKern runtime panicked at {}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                );
+            } else {
+                eprintln!("VaultKern runtime panicked");
+            }
+        }));
+    });
 }
 
 fn run_loop_with_io(
@@ -38,7 +58,36 @@ fn run_loop_with_io_with_limit(
         match read_native_message_or_eof_with_limit::<ProtocolEnvelope>(stdin, max_message_bytes)? {
             NativeMessage::Eof => return Ok(()),
             NativeMessage::Message(envelope) => {
-                let request_id = envelope.request_id;
+                let request_id = match envelope.request_id {
+                    Some(request_id) if request_id.len() <= MAX_NATIVE_REQUEST_ID_BYTES => {
+                        Some(request_id)
+                    }
+                    Some(_) => {
+                        write_native_message(
+                            stdout,
+                            &invalid_native_message_response(
+                                "native request id exceeds the framing limit".to_owned(),
+                            ),
+                            None,
+                        )?;
+                        continue;
+                    }
+                    None => None,
+                };
+                if envelope.version != vaultkern_runtime_protocol::PROTOCOL_VERSION {
+                    write_native_message(
+                        stdout,
+                        &RuntimeResponse::Error(ErrorDto {
+                            code: "unsupported_version".into(),
+                            message: format!(
+                                "unsupported runtime protocol version: {}",
+                                envelope.version
+                            ),
+                        }),
+                        request_id.as_deref(),
+                    )?;
+                    continue;
+                }
                 let outcome = handle_command_response(&mut runtime, envelope.command);
                 #[cfg(debug_assertions)]
                 maybe_abort_after_autofill_source_commit(&outcome.response);
@@ -63,6 +112,7 @@ fn run_loop_with_io_with_limit(
                     &oversized_native_message_response(length, max_length),
                     None,
                 )?;
+                return Ok(());
             }
         };
     }
@@ -148,27 +198,14 @@ fn command_response_from_result(run: impl FnOnce() -> Result<RuntimeResponse>) -
             }),
             fatal: false,
         },
-        Err(payload) => CommandOutcome {
+        Err(_payload) => CommandOutcome {
             response: RuntimeResponse::Error(ErrorDto {
                 code: "panic".into(),
-                message: format!(
-                    "runtime command panicked: {}",
-                    panic_payload_message(payload.as_ref())
-                ),
+                message: "runtime command panicked".into(),
             }),
             fatal: true,
         },
     }
-}
-
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        return (*message).to_owned();
-    }
-    if let Some(message) = payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-    "unknown panic".into()
 }
 
 pub(crate) fn format_error_chain(error: &anyhow::Error) -> String {
@@ -214,9 +251,6 @@ fn read_native_message_or_eof_with_limit<T: serde::de::DeserializeOwned>(
 
     let length = u32::from_le_bytes(length) as usize;
     if length > max_message_bytes {
-        discard_native_message_payload(reader, length).with_context(|| {
-            format!("failed to discard oversized native message payload: {length}")
-        })?;
         return Ok(NativeMessage::Oversized {
             length,
             max_length: max_message_bytes,
@@ -235,15 +269,6 @@ fn read_native_message_or_eof_with_limit<T: serde::de::DeserializeOwned>(
     }
 }
 
-fn discard_native_message_payload(reader: &mut impl Read, length: usize) -> Result<()> {
-    let copied = std::io::copy(&mut reader.take(length as u64), &mut std::io::sink())
-        .context("failed to read oversized native message payload")?;
-    if copied != length as u64 {
-        anyhow::bail!("failed to read oversized native message payload");
-    }
-    Ok(())
-}
-
 fn oversized_native_message_response(length: usize, max_length: usize) -> RuntimeResponse {
     RuntimeResponse::Error(ErrorDto {
         code: "invalid_request".into(),
@@ -259,11 +284,16 @@ fn invalid_native_message_response(message: String) -> RuntimeResponse {
 }
 
 fn request_id_from_native_payload(payload: &[u8]) -> Option<String> {
-    let value = serde_json::from_slice::<serde_json::Value>(payload).ok()?;
-    value
-        .get("requestId")
-        .and_then(|request_id| request_id.as_str())
-        .map(str::to_owned)
+    #[derive(serde::Deserialize)]
+    struct RequestIdOnly {
+        #[serde(default, rename = "requestId")]
+        request_id: Option<String>,
+    }
+
+    serde_json::from_slice::<RequestIdOnly>(payload)
+        .ok()?
+        .request_id
+        .filter(|request_id| request_id.len() <= MAX_NATIVE_REQUEST_ID_BYTES)
 }
 
 fn write_native_message(
@@ -273,7 +303,7 @@ fn write_native_message(
 ) -> Result<()> {
     let payload =
         encode_native_response(response, request_id).context("failed to encode native message")?;
-    let length = (payload.len() as u32).to_le_bytes();
+    let length = native_message_length_prefix(payload.len())?;
     writer
         .write_all(&length)
         .context("failed to write message length")?;
@@ -283,20 +313,32 @@ fn write_native_message(
     writer.flush().context("failed to flush native message")
 }
 
-fn encode_native_response(response: &RuntimeResponse, request_id: Option<&str>) -> Result<Vec<u8>> {
-    let Some(request_id) = request_id else {
-        return serde_json::to_vec(response).context("failed to encode native response");
-    };
+fn native_message_length_prefix(length: usize) -> Result<[u8; 4]> {
+    let length = u32::try_from(length).context("native response exceeds the framing limit")?;
+    Ok(length.to_le_bytes())
+}
 
-    let mut value = serde_json::to_value(response).context("failed to encode native response")?;
-    let serde_json::Value::Object(fields) = &mut value else {
-        anyhow::bail!("native response must encode as a JSON object");
-    };
-    fields.insert(
-        "requestId".into(),
-        serde_json::Value::String(request_id.to_owned()),
-    );
-    serde_json::to_vec(&value).context("failed to encode native response")
+fn encode_native_response(
+    response: &RuntimeResponse,
+    request_id: Option<&str>,
+) -> Result<Zeroizing<Vec<u8>>> {
+    #[derive(serde::Serialize)]
+    struct ResponseWithRequestId<'a> {
+        #[serde(flatten)]
+        response: &'a RuntimeResponse,
+        #[serde(rename = "requestId")]
+        request_id: &'a str,
+    }
+
+    let payload = match request_id {
+        Some(request_id) => serde_json::to_vec(&ResponseWithRequestId {
+            response,
+            request_id,
+        }),
+        None => serde_json::to_vec(response),
+    }
+    .context("failed to encode native response")?;
+    Ok(Zeroizing::new(payload))
 }
 
 #[cfg(not(windows))]
@@ -339,9 +381,10 @@ mod tests {
 
     use super::{
         NativeMessage, claim_autofill_source_commit_crash_marker, command_response_from_result,
-        configure_stdio_for_native_messaging, format_error_chain, handle_command_response,
-        is_committed_autofill_source_response, read_native_message_or_eof_with_limit,
-        run_loop_with_io, run_loop_with_io_with_limit,
+        configure_stdio_for_native_messaging, encode_native_response, format_error_chain,
+        handle_command_response, is_committed_autofill_source_response,
+        native_message_length_prefix, read_native_message_or_eof_with_limit,
+        request_id_from_native_payload, run_loop_with_io, run_loop_with_io_with_limit,
     };
     use crate::Runtime;
 
@@ -435,6 +478,39 @@ mod tests {
     }
 
     #[test]
+    fn native_response_frames_are_zeroizing_and_inject_request_ids_without_a_value_copy() {
+        fn assert_zeroizing(_: &zeroize::Zeroizing<Vec<u8>>) {}
+
+        let response = RuntimeResponse::Error(vaultkern_runtime_protocol::ErrorDto {
+            code: "example".into(),
+            message: "response-secret".into(),
+        });
+        let payload = encode_native_response(&response, Some("request-1")).unwrap();
+
+        assert_zeroizing(&payload);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            serde_json::json!({
+                "type": "error",
+                "code": "example",
+                "message": "response-secret",
+                "requestId": "request-1"
+            })
+        );
+    }
+
+    #[test]
+    fn native_response_length_prefix_rejects_integer_truncation() {
+        assert_eq!(
+            native_message_length_prefix(u32::MAX as usize).unwrap(),
+            u32::MAX.to_le_bytes()
+        );
+        if usize::BITS > u32::BITS {
+            assert!(native_message_length_prefix(u32::MAX as usize + 1).is_err());
+        }
+    }
+
+    #[test]
     fn native_message_loop_treats_clean_eof_as_shutdown() {
         let mut input = std::io::Cursor::new(Vec::<u8>::new());
         let mut output = Vec::new();
@@ -446,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn native_message_reader_reports_oversized_messages_after_draining_payload() {
+    fn native_message_reader_rejects_oversized_messages_without_draining_attacker_payload() {
         let mut input = Vec::new();
         input.extend_from_slice(&9_u32.to_le_bytes());
         input.extend_from_slice(b"oversized");
@@ -464,15 +540,11 @@ mod tests {
                 max_length: 8,
             }
         );
-        assert_eq!(
-            read_native_message_or_eof_with_limit::<serde_json::Value>(&mut input, 8)
-                .expect("read following message"),
-            NativeMessage::Message(serde_json::json!({}))
-        );
+        assert_eq!(input.position(), 4);
     }
 
     #[test]
-    fn native_message_loop_serializes_oversized_errors_without_exiting_the_host() {
+    fn native_message_loop_serializes_oversized_errors_and_exits_the_host() {
         let max_length = 1024;
         let mut input = Vec::new();
         input.extend_from_slice(&((max_length + 1) as u32).to_le_bytes());
@@ -493,7 +565,6 @@ mod tests {
 
         let mut output = std::io::Cursor::new(output);
         let first = read_response_from(&mut output);
-        let second = read_response_from(&mut output);
         assert!(matches!(first, RuntimeResponse::Error(_)));
         let RuntimeResponse::Error(first_error) = first else {
             panic!("expected oversized error");
@@ -503,14 +574,7 @@ mod tests {
                 .message
                 .contains("native message exceeds maximum length")
         );
-        let RuntimeResponse::Error(second_error) = second else {
-            panic!("expected command error");
-        };
-        assert!(
-            second_error
-                .message
-                .contains("failed to resolve vault path: /definitely/missing/demo.kdbx")
-        );
+        assert_eq!(output.position(), output.get_ref().len() as u64);
     }
 
     #[test]
@@ -550,6 +614,37 @@ mod tests {
     }
 
     #[test]
+    fn malformed_native_messages_extract_only_a_bounded_request_id() {
+        let secret = "malformed-command-secret-must-not-be-retained";
+        let invalid_command = serde_json::json!({
+            "version": 1,
+            "requestId": "request-1",
+            "command": {
+                "type": "future_runtime_command",
+                "password": secret
+            }
+        });
+        let payload = serde_json::to_vec(&invalid_command).unwrap();
+
+        assert_eq!(
+            request_id_from_native_payload(&payload).as_deref(),
+            Some("request-1")
+        );
+
+        let oversized_request_id = "r".repeat(super::MAX_NATIVE_REQUEST_ID_BYTES + 1);
+        let invalid_command = serde_json::json!({
+            "version": 1,
+            "requestId": oversized_request_id,
+            "command": {
+                "type": "future_runtime_command",
+                "password": secret
+            }
+        });
+        let payload = serde_json::to_vec(&invalid_command).unwrap();
+        assert_eq!(request_id_from_native_payload(&payload), None);
+    }
+
+    #[test]
     fn native_message_loop_echoes_request_id_in_response() {
         let command = serde_json::json!({
             "version": 1,
@@ -570,6 +665,28 @@ mod tests {
         let response = read_response_value_from(&mut output);
         assert_eq!(response["requestId"], "request-1");
         assert_eq!(response["type"], "session_state");
+    }
+
+    #[test]
+    fn native_message_loop_rejects_an_unsupported_envelope_version() {
+        let command = serde_json::json!({
+            "version": 2,
+            "requestId": "future-version",
+            "command": { "type": "get_session_state" }
+        });
+        let payload = serde_json::to_vec(&command).unwrap();
+        let mut input = Vec::new();
+        input.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        input.extend_from_slice(&payload);
+        let mut input = std::io::Cursor::new(input);
+        let mut output = Vec::new();
+
+        run_loop_with_io(Runtime::for_tests(), &mut input, &mut output).unwrap();
+
+        let response = read_response_value_from(&mut std::io::Cursor::new(output));
+        assert_eq!(response["requestId"], "future-version");
+        assert_eq!(response["type"], "error");
+        assert_eq!(response["code"], "unsupported_version");
     }
 
     fn read_response_from(reader: &mut impl std::io::Read) -> RuntimeResponse {
@@ -624,14 +741,14 @@ mod tests {
     #[test]
     fn command_response_converts_panics_to_fatal_protocol_errors() {
         let outcome = command_response_from_result(|| -> anyhow::Result<RuntimeResponse> {
-            panic!("passkey assertion panic");
+            panic!("panic payload contains secret material");
         });
 
         assert_eq!(
             outcome.response,
             RuntimeResponse::Error(vaultkern_runtime_protocol::ErrorDto {
                 code: "panic".into(),
-                message: "runtime command panicked: passkey assertion panic".into(),
+                message: "runtime command panicked".into(),
             })
         );
         assert!(outcome.fatal);

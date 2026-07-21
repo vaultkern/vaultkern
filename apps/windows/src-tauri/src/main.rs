@@ -1,15 +1,21 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
-use serde_json::{Value, json};
+use serde::Deserialize;
+#[cfg(windows)]
+use serde_json::Value;
+#[cfg(windows)]
+use std::sync::Arc;
 #[cfg(windows)]
 use tauri::{Manager, State};
 #[cfg(windows)]
-use vaultkern_runtime_protocol::ProtocolEnvelope;
+use vaultkern_runtime::QuickUnlockReconciliationCredentials;
+#[cfg(windows)]
+use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeResponse, SensitiveString};
 #[cfg(windows)]
 use vaultkern_windows::{
-    DesktopSettingsStore, PasskeyPluginServer, RuntimeBridge, launch_requests_visible_window,
-    platform_passkey_refresh_command_type, should_refresh_platform_passkeys,
+    DesktopSettingsStore, PasskeyPluginServer, RuntimeBridge, SettingsReconciliationRequest,
+    launch_requests_visible_window,
 };
 
 #[cfg(windows)]
@@ -17,9 +23,7 @@ use vaultkern_windows::{
 async fn runtime_send(
     message: ProtocolEnvelope,
     bridge: State<'_, RuntimeBridge>,
-    passkey_plugin: State<'_, PasskeyPluginServer>,
-) -> Result<Value, String> {
-    let command_type = platform_passkey_refresh_command_type(&message.command);
+) -> Result<RuntimeResponse, String> {
     let bridge = bridge.inner().clone();
     let response = match tauri::async_runtime::spawn_blocking(move || {
         bridge.request_envelope(message)
@@ -27,45 +31,66 @@ async fn runtime_send(
     .await
     {
         Ok(response) => response,
-        Err(error) => json!({
-            "type": "error",
-            "code": "runtime_task_failed",
-            "message": format!("runtime task failed: {error}")
+        Err(error) => RuntimeResponse::Error(ErrorDto {
+            code: "runtime_task_failed".into(),
+            message: format!("runtime task failed: {error}"),
         }),
     };
-    if should_refresh_platform_passkeys(command_type, &response) {
-        if let Err(error) = passkey_plugin.sync_credentials() {
-            eprintln!("passkey credential cache refresh failed: {error}");
-        }
-    }
     Ok(response)
-}
-
-#[cfg(windows)]
-#[tauri::command]
-fn reconcile_settings(
-    vault_unlocked: bool,
-    settings: State<'_, DesktopSettingsStore>,
-    passkey_plugin: State<'_, PasskeyPluginServer>,
-) -> Result<bool, String> {
-    reconcile_desktop_settings(&settings, &passkey_plugin, vault_unlocked)
 }
 
 #[cfg(windows)]
 fn reconcile_desktop_settings(
     settings: &DesktopSettingsStore,
+    bridge: &RuntimeBridge,
     passkey_plugin: &PasskeyPluginServer,
-    vault_unlocked: bool,
-) -> Result<bool, String> {
-    let enabled = settings
-        .passkey_provider_enabled()
-        .map_err(|error| error.to_string())?;
-    passkey_plugin.reconcile_settings(enabled, vault_unlocked)
+    request: SettingsReconciliationRequest,
+) -> Result<(), String> {
+    let SettingsReconciliationRequest {
+        quick_unlock_credentials,
+        quick_unlock_completion,
+    } = request;
+    let desired = match settings.desired_state() {
+        Ok(desired) => desired,
+        Err(error) => {
+            drop(quick_unlock_credentials);
+            let error = error.to_string();
+            if let Some(completion) = quick_unlock_completion {
+                let _ = completion.send(Err(error.clone()));
+            }
+            return Err(error);
+        }
+    };
+    let vault_unlocked = bridge.platform_passkey_is_unlocked();
+    let mut failures = Vec::new();
+
+    let quick_unlock_result = bridge
+        .reconcile_quick_unlock(desired.quick_unlock_enabled, quick_unlock_credentials)
+        .map(|_| ());
+    if let Err(error) = &quick_unlock_result {
+        failures.push(error.clone());
+    }
+    if let Some(completion) = quick_unlock_completion {
+        let _ = completion.send(quick_unlock_result);
+    }
+
+    match passkey_plugin.reconcile_settings(desired.passkey_provider_enabled, vault_unlocked) {
+        Ok(true) | Ok(false) if !desired.passkey_provider_enabled => {}
+        Ok(true) => {}
+        Ok(false) => failures
+            .push("passkey provider is registered but disabled in Windows Settings".to_owned()),
+        Err(error) => failures.push(error),
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 #[cfg(windows)]
 #[tauri::command]
-fn load_desktop_settings(settings: State<'_, DesktopSettingsStore>) -> Result<Value, String> {
+fn load_desktop_settings(settings: State<'_, Arc<DesktopSettingsStore>>) -> Result<Value, String> {
     settings.load().map_err(|error| error.to_string())
 }
 
@@ -73,13 +98,39 @@ fn load_desktop_settings(settings: State<'_, DesktopSettingsStore>) -> Result<Va
 #[tauri::command]
 fn save_desktop_settings(
     desired: Value,
-    settings: State<'_, DesktopSettingsStore>,
+    settings: State<'_, Arc<DesktopSettingsStore>>,
+    bridge: State<'_, RuntimeBridge>,
 ) -> Result<(), String> {
-    settings.save(&desired).map_err(|error| error.to_string())
+    settings.save(&desired).map_err(|error| error.to_string())?;
+    bridge.schedule_reconciliation();
+    Ok(())
+}
+
+#[cfg(windows)]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QuickUnlockEnrollmentCredentialsDto {
+    #[serde(default)]
+    password: Option<SensitiveString>,
+    #[serde(default)]
+    key_file_path: Option<String>,
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn queue_quick_unlock_enrollment(
+    credentials: QuickUnlockEnrollmentCredentialsDto,
+    bridge: State<'_, RuntimeBridge>,
+) -> Result<(), String> {
+    bridge.queue_quick_unlock_enrollment(QuickUnlockReconciliationCredentials::from_protocol_input(
+        credentials.password,
+        credentials.key_file_path,
+    ))
 }
 
 #[cfg(windows)]
 fn main() {
+    vaultkern_runtime::install_redacted_panic_hook();
     #[cfg(debug_assertions)]
     configure_webview_debugging();
     let bridge = RuntimeBridge::new();
@@ -106,14 +157,34 @@ fn main() {
                 .app_data_dir()
                 .map_err(std::io::Error::other)?
                 .join("desktop-settings.json");
-            let settings = DesktopSettingsStore::new(settings_path);
-            let plugin = PasskeyPluginServer::start(plugin_bridge.clone());
+            let settings = Arc::new(DesktopSettingsStore::new(settings_path));
+            let plugin = Arc::new(PasskeyPluginServer::start(plugin_bridge.clone()));
             if let Some(error) = plugin.start_error() {
                 eprintln!("passkey COM server unavailable: {error}");
             }
-            if let Err(error) = reconcile_desktop_settings(&settings, &plugin, false) {
-                eprintln!("startup settings reconciliation failed: {error}");
-            }
+            let (reconciliation, reconciliation_requests) = std::sync::mpsc::sync_channel(1);
+            plugin_bridge
+                .set_reconciliation_notifier(reconciliation)
+                .map_err(std::io::Error::other)?;
+            let reconciliation_settings = Arc::clone(&settings);
+            let reconciliation_plugin = Arc::clone(&plugin);
+            let reconciliation_bridge = plugin_bridge.clone();
+            std::thread::Builder::new()
+                .name("vaultkern-settings-reconciliation".to_owned())
+                .spawn(move || {
+                    while let Ok(request) = reconciliation_requests.recv() {
+                        if let Err(error) = reconcile_desktop_settings(
+                            &reconciliation_settings,
+                            &reconciliation_bridge,
+                            &reconciliation_plugin,
+                            request,
+                        ) {
+                            eprintln!("post-commit settings reconciliation failed: {error}");
+                        }
+                    }
+                })
+                .map_err(std::io::Error::other)?;
+            plugin_bridge.schedule_reconciliation();
             app.manage(settings);
             app.manage(plugin);
             if show_window_on_start {
@@ -139,7 +210,7 @@ fn main() {
             runtime_send,
             load_desktop_settings,
             save_desktop_settings,
-            reconcile_settings
+            queue_quick_unlock_enrollment
         ])
         .run(tauri::generate_context!())
         .expect("failed to run VaultKern");

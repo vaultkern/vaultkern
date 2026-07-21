@@ -15,7 +15,6 @@ const unsupportedClient = {
   },
   addLocalVaultReference: unsupported,
   beginOneDriveLogin: unsupported,
-  completeOneDriveLogin: unsupported,
   completePendingOneDriveLogin: unsupported,
   async listOneDriveChildren() {
     return [];

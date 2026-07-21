@@ -3,11 +3,12 @@ import type { CSSProperties } from "react";
 import type { UnlockCredentials } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
-import type { ExtensionSettings } from "../extensionSettings";
+import type { ExtensionSettings, SettingsSurface } from "../extensionSettings";
 import { useText } from "../i18n";
 
 interface ExtensionSettingsPanelProps {
   settings: ExtensionSettings;
+  surface?: SettingsSurface;
   saving: boolean;
   error: string | null;
   quickUnlockSupported?: boolean;
@@ -16,6 +17,7 @@ interface ExtensionSettingsPanelProps {
   quickUnlockVaultUnlocked?: boolean;
   quickUnlockBusy?: boolean;
   quickUnlockError?: string | null;
+  reconciliationError?: string | null;
   onEnrollQuickUnlock?(credentials: UnlockCredentials): Promise<void>;
   onSave(settings: ExtensionSettings): void;
   onDraftChange?(settings: ExtensionSettings, dirty: boolean): void;
@@ -23,6 +25,7 @@ interface ExtensionSettingsPanelProps {
 
 export function ExtensionSettingsPanel({
   settings,
+  surface = "windows",
   saving,
   error,
   quickUnlockSupported = true,
@@ -31,6 +34,7 @@ export function ExtensionSettingsPanel({
   quickUnlockVaultUnlocked = false,
   quickUnlockBusy = false,
   quickUnlockError = null,
+  reconciliationError = null,
   onEnrollQuickUnlock,
   onSave,
   onDraftChange
@@ -40,6 +44,10 @@ export function ExtensionSettingsPanel({
   const [quickUnlockPassword, setQuickUnlockPassword] = useState("");
   const [quickUnlockKeyFilePath, setQuickUnlockKeyFilePath] = useState("");
   const quickUnlockAvailable = quickUnlockSupported !== false;
+  const providerEnabled =
+    surface === "browser"
+      ? draft.browserPasskeyProxyEnabled
+      : draft.windowsPasskeyProviderEnabled;
 
   useEffect(() => {
     setDraft(toDraft(settings));
@@ -53,7 +61,11 @@ export function ExtensionSettingsPanel({
   }, [quickUnlockEnrolled]);
 
   useLayoutEffect(() => {
-    const nextSettings = settingsFromDraft(draft, quickUnlockAvailable);
+    const nextSettings = settingsFromDraft(
+      draft,
+      quickUnlockAvailable,
+      settings.quickUnlockEnabled
+    );
     onDraftChange?.(nextSettings, !extensionSettingsMatch(nextSettings, settings));
   }, [draft, onDraftChange, quickUnlockAvailable, settings]);
 
@@ -62,20 +74,40 @@ export function ExtensionSettingsPanel({
       style={panelStyle}
       onSubmit={(event) => {
         event.preventDefault();
-        onSave(settingsFromDraft(draft, quickUnlockAvailable));
+        onSave(
+          settingsFromDraft(
+            draft,
+            quickUnlockAvailable,
+            settings.quickUnlockEnabled
+          )
+        );
       }}
     >
       <div style={titleRowStyle}>
         <div>
-          <h2 style={headingStyle}>{text("Extension Settings")}</h2>
+          <h2 style={headingStyle}>
+            {text(surface === "browser" ? "Browser Extension Settings" : "Windows Settings")}
+          </h2>
           <p style={descriptionStyle}>
-            {text("Local extension preferences. These are not stored in the KDBX database.")}
+            {text(
+              surface === "browser"
+                ? "Local browser extension preferences. These are not stored in the KDBX database."
+                : "Local Windows app preferences. These are not stored in the KDBX database."
+            )}
           </p>
         </div>
         <button type="submit" disabled={saving} style={primaryButtonStyle}>
-          {saving ? text("Saving...") : text("Save Extension Settings")}
+          {saving
+            ? text("Saving...")
+            : text(
+                surface === "browser"
+                  ? "Save Extension Settings"
+                  : "Save Windows Settings"
+              )}
         </button>
       </div>
+
+      {reconciliationError ? <div role="alert">{reconciliationError}</div> : null}
 
       <fieldset disabled={saving} style={settingsFieldsetStyle}>
       <div style={gridStyle}>
@@ -142,18 +174,34 @@ export function ExtensionSettingsPanel({
         </div>
         <label style={checkboxFieldStyle}>
           <input
-            aria-label={text("VaultKern passkey provider")}
+            aria-label={text(
+              surface === "browser"
+                ? "Browser passkey proxy"
+                : "Windows passkey provider"
+            )}
             type="checkbox"
-            checked={draft.passkeyProviderEnabled}
+            checked={providerEnabled}
             onChange={(event) =>
-              setDraft({
-                ...draft,
-                passkeyProviderEnabled: event.target.checked
-              })
+              setDraft(
+                surface === "browser"
+                  ? {
+                      ...draft,
+                      browserPasskeyProxyEnabled: event.target.checked
+                    }
+                  : {
+                      ...draft,
+                      windowsPasskeyProviderEnabled: event.target.checked
+                    }
+              )
             }
           />
-          {text("VaultKern passkey provider")}
+          {text(
+            surface === "browser"
+              ? "Browser passkey proxy"
+              : "Windows passkey provider"
+          )}
         </label>
+        {surface === "browser" ? (
         <label style={checkboxFieldStyle}>
           <input
             aria-label={text("Page-load autofill")}
@@ -168,7 +216,9 @@ export function ExtensionSettingsPanel({
           />
           {text("Page-load autofill")}
         </label>
+        ) : null}
       </div>
+      {surface === "windows" ? (
       <label style={toggleRowStyle}>
         <input
           aria-label={text("Quick Unlock")}
@@ -181,7 +231,9 @@ export function ExtensionSettingsPanel({
         />
         <span>{text("Quick Unlock")}</span>
       </label>
-      {quickUnlockAvailable &&
+      ) : null}
+      {surface === "windows" &&
+      quickUnlockAvailable &&
       quickUnlockEnabled &&
       draft.quickUnlockEnabled &&
       !quickUnlockEnrolled ? (
@@ -225,10 +277,13 @@ export function ExtensionSettingsPanel({
                 }
                 style={primaryButtonStyle}
                 onClick={() => {
-                  void onEnrollQuickUnlock?.({
+                  const credentials = {
                     password: quickUnlockPassword,
                     keyFilePath: quickUnlockKeyFilePath
-                  });
+                  };
+                  setQuickUnlockPassword("");
+                  setQuickUnlockKeyFilePath("");
+                  void onEnrollQuickUnlock?.(credentials);
                 }}
               >
                 {quickUnlockBusy
@@ -256,14 +311,16 @@ function toDraft(settings: ExtensionSettings) {
     idleLockMinutes: String(settings.idleLockMinutes),
     clearClipboardSeconds: String(settings.clearClipboardSeconds),
     autofillOnPageLoadEnabled: settings.autofillOnPageLoadEnabled,
-    passkeyProviderEnabled: settings.passkeyProviderEnabled,
+    browserPasskeyProxyEnabled: settings.browserPasskeyProxyEnabled,
+    windowsPasskeyProviderEnabled: settings.windowsPasskeyProviderEnabled,
     quickUnlockEnabled: settings.quickUnlockEnabled
   };
 }
 
 function settingsFromDraft(
   draft: ReturnType<typeof toDraft>,
-  quickUnlockAvailable: boolean
+  quickUnlockAvailable: boolean,
+  retainedQuickUnlockEnabled: boolean
 ): ExtensionSettings {
   return {
     recentVaultLimit: parseBoundedInteger(draft.recentVaultLimit, 1, 50, 10),
@@ -276,8 +333,11 @@ function settingsFromDraft(
       30
     ),
     autofillOnPageLoadEnabled: draft.autofillOnPageLoadEnabled,
-    passkeyProviderEnabled: draft.passkeyProviderEnabled,
-    quickUnlockEnabled: quickUnlockAvailable && draft.quickUnlockEnabled
+    browserPasskeyProxyEnabled: draft.browserPasskeyProxyEnabled,
+    windowsPasskeyProviderEnabled: draft.windowsPasskeyProviderEnabled,
+    quickUnlockEnabled: quickUnlockAvailable
+      ? draft.quickUnlockEnabled
+      : retainedQuickUnlockEnabled
   };
 }
 

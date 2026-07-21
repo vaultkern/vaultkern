@@ -64,14 +64,10 @@ async function sendBackgroundMessage(message: unknown) {
 }
 
 export async function sendRuntimeCommand(command: unknown) {
-  return sendBackgroundMessage({
+  return extensionTransport.send({
     version: 1,
     command
   });
 }
 
-export const extensionTransport: RuntimeTransport = {
-  send(message: unknown) {
-    return sendBackgroundMessage(message);
-  }
-};
+export const extensionTransport: RuntimeTransport = { send: sendBackgroundMessage };

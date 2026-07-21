@@ -19,6 +19,7 @@ typedef struct VkOwnedBytes {
 } VkOwnedBytes;
 
 typedef struct VkMakeCredentialInput {
+    VkBytes transaction_id;
     const uint16_t* rp_id;
     const uint16_t* rp_name;
     const uint16_t* user_name;
@@ -35,6 +36,7 @@ typedef struct VkMakeCredentialOutput {
 } VkMakeCredentialOutput;
 
 typedef struct VkGetAssertionInput {
+    VkBytes transaction_id;
     const uint16_t* rp_id;
     const VkBytes* allowed_credential_ids;
     uint32_t allowed_credential_count;
@@ -58,6 +60,11 @@ typedef struct VkCredentialMetadata {
 } VkCredentialMetadata;
 
 typedef int32_t (VK_CALL *VkIsUnlockedCallback)(void* context);
+typedef int32_t (VK_CALL *VkPrepareOperationCallback)(
+    void* context,
+    VkBytes transaction_id,
+    uintptr_t parent_window,
+    int32_t* fresh_user_verification);
 typedef void (VK_CALL *VkRetainContextCallback)(void* context);
 typedef void (VK_CALL *VkReleaseContextCallback)(void* context);
 typedef int32_t (VK_CALL *VkMakeCredentialCallback)(
@@ -68,6 +75,9 @@ typedef int32_t (VK_CALL *VkGetAssertionCallback)(
     void* context,
     const VkGetAssertionInput* input,
     VkGetAssertionOutput* output);
+typedef int32_t (VK_CALL *VkCommitRegistrationCallback)(
+    void* context,
+    VkBytes transaction_id);
 typedef int32_t (VK_CALL *VkBeginOperationCallback)(void* context, VkBytes transaction_id);
 typedef int32_t (VK_CALL *VkIsOperationCancelledCallback)(
     void* context,
@@ -82,7 +92,9 @@ typedef struct VkPluginCallbacks {
     VkRetainContextCallback retain_context;
     VkReleaseContextCallback release_context;
     VkIsUnlockedCallback is_unlocked;
+    VkPrepareOperationCallback prepare_operation;
     VkMakeCredentialCallback make_credential;
+    VkCommitRegistrationCallback commit_registration;
     VkGetAssertionCallback get_assertion;
     VkBeginOperationCallback begin_operation;
     VkIsOperationCancelledCallback is_operation_cancelled;
@@ -98,6 +110,9 @@ int32_t VK_CALL vaultkern_plugin_stop(uint32_t registration_cookie);
 int32_t VK_CALL vaultkern_plugin_ensure_registered(int32_t* authenticator_state);
 int32_t VK_CALL vaultkern_plugin_remove_registered(void);
 int32_t VK_CALL vaultkern_plugin_sync_credentials(
+    const VkCredentialMetadata* credentials,
+    uint32_t credential_count);
+int32_t VK_CALL vaultkern_plugin_replace_runtime_credentials(
     const VkCredentialMetadata* credentials,
     uint32_t credential_count);
 

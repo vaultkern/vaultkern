@@ -139,13 +139,7 @@ describe("RuntimeClient", () => {
           type: "one_drive_auth_session",
           authUrl: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize",
           redirectUri: "http://127.0.0.1:53121/callback",
-          codeVerifier: "verifier",
           expiresInSeconds: 600
-        })
-        .mockResolvedValueOnce({
-          type: "one_drive_auth_status",
-          status: "authorized",
-          accountLabel: "alice@example.com"
         })
         .mockResolvedValueOnce({
           type: "one_drive_auth_status",
@@ -180,16 +174,8 @@ describe("RuntimeClient", () => {
     const client = new RuntimeClient(transport);
 
     await expect(client.beginOneDriveLogin()).resolves.toMatchObject({
-      type: "one_drive_auth_session",
-      codeVerifier: "verifier"
+      type: "one_drive_auth_session"
     });
-    await expect(
-      client.completeOneDriveLogin({
-        code: "auth-code",
-        redirectUri: "http://127.0.0.1:53121/callback",
-        codeVerifier: "verifier"
-      })
-    ).resolves.toMatchObject({ status: "authorized" });
     await expect(client.completePendingOneDriveLogin()).resolves.toMatchObject({
       status: "authorized"
     });
@@ -204,22 +190,13 @@ describe("RuntimeClient", () => {
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
       version: 1,
-      command: {
-        type: "complete_one_drive_login",
-        code: "auth-code",
-        redirect_uri: "http://127.0.0.1:53121/callback",
-        code_verifier: "verifier"
-      }
+      command: { type: "complete_pending_one_drive_login" }
     });
     expect(transport.send).toHaveBeenNthCalledWith(3, {
       version: 1,
-      command: { type: "complete_pending_one_drive_login" }
-    });
-    expect(transport.send).toHaveBeenNthCalledWith(4, {
-      version: 1,
       command: { type: "list_one_drive_children", parent_item_id: "folder-1" }
     });
-    expect(transport.send).toHaveBeenNthCalledWith(5, {
+    expect(transport.send).toHaveBeenNthCalledWith(4, {
       version: 1,
       command: {
         type: "add_one_drive_vault_reference",
@@ -1251,7 +1228,6 @@ describe("RuntimeClient", () => {
       username: "alice@example.com",
       credentialId: "credential-base64url",
       generatedUserId: "generated-user",
-      privateKeyPem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
       relyingParty: "example.com",
       userHandle: "user-handle",
       backupEligible: true,
@@ -1502,7 +1478,6 @@ describe("RuntimeClient", () => {
           historyIndex: 0,
           title: "Old Example",
           username: "alice",
-          password: "old-secret",
           url: "https://example.com",
           notes: "old note",
           customFields: [],

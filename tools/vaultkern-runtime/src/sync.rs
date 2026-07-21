@@ -6,7 +6,8 @@ use std::time::Duration;
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, TargetExpectation,
     TempWriteFaultPoints, create_dir_all_durable, path_file_identity, publish_temp,
-    remove_if_exists, sha256_hex, sync_directory, write_verified_temp,
+    remove_and_sync_absence, sha256_hex, sync_directory, sync_published_target,
+    write_verified_temp,
 };
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
@@ -137,7 +138,7 @@ impl SyncedBaseStore {
         let (target, lock_path) = self.paths(vault_id);
         let _lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, self.lock_timeout)?;
         match fs::symlink_metadata(&target) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => sync_directory(&self.root),
             Err(error) => Err(error),
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 Err(io::Error::new(
@@ -145,10 +146,7 @@ impl SyncedBaseStore {
                     "synced base is not a regular file",
                 ))
             }
-            Ok(_) => {
-                remove_if_exists(&target)?;
-                sync_directory(&self.root)
-            }
+            Ok(_) => remove_and_sync_absence(&target),
         }
     }
 
@@ -226,7 +224,7 @@ pub(crate) fn write_local_conflict_copy(
     ))
 }
 
-fn durable_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn durable_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
     let expectation = match fs::symlink_metadata(target) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => TargetExpectation::Missing,
         Err(error) => return Err(error),
@@ -248,7 +246,7 @@ fn durable_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
     };
     let faults = DurableFaultInjector::default();
     let temp = write_verified_temp(target, bytes, &faults, BASE_WRITE_POINTS)?;
-    publish_temp(
+    match publish_temp(
         temp,
         target,
         expectation,
@@ -257,8 +255,20 @@ fn durable_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
         DurableFaultPoint::BeforeGenerationPublish,
         DurableFaultPoint::GenerationPublished,
         DurableFaultPoint::GenerationParentSynced,
-    )
-    .map_err(|error| error.source)
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if error.published => match fs::read(target) {
+            Ok(current) if current == bytes => {
+                sync_published_target(target)?;
+                let parent = target.parent().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "durable target has no parent")
+                })?;
+                sync_directory(parent)
+            }
+            _ => Err(error.source),
+        },
+        Err(error) => Err(error.source),
+    }
 }
 
 #[cfg(test)]

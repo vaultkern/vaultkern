@@ -66,7 +66,6 @@ struct HistorySemanticSnapshotDigest {
         String,
         Option<String>,
         String,
-        String,
         Option<String>,
         bool,
         bool,
@@ -831,14 +830,14 @@ fn collect_history_semantic_projection_digest(
     let passkey = core
         .project_entry_history_passkey(vault, entry_id, history_index)
         .expect("project history semantic passkey")
+        .as_ref()
         .map(|value| {
             (
-                value.username,
-                value.credential_id,
-                value.generated_user_id,
-                value.private_key_pem,
-                value.relying_party,
-                value.user_handle,
+                value.username.clone(),
+                value.credential_id.clone(),
+                value.generated_user_id.clone(),
+                value.relying_party.clone(),
+                value.user_handle.clone(),
                 value.backup_eligible,
                 value.backup_state,
             )
@@ -915,7 +914,6 @@ fn collect_raw_history_semantic_digest(
                 value.username.clone(),
                 value.credential_id.clone(),
                 value.generated_user_id.clone(),
-                value.private_key_pem.clone(),
                 value.relying_party.clone(),
                 value.user_handle.clone(),
                 value.backup_eligible,

@@ -205,7 +205,7 @@ fn passkey(credential_id: &str) -> PasskeyRecord {
         username: "alice".into(),
         credential_id: credential_id.into(),
         generated_user_id: None,
-        private_key_pem: format!("private-{credential_id}"),
+        private_key_pem: format!("private-{credential_id}").into(),
         relying_party: "example.com".into(),
         user_handle: Some("user-handle".into()),
         backup_eligible: false,

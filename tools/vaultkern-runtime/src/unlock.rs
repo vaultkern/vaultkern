@@ -28,17 +28,30 @@ pub(crate) struct MasterCredentialShape {
 impl MasterCredential {
     pub(crate) fn new(
         password: Option<&[u8]>,
-        key_file_contribution: Option<[u8; 32]>,
+        key_file_contribution: Option<Zeroizing<[u8; 32]>>,
+    ) -> Result<Self> {
+        Self::from_zeroizing_parts(
+            password.map(|password| Zeroizing::new(password.to_vec())),
+            key_file_contribution,
+        )
+    }
+
+    fn from_zeroizing_parts(
+        password: Option<Zeroizing<Vec<u8>>>,
+        key_file_contribution: Option<Zeroizing<[u8; 32]>>,
     ) -> Result<Self> {
         if password.is_none() && key_file_contribution.is_none() {
             anyhow::bail!("master credential has no components");
         }
-        if password.is_some_and(|password| password.len() > MAX_PASSWORD_BYTES) {
+        if password
+            .as_ref()
+            .is_some_and(|password| password.len() > MAX_PASSWORD_BYTES)
+        {
             anyhow::bail!("master credential password is too large");
         }
         Ok(Self {
-            password: password.map(|password| Zeroizing::new(password.to_vec())),
-            key_file_contribution: key_file_contribution.map(Zeroizing::new),
+            password,
+            key_file_contribution,
         })
     }
 
@@ -48,7 +61,7 @@ impl MasterCredential {
             key.add_password_bytes(password.as_slice());
         }
         if let Some(key_file_contribution) = &self.key_file_contribution {
-            key.add_key_file(**key_file_contribution);
+            key.add_key_file(key_file_contribution.as_ref());
         }
         key
     }
@@ -148,24 +161,24 @@ impl UnlockBlob {
         }
         let password = take(bytes, &mut cursor, password_len)?;
         let key_file_contribution = if flags & KEY_FILE_PRESENT != 0 {
-            Some(
-                take(bytes, &mut cursor, 32)?
-                    .try_into()
-                    .context("unlock blob key-file contribution is truncated")?,
-            )
+            Some(zeroizing_array::<32>(
+                take(bytes, &mut cursor, 32)?,
+                "unlock blob key-file contribution is truncated",
+            )?)
         } else {
             None
         };
-        let transformed = take(bytes, &mut cursor, 32)?
-            .try_into()
-            .context("unlock blob transformed key is truncated")?;
+        let transformed = zeroizing_array::<32>(
+            take(bytes, &mut cursor, 32)?,
+            "unlock blob transformed key is truncated",
+        )?;
         if cursor != bytes.len() {
             anyhow::bail!("unlock blob has trailing bytes");
         }
-        let password = (flags & PASSWORD_PRESENT != 0).then_some(password);
+        let password = (flags & PASSWORD_PRESENT != 0).then(|| Zeroizing::new(password.to_vec()));
         Ok(Self::new(
-            MasterCredential::new(password, key_file_contribution)?,
-            TransformedKey::from_bytes(transformed),
+            MasterCredential::from_zeroizing_parts(password, key_file_contribution)?,
+            TransformedKey::from_zeroizing(transformed),
         ))
     }
 }
@@ -325,11 +338,23 @@ fn take<'a>(bytes: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8]>
     Ok(value)
 }
 
+fn zeroizing_array<const N: usize>(
+    bytes: &[u8],
+    truncated_message: &str,
+) -> Result<Zeroizing<[u8; N]>> {
+    if bytes.len() != N {
+        anyhow::bail!(truncated_message.to_owned());
+    }
+    let mut value = Zeroizing::new([0u8; N]);
+    value.copy_from_slice(bytes);
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         MasterCredential, UnlockAttempt, UnlockBlob, enroll_unlock_blob, unlock_from_blob,
-        unlock_historical_snapshot_from_blob,
+        unlock_historical_snapshot_from_blob, zeroizing_array,
     };
     use crate::providers::secure_storage::{SecureStorageError, SecureStorageProvider};
     use std::cell::{Cell, RefCell};
@@ -338,6 +363,16 @@ mod tests {
         Vault, derive_transformed_key, save_kdbx_bytes,
     };
     use zeroize::Zeroizing;
+
+    #[test]
+    fn fixed_length_unlock_blob_secrets_decode_directly_into_zeroizing_ownership() {
+        fn assert_zeroizing_array(_: &Zeroizing<[u8; 32]>) {}
+
+        let decoded = zeroizing_array::<32>(&[0x5a; 32], "test secret").unwrap();
+
+        assert_zeroizing_array(&decoded);
+        assert_eq!(decoded.as_slice(), &[0x5a; 32]);
+    }
 
     #[derive(Default)]
     struct CountingStore {
@@ -444,10 +479,12 @@ mod tests {
     #[test]
     fn one_blob_roundtrips_master_credential_and_cached_transformed_key() {
         let key_file_contribution = [0x5a; 32];
-        let master =
-            MasterCredential::new(Some("pāssword".as_bytes()), Some(key_file_contribution))
-                .unwrap();
-        let transformed = TransformedKey::from_bytes([0xa5; 32]);
+        let master = MasterCredential::new(
+            Some("pāssword".as_bytes()),
+            Some(Zeroizing::new(key_file_contribution)),
+        )
+        .unwrap();
+        let transformed = TransformedKey::from_zeroizing(Zeroizing::new([0xa5; 32]));
         let encoded = UnlockBlob::new(master, transformed).encode().unwrap();
 
         let decoded = UnlockBlob::decode(&encoded).unwrap();

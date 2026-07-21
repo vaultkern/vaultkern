@@ -5,8 +5,15 @@ use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DesktopDesiredState {
+    pub passkey_provider_enabled: bool,
+    pub quick_unlock_enabled: bool,
+}
 
 #[derive(Debug)]
 pub struct DesktopSettingsStoreError {
@@ -50,11 +57,15 @@ impl Error for DesktopSettingsStoreError {
 #[derive(Debug, Clone)]
 pub struct DesktopSettingsStore {
     path: PathBuf,
+    save_gate: Arc<Mutex<()>>,
 }
 
 impl DesktopSettingsStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            save_gate: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn load(&self) -> Result<Value, DesktopSettingsStoreError> {
@@ -70,6 +81,13 @@ impl DesktopSettingsStore {
     }
 
     pub fn save(&self, settings: &Value) -> Result<(), DesktopSettingsStoreError> {
+        let _save_guard = self.save_gate.lock().map_err(|_| {
+            DesktopSettingsStoreError::new(
+                "serialize concurrent writes to",
+                &self.path,
+                io::Error::other("desktop settings save lock is poisoned"),
+            )
+        })?;
         let bytes = serde_json::to_vec(settings)
             .map_err(|error| DesktopSettingsStoreError::new("serialize", &self.path, error))?;
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
@@ -114,12 +132,23 @@ impl DesktopSettingsStore {
         Ok(())
     }
 
-    pub fn passkey_provider_enabled(&self) -> Result<bool, DesktopSettingsStoreError> {
-        Ok(self
-            .load()?
-            .get("passkeyProviderEnabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false))
+    pub fn desired_state(&self) -> Result<DesktopDesiredState, DesktopSettingsStoreError> {
+        let settings = self.load()?;
+        Ok(DesktopDesiredState {
+            passkey_provider_enabled: settings
+                .get("windowsPasskeyProviderEnabled")
+                .and_then(Value::as_bool)
+                .or_else(|| {
+                    settings
+                        .get("passkeyProviderEnabled")
+                        .and_then(Value::as_bool)
+                })
+                .unwrap_or(false),
+            quick_unlock_enabled: settings
+                .get("quickUnlockEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        })
     }
 }
 

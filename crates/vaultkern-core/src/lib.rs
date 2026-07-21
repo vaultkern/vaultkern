@@ -22,6 +22,7 @@ pub use vaultkern_model::{
     TotpSpec, Vault, is_totp_persistent_attribute_key, prepare_entry_history_snapshot,
     three_way_field_patch,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Attachment {
@@ -100,7 +101,7 @@ pub struct EntryView {
     pub field_protection: EntryFieldProtection,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EntryDetailView {
     pub id: String,
     pub title: String,
@@ -115,7 +116,34 @@ pub struct EntryDetailView {
     pub field_protection: EntryFieldProtection,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for EntryDetailView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryDetailView([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryDetailView {
+    fn zeroize(&mut self) {
+        self.id.zeroize();
+        self.title.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        self.custom_icon_id.zeroize();
+        self.tags.zeroize();
+    }
+}
+
+impl Drop for EntryDetailView {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryDetailView {}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct EntryHistoryDetailView {
     pub title: String,
     pub icon_id: Option<u32>,
@@ -127,6 +155,32 @@ pub struct EntryHistoryDetailView {
     pub custom_icon_id: Option<String>,
     pub tags: Vec<String>,
 }
+
+impl fmt::Debug for EntryHistoryDetailView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryHistoryDetailView([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryHistoryDetailView {
+    fn zeroize(&mut self) {
+        self.title.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        self.custom_icon_id.zeroize();
+        self.tags.zeroize();
+    }
+}
+
+impl Drop for EntryHistoryDetailView {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryHistoryDetailView {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupView {
@@ -248,12 +302,33 @@ pub struct EntryPresentationMetadataView {
     pub override_url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EntryCustomFieldView {
     pub key: String,
     pub value: String,
     pub protected: bool,
 }
+
+impl fmt::Debug for EntryCustomFieldView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryCustomFieldView([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryCustomFieldView {
+    fn zeroize(&mut self) {
+        self.key.zeroize();
+        self.value.zeroize();
+    }
+}
+
+impl Drop for EntryCustomFieldView {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryCustomFieldView {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryLineageReportMetadataView {
@@ -261,7 +336,7 @@ pub struct EntryLineageReportMetadataView {
     pub exclude_from_reports: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EntryTotpView {
     pub secret_base32: String,
     pub algorithm: vaultkern_model::TotpAlgorithm,
@@ -270,6 +345,28 @@ pub struct EntryTotpView {
     pub issuer: Option<String>,
     pub account_name: Option<String>,
 }
+
+impl fmt::Debug for EntryTotpView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryTotpView([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryTotpView {
+    fn zeroize(&mut self) {
+        self.secret_base32.zeroize();
+        self.issuer.zeroize();
+        self.account_name.zeroize();
+    }
+}
+
+impl Drop for EntryTotpView {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryTotpView {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryPasskeyView {
@@ -333,7 +430,7 @@ pub struct EntryHistoryItemView {
     pub custom_field_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EntryCreate {
     pub title: String,
     pub username: String,
@@ -342,13 +439,234 @@ pub struct EntryCreate {
     pub notes: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+impl fmt::Debug for EntryCreate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryCreate([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryCreate {
+    fn zeroize(&mut self) {
+        self.title.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+    }
+}
+
+impl Drop for EntryCreate {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryCreate {}
+
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct EntryUpdate {
     pub title: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
     pub url: Option<String>,
     pub notes: Option<String>,
+}
+
+impl fmt::Debug for EntryUpdate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryUpdate([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryUpdate {
+    fn zeroize(&mut self) {
+        self.title.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+    }
+}
+
+impl Drop for EntryUpdate {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryUpdate {}
+
+#[cfg(test)]
+mod entry_secret_memory_hygiene_tests {
+    use super::{
+        EntryCreate, EntryCustomFieldView, EntryDetailView, EntryHistoryDetailView, EntryTotpView,
+        EntryUpdate,
+    };
+    use vaultkern_model::{EntryFieldProtection, TotpAlgorithm};
+    use zeroize::{Zeroize, ZeroizeOnDrop};
+
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    #[test]
+    fn leaf_entry_secret_core_types_zeroize_on_drop() {
+        assert_zeroize_on_drop::<EntryCustomFieldView>();
+        assert_zeroize_on_drop::<EntryTotpView>();
+    }
+
+    #[test]
+    fn entry_secret_view_types_zeroize_on_drop() {
+        assert_zeroize_on_drop::<EntryDetailView>();
+        assert_zeroize_on_drop::<EntryHistoryDetailView>();
+    }
+
+    #[test]
+    fn entry_secret_input_types_zeroize_on_drop() {
+        assert_zeroize_on_drop::<EntryCreate>();
+        assert_zeroize_on_drop::<EntryUpdate>();
+    }
+
+    #[test]
+    fn entry_secret_core_types_redact_debug_output() {
+        let detail = EntryDetailView {
+            id: "entry-1".into(),
+            title: "title".into(),
+            icon_id: None,
+            username: "username".into(),
+            password: "detail-password-secret".into(),
+            url: "https://example.com".into(),
+            notes: "notes".into(),
+            modified_at: 1,
+            custom_icon_id: None,
+            tags: Vec::new(),
+            field_protection: EntryFieldProtection::default(),
+        };
+        let history = EntryHistoryDetailView {
+            title: "title".into(),
+            icon_id: None,
+            username: "username".into(),
+            password: "history-password-secret".into(),
+            url: "https://example.com".into(),
+            notes: "notes".into(),
+            modified_at: 1,
+            custom_icon_id: None,
+            tags: Vec::new(),
+        };
+        let custom = EntryCustomFieldView {
+            key: "RecoveryCode".into(),
+            value: "custom-field-secret".into(),
+            protected: true,
+        };
+        let totp = EntryTotpView {
+            secret_base32: "totp-secret-base32".into(),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: None,
+            account_name: None,
+        };
+        let create = EntryCreate {
+            title: "title".into(),
+            username: "username".into(),
+            password: "create-password-secret".into(),
+            url: "https://example.com".into(),
+            notes: "notes".into(),
+        };
+        let mut update = EntryUpdate::default();
+        update.password = Some("update-password-secret".into());
+
+        let debug_outputs = [
+            format!("{detail:?}"),
+            format!("{history:?}"),
+            format!("{custom:?}"),
+            format!("{totp:?}"),
+            format!("{create:?}"),
+            format!("{update:?}"),
+        ];
+        for debug in debug_outputs {
+            for secret in [
+                "detail-password-secret",
+                "history-password-secret",
+                "custom-field-secret",
+                "totp-secret-base32",
+                "create-password-secret",
+                "update-password-secret",
+            ] {
+                assert!(!debug.contains(secret), "Debug leaked {secret}: {debug}");
+            }
+        }
+    }
+
+    #[test]
+    fn entry_secret_core_types_explicitly_zeroize_owned_buffers() {
+        let mut detail = EntryDetailView {
+            id: "entry-1".into(),
+            title: "title".into(),
+            icon_id: None,
+            username: "username".into(),
+            password: "detail-password".into(),
+            url: "https://example.com".into(),
+            notes: "notes".into(),
+            modified_at: 1,
+            custom_icon_id: None,
+            tags: vec!["tag".into()],
+            field_protection: EntryFieldProtection::default(),
+        };
+        let mut history = EntryHistoryDetailView {
+            title: "title".into(),
+            icon_id: None,
+            username: "username".into(),
+            password: "history-password".into(),
+            url: "https://example.com".into(),
+            notes: "notes".into(),
+            modified_at: 1,
+            custom_icon_id: None,
+            tags: vec!["tag".into()],
+        };
+        let mut custom = EntryCustomFieldView {
+            key: "RecoveryCode".into(),
+            value: "custom-secret".into(),
+            protected: true,
+        };
+        let mut totp = EntryTotpView {
+            secret_base32: "totp-secret".into(),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: Some("issuer".into()),
+            account_name: Some("account".into()),
+        };
+        let mut create = EntryCreate {
+            title: "title".into(),
+            username: "username".into(),
+            password: "create-password".into(),
+            url: "https://example.com".into(),
+            notes: "notes".into(),
+        };
+        let mut update = EntryUpdate {
+            title: Some("title".into()),
+            username: Some("username".into()),
+            password: Some("update-password".into()),
+            url: Some("https://example.com".into()),
+            notes: Some("notes".into()),
+        };
+
+        detail.zeroize();
+        history.zeroize();
+        custom.zeroize();
+        totp.zeroize();
+        create.zeroize();
+        update.zeroize();
+
+        assert!(detail.password.is_empty());
+        assert!(detail.tags.is_empty());
+        assert!(history.password.is_empty());
+        assert!(history.tags.is_empty());
+        assert!(custom.value.is_empty());
+        assert!(totp.secret_base32.is_empty());
+        assert!(totp.issuer.is_none());
+        assert!(create.password.is_empty());
+        assert!(update.password.is_none());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1438,7 +1756,7 @@ impl KeepassCore {
         &self,
         vault: &mut Vault,
         entry_id: &str,
-        update: EntryUpdate,
+        mut update: EntryUpdate,
     ) -> Result<EntryView, MutationError> {
         let protection = find_entry_by_id(&vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?
@@ -1473,19 +1791,19 @@ impl KeepassCore {
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
 
-        if let Some(title) = update.title {
+        if let Some(title) = update.title.take() {
             entry.title = title;
         }
-        if let Some(username) = update.username {
+        if let Some(username) = update.username.take() {
             entry.username = username;
         }
-        if let Some(password) = update.password {
+        if let Some(password) = update.password.take() {
             entry.password = password;
         }
-        if let Some(url) = update.url {
+        if let Some(url) = update.url.take() {
             entry.url = url;
         }
-        if let Some(notes) = update.notes {
+        if let Some(notes) = update.notes.take() {
             entry.notes = notes;
         }
 
@@ -1746,7 +2064,7 @@ impl KeepassCore {
         vault: &mut Vault,
         parent_group_id: &str,
         entry_id: &str,
-        create: EntryCreate,
+        mut create: EntryCreate,
     ) -> Result<EntryView, MutationError> {
         let parsed_entry_id = parse_uuid(entry_id)?;
         if parsed_entry_id.is_nil() || parsed_entry_id.to_string() != entry_id {
@@ -1772,14 +2090,14 @@ impl KeepassCore {
         let parent = find_group_by_id_mut(&mut vault.root, parent_group_id)
             .ok_or_else(|| MutationError::GroupNotFound(parent_group_id.into()))?;
 
-        let mut entry = Entry::new(create.title);
+        let mut entry = Entry::new(std::mem::take(&mut create.title));
         let creation_time = current_unix_timestamp().max(0) as u64;
         validate_persistent_unsigned_timestamp(creation_time)?;
         entry.id = parsed_entry_id;
-        entry.username = create.username;
-        entry.password = create.password;
-        entry.url = create.url;
-        entry.notes = create.notes;
+        entry.username = std::mem::take(&mut create.username);
+        entry.password = std::mem::take(&mut create.password);
+        entry.url = std::mem::take(&mut create.url);
+        entry.notes = std::mem::take(&mut create.notes);
         entry.created_at = creation_time;
         entry.modified_at = creation_time;
         entry.expiry_time = Some(creation_time as i64);
@@ -4884,16 +5202,11 @@ mod internal_tests {
         let forbidden = "forbidden\u{1}text".to_owned();
 
         let before = vault.clone();
+        let mut forbidden_title_update = super::EntryUpdate::default();
+        forbidden_title_update.title = Some(forbidden.clone());
         assert!(
-            core.update_entry_fields(
-                &mut vault,
-                &entry_id,
-                super::EntryUpdate {
-                    title: Some(forbidden.clone()),
-                    ..super::EntryUpdate::default()
-                },
-            )
-            .is_err()
+            core.update_entry_fields(&mut vault, &entry_id, forbidden_title_update)
+                .is_err()
         );
         assert_eq!(vault, before);
 
@@ -4922,15 +5235,10 @@ mod internal_tests {
         );
         assert_eq!(vault, before);
 
-        core.update_entry_fields(
-            &mut vault,
-            &entry_id,
-            super::EntryUpdate {
-                password: Some(forbidden),
-                ..super::EntryUpdate::default()
-            },
-        )
-        .expect("protected XML text remains persistable");
+        let mut protected_password_update = super::EntryUpdate::default();
+        protected_password_update.password = Some(forbidden);
+        core.update_entry_fields(&mut vault, &entry_id, protected_password_update)
+            .expect("protected XML text remains persistable");
         let before_unprotect = vault.clone();
         assert!(
             core.update_entry_field_protection(
@@ -8184,7 +8492,7 @@ mod tests {
             username: "alice".into(),
             credential_id: "cred-1".into(),
             generated_user_id: Some("generated-user".into()),
-            private_key_pem: "pem".into(),
+            private_key_pem: String::from("pem").into(),
             relying_party: "example.com".into(),
             user_handle: Some("handle".into()),
             backup_eligible: true,
@@ -8702,7 +9010,7 @@ mod tests {
             username: "alice".into(),
             credential_id: "cred-1".into(),
             generated_user_id: Some("generated-user".into()),
-            private_key_pem: "pem".into(),
+            private_key_pem: String::from("pem").into(),
             relying_party: "example.com".into(),
             user_handle: Some("handle".into()),
             backup_eligible: true,
@@ -9042,7 +9350,7 @@ mod tests {
             username: "history-user".into(),
             credential_id: "history-credential".into(),
             generated_user_id: Some("generated".into()),
-            private_key_pem: "pem".into(),
+            private_key_pem: String::from("pem").into(),
             relying_party: "example.com".into(),
             user_handle: Some("handle".into()),
             backup_eligible: true,
@@ -9123,7 +9431,7 @@ mod tests {
             username: "history-user".into(),
             credential_id: "history-credential".into(),
             generated_user_id: Some("generated".into()),
-            private_key_pem: "pem".into(),
+            private_key_pem: String::from("pem").into(),
             relying_party: "example.com".into(),
             user_handle: Some("handle".into()),
             backup_eligible: true,
@@ -10027,7 +10335,7 @@ mod tests {
             username: "passkey-user".into(),
             credential_id: "credential-id".into(),
             generated_user_id: Some("generated".into()),
-            private_key_pem: "pem".into(),
+            private_key_pem: String::from("pem").into(),
             relying_party: "example.com".into(),
             user_handle: Some("user-handle".into()),
             backup_eligible: true,
@@ -10105,7 +10413,7 @@ mod tests {
             username: "passkey-user".into(),
             credential_id: "credential-id".into(),
             generated_user_id: Some("generated".into()),
-            private_key_pem: "pem".into(),
+            private_key_pem: String::from("pem").into(),
             relying_party: "example.com".into(),
             user_handle: Some("user-handle".into()),
             backup_eligible: true,
@@ -10383,7 +10691,10 @@ mod tests {
             username: "alice".into(),
             credential_id: "cred-1".into(),
             generated_user_id: Some("generated-user".into()),
-            private_key_pem: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----".into(),
+            private_key_pem: String::from(
+                "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+            )
+            .into(),
             relying_party: "example.com".into(),
             user_handle: Some("handle".into()),
             backup_eligible: true,

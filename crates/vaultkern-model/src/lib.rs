@@ -9,7 +9,7 @@ use data_encoding::BASE32_NOPAD;
 use thiserror::Error;
 use uuid::Uuid;
 use vaultkern_crypto::{OtpAlgorithm, generate_totp};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 mod canonical_serialization;
 mod three_way_patch;
@@ -35,11 +35,43 @@ pub enum ModelError {
 
 pub type Result<T> = std::result::Result<T, ModelError>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+struct Redacted;
+
+impl fmt::Debug for Redacted {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct CustomField {
     pub value: String,
     pub protected: bool,
 }
+
+impl fmt::Debug for CustomField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CustomField")
+            .field("value", &Redacted)
+            .field("protected", &self.protected)
+            .finish()
+    }
+}
+
+impl Zeroize for CustomField {
+    fn zeroize(&mut self) {
+        self.value.zeroize();
+    }
+}
+
+impl Drop for CustomField {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for CustomField {}
 
 enum MaterializedPersistentValue<'a> {
     Borrowed(&'a str),
@@ -741,17 +773,47 @@ pub struct GroupTimes {
     pub location_changed_at: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PasskeyRecord {
     pub username: String,
     pub credential_id: String,
     pub generated_user_id: Option<String>,
-    pub private_key_pem: String,
+    pub private_key_pem: Zeroizing<String>,
     pub relying_party: String,
     pub user_handle: Option<String>,
     pub backup_eligible: bool,
     pub backup_state: bool,
 }
+
+impl fmt::Debug for PasskeyRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PasskeyRecord")
+            .field("credential", &Redacted)
+            .field("backup_eligible", &self.backup_eligible)
+            .field("backup_state", &self.backup_state)
+            .finish()
+    }
+}
+
+impl Zeroize for PasskeyRecord {
+    fn zeroize(&mut self) {
+        self.username.zeroize();
+        self.credential_id.zeroize();
+        self.generated_user_id.zeroize();
+        self.private_key_pem.zeroize();
+        self.relying_party.zeroize();
+        self.user_handle.zeroize();
+    }
+}
+
+impl Drop for PasskeyRecord {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for PasskeyRecord {}
 
 #[derive(Clone, Copy)]
 struct PasskeyPersistentView<'a> {
@@ -771,7 +833,7 @@ impl<'a> PasskeyPersistentView<'a> {
             username: &passkey.username,
             credential_id: &passkey.credential_id,
             generated_user_id: passkey.generated_user_id.as_deref(),
-            private_key_pem: &passkey.private_key_pem,
+            private_key_pem: passkey.private_key_pem.as_str(),
             relying_party: &passkey.relying_party,
             user_handle: passkey.user_handle.as_deref(),
             backup_eligible: passkey.backup_eligible,
@@ -884,7 +946,7 @@ impl PasskeyRecord {
             username: view.username.to_owned(),
             credential_id: view.credential_id.to_owned(),
             generated_user_id: view.generated_user_id.map(str::to_owned),
-            private_key_pem: view.private_key_pem.to_owned(),
+            private_key_pem: Zeroizing::new(view.private_key_pem.to_owned()),
             relying_party: view.relying_party.to_owned(),
             user_handle: view.user_handle.map(str::to_owned),
             backup_eligible: view.backup_eligible,
@@ -910,7 +972,7 @@ pub enum TotpAlgorithm {
     Sha512,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TotpSpec {
     pub secret_base32: String,
     pub algorithm: TotpAlgorithm,
@@ -920,6 +982,20 @@ pub struct TotpSpec {
     pub account_name: Option<String>,
 }
 
+impl fmt::Debug for TotpSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TotpSpec")
+            .field("secret_base32", &Redacted)
+            .field("algorithm", &self.algorithm)
+            .field("digits", &self.digits)
+            .field("period_seconds", &self.period_seconds)
+            .field("issuer", &Redacted)
+            .field("account_name", &Redacted)
+            .finish()
+    }
+}
+
 impl Zeroize for TotpSpec {
     fn zeroize(&mut self) {
         self.secret_base32.zeroize();
@@ -927,6 +1003,14 @@ impl Zeroize for TotpSpec {
         self.account_name.zeroize();
     }
 }
+
+impl Drop for TotpSpec {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for TotpSpec {}
 
 impl TotpSpec {
     pub fn parse_otpauth(uri: &str) -> Result<Self> {
@@ -1011,7 +1095,10 @@ impl TotpSpec {
         let account_name = account_name
             .filter(|account| !account.is_empty())
             .ok_or(ModelError::Unimplemented)?;
-        if issuer.is_none() && account_name.contains(':') {
+        if issuer.is_none() && account_name.contains(':')
+            || !(1..=9).contains(&digits)
+            || period_seconds == 0
+        {
             return Err(ModelError::Unimplemented);
         }
         Ok(Self {
@@ -1049,7 +1136,7 @@ impl TotpSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Entry {
     pub id: Uuid,
     pub title: String,
@@ -1084,6 +1171,69 @@ pub struct Entry {
     pub raw_state: EntryRawState,
     pub opaque_xml: Vec<OpaqueXmlFragment>,
 }
+
+impl fmt::Debug for Entry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Entry")
+            .field("id", &self.id)
+            .field("fields", &Redacted)
+            .field("modified_at", &self.modified_at)
+            .finish()
+    }
+}
+
+impl Zeroize for Entry {
+    fn zeroize(&mut self) {
+        self.title.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+
+        for (mut key, mut field) in std::mem::take(&mut self.attributes) {
+            key.zeroize();
+            field.zeroize();
+        }
+        for (mut name, mut attachment) in std::mem::take(&mut self.attachments.0) {
+            name.zeroize();
+            attachment.name.zeroize();
+        }
+        self.history.zeroize();
+        self.totp.zeroize();
+        self.passkey.zeroize();
+
+        self.foreground_color.zeroize();
+        self.background_color.zeroize();
+        self.override_url.zeroize();
+        for mut tag in std::mem::take(&mut self.tags) {
+            tag.zeroize();
+        }
+        for (mut key, mut value) in std::mem::take(&mut self.custom_data) {
+            key.zeroize();
+            value.zeroize();
+        }
+        for block in &mut self.custom_data_blocks {
+            for item in &mut block.items {
+                item.key.zeroize();
+                item.value.zeroize();
+            }
+        }
+        self.custom_data_blocks.clear();
+        for fragment in &mut self.opaque_xml {
+            fragment.xml.zeroize();
+        }
+        self.opaque_xml.clear();
+    }
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for Entry {}
 
 impl Entry {
     pub fn new(title: impl Into<String>) -> Self {
@@ -1687,6 +1837,7 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+    use zeroize::Zeroize;
 
     #[test]
     fn attachment_content_is_shared_across_entry_and_history_clones() {
@@ -1767,6 +1918,128 @@ mod tests {
     }
 
     #[test]
+    fn core_entry_secret_owners_redact_debug_output() {
+        let mut entry = Entry::new("entry-title");
+        entry.password = "entry-password-secret".into();
+        entry.attributes.insert(
+            "RecoveryCode".into(),
+            CustomField {
+                value: "custom-field-secret".into(),
+                protected: true,
+            },
+        );
+        entry.totp = Some(TotpSpec {
+            secret_base32: "totp-secret-base32".into(),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: Some("issuer".into()),
+            account_name: Some("account".into()),
+        });
+        entry.passkey = Some(PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "credential-id".into(),
+            generated_user_id: None,
+            private_key_pem: String::from("passkey-private-key-secret").into(),
+            relying_party: "example.com".into(),
+            user_handle: None,
+            backup_eligible: false,
+            backup_state: false,
+        });
+
+        let debug_outputs = [
+            format!("{:?}", entry.attributes["RecoveryCode"]),
+            format!("{:?}", entry.totp.as_ref().expect("TOTP")),
+            format!("{:?}", entry.passkey.as_ref().expect("passkey")),
+            format!("{entry:?}"),
+        ];
+
+        for debug in debug_outputs {
+            for secret in [
+                "entry-password-secret",
+                "custom-field-secret",
+                "totp-secret-base32",
+                "passkey-private-key-secret",
+            ] {
+                assert!(!debug.contains(secret), "Debug leaked {secret}: {debug}");
+            }
+        }
+    }
+
+    #[test]
+    fn passkey_private_key_is_owned_by_a_zeroizing_buffer() {
+        fn assert_zeroizing_string(_: &zeroize::Zeroizing<String>) {}
+
+        let passkey = PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "credential-id".into(),
+            generated_user_id: None,
+            private_key_pem: String::from("passkey-private-key-secret").into(),
+            relying_party: "example.com".into(),
+            user_handle: None,
+            backup_eligible: false,
+            backup_state: false,
+        };
+
+        assert_zeroizing_string(&passkey.private_key_pem);
+    }
+
+    #[test]
+    fn explicit_entry_zeroize_removes_nested_secret_material() {
+        let mut entry = Entry::new("entry-title");
+        entry.username = "entry-username".into();
+        entry.password = "entry-password".into();
+        entry.url = "entry-url".into();
+        entry.notes = "entry-notes".into();
+        entry.attributes.insert(
+            "RecoveryCode".into(),
+            CustomField {
+                value: "custom-field-secret".into(),
+                protected: true,
+            },
+        );
+        entry.totp = Some(TotpSpec {
+            secret_base32: "totp-secret".into(),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: None,
+            account_name: None,
+        });
+        entry.passkey = Some(PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "credential-id".into(),
+            generated_user_id: None,
+            private_key_pem: String::from("passkey-private-key").into(),
+            relying_party: "example.com".into(),
+            user_handle: None,
+            backup_eligible: false,
+            backup_state: false,
+        });
+
+        entry.zeroize();
+
+        assert!(entry.title.is_empty());
+        assert!(entry.username.is_empty());
+        assert!(entry.password.is_empty());
+        assert!(entry.url.is_empty());
+        assert!(entry.notes.is_empty());
+        assert!(entry.attributes.is_empty());
+        assert!(entry.totp.is_none());
+        assert!(entry.passkey.is_none());
+    }
+
+    #[test]
+    fn core_entry_secret_owners_guarantee_zeroize_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+        assert_zeroize_on_drop::<CustomField>();
+        assert_zeroize_on_drop::<TotpSpec>();
+        assert_zeroize_on_drop::<PasskeyRecord>();
+        assert_zeroize_on_drop::<Entry>();
+    }
+
+    #[test]
     fn otpauth_parser_and_generator_match_rfc_vector() {
         let spec = TotpSpec::parse_otpauth(
             "otpauth://totp/ACME:alice@example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=ACME&algorithm=SHA1&digits=6&period=30",
@@ -1779,6 +2052,17 @@ mod tests {
         assert_eq!(spec.issuer.as_deref(), Some("ACME"));
         assert_eq!(spec.account_name.as_deref(), Some("alice@example.com"));
         assert_eq!(spec.generate_at(59).expect("generate"), "287082");
+    }
+
+    #[test]
+    fn otpauth_parser_rejects_parameters_that_cannot_generate_a_code() {
+        for uri in [
+            "otpauth://totp/alice?secret=SECRET&digits=0",
+            "otpauth://totp/alice?secret=SECRET&digits=10",
+            "otpauth://totp/alice?secret=SECRET&period=0",
+        ] {
+            assert!(TotpSpec::parse_otpauth(uri).is_err(), "accepted {uri}");
+        }
     }
 
     #[test]
@@ -1950,7 +2234,10 @@ mod tests {
             username: "alice".into(),
             credential_id: "cred-123".into(),
             generated_user_id: Some("generated-user".into()),
-            private_key_pem: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----".into(),
+            private_key_pem: String::from(
+                "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+            )
+            .into(),
             relying_party: "example.com".into(),
             user_handle: Some("user-handle".into()),
             backup_eligible: true,
@@ -2408,7 +2695,7 @@ mod tests {
             username: "alice".into(),
             credential_id: "credential".into(),
             generated_user_id: None,
-            private_key_pem: "private-key".into(),
+            private_key_pem: String::from("private-key").into(),
             relying_party: "example.com".into(),
             user_handle: None,
             backup_eligible: true,
@@ -2577,7 +2864,7 @@ mod tests {
             username: "alice".into(),
             credential_id: "cred-123".into(),
             generated_user_id: None,
-            private_key_pem: "pem".into(),
+            private_key_pem: String::from("pem").into(),
             relying_party: "example.com".into(),
             user_handle: None,
             backup_eligible: false,
@@ -2605,7 +2892,7 @@ mod tests {
             username: "alice".into(),
             credential_id: "cred-123".into(),
             generated_user_id: None,
-            private_key_pem: "pem".into(),
+            private_key_pem: String::from("pem").into(),
             relying_party: "example.com".into(),
             user_handle: None,
             backup_eligible: false,

@@ -10,11 +10,12 @@ use sha2::{Digest, Sha256};
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, TargetExpectation,
     TempWriteFaultPoints, create_dir_all_durable, durable_path, opened_file_identity,
-    path_file_identity, publish_temp, remove_if_exists, sha256_hex, sync_directory, sync_parent,
-    unique_sibling_path, write_verified_temp,
+    path_file_identity, publish_temp, remove_and_sync_absence, remove_if_exists, sha256_hex,
+    sync_directory, sync_parent, sync_published_target, unique_sibling_path, write_verified_temp,
 };
 use crate::providers::local_file::VaultSourceFingerprint;
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
+use crate::sync::durable_replace;
 
 const REMOTE_CACHE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -173,6 +174,30 @@ pub struct RemoteVaultCachePaths {
     pub bytes_path: PathBuf,
     pub metadata_path: PathBuf,
     pub lock_path: PathBuf,
+    pub retired_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct RemoteCacheCleanupGuard<'a> {
+    cache: &'a RemoteVaultCache,
+    key: RemoteCacheKey,
+    paths: RemoteVaultCachePaths,
+    _lock: ExclusiveFileLock,
+}
+
+impl RemoteCacheCleanupGuard<'_> {
+    pub(crate) fn delete_cached_state(&self) -> Result<()> {
+        self.cache.delete_files_locked(&self.key, &self.paths)
+    }
+
+    pub(crate) fn cancel_retirement(&self) -> Result<()> {
+        remove_and_sync_absence(&self.paths.retired_path).with_context(|| {
+            format!(
+                "failed to cancel stale remote cache retirement: {}",
+                self.paths.retired_path.display()
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,7 +263,39 @@ struct RemoteVaultGeneration {
 enum RemoteVaultPendingKind {
     None,
     Generic,
+    ConflictCopy,
     Autofill,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GenericPendingKind {
+    SourceWrite,
+    ConflictCopy,
+}
+
+impl GenericPendingKind {
+    fn manifest_kind(self) -> RemoteVaultPendingKind {
+        match self {
+            Self::SourceWrite => RemoteVaultPendingKind::Generic,
+            Self::ConflictCopy => RemoteVaultPendingKind::ConflictCopy,
+        }
+    }
+}
+
+fn resident_pending_kind_matches(
+    actual: Option<RemoteVaultPendingKind>,
+    expected: Option<GenericPendingKind>,
+) -> bool {
+    match (actual, expected) {
+        (Some(RemoteVaultPendingKind::Generic), None | Some(GenericPendingKind::SourceWrite)) => {
+            true
+        }
+        (
+            Some(RemoteVaultPendingKind::ConflictCopy),
+            None | Some(GenericPendingKind::ConflictCopy),
+        ) => true,
+        _ => false,
+    }
 }
 
 #[derive(Debug)]
@@ -263,6 +320,7 @@ enum GenericPendingWriteMode {
 struct GenericPendingWriteProof<'a> {
     mode: GenericPendingWriteMode,
     expected_fingerprint: &'a VaultSourceFingerprint,
+    kind: Option<GenericPendingKind>,
 }
 
 #[derive(Debug)]
@@ -433,8 +491,10 @@ impl RemoteVaultCache {
             return Err(PendingRemoteCacheChainError::Legacy);
         }
         if current.generation.pending_kind != Some(RemoteVaultPendingKind::Autofill) {
-            return if current.generation.pending_kind == Some(RemoteVaultPendingKind::Generic)
-                && current.generation.pending_operation_id.is_none()
+            return if matches!(
+                current.generation.pending_kind,
+                Some(RemoteVaultPendingKind::Generic | RemoteVaultPendingKind::ConflictCopy)
+            ) && current.generation.pending_operation_id.is_none()
             {
                 Err(PendingRemoteCacheChainError::MissingOperationBinding)
             } else {
@@ -619,11 +679,44 @@ impl RemoteVaultCache {
         )
     }
 
-    pub(crate) fn write_generic_pending(
+    pub(crate) fn write_generic_pending_with_observed(
         &self,
         key: &RemoteCacheKey,
         entry: RemoteVaultCacheEntry,
         expected_current: &VaultSourceFingerprint,
+        observed_source: Option<RemoteVaultCacheEntry>,
+    ) -> Result<()> {
+        self.write_resident_pending(
+            key,
+            entry,
+            expected_current,
+            GenericPendingKind::SourceWrite,
+            observed_source,
+        )
+    }
+
+    pub(crate) fn write_conflict_copy_pending(
+        &self,
+        key: &RemoteCacheKey,
+        entry: RemoteVaultCacheEntry,
+        expected_current: &VaultSourceFingerprint,
+    ) -> Result<()> {
+        self.write_resident_pending(
+            key,
+            entry,
+            expected_current,
+            GenericPendingKind::ConflictCopy,
+            None,
+        )
+    }
+
+    fn write_resident_pending(
+        &self,
+        key: &RemoteCacheKey,
+        entry: RemoteVaultCacheEntry,
+        expected_current: &VaultSourceFingerprint,
+        kind: GenericPendingKind,
+        observed_source: Option<RemoteVaultCacheEntry>,
     ) -> Result<()> {
         if !entry.pending_sync {
             bail!("generic pending cache entry must be marked pending_sync");
@@ -631,7 +724,7 @@ impl RemoteVaultCache {
         require_durable_cache_publish(self.write_with_source_context(
             key,
             entry,
-            None,
+            observed_source,
             None,
             None,
             None,
@@ -640,6 +733,7 @@ impl RemoteVaultCache {
             Some(GenericPendingWriteProof {
                 mode: GenericPendingWriteMode::Update,
                 expected_fingerprint: expected_current,
+                kind: Some(kind),
             }),
         )?)
     }
@@ -666,6 +760,7 @@ impl RemoteVaultCache {
                 Some(GenericPendingWriteProof {
                     mode: GenericPendingWriteMode::Complete,
                     expected_fingerprint: expected_pending,
+                    kind: None,
                 }),
             )? {
                 CacheManifestPublishOutcome::Durable => PendingRemoteCacheCompletion::Durable,
@@ -713,6 +808,7 @@ impl RemoteVaultCache {
             Some(GenericPendingWriteProof {
                 mode: GenericPendingWriteMode::Complete,
                 expected_fingerprint: expected_pending,
+                kind: None,
             }),
         )?;
         let completion = match outcome {
@@ -722,6 +818,110 @@ impl RemoteVaultCache {
             }
         };
         Ok((value, completion))
+    }
+
+    pub(crate) fn generic_pending_kind(
+        &self,
+        key: &RemoteCacheKey,
+        expected_pending: &VaultSourceFingerprint,
+    ) -> Result<GenericPendingKind> {
+        let paths = self.paths(key);
+        create_dir_all_durable(&self.root).with_context(|| {
+            format!(
+                "failed to create remote vault cache dir: {}",
+                self.root.display()
+            )
+        })?;
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)
+            .with_context(|| {
+                format!(
+                    "failed to acquire remote vault cache lock: {}",
+                    paths.lock_path.display()
+                )
+            })?;
+        let AuthenticatedCacheRead::Current(current) = self.read_authenticated_locked(key) else {
+            return Err(PendingRemoteCacheConflict::new(
+                "pending cache is unavailable before synchronization",
+            )
+            .into());
+        };
+        if !current.entry.pending_sync
+            || !same_content_fingerprint(&current.entry.fingerprint, expected_pending)
+            || current.generation.pending_operation_id.is_some()
+        {
+            return Err(PendingRemoteCacheConflict::new(
+                "pending cache changed before synchronization",
+            )
+            .into());
+        }
+        match current.generation.pending_kind {
+            Some(RemoteVaultPendingKind::Generic) => Ok(GenericPendingKind::SourceWrite),
+            Some(RemoteVaultPendingKind::ConflictCopy) => Ok(GenericPendingKind::ConflictCopy),
+            None if current.legacy => Ok(GenericPendingKind::SourceWrite),
+            _ => Err(PendingRemoteCacheConflict::new(
+                "pending cache kind is not a resident synchronization operation",
+            )
+            .into()),
+        }
+    }
+
+    pub(crate) fn generic_pending_observed_source(
+        &self,
+        key: &RemoteCacheKey,
+        expected_pending: &VaultSourceFingerprint,
+    ) -> Result<Option<RemoteVaultCacheEntry>> {
+        let paths = self.paths(key);
+        create_dir_all_durable(&self.root).with_context(|| {
+            format!(
+                "failed to create remote vault cache dir: {}",
+                self.root.display()
+            )
+        })?;
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)
+            .with_context(|| {
+                format!(
+                    "failed to acquire remote vault cache lock: {}",
+                    paths.lock_path.display()
+                )
+            })?;
+        let AuthenticatedCacheRead::Current(current) = self.read_authenticated_locked(key) else {
+            return Err(PendingRemoteCacheConflict::new(
+                "pending cache is unavailable before reading its observed source",
+            )
+            .into());
+        };
+        if !current.entry.pending_sync
+            || !same_content_fingerprint(&current.entry.fingerprint, expected_pending)
+            || current.generation.pending_operation_id.is_some()
+            || (!current.legacy
+                && current.generation.pending_kind != Some(RemoteVaultPendingKind::Generic))
+        {
+            return Err(PendingRemoteCacheConflict::new(
+                "source-write pending cache changed before reading its observed source",
+            )
+            .into());
+        }
+        let Some(observed) = current.observed else {
+            return Ok(None);
+        };
+        if observed.pending_sync
+            || observed.pending_operation_id.is_some()
+            || observed.pending_kind != Some(RemoteVaultPendingKind::None)
+        {
+            return Err(PendingRemoteCacheConflict::new(
+                "generic pending observed source is not a committed generation",
+            )
+            .into());
+        }
+        let digest = cache_key_digest(key);
+        let observed = self
+            .read_generation(&digest, &observed, false)
+            .map_err(|reason| {
+                PendingRemoteCacheConflict::new(format!(
+                    "generic pending observed source is corrupt: {reason}"
+                ))
+            })?;
+        Ok(Some(observed.entry))
     }
 
     fn require_generic_pending_locked(
@@ -736,7 +936,7 @@ impl RemoteVaultCache {
             .into());
         };
         let pending_is_generic = current.entry.pending_sync
-            && ((current.generation.pending_kind == Some(RemoteVaultPendingKind::Generic)
+            && ((resident_pending_kind_matches(current.generation.pending_kind, None)
                 && current.generation.pending_operation_id.is_none())
                 || (current.legacy
                     && current.generation.pending_operation_id.is_none()
@@ -807,14 +1007,33 @@ impl RemoteVaultCache {
     ) -> Result<CacheManifestPublishOutcome> {
         let paths = self.paths(key);
 
+        match fs::symlink_metadata(&paths.retired_path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                bail!(
+                    "remote cache retirement marker is not a regular file: {}",
+                    paths.retired_path.display()
+                );
+            }
+            Ok(_) => bail!("remote cache was retired after its vault reference was deleted"),
+        }
+
         let actual_sha256 = sha256_hex(&entry.bytes);
         if entry.fingerprint.content_sha256 != actual_sha256
             || entry.fingerprint.size_bytes != entry.bytes.len() as u64
         {
             bail!("remote cache fingerprint does not authenticate the supplied bytes");
         }
-        if pending_operation_id.is_some() != observed_source.is_some()
-            || pending_operation_id.is_some() != expected_plan_baseline.is_some()
+        let generic_observed_update = observed_source.is_some()
+            && generic_proof.is_some_and(|proof| proof.mode == GenericPendingWriteMode::Update)
+            && pending_operation_id.is_none()
+            && completion_proof.is_none();
+        if pending_operation_id.is_some() != expected_plan_baseline.is_some()
+            || (observed_source.is_some()
+                && pending_operation_id.is_none()
+                && !generic_observed_update)
+            || (pending_operation_id.is_some() && observed_source.is_none())
             || (completion_proof.is_some() && pending_operation_id.is_some())
             || (generic_proof.is_some()
                 && (pending_operation_id.is_some() || completion_proof.is_some()))
@@ -893,8 +1112,10 @@ impl RemoteVaultCache {
                             .as_ref()
                             .filter(|generation| {
                                 generation.pending_sync
-                                    && generation.pending_kind
-                                        == Some(RemoteVaultPendingKind::Generic)
+                                    && resident_pending_kind_matches(
+                                        generation.pending_kind,
+                                        proof.kind,
+                                    )
                                     && generation.pending_operation_id.is_none()
                                     && generation.content_sha256
                                         == proof.expected_fingerprint.content_sha256
@@ -914,10 +1135,12 @@ impl RemoteVaultCache {
                         }
                     }
                     let pending_is_generic = previous.entry.pending_sync
-                        && ((previous.generation.pending_kind
-                            == Some(RemoteVaultPendingKind::Generic)
-                            && previous.generation.pending_operation_id.is_none())
+                        && ((resident_pending_kind_matches(
+                            previous.generation.pending_kind,
+                            proof.kind,
+                        ) && previous.generation.pending_operation_id.is_none())
                             || (previous.legacy
+                                && proof.kind != Some(GenericPendingKind::ConflictCopy)
                                 && previous.generation.pending_operation_id.is_none()
                                 && previous.observed.is_none()));
                     let authorized = match proof.mode {
@@ -1025,6 +1248,28 @@ impl RemoteVaultCache {
             bail!("authenticated cache plan baseline changed before pending publish");
         }
 
+        let inherited_generic_observed = generic_proof
+            .filter(|proof| proof.mode == GenericPendingWriteMode::Update)
+            .filter(|_| observed_source.is_none())
+            .and_then(|_| previous.as_ref())
+            .and_then(|previous| {
+                if previous.entry.pending_sync {
+                    previous.observed.clone().or_else(|| {
+                        previous
+                            .fallback
+                            .as_ref()
+                            .filter(|generation| {
+                                !generation.pending_sync
+                                    && generation.pending_operation_id.is_none()
+                                    && generation.pending_kind == Some(RemoteVaultPendingKind::None)
+                            })
+                            .cloned()
+                    })
+                } else {
+                    Some(previous.generation.clone())
+                }
+            });
+
         let generation = generation_name(&digest, &actual_sha256)
             .ok_or_else(|| anyhow!("remote cache content SHA-256 is not canonical"))?;
         let previous_generation = previous.and_then(|previous| {
@@ -1063,7 +1308,8 @@ impl RemoteVaultCache {
                     pending_operation_id: None,
                 })
             })
-            .transpose()?;
+            .transpose()?
+            .or(inherited_generic_observed);
         let ensured_generation = self.ensure_generation(&digest, &entry.bytes, &actual_sha256)?;
         debug_assert_eq!(ensured_generation, generation);
         let manifest = RemoteVaultCacheManifestV2 {
@@ -1083,7 +1329,10 @@ impl RemoteVaultCache {
             pending_kind: Some(if pending_operation_id.is_some() {
                 RemoteVaultPendingKind::Autofill
             } else if entry.pending_sync {
-                RemoteVaultPendingKind::Generic
+                generic_proof
+                    .and_then(|proof| proof.kind)
+                    .unwrap_or(GenericPendingKind::SourceWrite)
+                    .manifest_kind()
             } else {
                 RemoteVaultPendingKind::None
             }),
@@ -1116,24 +1365,7 @@ impl RemoteVaultCache {
         Ok(publish)
     }
 
-    pub fn delete(&self, key: &RemoteCacheKey) -> Result<()> {
-        let paths = self.paths(key);
-        if !self.root.exists() {
-            return Ok(());
-        }
-        create_dir_all_durable(&self.root).with_context(|| {
-            format!(
-                "remote vault cache root is not a private directory: {}",
-                self.root.display()
-            )
-        })?;
-        let _lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)
-            .with_context(|| {
-                format!(
-                    "failed to acquire remote vault cache lock: {}",
-                    paths.lock_path.display()
-                )
-            })?;
+    fn ensure_deletable_locked(&self, key: &RemoteCacheKey) -> Result<()> {
         match self.read_authenticated_locked(key) {
             AuthenticatedCacheRead::Missing => {}
             AuthenticatedCacheRead::Current(current) if !current.entry.pending_sync => {}
@@ -1156,8 +1388,112 @@ impl RemoteVaultCache {
                 .into());
             }
         }
-        remove_file_if_exists(&paths.metadata_path)?;
-        let _ = sync_directory(&self.root);
+        Ok(())
+    }
+
+    pub(crate) fn activate_while<T>(
+        &self,
+        key: &RemoteCacheKey,
+        commit_reference: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        create_dir_all_durable(&self.root).with_context(|| {
+            format!(
+                "remote vault cache root is not a private directory: {}",
+                self.root.display()
+            )
+        })?;
+        let paths = self.paths(key);
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)
+            .with_context(|| {
+                format!(
+                    "failed to acquire remote vault cache lock: {}",
+                    paths.lock_path.display()
+                )
+            })?;
+        let result = commit_reference()?;
+        remove_and_sync_absence(&paths.retired_path).with_context(|| {
+            format!(
+                "failed to clear remote vault cache retirement marker: {}",
+                paths.retired_path.display()
+            )
+        })?;
+        Ok(result)
+    }
+
+    pub(crate) fn recover_activation_while(
+        &self,
+        key: &RemoteCacheKey,
+        reference_is_current: impl FnOnce() -> Result<bool>,
+    ) -> Result<bool> {
+        if !self.root.exists() {
+            return Ok(true);
+        }
+        create_dir_all_durable(&self.root)?;
+        let paths = self.paths(key);
+        let _lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)?;
+        if !reference_is_current()? {
+            return Ok(false);
+        }
+        if paths.retired_path.exists() {
+            remove_and_sync_absence(&paths.retired_path)?;
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn begin_retirement(
+        &self,
+        key: &RemoteCacheKey,
+    ) -> Result<RemoteCacheCleanupGuard<'_>> {
+        create_dir_all_durable(&self.root)?;
+        let paths = self.paths(key);
+        let lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)?;
+        self.ensure_deletable_locked(key)?;
+        self.persist_retirement_marker(&paths)?;
+        Ok(RemoteCacheCleanupGuard {
+            cache: self,
+            key: key.clone(),
+            paths,
+            _lock: lock,
+        })
+    }
+
+    pub(crate) fn begin_cleanup_after_intent(
+        &self,
+        key: &RemoteCacheKey,
+    ) -> Result<RemoteCacheCleanupGuard<'_>> {
+        create_dir_all_durable(&self.root)?;
+        let paths = self.paths(key);
+        let lock = ExclusiveFileLock::acquire_with_timeout(&paths.lock_path, self.lock_timeout)?;
+        self.ensure_cleanup_intent_deletable_locked(key)?;
+        self.persist_retirement_marker(&paths)?;
+        Ok(RemoteCacheCleanupGuard {
+            cache: self,
+            key: key.clone(),
+            paths,
+            _lock: lock,
+        })
+    }
+
+    fn persist_retirement_marker(&self, paths: &RemoteVaultCachePaths) -> Result<()> {
+        durable_replace(&paths.retired_path, b"VaultKern remote cache retired v1\n").with_context(
+            || {
+                format!(
+                    "failed to persist remote vault cache retirement marker: {}",
+                    paths.retired_path.display()
+                )
+            },
+        )
+    }
+
+    fn delete_files_locked(
+        &self,
+        key: &RemoteCacheKey,
+        paths: &RemoteVaultCachePaths,
+    ) -> Result<()> {
+        // The manifest is the commit point.  Make its absence durable before
+        // deleting generations so a crash can only expose Missing, never a
+        // manifest that points at an already-removed generation.
+        remove_and_sync_absence(&paths.metadata_path)?;
         remove_file_if_exists(&paths.bytes_path)?;
         let digest = cache_key_digest(key);
         for entry in fs::read_dir(&self.root).with_context(|| {
@@ -1180,6 +1516,39 @@ impl RemoteVaultCache {
         })
     }
 
+    fn ensure_cleanup_intent_deletable_locked(&self, key: &RemoteCacheKey) -> Result<()> {
+        match self.read_authenticated_locked(key) {
+            AuthenticatedCacheRead::Missing => Ok(()),
+            AuthenticatedCacheRead::Current(current)
+            | AuthenticatedCacheRead::Degraded(current)
+                if current.entry.pending_sync =>
+            {
+                Err(PendingRemoteCacheConflict::new(
+                    "pending remote cache appeared after cleanup was requested",
+                )
+                .into())
+            }
+            AuthenticatedCacheRead::Current(_) | AuthenticatedCacheRead::Degraded(_) => Ok(()),
+            AuthenticatedCacheRead::Corrupt(_) => {
+                let paths = self.paths(key);
+                let pending = read_regular_file(&paths.metadata_path)
+                    .ok()
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<RemoteVaultCacheManifestV2>(&bytes).ok()
+                    })
+                    .is_some_and(|manifest| manifest.pending_sync);
+                if pending {
+                    Err(PendingRemoteCacheConflict::new(
+                        "pending remote cache became corrupt after cleanup was requested",
+                    )
+                    .into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     pub fn paths_for_tests(&self, key: &RemoteCacheKey) -> RemoteVaultCachePaths {
         self.paths(key)
@@ -1191,6 +1560,7 @@ impl RemoteVaultCache {
             bytes_path: self.root.join(format!("{digest}.kdbx")),
             metadata_path: self.root.join(format!("{digest}.json")),
             lock_path: self.root.join(format!("{digest}.lock")),
+            retired_path: self.root.join(format!("{digest}.retired")),
         }
     }
 
@@ -1499,12 +1869,70 @@ impl RemoteVaultCache {
                 }
                 .into());
             }
-            return Ok(CacheManifestPublishOutcome::DurabilityUnknown {
-                source: anyhow!(error.source).context(format!(
-                    "remote cache manifest was replaced but durability is unknown: {}",
-                    target.display()
-                )),
-            });
+            let publish_error = anyhow!(error.source).context(format!(
+                "remote cache manifest was replaced but durability was not confirmed: {}",
+                target.display()
+            ));
+            let visible_repair_error = if read_regular_file(target)
+                .ok()
+                .is_some_and(|current| current == bytes)
+            {
+                match sync_published_target(target).and_then(|_| sync_parent(target)) {
+                    Ok(()) => {
+                        if let Some(backup) = backup {
+                            let _ = remove_if_exists(&backup).and_then(|_| sync_parent(target));
+                        }
+                        return Ok(CacheManifestPublishOutcome::Durable);
+                    }
+                    Err(repair_error) => Some(repair_error),
+                }
+            } else {
+                None
+            };
+
+            let restore = (|| -> Result<()> {
+                if let Some(backup) = backup.as_deref() {
+                    let previous = read_regular_file(backup).with_context(|| {
+                        format!(
+                            "remote cache manifest backup disappeared before recovery: {}",
+                            backup.display()
+                        )
+                    })?;
+                    durable_replace(target, &previous)?;
+                } else {
+                    remove_and_sync_absence(target)?;
+                }
+                Ok(())
+            })();
+            return match restore {
+                Ok(()) => {
+                    if let Some(backup) = backup {
+                        let _ = remove_if_exists(&backup).and_then(|_| sync_parent(target));
+                    }
+                    Err(CacheManifestNotPublished {
+                        source: if let Some(repair_error) = visible_repair_error {
+                            publish_error.context(format!(
+                                "visible manifest durability repair failed ({repair_error}); the previous manifest state was restored"
+                            ))
+                        } else {
+                            publish_error.context(
+                                "the previous remote cache manifest state was restored",
+                            )
+                        },
+                    }
+                    .into())
+                }
+                Err(recovery_error) => Ok(CacheManifestPublishOutcome::DurabilityUnknown {
+                    source: publish_error.context(match visible_repair_error {
+                        Some(repair_error) => format!(
+                            "visible manifest durability repair failed ({repair_error}) and rollback failed ({recovery_error})"
+                        ),
+                        None => format!(
+                            "failed to recover either manifest state: {recovery_error}"
+                        ),
+                    }),
+                }),
+            };
         }
 
         let _post_durable_fault = self
@@ -1590,7 +2018,7 @@ fn generation_pending_schema_is_valid(generation: &RemoteVaultGeneration) -> boo
         Some(RemoteVaultPendingKind::None) => {
             !generation.pending_sync && generation.pending_operation_id.is_none()
         }
-        Some(RemoteVaultPendingKind::Generic) => {
+        Some(RemoteVaultPendingKind::Generic | RemoteVaultPendingKind::ConflictCopy) => {
             generation.pending_sync && generation.pending_operation_id.is_none()
         }
         Some(RemoteVaultPendingKind::Autofill) => {
@@ -1888,11 +2316,16 @@ mod tests {
         cache.write(&key(), current.clone()).unwrap();
         let pending_a = entry(b"pending-a", 2, true);
         cache
-            .write_generic_pending(&key(), pending_a.clone(), &current.fingerprint)
+            .write_generic_pending_with_observed(
+                &key(),
+                pending_a.clone(),
+                &current.fingerprint,
+                None,
+            )
             .unwrap();
         let pending_b = entry(b"pending-b", 3, true);
         cache
-            .write_generic_pending(&key(), pending_b, &pending_a.fingerprint)
+            .write_generic_pending_with_observed(&key(), pending_b, &pending_a.fingerprint, None)
             .unwrap();
         let source_write_called = std::cell::Cell::new(false);
 
@@ -1914,7 +2347,12 @@ mod tests {
         cache.write(&key(), current.clone()).unwrap();
         let pending = entry(b"pending", 2, true);
         cache
-            .write_generic_pending(&key(), pending.clone(), &current.fingerprint)
+            .write_generic_pending_with_observed(
+                &key(),
+                pending.clone(),
+                &current.fingerprint,
+                None,
+            )
             .unwrap();
         let competing_cache = cache.clone();
         let expected = pending.fingerprint.clone();
@@ -1927,8 +2365,12 @@ mod tests {
             .complete_generic_pending_while(&key(), &pending.fingerprint, || {
                 handle.replace(Some(std::thread::spawn(move || {
                     started_tx.send(()).unwrap();
-                    let result =
-                        competing_cache.write_generic_pending(&key(), competing, &expected);
+                    let result = competing_cache.write_generic_pending_with_observed(
+                        &key(),
+                        competing,
+                        &expected,
+                        None,
+                    );
                     finished_tx.send(result.is_ok()).unwrap();
                 })));
                 started_rx.recv().unwrap();
@@ -2227,7 +2669,7 @@ mod tests {
             .expect_err("ordinary cache writes must not replace an autofill pending chain");
         assert!(write_error.is::<PendingRemoteCacheConflict>());
         let delete_error = cache
-            .delete(&key())
+            .begin_retirement(&key())
             .expect_err("ordinary cache deletion must not remove pending durability");
         assert!(delete_error.is::<PendingRemoteCacheConflict>());
 
@@ -2244,28 +2686,31 @@ mod tests {
         let cache = RemoteVaultCache::new_at(dir.path());
         cache.write(&key(), entry(b"baseline", 10, false)).unwrap();
         cache
-            .write_generic_pending(
+            .write_generic_pending_with_observed(
                 &key(),
                 entry(b"pending-1", 11, true),
                 &fingerprint(b"baseline", 10),
+                None,
             )
             .unwrap();
 
         let stale_error = cache
-            .write_generic_pending(
+            .write_generic_pending_with_observed(
                 &key(),
                 entry(b"stale-must-not-win", 12, true),
                 &fingerprint(b"baseline", 10),
+                None,
             )
             .expect_err("a stale generic pending writer must lose its cache CAS");
         assert!(stale_error.is::<PendingRemoteCacheConflict>());
         assert_eq!(cache.read(&key()).unwrap().unwrap().bytes, b"pending-1");
 
         cache
-            .write_generic_pending(
+            .write_generic_pending_with_observed(
                 &key(),
                 entry(b"pending-2", 13, true),
                 &fingerprint(b"pending-1", 11),
+                None,
             )
             .unwrap();
         let ordinary_error = cache
@@ -2382,7 +2827,7 @@ mod tests {
             ),
             (
                 DurableFaultPoint::ManifestReplaced,
-                PendingRemoteCacheCompletion::DurabilityUnknown,
+                PendingRemoteCacheCompletion::Durable,
             ),
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -2798,7 +3243,10 @@ mod tests {
     #[test]
     fn locked_readers_never_observe_cleanup_as_a_false_miss() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(RemoteVaultCache::new_at(dir.path()));
+        let cache = Arc::new(RemoteVaultCache::new_at_with_lock_timeout(
+            dir.path(),
+            std::time::Duration::from_secs(10),
+        ));
         cache.write(&key(), entry(b"seed", 0, false)).unwrap();
         let writer = {
             let cache = Arc::clone(&cache);
@@ -2928,12 +3376,11 @@ mod tests {
                 DurableFaultInjector::fail_once(point),
             );
 
-            assert!(faulted.write(&key(), entry(b"new-kdbx", 2, false)).is_err());
+            faulted
+                .write(&key(), entry(b"new-kdbx", 2, false))
+                .expect("visible manifest repair must reconcile the committed generation");
             let visible = cache.read(&key()).unwrap().unwrap();
-            assert!(
-                visible.bytes == b"old-kdbx" || visible.bytes == b"new-kdbx",
-                "{point:?}"
-            );
+            assert_eq!(visible.bytes, b"new-kdbx", "{point:?}");
             assert_eq!(
                 visible.fingerprint.content_sha256,
                 sha256_hex(&visible.bytes)
@@ -3203,7 +3650,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = RemoteVaultCache::new_at(dir.path());
 
-        cache.delete(&key()).unwrap();
+        let missing = cache.begin_retirement(&key()).unwrap();
+        missing.delete_cached_state().unwrap();
+        drop(missing);
+        cache.activate_while(&key(), || Ok(())).unwrap();
         cache.write(&key(), entry(b"kdbx", 42, false)).unwrap();
 
         let paths = cache.paths_for_tests(&key());
@@ -3211,11 +3661,53 @@ mod tests {
         let generation = current_generation_path(&cache);
         assert!(generation.exists());
 
-        cache.delete(&key()).unwrap();
-        cache.delete(&key()).unwrap();
+        let retirement = cache.begin_retirement(&key()).unwrap();
+        retirement.delete_cached_state().unwrap();
+        drop(retirement);
+        let retry = cache.begin_cleanup_after_intent(&key()).unwrap();
+        retry.delete_cached_state().unwrap();
 
         assert!(!paths.bytes_path.exists());
         assert!(!paths.metadata_path.exists());
         assert!(!generation.exists());
+    }
+
+    #[test]
+    fn committed_cleanup_intent_can_finish_after_a_crash_left_a_corrupt_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RemoteVaultCache::new_at(dir.path());
+        cache.write(&key(), entry(b"kdbx", 42, false)).unwrap();
+        let paths = cache.paths_for_tests(&key());
+        let generation = current_generation_path(&cache);
+
+        fs::remove_file(&generation).unwrap();
+        assert!(cache.begin_retirement(&key()).is_err());
+
+        let cleanup = cache.begin_cleanup_after_intent(&key()).unwrap();
+        cleanup.delete_cached_state().unwrap();
+        drop(cleanup);
+        assert!(!paths.metadata_path.exists());
+        let cleanup = cache.begin_cleanup_after_intent(&key()).unwrap();
+        cleanup.delete_cached_state().unwrap();
+        drop(cleanup);
+        assert!(cache.write(&key(), entry(b"orphan", 43, true)).is_err());
+
+        cache.activate_while(&key(), || Ok(())).unwrap();
+        cache.write(&key(), entry(b"re-added", 44, false)).unwrap();
+    }
+
+    #[test]
+    fn retirement_marker_blocks_a_concurrent_pending_write_before_reference_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = RemoteVaultCache::new_at(dir.path());
+        let concurrent = RemoteVaultCache::new_at(dir.path());
+        first.write(&key(), entry(b"clean", 1, false)).unwrap();
+        let clean_guard = first.begin_retirement(&key()).unwrap();
+        drop(clean_guard);
+
+        let error = concurrent
+            .write(&key(), entry(b"pending-edit", 2, true))
+            .unwrap_err();
+        assert!(error.to_string().contains("retired"));
     }
 }

@@ -44,6 +44,20 @@ constexpr wchar_t kPluginName[] = L"VaultKern";
 constexpr wchar_t kPluginRpId[] = L"vaultkern.app";
 constexpr wchar_t kHelloDisplayHint[] = L"Verify this VaultKern passkey operation";
 
+void SecureClear(std::vector<BYTE>& value) noexcept {
+    if (!value.empty()) {
+        SecureZeroMemory(value.data(), value.size());
+        value.clear();
+    }
+}
+
+void SecureClear(std::wstring& value) noexcept {
+    if (!value.empty()) {
+        SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
+        value.clear();
+    }
+}
+
 struct CachedCredential {
     std::vector<BYTE> credential_id;
     std::wstring rp_id;
@@ -51,6 +65,30 @@ struct CachedCredential {
     std::vector<BYTE> user_id;
     std::wstring user_name;
     std::wstring user_display_name;
+
+    CachedCredential& operator=(const CachedCredential& other) {
+        if (this != &other) {
+            Clear();
+            credential_id = other.credential_id;
+            rp_id = other.rp_id;
+            rp_name = other.rp_name;
+            user_id = other.user_id;
+            user_name = other.user_name;
+            user_display_name = other.user_display_name;
+        }
+        return *this;
+    }
+
+    ~CachedCredential() { Clear(); }
+
+    void Clear() noexcept {
+        SecureClear(credential_id);
+        SecureClear(rp_id);
+        SecureClear(rp_name);
+        SecureClear(user_id);
+        SecureClear(user_name);
+        SecureClear(user_display_name);
+    }
 };
 
 std::mutex g_credential_cache_mutex;
@@ -127,9 +165,50 @@ void ReplaceCredentialCache(std::vector<CachedCredential> credentials) {
     g_credential_cache = std::move(credentials);
 }
 
+HRESULT PrepareCredentialCache(
+    const VkCredentialMetadata* credentials,
+    uint32_t credential_count,
+    std::vector<CachedCredential>& prepared) noexcept {
+    if (credential_count != 0 && !credentials) {
+        return E_INVALIDARG;
+    }
+    try {
+        prepared.clear();
+        prepared.reserve(credential_count);
+        for (uint32_t index = 0; index < credential_count; ++index) {
+            const auto& credential = credentials[index];
+            if (!credential.credential_id.data || credential.credential_id.len == 0 ||
+                !credential.rp_id || !credential.rp_name ||
+                !credential.user_handle.data || credential.user_handle.len == 0 ||
+                !credential.user_name || !credential.user_display_name) {
+                return E_INVALIDARG;
+            }
+            prepared.push_back({
+                {credential.credential_id.data,
+                 credential.credential_id.data + credential.credential_id.len},
+                reinterpret_cast<PCWSTR>(credential.rp_id),
+                reinterpret_cast<PCWSTR>(credential.rp_name),
+                {credential.user_handle.data,
+                 credential.user_handle.data + credential.user_handle.len},
+                reinterpret_cast<PCWSTR>(credential.user_name),
+                reinterpret_cast<PCWSTR>(credential.user_display_name)});
+        }
+        return S_OK;
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
 struct SelectedCredential {
     std::vector<BYTE> credential_id;
     std::wstring user_name;
+
+    ~SelectedCredential() {
+        SecureClear(credential_id);
+        SecureClear(user_name);
+    }
 };
 
 using CredentialChooser = HRESULT (*)(
@@ -573,99 +652,18 @@ public:
             : S_OK;
     }
 
-private:
     VkBytes TransactionBytes() const noexcept {
         return {
             reinterpret_cast<const uint8_t*>(&transaction_id_),
             static_cast<uint32_t>(sizeof(transaction_id_))};
     }
 
+private:
     VkPluginCallbacks callbacks_;
     GUID transaction_id_{};
     HRESULT status_{E_FAIL};
     bool active_{false};
 };
-
-HRESULT AddCredentialMetadata(
-    const VkOwnedBytes& credential_id,
-    PCWSTR rp_id,
-    PCWSTR rp_name,
-    const BYTE* user_id,
-    DWORD user_id_size,
-    PCWSTR user_name,
-    PCWSTR user_display_name) noexcept {
-    using AddCredentials = HRESULT(WINAPI*)(
-        REFCLSID,
-        DWORD,
-        PCWEBAUTHN_PLUGIN_CREDENTIAL_DETAILS);
-    using RemoveCredentials = HRESULT(WINAPI*)(
-        REFCLSID,
-        DWORD,
-        PCWEBAUTHN_PLUGIN_CREDENTIAL_DETAILS);
-    auto add =
-        WebAuthnFunction<AddCredentials>("WebAuthNPluginAuthenticatorAddCredentials");
-    auto remove = WebAuthnFunction<RemoveCredentials>(
-        "WebAuthNPluginAuthenticatorRemoveCredentials");
-    if (!add || !remove) {
-        return E_NOTIMPL;
-    }
-    std::lock_guard<std::mutex> metadata_lock(g_credential_metadata_mutex);
-    std::vector<CachedCredential> superseded;
-    std::vector<WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS> superseded_details;
-    try {
-        superseded = SupersededCredentials(
-            credential_id.data,
-            credential_id.len,
-            rp_id,
-            user_id,
-            user_id_size);
-        superseded_details.reserve(superseded.size());
-        for (const auto& credential : superseded) {
-            superseded_details.push_back(NativeCredential(credential));
-        }
-    } catch (const std::bad_alloc&) {
-        return E_OUTOFMEMORY;
-    } catch (...) {
-        return E_FAIL;
-    }
-    if (!superseded_details.empty()) {
-        const HRESULT remove_result = remove(
-            kPluginClsid,
-            static_cast<DWORD>(superseded_details.size()),
-            superseded_details.data());
-        if (FAILED(remove_result)) {
-            return remove_result;
-        }
-    }
-    WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS details{
-        credential_id.len,
-        credential_id.data,
-        rp_id,
-        rp_name ? rp_name : rp_id,
-        user_id_size,
-        user_id,
-        user_name,
-        user_display_name ? user_display_name : user_name};
-    HRESULT result = add(kPluginClsid, 1, &details);
-    if (SUCCEEDED(result)) {
-        try {
-            CacheCredential(
-                credential_id.data,
-                credential_id.len,
-                rp_id,
-                rp_name ? rp_name : rp_id,
-                user_id,
-                user_id_size,
-                user_name,
-                user_display_name ? user_display_name : user_name);
-        } catch (const std::bad_alloc&) {
-            return E_OUTOFMEMORY;
-        } catch (...) {
-            return E_FAIL;
-        }
-    }
-    return result;
-}
 
 class PluginAuthenticator final : public IPluginAuthenticator {
 public:
@@ -713,9 +711,6 @@ public:
         if (FAILED(result)) {
             return result;
         }
-        if (!callbacks_.is_unlocked(callbacks_.context)) {
-            return NTE_NOT_FOUND;
-        }
         PluginOperation operation(callbacks_, request->transactionId);
         if (FAILED(operation.status())) {
             return operation.status();
@@ -723,7 +718,6 @@ public:
         if (FAILED(result = operation.CheckCancelled())) {
             return result;
         }
-
         using Decode = HRESULT(WINAPI*)(
             DWORD,
             const BYTE*,
@@ -782,12 +776,28 @@ public:
             return result;
         }
 
-        result = PerformHelloVerification(
-            request,
-            decoded->pUserInformation->pwszName);
-        Trace("make", "hello-uv", result);
+        int32_t fresh_user_verification = 0;
+        result = callbacks_.prepare_operation(
+            callbacks_.context,
+            operation.TransactionBytes(),
+            reinterpret_cast<uintptr_t>(request->hWnd),
+            &fresh_user_verification);
+        Trace("make", "prepare-operation", result);
         if (FAILED(result)) {
             return result;
+        }
+        if (FAILED(result = operation.CheckCancelled())) {
+            return result;
+        }
+
+        if (!fresh_user_verification) {
+            result = PerformHelloVerification(
+                request,
+                decoded->pUserInformation->pwszName);
+            Trace("make", "hello-uv", result);
+            if (FAILED(result)) {
+                return result;
+            }
         }
         if (FAILED(result = operation.CheckCancelled())) {
             return result;
@@ -803,6 +813,7 @@ public:
                 }
             }
             VkMakeCredentialInput input{
+                operation.TransactionBytes(),
                 reinterpret_cast<const uint16_t*>(decoded->pRpInformation->pwszId),
                 reinterpret_cast<const uint16_t*>(
                     decoded->pRpInformation->pwszName
@@ -828,10 +839,6 @@ public:
             }
             RustBytes credential_id(callbacks_, output.credential_id);
             RustBytes authenticator_data(callbacks_, output.authenticator_data);
-            // The Rust callback is the durable registration commit point. A
-            // cancellation observed after it returns cannot roll that commit
-            // back, so complete the ceremony instead of reporting a failure
-            // for a credential that now exists in the vault.
             if (!credential_id.data() || credential_id.size() == 0 ||
                 !authenticator_data.data() || authenticator_data.size() == 0) {
                 return E_FAIL;
@@ -850,18 +857,17 @@ public:
             if (FAILED(result)) {
                 return result;
             }
+            if (FAILED(result = operation.CheckCancelled())) {
+                return result;
+            }
+            result = callbacks_.commit_registration(
+                callbacks_.context,
+                operation.TransactionBytes());
+            Trace("make", "commit-registration", result);
+            if (FAILED(result)) {
+                return result;
+            }
 
-            // The durable KPEX save already succeeded. Cache population is recoverable
-            // and is retried when the resident app next refreshes its unlocked vault.
-            HRESULT cache_result = AddCredentialMetadata(
-                output.credential_id,
-                decoded->pRpInformation->pwszId,
-                decoded->pRpInformation->pwszName,
-                decoded->pUserInformation->pbId,
-                decoded->pUserInformation->cbId,
-                decoded->pUserInformation->pwszName,
-                decoded->pUserInformation->pwszDisplayName);
-            Trace("make", "credential-cache", cache_result);
             return S_OK;
         } catch (const std::bad_alloc&) {
             return E_OUTOFMEMORY;
@@ -883,9 +889,6 @@ public:
         if (FAILED(result)) {
             return result;
         }
-        if (!callbacks_.is_unlocked(callbacks_.context)) {
-            return NTE_NOT_FOUND;
-        }
         PluginOperation operation(callbacks_, request->transactionId);
         if (FAILED(operation.status())) {
             return operation.status();
@@ -893,7 +896,6 @@ public:
         if (FAILED(result = operation.CheckCancelled())) {
             return result;
         }
-
         using Decode = HRESULT(WINAPI*)(
             DWORD,
             const BYTE*,
@@ -931,6 +933,20 @@ public:
             return E_INVALIDARG;
         }
 
+        int32_t fresh_user_verification = 0;
+        result = callbacks_.prepare_operation(
+            callbacks_.context,
+            operation.TransactionBytes(),
+            reinterpret_cast<uintptr_t>(request->hWnd),
+            &fresh_user_verification);
+        Trace("get", "prepare-operation", result);
+        if (FAILED(result)) {
+            return result;
+        }
+        if (FAILED(result = operation.CheckCancelled())) {
+            return result;
+        }
+
         std::vector<VkBytes> allowed;
         try {
             allowed.reserve(decoded->CredentialList.cCredentials);
@@ -957,10 +973,12 @@ public:
             return result;
         }
 
-        result = PerformHelloVerification(request, selected.user_name.c_str());
-        Trace("get", "hello-uv", result);
-        if (FAILED(result)) {
-            return result;
+        if (!fresh_user_verification) {
+            result = PerformHelloVerification(request, selected.user_name.c_str());
+            Trace("get", "hello-uv", result);
+            if (FAILED(result)) {
+                return result;
+            }
         }
         if (FAILED(result = operation.CheckCancelled())) {
             return result;
@@ -971,6 +989,7 @@ public:
                 selected.credential_id.data(),
                 static_cast<uint32_t>(selected.credential_id.size())};
             VkGetAssertionInput input{
+                operation.TransactionBytes(),
                 reinterpret_cast<const uint16_t*>(decoded->pwszRpId),
                 &selected_credential,
                 1,
@@ -1156,10 +1175,12 @@ std::vector<BYTE> AuthenticatorInfo() {
 extern "C" int32_t VK_CALL vaultkern_plugin_start(
     const VkPluginCallbacks* callbacks,
     uint32_t* registration_cookie) {
-    if (!callbacks || !registration_cookie || callbacks->version != 3 ||
+    if (!callbacks || !registration_cookie || callbacks->version != 6 ||
         !callbacks->context || !callbacks->retain_context ||
         !callbacks->release_context || !callbacks->is_unlocked ||
-        !callbacks->make_credential || !callbacks->get_assertion ||
+        !callbacks->prepare_operation ||
+        !callbacks->make_credential || !callbacks->commit_registration ||
+        !callbacks->get_assertion ||
         !callbacks->begin_operation || !callbacks->is_operation_cancelled ||
         !callbacks->cancel_operation || !callbacks->end_operation ||
         !callbacks->free_bytes) {
@@ -1289,8 +1310,10 @@ extern "C" int32_t VK_CALL vaultkern_plugin_remove_registered(void) {
 extern "C" int32_t VK_CALL vaultkern_plugin_sync_credentials(
     const VkCredentialMetadata* credentials,
     uint32_t credential_count) {
-    if (credential_count != 0 && !credentials) {
-        return E_INVALIDARG;
+    std::vector<CachedCredential> cached;
+    HRESULT result = PrepareCredentialCache(credentials, credential_count, cached);
+    if (FAILED(result)) {
+        return result;
     }
     using RemoveAll = HRESULT(WINAPI*)(REFCLSID);
     using Add = HRESULT(WINAPI*)(
@@ -1305,59 +1328,90 @@ extern "C" int32_t VK_CALL vaultkern_plugin_sync_credentials(
         return E_NOTIMPL;
     }
     std::lock_guard<std::mutex> metadata_lock(g_credential_metadata_mutex);
-    HRESULT result = remove_all(kPluginClsid);
-    if (FAILED(result)) {
-        return result;
-    }
-    if (credential_count == 0) {
-        ReplaceCredentialCache({});
-        return S_OK;
-    }
     try {
-        std::vector<WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS> details;
-        std::vector<CachedCredential> cached;
-        details.reserve(credential_count);
-        cached.reserve(credential_count);
-        for (uint32_t index = 0; index < credential_count; ++index) {
-            const auto& credential = credentials[index];
-            if (!credential.credential_id.data || credential.credential_id.len == 0 ||
-                !credential.rp_id || !credential.rp_name ||
-                !credential.user_handle.data || credential.user_handle.len == 0 ||
-                !credential.user_name || !credential.user_display_name) {
-                return E_INVALIDARG;
-            }
-            details.push_back({
-                credential.credential_id.len,
-                credential.credential_id.data,
-                reinterpret_cast<PCWSTR>(credential.rp_id),
-                reinterpret_cast<PCWSTR>(credential.rp_name),
-                credential.user_handle.len,
-                credential.user_handle.data,
-                reinterpret_cast<PCWSTR>(credential.user_name),
-                reinterpret_cast<PCWSTR>(credential.user_display_name)});
-            cached.push_back({
-                {credential.credential_id.data,
-                 credential.credential_id.data + credential.credential_id.len},
-                reinterpret_cast<PCWSTR>(credential.rp_id),
-                reinterpret_cast<PCWSTR>(credential.rp_name),
-                {credential.user_handle.data,
-                 credential.user_handle.data + credential.user_handle.len},
-                reinterpret_cast<PCWSTR>(credential.user_name),
-                reinterpret_cast<PCWSTR>(credential.user_display_name)});
+        std::vector<CachedCredential> previous_cache;
+        {
+            std::lock_guard<std::mutex> cache_lock(g_credential_cache_mutex);
+            previous_cache = g_credential_cache;
         }
+        std::vector<WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS> details;
+        details.reserve(cached.size());
+        for (const auto& credential : cached) {
+            details.push_back(NativeCredential(credential));
+        }
+        std::vector<WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS> restore_details;
+        restore_details.reserve(previous_cache.size());
+        for (const auto& credential : previous_cache) {
+            restore_details.push_back(NativeCredential(credential));
+        }
+
+        // Validate the desired batch against the OS before crossing the
+        // destructive RemoveAll commit point. AddCredentials is idempotent.
+        if (!details.empty()) {
+            result = add(
+                kPluginClsid,
+                static_cast<DWORD>(details.size()),
+                details.data());
+            if (FAILED(result)) {
+                return result;
+            }
+        }
+        result = remove_all(kPluginClsid);
+        if (FAILED(result)) {
+            return result;
+        }
+        if (details.empty()) {
+            ReplaceCredentialCache({});
+            return S_OK;
+        }
+
         result = add(
             kPluginClsid,
             static_cast<DWORD>(details.size()),
             details.data());
-        if (SUCCEEDED(result)) {
-            ReplaceCredentialCache(std::move(cached));
+        if (FAILED(result)) {
+            // A transient failure after RemoveAll is recoverable from the
+            // same desired snapshot and at every later reconciliation point.
+            const HRESULT retry_result = add(
+                kPluginClsid,
+                static_cast<DWORD>(details.size()),
+                details.data());
+            if (SUCCEEDED(retry_result)) {
+                ReplaceCredentialCache(std::move(cached));
+                return S_OK;
+            }
+            HRESULT restore_result = S_OK;
+            if (!restore_details.empty()) {
+                restore_result = add(
+                    kPluginClsid,
+                    static_cast<DWORD>(restore_details.size()),
+                    restore_details.data());
+            }
+            if (SUCCEEDED(restore_result)) {
+                ReplaceCredentialCache(std::move(previous_cache));
+                return result;
+            }
+            return restore_result;
         }
-        return result;
+        ReplaceCredentialCache(std::move(cached));
+        return S_OK;
     } catch (const std::bad_alloc&) {
         return E_OUTOFMEMORY;
     } catch (...) {
         return E_FAIL;
     }
+}
+
+extern "C" int32_t VK_CALL vaultkern_plugin_replace_runtime_credentials(
+    const VkCredentialMetadata* credentials,
+    uint32_t credential_count) {
+    std::vector<CachedCredential> cached;
+    const HRESULT result = PrepareCredentialCache(credentials, credential_count, cached);
+    if (FAILED(result)) {
+        return result;
+    }
+    ReplaceCredentialCache(std::move(cached));
+    return S_OK;
 }
 
 extern "C" int32_t VK_CALL

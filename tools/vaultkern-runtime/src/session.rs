@@ -68,7 +68,6 @@ pub(crate) struct LoadedVault {
     pub(crate) credential_shape: MasterCredentialShape,
     pub(crate) save_profile: SaveProfile,
     pub(crate) requires_source_migration: bool,
-    pub(crate) autosave_delay_seconds: Option<u32>,
     pub(crate) vault: Option<Vault>,
     pub(crate) transformed_key: Option<Arc<TransformedKey>>,
     pub(crate) source_status: Option<VaultSourceStatusDto>,
@@ -262,7 +261,6 @@ mod tests {
         baseline_fingerprint: VaultSourceFingerprint,
         save_profile: SaveProfile,
         requires_source_migration: bool,
-        autosave_delay_seconds: Option<u32>,
         source_status: Option<VaultSourceStatusDto>,
         source_account_label: Option<String>,
         credential_shape: MasterCredentialShape,
@@ -277,7 +275,6 @@ mod tests {
             credential_shape,
             save_profile,
             requires_source_migration,
-            autosave_delay_seconds,
             vault: _,
             transformed_key: _,
             source_status,
@@ -291,7 +288,6 @@ mod tests {
             baseline_fingerprint: baseline_fingerprint.clone(),
             save_profile: save_profile.clone(),
             requires_source_migration: *requires_source_migration,
-            autosave_delay_seconds: *autosave_delay_seconds,
             source_status: source_status.clone(),
             source_account_label: source_account_label.clone(),
             credential_shape: *credential_shape,
@@ -397,7 +393,6 @@ mod tests {
             },
             save_profile: SaveProfile::recommended(),
             requires_source_migration: false,
-            autosave_delay_seconds: Some(u32::from(marker)),
             vault: Some(Vault::empty(name)),
             transformed_key: None,
             source_status: Some(VaultSourceStatusDto {
@@ -485,7 +480,7 @@ mod tests {
             .finish_unlock(
                 "vault-a",
                 Vault::empty("unlocked"),
-                TransformedKey::from_bytes([0x33; 32]),
+                TransformedKey::from_zeroizing(zeroize::Zeroizing::new([0x33; 32])),
                 credential_shape,
                 Some("ref-a".into()),
             )

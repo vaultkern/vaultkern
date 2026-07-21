@@ -1,26 +1,28 @@
-import { normalizeExtensionSettings } from "@vaultkern/shared-web-ui";
+import { normalizeWindowsAppSettings } from "@vaultkern/shared-web-ui";
 import type {
   ExtensionSettings,
-  ExtensionSettingsReconciliationContext,
   ExtensionSettingsStore
 } from "@vaultkern/shared-web-ui";
 
 export function createDesktopSettingsStore(
   loadDesiredSettings: () => Promise<unknown>,
   saveDesiredSettings: (settings: ExtensionSettings) => Promise<unknown>,
-  reconcileNativeSettings: (
-    context: ExtensionSettingsReconciliationContext
-  ) => Promise<unknown> = async () => undefined
+  queueQuickUnlockEnrollment: (credentials: {
+    password?: string | null;
+    keyFilePath?: string | null;
+  }) => Promise<unknown> = async () => undefined
 ): ExtensionSettingsStore {
   return {
+    surface: "windows",
+    nativeReconciliationOwned: true,
+    async queueQuickUnlockEnrollment(credentials) {
+      await queueQuickUnlockEnrollment(credentials);
+    },
     async load() {
-      return normalizeExtensionSettings(await loadDesiredSettings());
+      return normalizeWindowsAppSettings(await loadDesiredSettings());
     },
     async save(settings) {
-      await saveDesiredSettings(normalizeExtensionSettings(settings));
-    },
-    async reconcile(context) {
-      await reconcileNativeSettings(context);
+      await saveDesiredSettings(normalizeWindowsAppSettings(settings));
     }
   };
 }

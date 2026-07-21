@@ -13,6 +13,7 @@ use uuid::Uuid;
 use vaultkern_core::PasskeyRecord;
 use vaultkern_runtime_protocol::PasskeyAssertionDto;
 use vaultkern_runtime_protocol::PasskeyRegistrationDto;
+use zeroize::Zeroizing;
 
 const ES256_COSE_ALGORITHM: i32 = -7;
 const AUTH_DATA_FLAG_USER_PRESENT: u8 = 0x01;
@@ -338,10 +339,7 @@ fn create_registration_material(
     }
 
     let signing_key = SigningKey::random(&mut OsRng);
-    let private_key_pem = signing_key
-        .to_pkcs8_pem(LineEnding::LF)
-        .context("failed to encode passkey private key")?
-        .to_string();
+    let private_key_pem = encode_private_key_pem(&signing_key)?;
     let verifying_key = signing_key.verifying_key();
     let public_key = verifying_key.to_encoded_point(false);
     let public_key_der = verifying_key
@@ -371,6 +369,12 @@ fn create_registration_material(
         authenticator_data,
         public_key_der,
     })
+}
+
+fn encode_private_key_pem(signing_key: &SigningKey) -> Result<Zeroizing<String>> {
+    signing_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .context("failed to encode passkey private key")
 }
 
 fn credential_id_bytes_from_authenticator_data(authenticator_data: &[u8]) -> Result<&[u8]> {
@@ -750,6 +754,7 @@ mod tests {
         PasskeyAssertionRequest, PasskeyRegistrationRequest, PlatformPasskeyAssertionRequest,
         PlatformPasskeyRegistrationRequest, create_assertion, create_platform_assertion,
         create_platform_registration_with_credential_id, create_registration,
+        encode_private_key_pem,
     };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use p256::{
@@ -758,6 +763,16 @@ mod tests {
     };
     use sha2::Digest;
     use vaultkern_core::PasskeyRecord;
+
+    #[test]
+    fn generated_private_key_pem_stays_in_zeroizing_ownership() {
+        fn assert_zeroizing_encoder(
+            _: fn(&SigningKey) -> anyhow::Result<zeroize::Zeroizing<String>>,
+        ) {
+        }
+
+        assert_zeroizing_encoder(encode_private_key_pem);
+    }
 
     #[test]
     fn registration_rejects_public_suffix_relying_party() {
@@ -1119,7 +1134,7 @@ mod tests {
             username: "alice@example.com".into(),
             credential_id: "Y3JlZGVudGlhbA".into(),
             generated_user_id: None,
-            private_key_pem: String::new(),
+            private_key_pem: String::new().into(),
             relying_party: "example.com".into(),
             user_handle: Some("dXNlci0x".into()),
             backup_eligible: false,
@@ -1139,7 +1154,7 @@ mod tests {
             username: "alice@example.com".into(),
             credential_id: "Y3JlZGVudGlhbA".into(),
             generated_user_id: None,
-            private_key_pem: String::new(),
+            private_key_pem: String::new().into(),
             relying_party: "example.com".into(),
             user_handle: Some("dXNlci0x".into()),
             backup_eligible: true,
@@ -1158,7 +1173,7 @@ mod tests {
             username: "alice@example.com".into(),
             credential_id: "Y3JlZGVudGlhbA".into(),
             generated_user_id: None,
-            private_key_pem: String::new(),
+            private_key_pem: String::new().into(),
             relying_party: "example.com".into(),
             user_handle: Some("dXNlci0x".into()),
             backup_eligible: true,
@@ -1307,7 +1322,7 @@ mod tests {
             username: "alice@example.com".into(),
             credential_id: "Y3JlZGVudGlhbA".into(),
             generated_user_id: None,
-            private_key_pem: String::new(),
+            private_key_pem: String::new().into(),
             relying_party: "example.com".into(),
             user_handle: Some("dXNlci0x".into()),
             backup_eligible: true,

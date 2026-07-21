@@ -217,6 +217,7 @@ fn browser_origin_native_hosts_do_not_share_recent_vaults() {
 
     let mut first =
         spawn_isolated_runtime_native_host_for_origin(&state_dir, &home_dir, first_origin);
+    negotiate_browser_runtime(&mut first);
     let opened = send_native_command(
         &mut first,
         json!({
@@ -231,11 +232,13 @@ fn browser_origin_native_hosts_do_not_share_recent_vaults() {
     first.wait().ok();
     assert_eq!(
         opened.get("type").and_then(|value| value.as_str()),
-        Some("vault_opened")
+        Some("vault_opened"),
+        "unexpected browser-origin open response: {opened}"
     );
 
     let mut second =
         spawn_isolated_runtime_native_host_for_origin(&state_dir, &home_dir, second_origin);
+    negotiate_browser_runtime(&mut second);
     let second_recent = send_native_command(
         &mut second,
         json!({
@@ -262,6 +265,7 @@ fn browser_origin_native_hosts_do_not_share_recent_vaults() {
 
     let mut first_again =
         spawn_isolated_runtime_native_host_for_origin(&state_dir, &home_dir, first_origin);
+    negotiate_browser_runtime(&mut first_again);
     let first_recent = send_native_command(
         &mut first_again,
         json!({
@@ -327,6 +331,25 @@ fn send_native_command(
         &serde_json::to_vec(&request).expect("encode request"),
     );
     read_native_message(child.stdout.as_mut().expect("runtime stdout"))
+}
+
+fn negotiate_browser_runtime(child: &mut std::process::Child) {
+    let response = send_native_command(
+        child,
+        json!({
+            "version": 1,
+            "command": {
+                "type": "handshake",
+                "protocol_version": 1,
+                "capabilities": ["runtime-core", "browser-extension"]
+            }
+        }),
+    );
+    assert_eq!(
+        response.get("type").and_then(|value| value.as_str()),
+        Some("handshake"),
+        "unexpected browser-origin handshake response: {response}"
+    );
 }
 
 fn write_native_message(writer: &mut impl Write, payload: &[u8]) {

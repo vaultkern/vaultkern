@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 static UNIQUE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static PROCESS_NONCE: LazyLock<String> = LazyLock::new(process_nonce);
@@ -24,6 +27,9 @@ pub(crate) enum DurableFaultPoint {
     BeforeTargetReplace,
     TargetReplaced,
     ParentSynced,
+    LocalPublishedRepair,
+    LocalRollbackPublished,
+    LocalFinalReadback,
     Cleanup,
     GenerationTempCreated,
     GenerationTempWritten,
@@ -45,7 +51,7 @@ pub(crate) enum DurableFaultPoint {
 #[derive(Clone, Default)]
 pub(crate) struct DurableFaultInjector {
     #[cfg(test)]
-    action: Option<Arc<Mutex<Option<DurableFaultAction>>>>,
+    action: Option<Arc<Mutex<VecDeque<DurableFaultAction>>>>,
     #[cfg(test)]
     callback: Option<Arc<Mutex<Option<DurableFaultCallback>>>>,
 }
@@ -74,12 +80,12 @@ impl DurableFaultInjector {
         if let Some(action) = &self.action {
             let selected = {
                 let mut action = action.lock().expect("durable fault lock");
-                match *action {
+                match action.front().copied() {
                     Some(DurableFaultAction::Fail(selected))
                     | Some(DurableFaultAction::Crash(selected))
                         if selected == point =>
                     {
-                        action.take()
+                        action.pop_front()
                     }
                     _ => None,
                 }
@@ -118,7 +124,19 @@ impl DurableFaultInjector {
     #[cfg(test)]
     pub(crate) fn fail_once(point: DurableFaultPoint) -> Self {
         Self {
-            action: Some(Arc::new(Mutex::new(Some(DurableFaultAction::Fail(point))))),
+            action: Some(Arc::new(Mutex::new(VecDeque::from([
+                DurableFaultAction::Fail(point),
+            ])))),
+            callback: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_in_order(points: impl IntoIterator<Item = DurableFaultPoint>) -> Self {
+        Self {
+            action: Some(Arc::new(Mutex::new(
+                points.into_iter().map(DurableFaultAction::Fail).collect(),
+            ))),
             callback: None,
         }
     }
@@ -126,7 +144,9 @@ impl DurableFaultInjector {
     #[cfg(test)]
     pub(crate) fn crash_once(point: DurableFaultPoint) -> Self {
         Self {
-            action: Some(Arc::new(Mutex::new(Some(DurableFaultAction::Crash(point))))),
+            action: Some(Arc::new(Mutex::new(VecDeque::from([
+                DurableFaultAction::Crash(point),
+            ])))),
             callback: None,
         }
     }
@@ -180,6 +200,9 @@ impl DurableFaultPoint {
             "BeforeTargetReplace" => Self::BeforeTargetReplace,
             "TargetReplaced" => Self::TargetReplaced,
             "ParentSynced" => Self::ParentSynced,
+            "LocalPublishedRepair" => Self::LocalPublishedRepair,
+            "LocalRollbackPublished" => Self::LocalRollbackPublished,
+            "LocalFinalReadback" => Self::LocalFinalReadback,
             "Cleanup" => Self::Cleanup,
             "GenerationTempCreated" => Self::GenerationTempCreated,
             "GenerationTempWritten" => Self::GenerationTempWritten,
@@ -207,6 +230,7 @@ pub(crate) struct ExclusiveFileLock {
 }
 
 impl ExclusiveFileLock {
+    #[allow(dead_code)]
     pub(crate) fn acquire(path: &Path) -> io::Result<Self> {
         let file = open_validated_lock_file(path)?;
         file.lock()?;
@@ -1404,6 +1428,14 @@ pub(crate) fn remove_if_exists(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+pub(crate) fn remove_and_sync_absence(path: &Path) -> io::Result<()> {
+    remove_if_exists(path)?;
+    if path.parent().is_some_and(Path::exists) {
+        sync_parent(path)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

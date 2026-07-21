@@ -2,15 +2,35 @@ use std::fmt;
 use std::ops::Deref;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+pub const PROTOCOL_VERSION: u32 = 1;
 
 pub struct SensitiveString(Zeroizing<String>);
 
 impl SensitiveString {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
     pub fn into_zeroizing(self) -> Zeroizing<String> {
         self.0
     }
 }
+
+impl Default for SensitiveString {
+    fn default() -> Self {
+        String::new().into()
+    }
+}
+
+impl Zeroize for SensitiveString {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SensitiveString {}
 
 impl fmt::Debug for SensitiveString {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -25,6 +45,30 @@ impl PartialEq for SensitiveString {
 }
 
 impl Eq for SensitiveString {}
+
+impl PartialEq<str> for SensitiveString {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for SensitiveString {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<SensitiveString> for str {
+    fn eq(&self, other: &SensitiveString) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<SensitiveString> for &str {
+    fn eq(&self, other: &SensitiveString) -> bool {
+        *self == other.as_str()
+    }
+}
 
 impl Deref for SensitiveString {
     type Target = str;
@@ -81,16 +125,20 @@ pub struct ProtocolEnvelope {
 impl ProtocolEnvelope {
     pub fn new(command: RuntimeCommand) -> Self {
         Self {
-            version: 1,
+            version: PROTOCOL_VERSION,
             request_id: None,
             command,
         }
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeCommand {
+    Handshake {
+        protocol_version: u32,
+        capabilities: Vec<String>,
+    },
     GetSessionState,
     ListRecentVaults,
     PreloadCurrentVault,
@@ -98,11 +146,6 @@ pub enum RuntimeCommand {
         path: Option<String>,
     },
     BeginOneDriveLogin,
-    CompleteOneDriveLogin {
-        code: String,
-        redirect_uri: String,
-        code_verifier: String,
-    },
     CompletePendingOneDriveLogin,
     ListOneDriveChildren {
         parent_item_id: Option<String>,
@@ -168,22 +211,22 @@ pub enum RuntimeCommand {
     CreateEntry {
         vault_id: String,
         parent_group_id: String,
-        title: String,
-        username: String,
-        password: String,
-        url: String,
-        notes: String,
-        totp_uri: Option<String>,
+        title: SensitiveString,
+        username: SensitiveString,
+        password: SensitiveString,
+        url: SensitiveString,
+        notes: SensitiveString,
+        totp_uri: Option<SensitiveString>,
     },
     UpdateEntryFields {
         vault_id: String,
         entry_id: String,
-        title: String,
-        username: String,
-        password: String,
-        url: String,
-        notes: String,
-        totp_uri: Option<String>,
+        title: SensitiveString,
+        username: SensitiveString,
+        password: SensitiveString,
+        url: SensitiveString,
+        notes: SensitiveString,
+        totp_uri: Option<SensitiveString>,
         custom_fields: Vec<EntryCustomFieldDto>,
     },
     CompareAndUpdateEntryFields {
@@ -341,7 +384,7 @@ pub enum RuntimeCommand {
         vault_id: String,
         entry_id: String,
         name: String,
-        data_base64: String,
+        data_base64: SensitiveString,
         protect_in_memory: bool,
     },
     UpdateEntryAttachmentMetadata {
@@ -355,7 +398,7 @@ pub enum RuntimeCommand {
         vault_id: String,
         entry_id: String,
         name: String,
-        data_base64: String,
+        data_base64: SensitiveString,
     },
     DeleteEntryAttachment {
         vault_id: String,
@@ -365,11 +408,11 @@ pub enum RuntimeCommand {
     UpdateEntry {
         vault_id: String,
         entry_id: String,
-        title: String,
-        username: String,
-        password: String,
-        url: String,
-        notes: String,
+        title: SensitiveString,
+        username: SensitiveString,
+        password: SensitiveString,
+        url: SensitiveString,
+        notes: SensitiveString,
     },
     SaveVault {
         vault_id: String,
@@ -391,9 +434,18 @@ pub enum RuntimeCommand {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl fmt::Debug for RuntimeCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RuntimeCommand([REDACTED])")
+    }
+}
+
+impl ZeroizeOnDrop for RuntimeCommand {}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeResponse {
+    Handshake(HandshakeDto),
     SessionState(SessionStateDto),
     VaultReferenceList(VaultReferenceListDto),
     VaultReference(VaultReferenceDto),
@@ -428,6 +480,21 @@ pub enum RuntimeResponse {
     SaveVaultResult(SaveVaultResultDto),
     AutofillPersistResult(AutofillPersistResultDto),
     Error(ErrorDto),
+}
+
+impl fmt::Debug for RuntimeResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RuntimeResponse([REDACTED])")
+    }
+}
+
+impl ZeroizeOnDrop for RuntimeResponse {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandshakeDto {
+    pub protocol_version: u32,
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -475,7 +542,6 @@ pub struct VaultReferenceListDto {
 pub struct OneDriveAuthSessionDto {
     pub auth_url: String,
     pub redirect_uri: String,
-    pub code_verifier: String,
     pub expires_in_seconds: u32,
 }
 
@@ -688,37 +754,91 @@ pub struct EntryIdListDto {
     pub entry_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryDetailDto {
     pub id: String,
-    pub title: String,
-    pub username: String,
-    pub password: String,
-    pub url: String,
-    pub notes: String,
+    pub title: SensitiveString,
+    pub username: SensitiveString,
+    pub password: SensitiveString,
+    pub url: SensitiveString,
+    pub notes: SensitiveString,
     pub modified_at: u64,
-    pub totp: Option<String>,
-    pub totp_uri: Option<String>,
+    pub totp: Option<SensitiveString>,
+    pub totp_uri: Option<SensitiveString>,
     pub passkey: Option<EntryPasskeyDto>,
     pub field_protection: EntryFieldProtectionDto,
     pub custom_fields: Vec<EntryCustomFieldDto>,
     pub attachments: Vec<EntryAttachmentDto>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl fmt::Debug for EntryDetailDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryDetailDto([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryDetailDto {
+    fn zeroize(&mut self) {
+        self.id.zeroize();
+        self.title.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        self.totp.zeroize();
+        self.totp_uri.zeroize();
+        if let Some(passkey) = &mut self.passkey {
+            passkey.username.zeroize();
+            passkey.credential_id.zeroize();
+            passkey.generated_user_id.zeroize();
+            passkey.relying_party.zeroize();
+            passkey.user_handle.zeroize();
+        }
+        self.passkey = None;
+        self.custom_fields.zeroize();
+        for attachment in &mut self.attachments {
+            attachment.name.zeroize();
+        }
+        self.attachments.clear();
+    }
+}
+
+impl ZeroizeOnDrop for EntryDetailDto {}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryFieldsDto {
-    pub title: String,
-    pub username: String,
-    pub password: String,
-    pub url: String,
-    pub notes: String,
-    pub totp_uri: Option<String>,
+    pub title: SensitiveString,
+    pub username: SensitiveString,
+    pub password: SensitiveString,
+    pub url: SensitiveString,
+    pub notes: SensitiveString,
+    pub totp_uri: Option<SensitiveString>,
     pub custom_fields: Vec<EntryCustomFieldDto>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl fmt::Debug for EntryFieldsDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryFieldsDto([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryFieldsDto {
+    fn zeroize(&mut self) {
+        self.title.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        self.totp_uri.zeroize();
+        self.custom_fields.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryFieldsDto {}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum AutofillPersistPlanDto {
     Update {
@@ -734,7 +854,42 @@ pub enum AutofillPersistPlanDto {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl fmt::Debug for AutofillPersistPlanDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AutofillPersistPlanDto([REDACTED])")
+    }
+}
+
+impl Zeroize for AutofillPersistPlanDto {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Update {
+                entry_id,
+                expected_fields,
+                desired_fields,
+            } => {
+                entry_id.zeroize();
+                expected_fields.zeroize();
+                desired_fields.zeroize();
+            }
+            Self::Create {
+                parent_group_id,
+                planned_entry_id,
+                expected_matching_entry_ids,
+                desired_fields,
+            } => {
+                parent_group_id.zeroize();
+                planned_entry_id.zeroize();
+                expected_matching_entry_ids.zeroize();
+                desired_fields.zeroize();
+            }
+        }
+    }
+}
+
+impl ZeroizeOnDrop for AutofillPersistPlanDto {}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EntryPasskeyDto {
@@ -747,17 +902,28 @@ pub struct EntryPasskeyDto {
     pub backup_state: bool,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+impl fmt::Debug for EntryPasskeyDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryPasskeyDto([REDACTED])")
+    }
+}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EntryPasskeyUpdateDto {
     pub username: String,
     pub credential_id: String,
     pub generated_user_id: Option<String>,
-    pub private_key_pem: Option<SensitiveString>,
     pub relying_party: String,
     pub user_handle: Option<String>,
     pub backup_eligible: bool,
     pub backup_state: bool,
+}
+
+impl fmt::Debug for EntryPasskeyUpdateDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryPasskeyUpdateDto([REDACTED])")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1066,20 +1232,42 @@ pub struct EntryHistoryListDto {
     pub items: Vec<EntryHistoryItemDto>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryHistoryDetailDto {
     pub entry_id: String,
     pub history_index: usize,
-    pub title: String,
-    pub username: String,
-    pub password: String,
-    pub url: String,
-    pub notes: String,
+    pub title: SensitiveString,
+    pub username: SensitiveString,
+    pub url: SensitiveString,
+    pub notes: SensitiveString,
     pub modified_at: u64,
     pub custom_fields: Vec<EntryCustomFieldDto>,
     pub attachments: Vec<EntryAttachmentDto>,
 }
+
+impl fmt::Debug for EntryHistoryDetailDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryHistoryDetailDto([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryHistoryDetailDto {
+    fn zeroize(&mut self) {
+        self.entry_id.zeroize();
+        self.title.zeroize();
+        self.username.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        self.custom_fields.zeroize();
+        for attachment in &mut self.attachments {
+            attachment.name.zeroize();
+        }
+        self.attachments.clear();
+    }
+}
+
+impl ZeroizeOnDrop for EntryHistoryDetailDto {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1091,13 +1279,28 @@ pub struct EntryFieldProtectionDto {
     pub protect_notes: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryCustomFieldDto {
     pub key: String,
-    pub value: String,
+    pub value: SensitiveString,
     pub protected: bool,
 }
+
+impl fmt::Debug for EntryCustomFieldDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryCustomFieldDto([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryCustomFieldDto {
+    fn zeroize(&mut self) {
+        self.key.zeroize();
+        self.value.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryCustomFieldDto {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1107,13 +1310,28 @@ pub struct EntryAttachmentDto {
     pub protect_in_memory: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryAttachmentContentDto {
     pub name: String,
-    pub data_base64: String,
+    pub data_base64: SensitiveString,
     pub protect_in_memory: bool,
 }
+
+impl fmt::Debug for EntryAttachmentContentDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryAttachmentContentDto([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryAttachmentContentDto {
+    fn zeroize(&mut self) {
+        self.name.zeroize();
+        self.data_base64.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryAttachmentContentDto {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

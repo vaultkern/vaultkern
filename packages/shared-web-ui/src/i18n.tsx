@@ -23,7 +23,12 @@ type TranslationKey =
   | "Needs repair in manager"
   | "Extension Settings"
   | "Local extension preferences. These are not stored in the KDBX database."
+  | "Browser Extension Settings"
+  | "Windows Settings"
+  | "Local browser extension preferences. These are not stored in the KDBX database."
+  | "Local Windows app preferences. These are not stored in the KDBX database."
   | "Save Extension Settings"
+  | "Save Windows Settings"
   | "Saving..."
   | "Database Settings"
   | "Recent Databases"
@@ -31,6 +36,8 @@ type TranslationKey =
   | "Clear Clipboard Seconds"
   | "Language"
   | "VaultKern passkey provider"
+  | "Browser passkey proxy"
+  | "Windows passkey provider"
   | "Page-load autofill"
   | "Quick Unlock"
   | "Quick Unlock Master Password"
@@ -185,6 +192,7 @@ type TranslationKey =
   | "Retry save"
   | "Failed to save extension settings"
   | "Failed to update quick unlock"
+  | "Failed to reconcile Windows settings"
   | "Failed to add local vault"
   | "Failed to add OneDrive vault"
   | "Failed to save entry changes"
@@ -197,6 +205,7 @@ type TranslationKey =
   | "Failed to delete attachment"
   | "Failed to save database settings"
   | "Failed to load entry history"
+  | "Failed to load settings"
   | "Failed to load session state"
   | "Failed to load groups"
   | "Failed to load entries"
@@ -243,7 +252,12 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Needs repair in manager": "需要在管理器中修复",
   "Extension Settings": "插件设置",
   "Local extension preferences. These are not stored in the KDBX database.": "本地插件偏好设置，不会保存到 KDBX 数据库。",
+  "Browser Extension Settings": "浏览器插件设置",
+  "Windows Settings": "Windows 设置",
+  "Local browser extension preferences. These are not stored in the KDBX database.": "本地浏览器插件偏好设置，不会保存到 KDBX 数据库。",
+  "Local Windows app preferences. These are not stored in the KDBX database.": "本地 Windows 应用偏好设置，不会保存到 KDBX 数据库。",
   "Save Extension Settings": "保存插件设置",
+  "Save Windows Settings": "保存 Windows 设置",
   "Saving...": "保存中...",
   "Database Settings": "数据库设置",
   "Recent Databases": "最近数据库",
@@ -251,6 +265,8 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Clear Clipboard Seconds": "清空剪贴板秒数",
   Language: "语言",
   "VaultKern passkey provider": "VaultKern 通行密钥提供器",
+  "Browser passkey proxy": "浏览器通行密钥代理",
+  "Windows passkey provider": "Windows 通行密钥提供器",
   "Page-load autofill": "页面加载时自动填充",
   "Quick Unlock": "快速解锁",
   "Quick Unlock Master Password": "快速解锁主密码",
@@ -405,6 +421,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Retry save": "重试保存",
   "Failed to save extension settings": "保存插件设置失败",
   "Failed to update quick unlock": "更新快速解锁失败",
+  "Failed to reconcile Windows settings": "协调 Windows 设置失败",
   "Failed to add local vault": "添加本地数据库失败",
   "Failed to add OneDrive vault": "添加 OneDrive 数据库失败",
   "Failed to save entry changes": "保存条目更改失败",
@@ -417,6 +434,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Failed to delete attachment": "删除附件失败",
   "Failed to save database settings": "保存数据库设置失败",
   "Failed to load entry history": "加载条目历史失败",
+  "Failed to load settings": "加载设置失败",
   "Failed to load session state": "加载会话状态失败",
   "Failed to load groups": "加载分组失败",
   "Failed to load entries": "加载条目失败",

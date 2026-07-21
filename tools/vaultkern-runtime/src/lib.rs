@@ -11,11 +11,11 @@ mod sync;
 mod unlock;
 mod vault_reference_store;
 
-pub use command_loop::run_stdio_loop;
+pub use command_loop::{install_redacted_panic_hook, run_stdio_loop};
 pub use native_host::render_manifest;
 pub use passkey::{
     PlatformPasskeyAssertionInput, PlatformPasskeyAssertionOutput, PlatformPasskeyCredential,
     PlatformPasskeyRegistrationInput, PlatformPasskeyRegistrationOutput,
 };
-pub use runtime::Runtime;
+pub use runtime::{QuickUnlockReconciliationCredentials, Runtime};
 pub use state_paths::is_supported_browser_origin;

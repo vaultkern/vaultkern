@@ -152,9 +152,7 @@ export interface EntryPasskey {
   backupState: boolean;
 }
 
-export interface EntryPasskeyUpdate extends EntryPasskey {
-  privateKeyPem: string | null;
-}
+export type EntryPasskeyUpdate = EntryPasskey;
 
 export interface EntryFieldProtection {
   protectTitle: boolean;
@@ -225,7 +223,6 @@ export interface EntryHistoryDetail {
   historyIndex: number;
   title: string;
   username: string;
-  password: string;
   url: string;
   notes: string;
   modifiedAt: number;
@@ -354,7 +351,6 @@ export interface OneDriveAuthSession {
   type: "one_drive_auth_session";
   authUrl: string;
   redirectUri: string;
-  codeVerifier: string;
   expiresInSeconds: number;
 }
 
@@ -375,12 +371,6 @@ export interface OneDriveItem {
 export interface OneDriveItemList {
   type: "one_drive_item_list";
   items: OneDriveItem[];
-}
-
-export interface CompleteOneDriveLoginInput {
-  code: string;
-  redirectUri: string;
-  codeVerifier: string;
 }
 
 interface RuntimeErrorResponse {
@@ -431,17 +421,6 @@ export class RuntimeClient {
   async beginOneDriveLogin(): Promise<OneDriveAuthSession> {
     return this.sendCommand<OneDriveAuthSession>({
       type: "begin_one_drive_login"
-    });
-  }
-
-  async completeOneDriveLogin(
-    input: CompleteOneDriveLoginInput
-  ): Promise<OneDriveAuthStatus> {
-    return this.sendCommand<OneDriveAuthStatus>({
-      type: "complete_one_drive_login",
-      code: input.code,
-      redirect_uri: input.redirectUri,
-      code_verifier: input.codeVerifier
     });
   }
 
@@ -867,6 +846,11 @@ export class RuntimeClient {
 }
 
 export type { RuntimeTransport };
+export {
+  RUNTIME_PROTOCOL_VERSION,
+  createNegotiatedRuntimeTransport
+} from "./transport";
+export type { RuntimeHandshake } from "./transport";
 
 function isRuntimeErrorResponse(value: unknown): value is RuntimeErrorResponse {
   return (

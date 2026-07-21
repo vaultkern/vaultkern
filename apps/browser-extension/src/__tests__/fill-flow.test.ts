@@ -2041,7 +2041,7 @@ describe("PopupShell fill flow", () => {
     expect(screen.queryByText("secret-123")).not.toBeInTheDocument();
   });
 
-  it("enables quick unlock during the first popup password unlock when the extension preference is on", async () => {
+  it("never provisions resident quick unlock from a popup password unlock", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       storage: {
         local: {
@@ -2052,7 +2052,7 @@ describe("PopupShell fill flow", () => {
                 language: "en",
                 idleLockMinutes: 0,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: false,
+                browserPasskeyProxyEnabled: false,
                 quickUnlockEnabled: true
               }
             })
@@ -2122,11 +2122,8 @@ describe("PopupShell fill flow", () => {
         password: "demo-password",
         keyFilePath: ""
       });
-      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledWith({
-        password: "demo-password",
-        keyFilePath: ""
-      });
     });
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 
   it("does not provision quick unlock after popup unlock when biometric unlock is unsupported", async () => {
@@ -2140,7 +2137,7 @@ describe("PopupShell fill flow", () => {
                 language: "en",
                 idleLockMinutes: 0,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: false,
+                browserPasskeyProxyEnabled: false,
                 quickUnlockEnabled: true
               }
             })
@@ -2208,7 +2205,7 @@ describe("PopupShell fill flow", () => {
     expect(screen.queryByText("Failed to update quick unlock")).not.toBeInTheDocument();
   });
 
-  it("enables quick unlock during the first popup key-file-only unlock when the extension preference is on", async () => {
+  it("never provisions resident quick unlock from a popup key-file-only unlock", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       storage: {
         local: {
@@ -2219,7 +2216,7 @@ describe("PopupShell fill flow", () => {
                 language: "en",
                 idleLockMinutes: 0,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: false,
+                browserPasskeyProxyEnabled: false,
                 quickUnlockEnabled: true
               }
             })
@@ -2289,11 +2286,11 @@ describe("PopupShell fill flow", () => {
         password: "",
         keyFilePath: "/tmp/demo.keyx"
       });
-      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
     });
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
   });
 
-  it("enables quick unlock when the popup unlocks before recent vaults finish loading", async () => {
+  it("unlocks without provisioning quick unlock while recent vaults are still loading", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       storage: {
         local: {
@@ -2304,7 +2301,7 @@ describe("PopupShell fill flow", () => {
                 language: "en",
                 idleLockMinutes: 0,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: false,
+                browserPasskeyProxyEnabled: false,
                 quickUnlockEnabled: true
               }
             })
@@ -2386,20 +2383,21 @@ describe("PopupShell fill flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
 
     await waitFor(() => {
-      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledTimes(1);
     });
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 
     slowVaults.resolve(loadedVaults);
   });
 
-  it("uses the saved quick unlock preference when unlocking before popup settings finish loading", async () => {
+  it("does not wait for browser settings before unlocking or provision resident quick unlock", async () => {
     const storageCallbacks: Array<(items: Record<string, unknown>) => void> = [];
     const savedSettings = {
       recentVaultLimit: 10,
       language: "en",
       idleLockMinutes: 0,
       clearClipboardSeconds: 30,
-      passkeyProviderEnabled: false,
+      browserPasskeyProxyEnabled: false,
       quickUnlockEnabled: true
     };
     const resolveSavedSettings = () => {
@@ -2476,14 +2474,11 @@ describe("PopupShell fill flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
 
     await waitFor(() => {
+      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledTimes(1);
       expect(storageCallbacks.length).toBeGreaterThan(0);
     });
+    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
     resolveSavedSettings();
-
-    await waitFor(() => {
-      resolveSavedSettings();
-      expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
-    });
   });
 
   it("keeps the popup unlocked when quick unlock vault refresh fails after unlock", async () => {
@@ -2497,7 +2492,7 @@ describe("PopupShell fill flow", () => {
                 language: "en",
                 idleLockMinutes: 0,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: false,
+                browserPasskeyProxyEnabled: false,
                 quickUnlockEnabled: true
               }
             })
