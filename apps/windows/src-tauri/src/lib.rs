@@ -31,7 +31,7 @@ pub fn should_refresh_platform_passkeys(
         command_type,
         Some(
             "add_local_vault_reference"
-                | "add_onedrive_vault_reference"
+                | "add_one_drive_vault_reference"
                 | "open_local_vault"
                 | "delete_vault_reference"
                 | "retry_vault_source_sync"
@@ -86,6 +86,10 @@ mod tests {
         ));
         assert!(should_refresh_platform_passkeys(
             Some("add_local_vault_reference"),
+            &json!({ "type": "vault_reference" })
+        ));
+        assert!(should_refresh_platform_passkeys(
+            Some("add_one_drive_vault_reference"),
             &json!({ "type": "vault_reference" })
         ));
         assert!(!should_refresh_platform_passkeys(

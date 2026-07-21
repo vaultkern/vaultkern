@@ -9,6 +9,7 @@ import {
   waitFor
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import type { DatabaseSettingsUpdate } from "@vaultkern/runtime-web-client";
 import { App, type RuntimeClientLike } from "../App";
 import { DEFAULT_EXTENSION_SETTINGS } from "../extensionSettings";
 import type { ExtensionSettings, ExtensionSettingsStore } from "../extensionSettings";
@@ -1283,6 +1284,44 @@ it("loads database settings and preserves a conflict-copy warning after saving",
     await screen.findByText(/Local edits were saved to a conflict copy:/)
   ).toHaveTextContent("C:\\Vaults\\Archive.conflict.kdbx");
   expect(screen.queryByText("Database settings saved.")).not.toBeInTheDocument();
+});
+
+it("preserves a default autosave delay when saving unrelated database settings", async () => {
+  const baseClient = createVaultSelectionMethods();
+  const initialSettings = await baseClient.getDatabaseSettings();
+  const updateDatabaseSettings = vi.fn(
+    async (_vaultId: string, _update: DatabaseSettingsUpdate) => ({
+      ...initialSettings,
+      metadata: { ...initialSettings.metadata, name: "Engineering" }
+    })
+  );
+  const client = {
+    ...baseClient,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    updateDatabaseSettings,
+    saveVault: vi.fn(async () => ({
+      type: "save_vault_result" as const,
+      status: "saved" as const
+    }))
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Engineering" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+  await waitFor(() => expect(updateDatabaseSettings).toHaveBeenCalledTimes(1));
+  expect(updateDatabaseSettings.mock.calls[0]?.[1]).not.toHaveProperty(
+    "autosaveDelaySeconds"
+  );
 });
 
 it("retries a failed database settings save without updating settings again", async () => {
@@ -3741,10 +3780,16 @@ it("retries a failed delete save without deleting the entry again", async () => 
   expect(deleteEntry).toHaveBeenCalledTimes(1);
   expect(saveVault).toHaveBeenCalledTimes(1);
 
-  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Statistics", hidden: true })
+  );
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Discard changes" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
   await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
   expect(deleteEntry).toHaveBeenCalledTimes(1);
+  expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
 });
 
 it("generates a password into the entry editor only after explicit use", async () => {

@@ -319,6 +319,7 @@ function createDraft(settings: DatabaseSettings | null): Draft {
 
 function createUpdate(settings: DatabaseSettings, draft: Draft): DatabaseSettingsUpdate {
   const kdf: DatabaseKdfSettings = settings.encryption.kdf;
+  const autosaveDelaySeconds = parseOptionalInteger(draft.autosaveDelaySeconds);
   const encryption: DatabaseEncryptionSettings = {
     compression: draft.compression,
     cipher: draft.cipher,
@@ -344,7 +345,7 @@ function createUpdate(settings: DatabaseSettings, draft: Draft): DatabaseSetting
       enabled: draft.recycleBinEnabled
     },
     encryption,
-    autosaveDelaySeconds: parseOptionalInteger(draft.autosaveDelaySeconds) ?? 0
+    ...(autosaveDelaySeconds === null ? {} : { autosaveDelaySeconds })
   };
 }
 

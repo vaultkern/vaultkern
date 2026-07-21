@@ -792,7 +792,8 @@ export function App({
   const pendingDetailSave = pendingAttachmentSave || pendingPasskeySave;
   const hasPendingEntrySave = Boolean(pendingEntrySave || pendingDetailSave);
   const hasPendingDurableSave =
-    hasPendingEntrySave || Boolean(pendingDatabaseSettingsVaultId);
+    hasPendingEntrySave ||
+    Boolean(pendingEntryDelete || pendingDatabaseSettingsVaultId);
   const draftDirty =
     editorMode === "create-pending"
       ? hasDraftChangesFromEmpty(draft)
@@ -997,6 +998,7 @@ export function App({
 
     try {
       const hadPendingDatabaseSettings = Boolean(pendingDatabaseSettingsVaultId);
+      const pendingDelete = pendingEntryDelete;
       const hadDatabaseSettingsDraft = Boolean(
         showDatabaseSettingsPage && databaseSettingsDraftDirty && databaseSettingsDraftUpdate
       );
@@ -1011,6 +1013,8 @@ export function App({
           ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate!)
           : hadExtensionSettingsDraft
             ? await saveExtensionSettings(extensionSettingsDraft!)
+            : pendingDelete
+              ? await handleDeleteEntry(pendingDelete.entryId)
             : pendingDetailSave
               ? await retryPendingDetailSave()
               : true;
@@ -1018,6 +1022,7 @@ export function App({
         saved &&
         !handledDatabaseSettings &&
         !hadExtensionSettingsDraft &&
+        !pendingDelete &&
         (draftDirty || !pendingDetailSave)
       ) {
         saved = await saveDraft();
@@ -1048,7 +1053,7 @@ export function App({
               ? "Save your database settings before leaving, discard your edits, or continue editing."
               : showExtensionSettingsPage && extensionSettingsDraftDirty
                 ? "Save your extension settings before leaving, discard your edits, or continue editing."
-                : hasPendingEntrySave
+                : hasPendingEntrySave || pendingEntryDelete
                   ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
                   : "Save before leaving this entry, discard your edits, or continue editing."
         )}
@@ -1085,7 +1090,7 @@ export function App({
 
   async function handleDeleteEntry(entryId: string) {
     if (!session?.activeVaultId) {
-      return;
+      return false;
     }
 
     const vaultId = session.activeVaultId;
@@ -1108,6 +1113,7 @@ export function App({
       clearDetailSelection();
       setWorkspaceReloadKey((current) => current + 1);
       setDialogState(null);
+      return true;
     } catch (deleteError) {
       setEntryActionError(
         errorMessage(
@@ -1118,6 +1124,7 @@ export function App({
       if (!mutationApplied) {
         setDialogState(null);
       }
+      return false;
     } finally {
       setEntryActionBusy(false);
     }
