@@ -9,7 +9,10 @@ import {
   waitFor
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { DatabaseSettingsUpdate } from "@vaultkern/runtime-web-client";
+import type {
+  DatabaseSettings,
+  DatabaseSettingsUpdate
+} from "@vaultkern/runtime-web-client";
 import { App, type RuntimeClientLike } from "../App";
 import { DEFAULT_EXTENSION_SETTINGS } from "../extensionSettings";
 import type { ExtensionSettings, ExtensionSettingsStore } from "../extensionSettings";
@@ -66,7 +69,7 @@ function createVaultSelectionMethods() {
     replaceEntryAttachmentContent: vi.fn(),
     deleteEntryAttachment: vi.fn(),
     retryVaultSourceSync: vi.fn(),
-    getDatabaseSettings: vi.fn(async () => ({
+    getDatabaseSettings: vi.fn(async (): Promise<DatabaseSettings> => ({
       type: "database_settings" as const,
       metadata: { name: "The Archive", description: null, defaultUsername: null },
       publicMetadata: { displayName: null, color: null, icon: null },
@@ -3257,6 +3260,7 @@ it("shows remote cache warning and retries source sync", async () => {
 it("rebases an unsaved entry draft after source sync", async () => {
   let sourceRestored = false;
   const initialDetail = {
+    type: "entry_detail" as const,
     id: "entry-shared",
     title: "Cached Entry",
     username: "cached-user",
