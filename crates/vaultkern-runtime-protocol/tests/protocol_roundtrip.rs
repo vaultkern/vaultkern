@@ -552,7 +552,7 @@ fn protocol_roundtrips_entry_passkey_commands() {
     let set = ProtocolEnvelope::new(RuntimeCommand::SetEntryPasskey {
         vault_id: "vault-1".into(),
         entry_id: "entry-1".into(),
-        passkey: passkey.clone(),
+        passkey,
     });
     let clear = ProtocolEnvelope::new(RuntimeCommand::ClearEntryPasskey {
         vault_id: "vault-1".into(),
@@ -789,8 +789,13 @@ fn protocol_roundtrips_entry_mutation_commands() {
         custom_fields: vec![],
     };
     let desired_fields = EntryFieldsDto {
+        title: "Example".into(),
+        username: "alice".into(),
         password: "secret-2".into(),
-        ..expected_fields.clone()
+        url: "https://example.com".into(),
+        notes: "demo".into(),
+        totp_uri: None,
+        custom_fields: vec![],
     };
     let create = ProtocolEnvelope::new(RuntimeCommand::CreateEntry {
         vault_id: "vault-1".into(),
@@ -822,8 +827,8 @@ fn protocol_roundtrips_entry_mutation_commands() {
     let compare_and_update = ProtocolEnvelope::new(RuntimeCommand::CompareAndUpdateEntryFields {
         vault_id: "vault-1".into(),
         entry_id: "entry-1".into(),
-        expected_fields: expected_fields.clone(),
-        desired_fields: desired_fields.clone(),
+        expected_fields,
+        desired_fields,
     });
     let clear_totp = ProtocolEnvelope::new(RuntimeCommand::ClearEntryTotp {
         vault_id: "vault-1".into(),
@@ -885,18 +890,14 @@ fn protocol_accepts_runtime_web_client_atomic_entry_field_shape() {
 
 #[test]
 fn protocol_roundtrips_atomic_autofill_persist_plans_with_snake_case_commands() {
-    let expected_fields = EntryFieldsDto {
+    let fields = |password: &str| EntryFieldsDto {
         title: "Example".into(),
         username: "alice".into(),
-        password: "old-secret".into(),
+        password: password.into(),
         url: "https://example.com/login".into(),
         notes: String::new(),
         totp_uri: None,
         custom_fields: vec![],
-    };
-    let desired_fields = EntryFieldsDto {
-        password: "new-secret".into(),
-        ..expected_fields.clone()
     };
     let update = ProtocolEnvelope::new(RuntimeCommand::PersistAutofillMutation {
         transaction_id: "transaction-1".into(),
@@ -904,8 +905,8 @@ fn protocol_roundtrips_atomic_autofill_persist_plans_with_snake_case_commands() 
         vault_id: "vault-1".into(),
         plan: AutofillPersistPlanDto::Update {
             entry_id: "entry-1".into(),
-            expected_fields: expected_fields.clone(),
-            desired_fields: desired_fields.clone(),
+            expected_fields: fields("old-secret"),
+            desired_fields: fields("new-secret"),
         },
     });
     let create = ProtocolEnvelope::new(RuntimeCommand::PersistAutofillMutation {
@@ -916,7 +917,7 @@ fn protocol_roundtrips_atomic_autofill_persist_plans_with_snake_case_commands() 
             parent_group_id: "group-root".into(),
             planned_entry_id: "12345678-1234-4abc-8def-1234567890ab".into(),
             expected_matching_entry_ids: vec!["entry-existing".into()],
-            desired_fields,
+            desired_fields: fields("new-secret"),
         },
     });
 

@@ -124,14 +124,33 @@ pub fn three_way_field_patch(
     )?;
     ensure_local_sibling_order_representable(&base_flat, &local_flat, &remote_flat)?;
 
+    let locally_preserved_subtrees =
+        changed_subtrees_deleted_from_other(&base_flat, &local_flat, &remote_flat);
+    let remotely_preserved_subtrees =
+        changed_subtrees_deleted_from_other(&base_flat, &remote_flat, &local_flat);
     let mut report = ThreeWayPatchReport::default();
-    let mut groups = merge_groups(&base_flat, &local_flat, &remote_flat, &mut report)?;
+    let mut groups = merge_groups(
+        &base_flat,
+        &local_flat,
+        &remote_flat,
+        &locally_preserved_subtrees,
+        &remotely_preserved_subtrees,
+        &mut report,
+    )?;
     reconcile_group_sibling_orders(&base_flat, &local_flat, &remote_flat, &mut groups)?;
     validate_group_hierarchy(base_flat.root_id, &groups)?;
-    let mut entries = merge_entries(&base_flat, &local_flat, &remote_flat, &groups, &mut report)?;
+    let mut entries = merge_entries(
+        &base_flat,
+        &local_flat,
+        &remote_flat,
+        &groups,
+        &locally_preserved_subtrees,
+        &remotely_preserved_subtrees,
+        &mut report,
+    )?;
     reconcile_entry_sibling_orders(&base_flat, &local_flat, &remote_flat, &mut entries)?;
     let root = rebuild_tree(base_flat.root_id, &groups, &entries, &mut BTreeSet::new())?;
-    let mut vault = merge_meta(base, local, remote, &mut report);
+    let mut vault = merge_meta(base, local, remote, &mut report)?;
     vault
         .deleted_objects
         .retain(|deleted| !groups.contains_key(&deleted.id) && !entries.contains_key(&deleted.id));
@@ -645,6 +664,8 @@ fn merge_entries(
     local: &FlatVault,
     remote: &FlatVault,
     groups: &BTreeMap<Uuid, FlatGroup>,
+    locally_preserved_subtrees: &BTreeSet<Uuid>,
+    remotely_preserved_subtrees: &BTreeSet<Uuid>,
     report: &mut ThreeWayPatchReport,
 ) -> Result<BTreeMap<Uuid, FlatEntry>, ThreeWayPatchError> {
     let ids = union_keys3(&base.entries, &local.entries, &remote.entries);
@@ -664,12 +685,20 @@ fn merge_entries(
                 }
             }
             (Some(_), None, None) => None,
-            (Some(base), Some(local), None) => {
-                (!same_entry_record(base, local)).then(|| local.clone())
-            }
-            (Some(base), None, Some(remote)) => {
-                (!same_entry_record(base, remote)).then(|| remote.clone())
-            }
+            (Some(base), Some(local_entry), None) => (!same_entry_record(base, local_entry)
+                || belongs_to_preserved_subtree(
+                    local_entry.parent,
+                    local,
+                    locally_preserved_subtrees,
+                ))
+            .then(|| local_entry.clone()),
+            (Some(base), None, Some(remote_entry)) => (!same_entry_record(base, remote_entry)
+                || belongs_to_preserved_subtree(
+                    remote_entry.parent,
+                    remote,
+                    remotely_preserved_subtrees,
+                ))
+            .then(|| remote_entry.clone()),
             (Some(base), Some(local), Some(remote)) => {
                 let (value, changed) =
                     merge_entry(&base.value, &local.value, &remote.value, report);
@@ -723,6 +752,8 @@ fn merge_groups(
     base: &FlatVault,
     local: &FlatVault,
     remote: &FlatVault,
+    locally_preserved_subtrees: &BTreeSet<Uuid>,
+    remotely_preserved_subtrees: &BTreeSet<Uuid>,
     report: &mut ThreeWayPatchReport,
 ) -> Result<BTreeMap<Uuid, FlatGroup>, ThreeWayPatchError> {
     let ids = union_keys3(&base.groups, &local.groups, &remote.groups);
@@ -743,20 +774,23 @@ fn merge_groups(
             }
             (Some(_), None, None) => None,
             (Some(_), Some(local_group), None) => {
-                subtree_changed(base, local, id).then(|| local_group.clone())
+                belongs_to_preserved_subtree(id, local, locally_preserved_subtrees)
+                    .then(|| local_group.clone())
             }
             (Some(_), None, Some(remote_group)) => {
-                subtree_changed(base, remote, id).then(|| remote_group.clone())
+                belongs_to_preserved_subtree(id, remote, remotely_preserved_subtrees)
+                    .then(|| remote_group.clone())
             }
             (Some(base_group), Some(local_group), Some(remote_group)) => {
                 let local_timestamp = group_modified_at(&local_group.value);
                 let remote_timestamp = group_modified_at(&remote_group.value);
                 let (mut value, changed) = merge_group_fields(
+                    id,
                     &base_group.value,
                     &local_group.value,
                     &remote_group.value,
                     local_timestamp > remote_timestamp,
-                );
+                )?;
                 let (parent, location_changed_at, _, location_prefers_local) =
                     match (base_group.parent, local_group.parent, remote_group.parent) {
                         (None, None, None) => {
@@ -959,11 +993,12 @@ fn merge_entry(
 }
 
 fn merge_group_fields(
+    id: Uuid,
     base: &Group,
     local: &Group,
     remote: &Group,
     prefer_local: bool,
-) -> (Group, bool) {
+) -> Result<(Group, bool), ThreeWayPatchError> {
     let mut state = FieldMerge::default();
     let mut merged = remote.clone();
     merged.entries.clear();
@@ -1014,7 +1049,14 @@ fn merge_group_fields(
         &merged.custom_data,
         None,
     );
-    (merged, state.changed_from_remote || state.conflict)
+    if state.conflict {
+        return Err(ThreeWayPatchError::FidelityConflict {
+            object: "group",
+            id: Some(id),
+            field: "modeled field",
+        });
+    }
+    Ok((merged, state.changed_from_remote))
 }
 
 fn merge_meta(
@@ -1022,7 +1064,7 @@ fn merge_meta(
     local: &Vault,
     remote: &Vault,
     report: &mut ThreeWayPatchReport,
-) -> Vault {
+) -> Result<Vault, ThreeWayPatchError> {
     let prefer_local = local.settings_changed.unwrap_or(0) > remote.settings_changed.unwrap_or(0);
     let mut state = FieldMerge::default();
     let mut merged = remote.clone();
@@ -1127,9 +1169,13 @@ fn merge_meta(
     merged.custom_icons = icons;
     report.icon_conflicts_resolved += icon_conflicts;
     if state.conflict {
-        report.meta_conflicts_resolved += 1;
+        return Err(ThreeWayPatchError::FidelityConflict {
+            object: "meta",
+            id: None,
+            field: "modeled field",
+        });
     }
-    merged
+    Ok(merged)
 }
 
 fn merge_value<T: Clone + Eq>(
@@ -1274,12 +1320,45 @@ fn subtree_changed(base: &FlatVault, side: &FlatVault, root: Uuid) -> bool {
             return true;
         }
     }
-    side.groups
-        .iter()
-        .any(|(id, _)| !base.groups.contains_key(id) && group_is_below_or_same(side, *id, root))
-        || side.entries.iter().any(|(id, entry)| {
-            !base.entries.contains_key(id) && group_is_below_or_same(side, entry.parent, root)
+    side.groups.iter().any(|(id, group)| {
+        group_is_below_or_same(side, *id, root)
+            && base
+                .groups
+                .get(id)
+                .is_none_or(|base_group| !same_group_record(base_group, group))
+    }) || side.entries.iter().any(|(id, entry)| {
+        group_is_below_or_same(side, entry.parent, root)
+            && base
+                .entries
+                .get(id)
+                .is_none_or(|base_entry| !same_entry_record(base_entry, entry))
+    })
+}
+
+fn changed_subtrees_deleted_from_other(
+    base: &FlatVault,
+    survivor: &FlatVault,
+    other: &FlatVault,
+) -> BTreeSet<Uuid> {
+    base.groups
+        .keys()
+        .copied()
+        .filter(|id| {
+            survivor.groups.contains_key(id)
+                && !other.groups.contains_key(id)
+                && subtree_changed(base, survivor, *id)
         })
+        .collect()
+}
+
+fn belongs_to_preserved_subtree(
+    group_id: Uuid,
+    survivor: &FlatVault,
+    preserved_subtrees: &BTreeSet<Uuid>,
+) -> bool {
+    preserved_subtrees
+        .iter()
+        .any(|root| group_is_below_or_same(survivor, group_id, *root))
 }
 
 fn subtrees_equal(left: &FlatVault, right: &FlatVault, root: Uuid) -> bool {

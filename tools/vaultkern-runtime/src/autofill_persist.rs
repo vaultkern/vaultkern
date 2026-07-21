@@ -89,14 +89,14 @@ enum ReceiptMode {
     Create,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ValidatedFields {
     dto: EntryFieldsDto,
     custom_fields: BTreeMap<String, CustomField>,
     totp: Option<TotpSpec>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum ValidatedPlan {
     Update {
         entry_id: String,
@@ -1124,7 +1124,23 @@ fn validate_fields(
         return invalid_plan(format!("{name} is too large"));
     }
     Ok(ValidatedFields {
-        dto: fields.clone(),
+        dto: EntryFieldsDto {
+            title: fields.title.clone(),
+            username: fields.username.clone(),
+            password: fields.password.clone(),
+            url: fields.url.clone(),
+            notes: fields.notes.clone(),
+            totp_uri: fields.totp_uri.clone(),
+            custom_fields: fields
+                .custom_fields
+                .iter()
+                .map(|field| vaultkern_runtime_protocol::EntryCustomFieldDto {
+                    key: field.key.clone(),
+                    value: field.value.clone(),
+                    protected: field.protected,
+                })
+                .collect(),
+        },
         custom_fields,
         totp,
     })
@@ -1986,6 +2002,7 @@ fn conflict<T>(code: AutofillPersistConflictCodeDto) -> Result<T, AutofillPersis
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Serialize, de::DeserializeOwned};
     use vaultkern_core::{DeletedObject, EntryCreate, EntryUpdate, KeepassCore, TotpSpec, Vault};
     use vaultkern_runtime_protocol::{
         AutofillPersistConflictCodeDto, AutofillPersistPlanDto, EntryCustomFieldDto, EntryFieldsDto,
@@ -2003,6 +2020,17 @@ mod tests {
     const OPERATION_ID: &str = "operation-1";
     const NOW_MS: u64 = 1_800_000_000_000;
     const TOTP_URI: &str = "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&issuer=Example&algorithm=SHA256&digits=8&period=45";
+
+    trait DuplicateForTest: Sized + Serialize + DeserializeOwned {
+        fn duplicate_for_test(&self) -> Self {
+            serde_json::from_slice(
+                &serde_json::to_vec(self).expect("serialize test value for explicit duplication"),
+            )
+            .expect("deserialize explicitly duplicated test value")
+        }
+    }
+
+    impl<T> DuplicateForTest for T where T: Sized + Serialize + DeserializeOwned {}
 
     fn fields(password: &str) -> EntryFieldsDto {
         EntryFieldsDto {
@@ -2268,7 +2296,7 @@ mod tests {
     fn plan_digest_is_domain_separated_length_prefixed_and_canonical() {
         let expected = fields_with_custom("old-secret", true);
         let desired = fields_with_custom("new-secret", false);
-        let plan = update_plan(expected.clone(), desired.clone());
+        let plan = update_plan(expected.duplicate_for_test(), desired.duplicate_for_test());
 
         let digest = plan_sha256(TRANSACTION_ID, VAULT_ID, SOURCE_SHA, &plan).unwrap();
         assert_eq!(
@@ -2596,16 +2624,16 @@ mod tests {
         let current = vault_with_entry(&expected);
         let parent = current.root.id.to_string();
         let invalid_plans = [
-            update_plan(expected.clone(), fields("")),
+            update_plan(expected.duplicate_for_test(), fields("")),
             update_plan(
-                expected.clone(),
+                expected.duplicate_for_test(),
                 EntryFieldsDto {
                     url: "javascript:alert(1)".into(),
                     ..fields("new-secret")
                 },
             ),
             update_plan(
-                expected.clone(),
+                expected.duplicate_for_test(),
                 EntryFieldsDto {
                     url: "https://other.example/login".into(),
                     ..fields("new-secret")
@@ -2655,7 +2683,7 @@ mod tests {
         let prepared = execute(
             &current,
             &current,
-            &update_plan(expected.clone(), desired.clone()),
+            &update_plan(expected.duplicate_for_test(), desired.duplicate_for_test()),
         )
         .unwrap();
 
@@ -2677,7 +2705,7 @@ mod tests {
         let expected = fields("old-secret");
         let desired = EntryFieldsDto {
             password: "new-secret".into(),
-            ..expected.clone()
+            ..expected.duplicate_for_test()
         };
         let mut current = vault_with_entry(&expected);
         let entry = find_entry_mut(&mut current, ENTRY_ID).unwrap();
@@ -2711,7 +2739,7 @@ mod tests {
         let expected = fields_with_custom_and_totp("old-secret");
         let desired = EntryFieldsDto {
             password: "new-secret".into(),
-            ..expected.clone()
+            ..expected.duplicate_for_test()
         };
         let mut current = vault_with_entry(&expected);
         let entry = find_entry_mut(&mut current, ENTRY_ID).unwrap();
@@ -2732,7 +2760,12 @@ mod tests {
         let desired = fields_with_custom_and_totp("secret");
         let current = vault_with_entry(&desired);
 
-        let prepared = execute(&current, &current, &update_plan(desired.clone(), desired)).unwrap();
+        let prepared = execute(
+            &current,
+            &current,
+            &update_plan(desired.duplicate_for_test(), desired),
+        )
+        .unwrap();
 
         assert!(
             find_entry(&prepared.candidate, ENTRY_ID)
@@ -2791,7 +2824,12 @@ mod tests {
             },
         );
 
-        let prepared = execute(&current, &current, &update_plan(desired.clone(), desired)).unwrap();
+        let prepared = execute(
+            &current,
+            &current,
+            &update_plan(desired.duplicate_for_test(), desired),
+        )
+        .unwrap();
         let entry = find_entry(&prepared.candidate, ENTRY_ID).unwrap().0;
 
         assert!(entry.field_protection.protect_username);
@@ -2806,7 +2844,11 @@ mod tests {
         let prepared = execute(
             &current,
             &current,
-            &create_plan(&current.root.id.to_string(), vec![], desired.clone()),
+            &create_plan(
+                &current.root.id.to_string(),
+                vec![],
+                desired.duplicate_for_test(),
+            ),
         )
         .unwrap();
 
@@ -2915,7 +2957,7 @@ mod tests {
         let desired = fields("new-secret");
         let desired_current = vault_with_entry(&desired);
         let base = desired_current.clone();
-        let plan = update_plan(expected.clone(), desired.clone());
+        let plan = update_plan(expected.duplicate_for_test(), desired.duplicate_for_test());
 
         let prepared = execute(&base, &desired_current, &plan).unwrap();
         assert_eq!(history_count(&prepared.candidate, ENTRY_ID), 0);
@@ -3112,7 +3154,7 @@ mod tests {
             &original,
             &local,
             &deleted,
-            &update_plan(expected.clone(), desired.clone()),
+            &update_plan(expected.duplicate_for_test(), desired.duplicate_for_test()),
         )
         .unwrap()
         .candidate;
@@ -3572,7 +3614,7 @@ mod tests {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let original = vault_with_entry(&expected);
-        let plan = update_plan(expected.clone(), desired.clone());
+        let plan = update_plan(expected.duplicate_for_test(), desired.duplicate_for_test());
         let base_with_receipt = execute(&original, &original, &plan).unwrap().candidate;
 
         let mut current_desired = base_with_receipt.clone();
@@ -3702,7 +3744,11 @@ mod tests {
         let desired = fields("secret");
         let mut collision = empty_vault();
         add_entry(&mut collision, PLANNED_ID, &fields("different"));
-        let collision_plan = create_plan(&collision.root.id.to_string(), vec![], desired.clone());
+        let collision_plan = create_plan(
+            &collision.root.id.to_string(),
+            vec![],
+            desired.duplicate_for_test(),
+        );
         assert_eq!(
             execute(&collision, &collision, &collision_plan),
             Err(AutofillPersistEngineError::Conflict(
@@ -3731,7 +3777,7 @@ mod tests {
         let adopted = execute(
             &current,
             &current,
-            &create_plan(&parent, vec![], desired.clone()),
+            &create_plan(&parent, vec![], desired.duplicate_for_test()),
         )
         .unwrap();
         assert_eq!(entry_count(&adopted.candidate), 1);

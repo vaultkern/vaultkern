@@ -18,6 +18,7 @@ vaultkern-runtime-protocol = { path = "../../crates/vaultkern-runtime-protocol" 
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tempfile = "3.10"
 ureq = { version = "2.10", features = ["json"] }
 url = "2.5"
 uuid.workspace = true
@@ -33,4 +34,3 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [dev-dependencies]
 mockito = "1.5"
 p256.workspace = true
-tempfile = "3.10"

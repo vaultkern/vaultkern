@@ -1985,3 +1985,294 @@ fn unrepresentable_remote_lineage_uploads_a_sibling_conflict_copy() {
             .any(|item| item.name.contains("VaultKern conflict"))
     );
 }
+
+#[test]
+fn foreign_writer_with_same_root_uses_a_conflict_copy_instead_of_field_patch() {
+    let core = KeepassCore::new();
+    let mut initial = Vault::empty("Cloud Vault");
+    initial.generator = Some("VaultKern".into());
+    let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let mut runtime = Runtime::for_tests_at_with_onedrive_item(
+        100,
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes.clone(),
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+    runtime
+        .handle(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            title: "Account".into(),
+            username: "alice".into(),
+            password: "local-password".into(),
+            url: "https://account.example".into(),
+            notes: String::new(),
+            totp_uri: None,
+            custom_fields: vec![],
+        })
+        .unwrap();
+
+    let mut foreign = core.load_database(&initial_bytes, &key()).unwrap().vault;
+    foreign.generator = Some("KeePassXC".into());
+    core.update_entry_fields(
+        &mut foreign,
+        &entry_id,
+        vaultkern_core::EntryUpdate {
+            title: None,
+            username: None,
+            password: None,
+            url: None,
+            notes: Some("foreign-notes".into()),
+        },
+    )
+    .unwrap();
+    let foreign_bytes = core
+        .save_kdbx(&foreign, &key(), SaveProfile::recommended())
+        .unwrap();
+    runtime.replace_test_onedrive_item("drive-1", "item-1", foreign_bytes.clone());
+
+    let response = runtime
+        .handle(RuntimeCommand::SaveVault { vault_id })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::SaveVaultResult(result)
+            if result.status == SaveVaultStatusDto::ConflictCopy
+    ));
+    assert_eq!(
+        runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap(),
+        foreign_bytes
+    );
+}
+
+#[test]
+fn failed_conflict_copy_upload_falls_back_to_durable_pending_state() {
+    let core = KeepassCore::new();
+    let mut initial = Vault::empty("Cloud Vault");
+    initial.generator = Some("VaultKern".into());
+    let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
+    let mut runtime = Runtime::for_tests_at_with_onedrive_item_and_remote_cache(
+        100,
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes.clone(),
+        cache_dir.path(),
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+    runtime
+        .handle(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            title: "Account".into(),
+            username: "alice".into(),
+            password: "local-password".into(),
+            url: "https://account.example".into(),
+            notes: String::new(),
+            totp_uri: None,
+            custom_fields: vec![],
+        })
+        .unwrap();
+
+    let mut foreign = core.load_database(&initial_bytes, &key()).unwrap().vault;
+    foreign.generator = Some("KeePassXC".into());
+    core.update_entry_fields(
+        &mut foreign,
+        &entry_id,
+        vaultkern_core::EntryUpdate {
+            title: None,
+            username: None,
+            password: None,
+            url: None,
+            notes: Some("foreign-notes".into()),
+        },
+    )
+    .unwrap();
+    let foreign_bytes = core
+        .save_kdbx(&foreign, &key(), SaveProfile::recommended())
+        .unwrap();
+    runtime.replace_test_onedrive_item("drive-1", "item-1", foreign_bytes.clone());
+    runtime.fail_next_test_onedrive_conflict_copy();
+
+    let response = runtime
+        .handle(RuntimeCommand::SaveVault {
+            vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::SaveVaultResult(result)
+            if result.status == SaveVaultStatusDto::SavedToCache
+    ));
+    assert_eq!(
+        runtime.session_state().source_status.unwrap().remote_state,
+        "pending_sync"
+    );
+    assert_eq!(
+        runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap(),
+        foreign_bytes
+    );
+}
+
+#[test]
+fn failed_unrepresentable_patch_conflict_copy_also_falls_back_to_pending() {
+    let core = KeepassCore::new();
+    let mut initial = Vault::empty("Cloud Vault");
+    let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
+    let mut runtime = Runtime::for_tests_at_with_onedrive_item_and_remote_cache(
+        100,
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes,
+        cache_dir.path(),
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+    runtime
+        .handle(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id,
+            title: "Local".into(),
+            username: "alice".into(),
+            password: "local-password".into(),
+            url: "https://local.example".into(),
+            notes: "keep me".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        })
+        .unwrap();
+    let unrelated = core
+        .save_kdbx(
+            &Vault::empty("Unrelated remote"),
+            &key(),
+            SaveProfile::recommended(),
+        )
+        .unwrap();
+    runtime.replace_test_onedrive_item("drive-1", "item-1", unrelated);
+    runtime.fail_next_test_onedrive_conflict_copy();
+
+    let response = runtime
+        .handle(RuntimeCommand::SaveVault { vault_id })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::SaveVaultResult(result)
+            if result.status == SaveVaultStatusDto::SavedToCache
+    ));
+}
+
+#[test]
+fn source_refresh_turns_unrepresentable_live_edits_into_a_terminal_conflict_copy() {
+    let core = KeepassCore::new();
+    let initial = Vault::empty("Cloud Vault");
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let mut runtime = Runtime::for_tests_at_with_onedrive_item(
+        100,
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes.clone(),
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+    let mut local_metadata = runtime.get_database_settings(&vault_id).unwrap().metadata;
+    local_metadata.name = "Local name".into();
+    runtime
+        .handle(RuntimeCommand::UpdateDatabaseSettings {
+            vault_id: vault_id.clone(),
+            update: DatabaseSettingsUpdateDto {
+                metadata: Some(local_metadata),
+                ..DatabaseSettingsUpdateDto::default()
+            },
+        })
+        .unwrap();
+
+    let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
+    remote.name = "Remote name".into();
+    remote.database_name_changed = Some(200);
+    remote.settings_changed = Some(200);
+    let remote_bytes = core
+        .save_kdbx(&remote, &key(), SaveProfile::recommended())
+        .unwrap();
+    runtime.replace_test_onedrive_item("drive-1", "item-1", remote_bytes);
+
+    let response = runtime
+        .handle(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    let RuntimeResponse::VaultSourceStatus(status) = response else {
+        panic!("expected source status");
+    };
+    assert_eq!(status.remote_state, "online");
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("VaultKern conflict"))
+    );
+    assert_eq!(
+        runtime
+            .get_database_settings(&vault_id)
+            .unwrap()
+            .metadata
+            .name,
+        "Remote name"
+    );
+
+    let list = runtime
+        .handle(RuntimeCommand::ListOneDriveChildren {
+            parent_item_id: None,
+        })
+        .unwrap();
+    let RuntimeResponse::OneDriveItemList(list) = list else {
+        panic!("expected OneDrive list");
+    };
+    assert_eq!(list.items.len(), 2);
+}

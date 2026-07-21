@@ -1,8 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::sync::mpsc::{self, Sender};
 
 use serde_json::Value;
 use vaultkern_runtime::{
@@ -19,11 +18,12 @@ pub struct RuntimeBridge {
 enum RuntimeRequest {
     SetParentWindowHandle {
         parent_window: Option<usize>,
-        response: Sender<()>,
+        response: Option<Sender<()>>,
     },
     Protocol {
         command: RuntimeCommand,
         cancelled: Arc<AtomicBool>,
+        execution_started: Arc<AtomicBool>,
         browser_client: bool,
         parent_window: Option<usize>,
         response: Sender<Value>,
@@ -79,15 +79,19 @@ impl RuntimeBridge {
                         } => {
                             default_parent_window = parent_window;
                             runtime.set_parent_window_handle(parent_window);
-                            let _ = response.send(());
+                            if let Some(response) = response {
+                                let _ = response.send(());
+                            }
                         }
                         RuntimeRequest::Protocol {
                             command,
                             cancelled,
+                            execution_started,
                             browser_client,
                             parent_window,
                             response,
                         } => {
+                            execution_started.store(true, Ordering::Release);
                             let value = if cancelled.load(Ordering::Acquire) {
                                 cancelled_value()
                             } else {
@@ -118,11 +122,7 @@ impl RuntimeBridge {
                                 if request_parent_window.is_some() {
                                     runtime.set_parent_window_handle(default_parent_window);
                                 }
-                                if cancelled.load(Ordering::Acquire) {
-                                    cancelled_value()
-                                } else {
-                                    value
-                                }
+                                value
                             };
                             let _ = response.send(value);
                         }
@@ -168,14 +168,15 @@ impl RuntimeBridge {
                             committed,
                             response,
                         } => {
+                            if cancelled.load(Ordering::Acquire) {
+                                let _ = response.send(cancelled_value());
+                                continue;
+                            }
                             let _ = started.send(());
                             let _ = release.recv();
                             committed.store(true, Ordering::Release);
-                            let value = if cancelled.load(Ordering::Acquire) {
-                                cancelled_value()
-                            } else {
-                                serde_json::json!({ "type": "test_mutation_committed" })
-                            };
+                            let value =
+                                serde_json::json!({ "type": "test_mutation_committed" });
                             let _ = response.send(value);
                         }
                     }
@@ -191,22 +192,30 @@ impl RuntimeBridge {
     }
 
     pub fn request_cancellable(&self, message: Value, cancelled: Arc<AtomicBool>) -> Value {
-        self.request_with_client(message, cancelled, false, None)
+        self.request_with_client(
+            message,
+            cancelled,
+            Arc::new(AtomicBool::new(false)),
+            false,
+            None,
+        )
     }
 
     pub fn request_browser_cancellable(
         &self,
         message: Value,
         cancelled: Arc<AtomicBool>,
+        execution_started: Arc<AtomicBool>,
         parent_window: Option<usize>,
     ) -> Value {
-        self.request_with_client(message, cancelled, true, parent_window)
+        self.request_with_client(message, cancelled, execution_started, true, parent_window)
     }
 
     fn request_with_client(
         &self,
         message: Value,
         cancelled: Arc<AtomicBool>,
+        execution_started: Arc<AtomicBool>,
         browser_client: bool,
         parent_window: Option<usize>,
     ) -> Value {
@@ -236,6 +245,7 @@ impl RuntimeBridge {
             .send(RuntimeRequest::Protocol {
                 command: envelope.command,
                 cancelled,
+                execution_started,
                 browser_client,
                 parent_window,
                 response,
@@ -256,12 +266,21 @@ impl RuntimeBridge {
         self.requests
             .send(RuntimeRequest::SetParentWindowHandle {
                 parent_window,
-                response,
+                response: Some(response),
             })
             .map_err(|_| "the in-process runtime is unavailable".to_owned())?;
         receiver
             .recv()
             .map_err(|_| "the in-process runtime stopped responding".to_owned())
+    }
+
+    pub fn queue_parent_window_handle(&self, parent_window: Option<usize>) -> Result<(), String> {
+        self.requests
+            .send(RuntimeRequest::SetParentWindowHandle {
+                parent_window,
+                response: None,
+            })
+            .map_err(|_| "the in-process runtime is unavailable".to_owned())
     }
 
     pub fn platform_passkey_is_unlocked(&self) -> bool {
@@ -393,21 +412,13 @@ fn cancelled_value() -> Value {
 }
 
 fn wait_for_runtime_response(receiver: mpsc::Receiver<Value>, cancelled: Arc<AtomicBool>) -> Value {
-    loop {
-        if cancelled.load(Ordering::Acquire) {
-            return cancelled_value();
-        }
-        match receiver.recv_timeout(Duration::from_millis(25)) {
-            Ok(value) => return value,
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
-                return error_value(
-                    "runtime_unavailable",
-                    "the in-process runtime stopped responding",
-                );
-            }
-        }
-    }
+    let _ = cancelled;
+    receiver.recv().unwrap_or_else(|_| {
+        error_value(
+            "runtime_unavailable",
+            "the in-process runtime stopped responding",
+        )
+    })
 }
 
 fn protocol_parent_window_override(
@@ -468,6 +479,7 @@ mod tests {
                 }
             }),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             Some(0x1234),
         );
 
@@ -504,8 +516,6 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("mutation reached the runtime thread");
         cancelled.store(true, Ordering::Release);
-        let response = mutation.join().expect("cancelled mutation caller");
-        assert_eq!(response["code"], "request_cancelled");
 
         let sync_bridge = bridge.clone();
         let sync_committed = committed.clone();
@@ -520,10 +530,42 @@ mod tests {
         );
 
         release_tx.send(()).expect("release mutation");
+        let response = mutation.join().expect("completed mutation caller");
+        assert_eq!(response["type"], "test_mutation_committed");
         let (result, committed_before_sync_returned) = sync_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("sync completes after mutation");
         result.expect("sync snapshot");
         assert!(committed_before_sync_returned);
+    }
+
+    #[test]
+    fn cancellation_after_execution_starts_returns_the_real_mutation_outcome() {
+        let bridge = RuntimeBridge::new_for_tests();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let committed = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let request_bridge = bridge.clone();
+        let request_cancelled = cancelled.clone();
+        let request_committed = committed.clone();
+        let request = std::thread::spawn(move || {
+            request_bridge.request_test_mutation_cancellable(
+                request_cancelled,
+                started_tx,
+                release_rx,
+                request_committed,
+            )
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("mutation reached the runtime thread");
+        cancelled.store(true, Ordering::Release);
+        release_tx.send(()).expect("release mutation");
+
+        let response = request.join().expect("mutation response");
+        assert!(committed.load(Ordering::Acquire));
+        assert_eq!(response["type"], "test_mutation_committed");
     }
 }

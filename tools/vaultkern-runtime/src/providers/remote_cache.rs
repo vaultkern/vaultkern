@@ -7,11 +7,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(not(windows))]
+use crate::providers::durable_file::unique_sibling_path;
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, TargetExpectation,
-    TempWriteFaultPoints, create_dir_all_durable, durable_path, opened_file_identity,
-    path_file_identity, publish_temp, remove_if_exists, sha256_hex, sync_directory, sync_parent,
-    unique_sibling_path, write_verified_temp,
+    TempWriteFaultPoints, create_dir_all_durable, create_durable_backup_copy, durable_path,
+    opened_file_identity, path_file_identity, publish_temp, remove_if_exists, sha256_hex,
+    sync_directory, sync_parent, write_verified_temp,
 };
 use crate::providers::local_file::VaultSourceFingerprint;
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
@@ -1747,7 +1749,7 @@ fn create_manifest_backup(target: &Path) -> io::Result<Option<PathBuf>> {
     }
     #[cfg(windows)]
     {
-        Ok(Some(unique_sibling_path(target, "bak")?))
+        create_durable_backup_copy(target, "bak").map(Some)
     }
     #[cfg(not(any(unix, windows)))]
     {

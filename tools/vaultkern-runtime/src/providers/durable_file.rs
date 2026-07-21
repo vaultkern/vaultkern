@@ -615,6 +615,70 @@ pub(crate) fn unique_sibling_path(target: &Path, marker: &str) -> io::Result<Pat
     ))
 }
 
+pub(crate) fn create_durable_backup_copy(target: &Path, marker: &str) -> io::Result<PathBuf> {
+    let target_metadata = fs::symlink_metadata(target)?;
+    if target_metadata.file_type().is_symlink() || !target_metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable backup source is not a regular file",
+        ));
+    }
+    reject_reparse_point(&target_metadata)?;
+    let mut source = File::open(target)?;
+    let source_before = source.metadata()?;
+    let source_identity = opened_file_identity(&source, &source_before)?;
+    if source_identity != path_file_identity(target, &target_metadata)? {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "durable backup source changed while it was opened",
+        ));
+    }
+
+    for _ in 0..128 {
+        let backup = unique_sibling_path(target, marker)?;
+        let mut backup_file = match OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&backup)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let copied = (|| {
+            io::copy(&mut source, &mut backup_file)?;
+            backup_file.sync_all()?;
+            let source_after = source.metadata()?;
+            let final_target_metadata = fs::symlink_metadata(target)?;
+            reject_reparse_point(&final_target_metadata)?;
+            if opened_file_identity(&source, &source_after)? != source_identity
+                || path_file_identity(target, &final_target_metadata)? != source_identity
+                || source_before.len() != source_after.len()
+                || source_before.modified().ok() != source_after.modified().ok()
+                || backup_file.metadata()?.len() != source_after.len()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "durable backup source changed while it was copied",
+                ));
+            }
+            sync_parent(target)
+        })();
+        if let Err(error) = copied {
+            drop(backup_file);
+            let _ = remove_if_exists(&backup);
+            let _ = sync_parent(target);
+            return Err(error);
+        }
+        return Ok(backup);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique durable backup path",
+    ))
+}
+
 #[derive(Debug)]
 pub(crate) struct VerifiedTemp {
     path: PathBuf,
@@ -951,10 +1015,58 @@ pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-pub(crate) fn sync_directory(_path: &Path) -> io::Result<()> {
-    // The published target is flushed explicitly. MoveFileExW also uses
-    // WRITE_THROUGH when publishing to a previously missing target.
-    Ok(())
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+
+    let share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    let mut directory_options = OpenOptions::new();
+    directory_options
+        .read(true)
+        .write(true)
+        .share_mode(share_mode)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_WRITE_THROUGH);
+    if let Ok(directory) = directory_options.open(path)
+        && directory.sync_all().is_ok()
+    {
+        return Ok(());
+    }
+
+    // Some Windows file systems reject FlushFileBuffers on a directory
+    // handle. A write-through, delete-on-close marker forces a later metadata
+    // transaction in the same directory without leaving durable clutter.
+    for _ in 0..128 {
+        let marker = unique_sibling_path(&path.join(".vaultkern-dir-sync"), "flush")?;
+        let mut marker_options = OpenOptions::new();
+        marker_options
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(share_mode)
+            .custom_flags(
+                FILE_ATTRIBUTE_HIDDEN
+                    | FILE_ATTRIBUTE_TEMPORARY
+                    | FILE_FLAG_DELETE_ON_CLOSE
+                    | FILE_FLAG_WRITE_THROUGH,
+            );
+        match marker_options.open(&marker) {
+            Ok(mut file) => {
+                file.write_all(&[0])?;
+                file.sync_all()?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a Windows directory-sync marker",
+    ))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -972,6 +1084,7 @@ pub(crate) fn publish_temp(
     after_replace: DurableFaultPoint,
     parent_sync: DurableFaultPoint,
 ) -> Result<(), PublishError> {
+    let target_must_be_missing = matches!(&target_expectation, TargetExpectation::Missing);
     if let Err(source) = faults
         .check(DurableFaultPoint::BeforeTempPublishValidation)
         .and_then(|_| temp.verify_for_publish())
@@ -991,6 +1104,27 @@ pub(crate) fn publish_temp(
             source,
         });
     }
+    if let Some(backup) = backup {
+        let backup_metadata = fs::symlink_metadata(backup);
+        let backup_is_valid = backup_metadata.as_ref().is_ok_and(|metadata| {
+            metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink()
+                && reject_reparse_point(metadata).is_ok()
+        });
+        if !backup_is_valid {
+            let _ = temp.discard();
+            return Err(PublishError {
+                published: false,
+                target_conflict: false,
+                source: backup_metadata.err().unwrap_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "durable recovery backup is not a regular file",
+                    )
+                }),
+            });
+        }
+    }
     if let Err(source) = verify_target_expectation(target, target_expectation) {
         let _ = temp.discard();
         return Err(PublishError {
@@ -1003,7 +1137,15 @@ pub(crate) fn publish_temp(
     // handle must be closed for the duration of the path-based replacement.
     #[cfg(windows)]
     temp.close_before_replace();
-    if let Err(error) = replace_file(temp.path(), target, backup) {
+    let publish_result = if target_must_be_missing {
+        publish_file_no_replace(temp.path(), target)
+    } else {
+        replace_file(temp.path(), target, backup)
+    };
+    if let Err(error) = publish_result {
+        let target_conflict = target_must_be_missing
+            && !error.published
+            && error.source.kind() == io::ErrorKind::AlreadyExists;
         if error.published {
             drop(temp);
         } else {
@@ -1011,7 +1153,7 @@ pub(crate) fn publish_temp(
         }
         return Err(PublishError {
             published: error.published,
-            target_conflict: false,
+            target_conflict,
             source: error.source,
         });
     }
@@ -1074,6 +1216,41 @@ pub(crate) fn publish_temp(
         source,
     })?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn publish_file_no_replace(temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    fs::hard_link(temp, target).map_err(|source| ReplaceError {
+        published: false,
+        source,
+    })?;
+    fs::remove_file(temp).map_err(|source| ReplaceError {
+        published: true,
+        source,
+    })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn publish_file_no_replace(temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let target = wide(target);
+    let temp = wide(temp);
+    let result = unsafe { MoveFileExW(temp.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if result == 0 {
+        Err(ReplaceError {
+            published: false,
+            source: io::Error::last_os_error(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn verify_target_expectation(target: &Path, expectation: TargetExpectation) -> io::Result<()> {
@@ -1198,29 +1375,22 @@ fn replace_file(temp: &Path, target: &Path, _backup: Option<&Path>) -> Result<()
     })
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowsReplaceFileApi {
-    MoveFileExWriteThrough,
-    ReplaceFile,
+    ReplaceFileWithoutApiBackup,
 }
 
-#[cfg(windows)]
-fn windows_replace_file_api(backup: Option<&Path>) -> WindowsReplaceFileApi {
-    if backup.is_some() {
-        WindowsReplaceFileApi::ReplaceFile
-    } else {
-        WindowsReplaceFileApi::MoveFileExWriteThrough
-    }
+#[cfg(any(windows, test))]
+fn windows_replace_file_api(_backup: Option<&Path>) -> WindowsReplaceFileApi {
+    WindowsReplaceFileApi::ReplaceFileWithoutApiBackup
 }
 
 #[cfg(windows)]
 fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(), ReplaceError> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW,
-    };
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
 
     fn wide(path: &Path) -> Vec<u16> {
         path.as_os_str().encode_wide().chain(Some(0)).collect()
@@ -1228,35 +1398,23 @@ fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(),
 
     let target_wide = wide(target);
     let temp_wide = wide(temp);
-    let backup_wide = backup.map(wide);
+    let _ = windows_replace_file_api(backup);
     let replacing_existing = target.exists();
     let result = unsafe {
-        match windows_replace_file_api(backup) {
-            WindowsReplaceFileApi::ReplaceFile => ReplaceFileW(
-                target_wide.as_ptr(),
-                temp_wide.as_ptr(),
-                backup_wide
-                    .as_ref()
-                    .map_or(ptr::null(), |value| value.as_ptr()),
-                WINDOWS_REPLACE_FILE_FLAGS,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ),
-            WindowsReplaceFileApi::MoveFileExWriteThrough => MoveFileExW(
-                temp_wide.as_ptr(),
-                target_wide.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            ),
-        }
+        ReplaceFileW(
+            target_wide.as_ptr(),
+            temp_wide.as_ptr(),
+            ptr::null(),
+            WINDOWS_REPLACE_FILE_FLAGS,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
     };
     if result == 0 {
         let source = io::Error::last_os_error();
         Err(ReplaceError {
-            // Only the documented partial-failure states can have moved the
-            // original or replacement. Preserve their recovery artifacts.
             published: windows_replace_failure_is_outcome_unknown(
                 replacing_existing,
-                backup.is_some(),
                 source.raw_os_error(),
             ),
             source,
@@ -1277,15 +1435,16 @@ const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
 #[cfg(any(windows, test))]
 fn windows_replace_failure_is_outcome_unknown(
     replacing_existing: bool,
-    backup_supplied: bool,
     raw_os_error: Option<i32>,
 ) -> bool {
     replacing_existing
-        && match raw_os_error {
-            Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT) => !backup_supplied,
-            Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) => true,
-            _ => false,
-        }
+        && matches!(
+            raw_os_error,
+            Some(
+                WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT
+                    | WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2
+            )
+        )
 }
 
 #[cfg(not(windows))]
@@ -1322,8 +1481,21 @@ mod tests {
     use super::{
         DurableFaultInjector, DurableFaultPoint, TempWriteFaultPoints, write_verified_temp,
     };
-    use super::{ExclusiveFileLock, unique_sibling_path};
+    use super::{ExclusiveFileLock, create_durable_backup_copy, unique_sibling_path};
     use std::fs;
+
+    #[test]
+    fn durable_backup_copy_preserves_the_complete_previous_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("record.bin");
+        fs::write(&target, b"complete previous generation").unwrap();
+
+        let backup = create_durable_backup_copy(&target, "bak").unwrap();
+        fs::write(&target, b"next generation").unwrap();
+
+        assert_ne!(backup, target);
+        assert_eq!(fs::read(backup).unwrap(), b"complete previous generation");
+    }
     use std::io;
     use std::sync::mpsc;
     use std::thread;
@@ -1510,64 +1682,40 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"new");
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_backup_free_publication_uses_write_through_move() {
+    fn windows_replacement_keeps_the_separate_durable_backup_out_of_the_api() {
         assert_eq!(
             super::windows_replace_file_api(None),
-            super::WindowsReplaceFileApi::MoveFileExWriteThrough
+            super::WindowsReplaceFileApi::ReplaceFileWithoutApiBackup
         );
         assert_eq!(
             super::windows_replace_file_api(Some(std::path::Path::new("backup"))),
-            super::WindowsReplaceFileApi::ReplaceFile
+            super::WindowsReplaceFileApi::ReplaceFileWithoutApiBackup
         );
     }
 
     #[test]
-    fn windows_replace_failure_classification_preserves_only_partial_failure_artifacts() {
+    fn windows_replace_partial_failures_are_reconciled_as_unknown_outcomes() {
         assert_eq!(super::WINDOWS_REPLACE_FILE_FLAGS, 0);
         assert!(!super::windows_replace_failure_is_outcome_unknown(
             false,
-            false,
-            Some(1176)
+            Some(1177)
         ));
         assert!(!super::windows_replace_failure_is_outcome_unknown(
             true,
-            false,
             Some(5)
         ));
         assert!(!super::windows_replace_failure_is_outcome_unknown(
             true,
-            false,
-            Some(32)
-        ));
-        assert!(!super::windows_replace_failure_is_outcome_unknown(
-            true,
-            false,
             Some(1175)
         ));
         assert!(super::windows_replace_failure_is_outcome_unknown(
             true,
-            false,
-            Some(1176)
-        ));
-        assert!(!super::windows_replace_failure_is_outcome_unknown(
-            true,
-            true,
             Some(1176)
         ));
         assert!(super::windows_replace_failure_is_outcome_unknown(
             true,
-            false,
             Some(1177)
-        ));
-        assert!(super::windows_replace_failure_is_outcome_unknown(
-            true,
-            true,
-            Some(1177)
-        ));
-        assert!(!super::windows_replace_failure_is_outcome_unknown(
-            true, false, None
         ));
     }
 }

@@ -11,14 +11,16 @@ use zeroize::Zeroizing;
 
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
+#[cfg(test)]
+use crate::providers::durable_file::unique_sibling_path;
 #[cfg(windows)]
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, TargetExpectation, TempWriteFaultPoints,
-    create_dir_all_durable, opened_file_identity, path_file_identity, publish_temp,
-    remove_if_exists, sync_parent, write_verified_temp,
+    create_dir_all_durable, create_durable_backup_copy, opened_file_identity, path_file_identity,
+    publish_temp, remove_if_exists, sync_parent, write_verified_temp,
 };
 #[cfg(any(windows, test))]
-use crate::providers::durable_file::{ExclusiveFileLock, VerifiedTemp, unique_sibling_path};
+use crate::providers::durable_file::{ExclusiveFileLock, VerifiedTemp};
 
 const TOKEN_FILE_NAME: &str = "onedrive-refresh-token.dpapi";
 #[cfg(any(windows, test))]
@@ -242,11 +244,25 @@ fn token_lock_path(path: &std::path::Path) -> Result<PathBuf> {
     Ok(path.with_file_name(lock_name))
 }
 
-#[cfg(any(windows, test))]
+#[cfg(test)]
 fn token_backup_path(path: &std::path::Path, target_exists: bool) -> Result<Option<PathBuf>> {
     target_exists
         .then(|| unique_sibling_path(path, "bak").map_err(anyhow::Error::from))
         .transpose()
+}
+
+#[cfg(windows)]
+fn publish_token_backup(path: &std::path::Path, target_exists: bool) -> Result<Option<PathBuf>> {
+    if !target_exists {
+        return Ok(None);
+    }
+    let backup = create_durable_backup_copy(path, "bak")?;
+    if let Err(error) = enforce_private_acl(&backup, false) {
+        let _ = remove_if_exists(&backup);
+        let _ = sync_parent(path);
+        return Err(error);
+    }
+    Ok(Some(backup))
 }
 
 #[cfg(any(windows, test))]
@@ -479,7 +495,7 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
             )
         })?;
         let temp = enforce_temp_metadata_or_discard(temp, |path| enforce_private_acl(path, false))?;
-        let backup = token_backup_path(&self.path, target_exists)?;
+        let backup = publish_token_backup(&self.path, target_exists)?;
         let publish = publish_temp(
             temp,
             &self.path,
@@ -495,13 +511,22 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
                 "failed to publish protected OneDrive refresh token: {}",
                 self.path.display()
             ));
-            if error.published
-                && let Some(backup) = backup.as_deref()
-                && let Err(recovery_error) = restore_backup_if_target_missing(&self.path, backup)
-            {
-                failure = failure.context(format!(
-                    "failed to restore the previous protected OneDrive refresh token: {recovery_error:#}"
-                ));
+            if let Some(backup) = backup.as_deref() {
+                if error.published {
+                    if let Err(recovery_error) =
+                        restore_backup_if_target_missing(&self.path, backup)
+                    {
+                        failure = failure.context(format!(
+                            "failed to restore the previous protected OneDrive refresh token: {recovery_error:#}"
+                        ));
+                    }
+                } else if let Err(cleanup_error) =
+                    remove_if_exists(backup).and_then(|_| sync_parent(&self.path))
+                {
+                    failure = failure.context(format!(
+                        "failed to remove an unpublished OneDrive refresh-token backup: {cleanup_error}"
+                    ));
+                }
             }
             return Err(failure);
         }
@@ -1732,6 +1757,38 @@ mod tests {
                 .map(String::as_str),
             Some(OLD_TOKEN)
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_store_removes_backup_when_replacement_was_not_published() {
+        use super::WindowsOneDriveRefreshTokenStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("onedrive-refresh-token.dpapi");
+        WindowsOneDriveRefreshTokenStore::new(path.clone(), "test/default")
+            .store("refresh-token-before-failure")
+            .unwrap();
+        let store = WindowsOneDriveRefreshTokenStore::new_with_faults(
+            path,
+            "test/default",
+            DurableFaultInjector::fail_once(DurableFaultPoint::BeforeTargetReplace),
+        );
+
+        store
+            .store("refresh-token-not-published")
+            .expect_err("pre-publish fault must fail the store");
+        assert_eq!(
+            store.load().unwrap().as_deref().map(String::as_str),
+            Some("refresh-token-before-failure")
+        );
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".bak.")
+        }));
     }
 
     #[cfg(windows)]

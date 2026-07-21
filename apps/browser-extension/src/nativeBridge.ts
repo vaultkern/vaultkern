@@ -217,9 +217,17 @@ function shouldCancelActivePreload(
   return isStartupCommand(nextMessage);
 }
 
-// Keep this timeout classification aligned with
-// browser_command_requires_fresh_verification in the Rust runtime.
+// This list only grants enough UI time for the runtime's interactive gate.
+// The Rust runtime owns and exhaustively enforces the authorization policy.
 const FRESH_VERIFICATION_COMMANDS = new Set([
+  "add_local_vault_reference",
+  "begin_one_drive_login",
+  "complete_one_drive_login",
+  "complete_pending_one_drive_login",
+  "list_one_drive_children",
+  "add_one_drive_vault_reference",
+  "retry_vault_source_sync",
+  "delete_vault_reference",
   "create_entry",
   "update_entry_fields",
   "compare_and_update_entry_fields",
@@ -235,28 +243,17 @@ const FRESH_VERIFICATION_COMMANDS = new Set([
   "update_entry_attachment_metadata",
   "replace_entry_attachment_content",
   "delete_entry_attachment",
+  "update_entry",
+  "update_database_settings",
+  "find_exact_matching_entry_ids",
   "disable_quick_unlock_for_current_vault"
 ]);
 
 function commandRequiresFreshVerification(command: Record<string, unknown>) {
-  if (
+  return (
     typeof command.type === "string" &&
     FRESH_VERIFICATION_COMMANDS.has(command.type)
-  ) {
-    return true;
-  }
-
-  if (
-    command.type !== "update_database_settings" ||
-    typeof command.update !== "object" ||
-    command.update === null ||
-    Array.isArray(command.update)
-  ) {
-    return false;
-  }
-
-  const update = command.update as Record<string, unknown>;
-  return update.credentials != null || update.encryption != null;
+  );
 }
 
 export function createNativeMessagingBridge(

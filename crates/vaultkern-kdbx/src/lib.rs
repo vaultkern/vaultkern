@@ -585,13 +585,13 @@ pub fn load_kdbx_with_transformed_key_diagnostic(
         })(),
     )?;
 
-    let encryption_key = sha256_seeded(&header.master_seed, transformed.as_bytes());
-    let mac_seed = mac_seed(&header.master_seed, transformed.as_bytes());
+    let encryption_key = Zeroizing::new(sha256_seeded(&header.master_seed, transformed.as_bytes()));
+    let mac_seed = Zeroizing::new(mac_seed(&header.master_seed, transformed.as_bytes()));
     let encrypted_payload = load_stage(
         KdbxLoadStage::PayloadBlocks,
         decode_block_stream(&mac_seed, &payload_bytes),
     )?;
-    let payload = load_stage(
+    let payload = Zeroizing::new(load_stage(
         KdbxLoadStage::Decryption,
         decrypt_payload(
             header.cipher,
@@ -599,25 +599,34 @@ pub fn load_kdbx_with_transformed_key_diagnostic(
             &header.encryption_iv,
             &encrypted_payload,
         ),
-    )?;
-    let payload = load_stage(
-        KdbxLoadStage::Decompression,
-        match header.compression {
-            Compression::None => Ok(payload),
-            Compression::Gzip => gzip_decompress(&payload),
-        },
-    )?;
+    )?);
+    let payload = match header.compression {
+        Compression::None => payload,
+        Compression::Gzip => Zeroizing::new(load_stage(
+            KdbxLoadStage::Decompression,
+            gzip_decompress(&payload),
+        )?),
+    };
 
     let (inner_algorithm, inner_key, binaries, consumed) =
         load_stage(KdbxLoadStage::InnerHeader, parse_inner_header(&payload))?;
-    let root = load_stage(
+    let guarded_root = load_stage(
         KdbxLoadStage::XmlDocument,
         parse_xml_document(&payload[consumed..]),
     )?;
-    load_stage(KdbxLoadStage::XmlShape, validate_xml_model_shape(&root))?;
+    load_stage(
+        KdbxLoadStage::XmlShape,
+        validate_xml_model_shape(guarded_root.element()),
+    )?;
     load_stage(
         KdbxLoadStage::XmlProjection,
-        project_xml(root, &header, inner_algorithm, &inner_key, &binaries),
+        project_xml(
+            guarded_root,
+            &header,
+            inner_algorithm,
+            &inner_key,
+            &binaries,
+        ),
     )
 }
 
@@ -673,22 +682,27 @@ fn encode_kdbx_with_transformed_key(
     header: KdbxHeader,
     transformed: &TransformedKey,
 ) -> Result<Vec<u8>> {
-    let encryption_key = sha256_seeded(&header.master_seed, transformed.as_bytes());
-    let mac_seed = mac_seed(&header.master_seed, transformed.as_bytes());
+    let encryption_key = Zeroizing::new(sha256_seeded(&header.master_seed, transformed.as_bytes()));
+    let mac_seed = Zeroizing::new(mac_seed(&header.master_seed, transformed.as_bytes()));
 
     let mut binaries = Vec::new();
     let attachment_refs = collect_attachment_refs(vault, &mut binaries)?;
-    let inner_key = random_bytes(64);
-    let inner_header = build_inner_header(&inner_key, &binaries);
-    let xml = build_xml(vault, &attachment_refs, &inner_key, profile.version)?;
+    let inner_key = Zeroizing::new(random_bytes(64));
+    let inner_header = Zeroizing::new(build_inner_header(&inner_key, &binaries));
+    let xml = Zeroizing::new(build_xml(
+        vault,
+        &attachment_refs,
+        &inner_key,
+        profile.version,
+    )?);
 
-    let mut payload = Vec::new();
-    payload.extend(inner_header);
-    payload.extend(xml);
+    let mut payload = Zeroizing::new(Vec::new());
+    payload.extend(inner_header.iter().copied());
+    payload.extend(xml.iter().copied());
 
     let payload = match profile.compression {
         Compression::None => payload,
-        Compression::Gzip => gzip_compress(&payload)?,
+        Compression::Gzip => Zeroizing::new(gzip_compress(&payload)?),
     };
 
     let encrypted_payload = encrypt_payload(
@@ -758,16 +772,16 @@ fn load_kdbx3(
         ExternalKdfParameters::decode_kdbx3(header.transform_rounds, header.transform_seed)?;
     enforce_external_kdf_policy(&parameters, policy, confirmation)?;
     let kdf = parameters.into_profile();
-    let raw_key = composite_key.raw_key()?;
-    let transformed = kdf.derive_key(&raw_key)?;
-    let encryption_key = sha256_seeded(&header.master_seed, &transformed);
+    let raw_key = Zeroizing::new(composite_key.raw_key()?);
+    let transformed = Zeroizing::new(kdf.derive_key(&raw_key[..])?);
+    let encryption_key = Zeroizing::new(sha256_seeded(&header.master_seed, &transformed));
     let encrypted_payload = &bytes[header_len..];
-    let payload = decrypt_payload(
+    let payload = Zeroizing::new(decrypt_payload(
         header.cipher,
         &encryption_key,
         &header.encryption_iv,
         encrypted_payload,
-    )?;
+    )?);
 
     if payload.len() < header.stream_start_bytes.len()
         || &payload[..header.stream_start_bytes.len()] != header.stream_start_bytes.as_slice()
@@ -775,10 +789,12 @@ fn load_kdbx3(
         return Err(KdbxError::HeaderHashMismatch);
     }
 
-    let block_payload = decode_legacy_block_stream(&payload[header.stream_start_bytes.len()..])?;
+    let block_payload = Zeroizing::new(decode_legacy_block_stream(
+        &payload[header.stream_start_bytes.len()..],
+    )?);
     let xml_bytes = match header.compression {
         Compression::None => block_payload,
-        Compression::Gzip => gzip_decompress(&block_payload)?,
+        Compression::Gzip => Zeroizing::new(gzip_decompress(&block_payload)?),
     };
 
     parse_kdbx3_xml(
@@ -1126,7 +1142,9 @@ fn build_inner_header(inner_key: &[u8], binaries: &[InnerBinary]) -> Vec<u8> {
     bytes
 }
 
-fn parse_inner_header(payload: &[u8]) -> Result<(u32, Vec<u8>, Vec<InnerBinary>, usize)> {
+fn parse_inner_header(
+    payload: &[u8],
+) -> Result<(u32, Zeroizing<Vec<u8>>, Vec<InnerBinary>, usize)> {
     let mut cursor = Cursor::new(payload);
     let mut inner_algorithm = 3_u32;
     let mut inner_key = None;
@@ -1136,12 +1154,15 @@ fn parse_inner_header(payload: &[u8]) -> Result<(u32, Vec<u8>, Vec<InnerBinary>,
     loop {
         let field_id = cursor.read_u8()?;
         let len = cursor.read_i32()? as usize;
-        let data = cursor.read_exact(len)?.to_vec();
+        let data = Zeroizing::new(cursor.read_exact(len)?.to_vec());
         match field_id {
             0 => break,
             1 => {
-                inner_algorithm =
-                    u32::from_le_bytes(data.try_into().map_err(|_| KdbxError::InvalidValue)?);
+                inner_algorithm = u32::from_le_bytes(
+                    data.as_slice()
+                        .try_into()
+                        .map_err(|_| KdbxError::InvalidValue)?,
+                );
                 if inner_algorithm != 2 && inner_algorithm != 3 {
                     return Err(KdbxError::UnsupportedInnerStream);
                 }
@@ -2112,6 +2133,10 @@ impl ZeroizingXmlElement {
         self.element.as_mut().expect("live XML guard")
     }
 
+    fn element(&self) -> &Element {
+        self.element.as_ref().expect("live XML guard")
+    }
+
     fn into_inner(mut self) -> Element {
         self.element.take().expect("live XML guard")
     }
@@ -2838,19 +2863,21 @@ fn element_children(element: &Element) -> impl Iterator<Item = &Element> {
     })
 }
 
-fn parse_xml_document(bytes: &[u8]) -> Result<Element> {
+fn parse_xml_document(bytes: &[u8]) -> Result<ZeroizingXmlElement> {
     Element::parse(IoCursor::new(strip_utf8_bom(bytes)))
+        .map(ZeroizingXmlElement::from_element)
         .map_err(|error| KdbxError::Xml(error.to_string()))
 }
 
 fn project_xml(
-    root: Element,
+    guarded_root: ZeroizingXmlElement,
     header: &KdbxHeader,
     inner_algorithm: u32,
     inner_key: &[u8],
     binaries: &[InnerBinary],
 ) -> Result<Vault> {
-    let meta = child(&root, "Meta")?;
+    let root = guarded_root.element();
+    let meta = child(root, "Meta")?;
     let generator = child_text(&meta, "Generator");
     let settings_changed = latest_child_datetime(&meta, "SettingsChanged");
     let name = child_text(&meta, "DatabaseName").unwrap_or_default();
@@ -3034,8 +3061,10 @@ fn parse_kdbx3_xml(
     let xml_bytes = strip_utf8_bom(bytes);
     let root = Element::parse(IoCursor::new(xml_bytes))
         .map_err(|error| KdbxError::Xml(error.to_string()))?;
-    validate_xml_model_shape(&root).map_err(normalize_xml_model_error)?;
-    let meta = child(&root, "Meta")?;
+    let guarded_root = ZeroizingXmlElement::from_element(root);
+    let root = guarded_root.element();
+    validate_xml_model_shape(root).map_err(normalize_xml_model_error)?;
+    let meta = child(root, "Meta")?;
 
     if let Some(header_hash) = child_text(&meta, "HeaderHash")
         && !header_hash.is_empty()
@@ -3708,23 +3737,27 @@ fn parse_kdbx3_binaries(
         let compressed = parse_bool_attribute(binary, "Compressed")?;
         let protected_in_memory = parse_bool_attribute(binary, "Protected")?;
 
-        let encoded = binary
-            .get_text()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let mut data = STANDARD
-            .decode(encoded.as_bytes())
-            .map_err(|_| KdbxError::InvalidValue)?;
+        let encoded = Zeroizing::new(
+            binary
+                .get_text()
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        );
+        let mut data = Zeroizing::new(
+            STANDARD
+                .decode(encoded.as_bytes())
+                .map_err(|_| KdbxError::InvalidValue)?,
+        );
         if protected_in_memory {
             protected.apply(&mut data);
         }
         if compressed {
-            data = gzip_decompress(&data)?;
+            data = Zeroizing::new(gzip_decompress(&data)?);
         }
 
         let binary = InnerBinary {
             protect_in_memory: protected_in_memory,
-            data: content_pool.intern_vec(data)?,
+            data: content_pool.intern_vec(std::mem::take(&mut *data))?,
         };
         if binaries.insert(index, binary).is_some() {
             return Err(KdbxError::InvalidValue);
@@ -9935,7 +9968,7 @@ mod compatibility_tests {
     fn extract_kdbx4_inner_key(
         bytes: &[u8],
         composite_key: &CompositeKey,
-    ) -> super::Result<Vec<u8>> {
+    ) -> super::Result<zeroize::Zeroizing<Vec<u8>>> {
         let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
         let mut cursor = super::Cursor::new(&bytes[header_len..]);
         cursor.read_exact(32)?;

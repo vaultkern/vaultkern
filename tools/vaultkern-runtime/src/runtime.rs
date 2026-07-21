@@ -84,12 +84,14 @@ use crate::session::{
     LoadedVault, VaultSession, VaultSource, onedrive_remote_id, onedrive_vault_id,
 };
 use crate::state_paths::extension_id_from_browser_origin;
-use crate::sync::{SyncedBaseStore, write_local_conflict_copy};
+use crate::sync::{SessionBaseStore, SyncedBaseStore, write_local_conflict_copy};
 use crate::unlock::{
     MasterCredential, MasterCredentialShape, UnlockAttempt, enroll_unlock_blob, unlock_from_blob,
     unlock_historical_snapshot_from_blob,
 };
 use crate::vault_reference_store::{StoredVaultSource, VaultReferenceStore};
+
+const VAULTKERN_KDBX_GENERATOR: &str = "VaultKern";
 
 fn canonical_custom_fields(fields: &[EntryCustomFieldDto]) -> Option<BTreeMap<&str, (&str, bool)>> {
     let canonical = fields
@@ -256,6 +258,11 @@ struct SessionLoadedDatabase {
     vault: Vault,
 }
 
+enum SourceRefreshConflictDisposition {
+    UploadedConflictCopy { warning: String },
+    Pending { status: VaultSourceStatusDto },
+}
+
 pub struct Runtime {
     core: KeepassCore,
     vault_session: VaultSession,
@@ -264,11 +271,11 @@ pub struct Runtime {
     one_drive: OneDriveVaultSourceProvider,
     remote_cache: RemoteVaultCache,
     synced_bases: SyncedBaseStore,
+    session_bases: SessionBaseStore,
     biometric: Box<dyn BiometricProvider>,
     secure_storage: Box<dyn SecureStorageProvider>,
     allow_unlock_kdf: bool,
     passkey_ceremonies: BTreeMap<String, PasskeyCeremonyLedgerEntry>,
-    recent_unlock_user_verification: Option<PasskeyUserVerificationProof>,
     passkey_credential_id_generator: Box<dyn FnMut() -> String>,
     fixed_unix_time: Option<u64>,
     fixed_unix_time_ms: Option<u64>,
@@ -320,6 +327,25 @@ impl Runtime {
         anyhow::bail!("KDBX encryption profile changed concurrently")
     }
 
+    fn prepare_source_refresh_rebase(
+        base_vault: &Vault,
+        local_vault: &Vault,
+        remote_vault: &Vault,
+        base_save_profile: &SaveProfile,
+        local_save_profile: &SaveProfile,
+        remote_save_profile: &SaveProfile,
+    ) -> Result<(Vault, SaveProfile)> {
+        if !has_vaultkern_sync_lineage(base_vault, remote_vault) {
+            anyhow::bail!("current generation has foreign or unclear writer lineage");
+        }
+        let merged_save_profile =
+            Self::merge_save_profile(base_save_profile, local_save_profile, remote_save_profile)
+                .context("cannot merge concurrent encryption profile changes")?;
+        let patched = three_way_field_patch(base_vault, local_vault, remote_vault)
+            .context("changes cannot be represented as a field patch")?;
+        Ok((patched.vault, merged_save_profile))
+    }
+
     pub fn new() -> Self {
         Self::new_with_state(
             VaultReferenceStore::new_default(),
@@ -367,11 +393,11 @@ impl Runtime {
             one_drive,
             remote_cache,
             synced_bases,
+            session_bases: SessionBaseStore::new(),
             biometric: default_biometric_provider(),
             secure_storage,
             allow_unlock_kdf,
             passkey_ceremonies: BTreeMap::new(),
-            recent_unlock_user_verification: None,
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
             fixed_unix_time_ms: None,
@@ -395,11 +421,11 @@ impl Runtime {
                 "vaultkern-runtime-test-synced-bases-{}",
                 uuid::Uuid::new_v4()
             ))),
+            session_bases: SessionBaseStore::new(),
             biometric: Box::new(UnsupportedBiometricProvider),
             secure_storage: Box::new(UnsupportedSecureStorageProvider),
             allow_unlock_kdf: true,
             passkey_ceremonies: BTreeMap::new(),
-            recent_unlock_user_verification: None,
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
             fixed_unix_time_ms: None,
@@ -574,6 +600,10 @@ impl Runtime {
         });
     }
 
+    pub fn fail_next_test_onedrive_conflict_copy(&self) {
+        self.one_drive.fail_next_memory_conflict_copy();
+    }
+
     pub fn open_local_vault(&mut self, path: &str) -> Result<VaultHandleDto> {
         let path = normalize_local_path(path)?;
         self.load_local_vault_snapshot(&path)
@@ -590,6 +620,9 @@ impl Runtime {
         self.synced_bases
             .store(&vault_id, &bytes)
             .with_context(|| format!("failed to store synced base: {vault_id}"))?;
+        self.session_bases
+            .store(&vault_id, &bytes)
+            .with_context(|| format!("failed to store session base: {vault_id}"))?;
         let name = Path::new(path)
             .file_stem()
             .and_then(|value| value.to_str())
@@ -806,14 +839,29 @@ impl Runtime {
                     }
                 };
 
-                if !source_status
+                let pending_sync = source_status
                     .as_ref()
-                    .is_some_and(|status| status.remote_state == "pending_sync")
-                {
+                    .is_some_and(|status| status.remote_state == "pending_sync");
+                let session_base_bytes = if pending_sync {
+                    let pending_cache_key =
+                        RemoteCacheKey::new("onedrive", &onedrive_remote_id(&drive_id, &item_id));
+                    match self.remote_cache.read_pending_chain(&pending_cache_key) {
+                        Ok(chain) => chain.plan_baseline.bytes,
+                        Err(_) => self
+                            .synced_bases
+                            .read(&vault_id)
+                            .with_context(|| format!("failed to read synced base: {vault_id}"))?
+                            .with_context(|| format!("synced base is missing: {vault_id}"))?,
+                    }
+                } else {
                     self.synced_bases
                         .store(&vault_id, &bytes)
                         .with_context(|| format!("failed to store synced base: {vault_id}"))?;
-                }
+                    bytes.clone()
+                };
+                self.session_bases
+                    .store(&vault_id, &session_base_bytes)
+                    .with_context(|| format!("failed to store session base: {vault_id}"))?;
 
                 self.vault_session.insert_loaded(
                     vault_id.clone(),
@@ -927,8 +975,9 @@ impl Runtime {
             self.remote_cache.delete(&cache_key)?;
         }
         if let Some(source) = source.as_ref() {
-            self.synced_bases
-                .delete(&vault_id_for_stored_source(source))?;
+            let vault_id = vault_id_for_stored_source(source);
+            self.synced_bases.delete(&vault_id)?;
+            self.session_bases.delete(&vault_id)?;
         }
         let deleted_current = self.references.delete(vault_ref_id)?;
         if let Some(vault_id) = vault_id.as_deref() {
@@ -1035,6 +1084,9 @@ impl Runtime {
             self.synced_bases
                 .store(vault_id, migrated_base)
                 .with_context(|| format!("failed to store migrated synced base: {vault_id}"))?;
+            self.session_bases
+                .store(vault_id, migrated_base)
+                .with_context(|| format!("failed to store migrated session base: {vault_id}"))?;
         }
         self.vault_session.finish_unlock(
             vault_id,
@@ -1050,7 +1102,6 @@ impl Runtime {
         loaded.save_profile = save_profile;
         loaded.requires_source_migration = requires_source_migration;
         loaded.name = name;
-        self.recent_unlock_user_verification = None;
         Ok(())
     }
 
@@ -1095,14 +1146,37 @@ impl Runtime {
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
         for vault_id in vault_ids {
-            if let Ok(Some(bytes)) = self.synced_bases.read(&vault_id) {
-                if let Some(loaded) = self.vault_session.find_loaded_mut(&vault_id) {
-                    loaded.bytes = bytes;
+            let pending_cache_key = match self.vault_session.find_loaded(&vault_id) {
+                Some(loaded) => loaded
+                    .source_status
+                    .as_ref()
+                    .is_some_and(|status| status.remote_state == "pending_sync")
+                    .then(|| remote_cache_key_for_source(&loaded.source))
+                    .flatten(),
+                None => continue,
+            };
+            let pending = pending_cache_key
+                .as_ref()
+                .and_then(|cache_key| self.remote_cache.read(cache_key).ok().flatten())
+                .filter(|entry| entry.pending_sync);
+            let session_base = pending_cache_key
+                .is_none()
+                .then(|| self.session_bases.read(&vault_id).ok().flatten())
+                .flatten();
+            if let Some(loaded) = self.vault_session.find_loaded_mut(&vault_id) {
+                if pending_cache_key.is_some() {
+                    if let Some(pending) = pending {
+                        loaded.bytes = pending.bytes;
+                        loaded.baseline_fingerprint = pending.fingerprint;
+                    } else {
+                        loaded.bytes.clear();
+                    }
+                } else if loaded.bytes.is_empty() {
+                    loaded.bytes = session_base.unwrap_or_default();
                 }
             }
         }
         self.vault_session.lock_all();
-        self.recent_unlock_user_verification = None;
     }
 
     pub fn enable_quick_unlock_for_current_vault(
@@ -1150,7 +1224,7 @@ impl Runtime {
                 .bytes
                 .context("current vault source did not include bytes")?,
             Err(_) => self
-                .synced_bases
+                .session_bases
                 .read(&active_vault_id)?
                 .context("synced base is unavailable for quick unlock enrollment")?,
         };
@@ -1238,10 +1312,6 @@ impl Runtime {
             .context("vault disappeared after quick unlock")?;
         loaded.save_profile = save_profile;
         loaded.name = handle.name;
-        self.record_recent_unlock_user_verification(
-            &handle.vault_id,
-            PasskeyUserVerificationMethodDto::QuickUnlock,
-        );
         Ok(())
     }
 
@@ -1324,7 +1394,7 @@ impl Runtime {
             anyhow::bail!("passkey user verification vault mismatch");
         }
         let validation_epoch_ms = self.current_unix_time_ms();
-        let recent_unlock_verified = {
+        {
             let entry = self
                 .passkey_ceremonies
                 .get(ceremony_token)
@@ -1334,26 +1404,16 @@ impl Runtime {
             }
             validate_passkey_ceremony_not_expired(entry, validation_epoch_ms)?;
             validate_passkey_ceremony_vault_binding(entry, vault_id)?;
-            self.recent_unlock_user_verification_matches(
-                entry,
-                vault_id,
-                method,
-                validation_epoch_ms,
-            )
-        };
+        }
 
         match method {
             PasskeyUserVerificationMethodDto::MasterPassword => {
-                if !recent_unlock_verified {
-                    let password =
-                        password.context("passkey user verification password is required")?;
-                    self.verify_passkey_user_with_master_password(vault_id, password)?;
-                }
+                let password =
+                    password.context("passkey user verification password is required")?;
+                self.verify_passkey_user_with_master_password(vault_id, password)?;
             }
             PasskeyUserVerificationMethodDto::QuickUnlock => {
-                if !recent_unlock_verified {
-                    self.verify_passkey_user_with_quick_unlock(vault_id)?;
-                }
+                self.verify_passkey_user_with_quick_unlock(vault_id)?;
             }
         }
 
@@ -1377,37 +1437,6 @@ impl Runtime {
             method,
             verified_at_epoch_ms: verified_at_epoch_ms as i64,
         })
-    }
-
-    fn record_recent_unlock_user_verification(
-        &mut self,
-        vault_id: &str,
-        method: PasskeyUserVerificationMethodDto,
-    ) {
-        let now_epoch_ms = self.current_unix_time_ms();
-        self.recent_unlock_user_verification = Some(PasskeyUserVerificationProof {
-            vault_id: vault_id.to_owned(),
-            method,
-            verified_at_epoch_ms: now_epoch_ms,
-        });
-    }
-
-    fn recent_unlock_user_verification_matches(
-        &self,
-        entry: &PasskeyCeremonyLedgerEntry,
-        vault_id: &str,
-        method: PasskeyUserVerificationMethodDto,
-        now_epoch_ms: u64,
-    ) -> bool {
-        self.recent_unlock_user_verification
-            .as_ref()
-            .is_some_and(|proof| {
-                proof.vault_id == vault_id
-                    && proof.method == method
-                    && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
-                    && proof.verified_at_epoch_ms <= now_epoch_ms
-                    && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
-            })
     }
 
     fn verify_passkey_user_with_master_password(
@@ -1453,9 +1482,9 @@ impl Runtime {
             }
             pending.bytes
         } else {
-            self.synced_bases
+            self.session_bases
                 .read(vault_id)?
-                .context("synced base is unavailable for password verification")?
+                .context("session base is unavailable for password verification")?
         };
         let candidate = MasterCredential::new(Some(password.as_bytes()), None)?;
         let (policy, confirmation) = Self::external_open_kdf_policy();
@@ -2393,14 +2422,16 @@ impl Runtime {
             Some(discoverable),
             client_data_json_base64url,
         )?;
-        let user_verified = self.passkey_ceremony_user_verified(ceremony_token, vault_id)?;
         let credential_id = credential_id.context("passkey assertion credential id is required")?;
-        let effective_user_presence_verified = user_presence_verified || user_verified;
+        let effective_user_presence_verified = user_presence_verified
+            || self.passkey_ceremony_user_verification_is_valid(ceremony_token, vault_id)?;
         if !effective_user_presence_verified {
             anyhow::bail!("passkey user presence was not verified");
         }
         let _ = self.loaded_vault(vault_id)?;
         self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
+        self.consume_passkey_ceremony_user_verification(ceremony_token, vault_id)?;
+        let user_verified = true;
         let vault = self.loaded_vault(vault_id)?;
         let passkey = find_unique_passkey_by_credential_id_and_relying_party(
             &vault.root,
@@ -2480,23 +2511,44 @@ impl Runtime {
         })
     }
 
-    fn passkey_ceremony_user_verified(&self, ceremony_token: &str, vault_id: &str) -> Result<bool> {
+    fn passkey_ceremony_user_verification_is_valid(
+        &self,
+        ceremony_token: &str,
+        vault_id: &str,
+    ) -> Result<bool> {
         let now_epoch_ms = self.current_unix_time_ms();
         let entry = self
             .passkey_ceremonies
             .get(ceremony_token)
             .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
-        let verified = entry.user_verification.as_ref().is_some_and(|proof| {
+        Ok(entry.user_verification.as_ref().is_some_and(|proof| {
             proof.vault_id == vault_id
                 && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
                 && proof.verified_at_epoch_ms <= now_epoch_ms
+                && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
+        }))
+    }
+
+    fn consume_passkey_ceremony_user_verification(
+        &mut self,
+        ceremony_token: &str,
+        vault_id: &str,
+    ) -> Result<()> {
+        let now_epoch_ms = self.current_unix_time_ms();
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        let verified = entry.user_verification.take().is_some_and(|proof| {
+            proof.vault_id == vault_id
+                && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
+                && proof.verified_at_epoch_ms <= now_epoch_ms
+                && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
         });
-        if entry.identity.user_verification == PasskeyUserVerificationRequirementDto::Required
-            && !verified
-        {
+        if !verified {
             anyhow::bail!("passkey user verification was not verified");
         }
-        Ok(verified)
+        Ok(())
     }
 
     pub fn passkey_credential_status(
@@ -3007,7 +3059,7 @@ impl Runtime {
             None,
             client_data_json_base64url,
         )?;
-        let user_verified = self.passkey_ceremony_user_verified(ceremony_token, vault_id)?;
+        let user_verified = true;
         let modified_at = self.current_unix_time();
         let credential_id = (self.passkey_credential_id_generator)();
         let registration = create_registration_with_credential_id(
@@ -3073,6 +3125,7 @@ impl Runtime {
         if credential_id_collision_count > allowed_collision_count {
             anyhow::bail!("passkey credential id collision");
         }
+        self.consume_passkey_ceremony_user_verification(ceremony_token, vault_id)?;
         if let Some((entry_id, rollback_entry)) = existing {
             let refresh_entry_username = rollback_entry
                 .passkey
@@ -3562,7 +3615,8 @@ impl Runtime {
         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
             anyhow::bail!("browser request was cancelled");
         }
-        if browser_command_requires_fresh_verification(&command) {
+        if browser_command_authorization(&command) == BrowserCommandAuthorization::FreshInteractive
+        {
             self.biometric
                 .authorize("Allow browser access to VaultKern secrets or security settings")
                 .context("fresh browser request verification failed")?;
@@ -4183,10 +4237,10 @@ impl Runtime {
             })
         });
         let baseline_bytes = self
-            .synced_bases
+            .session_bases
             .read(&vault_id)
-            .with_context(|| format!("failed to read synced base: {vault_id}"))?
-            .with_context(|| format!("synced base is missing: {vault_id}"))?;
+            .with_context(|| format!("failed to read session base: {vault_id}"))?
+            .with_context(|| format!("session base is missing: {vault_id}"))?;
         let baseline_bytes_fingerprint = fingerprint_for_cached_bytes(&baseline_bytes, 0);
         let source_identity_sha256 = autofill_source_identity_sha256(&source);
         if let Err(error) = plan_sha256(&transaction_id, &vault_id, &source_identity_sha256, &plan)
@@ -5133,10 +5187,24 @@ impl Runtime {
         let synced = source_status
             .as_ref()
             .is_none_or(|status| status.remote_state == "online");
+        let mut retain_committed_bytes = false;
         let base_warning = synced
-            .then(|| self.synced_bases.store(vault_id, &bytes).err())
-            .flatten()
-            .map(|error| format!("failed to store synced base for {vault_id}: {error}"));
+            .then(|| {
+                let mut warnings = Vec::new();
+                if let Err(error) = self.synced_bases.store(vault_id, &bytes) {
+                    warnings.push(format!(
+                        "failed to store synced base for {vault_id}: {error}"
+                    ));
+                }
+                if let Err(error) = self.session_bases.store(vault_id, &bytes) {
+                    retain_committed_bytes = true;
+                    warnings.push(format!(
+                        "failed to store session base for {vault_id}: {error}"
+                    ));
+                }
+                (!warnings.is_empty()).then(|| warnings.join("; "))
+            })
+            .flatten();
         if let Some(warning) = base_warning {
             if let Some(status) = source_status.as_mut() {
                 status.last_error = Some(match status.last_error.take() {
@@ -5152,7 +5220,11 @@ impl Runtime {
             .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded.vault = Some(vault);
-        loaded.bytes = Vec::new();
+        loaded.bytes = if retain_committed_bytes {
+            bytes
+        } else {
+            Vec::new()
+        };
         loaded.baseline_fingerprint = fingerprint;
         loaded.save_profile = save_profile;
         loaded.requires_source_migration = false;
@@ -5287,19 +5359,36 @@ impl Runtime {
                 return Err(error).with_context(|| format!("failed to write vault: {vault_id}"));
             }
         };
+        let mut warnings = Vec::new();
+        let retain_committed_bytes = match self.session_bases.store(vault_id, &bytes) {
+            Ok(()) => false,
+            Err(error) => {
+                warnings.push(format!(
+                    "failed to store session base for {vault_id}: {error}"
+                ));
+                true
+            }
+        };
+        if let Err(error) = self.synced_bases.store(vault_id, &bytes) {
+            warnings.push(format!(
+                "failed to store synced base for {vault_id}: {error}"
+            ));
+        }
         {
             let loaded = self
                 .vault_session
                 .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
-            loaded.bytes = Vec::new();
+            loaded.bytes = if retain_committed_bytes {
+                bytes
+            } else {
+                Vec::new()
+            };
             loaded.baseline_fingerprint = next_fingerprint;
             loaded.requires_source_migration = false;
         }
-        if let Err(error) = self.synced_bases.store(vault_id, &bytes) {
-            self.record_local_save_warnings(vec![format!(
-                "failed to store synced base for {vault_id}: {error}"
-            )]);
+        if !warnings.is_empty() {
+            self.record_local_save_warnings(warnings);
         }
         Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
             status: SaveVaultStatusDto::Saved,
@@ -5345,12 +5434,22 @@ impl Runtime {
         };
         let cache_key = remote_cache_key_for_source(&source).expect("OneDrive source");
         let account_label = account_label.unwrap_or_else(|| cache_key.provider_kind.clone());
-        let local_vault = self.loaded_vault(vault_id)?.clone();
+        let local_vault = {
+            let loaded = self
+                .vault_session
+                .find_loaded(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let local_vault = loaded
+                .vault
+                .as_ref()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            local_vault.clone()
+        };
         let base_bytes = self
-            .synced_bases
+            .session_bases
             .read(vault_id)
-            .with_context(|| format!("failed to read synced base: {vault_id}"))?
-            .with_context(|| format!("synced base is missing: {vault_id}"))?;
+            .with_context(|| format!("failed to read session base: {vault_id}"))?
+            .with_context(|| format!("session base is missing: {vault_id}"))?;
         let base_vault = match Self::load_session_database(&base_bytes, &key) {
             Ok(database) => database.vault,
             Err(KdbxError::HeaderHmacMismatch) => self
@@ -5436,25 +5535,50 @@ impl Runtime {
                         .refresh_transformed_key_from_unlock_blob(vault_id, &remote_bytes)
                         .context("failed to refresh quick unlock after the OneDrive KDF changed")?
                     else {
-                        return self.upload_onedrive_conflict_copy(
+                        return self.upload_or_persist_onedrive_conflict_copy(
+                            vault_id,
                             drive_id,
                             item_id,
                             &display_name,
+                            &account_label,
+                            baseline_fingerprint,
                             &local_bytes,
+                            Some(verified_local.clone()),
+                            "current OneDrive generation uses a different vault key",
                         );
                     };
                     key = refreshed_key;
                     vault
                 }
-                Err(_) => {
-                    return self.upload_onedrive_conflict_copy(
+                Err(error) => {
+                    return self.upload_or_persist_onedrive_conflict_copy(
+                        vault_id,
                         drive_id,
                         item_id,
                         &display_name,
+                        &account_label,
+                        baseline_fingerprint,
                         &local_bytes,
+                        Some(verified_local.clone()),
+                        &format!("current OneDrive generation cannot be parsed: {error}"),
                     );
                 }
             };
+            if !state.matches_fingerprint(baseline_fingerprint)
+                && !has_vaultkern_sync_lineage(&base_vault, &remote_vault)
+            {
+                return self.upload_or_persist_onedrive_conflict_copy(
+                    vault_id,
+                    drive_id,
+                    item_id,
+                    &display_name,
+                    &account_label,
+                    baseline_fingerprint,
+                    &local_bytes,
+                    Some(verified_local.clone()),
+                    "current OneDrive generation has foreign or unclear writer lineage",
+                );
+            }
             let remote_save_profile = self
                 .inspected_save_profile(&remote_bytes)
                 .context("failed to inspect the current OneDrive generation")?;
@@ -5464,23 +5588,35 @@ impl Runtime {
                 &remote_save_profile,
             ) {
                 Ok(profile) => profile,
-                Err(_) => {
-                    return self.upload_onedrive_conflict_copy(
+                Err(error) => {
+                    return self.upload_or_persist_onedrive_conflict_copy(
+                        vault_id,
                         drive_id,
                         item_id,
                         &display_name,
+                        &account_label,
+                        baseline_fingerprint,
                         &local_bytes,
+                        Some(verified_local.clone()),
+                        &format!(
+                            "concurrent OneDrive encryption profile cannot be merged: {error}"
+                        ),
                     );
                 }
             };
             let patched = match three_way_field_patch(&base_vault, &local_vault, &remote_vault) {
                 Ok(patched) => patched,
-                Err(_) => {
-                    return self.upload_onedrive_conflict_copy(
+                Err(error) => {
+                    return self.upload_or_persist_onedrive_conflict_copy(
+                        vault_id,
                         drive_id,
                         item_id,
                         &display_name,
+                        &account_label,
+                        baseline_fingerprint,
                         &local_bytes,
+                        Some(verified_local.clone()),
+                        &format!("concurrent changes cannot be represented: {error}"),
                     );
                 }
             };
@@ -5540,11 +5676,16 @@ impl Runtime {
                     continue;
                 }
                 Ok(OneDriveConditionalWriteOutcome::PreconditionFailed) => {
-                    return self.upload_onedrive_conflict_copy(
+                    return self.upload_or_persist_onedrive_conflict_copy(
+                        vault_id,
                         drive_id,
                         item_id,
                         &display_name,
+                        &account_label,
+                        baseline_fingerprint,
                         &bytes,
+                        Some(verified_vault),
+                        "OneDrive CAS retry budget was exhausted",
                     );
                 }
                 Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown { message }) => {
@@ -5553,6 +5694,18 @@ impl Runtime {
                         .with_context(|| {
                             format!("failed to store pending OneDrive base: {vault_id}")
                         })?;
+                    if let Err(error) = self.session_bases.store(vault_id, &remote_bytes) {
+                        let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
+                        let session_restore = self.session_bases.store(vault_id, &base_bytes);
+                        if let Err(restore_error) = synced_restore.and(session_restore) {
+                            return Err(error).context(format!(
+                                "failed to restore OneDrive bases after session-base staging failed: {restore_error}"
+                            ));
+                        }
+                        return Err(error).with_context(|| {
+                            format!("failed to store pending session base: {vault_id}")
+                        });
+                    }
                     let response = self.save_remote_vault_to_pending_cache(
                         vault_id,
                         source,
@@ -5565,11 +5718,13 @@ impl Runtime {
                     let response = match response {
                         Ok(response) => response,
                         Err(error) => {
-                            self.synced_bases.store(vault_id, &base_bytes).with_context(|| {
-                                format!(
-                                    "failed to restore the synced OneDrive base after pending cache failure: {error:#}"
-                                )
-                            })?;
+                            let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
+                            let session_restore = self.session_bases.store(vault_id, &base_bytes);
+                            if let Err(restore_error) = synced_restore.and(session_restore) {
+                                return Err(error).context(format!(
+                                    "failed to restore OneDrive bases after pending cache failure: {restore_error}"
+                                ));
+                            }
                             return Err(error);
                         }
                     };
@@ -5583,6 +5738,18 @@ impl Runtime {
                         .with_context(|| {
                             format!("failed to store pending OneDrive base: {vault_id}")
                         })?;
+                    if let Err(stage_error) = self.session_bases.store(vault_id, &remote_bytes) {
+                        let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
+                        let session_restore = self.session_bases.store(vault_id, &base_bytes);
+                        if let Err(restore_error) = synced_restore.and(session_restore) {
+                            return Err(stage_error).context(format!(
+                                "failed to restore OneDrive bases after session-base staging failed: {restore_error}"
+                            ));
+                        }
+                        return Err(stage_error).with_context(|| {
+                            format!("failed to store pending session base: {vault_id}")
+                        });
+                    }
                     let response = self.save_remote_vault_to_pending_cache(
                         vault_id,
                         source,
@@ -5595,11 +5762,13 @@ impl Runtime {
                     let response = match response {
                         Ok(response) => response,
                         Err(error) => {
-                            self.synced_bases.store(vault_id, &base_bytes).with_context(|| {
-                                format!(
-                                    "failed to restore the synced OneDrive base after pending cache failure: {error:#}"
-                                )
-                            })?;
+                            let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
+                            let session_restore = self.session_bases.store(vault_id, &base_bytes);
+                            if let Err(restore_error) = synced_restore.and(session_restore) {
+                                return Err(error).context(format!(
+                                    "failed to restore OneDrive bases after pending cache failure: {restore_error}"
+                                ));
+                            }
                             return Err(error);
                         }
                     };
@@ -5806,6 +5975,101 @@ impl Runtime {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn upload_or_persist_onedrive_conflict_copy(
+        &mut self,
+        vault_id: &str,
+        drive_id: &str,
+        item_id: &str,
+        display_name: &str,
+        account_label: &str,
+        baseline_fingerprint: &VaultSourceFingerprint,
+        bytes: &[u8],
+        pending_vault: Option<Vault>,
+        reason: &str,
+    ) -> Result<RuntimeResponse> {
+        match self.upload_onedrive_conflict_copy(drive_id, item_id, display_name, bytes) {
+            Ok(response) => Ok(response),
+            Err(upload_error) => {
+                let response = self.save_remote_vault_to_pending_cache(
+                    vault_id,
+                    VaultSource::OneDriveItem {
+                        drive_id: drive_id.to_owned(),
+                        item_id: item_id.to_owned(),
+                    },
+                    bytes.to_vec(),
+                    baseline_fingerprint,
+                    display_name.to_owned(),
+                    Some(account_label.to_owned()),
+                    format!(
+                        "{reason}; conflict-copy upload failed and remains pending: {upload_error:#}"
+                    ),
+                )?;
+                if let Some(vault) = pending_vault {
+                    self.install_pending_vault_candidate(vault_id, vault)?;
+                }
+                Ok(response)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn preserve_source_refresh_conflict(
+        &mut self,
+        vault_id: &str,
+        drive_id: &str,
+        item_id: &str,
+        display_name: &str,
+        account_label: &str,
+        baseline_fingerprint: &VaultSourceFingerprint,
+        local_vault: &Vault,
+        local_save_profile: &SaveProfile,
+        key: &TransformedKey,
+        reason: &str,
+    ) -> Result<SourceRefreshConflictDisposition> {
+        let (bytes, verified_local) = Self::serialize_and_verify_vault_candidate(
+            local_vault.clone(),
+            key,
+            local_save_profile.clone(),
+        )
+        .context("failed to serialize the source-refresh conflict copy")?;
+        let name = onedrive_conflict_copy_name(display_name, self.current_unix_time());
+        match self
+            .one_drive
+            .upload_sibling_conflict_copy(drive_id, item_id, &name, &bytes)
+        {
+            Ok(item) => Ok(SourceRefreshConflictDisposition::UploadedConflictCopy {
+                warning: format!(
+                    "{reason}; local changes were saved to onedrive:{}",
+                    item.name
+                ),
+            }),
+            Err(upload_error) => {
+                self.save_remote_vault_to_pending_cache(
+                    vault_id,
+                    VaultSource::OneDriveItem {
+                        drive_id: drive_id.to_owned(),
+                        item_id: item_id.to_owned(),
+                    },
+                    bytes,
+                    baseline_fingerprint,
+                    display_name.to_owned(),
+                    Some(account_label.to_owned()),
+                    format!(
+                        "{reason}; conflict-copy upload failed and remains pending: {upload_error:#}"
+                    ),
+                )?;
+                self.install_pending_vault_candidate(vault_id, verified_local)?;
+                let status = self
+                    .vault_session
+                    .find_loaded(vault_id)
+                    .and_then(|loaded| loaded.source_status.clone())
+                    .context("pending source-refresh conflict did not install a source status")?;
+                Ok(SourceRefreshConflictDisposition::Pending { status })
+            }
+        }
+    }
+
     fn save_loaded_vault_bytes(
         &mut self,
         vault_id: &str,
@@ -5865,7 +6129,7 @@ impl Runtime {
             .vault_session
             .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
-        loaded.bytes = bytes;
+        loaded.bytes = Vec::new();
         loaded.baseline_fingerprint = fingerprint;
         loaded.save_profile = save_profile;
         loaded.source_status = Some(status);
@@ -5979,6 +6243,8 @@ impl Runtime {
                 let remote_save_profile = self
                     .inspected_save_profile(&snapshot.bytes)
                     .context("failed to inspect OneDrive generation during source refresh")?;
+                let display_name = display_name_for_cloud_name(&snapshot.name);
+                let mut refresh_warning = None;
                 let patched_vault = match (
                     self.vault_session.find_loaded(vault_id).and_then(|loaded| {
                         loaded
@@ -5990,10 +6256,10 @@ impl Runtime {
                 ) {
                     (Some((local_vault, local_save_profile)), Some(mut key)) => {
                         let base_bytes = self
-                            .synced_bases
+                            .session_bases
                             .read(vault_id)
-                            .with_context(|| format!("failed to read synced base: {vault_id}"))?
-                            .with_context(|| format!("synced base is missing: {vault_id}"))?;
+                            .with_context(|| format!("failed to read session base: {vault_id}"))?
+                            .with_context(|| format!("session base is missing: {vault_id}"))?;
                         let base_vault = Self::load_session_database(&base_bytes, &key)
                             .context("failed to parse synced base during source refresh")?
                             .vault;
@@ -6021,26 +6287,43 @@ impl Runtime {
                                 );
                             }
                         };
-                        let merged_save_profile = Self::merge_save_profile(
+                        let selected = match Self::prepare_source_refresh_rebase(
+                            &base_vault,
+                            &local_vault,
+                            &remote_vault,
                             &base_save_profile,
                             &local_save_profile,
                             &remote_save_profile,
-                        )
-                        .context(
-                            "OneDrive refresh cannot merge concurrent encryption profile changes",
-                        )?;
-                        Some((
-                            three_way_field_patch(&base_vault, &local_vault, &remote_vault)
-                                .context("OneDrive refresh cannot be represented as a field patch")?
-                                .vault,
-                            key,
-                            merged_save_profile,
-                        ))
+                        ) {
+                            Ok((patched, merged_save_profile)) => (patched, merged_save_profile),
+                            Err(error) => match self.preserve_source_refresh_conflict(
+                                vault_id,
+                                &drive_id,
+                                &item_id,
+                                &display_name,
+                                &snapshot.account_label,
+                                &baseline_fingerprint,
+                                &local_vault,
+                                &local_save_profile,
+                                key.as_ref(),
+                                &format!("OneDrive source refresh conflict: {error:#}"),
+                            )? {
+                                SourceRefreshConflictDisposition::UploadedConflictCopy {
+                                    warning,
+                                } => {
+                                    refresh_warning = Some(warning);
+                                    (remote_vault, remote_save_profile.clone())
+                                }
+                                SourceRefreshConflictDisposition::Pending { status } => {
+                                    return Ok(status);
+                                }
+                            },
+                        };
+                        Some((selected.0, key, selected.1))
                     }
                     _ => None,
                 };
                 let cached_at = self.current_unix_time() as i64;
-                let display_name = display_name_for_cloud_name(&snapshot.name);
                 self.remote_cache.write(
                     &cache_key,
                     RemoteVaultCacheEntry {
@@ -6055,12 +6338,15 @@ impl Runtime {
                 self.synced_bases
                     .store(vault_id, &snapshot.bytes)
                     .with_context(|| format!("failed to store synced base: {vault_id}"))?;
+                self.session_bases
+                    .store(vault_id, &snapshot.bytes)
+                    .with_context(|| format!("failed to store session base: {vault_id}"))?;
                 let status = VaultSourceStatusDto {
                     source_kind: cache_key.provider_kind,
                     remote_state: "online".into(),
                     last_sync_at: Some(cached_at),
                     cached_at: Some(cached_at),
-                    last_error: None,
+                    last_error: refresh_warning,
                 };
 
                 let loaded = self
@@ -6075,7 +6361,11 @@ impl Runtime {
                     loaded.save_profile = remote_save_profile;
                 }
                 loaded.name = display_name;
-                loaded.bytes = snapshot.bytes;
+                loaded.bytes = if loaded.vault.is_some() {
+                    Vec::new()
+                } else {
+                    snapshot.bytes
+                };
                 loaded.baseline_fingerprint = snapshot.fingerprint;
                 loaded.source_account_label = Some(snapshot.account_label);
                 loaded.source_status = Some(status.clone());
@@ -6599,10 +6889,10 @@ impl Runtime {
             .context("failed to verify live pending conflict copy")
         };
         let base_bytes = self
-            .synced_bases
+            .session_bases
             .read(vault_id)
-            .with_context(|| format!("failed to read synced base: {vault_id}"))?
-            .with_context(|| format!("synced base is missing: {vault_id}"))?;
+            .with_context(|| format!("failed to read session base: {vault_id}"))?
+            .with_context(|| format!("session base is missing: {vault_id}"))?;
         let base_vault = Self::load_session_database(&base_bytes, &key)
             .context("failed to parse synced base during pending synchronization")?
             .vault;
@@ -6648,6 +6938,18 @@ impl Runtime {
                     );
                 }
             };
+            if !has_vaultkern_sync_lineage(&base_vault, &remote_vault) {
+                let local_bytes = serialize_live_conflict_copy()?;
+                return self.upload_pending_onedrive_conflict_copy(
+                    vault_id,
+                    drive_id,
+                    item_id,
+                    cache_key,
+                    &pending,
+                    &local_bytes,
+                    "current OneDrive generation has foreign or unclear writer lineage",
+                );
+            }
             let remote_save_profile = self
                 .inspected_save_profile(&remote.bytes)
                 .context("failed to inspect current OneDrive generation during pending sync")?;
@@ -6920,12 +7222,25 @@ impl Runtime {
     }
 }
 
-fn browser_command_requires_fresh_verification(command: &RuntimeCommand) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserCommandAuthorization {
+    ChannelTrustOnly,
+    FreshInteractive,
+    IntrinsicallyVerified,
+    PasskeyCeremonyBound,
+}
+
+fn browser_command_authorization(command: &RuntimeCommand) -> BrowserCommandAuthorization {
     match command {
-        RuntimeCommand::UpdateDatabaseSettings { update, .. } => {
-            update.credentials.is_some() || update.encryption.is_some()
-        }
-        RuntimeCommand::CreateEntry { .. }
+        RuntimeCommand::AddLocalVaultReference { .. }
+        | RuntimeCommand::BeginOneDriveLogin
+        | RuntimeCommand::CompleteOneDriveLogin { .. }
+        | RuntimeCommand::CompletePendingOneDriveLogin
+        | RuntimeCommand::ListOneDriveChildren { .. }
+        | RuntimeCommand::AddOneDriveVaultReference { .. }
+        | RuntimeCommand::RetryVaultSourceSync { .. }
+        | RuntimeCommand::DeleteVaultReference { .. }
+        | RuntimeCommand::CreateEntry { .. }
         | RuntimeCommand::UpdateEntryFields { .. }
         | RuntimeCommand::CompareAndUpdateEntryFields { .. }
         | RuntimeCommand::PersistAutofillMutation { .. }
@@ -6940,9 +7255,58 @@ fn browser_command_requires_fresh_verification(command: &RuntimeCommand) -> bool
         | RuntimeCommand::UpdateEntryAttachmentMetadata { .. }
         | RuntimeCommand::ReplaceEntryAttachmentContent { .. }
         | RuntimeCommand::DeleteEntryAttachment { .. }
-        | RuntimeCommand::DisableQuickUnlockForCurrentVault => true,
-        _ => false,
+        | RuntimeCommand::UpdateEntry { .. }
+        | RuntimeCommand::UpdateDatabaseSettings { .. }
+        | RuntimeCommand::FindExactMatchingEntryIds { .. }
+        | RuntimeCommand::DisableQuickUnlockForCurrentVault => {
+            BrowserCommandAuthorization::FreshInteractive
+        }
+        RuntimeCommand::EnableQuickUnlockForCurrentVault { .. }
+        | RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
+        | RuntimeCommand::VerifyPasskeyUser { .. } => {
+            BrowserCommandAuthorization::IntrinsicallyVerified
+        }
+        RuntimeCommand::ListPasskeyCredentials { .. }
+        | RuntimeCommand::RegisterPasskeyCeremony { .. }
+        | RuntimeCommand::AdvancePasskeyCeremonyPhase { .. }
+        | RuntimeCommand::BindPasskeyCeremonyVault { .. }
+        | RuntimeCommand::QueryPasskeyCeremonyLedger { .. }
+        | RuntimeCommand::ReconcilePasskeyCeremonyLedger { .. }
+        | RuntimeCommand::MarkPasskeyCeremonyUnknownDelivery { .. }
+        | RuntimeCommand::CreatePasskeyAssertion { .. }
+        | RuntimeCommand::CreatePasskeyRegistration { .. }
+        | RuntimeCommand::SavePasskeyRegistration { .. }
+        | RuntimeCommand::AbortPasskeyRegistration { .. }
+        | RuntimeCommand::CommitPasskeyRegistration { .. }
+        | RuntimeCommand::PasskeyCredentialStatus { .. }
+        | RuntimeCommand::PasskeyCredentialStatusBatch { .. } => {
+            BrowserCommandAuthorization::PasskeyCeremonyBound
+        }
+        RuntimeCommand::GetSessionState
+        | RuntimeCommand::ListRecentVaults
+        | RuntimeCommand::PreloadCurrentVault
+        | RuntimeCommand::SetCurrentVault { .. }
+        | RuntimeCommand::UnlockCurrentVaultWithPassword { .. }
+        | RuntimeCommand::UnlockCurrentVault { .. }
+        | RuntimeCommand::OpenLocalVault { .. }
+        | RuntimeCommand::LockSession
+        | RuntimeCommand::UnlockWithPassword { .. }
+        | RuntimeCommand::UnlockVault { .. }
+        | RuntimeCommand::ListGroups { .. }
+        | RuntimeCommand::ListEntries { .. }
+        | RuntimeCommand::ListEntryHistory { .. }
+        | RuntimeCommand::GetPasskeyUserVerificationCapability
+        | RuntimeCommand::SaveVault { .. }
+        | RuntimeCommand::GetDatabaseSettings { .. }
+        | RuntimeCommand::FindFillCandidates { .. } => {
+            BrowserCommandAuthorization::ChannelTrustOnly
+        }
     }
+}
+
+#[cfg(test)]
+fn browser_command_requires_fresh_verification(command: &RuntimeCommand) -> bool {
+    browser_command_authorization(command) == BrowserCommandAuthorization::FreshInteractive
 }
 
 #[allow(dead_code)]
@@ -7313,8 +7677,8 @@ fn normalized_serialized_entry(mut entry: Entry) -> Entry {
     entry.raw_state = Default::default();
     entry.opaque_xml.clear();
     entry.custom_data_blocks.clear();
-    entry.history = entry
-        .history
+    let history = std::mem::take(&mut entry.history);
+    entry.history = history
         .into_iter()
         .map(normalized_serialized_entry)
         .collect();
@@ -8044,6 +8408,7 @@ fn save_kdbx_with_history_limits_transformed(
     transformed_key: &TransformedKey,
     mut save_profile: SaveProfile,
 ) -> std::result::Result<Vec<u8>, KdbxError> {
+    vault.generator = Some(VAULTKERN_KDBX_GENERATOR.into());
     if required_version(vault) == KdbxVersion::V4_1 {
         save_profile.version = KdbxVersion::V4_1;
     }
@@ -8062,6 +8427,12 @@ fn save_kdbx_with_history_limits_transformed(
     let header = vaultkern_core::KdbxHeader::decode(&bytes)?;
     vault.kdf_parameters = Some(header.kdf_parameters.encode()?);
     Ok(bytes)
+}
+
+fn has_vaultkern_sync_lineage(base: &Vault, remote: &Vault) -> bool {
+    base.root.id == remote.root.id
+        && base.generator.as_deref() == Some(VAULTKERN_KDBX_GENERATOR)
+        && remote.generator.as_deref() == Some(VAULTKERN_KDBX_GENERATOR)
 }
 
 fn clone_entry_histories(group: &vaultkern_core::Group) -> Vec<Vec<Entry>> {
@@ -9161,6 +9532,7 @@ struct RankedFillCandidate {
 mod tests {
     use super::*;
     use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
+    use serde::{Serialize, de::DeserializeOwned};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use vaultkern_core::CompositeKey;
@@ -9169,6 +9541,77 @@ mod tests {
         AutofillPersistOutcomeDto, AutofillPersistPlanDto, AutofillPersistResultDto,
         DatabaseCredentialsUpdateDto,
     };
+    use zeroize::Zeroizing;
+
+    trait DuplicateForTest: Sized + Serialize + DeserializeOwned {
+        fn duplicate_for_test(&self) -> Self {
+            serde_json::from_slice(
+                &serde_json::to_vec(self).expect("serialize test value for explicit duplication"),
+            )
+            .expect("deserialize explicitly duplicated test value")
+        }
+    }
+
+    impl<T> DuplicateForTest for T where T: Sized + Serialize + DeserializeOwned {}
+
+    #[test]
+    fn browser_policy_mutations_and_secret_oracles_require_fresh_verification() {
+        let commands = [
+            RuntimeCommand::AddLocalVaultReference {
+                path: Some("vault.kdbx".into()),
+            },
+            RuntimeCommand::CompleteOneDriveLogin {
+                code: "code".into(),
+                redirect_uri: "http://localhost/callback".into(),
+                code_verifier: "verifier".into(),
+            },
+            RuntimeCommand::AddOneDriveVaultReference {
+                drive_id: "drive".into(),
+                item_id: "item".into(),
+            },
+            RuntimeCommand::RetryVaultSourceSync {
+                vault_id: "vault".into(),
+            },
+            RuntimeCommand::DeleteVaultReference {
+                vault_ref_id: "reference".into(),
+            },
+            RuntimeCommand::UpdateEntry {
+                vault_id: "vault".into(),
+                entry_id: "entry".into(),
+                title: "title".into(),
+                username: "username".into(),
+                password: "password".into(),
+                url: "https://example.com".into(),
+                notes: "notes".into(),
+            },
+            RuntimeCommand::UpdateDatabaseSettings {
+                vault_id: "vault".into(),
+                update: DatabaseSettingsUpdateDto {
+                    autosave_delay_seconds: Some(30),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            },
+            RuntimeCommand::FindExactMatchingEntryIds {
+                vault_id: "vault".into(),
+                fields: EntryFieldsDto {
+                    title: "title".into(),
+                    username: "username".into(),
+                    password: "password".into(),
+                    url: "https://example.com".into(),
+                    notes: "notes".into(),
+                    totp_uri: None,
+                    custom_fields: Vec::new(),
+                },
+            },
+        ];
+
+        for command in commands {
+            assert!(
+                browser_command_requires_fresh_verification(&command),
+                "browser command must require fresh verification: {command:?}"
+            );
+        }
+    }
 
     #[test]
     fn browser_secret_access_mutations_and_security_policy_changes_require_fresh_verification() {
@@ -9230,13 +9673,14 @@ mod tests {
     }
 
     #[test]
-    fn browser_metadata_queries_and_commands_with_internal_verification_do_not_double_prompt() {
+    fn browser_metadata_queries_are_channel_trusted_but_settings_updates_require_fresh_verification()
+     {
         assert!(!browser_command_requires_fresh_verification(
             &RuntimeCommand::ListEntries {
                 vault_id: "vault".into(),
             }
         ));
-        assert!(!browser_command_requires_fresh_verification(
+        assert!(browser_command_requires_fresh_verification(
             &RuntimeCommand::UpdateDatabaseSettings {
                 vault_id: "vault".into(),
                 update: DatabaseSettingsUpdateDto {
@@ -9544,10 +9988,10 @@ mod tests {
         assert_eq!(local.root.times, base.root.times);
 
         let mut remote = base.clone();
-        remote.name = "Earlier remote name".into();
-        remote.database_name_changed = Some(100);
+        remote.maintenance_history_days = Some(42);
         let merged = three_way_field_patch(&base, &local, &remote).unwrap();
         assert_eq!(merged.vault.name, "Local name");
+        assert_eq!(merged.vault.maintenance_history_days, Some(42));
     }
 
     #[test]
@@ -9689,7 +10133,7 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+        fn load(&self, _key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
             anyhow::bail!("quick unlock secret should not be decrypted while listing vaults")
         }
 
@@ -9723,8 +10167,8 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            Ok(self.values.borrow().get(key).cloned())
+        fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+            Ok(self.values.borrow().get(key).cloned().map(Zeroizing::new))
         }
 
         fn contains(&self, key: &str) -> Result<bool> {
@@ -9765,8 +10209,8 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            Ok(self.values.borrow().get(key).cloned())
+        fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+            Ok(self.values.borrow().get(key).cloned().map(Zeroizing::new))
         }
 
         fn contains(&self, key: &str) -> Result<bool> {
@@ -9817,8 +10261,8 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            Ok(self.values.borrow().get(key).cloned())
+        fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+            Ok(self.values.borrow().get(key).cloned().map(Zeroizing::new))
         }
 
         fn contains(&self, key: &str) -> Result<bool> {
@@ -9852,7 +10296,7 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+        fn load(&self, _key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
             Ok(None)
         }
 
@@ -9982,6 +10426,13 @@ mod tests {
         let loaded = runtime.vault_session.find_loaded(&opened.vault_id).unwrap();
 
         assert!(loaded.bytes.is_empty());
+        assert!(
+            runtime
+                .session_bases
+                .read(&opened.vault_id)
+                .unwrap()
+                .is_some()
+        );
         assert!(loaded.transformed_key.is_some());
         assert_eq!(
             loaded.credential_shape,
@@ -9990,6 +10441,37 @@ mod tests {
                 has_key_file: false,
             }
         );
+    }
+
+    #[test]
+    fn source_refresh_of_an_unlocked_vault_discards_downloaded_file_bytes() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_001);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let current = runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap();
+        let mut credential = CompositeKey::default();
+        credential.add_password("demo-password");
+        let transformed = vaultkern_core::derive_transformed_key(&current, &credential).unwrap();
+        let mut remote = KeepassCore::new().load_kdbx(&current, &credential).unwrap();
+        remote.description = Some("remote refresh".into());
+        let save_profile = runtime.inspected_save_profile(&current).unwrap();
+        let remote_bytes =
+            save_kdbx_with_history_limits_transformed(&mut remote, &transformed, save_profile)
+                .unwrap();
+        runtime.replace_test_onedrive_item("drive-1", "item-1", remote_bytes);
+
+        assert_eq!(
+            runtime
+                .retry_vault_source_sync(&vault_id)
+                .unwrap()
+                .remote_state,
+            "online"
+        );
+
+        let loaded = runtime.vault_session.find_loaded(&vault_id).unwrap();
+        assert!(loaded.vault.is_some());
+        assert!(loaded.bytes.is_empty());
     }
 
     #[test]
@@ -10357,6 +10839,32 @@ mod tests {
     }
 
     #[test]
+    fn committed_local_save_remains_current_after_session_base_write_failure_and_lock() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        runtime.session_bases.fail_next_store_for_tests();
+
+        let response = runtime
+            .save_vault(&opened.vault_id)
+            .expect("the primary KDBX commit already succeeded");
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+
+        runtime.lock_session();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .expect("the committed generation must remain unlockable after locking");
+
+        assert_eq!(runtime.list_entries(&opened.vault_id).unwrap().len(), 1);
+    }
+
+    #[test]
     fn committed_onedrive_save_survives_synced_base_write_failure() {
         let mut runtime = demo_onedrive_runtime(1_700_000_100);
         let vault_id = open_unlocked_demo_onedrive(&mut runtime);
@@ -10404,6 +10912,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn committed_onedrive_save_remains_current_after_session_base_write_failure_and_lock() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_100);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        create_demo_entry(&mut runtime, &vault_id);
+        runtime.session_bases.fail_next_store_for_tests();
+
+        let response = runtime
+            .save_vault(&vault_id)
+            .expect("the remote KDBX commit already succeeded");
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+
+        runtime.lock_session();
+        runtime
+            .unlock_vault(&vault_id, Some("demo-password"), None)
+            .expect("the committed generation must remain unlockable after locking");
+
+        assert_eq!(runtime.list_entries(&vault_id).unwrap().len(), 1);
     }
 
     #[test]
@@ -10614,7 +11148,7 @@ mod tests {
         let detail = runtime
             .get_entry_detail(&opened.vault_id, &registration.entry_id)
             .expect("created passkey entry");
-        let passkey = detail.passkey.expect("KPEX passkey record");
+        let passkey = detail.passkey.as_ref().expect("KPEX passkey record");
         assert_eq!(
             passkey.credential_id,
             URL_SAFE_NO_PAD.encode(&registration.credential.credential_id)
@@ -10775,7 +11309,7 @@ mod tests {
             .get_entry_detail(&handle.vault_id, &registration.entry_id)
             .unwrap();
         assert_eq!(
-            detail.passkey.unwrap().credential_id,
+            detail.passkey.as_ref().unwrap().credential_id,
             URL_SAFE_NO_PAD.encode(registration.credential.credential_id)
         );
     }
@@ -11081,7 +11615,7 @@ mod tests {
     fn ordinary_entry_update_preserves_hidden_unprojectable_totp_source() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        let created = create_demo_entry(&mut runtime, &opened.vault_id);
+        let mut created = create_demo_entry(&mut runtime, &opened.vault_id);
         let raw_key = "HmacOtp-Secret";
         {
             let loaded = runtime
@@ -11110,13 +11644,13 @@ mod tests {
             .update_entry_fields(
                 &opened.vault_id,
                 &created.id,
-                created.title,
-                created.username,
+                std::mem::take(&mut created.title),
+                std::mem::take(&mut created.username),
                 "changed password".into(),
-                created.url,
-                created.notes,
+                std::mem::take(&mut created.url),
+                std::mem::take(&mut created.notes),
                 None,
-                created.custom_fields,
+                std::mem::take(&mut created.custom_fields),
             )
             .expect("ordinary entry update");
 
@@ -11161,7 +11695,7 @@ mod tests {
             url: detail.url.clone(),
             notes: detail.notes.clone(),
             totp_uri: detail.totp_uri.clone(),
-            custom_fields: detail.custom_fields.clone(),
+            custom_fields: detail.custom_fields.duplicate_for_test(),
         }
     }
 
@@ -11179,7 +11713,7 @@ mod tests {
         let expected_fields = entry_fields(&target);
         let desired_fields = EntryFieldsDto {
             password: desired_password.into(),
-            ..expected_fields.clone()
+            ..expected_fields.duplicate_for_test()
         };
         runtime.queue_test_onedrive_ambiguous_write(remote_was_committed);
 
@@ -11191,7 +11725,7 @@ mod tests {
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: target.id.clone(),
                     expected_fields,
-                    desired_fields: desired_fields.clone(),
+                    desired_fields: desired_fields.duplicate_for_test(),
                 },
             })
             .unwrap();
@@ -11227,7 +11761,7 @@ mod tests {
         let expected_fields = entry_fields(&target);
         let desired_fields = EntryFieldsDto {
             password: "pending-after-observed-target-change".into(),
-            ..expected_fields.clone()
+            ..expected_fields.duplicate_for_test()
         };
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
@@ -11264,7 +11798,7 @@ mod tests {
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: target.id.clone(),
                     expected_fields,
-                    desired_fields: desired_fields.clone(),
+                    desired_fields: desired_fields.duplicate_for_test(),
                 },
             })
             .unwrap();
@@ -11360,7 +11894,7 @@ mod tests {
                 unrelated_fields.url.clone(),
                 unrelated_fields.notes.clone(),
                 unrelated_fields.totp_uri.clone(),
-                unrelated_fields.custom_fields.clone(),
+                unrelated_fields.custom_fields.duplicate_for_test(),
             )
             .unwrap();
         runtime.reset_test_onedrive_access_counts();
@@ -11597,15 +12131,15 @@ mod tests {
         let desired = EntryFieldsDto {
             password: "new-secret".into(),
             notes: "updated".into(),
-            ..expected.clone()
+            ..expected.duplicate_for_test()
         };
 
         let first = runtime
             .handle(RuntimeCommand::CompareAndUpdateEntryFields {
                 vault_id: opened.vault_id.clone(),
                 entry_id: created.id.clone(),
-                expected_fields: expected.clone(),
-                desired_fields: desired.clone(),
+                expected_fields: expected.duplicate_for_test(),
+                desired_fields: desired.duplicate_for_test(),
             })
             .unwrap();
         let RuntimeResponse::EntryDetail(updated) = first else {
@@ -11658,8 +12192,8 @@ mod tests {
                 .handle(RuntimeCommand::CompareAndUpdateEntryFields {
                     vault_id: opened.vault_id.clone(),
                     entry_id: entry.id.clone(),
-                    expected_fields: fields.clone(),
-                    desired_fields: fields.clone(),
+                    expected_fields: fields.duplicate_for_test(),
+                    desired_fields: fields.duplicate_for_test(),
                 })
                 .unwrap();
             assert!(matches!(response, RuntimeResponse::EntryDetail(_)));
@@ -11721,10 +12255,10 @@ mod tests {
             .handle(RuntimeCommand::CompareAndUpdateEntryFields {
                 vault_id: first.vault_id.clone(),
                 entry_id: entry.id.clone(),
-                expected_fields: fields.clone(),
+                expected_fields: fields.duplicate_for_test(),
                 desired_fields: EntryFieldsDto {
                     password: "new-secret".into(),
-                    ..fields.clone()
+                    ..fields.duplicate_for_test()
                 },
             })
             .unwrap();
@@ -11753,7 +12287,7 @@ mod tests {
         runtime.save_vault(&opened.vault_id).unwrap();
         let desired_fields = EntryFieldsDto {
             password: "durable-secret".into(),
-            ..fields.clone()
+            ..fields.duplicate_for_test()
         };
         let command = RuntimeCommand::PersistAutofillMutation {
             transaction_id: "transaction-update-1".into(),
@@ -11762,11 +12296,11 @@ mod tests {
             plan: AutofillPersistPlanDto::Update {
                 entry_id: entry.id.clone(),
                 expected_fields: fields,
-                desired_fields: desired_fields.clone(),
+                desired_fields: desired_fields.duplicate_for_test(),
             },
         };
 
-        let committed = runtime.handle(command.clone()).unwrap();
+        let committed = runtime.handle(command.duplicate_for_test()).unwrap();
         let RuntimeResponse::AutofillPersistResult(committed) = committed else {
             panic!("expected durable autofill result, got {committed:?}");
         };
@@ -11798,7 +12332,7 @@ mod tests {
         );
         let committed_bytes = std::fs::read(&opened.path).unwrap();
 
-        let replayed = runtime.handle(command.clone()).unwrap();
+        let replayed = runtime.handle(command.duplicate_for_test()).unwrap();
         let RuntimeResponse::AutofillPersistResult(replayed) = replayed else {
             panic!("expected replay result, got {replayed:?}");
         };
@@ -11824,7 +12358,7 @@ mod tests {
         restarted
             .unlock_vault(&reopened.vault_id, Some("demo-password"), None)
             .unwrap();
-        let replayed_after_restart = restarted.handle(command.clone()).unwrap();
+        let replayed_after_restart = restarted.handle(command.duplicate_for_test()).unwrap();
         assert!(matches!(
             replayed_after_restart,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -11918,7 +12452,7 @@ mod tests {
                 vault_id: opened.vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: expected_fields.clone(),
+                    expected_fields: expected_fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "after-local-kdf-rotation".into(),
                         ..expected_fields
@@ -11968,7 +12502,7 @@ mod tests {
 
         let desired_fields = EntryFieldsDto {
             password: "durable-secret".into(),
-            ..fields.clone()
+            ..fields.duplicate_for_test()
         };
         let response = runtime
             .handle(RuntimeCommand::PersistAutofillMutation {
@@ -11978,7 +12512,7 @@ mod tests {
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
                     expected_fields: fields,
-                    desired_fields: desired_fields.clone(),
+                    desired_fields: desired_fields.duplicate_for_test(),
                 },
             })
             .unwrap();
@@ -12109,11 +12643,11 @@ mod tests {
                 parent_group_id,
                 planned_entry_id: planned_entry_id.into(),
                 expected_matching_entry_ids: vec![],
-                desired_fields: desired_fields.clone(),
+                desired_fields: desired_fields.duplicate_for_test(),
             },
         };
 
-        let committed = runtime.handle(command.clone()).unwrap();
+        let committed = runtime.handle(command.duplicate_for_test()).unwrap();
         assert!(matches!(
             committed,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -12161,7 +12695,7 @@ mod tests {
     fn atomic_autofill_validation_returns_before_source_io() {
         let mut runtime = Runtime::for_tests();
         let (_first_dir, first) = open_unlocked_demo_vault(&mut runtime);
-        let entry = create_demo_entry(&mut runtime, &first.vault_id);
+        let mut entry = create_demo_entry(&mut runtime, &first.vault_id);
         runtime.save_vault(&first.vault_id).unwrap();
         let fields = entry_fields(&entry);
         let (_second_dir, second) = open_unlocked_demo_vault(&mut runtime);
@@ -12178,10 +12712,10 @@ mod tests {
                 vault_id: first.vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: fields.clone(),
+                    expected_fields: fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "must-not-run".into(),
-                        ..fields.clone()
+                        ..fields.duplicate_for_test()
                     },
                 },
             })
@@ -12211,8 +12745,8 @@ mod tests {
                 operation_id: "operation-locked".into(),
                 vault_id: second.vault_id,
                 plan: AutofillPersistPlanDto::Update {
-                    entry_id: entry.id,
-                    expected_fields: fields.clone(),
+                    entry_id: std::mem::take(&mut entry.id),
+                    expected_fields: fields.duplicate_for_test(),
                     desired_fields: fields,
                 },
             })
@@ -12240,7 +12774,7 @@ mod tests {
                 vault_id: opened.vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: fields.clone(),
+                    expected_fields: fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "must-not-swap".into(),
                         ..fields
@@ -12280,7 +12814,7 @@ mod tests {
                 vault_id: opened.vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: fields.clone(),
+                    expected_fields: fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "must-not-swap".into(),
                         ..fields
@@ -12314,7 +12848,7 @@ mod tests {
         let expected_fields = entry_fields(&target);
         let desired_fields = EntryFieldsDto {
             password: "merged-secret".into(),
-            ..expected_fields.clone()
+            ..expected_fields.duplicate_for_test()
         };
 
         let mut external = Runtime::for_tests_at(1_700_000_021);
@@ -12346,7 +12880,7 @@ mod tests {
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: target.id.clone(),
                     expected_fields,
-                    desired_fields: desired_fields.clone(),
+                    desired_fields: desired_fields.duplicate_for_test(),
                 },
             })
             .unwrap();
@@ -12439,14 +12973,14 @@ mod tests {
             vault_id: opened.vault_id.clone(),
             plan: AutofillPersistPlanDto::Update {
                 entry_id: entry.id.clone(),
-                expected_fields: expected_fields.clone(),
+                expected_fields: expected_fields.duplicate_for_test(),
                 desired_fields: EntryFieldsDto {
                     password: "committed-secret".into(),
                     ..expected_fields
                 },
             },
         };
-        let committed = runtime.handle(command.clone()).unwrap();
+        let committed = runtime.handle(command.duplicate_for_test()).unwrap();
         assert!(
             matches!(committed, RuntimeResponse::AutofillPersistResult(_)),
             "unexpected initial persist response: {committed:?}"
@@ -12471,7 +13005,7 @@ mod tests {
         external.delete_entry(&opened.vault_id, &entry.id).unwrap();
         external.save_vault(&opened.vault_id).unwrap();
 
-        let replayed = runtime.handle(command.clone()).unwrap();
+        let replayed = runtime.handle(command.duplicate_for_test()).unwrap();
 
         assert!(matches!(
             replayed,
@@ -12517,7 +13051,7 @@ mod tests {
                 other.url.clone(),
                 other.notes.clone(),
                 other.totp_uri.clone(),
-                other.custom_fields.clone(),
+                other.custom_fields.duplicate_for_test(),
             )
             .unwrap();
         let local_other = runtime
@@ -12539,7 +13073,7 @@ mod tests {
                 other.url.clone(),
                 other.notes.clone(),
                 other.totp_uri.clone(),
-                other.custom_fields.clone(),
+                other.custom_fields.duplicate_for_test(),
             )
             .unwrap();
         external.save_vault(&opened.vault_id).unwrap();
@@ -12552,7 +13086,7 @@ mod tests {
                 vault_id: opened.vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: target.id.clone(),
-                    expected_fields: target_expected.clone(),
+                    expected_fields: target_expected.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "must-not-apply".into(),
                         ..target_expected
@@ -12595,7 +13129,7 @@ mod tests {
         let expected_fields = entry_fields(&entry);
         let desired_fields = EntryFieldsDto {
             password: "remote-secret".into(),
-            ..expected_fields.clone()
+            ..expected_fields.duplicate_for_test()
         };
         let command = RuntimeCommand::PersistAutofillMutation {
             transaction_id: "transaction-remote".into(),
@@ -12604,11 +13138,11 @@ mod tests {
             plan: AutofillPersistPlanDto::Update {
                 entry_id: entry.id.clone(),
                 expected_fields,
-                desired_fields: desired_fields.clone(),
+                desired_fields: desired_fields.duplicate_for_test(),
             },
         };
 
-        let committed = runtime.handle(command.clone()).unwrap();
+        let committed = runtime.handle(command.duplicate_for_test()).unwrap();
         assert!(matches!(
             committed,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -12629,7 +13163,7 @@ mod tests {
             desired_fields
         );
 
-        let replayed = runtime.handle(command.clone()).unwrap();
+        let replayed = runtime.handle(command.duplicate_for_test()).unwrap();
         assert!(matches!(
             replayed,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -12724,7 +13258,7 @@ mod tests {
                 vault_id: vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: expected_fields.clone(),
+                    expected_fields: expected_fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "after-kdf-rotation".into(),
                         ..expected_fields
@@ -12766,7 +13300,7 @@ mod tests {
     fn atomic_autofill_onedrive_rereads_after_a_typed_precondition_failure() {
         let mut runtime = demo_onedrive_runtime(1_700_000_031);
         let vault_id = open_unlocked_demo_onedrive(&mut runtime);
-        let entry = create_demo_entry(&mut runtime, &vault_id);
+        let mut entry = create_demo_entry(&mut runtime, &vault_id);
         runtime.save_vault(&vault_id).unwrap();
         let expected_fields = entry_fields(&entry);
         runtime.queue_test_onedrive_precondition_failure(None);
@@ -12778,8 +13312,8 @@ mod tests {
                 operation_id: "operation-remote-412".into(),
                 vault_id: vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
-                    entry_id: entry.id,
-                    expected_fields: expected_fields.clone(),
+                    entry_id: std::mem::take(&mut entry.id),
+                    expected_fields: expected_fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "after-retry".into(),
                         ..expected_fields
@@ -12825,7 +13359,7 @@ mod tests {
                 vault_id: vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: expected_fields.clone(),
+                    expected_fields: expected_fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "must-not-swap".into(),
                         ..expected_fields
@@ -12868,7 +13402,7 @@ mod tests {
         let expected_fields = entry_fields(&entry);
         let desired_fields = EntryFieldsDto {
             password: "source-is-durable".into(),
-            ..expected_fields.clone()
+            ..expected_fields.duplicate_for_test()
         };
         runtime.remote_cache = RemoteVaultCache::new_at_with_faults(
             cache_dir.path(),
@@ -12885,7 +13419,7 @@ mod tests {
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
                     expected_fields,
-                    desired_fields: desired_fields.clone(),
+                    desired_fields: desired_fields.duplicate_for_test(),
                 },
             })
             .unwrap();
@@ -12928,7 +13462,7 @@ mod tests {
         let expected_fields = entry_fields(&entry);
         let desired_fields = EntryFieldsDto {
             password: "pending-secret".into(),
-            ..expected_fields.clone()
+            ..expected_fields.duplicate_for_test()
         };
         let remote_before = runtime
             .read_test_onedrive_item_bytes("drive-1", "item-1")
@@ -12941,11 +13475,11 @@ mod tests {
             plan: AutofillPersistPlanDto::Update {
                 entry_id: entry.id.clone(),
                 expected_fields,
-                desired_fields: desired_fields.clone(),
+                desired_fields: desired_fields.duplicate_for_test(),
             },
         };
 
-        let response = runtime.handle(command.clone()).unwrap();
+        let response = runtime.handle(command.duplicate_for_test()).unwrap();
 
         assert!(matches!(
             response,
@@ -13013,7 +13547,7 @@ mod tests {
                 vault_id: vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: expected_fields.clone(),
+                    expected_fields: expected_fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "must-not-swap".into(),
                         ..expected_fields
@@ -13059,7 +13593,7 @@ mod tests {
                 entry.url.clone(),
                 entry.notes.clone(),
                 entry.totp_uri.clone(),
-                entry.custom_fields.clone(),
+                entry.custom_fields.duplicate_for_test(),
             )
             .unwrap();
         let vault_before = runtime.loaded_vault(&vault_id).unwrap().clone();
@@ -13122,6 +13656,47 @@ mod tests {
     }
 
     #[test]
+    fn generic_pending_save_stages_the_session_base_before_publishing_the_pending_cache() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_034);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let mut entry = create_demo_entry(&mut runtime, &vault_id);
+        runtime.save_vault(&vault_id).unwrap();
+        runtime
+            .update_entry_fields(
+                &vault_id,
+                &entry.id,
+                std::mem::take(&mut entry.title),
+                std::mem::take(&mut entry.username),
+                "local-before-session-base-failure".into(),
+                std::mem::take(&mut entry.url),
+                std::mem::take(&mut entry.notes),
+                std::mem::take(&mut entry.totp_uri),
+                std::mem::take(&mut entry.custom_fields),
+            )
+            .unwrap();
+        let loaded_before = runtime.vault_session.find_loaded(&vault_id).unwrap();
+        let baseline_before = loaded_before.baseline_fingerprint.clone();
+        let status_before = loaded_before.source_status.clone();
+        runtime.session_bases.fail_next_store_for_tests();
+        runtime.queue_test_onedrive_ambiguous_write(false);
+
+        let error = runtime
+            .save_vault(&vault_id)
+            .expect_err("an unstaged session base must prevent pending-cache publication");
+
+        assert!(format!("{error:#}").contains("failed to store pending session base"));
+        let loaded = runtime.vault_session.find_loaded(&vault_id).unwrap();
+        assert_eq!(loaded.baseline_fingerprint, baseline_before);
+        assert_eq!(loaded.source_status, status_before);
+        assert!(matches!(
+            runtime
+                .remote_cache
+                .read_pending_chain(&RemoteCacheKey::new("onedrive", "drive-1:item-1")),
+            Err(PendingRemoteCacheChainError::NotPending)
+        ));
+    }
+
+    #[test]
     fn atomic_autofill_ambiguous_write_rejects_missing_previous_cache_without_swap() {
         let cache_dir = tempfile::tempdir().unwrap();
         let mut runtime = demo_onedrive_runtime(1_700_000_035);
@@ -13144,7 +13719,7 @@ mod tests {
                 vault_id: vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: expected_fields.clone(),
+                    expected_fields: expected_fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "must-not-swap-missing-cache".into(),
                         ..expected_fields
@@ -13205,7 +13780,7 @@ mod tests {
                 vault_id: vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: expected_fields.clone(),
+                    expected_fields: expected_fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "must-not-swap-corrupt-cache".into(),
                         ..expected_fields
@@ -13300,7 +13875,7 @@ mod tests {
                 vault_id: vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: expected_fields.clone(),
+                    expected_fields: expected_fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "must-not-swap-cache-race".into(),
                         ..expected_fields
@@ -13340,7 +13915,7 @@ mod tests {
                 value: "value\0after".into(),
                 protected: false,
             }],
-            ..expected_fields.clone()
+            ..expected_fields.duplicate_for_test()
         };
 
         let response = runtime
@@ -13396,7 +13971,7 @@ mod tests {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         let entry = create_demo_entry(&mut runtime, &opened.vault_id);
-        let unsafe_detail = runtime
+        let mut unsafe_detail = runtime
             .update_entry_fields(
                 &opened.vault_id,
                 &entry.id,
@@ -13433,11 +14008,11 @@ mod tests {
             .update_entry_fields(
                 &opened.vault_id,
                 &entry.id,
-                unsafe_detail.title,
-                unsafe_detail.username,
-                unsafe_detail.password,
-                unsafe_detail.url,
-                unsafe_detail.notes,
+                std::mem::take(&mut unsafe_detail.title),
+                std::mem::take(&mut unsafe_detail.username),
+                std::mem::take(&mut unsafe_detail.password),
+                std::mem::take(&mut unsafe_detail.url),
+                std::mem::take(&mut unsafe_detail.notes),
                 None,
                 vec![EntryCustomFieldDto {
                     key: "XmlSafe".into(),
@@ -13536,7 +14111,7 @@ mod tests {
             let expected_fields = entry_fields(&entry);
             let desired_fields = EntryFieldsDto {
                 password: "restart-pending-secret".into(),
-                ..expected_fields.clone()
+                ..expected_fields.duplicate_for_test()
             };
             let command = RuntimeCommand::PersistAutofillMutation {
                 transaction_id: "transaction-restart-pending".into(),
@@ -13545,11 +14120,11 @@ mod tests {
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
                     expected_fields,
-                    desired_fields: desired_fields.clone(),
+                    desired_fields: desired_fields.duplicate_for_test(),
                 },
             };
             first.queue_test_onedrive_ambiguous_write(remote_was_committed);
-            let response = first.handle(command.clone()).unwrap();
+            let response = first.handle(command.duplicate_for_test()).unwrap();
             assert!(matches!(
                 response,
                 RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -13657,7 +14232,7 @@ mod tests {
         let expected_fields = entry_fields(&target);
         let desired_fields = EntryFieldsDto {
             password: "pending-three-way-secret".into(),
-            ..expected_fields.clone()
+            ..expected_fields.duplicate_for_test()
         };
         first.queue_test_onedrive_ambiguous_write(false);
         let response = first
@@ -13668,7 +14243,7 @@ mod tests {
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: target.id.clone(),
                     expected_fields,
-                    desired_fields: desired_fields.clone(),
+                    desired_fields: desired_fields.duplicate_for_test(),
                 },
             })
             .unwrap();
@@ -13825,7 +14400,7 @@ mod tests {
         let expected_fields = entry_fields(&target);
         let desired_fields = EntryFieldsDto {
             password: "pending-after-kdf-rotation".into(),
-            ..expected_fields.clone()
+            ..expected_fields.duplicate_for_test()
         };
 
         let core = KeepassCore::new();
@@ -13857,10 +14432,10 @@ mod tests {
             plan: AutofillPersistPlanDto::Update {
                 entry_id: target.id.clone(),
                 expected_fields,
-                desired_fields: desired_fields.clone(),
+                desired_fields: desired_fields.duplicate_for_test(),
             },
         };
-        let response = runtime.handle(command.clone()).unwrap();
+        let response = runtime.handle(command.duplicate_for_test()).unwrap();
         assert!(matches!(
             response,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -13899,7 +14474,7 @@ mod tests {
             .replace_session_transformed_key(&vault_id, stale_session_key.clone())
             .unwrap();
         authorizations.borrow_mut().clear();
-        let adopted = runtime.handle(command.clone()).unwrap();
+        let adopted = runtime.handle(command.duplicate_for_test()).unwrap();
         assert!(matches!(
             adopted,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -13914,7 +14489,7 @@ mod tests {
         assert_eq!(authorizations.borrow().len(), 1);
 
         runtime.allow_unlock_kdf = false;
-        let replayed = runtime.handle(command.clone()).unwrap();
+        let replayed = runtime.handle(command.duplicate_for_test()).unwrap();
         assert!(
             matches!(
                 replayed,
@@ -14263,7 +14838,7 @@ mod tests {
                     parent_group_id: parent_group_id.clone(),
                     planned_entry_id: planned_entry_id.into(),
                     expected_matching_entry_ids: vec![],
-                    desired_fields: desired_fields.clone(),
+                    desired_fields: desired_fields.duplicate_for_test(),
                 },
             })
             .unwrap();
@@ -14367,6 +14942,205 @@ mod tests {
     }
 
     #[test]
+    fn generic_pending_save_survives_lock_and_direct_password_unlock() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_057);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &vault_id);
+        runtime.save_vault(&vault_id).unwrap();
+        let desired_fields = EntryFieldsDto {
+            notes: "durable pending edit".into(),
+            ..entry_fields(&entry)
+        };
+        runtime
+            .update_entry_fields(
+                &vault_id,
+                &entry.id,
+                desired_fields.title.clone(),
+                desired_fields.username.clone(),
+                desired_fields.password.clone(),
+                desired_fields.url.clone(),
+                desired_fields.notes.clone(),
+                desired_fields.totp_uri.clone(),
+                desired_fields.custom_fields.duplicate_for_test(),
+            )
+            .unwrap();
+        runtime.queue_test_onedrive_ambiguous_write(false);
+        assert!(matches!(
+            runtime.save_vault(&vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::SavedToCache,
+                ..
+            })
+        ));
+        assert!(
+            runtime
+                .vault_session
+                .find_loaded(&vault_id)
+                .unwrap()
+                .bytes
+                .is_empty()
+        );
+
+        runtime.lock_session();
+        runtime
+            .unlock_with_password(&vault_id, "demo-password")
+            .unwrap();
+
+        assert_eq!(
+            entry_fields(&runtime.get_entry_detail(&vault_id, &entry.id).unwrap()),
+            desired_fields
+        );
+        assert_eq!(
+            runtime
+                .retry_vault_source_sync(&vault_id)
+                .unwrap()
+                .remote_state,
+            "online"
+        );
+        assert_eq!(
+            entry_fields(&runtime.get_entry_detail(&vault_id, &entry.id).unwrap()),
+            desired_fields
+        );
+    }
+
+    #[test]
+    fn autofill_pending_save_survives_lock_and_direct_password_unlock() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_057);
+        let (vault_id, target, _, desired_fields) = begin_pending_update(
+            &mut runtime,
+            "transaction-lock-pending",
+            "operation-lock-pending",
+            "pending-after-lock",
+            false,
+        );
+
+        runtime.lock_session();
+        runtime
+            .unlock_with_password(&vault_id, "demo-password")
+            .unwrap();
+
+        assert_eq!(
+            entry_fields(&runtime.get_entry_detail(&vault_id, &target.id).unwrap()),
+            desired_fields
+        );
+        assert_eq!(
+            runtime
+                .retry_vault_source_sync(&vault_id)
+                .unwrap()
+                .remote_state,
+            "online"
+        );
+        assert_eq!(
+            entry_fields(&runtime.get_entry_detail(&vault_id, &target.id).unwrap()),
+            desired_fields
+        );
+    }
+
+    #[test]
+    fn concurrent_generic_saves_keep_each_runtime_three_way_base_isolated() {
+        let mut seed = demo_onedrive_runtime(1_700_000_057);
+        let vault_id = open_unlocked_demo_onedrive(&mut seed);
+        let first_entry = create_demo_entry(&mut seed, &vault_id);
+        let second_entry = create_demo_entry(&mut seed, &vault_id);
+        seed.save_vault(&vault_id).unwrap();
+        let baseline_bytes = seed
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap();
+
+        let cache_dir = tempfile::tempdir().unwrap();
+        let mut first = Runtime::for_tests_at_with_onedrive_item_and_remote_cache(
+            1_700_000_058,
+            "drive-1",
+            "item-1",
+            "Vault.kdbx",
+            "alice@example.com",
+            baseline_bytes.clone(),
+            cache_dir.path(),
+        );
+        let mut second = Runtime::for_tests_at_with_onedrive_item_and_remote_cache(
+            1_700_000_059,
+            "drive-1",
+            "item-1",
+            "Vault.kdbx",
+            "alice@example.com",
+            baseline_bytes,
+            cache_dir.path(),
+        );
+        assert_eq!(open_unlocked_demo_onedrive(&mut first), vault_id);
+        assert_eq!(open_unlocked_demo_onedrive(&mut second), vault_id);
+
+        let first_edit = EntryFieldsDto {
+            notes: "first runtime edit".into(),
+            ..entry_fields(&first.get_entry_detail(&vault_id, &first_entry.id).unwrap())
+        };
+        first
+            .update_entry_fields(
+                &vault_id,
+                &first_entry.id,
+                first_edit.title.clone(),
+                first_edit.username.clone(),
+                first_edit.password.clone(),
+                first_edit.url.clone(),
+                first_edit.notes.clone(),
+                first_edit.totp_uri.clone(),
+                first_edit.custom_fields.duplicate_for_test(),
+            )
+            .unwrap();
+        first.save_vault(&vault_id).unwrap();
+        second.replace_test_onedrive_item(
+            "drive-1",
+            "item-1",
+            first
+                .read_test_onedrive_item_bytes("drive-1", "item-1")
+                .unwrap(),
+        );
+
+        let second_edit = EntryFieldsDto {
+            password: "second-runtime-secret".into(),
+            ..entry_fields(
+                &second
+                    .get_entry_detail(&vault_id, &second_entry.id)
+                    .unwrap(),
+            )
+        };
+        second
+            .update_entry_fields(
+                &vault_id,
+                &second_entry.id,
+                second_edit.title.clone(),
+                second_edit.username.clone(),
+                second_edit.password.clone(),
+                second_edit.url.clone(),
+                second_edit.notes.clone(),
+                second_edit.totp_uri.clone(),
+                second_edit.custom_fields.duplicate_for_test(),
+            )
+            .unwrap();
+
+        let response = second.save_vault(&vault_id).unwrap();
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                ..
+            })
+        ));
+        assert_eq!(
+            entry_fields(&second.get_entry_detail(&vault_id, &first_entry.id).unwrap()),
+            first_edit
+        );
+        assert_eq!(
+            entry_fields(
+                &second
+                    .get_entry_detail(&vault_id, &second_entry.id)
+                    .unwrap()
+            ),
+            second_edit
+        );
+    }
+
+    #[test]
     fn generic_save_is_rejected_while_an_autofill_operation_is_pending() {
         let cache_dir = tempfile::tempdir().unwrap();
         let mut runtime = demo_onedrive_runtime(1_700_000_058);
@@ -14392,7 +15166,7 @@ mod tests {
                 edited_fields.url.clone(),
                 edited_fields.notes.clone(),
                 edited_fields.totp_uri.clone(),
-                edited_fields.custom_fields.clone(),
+                edited_fields.custom_fields.duplicate_for_test(),
             )
             .unwrap();
         let cache_key = RemoteCacheKey::new("onedrive", "drive-1:item-1");
@@ -14619,7 +15393,7 @@ mod tests {
                 stale_unrelated.url.clone(),
                 stale_unrelated.notes.clone(),
                 stale_unrelated.totp_uri.clone(),
-                stale_unrelated.custom_fields.clone(),
+                stale_unrelated.custom_fields.duplicate_for_test(),
             )
             .unwrap();
         let mut stale_encryption = stale.get_database_settings(&vault_id).unwrap().encryption;
@@ -14657,7 +15431,7 @@ mod tests {
                 retry_live_edit.url.clone(),
                 retry_live_edit.notes.clone(),
                 retry_live_edit.totp_uri.clone(),
-                retry_live_edit.custom_fields.clone(),
+                retry_live_edit.custom_fields.duplicate_for_test(),
             )
             .unwrap();
         let mut retry_encryption = stale_retry
@@ -14685,12 +15459,12 @@ mod tests {
             plan: AutofillPersistPlanDto::Update {
                 entry_id: target.id.clone(),
                 expected_fields: entry_fields(&target),
-                desired_fields: desired_fields.clone(),
+                desired_fields: desired_fields.duplicate_for_test(),
             },
         };
         first.queue_test_onedrive_ambiguous_write(false);
         assert!(matches!(
-            first.handle(command.clone()).unwrap(),
+            first.handle(command.duplicate_for_test()).unwrap(),
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
                 outcome: AutofillPersistOutcomeDto::Durable {
                     durability: AutofillPersistDurabilityDto::PendingRemoteCache,
@@ -14905,7 +15679,7 @@ mod tests {
                 pending_fields.url.clone(),
                 pending_fields.notes.clone(),
                 pending_fields.totp_uri.clone(),
-                pending_fields.custom_fields.clone(),
+                pending_fields.custom_fields.duplicate_for_test(),
             )
             .unwrap();
         runtime.queue_test_onedrive_ambiguous_write(false);
@@ -14931,7 +15705,7 @@ mod tests {
                 live_fields.url.clone(),
                 live_fields.notes.clone(),
                 live_fields.totp_uri.clone(),
-                live_fields.custom_fields.clone(),
+                live_fields.custom_fields.duplicate_for_test(),
             )
             .unwrap();
 
@@ -14995,7 +15769,7 @@ mod tests {
                 live_fields.url.clone(),
                 live_fields.notes.clone(),
                 live_fields.totp_uri.clone(),
-                live_fields.custom_fields.clone(),
+                live_fields.custom_fields.duplicate_for_test(),
             )
             .unwrap();
 
@@ -15153,7 +15927,7 @@ mod tests {
                 edited_fields.url.clone(),
                 edited_fields.notes.clone(),
                 edited_fields.totp_uri.clone(),
-                edited_fields.custom_fields.clone(),
+                edited_fields.custom_fields.duplicate_for_test(),
             )
             .unwrap();
         let cache_key = RemoteCacheKey::new("onedrive", "drive-1:item-1");
@@ -15235,11 +16009,11 @@ mod tests {
                 parent_group_id,
                 planned_entry_id: planned_entry_id.into(),
                 expected_matching_entry_ids: vec![],
-                desired_fields: desired_fields.clone(),
+                desired_fields: desired_fields.duplicate_for_test(),
             },
         };
         first.queue_test_onedrive_ambiguous_write(false);
-        let pending = first.handle(command.clone()).unwrap();
+        let pending = first.handle(command.duplicate_for_test()).unwrap();
         assert!(
             matches!(
                 &pending,
@@ -15338,7 +16112,7 @@ mod tests {
                     vault_id: vault_id.clone(),
                     plan: AutofillPersistPlanDto::Update {
                         entry_id: entry.id.clone(),
-                        expected_fields: expected_fields.clone(),
+                        expected_fields: expected_fields.duplicate_for_test(),
                         desired_fields: EntryFieldsDto {
                             password: "operation-secret".into(),
                             ..expected_fields
@@ -15417,7 +16191,7 @@ mod tests {
     fn pending_autofill_sync_rejects_a_corrupt_previous_generation_before_remote_io() {
         let mut runtime = demo_onedrive_runtime(1_700_000_080);
         let vault_id = open_unlocked_demo_onedrive(&mut runtime);
-        let entry = create_demo_entry(&mut runtime, &vault_id);
+        let mut entry = create_demo_entry(&mut runtime, &vault_id);
         runtime.save_vault(&vault_id).unwrap();
         let expected_fields = entry_fields(&entry);
         runtime.queue_test_onedrive_ambiguous_write(false);
@@ -15428,8 +16202,8 @@ mod tests {
                     operation_id: "operation-corrupt-chain".into(),
                     vault_id: vault_id.clone(),
                     plan: AutofillPersistPlanDto::Update {
-                        entry_id: entry.id,
-                        expected_fields: expected_fields.clone(),
+                        entry_id: std::mem::take(&mut entry.id),
+                        expected_fields: expected_fields.duplicate_for_test(),
                         desired_fields: EntryFieldsDto {
                             password: "pending".into(),
                             ..expected_fields
@@ -15511,7 +16285,7 @@ mod tests {
                 vault_id: vault_id.clone(),
                 plan: AutofillPersistPlanDto::Update {
                     entry_id: entry.id.clone(),
-                    expected_fields: expected_fields.clone(),
+                    expected_fields: expected_fields.duplicate_for_test(),
                     desired_fields: EntryFieldsDto {
                         password: "totp-pending".into(),
                         totp_uri: Some(noncanonical_totp.into()),
@@ -15607,7 +16381,7 @@ mod tests {
                     "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&issuer=Example&algorithm=SHA256&digits=8&period=45"
                         .into(),
                 ),
-                entry.custom_fields.clone(),
+                entry.custom_fields.duplicate_for_test(),
             )
             .unwrap();
         updater.save_vault(&update_handle.vault_id).unwrap();
@@ -15692,11 +16466,11 @@ mod tests {
             .vault_session
             .find_loaded_mut(&opened.vault_id)
             .unwrap()
-            .source_status = Some(expected.clone());
+            .source_status = Some(expected.duplicate_for_test());
 
         assert_eq!(
             runtime.session_state().source_status,
-            Some(expected.clone())
+            Some(expected.duplicate_for_test())
         );
 
         runtime.lock_session();
@@ -16401,7 +17175,7 @@ mod tests {
     }
 
     #[test]
-    fn passkey_quick_unlock_user_verification_reuses_same_ceremony_unlock() {
+    fn passkey_quick_unlock_user_verification_requires_a_fresh_prompt() {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
@@ -16488,6 +17262,7 @@ mod tests {
             [
                 "Enable quick unlock for this vault".to_owned(),
                 "Unlock this vault".to_owned(),
+                "Verify user for passkey".to_owned(),
             ]
         );
     }

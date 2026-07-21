@@ -20,8 +20,9 @@ pub use windows::{
     WindowsResidentIpcServer, run_windows_native_messaging_shim, start_windows_resident_ipc_server,
 };
 
-pub type ResidentIpcRequestHandler =
-    Arc<dyn Fn(Value, Arc<AtomicBool>, Option<usize>) -> Value + Send + Sync + 'static>;
+pub type ResidentIpcRequestHandler = Arc<
+    dyn Fn(Value, Arc<AtomicBool>, Arc<AtomicBool>, Option<usize>) -> Value + Send + Sync + 'static,
+>;
 
 pub const RESIDENT_IPC_PROTOCOL_VERSION: u32 = 1;
 pub const RESIDENT_IPC_MAX_FRAME_BYTES: usize = 64 * 1024 * 1024 + 4 * 1024;
@@ -38,6 +39,7 @@ pub(crate) struct PendingRequests {
 
 struct PendingRequestState {
     cancelled: Arc<AtomicBool>,
+    execution_started: Arc<AtomicBool>,
     responded: AtomicBool,
 }
 
@@ -52,6 +54,7 @@ impl PendingRequests {
     pub(crate) fn register(&self, request_id: &str) -> Result<PendingRequest> {
         let state = Arc::new(PendingRequestState {
             cancelled: Arc::new(AtomicBool::new(false)),
+            execution_started: Arc::new(AtomicBool::new(false)),
             responded: AtomicBool::new(false),
         });
         let mut entries = self
@@ -70,16 +73,23 @@ impl PendingRequests {
     }
 
     pub(crate) fn cancel(&self, request_id: &str) -> bool {
-        let state = self
+        let mut entries = self
             .entries
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(request_id);
+            .unwrap_or_else(|error| error.into_inner());
+        let state = entries.get(request_id).cloned();
         let Some(state) = state else {
             return false;
         };
         state.cancelled.store(true, Ordering::Release);
-        !state.responded.swap(true, Ordering::AcqRel)
+        if state.execution_started.load(Ordering::Acquire) {
+            return false;
+        }
+        if state.responded.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        entries.remove(request_id);
+        true
     }
 
     pub(crate) fn cancel_all(&self) {
@@ -101,8 +111,25 @@ impl PendingRequest {
         self.state.cancelled.clone()
     }
 
+    pub(crate) fn execution_started_token(&self) -> Arc<AtomicBool> {
+        self.state.execution_started.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn cancel_before_execution(&self) -> bool {
+        self.state.cancelled.store(true, Ordering::Release);
+        if self.state.execution_started.load(Ordering::Acquire) {
+            return false;
+        }
+        self.claim_response()
+    }
+
+    pub(crate) fn response_claimed(&self) -> bool {
+        self.state.responded.load(Ordering::Acquire)
     }
 
     pub(crate) fn claim_response(&self) -> bool {
@@ -519,6 +546,21 @@ mod tests {
         assert!(request.cancelled());
         assert!(!request.claim_response());
         assert!(!pending.cancel("native-7"));
+    }
+
+    #[test]
+    fn cancellation_after_runtime_dispatch_preserves_the_real_response() {
+        let pending = PendingRequests::default();
+        let request = pending
+            .register("native-running")
+            .expect("register request");
+        request
+            .execution_started_token()
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        assert!(!pending.cancel("native-running"));
+        assert!(request.cancelled());
+        assert!(request.claim_response());
     }
 
     #[test]

@@ -1,8 +1,10 @@
+#[cfg(not(windows))]
+use super::durable_file::unique_sibling_path;
 use super::durable_file::{
     DurableFaultInjector, DurableFaultPoint, DurableFileIdentity, ExclusiveFileLock,
-    TargetExpectation, TempWriteFaultPoints, VerifiedTemp, opened_file_identity,
-    path_file_identity, publish_temp, remove_if_exists, sha256_hex, sync_parent,
-    sync_published_target, unique_sibling_path, write_verified_temp,
+    TargetExpectation, TempWriteFaultPoints, VerifiedTemp, create_durable_backup_copy,
+    opened_file_identity, path_file_identity, publish_temp, remove_if_exists, sha256_hex,
+    sync_parent, sync_published_target, write_verified_temp,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
@@ -382,8 +384,12 @@ impl LocalFileWriteTxn {
         }
         #[cfg(windows)]
         {
-            let backup = unique_sibling_path(&self.target, "bak")?;
-            faults.check(DurableFaultPoint::BackupPublished)?;
+            let backup = create_durable_backup_copy(&self.target, "bak")?;
+            if let Err(error) = faults.check(DurableFaultPoint::BackupPublished) {
+                let _ = remove_if_exists(&backup);
+                let _ = sync_parent(&self.target);
+                return Err(error);
+            }
             Ok(backup)
         }
         #[cfg(not(any(unix, windows)))]

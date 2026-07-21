@@ -164,6 +164,7 @@ pub struct OneDriveVaultSourceProvider {
     memory_snapshot_from_state_reads: Cell<usize>,
     memory_writes: Cell<usize>,
     memory_write_behaviors: VecDeque<OneDriveMemoryWriteBehavior>,
+    memory_fail_next_conflict_copy: Cell<bool>,
 }
 
 struct PendingOneDriveLogin {
@@ -297,6 +298,7 @@ impl OneDriveVaultSourceProvider {
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
+            memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
 
@@ -318,6 +320,7 @@ impl OneDriveVaultSourceProvider {
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
+            memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
 
@@ -413,6 +416,7 @@ impl OneDriveVaultSourceProvider {
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
+            memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
 
@@ -474,6 +478,10 @@ impl OneDriveVaultSourceProvider {
 
     pub fn queue_memory_write_behavior(&mut self, behavior: OneDriveMemoryWriteBehavior) {
         self.memory_write_behaviors.push_back(behavior);
+    }
+
+    pub fn fail_next_memory_conflict_copy(&self) {
+        self.memory_fail_next_conflict_copy.set(true);
     }
 
     pub fn remove_memory_item(&mut self, drive_id: &str, item_id: &str) {
@@ -858,6 +866,9 @@ impl OneDriveVaultSourceProvider {
         bytes: &[u8],
     ) -> Result<OneDriveItemDto> {
         if !self.memory_items.is_empty() {
+            if self.memory_fail_next_conflict_copy.replace(false) {
+                anyhow::bail!("injected OneDrive conflict-copy upload failure");
+            }
             let account_label = self.item(drive_id, item_id)?.account_label.clone();
             let conflict_item_id = format!("vaultkern-conflict-{}", Uuid::new_v4());
             self.memory_writes.set(self.memory_writes.get() + 1);

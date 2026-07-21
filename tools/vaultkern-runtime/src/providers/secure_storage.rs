@@ -23,7 +23,6 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 #[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
-#[cfg(windows)]
 use zeroize::Zeroizing;
 
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
@@ -31,8 +30,8 @@ use crate::state_paths::{extension_state_dir, runtime_state_dir};
 #[cfg(any(windows, test))]
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, DurableFileIdentity, ExclusiveFileLock,
-    TargetExpectation, TempWriteFaultPoints, create_dir_all_durable, opened_file_identity,
-    path_file_identity, publish_temp, remove_if_exists, sync_parent, unique_sibling_path,
+    TargetExpectation, TempWriteFaultPoints, create_dir_all_durable, create_durable_backup_copy,
+    opened_file_identity, path_file_identity, publish_temp, remove_if_exists, sync_parent,
     write_verified_temp,
 };
 
@@ -49,11 +48,15 @@ const QUICK_UNLOCK_GESTURE_REQUIRED: u32 = 1;
 #[cfg(any(windows, test))]
 const QUICK_UNLOCK_RECORD_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(any(windows, test))]
+const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT: i32 = 1176;
+#[cfg(any(windows, test))]
 const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
 #[cfg(any(windows, test))]
 const NTE_BAD_KEY_STATE: u32 = 0x8009_000b;
 #[cfg(any(windows, test))]
 const NTE_NO_KEY: u32 = 0x8009_000d;
+#[cfg(any(windows, test))]
+const NTE_BAD_KEYSET: u32 = 0x8009_0016;
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 #[derive(Deserialize, Serialize)]
@@ -146,9 +149,6 @@ fn publish_quick_unlock_record_with(
     parent_guard.validate(parent)?;
     let expectation = quick_unlock_target_expectation(path)?;
     let replacing = matches!(expectation, TargetExpectation::Identity(_));
-    let backup = replacing
-        .then(|| unique_sibling_path(path, "bak"))
-        .transpose()?;
     let temp = write_verified_temp(
         path,
         bytes,
@@ -161,11 +161,31 @@ fn publish_quick_unlock_record_with(
         },
     )
     .with_context(|| format!("failed to prepare quick unlock record: {}", path.display()))?;
+    let backup = if replacing {
+        match create_durable_backup_copy(path, "bak") {
+            Ok(backup) => Some(backup),
+            Err(error) => {
+                let _ = temp.discard();
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to preserve the previous quick unlock record: {}",
+                        path.display()
+                    )
+                });
+            }
+        }
+    } else {
+        None
+    };
     if let Err(source) = faults
         .check(DurableFaultPoint::BeforeTargetReplace)
         .and_then(|_| parent_guard.validate(parent))
     {
         let _ = temp.discard();
+        if let Some(backup) = &backup {
+            let _ = remove_if_exists(backup);
+            let _ = sync_parent(path);
+        }
         return Err(anyhow::Error::new(source).context(format!(
             "quick unlock record was not published: {}",
             path.display()
@@ -181,6 +201,12 @@ fn publish_quick_unlock_record_with(
         DurableFaultPoint::TargetReplaced,
         DurableFaultPoint::ParentSynced,
     ) {
+        if !error.published
+            && let Some(backup) = &backup
+        {
+            let _ = remove_if_exists(backup);
+            let _ = sync_parent(path);
+        }
         let state = if error.published && quick_unlock_replacement_outcome_is_unknown(&error.source)
         {
             "quick unlock record publication outcome is unknown; recovery artifacts were preserved"
@@ -308,7 +334,10 @@ fn validate_quick_unlock_parent_metadata(metadata: &fs::Metadata) -> io::Result<
 
 #[cfg(any(windows, test))]
 fn quick_unlock_replacement_outcome_is_unknown(error: &io::Error) -> bool {
-    error.raw_os_error() == Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2)
+    matches!(
+        error.raw_os_error(),
+        Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT | WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2)
+    )
 }
 
 #[cfg(any(windows, test))]
@@ -479,7 +508,26 @@ fn is_hello_key_invalidated(error: &anyhow::Error) -> bool {
 
 #[cfg(any(windows, test))]
 fn is_hello_key_invalidated_status(status: u32) -> bool {
-    matches!(status, NTE_BAD_KEY_STATE | NTE_NO_KEY)
+    matches!(status, NTE_BAD_KEY_STATE | NTE_NO_KEY | NTE_BAD_KEYSET)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelloKeyOpenDisposition {
+    UseOpened,
+    CreateMissing,
+    ReturnError,
+}
+
+#[cfg(any(windows, test))]
+fn hello_key_open_disposition(status: u32, create_if_missing: bool) -> HelloKeyOpenDisposition {
+    if status == 0 {
+        HelloKeyOpenDisposition::UseOpened
+    } else if matches!(status, NTE_NO_KEY | NTE_BAD_KEYSET) && create_if_missing {
+        HelloKeyOpenDisposition::CreateMissing
+    } else {
+        HelloKeyOpenDisposition::ReturnError
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -507,7 +555,7 @@ pub trait SecureStorageProvider {
         Ok(())
     }
     fn store(&self, key: &str, value: &[u8]) -> Result<()>;
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>>;
     fn contains(&self, key: &str) -> Result<bool>;
     fn store_requires_user_presence(&self) -> bool {
         false
@@ -525,7 +573,7 @@ impl SecureStorageProvider for UnsupportedSecureStorageProvider {
         anyhow::bail!("secure storage is not implemented on this host")
     }
 
-    fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, _key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(None)
     }
 
@@ -611,12 +659,12 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
     }
 
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
-        let mut data_key = [0u8; 32];
+        let mut data_key = Zeroizing::new([0u8; 32]);
         let mut nonce = [0u8; 12];
-        fill_random(&mut data_key)?;
+        fill_random(&mut data_key[..])?;
         fill_random(&mut nonce)?;
 
-        let cipher = Aes256Gcm::new_from_slice(&data_key)
+        let cipher = Aes256Gcm::new_from_slice(&data_key[..])
             .map_err(|_| anyhow::anyhow!("failed to initialize quick unlock cipher"))?;
         let ciphertext = cipher
             .encrypt(Nonce::from_slice(&nonce), value)
@@ -625,7 +673,7 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
             &self.wrapping_key_name()?,
             false,
             self.parent_window,
-            |key, _created| ncrypt_encrypt_pkcs1(key, &data_key),
+            |key, _created| ncrypt_encrypt_pkcs1(key, &data_key[..]),
         )?;
         let envelope = QuickUnlockEnvelope {
             version: QUICK_UNLOCK_ENVELOPE_VERSION,
@@ -639,7 +687,7 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
         publish_quick_unlock_record(&self.path_for(key), &bytes)
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let path = self.path_for(key);
         if !path.is_file() {
             return Ok(None);
@@ -701,11 +749,15 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
                 "decrypted quick unlock data key has an invalid length",
             )
         })?;
-        let plaintext = cipher
-            .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
-            .map_err(|_| {
-                SecureStorageError::record_invalidated("failed to decrypt quick unlock credentials")
-            })?;
+        let plaintext = Zeroizing::new(
+            cipher
+                .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+                .map_err(|_| {
+                    SecureStorageError::record_invalidated(
+                        "failed to decrypt quick unlock credentials",
+                    )
+                })?,
+        );
         Ok(Some(plaintext))
     }
 
@@ -728,7 +780,8 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
     fn delete(&self, key: &str) -> Result<()> {
         let path = self.path_for(key);
         if path.exists() {
-            fs::remove_file(path)?;
+            fs::remove_file(&path)?;
+            sync_parent(&path)?;
         }
         Ok(())
     }
@@ -749,7 +802,7 @@ fn verify_hello_key_for_enrollment(
         key,
         "Verify with Windows Hello to enable quick unlock for this VaultKern vault",
     )?;
-    let unwrapped = Zeroizing::new(ncrypt_decrypt_pkcs1(key, &wrapped_challenge)?);
+    let unwrapped = ncrypt_decrypt_pkcs1(key, &wrapped_challenge)?;
     if unwrapped.as_slice() != challenge {
         anyhow::bail!("Windows Hello quick unlock key verification failed");
     }
@@ -805,24 +858,27 @@ fn with_hello_key<T>(
     let mut key = 0;
     let mut created = false;
     let open_status = unsafe { NCryptOpenKey(provider, &mut key, key_name.as_ptr(), 0, 0) };
-    if open_status != 0 {
-        if !create_if_missing {
+    match hello_key_open_disposition(open_status as u32, create_if_missing) {
+        HelloKeyOpenDisposition::UseOpened => {}
+        HelloKeyOpenDisposition::CreateMissing => {
+            check_ncrypt(
+                unsafe {
+                    NCryptCreatePersistedKey(
+                        provider,
+                        &mut key,
+                        NCRYPT_RSA_ALGORITHM,
+                        key_name.as_ptr(),
+                        0,
+                        0,
+                    )
+                },
+                "failed to create quick unlock Windows Hello key",
+            )?;
+            created = true;
+        }
+        HelloKeyOpenDisposition::ReturnError => {
             check_ncrypt(open_status, "failed to open quick unlock Windows Hello key")?;
         }
-        check_ncrypt(
-            unsafe {
-                NCryptCreatePersistedKey(
-                    provider,
-                    &mut key,
-                    NCRYPT_RSA_ALGORITHM,
-                    key_name.as_ptr(),
-                    0,
-                    0,
-                )
-            },
-            "failed to create quick unlock Windows Hello key",
-        )?;
-        created = true;
     }
 
     with_owned_ncrypt_handle(key, |key| {
@@ -1057,7 +1113,7 @@ fn ncrypt_encrypt_pkcs1(
 fn ncrypt_decrypt_pkcs1(
     key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
     value: &[u8],
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     use windows_sys::Win32::Security::Cryptography::{NCRYPT_PAD_PKCS1_FLAG, NCryptDecrypt};
 
     let mut output_len = 0u32;
@@ -1076,7 +1132,7 @@ fn ncrypt_decrypt_pkcs1(
         },
         "failed to measure unwrapped quick unlock key",
     )?;
-    let mut output = vec![0u8; usize::try_from(output_len)?];
+    let mut output = Zeroizing::new(vec![0u8; usize::try_from(output_len)?]);
     check_ncrypt(
         unsafe {
             NCryptDecrypt(
@@ -1252,7 +1308,7 @@ fn wide_null(value: &str) -> Vec<u16> {
 }
 
 pub(crate) struct MemorySecureStorageProvider {
-    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    values: RefCell<BTreeMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl MemorySecureStorageProvider {
@@ -1267,11 +1323,11 @@ impl SecureStorageProvider for MemorySecureStorageProvider {
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
         self.values
             .borrow_mut()
-            .insert(key.to_owned(), value.to_owned());
+            .insert(key.to_owned(), Zeroizing::new(value.to_owned()));
         Ok(())
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(self.values.borrow().get(key).cloned())
     }
 
@@ -1286,7 +1342,7 @@ impl SecureStorageProvider for MemorySecureStorageProvider {
 }
 
 pub(crate) struct FailingContainsSecureStorageProvider {
-    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    values: RefCell<BTreeMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl FailingContainsSecureStorageProvider {
@@ -1301,11 +1357,11 @@ impl SecureStorageProvider for FailingContainsSecureStorageProvider {
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
         self.values
             .borrow_mut()
-            .insert(key.to_owned(), value.to_owned());
+            .insert(key.to_owned(), Zeroizing::new(value.to_owned()));
         Ok(())
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(self.values.borrow().get(key).cloned())
     }
 
@@ -1320,7 +1376,7 @@ impl SecureStorageProvider for FailingContainsSecureStorageProvider {
 }
 
 pub(crate) struct FailingDeleteSecureStorageProvider {
-    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    values: RefCell<BTreeMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl FailingDeleteSecureStorageProvider {
@@ -1335,11 +1391,11 @@ impl SecureStorageProvider for FailingDeleteSecureStorageProvider {
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
         self.values
             .borrow_mut()
-            .insert(key.to_owned(), value.to_owned());
+            .insert(key.to_owned(), Zeroizing::new(value.to_owned()));
         Ok(())
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(self.values.borrow().get(key).cloned())
     }
 
@@ -1355,16 +1411,30 @@ impl SecureStorageProvider for FailingDeleteSecureStorageProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        SecureStorageError, is_quick_unlock_envelope, is_secure_storage_cancelled,
-        publish_quick_unlock_record, publish_quick_unlock_record_with,
-        quick_unlock_gesture_required, quick_unlock_key_storage_provider_name,
-        quick_unlock_ngc_cache_type, quick_unlock_persistent_key_name,
-        quick_unlock_record_lock_path, quick_unlock_replacement_outcome_is_unknown,
-        quick_unlock_storage_dir, verify_or_recreate_hello_key, with_owned_resource,
+        MemorySecureStorageProvider, SecureStorageError, SecureStorageProvider,
+        is_quick_unlock_envelope, is_secure_storage_cancelled, publish_quick_unlock_record,
+        publish_quick_unlock_record_with, quick_unlock_gesture_required,
+        quick_unlock_key_storage_provider_name, quick_unlock_ngc_cache_type,
+        quick_unlock_persistent_key_name, quick_unlock_record_lock_path,
+        quick_unlock_replacement_outcome_is_unknown, quick_unlock_storage_dir,
+        verify_or_recreate_hello_key, with_owned_resource,
     };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock,
     };
+    use zeroize::Zeroizing;
+
+    #[test]
+    fn loaded_secure_storage_bytes_have_zeroizing_ownership() {
+        fn assert_zeroizing(_: &Zeroizing<Vec<u8>>) {}
+
+        let storage = MemorySecureStorageProvider::new();
+        storage.store("vault", b"secret").unwrap();
+        let loaded = storage.load("vault").unwrap().unwrap();
+
+        assert_zeroizing(&loaded);
+        assert_eq!(loaded.as_slice(), b"secret");
+    }
     use crate::state_paths::{extension_state_dir, runtime_state_dir};
     use std::time::Duration;
 
@@ -1447,8 +1517,42 @@ mod tests {
             super::NTE_BAD_KEY_STATE
         ));
         assert!(super::is_hello_key_invalidated_status(super::NTE_NO_KEY));
+        assert!(super::is_hello_key_invalidated_status(
+            super::NTE_BAD_KEYSET
+        ));
         assert!(!super::is_hello_key_invalidated_status(0x8009_0010));
         assert!(!super::is_hello_key_invalidated_status(0x8009_0030));
+    }
+
+    #[test]
+    fn hello_key_creation_only_follows_a_definitive_missing_key_status() {
+        use super::HelloKeyOpenDisposition::{CreateMissing, ReturnError, UseOpened};
+
+        assert_eq!(super::hello_key_open_disposition(0, true), UseOpened);
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_NO_KEY, true),
+            CreateMissing
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_BAD_KEYSET, true),
+            CreateMissing
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_BAD_KEY_STATE, true),
+            ReturnError
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(0x8009_0030, true),
+            ReturnError
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_NO_KEY, false),
+            ReturnError
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_BAD_KEYSET, false),
+            ReturnError
+        );
     }
 
     #[test]
@@ -1638,12 +1742,12 @@ mod tests {
     }
 
     #[test]
-    fn windows_error_1177_is_classified_as_outcome_unknown() {
+    fn windows_replace_errors_that_may_have_changed_the_target_are_outcome_unknown() {
+        assert!(quick_unlock_replacement_outcome_is_unknown(
+            &std::io::Error::from_raw_os_error(1176)
+        ));
         assert!(quick_unlock_replacement_outcome_is_unknown(
             &std::io::Error::from_raw_os_error(1177)
-        ));
-        assert!(!quick_unlock_replacement_outcome_is_unknown(
-            &std::io::Error::from_raw_os_error(1176)
         ));
         assert!(!quick_unlock_replacement_outcome_is_unknown(
             &std::io::Error::other("post-publish cleanup failed")

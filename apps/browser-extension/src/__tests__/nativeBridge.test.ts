@@ -180,6 +180,14 @@ describe("createNativeMessagingBridge", () => {
       interactiveTimeoutMs: 56_789
     });
     const commandTypes = [
+      "add_local_vault_reference",
+      "begin_one_drive_login",
+      "complete_one_drive_login",
+      "complete_pending_one_drive_login",
+      "list_one_drive_children",
+      "add_one_drive_vault_reference",
+      "retry_vault_source_sync",
+      "delete_vault_reference",
       "create_entry",
       "update_entry_fields",
       "compare_and_update_entry_fields",
@@ -195,6 +203,8 @@ describe("createNativeMessagingBridge", () => {
       "update_entry_attachment_metadata",
       "replace_entry_attachment_content",
       "delete_entry_attachment",
+      "update_entry",
+      "find_exact_matching_entry_ids",
       "disable_quick_unlock_for_current_vault"
     ];
 
@@ -207,7 +217,11 @@ describe("createNativeMessagingBridge", () => {
       await expect(request).resolves.toMatchObject({ code: "test" });
     }
 
-    for (const update of [{ credentials: {} }, { encryption: {} }]) {
+    for (const update of [
+      { metadata: { name: "Renamed" } },
+      { credentials: {} },
+      { encryption: {} }
+    ]) {
       const request = bridge.send({
         version: 1,
         command: { type: "update_database_settings", update }
@@ -220,7 +234,7 @@ describe("createNativeMessagingBridge", () => {
     }
   });
 
-  it("keeps the default timeout for database metadata updates", async () => {
+  it("uses the interactive timeout for database metadata updates", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
@@ -238,7 +252,7 @@ describe("createNativeMessagingBridge", () => {
     });
 
     expect(port.postMessage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ requestTimeoutMs: 1_234 })
+      expect.objectContaining({ requestTimeoutMs: 56_789 })
     );
     port.emitMessage({ type: "saved" });
     await expect(request).resolves.toEqual({ type: "saved" });

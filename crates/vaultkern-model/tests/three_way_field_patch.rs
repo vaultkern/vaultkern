@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use vaultkern_model::{
     Attachment, CustomField, CustomIcon, DeletedObject, Entry, Group, GroupTimes,
-    OpaqueXmlFragment, PasskeyRecord, TotpSpec, Vault, three_way_field_patch,
+    OpaqueXmlFragment, PasskeyRecord, ThreeWayPatchError, TotpSpec, Vault, three_way_field_patch,
 };
 
 fn base_vault() -> (Vault, Uuid) {
@@ -346,6 +346,165 @@ fn deleting_group_cannot_orphan_a_changed_descendant() {
         entry(&patched.vault.root, entry_id).unwrap().notes,
         "changed inside deleted group"
     );
+}
+
+#[test]
+fn moving_existing_entry_into_remotely_deleted_group_preserves_destination() {
+    let (mut base, entry_id) = base_vault();
+    let source = Group::new("Source");
+    let destination = Group::new("Destination");
+    let destination_id = destination.id;
+    base.root.children = vec![source, destination];
+
+    let mut local = base.clone();
+    let mut moved = local.root.entries.remove(0);
+    moved.location_changed_at = Some(20);
+    local.root.children[1].entries.push(moved);
+
+    let mut remote = base.clone();
+    remote.root.children.remove(1);
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    assert_eq!(
+        parent_of(&patched.vault.root, entry_id),
+        Some(destination_id)
+    );
+    assert!(
+        patched
+            .vault
+            .root
+            .children
+            .iter()
+            .any(|group| group.id == destination_id)
+    );
+}
+
+#[test]
+fn moving_existing_group_into_remotely_deleted_group_preserves_destination() {
+    let mut base = Vault::empty("Shared");
+    let moved = Group::new("Moved");
+    let moved_id = moved.id;
+    let destination = Group::new("Destination");
+    let destination_id = destination.id;
+    base.root.children = vec![moved, destination];
+
+    let mut local = base.clone();
+    let mut moved = local.root.children.remove(0);
+    moved.times = Some(GroupTimes {
+        created_at: 0,
+        modified_at: 20,
+        expires: false,
+        expiry_time: None,
+        last_accessed_at: None,
+        usage_count: None,
+        location_changed_at: Some(20),
+    });
+    local.root.children[0].children.push(moved);
+
+    let mut remote = base.clone();
+    remote.root.children.remove(1);
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    let destination = patched
+        .vault
+        .root
+        .children
+        .iter()
+        .find(|group| group.id == destination_id)
+        .expect("move destination survives its concurrent deletion");
+    assert!(
+        destination
+            .children
+            .iter()
+            .any(|group| group.id == moved_id)
+    );
+}
+
+#[test]
+fn concurrent_group_field_edits_fall_back_when_loser_has_no_history() {
+    let mut base = Vault::empty("Shared");
+    let mut folder = Group::new("Base");
+    folder.times = Some(GroupTimes {
+        created_at: 0,
+        modified_at: 10,
+        expires: false,
+        expiry_time: None,
+        last_accessed_at: None,
+        usage_count: None,
+        location_changed_at: None,
+    });
+    let folder_id = folder.id;
+    base.root.children.push(folder);
+
+    let mut local = base.clone();
+    local.root.children[0].title = "Local".into();
+    local.root.children[0].times.as_mut().unwrap().modified_at = 20;
+
+    let mut remote = base.clone();
+    remote.root.children[0].title = "Remote".into();
+    remote.root.children[0].times.as_mut().unwrap().modified_at = 30;
+
+    assert!(matches!(
+        three_way_field_patch(&base, &local, &remote),
+        Err(ThreeWayPatchError::FidelityConflict {
+            object: "group",
+            id: Some(id),
+            ..
+        }) if id == folder_id
+    ));
+}
+
+#[test]
+fn concurrent_meta_field_edits_fall_back_when_loser_has_no_history() {
+    let mut base = Vault::empty("Base");
+    base.database_name_changed = Some(10);
+
+    let mut local = base.clone();
+    local.name = "Local".into();
+    local.database_name_changed = Some(20);
+
+    let mut remote = base.clone();
+    remote.name = "Remote".into();
+    remote.database_name_changed = Some(30);
+
+    assert!(matches!(
+        three_way_field_patch(&base, &local, &remote),
+        Err(ThreeWayPatchError::FidelityConflict {
+            object: "meta",
+            id: None,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn renaming_group_during_remote_delete_preserves_unchanged_subtree() {
+    let (mut base, entry_id) = base_vault();
+    let mut nested = Group::new("Nested");
+    nested.entries = std::mem::take(&mut base.root.entries);
+    let nested_id = nested.id;
+    let mut folder = Group::new("Folder");
+    folder.children.push(nested);
+    let folder_id = folder.id;
+    base.root.children.push(folder);
+
+    let mut local = base.clone();
+    local.root.children[0].title = "Renamed locally".into();
+    let mut remote = base.clone();
+    remote.root.children.clear();
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    let restored = patched
+        .vault
+        .root
+        .children
+        .iter()
+        .find(|group| group.id == folder_id)
+        .expect("renamed group survives the delete/edit race");
+
+    assert_eq!(restored.title, "Renamed locally");
+    assert!(restored.children.iter().any(|group| group.id == nested_id));
+    assert!(entry(restored, entry_id).is_some());
 }
 
 #[test]

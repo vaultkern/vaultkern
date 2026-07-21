@@ -152,6 +152,13 @@ pub(super) fn authenticate_native_messaging_channel() -> Result<()> {
     authenticate_native_messaging_channel_identity(&identity, &trusted_browser_paths)
 }
 
+pub(super) fn authenticate_browser_process(process_id: u32) -> Result<()> {
+    let browser = browser_identity_for_process(process_id)
+        .context("authenticate browser prompt parent process")?;
+    let trusted_browser_paths = trusted_browser_executable_paths()?;
+    authenticate_browser_identity(&browser, &trusted_browser_paths)
+}
+
 fn authenticate_resident_server_identity(identity: &ResidentServerIdentity) -> Result<()> {
     if !identity
         .executable_name

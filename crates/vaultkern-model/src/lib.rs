@@ -740,7 +740,7 @@ pub struct GroupTimes {
     pub location_changed_at: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PasskeyRecord {
     pub username: String,
     pub credential_id: String,
@@ -750,6 +750,45 @@ pub struct PasskeyRecord {
     pub user_handle: Option<String>,
     pub backup_eligible: bool,
     pub backup_state: bool,
+}
+
+impl Zeroize for PasskeyRecord {
+    fn zeroize(&mut self) {
+        self.username.zeroize();
+        self.credential_id.zeroize();
+        self.generated_user_id.zeroize();
+        self.private_key_pem.zeroize();
+        self.relying_party.zeroize();
+        self.user_handle.zeroize();
+    }
+}
+
+impl Drop for PasskeyRecord {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl fmt::Debug for PasskeyRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PasskeyRecord")
+            .field("username", &"[REDACTED]")
+            .field("credential_id", &"[REDACTED]")
+            .field(
+                "generated_user_id",
+                &self.generated_user_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("private_key_pem", &"[REDACTED]")
+            .field("relying_party", &self.relying_party)
+            .field(
+                "user_handle",
+                &self.user_handle.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("backup_eligible", &self.backup_eligible)
+            .field("backup_state", &self.backup_state)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -909,7 +948,7 @@ pub enum TotpAlgorithm {
     Sha512,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TotpSpec {
     pub secret_base32: String,
     pub algorithm: TotpAlgorithm,
@@ -924,6 +963,29 @@ impl Zeroize for TotpSpec {
         self.secret_base32.zeroize();
         self.issuer.zeroize();
         self.account_name.zeroize();
+    }
+}
+
+impl Drop for TotpSpec {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl fmt::Debug for TotpSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TotpSpec")
+            .field("secret_base32", &"[REDACTED]")
+            .field("algorithm", &self.algorithm)
+            .field("digits", &self.digits)
+            .field("period_seconds", &self.period_seconds)
+            .field("issuer", &self.issuer.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "account_name",
+                &self.account_name.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
     }
 }
 
@@ -1048,7 +1110,7 @@ impl TotpSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Entry {
     pub id: Uuid,
     pub title: String,
@@ -1082,6 +1144,80 @@ pub struct Entry {
     pub exclude_from_reports: bool,
     pub raw_state: EntryRawState,
     pub opaque_xml: Vec<OpaqueXmlFragment>,
+}
+
+impl Zeroize for Entry {
+    fn zeroize(&mut self) {
+        self.title.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        for field in self.attributes.values_mut() {
+            field.value.zeroize();
+        }
+        for history in &mut self.history {
+            history.zeroize();
+        }
+        if let Some(totp) = &mut self.totp {
+            totp.zeroize();
+        }
+        if let Some(passkey) = &mut self.passkey {
+            passkey.zeroize();
+        }
+        self.foreground_color.zeroize();
+        self.background_color.zeroize();
+        self.override_url.zeroize();
+        if let Some(auto_type) = &mut self.auto_type {
+            auto_type.default_sequence.zeroize();
+            for association in &mut auto_type.associations {
+                association.window.zeroize();
+                association.sequence.zeroize();
+            }
+        }
+        for value in self.custom_data.values_mut() {
+            value.zeroize();
+        }
+        for block in &mut self.custom_data_blocks {
+            for item in &mut block.items {
+                item.value.zeroize();
+            }
+        }
+        self.raw_state.foreground_color_raw.zeroize();
+        self.raw_state.background_color_raw.zeroize();
+        self.raw_state.override_url_raw.zeroize();
+        self.raw_state.tags_raw.zeroize();
+        self.raw_state.quality_check_raw.zeroize();
+        for fragment in &mut self.opaque_xml {
+            fragment.xml.zeroize();
+        }
+    }
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl fmt::Debug for Entry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Entry")
+            .field("id", &self.id)
+            .field("title", &"[REDACTED]")
+            .field("username", &"[REDACTED]")
+            .field("password", &"[REDACTED]")
+            .field("url", &"[REDACTED]")
+            .field("notes", &"[REDACTED]")
+            .field("attribute_count", &self.attributes.len())
+            .field("attachment_count", &self.attachments.len())
+            .field("history_count", &self.history.len())
+            .field("has_totp", &self.totp.is_some())
+            .field("has_passkey", &self.passkey.is_some())
+            .field("modified_at", &self.modified_at)
+            .finish()
+    }
 }
 
 impl Entry {
@@ -1536,7 +1672,7 @@ impl Vault {
     pub fn empty(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
-            generator: None,
+            generator: Some("VaultKern".into()),
             settings_changed: None,
             root: Group::new(name.clone()),
             name,
@@ -1686,6 +1822,7 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+    use zeroize::Zeroize;
 
     #[test]
     fn attachment_content_is_shared_across_entry_and_history_clones() {
@@ -1763,6 +1900,61 @@ mod tests {
         assert!(!zeroized.load(Ordering::SeqCst));
         drop(clone);
         assert!(zeroized.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn entry_secrets_are_redacted_and_explicitly_zeroizable() {
+        let mut entry = Entry::new("title");
+        entry.username = "sensitive-user".into();
+        entry.password = "password-secret".into();
+        entry.notes = "notes-secret".into();
+        entry.attributes.insert(
+            "private-field".into(),
+            super::CustomField {
+                value: "custom-secret".into(),
+                protected: true,
+            },
+        );
+        entry.totp = Some(TotpSpec {
+            secret_base32: "totp-secret".into(),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: Some("issuer".into()),
+            account_name: Some("account".into()),
+        });
+        entry.passkey = Some(PasskeyRecord {
+            username: "passkey-user".into(),
+            credential_id: "credential-secret".into(),
+            generated_user_id: None,
+            private_key_pem: "private-key-secret".into(),
+            relying_party: "example.com".into(),
+            user_handle: Some("user-handle-secret".into()),
+            backup_eligible: false,
+            backup_state: false,
+        });
+
+        let debug = format!("{entry:?}");
+        for secret in [
+            "sensitive-user",
+            "password-secret",
+            "notes-secret",
+            "custom-secret",
+            "totp-secret",
+            "credential-secret",
+            "private-key-secret",
+            "user-handle-secret",
+        ] {
+            assert!(!debug.contains(secret), "debug leaked {secret}");
+        }
+
+        entry.zeroize();
+        assert!(entry.username.is_empty());
+        assert!(entry.password.is_empty());
+        assert!(entry.notes.is_empty());
+        assert!(entry.attributes["private-field"].value.is_empty());
+        assert!(entry.totp.as_ref().unwrap().secret_base32.is_empty());
+        assert!(entry.passkey.as_ref().unwrap().private_key_pem.is_empty());
     }
 
     #[test]

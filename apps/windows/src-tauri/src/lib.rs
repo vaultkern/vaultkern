@@ -23,7 +23,7 @@ pub fn should_refresh_platform_passkeys(
         command_type,
         Some(
             "add_local_vault_reference"
-                | "add_onedrive_vault_reference"
+                | "add_one_drive_vault_reference"
                 | "open_local_vault"
                 | "set_current_vault"
                 | "delete_vault_reference"
@@ -99,6 +99,10 @@ mod tests {
         ));
         assert!(should_refresh_platform_passkeys(
             Some("add_local_vault_reference"),
+            &json!({ "type": "vault_reference" })
+        ));
+        assert!(should_refresh_platform_passkeys(
+            Some("add_one_drive_vault_reference"),
             &json!({ "type": "vault_reference" })
         ));
         assert!(!should_refresh_platform_passkeys(
@@ -194,6 +198,22 @@ mod tests {
             "vaultkern-windows.exe".into(),
             "--webview-debug-port=9222".into(),
         ]));
+    }
+
+    #[test]
+    fn closing_the_main_window_hides_it_without_terminating_the_resident_app() {
+        let main_source = include_str!("main.rs");
+
+        assert!(main_source.contains(".on_window_event("));
+        assert!(main_source.contains("api.prevent_close()"));
+        assert!(main_source.contains("window.hide()"));
+        assert!(main_source.contains("queue_parent_window_handle(None)"));
+        assert!(
+            main_source.find("window.hide()").unwrap()
+                < main_source
+                    .find("queue_parent_window_handle(None)")
+                    .unwrap()
+        );
     }
 
     #[test]

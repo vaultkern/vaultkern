@@ -60,6 +60,7 @@ fn main() {
     let plugin_bridge = bridge.clone();
     let window_bridge = bridge.clone();
     let forwarded_bridge = bridge.clone();
+    let resident_bridge = bridge.clone();
     let show_window_on_start =
         launch_requests_visible_window(&std::env::args().collect::<Vec<_>>());
     tauri::Builder::default()
@@ -86,26 +87,32 @@ fn main() {
             let ipc_plugin = plugin.handle();
             app.manage(plugin);
             let ipc_bridge = plugin_bridge.clone();
-            let ipc_handler = Arc::new(move |message: Value, cancelled, parent_window| {
-                let command_type = message
-                    .pointer("/command/type")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                let response =
-                    ipc_bridge.request_browser_cancellable(message, cancelled, parent_window);
-                if should_refresh_platform_passkeys(command_type.as_deref(), &response) {
-                    if let Err(error) = ipc_plugin.sync_credentials() {
-                        eprintln!("passkey credential cache refresh failed: {error}");
+            let ipc_handler = Arc::new(
+                move |message: Value, cancelled, execution_started, parent_window| {
+                    let command_type = message
+                        .pointer("/command/type")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let response = ipc_bridge.request_browser_cancellable(
+                        message,
+                        cancelled,
+                        execution_started,
+                        parent_window,
+                    );
+                    if should_refresh_platform_passkeys(command_type.as_deref(), &response) {
+                        if let Err(error) = ipc_plugin.sync_credentials() {
+                            eprintln!("passkey credential cache refresh failed: {error}");
+                        }
                     }
-                }
-                response
-            });
+                    response
+                },
+            );
             let ipc_server =
                 start_windows_resident_ipc_server(ipc_handler).map_err(std::io::Error::other)?;
             app.manage(ipc_server);
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(move |window, event| {
             if window.label() != "main" {
                 return;
             }
@@ -113,6 +120,9 @@ fn main() {
                 api.prevent_close();
                 if let Err(error) = window.hide() {
                     eprintln!("failed to hide the resident VaultKern window: {error}");
+                }
+                if let Err(error) = resident_bridge.queue_parent_window_handle(None) {
+                    eprintln!("failed to queue clearing the Windows Hello parent window: {error}");
                 }
             }
         })

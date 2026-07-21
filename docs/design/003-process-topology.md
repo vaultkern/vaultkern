@@ -6,10 +6,12 @@ and the outbox below). 2026-07-19.
 
 ## Shape (one target, all platforms)
 
-The **resident app** hosts the Rust core (UniFFI): vault session, sync,
-policy. It is the sole owner of runtime state and the sole KDBX writer.
-Everything else is a client: the browser extension (through a thin shim),
-system credential extensions, and the UI layers.
+The **resident app** hosts the Rust core in-process: vault session, sync,
+policy. Mobile/native-language shells reach that core through UniFFI; the
+Windows Tauri app is Rust and calls it directly. The resident app is the sole
+owner of runtime state and the sole KDBX writer. Everything else is a client:
+the browser extension (through a thin shim), out-of-process system credential
+extensions, and the UI layers.
 
 ## Rules
 
@@ -30,6 +32,9 @@ system credential extensions, and the UI layers.
    immediately. Registrations only — no usage-count relay.
 3. **Android services run inside the app process.** They are the resident
    app: no outbox, no overlay, same writer lock.
+   The Windows passkey plugin COM server follows the same ownership rule: it
+   is hosted by the resident process family and calls the in-process core
+   bridge directly, with no outbox.
 4. **The browser extension speaks native messaging to a stateless shim**,
    which forwards over authenticated local IPC. Mutual peer authentication
    (macOS XPC with a code-signing requirement; Windows named pipe with a
@@ -40,8 +45,8 @@ system credential extensions, and the UI layers.
    requirement is refused — no degraded mode.
 5. **Protocol**: clients consume DTOs only. Handshake negotiates
    `{protocol_version, capabilities}`; changes are additive within a major
-   version. Runtime modularization precedes UniFFI — the FFI exposes module
-   interfaces, not a god file.
+   version. Runtime modularization precedes mobile UniFFI — the FFI exposes
+   module interfaces, not a god file.
 
 ## Access matrix
 
@@ -49,6 +54,7 @@ system credential extensions, and the UI layers.
 |---|---|---|---|
 | resident app | vault | **sole writer** | consumes |
 | Apple appex | cached copy + own outbox items | never | appends |
+| Windows passkey provider | via resident in-process bridge | resident app writes | never |
 | browser extension / shim | via protocol only | never | never |
 
 The OS writer lock serializes local file access; the remote copy is

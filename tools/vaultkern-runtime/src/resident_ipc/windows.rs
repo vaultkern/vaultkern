@@ -364,12 +364,13 @@ fn dispatch_request(
 ) {
     let request_id = request.request_id.clone();
     let cancellation = request.cancellation_token();
+    let execution_started = request.execution_started_token();
     let (result_sender, result_receiver) = mpsc::channel();
     let spawn_result = std::thread::Builder::new()
         .name("vaultkern-resident-ipc-request".into())
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                handler(message, cancellation, parent_window)
+                handler(message, cancellation, execution_started, parent_window)
             }))
             .map_err(|_| "resident IPC request handler panicked".to_owned());
             let _ = result_sender.send(result);
@@ -395,16 +396,14 @@ fn dispatch_request(
         .name("vaultkern-resident-ipc-response".into())
         .spawn(move || {
             let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            let mut enforce_deadline = true;
             loop {
-                if response_request.cancelled() {
+                if response_request.response_claimed() {
                     return;
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    if response_request.claim_response() {
-                        response_request
-                            .cancellation_token()
-                            .store(true, Ordering::Release);
+                if enforce_deadline && remaining.is_zero() {
+                    if response_request.cancel_before_execution() {
                         let _ = send_frame(
                             &response_writer,
                             &ResidentIpcFrame::Error {
@@ -413,10 +412,17 @@ fn dispatch_request(
                                 message: "the resident IPC request timed out".into(),
                             },
                         );
+                        return;
                     }
-                    return;
+                    enforce_deadline = false;
+                    continue;
                 }
-                match result_receiver.recv_timeout(remaining.min(REQUEST_POLL_INTERVAL)) {
+                let wait = if enforce_deadline {
+                    remaining.min(REQUEST_POLL_INTERVAL)
+                } else {
+                    REQUEST_POLL_INTERVAL
+                };
+                match result_receiver.recv_timeout(wait) {
                     Ok(Ok(message)) => {
                         if response_request.claim_response() {
                             let _ = send_runtime_response(
@@ -910,8 +916,10 @@ fn resolve_request_parent_window(
 ) -> Option<usize> {
     let requested =
         requested_parent_window.and_then(|window| window_identity_for_sid(window, expected_sid));
-    let foreground =
-        window_identity_for_sid(unsafe { GetForegroundWindow() } as usize, expected_sid);
+    let foreground = requested.as_ref().and_then(|(_, requested_process)| {
+        window_identity_for_sid(unsafe { GetForegroundWindow() } as usize, expected_sid)
+            .filter(|(_, foreground_process)| foreground_process == requested_process)
+    });
     select_request_parent_window(requested, foreground)
 }
 
@@ -922,7 +930,11 @@ fn window_identity_for_sid(window: usize, expected_sid: &[u8]) -> Option<(usize,
     let mut process_id = 0;
     let thread_id =
         unsafe { GetWindowThreadProcessId(window as *mut std::ffi::c_void, &mut process_id) };
-    if thread_id == 0 || process_id == 0 || verify_process_sid(process_id, expected_sid).is_err() {
+    if thread_id == 0
+        || process_id == 0
+        || verify_process_sid(process_id, expected_sid).is_err()
+        || peer_auth::authenticate_browser_process(process_id).is_err()
+    {
         return None;
     }
     Some((window, process_id))
@@ -939,8 +951,7 @@ fn select_request_parent_window(
             Some(foreground_window)
         }
         (Some((requested_window, _)), _) => Some(requested_window),
-        (None, Some((foreground_window, _))) => Some(foreground_window),
-        (None, None) => None,
+        (None, _) => None,
     }
 }
 
@@ -1347,6 +1358,11 @@ mod tests {
             select_request_parent_window(Some((0x1000, 41)), Some((0x3000, 99))),
             Some(0x1000)
         );
+        assert_eq!(
+            select_request_parent_window(None, Some((0x4000, 99))),
+            None,
+            "an unrelated same-user foreground window is not a trusted prompt owner"
+        );
     }
 
     #[test]
@@ -1419,37 +1435,47 @@ mod tests {
         let _pipe_test = PIPE_TEST_LOCK.lock().expect("lock resident pipe test");
         let observed_cancellations = Arc::new(AtomicUsize::new(0));
         let handler_cancellations = observed_cancellations.clone();
+        let running_mutation_started = Arc::new(AtomicBool::new(false));
+        let handler_mutation_started = running_mutation_started.clone();
         let server = start_windows_resident_ipc_server_with_authenticator(
-            Arc::new(move |message, cancelled, _parent_window| {
-                match message["command"]["type"].as_str() {
-                    Some("get_session_state") => {
-                        json!({ "type": "session_state", "unlocked": false })
-                    }
-                    Some("echo_blob") => json!({
-                        "type": "blob_echo",
-                        "payload": message["command"]["payload"].clone(),
-                    }),
-                    Some("consume_blob") => json!({
-                        "type": "blob_length",
-                        "length": message["command"]["payload"]
-                            .as_str()
-                            .map(str::len)
-                            .unwrap_or_default(),
-                    }),
-                    Some("oversized_response") => json!({
-                        "type": "oversized_response",
-                        "payload": "A".repeat(MAX_NATIVE_RESPONSE_BYTES),
-                    }),
-                    Some("block_until_cancelled") => {
-                        while !cancelled.load(Ordering::Acquire) {
-                            std::thread::sleep(Duration::from_millis(5));
+            Arc::new(
+                move |message, cancelled, execution_started, _parent_window| {
+                    match message["command"]["type"].as_str() {
+                        Some("get_session_state") => {
+                            json!({ "type": "session_state", "unlocked": false })
                         }
-                        handler_cancellations.fetch_add(1, Ordering::AcqRel);
-                        json!({ "type": "saved" })
+                        Some("echo_blob") => json!({
+                            "type": "blob_echo",
+                            "payload": message["command"]["payload"].clone(),
+                        }),
+                        Some("consume_blob") => json!({
+                            "type": "blob_length",
+                            "length": message["command"]["payload"]
+                                .as_str()
+                                .map(str::len)
+                                .unwrap_or_default(),
+                        }),
+                        Some("oversized_response") => json!({
+                            "type": "oversized_response",
+                            "payload": "A".repeat(MAX_NATIVE_RESPONSE_BYTES),
+                        }),
+                        Some("block_until_cancelled") => {
+                            while !cancelled.load(Ordering::Acquire) {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            handler_cancellations.fetch_add(1, Ordering::AcqRel);
+                            json!({ "type": "saved" })
+                        }
+                        Some("commit_after_dispatch") => {
+                            execution_started.store(true, Ordering::Release);
+                            handler_mutation_started.store(true, Ordering::Release);
+                            std::thread::sleep(Duration::from_millis(50));
+                            json!({ "type": "saved" })
+                        }
+                        command => panic!("unexpected test command: {command:?}"),
                     }
-                    command => panic!("unexpected test command: {command:?}"),
-                }
-            }),
+                },
+            ),
             Arc::new(verify_pipe_client_sid_only),
         )
         .expect("start resident IPC server");
@@ -1635,6 +1661,44 @@ mod tests {
             "native-cancel-1",
             "request_cancelled",
         );
+
+        write_frame(
+            &mut writer,
+            &ResidentIpcFrame::Request {
+                request_id: "native-running-cancel-1".into(),
+                timeout_ms: 5_000,
+                message: json!({
+                    "version": 1,
+                    "command": { "type": "commit_after_dispatch" }
+                }),
+            },
+        )
+        .expect("send running mutation request");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !running_mutation_started.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(running_mutation_started.load(Ordering::Acquire));
+        write_frame(
+            &mut writer,
+            &ResidentIpcFrame::Cancel {
+                request_id: "native-running-cancel-1".into(),
+            },
+        )
+        .expect("request cancellation after mutation dispatch");
+        match read_frame(&mut reader)
+            .expect("read running mutation response")
+            .expect("running mutation response before EOF")
+        {
+            ResidentIpcFrame::Response {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, "native-running-cancel-1");
+                assert_eq!(message["type"], "saved");
+            }
+            _ => panic!("expected committed mutation response"),
+        }
 
         write_frame(
             &mut writer,
