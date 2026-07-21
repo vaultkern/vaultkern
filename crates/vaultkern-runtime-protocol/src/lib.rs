@@ -353,6 +353,7 @@ pub enum RuntimeResponse {
     PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto),
     PasskeyCeremonyReconciliation(PasskeyCeremonyReconciliationDto),
     DatabaseSettings(DatabaseSettingsDto),
+    DatabaseSettingsCommitResult(DatabaseSettingsCommitResultDto),
     Saved,
     SaveVaultResult(SaveVaultResultDto),
     AutofillPersistResult(AutofillPersistResultDto),
@@ -449,6 +450,13 @@ pub struct DatabaseSettingsDto {
     pub encryption: DatabaseEncryptionSettingsDto,
     pub autosave_delay_seconds: Option<u32>,
     pub has_password: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseSettingsCommitResultDto {
+    pub settings: DatabaseSettingsDto,
+    pub save_result: SaveVaultResultDto,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -11,6 +11,7 @@ import {
 import { afterEach, expect, it, vi } from "vitest";
 import type {
   DatabaseSettings,
+  DatabaseSettingsCommitResult,
   DatabaseSettingsUpdate
 } from "@vaultkern/runtime-web-client";
 import { App, type RuntimeClientLike } from "../App";
@@ -34,6 +35,20 @@ function createDeferred<T>() {
   });
 
   return { promise, resolve };
+}
+
+function committedDatabaseSettings(
+  settings: DatabaseSettings,
+  saveResult: DatabaseSettingsCommitResult["saveResult"] = {
+    type: "save_vault_result",
+    status: "saved"
+  }
+): DatabaseSettingsCommitResult {
+  return {
+    type: "database_settings_commit_result",
+    settings,
+    saveResult
+  };
 }
 
 function createVaultSelectionMethods() {
@@ -207,6 +222,27 @@ it("reconciles saved settings at startup and again after every unlock", async ()
     expect(settingsStore.reconcile).toHaveBeenCalledWith({
       reason: "unlock",
       vaultUnlocked: true
+    });
+  });
+});
+
+it("reconciles non-vault settings even when startup session loading fails", async () => {
+  const settingsStore = createSettingsStore({ passkeyProviderEnabled: true });
+  settingsStore.reconcile = vi.fn(async () => undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => {
+      throw new Error("simulated session load failure");
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByText("simulated session load failure")).toBeInTheDocument();
+  await waitFor(() => {
+    expect(settingsStore.reconcile).toHaveBeenCalledWith({
+      reason: "startup",
+      vaultUnlocked: false
     });
   });
 });
@@ -506,6 +542,53 @@ it("opens extension settings while locked and saves local extension preferences"
     });
   });
   expect(screen.getByRole("heading", { name: "插件设置" })).toBeInTheDocument();
+});
+
+it("serializes settings reconciliation so the latest desired state wins", async () => {
+  const settingsStore = createSettingsStore();
+  const firstCommit = createDeferred<void>();
+  let commitReconciliations = 0;
+  let providerRegistered = false;
+  settingsStore.reconcile = vi.fn(async (context) => {
+    if (context.reason !== "settings-commit") {
+      return;
+    }
+    commitReconciliations += 1;
+    const desired = await settingsStore.load();
+    if (commitReconciliations === 1) {
+      await firstCommit.promise;
+    }
+    providerRegistered = desired.passkeyProviderEnabled;
+  });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    }),
+    listRecentVaults: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  await waitFor(() => expect(settingsStore.reconcile).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+  const providerToggle = await screen.findByLabelText("VaultKern passkey provider");
+
+  fireEvent.click(providerToggle);
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+  await waitFor(() => expect(commitReconciliations).toBe(1));
+
+  fireEvent.click(providerToggle);
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+  await waitFor(() => expect(settingsStore.save).toHaveBeenCalledTimes(2));
+  expect(commitReconciliations).toBe(1);
+
+  firstCommit.resolve();
+  await waitFor(() => expect(commitReconciliations).toBe(2));
+  expect(providerRegistered).toBe(false);
 });
 
 it("confirms before leaving unsaved extension settings", async () => {
@@ -889,6 +972,61 @@ it("does not apply a stale quick unlock revocation after desired state changes",
   vaultList.resolve(recentVaults);
 
   expect(await screen.findByText("Personal")).toBeInTheDocument();
+  expect(client.disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+});
+
+it("reconciles quick unlock against the actual current vault instead of a stale session reference", async () => {
+  const settingsStore = createSettingsStore({ quickUnlockEnabled: false });
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Old selection",
+      sourceKind: "local",
+      sourceSummary: "old.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: true,
+      isCurrent: false
+    },
+    {
+      vaultRefId: "vault-ref-2",
+      displayName: "Current selection",
+      sourceKind: "local",
+      sourceSummary: "current.kdbx",
+      lastUsedAt: 1776500001,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    disableQuickUnlockForCurrentVault: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-2",
+      supportsBiometricUnlock: true
+    }))
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByText("Current selection")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+  fireEvent.change(await screen.findByLabelText("Recent Databases"), {
+    target: { value: "9" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  await waitFor(() => expect(settingsStore.save).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(client.listRecentVaults).toHaveBeenCalledTimes(2));
   expect(client.disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 });
 
@@ -1588,42 +1726,46 @@ it("loads database settings and preserves a conflict-copy warning after saving",
       autosaveDelaySeconds: 20,
       hasPassword: true
     }),
-    updateDatabaseSettings: vi.fn().mockResolvedValue({
-      type: "database_settings",
-      metadata: {
-        name: "Engineering",
-        description: "Updated",
-        defaultUsername: "ops"
-      },
-      publicMetadata: {
-        displayName: "Engineering Public",
-        color: "#2f6f73",
-        icon: "database"
-      },
-      history: {
-        maxItemsPerEntry: 9,
-        maxTotalSizeBytes: 99000
-      },
-      recycleBin: { enabled: false },
-      encryption: {
-        compression: "none",
-        cipher: "chacha20",
-        kdf: {
-          algorithm: "argon2d",
-          transformRounds: null,
-          iterations: 3,
-          memoryKib: 65537,
-          parallelism: 2
+    updateDatabaseSettings: vi.fn().mockResolvedValue(
+      committedDatabaseSettings(
+        {
+          type: "database_settings",
+          metadata: {
+            name: "Engineering",
+            description: "Updated",
+            defaultUsername: "ops"
+          },
+          publicMetadata: {
+            displayName: "Engineering Public",
+            color: "#2f6f73",
+            icon: "database"
+          },
+          history: {
+            maxItemsPerEntry: 9,
+            maxTotalSizeBytes: 99000
+          },
+          recycleBin: { enabled: false },
+          encryption: {
+            compression: "none",
+            cipher: "chacha20",
+            kdf: {
+              algorithm: "argon2d",
+              transformRounds: null,
+              iterations: 3,
+              memoryKib: 65537,
+              parallelism: 2
+            }
+          },
+          autosaveDelaySeconds: 45,
+          hasPassword: true
+        },
+        {
+          type: "save_vault_result",
+          status: "conflict_copy",
+          conflictCopyPath: "C:\\Vaults\\Archive.conflict.kdbx"
         }
-      },
-      autosaveDelaySeconds: 45,
-      hasPassword: true
-    }),
-    saveVault: vi.fn().mockResolvedValue({
-      type: "save_vault_result",
-      status: "conflict_copy",
-      conflictCopyPath: "C:\\Vaults\\Archive.conflict.kdbx"
-    })
+      )
+    )
   };
 
   render(<App client={client as RuntimeClientLike} />);
@@ -1699,7 +1841,7 @@ it("loads database settings and preserves a conflict-copy warning after saving",
       autosaveDelaySeconds: 45
     });
   });
-  expect(client.saveVault).toHaveBeenCalledWith("vault-1");
+  expect(client.saveVault).not.toHaveBeenCalled();
   expect(
     await screen.findByText(/Local edits were saved to a conflict copy:/)
   ).toHaveTextContent("C:\\Vaults\\Archive.conflict.kdbx");
@@ -1710,10 +1852,11 @@ it("preserves a default autosave delay when saving unrelated database settings",
   const baseClient = createVaultSelectionMethods();
   const initialSettings = await baseClient.getDatabaseSettings();
   const updateDatabaseSettings = vi.fn(
-    async (_vaultId: string, _update: DatabaseSettingsUpdate) => ({
-      ...initialSettings,
-      metadata: { ...initialSettings.metadata, name: "Engineering" }
-    })
+    async (_vaultId: string, _update: DatabaseSettingsUpdate) =>
+      committedDatabaseSettings({
+        ...initialSettings,
+        metadata: { ...initialSettings.metadata, name: "Engineering" }
+      })
   );
   const client = {
     ...baseClient,
@@ -1722,11 +1865,7 @@ it("preserves a default autosave delay when saving unrelated database settings",
       activeVaultId: "vault-1",
       currentVaultRefId: "vault-ref-1"
     }),
-    updateDatabaseSettings,
-    saveVault: vi.fn(async () => ({
-      type: "save_vault_result" as const,
-      status: "saved" as const
-    }))
+    updateDatabaseSettings
   };
 
   render(<App client={client as RuntimeClientLike} />);
@@ -1759,7 +1898,7 @@ it("persists clearing a previously set autosave delay and leaves the settings pa
           autosaveDelaySeconds: update.autosaveDelaySeconds ?? null
         };
       }
-      return currentSettings;
+      return committedDatabaseSettings(currentSettings);
     }
   );
   const client = {
@@ -1770,11 +1909,7 @@ it("persists clearing a previously set autosave delay and leaves the settings pa
       currentVaultRefId: "vault-ref-1"
     }),
     getDatabaseSettings: vi.fn(async () => currentSettings),
-    updateDatabaseSettings,
-    saveVault: vi.fn(async () => ({
-      type: "save_vault_result" as const,
-      status: "saved" as const
-    }))
+    updateDatabaseSettings
   } satisfies RuntimeClientLike;
 
   render(<App client={client} />);
@@ -1798,8 +1933,49 @@ it("persists clearing a previously set autosave delay and leaves the settings pa
   expect(screen.queryByLabelText("Autosave Delay Seconds")).not.toBeInTheDocument();
 });
 
-it("retries a failed database settings save without updating settings again", async () => {
-  const updateDatabaseSettings = vi.fn(async () => ({
+it("accepts normalized database settings as the clean draft after a successful commit", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const initialSettings = await vaultMethods.getDatabaseSettings();
+  vaultMethods.updateDatabaseSettings.mockImplementation(async (_vaultId, update) =>
+    committedDatabaseSettings({
+      ...initialSettings,
+      metadata: {
+        ...initialSettings.metadata,
+        description: update.metadata?.description ?? null
+      }
+    })
+  );
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Description"), {
+    target: { value: "  Normalized description  " }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+  await waitFor(() => expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1));
+  expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledWith(
+    "vault-1",
+    expect.objectContaining({
+      metadata: expect.objectContaining({ description: "Normalized description" })
+    })
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Back to archive" }));
+  expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument();
+});
+
+it("retries a failed atomic database settings commit", async () => {
+  const updatedSettings: DatabaseSettings = {
     type: "database_settings" as const,
     metadata: { name: "Engineering", description: null, defaultUsername: null },
     publicMetadata: { displayName: null, color: null, icon: null },
@@ -1818,11 +1994,11 @@ it("retries a failed database settings save without updating settings again", as
     },
     autosaveDelaySeconds: 0,
     hasPassword: true
-  }));
-  const saveVault = vi
+  };
+  const updateDatabaseSettings = vi
     .fn()
     .mockRejectedValueOnce(new Error("simulated settings save failure"))
-    .mockResolvedValueOnce(undefined);
+    .mockResolvedValueOnce(committedDatabaseSettings(updatedSettings));
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -1830,8 +2006,7 @@ it("retries a failed database settings save without updating settings again", as
       activeVaultId: "vault-1",
       currentVaultRefId: "vault-ref-1"
     }),
-    updateDatabaseSettings,
-    saveVault
+    updateDatabaseSettings
   };
 
   render(<App client={client as RuntimeClientLike} />);
@@ -1845,30 +2020,67 @@ it("retries a failed database settings save without updating settings again", as
 
   expect(await screen.findByText("simulated settings save failure")).toBeInTheDocument();
   expect(updateDatabaseSettings).toHaveBeenCalledTimes(1);
-  expect(saveVault).toHaveBeenCalledTimes(1);
 
-  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
-  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
-  expect(updateDatabaseSettings).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(updateDatabaseSettings).toHaveBeenCalledTimes(2));
+  expect(await screen.findByText("Database settings saved.")).toBeInTheDocument();
+});
+
+it("keeps the database settings draft editable when persistence fails", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  vaultMethods.updateDatabaseSettings.mockRejectedValue(
+    new Error("simulated settings persistence failure")
+  );
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  const name = await screen.findByLabelText("Database Name");
+  fireEvent.change(name, { target: { value: "Engineering" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+  expect(
+    await screen.findByText("simulated settings persistence failure")
+  ).toBeInTheDocument();
+  expect(name).toHaveValue("Engineering");
+  expect(name).not.toBeDisabled();
+  expect(screen.getByRole("button", { name: "Save settings" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Back to archive" }));
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Discard changes" })).toBeInTheDocument();
 });
 
 it("applies a newer database settings draft before leaving after a failed save", async () => {
   const vaultMethods = createVaultSelectionMethods();
   const initialSettings = await vaultMethods.getDatabaseSettings();
-  vaultMethods.updateDatabaseSettings.mockImplementation(async (_vaultId, update) => ({
-    ...initialSettings,
-    metadata: {
-      name: update.metadata?.name ?? initialSettings.metadata.name,
-      description:
-        update.metadata?.description ?? initialSettings.metadata.description,
-      defaultUsername:
-        update.metadata?.defaultUsername ?? initialSettings.metadata.defaultUsername
+  let settingsCommitAttempt = 0;
+  vaultMethods.updateDatabaseSettings.mockImplementation(async (_vaultId, update) => {
+    settingsCommitAttempt += 1;
+    if (settingsCommitAttempt === 1) {
+      throw new Error("simulated settings save failure");
     }
-  }));
-  vaultMethods.saveVault
-    .mockRejectedValueOnce(new Error("simulated settings save failure"))
-    .mockResolvedValueOnce(undefined);
+    return committedDatabaseSettings({
+      ...initialSettings,
+      metadata: {
+        name: update.metadata?.name ?? initialSettings.metadata.name,
+        description:
+          update.metadata?.description ?? initialSettings.metadata.description,
+        defaultUsername:
+          update.metadata?.defaultUsername ?? initialSettings.metadata.defaultUsername
+      }
+    });
+  });
   const client = {
     ...vaultMethods,
     getSessionState: async () => ({
@@ -1907,7 +2119,7 @@ it("applies a newer database settings draft before leaving after a failed save",
       }
     })
   );
-  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(2);
+  expect(vaultMethods.saveVault).not.toHaveBeenCalled();
   expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
 });
 
@@ -1917,7 +2129,9 @@ it("confirms before leaving unsaved database settings", async () => {
     ...(await vaultMethods.getDatabaseSettings()),
     metadata: { name: "Engineering", description: null, defaultUsername: null }
   };
-  vaultMethods.updateDatabaseSettings.mockResolvedValue(updatedSettings);
+  vaultMethods.updateDatabaseSettings.mockResolvedValue(
+    committedDatabaseSettings(updatedSettings)
+  );
   const client = {
     ...vaultMethods,
     getSessionState: async () => ({
@@ -1952,7 +2166,7 @@ it("confirms before leaving unsaved database settings", async () => {
       })
     );
   });
-  expect(client.saveVault).toHaveBeenCalledWith("vault-1");
+  expect(client.saveVault).not.toHaveBeenCalled();
   await waitFor(() => {
     expect(screen.queryByLabelText("Database Name")).not.toBeInTheDocument();
   });
@@ -2112,9 +2326,8 @@ it("keeps an unsaved database settings draft when source reload fails", async ()
 it("coalesces save-and-continue with a database settings save already in flight", async () => {
   const vaultMethods = createVaultSelectionMethods();
   const currentSettings = await vaultMethods.getDatabaseSettings();
-  const update = createDeferred<typeof currentSettings>();
+  const update = createDeferred<DatabaseSettingsCommitResult>();
   vaultMethods.updateDatabaseSettings.mockImplementation(() => update.promise);
-  vaultMethods.saveVault.mockResolvedValue(undefined);
   const client = {
     ...vaultMethods,
     getSessionState: async () => ({
@@ -2140,59 +2353,16 @@ it("coalesces save-and-continue with a database settings save already in flight"
 
   expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
 
-  update.resolve({
-    ...currentSettings,
-    metadata: { ...currentSettings.metadata, name: "Engineering" }
-  });
-
-  expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
-  expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
-  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1);
-});
-
-it("coalesces save retry with database settings persistence already in flight", async () => {
-  const vaultMethods = createVaultSelectionMethods();
-  const currentSettings = await vaultMethods.getDatabaseSettings();
-  vaultMethods.updateDatabaseSettings.mockResolvedValue({
-    ...currentSettings,
-    metadata: { ...currentSettings.metadata, name: "Engineering" }
-  });
-  const save = createDeferred<void>();
-  vaultMethods.saveVault.mockImplementation(() => save.promise);
-  const client = {
-    ...vaultMethods,
-    getSessionState: async () => ({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
+  update.resolve(
+    committedDatabaseSettings({
+      ...currentSettings,
+      metadata: { ...currentSettings.metadata, name: "Engineering" }
     })
-  };
-
-  render(<App client={client as RuntimeClientLike} />);
-
-  await screen.findByText("No entries available.");
-  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
-  fireEvent.change(await screen.findByLabelText("Database Name"), {
-    target: { value: "Engineering" }
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
-  await waitFor(() => expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1));
-
-  fireEvent.click(screen.getByRole("button", { name: "Statistics" }));
-  expect(
-    await screen.findByText(
-      "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
-    )
-  ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-
-  expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
-  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1);
-
-  save.resolve();
+  );
 
   expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
-  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(1);
+  expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
+  expect(vaultMethods.saveVault).not.toHaveBeenCalled();
 });
 
 it("hides password actions until the authenticated credential flow exists", async () => {

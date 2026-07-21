@@ -66,7 +66,7 @@ mod tests {
         ));
         assert!(!should_refresh_platform_passkeys(
             Some("update_database_settings"),
-            &json!({ "type": "database_settings" })
+            &json!({ "type": "database_settings_commit_result" })
         ));
         assert!(!should_refresh_platform_passkeys(
             Some("get_entry_detail"),

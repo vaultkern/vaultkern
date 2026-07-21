@@ -2224,13 +2224,13 @@ fn source_refresh_turns_unrepresentable_live_edits_into_a_terminal_conflict_copy
     let mut local_metadata = runtime.get_database_settings(&vault_id).unwrap().metadata;
     local_metadata.name = "Local name".into();
     runtime
-        .handle(RuntimeCommand::UpdateDatabaseSettings {
-            vault_id: vault_id.clone(),
-            update: DatabaseSettingsUpdateDto {
+        .update_database_settings(
+            &vault_id,
+            DatabaseSettingsUpdateDto {
                 metadata: Some(local_metadata),
                 ..DatabaseSettingsUpdateDto::default()
             },
-        })
+        )
         .unwrap();
 
     let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;

@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 import type {
   DatabaseSettings,
+  DatabaseSettingsCommitResult,
   DatabaseSettingsUpdate,
   EntryAttachmentContent,
   EntryAttachmentContentUpdate,
@@ -101,7 +102,7 @@ export interface RuntimeClientLike {
   updateDatabaseSettings(
     vaultId: string,
     update: DatabaseSettingsUpdate
-  ): Promise<DatabaseSettings>;
+  ): Promise<DatabaseSettingsCommitResult>;
   getEntryAttachmentContent(
     vaultId: string,
     entryId: string,
@@ -354,8 +355,6 @@ export function App({
   const [databaseSettings, setDatabaseSettings] = useState<DatabaseSettings | null>(null);
   const [databaseSettingsError, setDatabaseSettingsError] = useState<string | null>(null);
   const [databaseSettingsBusy, setDatabaseSettingsBusy] = useState(false);
-  const [pendingDatabaseSettingsVaultId, setPendingDatabaseSettingsVaultId] =
-    useState<string | null>(null);
   const databaseSettingsDraftUpdate = useRef<DatabaseSettingsUpdate | null>(null);
   const [databaseSettingsDraftDirty, setDatabaseSettingsDraftDirty] = useState(false);
   const databaseSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
@@ -418,6 +417,7 @@ export function App({
   );
   const [extensionSettingsSaving, setExtensionSettingsSaving] = useState(false);
   const extensionSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
+  const settingsReconciliationTail = useRef<Promise<void>>(Promise.resolve());
   const extensionSettingsDraft = useRef<ExtensionSettings | null>(null);
   const [extensionSettingsDraftDirty, setExtensionSettingsDraftDirty] =
     useState(false);
@@ -507,7 +507,19 @@ export function App({
     }
   }
 
-  async function reconcileSavedSettings(
+  function reconcileSavedSettings(
+    reason: ExtensionSettingsReconciliationReason,
+    currentSession: SessionStateLike | null,
+    credentials?: UnlockCredentials
+  ): Promise<void> {
+    const run = () =>
+      runSavedSettingsReconciliation(reason, currentSession, credentials);
+    const operation = settingsReconciliationTail.current.then(run, run);
+    settingsReconciliationTail.current = operation.catch(() => undefined);
+    return operation;
+  }
+
+  async function runSavedSettingsReconciliation(
     reason: ExtensionSettingsReconciliationReason,
     currentSession: SessionStateLike | null,
     credentials?: UnlockCredentials
@@ -544,8 +556,8 @@ export function App({
     }
 
     const currentVault =
-      vaults.find((vault) => vault.vaultRefId === currentSession?.currentVaultRefId) ??
       vaults.find((vault) => vault.isCurrent) ??
+      vaults.find((vault) => vault.vaultRefId === currentSession?.currentVaultRefId) ??
       null;
     const enabled = desired.quickUnlockEnabled;
     if (
@@ -851,9 +863,7 @@ export function App({
 
   const pendingDetailSave = pendingAttachmentSave || pendingPasskeySave;
   const hasPendingEntrySave = Boolean(pendingEntrySave || pendingDetailSave);
-  const hasPendingDurableSave =
-    hasPendingEntrySave ||
-    Boolean(pendingEntryDelete || pendingDatabaseSettingsVaultId);
+  const hasPendingDurableSave = hasPendingEntrySave || Boolean(pendingEntryDelete);
   const draftDirty =
     editorMode === "create-pending"
       ? hasDraftChangesFromEmpty(draft)
@@ -1067,15 +1077,13 @@ export function App({
     setSaveAndContinueBusy(true);
 
     try {
-      const hadPendingDatabaseSettings = Boolean(pendingDatabaseSettingsVaultId);
       const pendingDelete = pendingEntryDelete;
       const hadDatabaseSettingsDraft = Boolean(
         showDatabaseSettingsPage &&
           databaseSettingsDraftDirty &&
           databaseSettingsDraftUpdate.current
       );
-      const handledDatabaseSettings =
-        hadPendingDatabaseSettings || hadDatabaseSettingsDraft;
+      const handledDatabaseSettings = hadDatabaseSettingsDraft;
       const hadExtensionSettingsDraft = Boolean(
         showExtensionSettingsPage &&
           extensionSettingsDraftDirty &&
@@ -1083,9 +1091,7 @@ export function App({
       );
       let saved = hadDatabaseSettingsDraft
         ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate.current!)
-        : hadPendingDatabaseSettings
-          ? await retryPendingDatabaseSettingsSave()
-          : hadExtensionSettingsDraft
+        : hadExtensionSettingsDraft
             ? await saveExtensionSettings(extensionSettingsDraft.current!)
             : pendingDelete
               ? await handleDeleteEntry(pendingDelete.entryId)
@@ -1121,9 +1127,7 @@ export function App({
         title={translate(extensionSettings.language, "You have unsaved changes")}
         description={translate(
           extensionSettings.language,
-          pendingDatabaseSettingsVaultId
-            ? "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
-            : showDatabaseSettingsPage && databaseSettingsDraftDirty
+          showDatabaseSettingsPage && databaseSettingsDraftDirty
               ? "Save your database settings before leaving, discard your edits, or continue editing."
               : showExtensionSettingsPage && extensionSettingsDraftDirty
                 ? "Save your extension settings before leaving, discard your edits, or continue editing."
@@ -1464,51 +1468,15 @@ export function App({
     setDatabaseSettingsError(null);
 
     try {
-      const settings = await client.updateDatabaseSettings(vaultId, update);
-      setDatabaseSettings(settings);
-      setDatabaseName(settings.metadata.name);
-      setPendingDatabaseSettingsVaultId(vaultId);
-      const saveResult = await client.saveVault(vaultId);
-      setPendingDatabaseSettingsVaultId(null);
-      handleSaveResult(saveResult);
+      const result = await client.updateDatabaseSettings(vaultId, update);
+      setDatabaseSettings(result.settings);
+      setDatabaseName(result.settings.metadata.name);
+      resetDatabaseSettingsDraftState();
+      setSettingsDraftEpoch((current) => current + 1);
+      handleSaveResult(result.saveResult);
       void reconcileSavedSettings("settings-commit", session);
       setWorkspaceReloadKey((current) => current + 1);
-      if (!saveResult || saveResult.status === "saved") {
-        setSaveTip(translate(extensionSettings.language, "Database settings saved."));
-      }
-      return true;
-    } catch (settingsError) {
-      setDatabaseSettingsError(
-        errorMessage(
-          settingsError,
-          translate(extensionSettings.language, "Failed to save database settings")
-        )
-      );
-      return false;
-    } finally {
-      setDatabaseSettingsBusy(false);
-    }
-  }
-
-  function retryPendingDatabaseSettingsSave() {
-    return runDatabaseSettingsSave(savePendingDatabaseSettings);
-  }
-
-  async function savePendingDatabaseSettings() {
-    if (!pendingDatabaseSettingsVaultId) {
-      return false;
-    }
-
-    setDatabaseSettingsBusy(true);
-    setDatabaseSettingsError(null);
-
-    try {
-      const saveResult = await client.saveVault(pendingDatabaseSettingsVaultId);
-      handleSaveResult(saveResult);
-      setPendingDatabaseSettingsVaultId(null);
-      void reconcileSavedSettings("settings-commit", session);
-      setWorkspaceReloadKey((current) => current + 1);
-      if (!saveResult || saveResult.status === "saved") {
+      if (result.saveResult.status === "saved") {
         setSaveTip(translate(extensionSettings.language, "Database settings saved."));
       }
       return true;
@@ -1587,6 +1555,7 @@ export function App({
         const normalizedSettings = normalizeExtensionSettings(loadedSettings);
         if (!cancelled) {
           setExtensionSettings(normalizedSettings);
+          void reconcileSavedSettings("startup", null);
         }
         return client.getSessionState();
       })
@@ -1594,7 +1563,9 @@ export function App({
         if (!cancelled) {
           setSession(state);
           setSessionErrorCause(null);
-          void reconcileSavedSettings("startup", state);
+          if (state.unlocked) {
+            void reconcileSavedSettings("startup", state);
+          }
         }
       })
       .catch((loadError) => {
@@ -2454,12 +2425,9 @@ export function App({
                   settings={databaseSettings}
                   loading={databaseSettingsBusy && !databaseSettings}
                   saving={databaseSettingsBusy && Boolean(databaseSettings)}
-                  pendingSave={Boolean(pendingDatabaseSettingsVaultId)}
                   error={databaseSettingsError}
                   onSave={(update) => {
-                    void (pendingDatabaseSettingsVaultId
-                      ? retryPendingDatabaseSettingsSave()
-                      : handleSaveDatabaseSettings(update));
+                    void handleSaveDatabaseSettings(update);
                   }}
                   onDraftChange={handleDatabaseSettingsDraftChange}
                 />

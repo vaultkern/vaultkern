@@ -28,21 +28,22 @@ use vaultkern_runtime_protocol::{
     AutofillPersistDispositionDto, AutofillPersistDurabilityDto, AutofillPersistOutcomeDto,
     AutofillPersistPlanDto, AutofillPersistResultDto, DatabaseEncryptionSettingsDto,
     DatabaseHistorySettingsDto, DatabaseKdfSettingsDto, DatabaseMetadataSettingsDto,
-    DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto, DatabaseSettingsDto,
-    DatabaseSettingsUpdateDto, EntryAttachmentContentDto, EntryAttachmentDto, EntryCustomFieldDto,
-    EntryDetailDto, EntryFieldProtectionDto, EntryFieldsDto, EntryHistoryDetailDto,
-    EntryHistoryItemDto, EntryHistoryListDto, EntryIdListDto, EntryListDto, EntryPasskeyDto,
-    EntrySummaryDto, ErrorDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto,
-    OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
-    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
-    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
-    PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto,
-    PasskeyCredentialCandidateDto, PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto,
-    PasskeyCredentialStatusDto, PasskeyFrameKindDto, PasskeyRegistrationDto,
-    PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
-    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse,
-    SaveVaultResultDto, SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto,
-    VaultReferenceListDto, VaultSourceStatusDto,
+    DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
+    DatabaseSettingsCommitResultDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
+    EntryAttachmentContentDto, EntryAttachmentDto, EntryCustomFieldDto, EntryDetailDto,
+    EntryFieldProtectionDto, EntryFieldsDto, EntryHistoryDetailDto, EntryHistoryItemDto,
+    EntryHistoryListDto, EntryIdListDto, EntryListDto, EntryPasskeyDto, EntrySummaryDto, ErrorDto,
+    FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto, OptionalSettingUpdateDto,
+    PasskeyAssertionDto, PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto,
+    PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
+    PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto,
+    PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto, PasskeyCredentialCandidateDto,
+    PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto,
+    PasskeyFrameKindDto, PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto,
+    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto,
+    PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
+    SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
+    VaultSourceStatusDto,
 };
 
 use crate::autofill_persist::{
@@ -1777,6 +1778,42 @@ impl Runtime {
         };
 
         Ok(settings)
+    }
+
+    fn commit_database_settings(
+        &mut self,
+        vault_id: &str,
+        update: DatabaseSettingsUpdateDto,
+    ) -> Result<DatabaseSettingsCommitResultDto> {
+        let previous = {
+            let loaded = self
+                .vault_session
+                .find_loaded(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            loaded.clone()
+        };
+
+        let result = (|| {
+            let updated_settings = self.update_database_settings(vault_id, update)?;
+            let RuntimeResponse::SaveVaultResult(save_result) = self.save_vault(vault_id)? else {
+                anyhow::bail!("database settings save returned an unexpected response");
+            };
+            let settings = self
+                .get_database_settings(vault_id)
+                .unwrap_or(updated_settings);
+            Ok(DatabaseSettingsCommitResultDto {
+                settings,
+                save_result,
+            })
+        })();
+
+        if result.is_err()
+            && let Some(loaded) = self.vault_session.find_loaded_mut(vault_id)
+        {
+            *loaded = previous;
+        }
+
+        result
     }
 
     pub fn find_fill_candidates(&self, vault_id: &str, url: &str) -> Result<FillCandidateListDto> {
@@ -3860,8 +3897,8 @@ impl Runtime {
                 })
             }
             RuntimeCommand::UpdateDatabaseSettings { vault_id, update } => {
-                Ok(match self.update_database_settings(&vault_id, update) {
-                    Ok(settings) => RuntimeResponse::DatabaseSettings(settings),
+                Ok(match self.commit_database_settings(&vault_id, update) {
+                    Ok(result) => RuntimeResponse::DatabaseSettingsCommitResult(result),
                     Err(error) => query_error_response(error),
                 })
             }
@@ -9685,6 +9722,93 @@ mod tests {
                 .autosave_delay_seconds,
             None
         );
+    }
+
+    #[test]
+    fn database_settings_command_rolls_back_the_model_when_persistence_fails() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let before = runtime
+            .get_database_settings(&opened.vault_id)
+            .expect("database settings before failed commit");
+        let model_before = runtime
+            .loaded_vault(&opened.vault_id)
+            .expect("vault model before failed commit")
+            .clone();
+        let source_before = std::fs::read(&opened.path).expect("source before failed commit");
+        arm_local_write_fault(&mut runtime, DurableFaultPoint::BeforeTargetReplace);
+
+        let response = runtime
+            .handle(RuntimeCommand::UpdateDatabaseSettings {
+                vault_id: opened.vault_id.clone(),
+                update: DatabaseSettingsUpdateDto {
+                    metadata: Some(DatabaseMetadataSettingsDto {
+                        name: "must not leak from a failed commit".into(),
+                        description: before.metadata.description.clone(),
+                        default_username: before.metadata.default_username.clone(),
+                    }),
+                    history: Some(DatabaseHistorySettingsDto {
+                        max_items_per_entry: Some(0),
+                        max_total_size_bytes: Some(0),
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            })
+            .expect("settings failures are protocol responses");
+
+        assert!(matches!(response, RuntimeResponse::Error(_)));
+        assert_eq!(
+            runtime
+                .get_database_settings(&opened.vault_id)
+                .expect("database settings after failed commit"),
+            before
+        );
+        assert_eq!(
+            runtime
+                .loaded_vault(&opened.vault_id)
+                .expect("vault model after failed commit"),
+            &model_before
+        );
+        assert_eq!(
+            std::fs::read(&opened.path).expect("source after failed commit"),
+            source_before
+        );
+    }
+
+    #[test]
+    fn database_settings_command_returns_only_after_the_settings_are_durable() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+
+        let response = runtime
+            .handle(RuntimeCommand::UpdateDatabaseSettings {
+                vault_id: opened.vault_id.clone(),
+                update: DatabaseSettingsUpdateDto {
+                    metadata: Some(DatabaseMetadataSettingsDto {
+                        name: "durable settings".into(),
+                        description: None,
+                        default_username: None,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            })
+            .expect("commit database settings");
+
+        let RuntimeResponse::DatabaseSettingsCommitResult(result) = response else {
+            panic!("expected committed database settings response");
+        };
+        assert_eq!(result.settings.metadata.name, "durable settings");
+        assert_eq!(result.save_result.status, SaveVaultStatusDto::Saved);
+
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let saved = KeepassCore::new()
+            .load_kdbx(
+                &std::fs::read(&opened.path).expect("read committed source"),
+                &key,
+            )
+            .expect("load committed source");
+        assert_eq!(saved.name, "durable settings");
     }
 
     #[test]

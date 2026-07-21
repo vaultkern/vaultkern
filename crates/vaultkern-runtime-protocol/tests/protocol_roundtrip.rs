@@ -4,20 +4,20 @@ use vaultkern_runtime_protocol::{
     AutofillPersistPlanDto, AutofillPersistResultDto, DatabaseCredentialsUpdateDto,
     DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseKdfSettingsDto,
     DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
-    DatabaseSettingsDto, DatabaseSettingsUpdateDto, EntryAttachmentContentDto, EntryDetailDto,
-    EntryFieldsDto, EntryHistoryDetailDto, EntryHistoryItemDto, EntryHistoryListDto,
-    EntryPasskeyDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto,
-    MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
-    OneDriveItemListDto, OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
-    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
-    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
-    PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto,
-    PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto,
-    PasskeyFrameKindDto, PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto,
-    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto,
-    PasskeyUserVerifiedDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-    SaveVaultStatusDto, SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
-    VaultSourceStatusDto,
+    DatabaseSettingsCommitResultDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
+    EntryAttachmentContentDto, EntryDetailDto, EntryFieldsDto, EntryHistoryDetailDto,
+    EntryHistoryItemDto, EntryHistoryListDto, EntryPasskeyDto, EntrySummaryDto,
+    FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto, OneDriveAuthSessionDto,
+    OneDriveAuthStatusDto, OneDriveItemDto, OneDriveItemListDto, OptionalSettingUpdateDto,
+    PasskeyAssertionDto, PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto,
+    PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
+    PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto,
+    PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto, PasskeyCredentialListDto,
+    PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
+    PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
+    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, ProtocolEnvelope,
+    RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
+    VaultHandleDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
 };
 
 #[test]
@@ -122,7 +122,7 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
             autosave_delay_seconds: OptionalSettingUpdateDto::Set(30),
         },
     });
-    let response = RuntimeResponse::DatabaseSettings(DatabaseSettingsDto {
+    let settings = DatabaseSettingsDto {
         metadata: DatabaseMetadataSettingsDto {
             name: "Project Vault".into(),
             description: Some("Shared engineering secrets".into()),
@@ -151,7 +151,8 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
         },
         autosave_delay_seconds: Some(30),
         has_password: true,
-    });
+    };
+    let response = RuntimeResponse::DatabaseSettings(settings.clone());
 
     for envelope in [get, update] {
         assert_eq!(
@@ -171,6 +172,24 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
 
     let decoded: RuntimeResponse = serde_json::from_value(value).expect("deserialize response");
     assert_eq!(decoded, response);
+
+    let commit_response =
+        RuntimeResponse::DatabaseSettingsCommitResult(DatabaseSettingsCommitResultDto {
+            settings,
+            save_result: SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                merge_summary: None,
+                conflict_copy_path: None,
+            },
+        });
+    let value = serde_json::to_value(&commit_response).expect("serialize commit response");
+    assert_eq!(value["type"], "database_settings_commit_result");
+    assert_eq!(value["settings"]["metadata"]["name"], "Project Vault");
+    assert_eq!(value["saveResult"]["status"], "saved");
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(value).expect("deserialize commit response"),
+        commit_response
+    );
 }
 
 #[test]

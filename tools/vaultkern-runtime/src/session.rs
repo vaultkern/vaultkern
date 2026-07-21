@@ -59,6 +59,7 @@ impl SessionState {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct LoadedVault {
     pub(crate) source: VaultSource,
     pub(crate) name: String,

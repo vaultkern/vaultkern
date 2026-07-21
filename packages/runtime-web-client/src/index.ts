@@ -47,6 +47,12 @@ export interface DatabaseSettings {
   hasPassword: boolean;
 }
 
+export interface DatabaseSettingsCommitResult {
+  type: "database_settings_commit_result";
+  settings: DatabaseSettings;
+  saveResult: SaveVaultResult;
+}
+
 export interface DatabaseSettingsUpdate {
   metadata?: DatabaseMetadataSettings;
   publicMetadata?: DatabasePublicMetadataSettings;
@@ -713,8 +719,8 @@ export class RuntimeClient {
   async updateDatabaseSettings(
     vaultId: string,
     update: DatabaseSettingsUpdate
-  ): Promise<DatabaseSettings> {
-    return this.sendCommand<DatabaseSettings>({
+  ): Promise<DatabaseSettingsCommitResult> {
+    return this.sendCommand<DatabaseSettingsCommitResult>({
       type: "update_database_settings",
       vault_id: vaultId,
       update
