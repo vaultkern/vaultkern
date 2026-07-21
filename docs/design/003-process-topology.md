@@ -1,8 +1,9 @@
 # 003 — Process Topology
 
-Status: **Stable — r14** (rewritten in the r16 scope reset; the quick-unlock
-state machine and the journal contract are retired — see 002's unlock blob
-and the outbox below). 2026-07-19.
+Status: **Stable — r15** (r15 adds rule 7, settings as desired state; r14
+was rewritten in the r16 scope reset — the quick-unlock state machine and
+the journal contract are retired, see 002's unlock blob and the outbox
+below). 2026-07-21.
 
 ## Shape (one target, all platforms)
 
@@ -45,6 +46,19 @@ system credential extensions, and the UI layers.
    `{protocol_version, capabilities}`; changes are additive within a major
    version. Runtime modularization precedes UniFFI — the FFI exposes module
    interfaces, not a god file.
+7. **Settings are desired state.** Saving settings persists the desired
+   state and nothing else — the settings store, or vault fields through the
+   normal save path. The save succeeds or fails on that persistence alone;
+   on failure nothing has changed and the user's draft stays. Everything
+   that makes the world match the settings — OS provider registration,
+   credential-metadata sync, unlock-blob creation or revocation — runs as
+   idempotent reconciliation, never inline in the save path. Reconciliation
+   runs after a successful settings commit and after every unlock. Steps
+   that need vault data are skipped while the vault is locked — skipped,
+   never executed against empty data — and the next unlock applies them;
+   steps that don't need the vault run immediately. A skipped or crashed
+   reconciliation is harmless: the next reconciliation point converges
+   actual state to the saved settings.
 
 ## Access matrix
 
