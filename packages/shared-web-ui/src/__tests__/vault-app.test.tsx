@@ -677,6 +677,51 @@ it("toggles quick unlock for the current vault from extension settings", async (
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).not.toBeChecked();
 });
 
+it("does not persist quick unlock as disabled when vault revocation fails", async () => {
+  const settingsStore = createSettingsStore({ quickUnlockEnabled: true });
+  const recentVaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: true,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    }),
+    listRecentVaults: vi.fn(async () => recentVaults),
+    disableQuickUnlockForCurrentVault: vi.fn(async () => {
+      throw new Error("simulated quick unlock revocation failure");
+    })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Extension Settings" }));
+  const quickUnlock = await screen.findByRole("checkbox", { name: "Quick Unlock" });
+  expect(quickUnlock).toBeChecked();
+
+  fireEvent.click(quickUnlock);
+  fireEvent.click(screen.getByRole("button", { name: "Save Extension Settings" }));
+
+  expect(
+    await screen.findByText("simulated quick unlock revocation failure")
+  ).toBeInTheDocument();
+  expect(client.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
+  expect(settingsStore.save).not.toHaveBeenCalled();
+});
+
 it("stores the quick unlock preference without enrolling a locked vault", async () => {
   const settingsStore = createSettingsStore();
   const recentVaults = [
@@ -1061,6 +1106,208 @@ it("locks an unlocked manager after local idle timeout", async () => {
   expect(client.lockSession).toHaveBeenCalledTimes(1);
 });
 
+it("retries idle locking after a transient runtime failure", async () => {
+  vi.useFakeTimers();
+  const settingsStore = createSettingsStore({ idleLockMinutes: 1 });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn(),
+    lockSession: vi
+      .fn()
+      .mockRejectedValueOnce(new Error("runtime temporarily unavailable"))
+      .mockResolvedValueOnce({
+        unlocked: false,
+        activeVaultId: null,
+        currentVaultRefId: "vault-ref-1"
+      })
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(client.lockSession).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(client.lockSession).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+});
+
+it("does not idle-lock while an entry draft has unsaved changes", async () => {
+  vi.useFakeTimers();
+  const settingsStore = createSettingsStore({ idleLockMinutes: 1 });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      customFields: [],
+      attachments: []
+    }))
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Example" }));
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Title"), {
+    target: { value: "Unsaved title" }
+  });
+
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+    await Promise.resolve();
+  });
+
+  expect(client.lockSession).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("Title")).toHaveValue("Unsaved title");
+});
+
+it("does not idle-lock while a vault mutation is still in flight", async () => {
+  vi.useFakeTimers();
+  const settingsStore = createSettingsStore({ idleLockMinutes: 1 });
+  const deletion = createDeferred<void>();
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      customFields: [],
+      attachments: []
+    })),
+    deleteEntry: vi.fn(() => deletion.promise),
+    saveVault: vi.fn(async () => undefined)
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Example" }));
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Delete Entry" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
+  expect(client.deleteEntry).toHaveBeenCalledWith("vault-1", "entry-1");
+
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+    await Promise.resolve();
+  });
+
+  expect(client.lockSession).not.toHaveBeenCalled();
+  deletion.resolve();
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+});
+
 it("shows progress while unlocking a recent vault", async () => {
   const unlock = createDeferred<{
     unlocked: boolean;
@@ -1380,6 +1627,64 @@ it("retries a failed database settings save without updating settings again", as
 
   await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
   expect(updateDatabaseSettings).toHaveBeenCalledTimes(1);
+});
+
+it("applies a newer database settings draft before leaving after a failed save", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const initialSettings = await vaultMethods.getDatabaseSettings();
+  vaultMethods.updateDatabaseSettings.mockImplementation(async (_vaultId, update) => ({
+    ...initialSettings,
+    metadata: {
+      name: update.metadata?.name ?? initialSettings.metadata.name,
+      description:
+        update.metadata?.description ?? initialSettings.metadata.description,
+      defaultUsername:
+        update.metadata?.defaultUsername ?? initialSettings.metadata.defaultUsername
+    }
+  }));
+  vaultMethods.saveVault
+    .mockRejectedValueOnce(new Error("simulated settings save failure"))
+    .mockResolvedValueOnce(undefined);
+  const client = {
+    ...vaultMethods,
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })
+  };
+
+  render(<App client={client as RuntimeClientLike} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  fireEvent.change(await screen.findByLabelText("Database Name"), {
+    target: { value: "Engineering" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+
+  expect(await screen.findByText("simulated settings save failure")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Description"), {
+    target: { value: "Second edit" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Statistics" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Save changes" }));
+
+  await waitFor(() => {
+    expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(2);
+  });
+  expect(vaultMethods.updateDatabaseSettings).toHaveBeenLastCalledWith(
+    "vault-1",
+    expect.objectContaining({
+      metadata: {
+        name: "Engineering",
+        description: "Second edit",
+        defaultUsername: null
+      }
+    })
+  );
+  expect(vaultMethods.saveVault).toHaveBeenCalledTimes(2);
+  expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
 });
 
 it("confirms before leaving unsaved database settings", async () => {

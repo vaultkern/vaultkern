@@ -56,6 +56,7 @@ fn main() {
     let plugin_bridge = bridge.clone();
     let window_bridge = bridge.clone();
     let forwarded_bridge = bridge.clone();
+    let resident_bridge = bridge.clone();
     let show_window_on_start =
         launch_requests_visible_window(&std::env::args().collect::<Vec<_>>());
     tauri::Builder::default()
@@ -79,6 +80,20 @@ fn main() {
             }
             app.manage(plugin);
             Ok(())
+        })
+        .on_window_event(move |window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Err(error) = window.hide() {
+                    eprintln!("failed to hide the resident VaultKern window: {error}");
+                }
+                if let Err(error) = resident_bridge.queue_parent_window_handle(None) {
+                    eprintln!("failed to queue clearing the Windows Hello parent window: {error}");
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             runtime_send,

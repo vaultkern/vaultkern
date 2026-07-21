@@ -54,6 +54,8 @@ const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
 const NTE_BAD_KEY_STATE: u32 = 0x8009_000b;
 #[cfg(any(windows, test))]
 const NTE_NO_KEY: u32 = 0x8009_000d;
+#[cfg(any(windows, test))]
+const NTE_BAD_KEYSET: u32 = 0x8009_0016;
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 #[derive(Deserialize, Serialize)]
@@ -479,7 +481,26 @@ fn is_hello_key_invalidated(error: &anyhow::Error) -> bool {
 
 #[cfg(any(windows, test))]
 fn is_hello_key_invalidated_status(status: u32) -> bool {
-    matches!(status, NTE_BAD_KEY_STATE | NTE_NO_KEY)
+    matches!(status, NTE_BAD_KEY_STATE | NTE_NO_KEY | NTE_BAD_KEYSET)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelloKeyOpenDisposition {
+    UseOpened,
+    CreateMissing,
+    ReturnError,
+}
+
+#[cfg(any(windows, test))]
+fn hello_key_open_disposition(status: u32, create_if_missing: bool) -> HelloKeyOpenDisposition {
+    if status == 0 {
+        HelloKeyOpenDisposition::UseOpened
+    } else if matches!(status, NTE_NO_KEY | NTE_BAD_KEYSET) && create_if_missing {
+        HelloKeyOpenDisposition::CreateMissing
+    } else {
+        HelloKeyOpenDisposition::ReturnError
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -805,24 +826,27 @@ fn with_hello_key<T>(
     let mut key = 0;
     let mut created = false;
     let open_status = unsafe { NCryptOpenKey(provider, &mut key, key_name.as_ptr(), 0, 0) };
-    if open_status != 0 {
-        if !create_if_missing {
+    match hello_key_open_disposition(open_status as u32, create_if_missing) {
+        HelloKeyOpenDisposition::UseOpened => {}
+        HelloKeyOpenDisposition::CreateMissing => {
+            check_ncrypt(
+                unsafe {
+                    NCryptCreatePersistedKey(
+                        provider,
+                        &mut key,
+                        NCRYPT_RSA_ALGORITHM,
+                        key_name.as_ptr(),
+                        0,
+                        0,
+                    )
+                },
+                "failed to create quick unlock Windows Hello key",
+            )?;
+            created = true;
+        }
+        HelloKeyOpenDisposition::ReturnError => {
             check_ncrypt(open_status, "failed to open quick unlock Windows Hello key")?;
         }
-        check_ncrypt(
-            unsafe {
-                NCryptCreatePersistedKey(
-                    provider,
-                    &mut key,
-                    NCRYPT_RSA_ALGORITHM,
-                    key_name.as_ptr(),
-                    0,
-                    0,
-                )
-            },
-            "failed to create quick unlock Windows Hello key",
-        )?;
-        created = true;
     }
 
     with_owned_ncrypt_handle(key, |key| {
@@ -1447,8 +1471,42 @@ mod tests {
             super::NTE_BAD_KEY_STATE
         ));
         assert!(super::is_hello_key_invalidated_status(super::NTE_NO_KEY));
+        assert!(super::is_hello_key_invalidated_status(
+            super::NTE_BAD_KEYSET
+        ));
         assert!(!super::is_hello_key_invalidated_status(0x8009_0010));
         assert!(!super::is_hello_key_invalidated_status(0x8009_0030));
+    }
+
+    #[test]
+    fn hello_key_creation_only_follows_a_definitive_missing_key_status() {
+        use super::HelloKeyOpenDisposition::{CreateMissing, ReturnError, UseOpened};
+
+        assert_eq!(super::hello_key_open_disposition(0, true), UseOpened);
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_NO_KEY, true),
+            CreateMissing
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_BAD_KEYSET, true),
+            CreateMissing
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_BAD_KEY_STATE, true),
+            ReturnError
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(0x8009_0030, true),
+            ReturnError
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_NO_KEY, false),
+            ReturnError
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_BAD_KEYSET, false),
+            ReturnError
+        );
     }
 
     #[test]

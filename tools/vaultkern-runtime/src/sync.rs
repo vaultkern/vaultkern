@@ -18,6 +18,42 @@ const BASE_WRITE_POINTS: TempWriteFaultPoints = TempWriteFaultPoints {
 };
 const SYNCED_BASE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
+pub(crate) struct SessionBaseStore {
+    _directory: tempfile::TempDir,
+    store: SyncedBaseStore,
+}
+
+impl SessionBaseStore {
+    pub(crate) fn new() -> Self {
+        let directory = tempfile::Builder::new()
+            .prefix("vaultkern-session-bases-")
+            .tempdir()
+            .expect("failed to create the session base directory");
+        let store = SyncedBaseStore::new_at(directory.path());
+        Self {
+            _directory: directory,
+            store,
+        }
+    }
+
+    pub(crate) fn store(&self, vault_id: &str, bytes: &[u8]) -> io::Result<()> {
+        self.store.store(vault_id, bytes)
+    }
+
+    pub(crate) fn read(&self, vault_id: &str) -> io::Result<Option<Vec<u8>>> {
+        self.store.read(vault_id)
+    }
+
+    pub(crate) fn delete(&self, vault_id: &str) -> io::Result<()> {
+        self.store.delete(vault_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_store_for_tests(&self) {
+        self.store.fail_next_store_for_tests();
+    }
+}
+
 pub(crate) struct SyncedBaseStore {
     root: PathBuf,
     lock_timeout: Duration,

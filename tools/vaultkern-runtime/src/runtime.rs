@@ -84,7 +84,7 @@ use crate::session::{
     LoadedVault, VaultSession, VaultSource, onedrive_remote_id, onedrive_vault_id,
 };
 use crate::state_paths::extension_id_from_browser_origin;
-use crate::sync::{SyncedBaseStore, write_local_conflict_copy};
+use crate::sync::{SessionBaseStore, SyncedBaseStore, write_local_conflict_copy};
 use crate::unlock::{
     MasterCredential, MasterCredentialShape, UnlockAttempt, enroll_unlock_blob, unlock_from_blob,
     unlock_historical_snapshot_from_blob,
@@ -264,6 +264,7 @@ pub struct Runtime {
     one_drive: OneDriveVaultSourceProvider,
     remote_cache: RemoteVaultCache,
     synced_bases: SyncedBaseStore,
+    session_bases: SessionBaseStore,
     biometric: Box<dyn BiometricProvider>,
     secure_storage: Box<dyn SecureStorageProvider>,
     allow_unlock_kdf: bool,
@@ -367,6 +368,7 @@ impl Runtime {
             one_drive,
             remote_cache,
             synced_bases,
+            session_bases: SessionBaseStore::new(),
             biometric: default_biometric_provider(),
             secure_storage,
             allow_unlock_kdf,
@@ -395,6 +397,7 @@ impl Runtime {
                 "vaultkern-runtime-test-synced-bases-{}",
                 uuid::Uuid::new_v4()
             ))),
+            session_bases: SessionBaseStore::new(),
             biometric: Box::new(UnsupportedBiometricProvider),
             secure_storage: Box::new(UnsupportedSecureStorageProvider),
             allow_unlock_kdf: true,
@@ -589,6 +592,9 @@ impl Runtime {
         self.synced_bases
             .store(&vault_id, &bytes)
             .with_context(|| format!("failed to store synced base: {vault_id}"))?;
+        self.session_bases
+            .store(&vault_id, &bytes)
+            .with_context(|| format!("failed to store session base: {vault_id}"))?;
         let name = Path::new(path)
             .file_stem()
             .and_then(|value| value.to_str())
@@ -805,14 +811,29 @@ impl Runtime {
                     }
                 };
 
-                if !source_status
+                let pending_sync = source_status
                     .as_ref()
-                    .is_some_and(|status| status.remote_state == "pending_sync")
-                {
+                    .is_some_and(|status| status.remote_state == "pending_sync");
+                let session_base_bytes = if pending_sync {
+                    let pending_cache_key =
+                        RemoteCacheKey::new("onedrive", &onedrive_remote_id(&drive_id, &item_id));
+                    match self.remote_cache.read_pending_chain(&pending_cache_key) {
+                        Ok(chain) => chain.plan_baseline.bytes,
+                        Err(_) => self
+                            .synced_bases
+                            .read(&vault_id)
+                            .with_context(|| format!("failed to read synced base: {vault_id}"))?
+                            .with_context(|| format!("synced base is missing: {vault_id}"))?,
+                    }
+                } else {
                     self.synced_bases
                         .store(&vault_id, &bytes)
                         .with_context(|| format!("failed to store synced base: {vault_id}"))?;
-                }
+                    bytes.clone()
+                };
+                self.session_bases
+                    .store(&vault_id, &session_base_bytes)
+                    .with_context(|| format!("failed to store session base: {vault_id}"))?;
 
                 self.vault_session.insert_loaded(
                     vault_id.clone(),
@@ -926,8 +947,9 @@ impl Runtime {
             self.remote_cache.delete(&cache_key)?;
         }
         if let Some(source) = source.as_ref() {
-            self.synced_bases
-                .delete(&vault_id_for_stored_source(source))?;
+            let vault_id = vault_id_for_stored_source(source);
+            self.synced_bases.delete(&vault_id)?;
+            self.session_bases.delete(&vault_id)?;
         }
         let deleted_current = self.references.delete(vault_ref_id)?;
         if let Some(vault_id) = vault_id.as_deref() {
@@ -1034,6 +1056,9 @@ impl Runtime {
             self.synced_bases
                 .store(vault_id, migrated_base)
                 .with_context(|| format!("failed to store migrated synced base: {vault_id}"))?;
+            self.session_bases
+                .store(vault_id, migrated_base)
+                .with_context(|| format!("failed to store migrated session base: {vault_id}"))?;
         }
         self.vault_session.finish_unlock(
             vault_id,
@@ -1094,9 +1119,33 @@ impl Runtime {
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
         for vault_id in vault_ids {
-            if let Ok(Some(bytes)) = self.synced_bases.read(&vault_id) {
-                if let Some(loaded) = self.vault_session.find_loaded_mut(&vault_id) {
-                    loaded.bytes = bytes;
+            let pending_cache_key = match self.vault_session.find_loaded(&vault_id) {
+                Some(loaded) => loaded
+                    .source_status
+                    .as_ref()
+                    .is_some_and(|status| status.remote_state == "pending_sync")
+                    .then(|| remote_cache_key_for_source(&loaded.source))
+                    .flatten(),
+                None => continue,
+            };
+            let pending = pending_cache_key
+                .as_ref()
+                .and_then(|cache_key| self.remote_cache.read(cache_key).ok().flatten())
+                .filter(|entry| entry.pending_sync);
+            let session_base = pending_cache_key
+                .is_none()
+                .then(|| self.session_bases.read(&vault_id).ok().flatten())
+                .flatten();
+            if let Some(loaded) = self.vault_session.find_loaded_mut(&vault_id) {
+                if pending_cache_key.is_some() {
+                    if let Some(pending) = pending {
+                        loaded.bytes = pending.bytes;
+                        loaded.baseline_fingerprint = pending.fingerprint;
+                    } else {
+                        loaded.bytes.clear();
+                    }
+                } else if loaded.bytes.is_empty() {
+                    loaded.bytes = session_base.unwrap_or_default();
                 }
             }
         }
@@ -1149,7 +1198,7 @@ impl Runtime {
                 .bytes
                 .context("current vault source did not include bytes")?,
             Err(_) => self
-                .synced_bases
+                .session_bases
                 .read(&active_vault_id)?
                 .context("synced base is unavailable for quick unlock enrollment")?,
         };
@@ -1452,9 +1501,9 @@ impl Runtime {
             }
             pending.bytes
         } else {
-            self.synced_bases
+            self.session_bases
                 .read(vault_id)?
-                .context("synced base is unavailable for password verification")?
+                .context("session base is unavailable for password verification")?
         };
         let candidate = MasterCredential::new(Some(password.as_bytes()), None)?;
         let (policy, confirmation) = Self::external_open_kdf_policy();
@@ -4158,10 +4207,10 @@ impl Runtime {
             })
         });
         let baseline_bytes = self
-            .synced_bases
+            .session_bases
             .read(&vault_id)
-            .with_context(|| format!("failed to read synced base: {vault_id}"))?
-            .with_context(|| format!("synced base is missing: {vault_id}"))?;
+            .with_context(|| format!("failed to read session base: {vault_id}"))?
+            .with_context(|| format!("session base is missing: {vault_id}"))?;
         let baseline_bytes_fingerprint = fingerprint_for_cached_bytes(&baseline_bytes, 0);
         let source_identity_sha256 = autofill_source_identity_sha256(&source);
         if let Err(error) = plan_sha256(&transaction_id, &vault_id, &source_identity_sha256, &plan)
@@ -5108,10 +5157,24 @@ impl Runtime {
         let synced = source_status
             .as_ref()
             .is_none_or(|status| status.remote_state == "online");
+        let mut retain_committed_bytes = false;
         let base_warning = synced
-            .then(|| self.synced_bases.store(vault_id, &bytes).err())
-            .flatten()
-            .map(|error| format!("failed to store synced base for {vault_id}: {error}"));
+            .then(|| {
+                let mut warnings = Vec::new();
+                if let Err(error) = self.synced_bases.store(vault_id, &bytes) {
+                    warnings.push(format!(
+                        "failed to store synced base for {vault_id}: {error}"
+                    ));
+                }
+                if let Err(error) = self.session_bases.store(vault_id, &bytes) {
+                    retain_committed_bytes = true;
+                    warnings.push(format!(
+                        "failed to store session base for {vault_id}: {error}"
+                    ));
+                }
+                (!warnings.is_empty()).then(|| warnings.join("; "))
+            })
+            .flatten();
         if let Some(warning) = base_warning {
             if let Some(status) = source_status.as_mut() {
                 status.last_error = Some(match status.last_error.take() {
@@ -5127,7 +5190,11 @@ impl Runtime {
             .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded.vault = Some(vault);
-        loaded.bytes = Vec::new();
+        loaded.bytes = if retain_committed_bytes {
+            bytes
+        } else {
+            Vec::new()
+        };
         loaded.baseline_fingerprint = fingerprint;
         loaded.save_profile = save_profile;
         loaded.requires_source_migration = false;
@@ -5262,19 +5329,36 @@ impl Runtime {
                 return Err(error).with_context(|| format!("failed to write vault: {vault_id}"));
             }
         };
+        let mut warnings = Vec::new();
+        let retain_committed_bytes = match self.session_bases.store(vault_id, &bytes) {
+            Ok(()) => false,
+            Err(error) => {
+                warnings.push(format!(
+                    "failed to store session base for {vault_id}: {error}"
+                ));
+                true
+            }
+        };
+        if let Err(error) = self.synced_bases.store(vault_id, &bytes) {
+            warnings.push(format!(
+                "failed to store synced base for {vault_id}: {error}"
+            ));
+        }
         {
             let loaded = self
                 .vault_session
                 .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
-            loaded.bytes = Vec::new();
+            loaded.bytes = if retain_committed_bytes {
+                bytes
+            } else {
+                Vec::new()
+            };
             loaded.baseline_fingerprint = next_fingerprint;
             loaded.requires_source_migration = false;
         }
-        if let Err(error) = self.synced_bases.store(vault_id, &bytes) {
-            self.record_local_save_warnings(vec![format!(
-                "failed to store synced base for {vault_id}: {error}"
-            )]);
+        if !warnings.is_empty() {
+            self.record_local_save_warnings(warnings);
         }
         Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
             status: SaveVaultStatusDto::Saved,
@@ -5320,12 +5404,22 @@ impl Runtime {
         };
         let cache_key = remote_cache_key_for_source(&source).expect("OneDrive source");
         let account_label = account_label.unwrap_or_else(|| cache_key.provider_kind.clone());
-        let local_vault = self.loaded_vault(vault_id)?.clone();
+        let local_vault = {
+            let loaded = self
+                .vault_session
+                .find_loaded(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            let local_vault = loaded
+                .vault
+                .as_ref()
+                .with_context(|| format!("vault is locked: {vault_id}"))?;
+            local_vault.clone()
+        };
         let base_bytes = self
-            .synced_bases
+            .session_bases
             .read(vault_id)
-            .with_context(|| format!("failed to read synced base: {vault_id}"))?
-            .with_context(|| format!("synced base is missing: {vault_id}"))?;
+            .with_context(|| format!("failed to read session base: {vault_id}"))?
+            .with_context(|| format!("session base is missing: {vault_id}"))?;
         let base_vault = match Self::load_session_database(&base_bytes, &key) {
             Ok(database) => database.vault,
             Err(KdbxError::HeaderHmacMismatch) => self
@@ -5528,6 +5622,18 @@ impl Runtime {
                         .with_context(|| {
                             format!("failed to store pending OneDrive base: {vault_id}")
                         })?;
+                    if let Err(error) = self.session_bases.store(vault_id, &remote_bytes) {
+                        let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
+                        let session_restore = self.session_bases.store(vault_id, &base_bytes);
+                        if let Err(restore_error) = synced_restore.and(session_restore) {
+                            return Err(error).context(format!(
+                                "failed to restore OneDrive bases after session-base staging failed: {restore_error}"
+                            ));
+                        }
+                        return Err(error).with_context(|| {
+                            format!("failed to store pending session base: {vault_id}")
+                        });
+                    }
                     let response = self.save_remote_vault_to_pending_cache(
                         vault_id,
                         source,
@@ -5540,11 +5646,13 @@ impl Runtime {
                     let response = match response {
                         Ok(response) => response,
                         Err(error) => {
-                            self.synced_bases.store(vault_id, &base_bytes).with_context(|| {
-                                format!(
-                                    "failed to restore the synced OneDrive base after pending cache failure: {error:#}"
-                                )
-                            })?;
+                            let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
+                            let session_restore = self.session_bases.store(vault_id, &base_bytes);
+                            if let Err(restore_error) = synced_restore.and(session_restore) {
+                                return Err(error).context(format!(
+                                    "failed to restore OneDrive bases after pending cache failure: {restore_error}"
+                                ));
+                            }
                             return Err(error);
                         }
                     };
@@ -5558,6 +5666,18 @@ impl Runtime {
                         .with_context(|| {
                             format!("failed to store pending OneDrive base: {vault_id}")
                         })?;
+                    if let Err(stage_error) = self.session_bases.store(vault_id, &remote_bytes) {
+                        let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
+                        let session_restore = self.session_bases.store(vault_id, &base_bytes);
+                        if let Err(restore_error) = synced_restore.and(session_restore) {
+                            return Err(stage_error).context(format!(
+                                "failed to restore OneDrive bases after session-base staging failed: {restore_error}"
+                            ));
+                        }
+                        return Err(stage_error).with_context(|| {
+                            format!("failed to store pending session base: {vault_id}")
+                        });
+                    }
                     let response = self.save_remote_vault_to_pending_cache(
                         vault_id,
                         source,
@@ -5570,11 +5690,13 @@ impl Runtime {
                     let response = match response {
                         Ok(response) => response,
                         Err(error) => {
-                            self.synced_bases.store(vault_id, &base_bytes).with_context(|| {
-                                format!(
-                                    "failed to restore the synced OneDrive base after pending cache failure: {error:#}"
-                                )
-                            })?;
+                            let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
+                            let session_restore = self.session_bases.store(vault_id, &base_bytes);
+                            if let Err(restore_error) = synced_restore.and(session_restore) {
+                                return Err(error).context(format!(
+                                    "failed to restore OneDrive bases after pending cache failure: {restore_error}"
+                                ));
+                            }
                             return Err(error);
                         }
                     };
@@ -5840,7 +5962,7 @@ impl Runtime {
             .vault_session
             .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
-        loaded.bytes = bytes;
+        loaded.bytes = Vec::new();
         loaded.baseline_fingerprint = fingerprint;
         loaded.save_profile = save_profile;
         loaded.source_status = Some(status);
@@ -5965,10 +6087,10 @@ impl Runtime {
                 ) {
                     (Some((local_vault, local_save_profile)), Some(mut key)) => {
                         let base_bytes = self
-                            .synced_bases
+                            .session_bases
                             .read(vault_id)
-                            .with_context(|| format!("failed to read synced base: {vault_id}"))?
-                            .with_context(|| format!("synced base is missing: {vault_id}"))?;
+                            .with_context(|| format!("failed to read session base: {vault_id}"))?
+                            .with_context(|| format!("session base is missing: {vault_id}"))?;
                         let base_vault = Self::load_session_database(&base_bytes, &key)
                             .context("failed to parse synced base during source refresh")?
                             .vault;
@@ -6030,6 +6152,9 @@ impl Runtime {
                 self.synced_bases
                     .store(vault_id, &snapshot.bytes)
                     .with_context(|| format!("failed to store synced base: {vault_id}"))?;
+                self.session_bases
+                    .store(vault_id, &snapshot.bytes)
+                    .with_context(|| format!("failed to store session base: {vault_id}"))?;
                 let status = VaultSourceStatusDto {
                     source_kind: cache_key.provider_kind,
                     remote_state: "online".into(),
@@ -6050,7 +6175,11 @@ impl Runtime {
                     loaded.save_profile = remote_save_profile;
                 }
                 loaded.name = display_name;
-                loaded.bytes = snapshot.bytes;
+                loaded.bytes = if loaded.vault.is_some() {
+                    Vec::new()
+                } else {
+                    snapshot.bytes
+                };
                 loaded.baseline_fingerprint = snapshot.fingerprint;
                 loaded.source_account_label = Some(snapshot.account_label);
                 loaded.source_status = Some(status.clone());
@@ -6574,10 +6703,10 @@ impl Runtime {
             .context("failed to verify live pending conflict copy")
         };
         let base_bytes = self
-            .synced_bases
+            .session_bases
             .read(vault_id)
-            .with_context(|| format!("failed to read synced base: {vault_id}"))?
-            .with_context(|| format!("synced base is missing: {vault_id}"))?;
+            .with_context(|| format!("failed to read session base: {vault_id}"))?
+            .with_context(|| format!("session base is missing: {vault_id}"))?;
         let base_vault = Self::load_session_database(&base_bytes, &key)
             .context("failed to parse synced base during pending synchronization")?
             .vault;
@@ -9741,6 +9870,13 @@ mod tests {
         let loaded = runtime.vault_session.find_loaded(&opened.vault_id).unwrap();
 
         assert!(loaded.bytes.is_empty());
+        assert!(
+            runtime
+                .session_bases
+                .read(&opened.vault_id)
+                .unwrap()
+                .is_some()
+        );
         assert!(loaded.transformed_key.is_some());
         assert_eq!(
             loaded.credential_shape,
@@ -9749,6 +9885,37 @@ mod tests {
                 has_key_file: false,
             }
         );
+    }
+
+    #[test]
+    fn source_refresh_of_an_unlocked_vault_discards_downloaded_file_bytes() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_001);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let current = runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap();
+        let mut credential = CompositeKey::default();
+        credential.add_password("demo-password");
+        let transformed = vaultkern_core::derive_transformed_key(&current, &credential).unwrap();
+        let mut remote = KeepassCore::new().load_kdbx(&current, &credential).unwrap();
+        remote.description = Some("remote refresh".into());
+        let save_profile = runtime.inspected_save_profile(&current).unwrap();
+        let remote_bytes =
+            save_kdbx_with_history_limits_transformed(&mut remote, &transformed, save_profile)
+                .unwrap();
+        runtime.replace_test_onedrive_item("drive-1", "item-1", remote_bytes);
+
+        assert_eq!(
+            runtime
+                .retry_vault_source_sync(&vault_id)
+                .unwrap()
+                .remote_state,
+            "online"
+        );
+
+        let loaded = runtime.vault_session.find_loaded(&vault_id).unwrap();
+        assert!(loaded.vault.is_some());
+        assert!(loaded.bytes.is_empty());
     }
 
     #[test]
@@ -10116,6 +10283,32 @@ mod tests {
     }
 
     #[test]
+    fn committed_local_save_remains_current_after_session_base_write_failure_and_lock() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        create_demo_entry(&mut runtime, &opened.vault_id);
+        runtime.session_bases.fail_next_store_for_tests();
+
+        let response = runtime
+            .save_vault(&opened.vault_id)
+            .expect("the primary KDBX commit already succeeded");
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+
+        runtime.lock_session();
+        runtime
+            .unlock_vault(&opened.vault_id, Some("demo-password"), None)
+            .expect("the committed generation must remain unlockable after locking");
+
+        assert_eq!(runtime.list_entries(&opened.vault_id).unwrap().len(), 1);
+    }
+
+    #[test]
     fn committed_onedrive_save_survives_synced_base_write_failure() {
         let mut runtime = demo_onedrive_runtime(1_700_000_100);
         let vault_id = open_unlocked_demo_onedrive(&mut runtime);
@@ -10163,6 +10356,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn committed_onedrive_save_remains_current_after_session_base_write_failure_and_lock() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_100);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        create_demo_entry(&mut runtime, &vault_id);
+        runtime.session_bases.fail_next_store_for_tests();
+
+        let response = runtime
+            .save_vault(&vault_id)
+            .expect("the remote KDBX commit already succeeded");
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+
+        runtime.lock_session();
+        runtime
+            .unlock_vault(&vault_id, Some("demo-password"), None)
+            .expect("the committed generation must remain unlockable after locking");
+
+        assert_eq!(runtime.list_entries(&vault_id).unwrap().len(), 1);
     }
 
     #[test]
@@ -12881,6 +13100,47 @@ mod tests {
     }
 
     #[test]
+    fn generic_pending_save_stages_the_session_base_before_publishing_the_pending_cache() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_034);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &vault_id);
+        runtime.save_vault(&vault_id).unwrap();
+        runtime
+            .update_entry_fields(
+                &vault_id,
+                &entry.id,
+                entry.title,
+                entry.username,
+                "local-before-session-base-failure".into(),
+                entry.url,
+                entry.notes,
+                entry.totp_uri,
+                entry.custom_fields,
+            )
+            .unwrap();
+        let loaded_before = runtime.vault_session.find_loaded(&vault_id).unwrap();
+        let baseline_before = loaded_before.baseline_fingerprint.clone();
+        let status_before = loaded_before.source_status.clone();
+        runtime.session_bases.fail_next_store_for_tests();
+        runtime.queue_test_onedrive_ambiguous_write(false);
+
+        let error = runtime
+            .save_vault(&vault_id)
+            .expect_err("an unstaged session base must prevent pending-cache publication");
+
+        assert!(format!("{error:#}").contains("failed to store pending session base"));
+        let loaded = runtime.vault_session.find_loaded(&vault_id).unwrap();
+        assert_eq!(loaded.baseline_fingerprint, baseline_before);
+        assert_eq!(loaded.source_status, status_before);
+        assert!(matches!(
+            runtime
+                .remote_cache
+                .read_pending_chain(&RemoteCacheKey::new("onedrive", "drive-1:item-1")),
+            Err(PendingRemoteCacheChainError::NotPending)
+        ));
+    }
+
+    #[test]
     fn atomic_autofill_ambiguous_write_rejects_missing_previous_cache_without_swap() {
         let cache_dir = tempfile::tempdir().unwrap();
         let mut runtime = demo_onedrive_runtime(1_700_000_035);
@@ -14123,6 +14383,205 @@ mod tests {
                 Err(PendingRemoteCacheChainError::NotPending)
             ));
         }
+    }
+
+    #[test]
+    fn generic_pending_save_survives_lock_and_direct_password_unlock() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_057);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &vault_id);
+        runtime.save_vault(&vault_id).unwrap();
+        let desired_fields = EntryFieldsDto {
+            notes: "durable pending edit".into(),
+            ..entry_fields(&entry)
+        };
+        runtime
+            .update_entry_fields(
+                &vault_id,
+                &entry.id,
+                desired_fields.title.clone(),
+                desired_fields.username.clone(),
+                desired_fields.password.clone(),
+                desired_fields.url.clone(),
+                desired_fields.notes.clone(),
+                desired_fields.totp_uri.clone(),
+                desired_fields.custom_fields.clone(),
+            )
+            .unwrap();
+        runtime.queue_test_onedrive_ambiguous_write(false);
+        assert!(matches!(
+            runtime.save_vault(&vault_id).unwrap(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::SavedToCache,
+                ..
+            })
+        ));
+        assert!(
+            runtime
+                .vault_session
+                .find_loaded(&vault_id)
+                .unwrap()
+                .bytes
+                .is_empty()
+        );
+
+        runtime.lock_session();
+        runtime
+            .unlock_with_password(&vault_id, "demo-password")
+            .unwrap();
+
+        assert_eq!(
+            entry_fields(&runtime.get_entry_detail(&vault_id, &entry.id).unwrap()),
+            desired_fields
+        );
+        assert_eq!(
+            runtime
+                .retry_vault_source_sync(&vault_id)
+                .unwrap()
+                .remote_state,
+            "online"
+        );
+        assert_eq!(
+            entry_fields(&runtime.get_entry_detail(&vault_id, &entry.id).unwrap()),
+            desired_fields
+        );
+    }
+
+    #[test]
+    fn autofill_pending_save_survives_lock_and_direct_password_unlock() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_057);
+        let (vault_id, target, _, desired_fields) = begin_pending_update(
+            &mut runtime,
+            "transaction-lock-pending",
+            "operation-lock-pending",
+            "pending-after-lock",
+            false,
+        );
+
+        runtime.lock_session();
+        runtime
+            .unlock_with_password(&vault_id, "demo-password")
+            .unwrap();
+
+        assert_eq!(
+            entry_fields(&runtime.get_entry_detail(&vault_id, &target.id).unwrap()),
+            desired_fields
+        );
+        assert_eq!(
+            runtime
+                .retry_vault_source_sync(&vault_id)
+                .unwrap()
+                .remote_state,
+            "online"
+        );
+        assert_eq!(
+            entry_fields(&runtime.get_entry_detail(&vault_id, &target.id).unwrap()),
+            desired_fields
+        );
+    }
+
+    #[test]
+    fn concurrent_generic_saves_keep_each_runtime_three_way_base_isolated() {
+        let mut seed = demo_onedrive_runtime(1_700_000_057);
+        let vault_id = open_unlocked_demo_onedrive(&mut seed);
+        let first_entry = create_demo_entry(&mut seed, &vault_id);
+        let second_entry = create_demo_entry(&mut seed, &vault_id);
+        seed.save_vault(&vault_id).unwrap();
+        let baseline_bytes = seed
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap();
+
+        let cache_dir = tempfile::tempdir().unwrap();
+        let mut first = Runtime::for_tests_at_with_onedrive_item_and_remote_cache(
+            1_700_000_058,
+            "drive-1",
+            "item-1",
+            "Vault.kdbx",
+            "alice@example.com",
+            baseline_bytes.clone(),
+            cache_dir.path(),
+        );
+        let mut second = Runtime::for_tests_at_with_onedrive_item_and_remote_cache(
+            1_700_000_059,
+            "drive-1",
+            "item-1",
+            "Vault.kdbx",
+            "alice@example.com",
+            baseline_bytes,
+            cache_dir.path(),
+        );
+        assert_eq!(open_unlocked_demo_onedrive(&mut first), vault_id);
+        assert_eq!(open_unlocked_demo_onedrive(&mut second), vault_id);
+
+        let first_edit = EntryFieldsDto {
+            notes: "first runtime edit".into(),
+            ..entry_fields(&first.get_entry_detail(&vault_id, &first_entry.id).unwrap())
+        };
+        first
+            .update_entry_fields(
+                &vault_id,
+                &first_entry.id,
+                first_edit.title.clone(),
+                first_edit.username.clone(),
+                first_edit.password.clone(),
+                first_edit.url.clone(),
+                first_edit.notes.clone(),
+                first_edit.totp_uri.clone(),
+                first_edit.custom_fields.clone(),
+            )
+            .unwrap();
+        first.save_vault(&vault_id).unwrap();
+        second.replace_test_onedrive_item(
+            "drive-1",
+            "item-1",
+            first
+                .read_test_onedrive_item_bytes("drive-1", "item-1")
+                .unwrap(),
+        );
+
+        let second_edit = EntryFieldsDto {
+            password: "second-runtime-secret".into(),
+            ..entry_fields(
+                &second
+                    .get_entry_detail(&vault_id, &second_entry.id)
+                    .unwrap(),
+            )
+        };
+        second
+            .update_entry_fields(
+                &vault_id,
+                &second_entry.id,
+                second_edit.title.clone(),
+                second_edit.username.clone(),
+                second_edit.password.clone(),
+                second_edit.url.clone(),
+                second_edit.notes.clone(),
+                second_edit.totp_uri.clone(),
+                second_edit.custom_fields.clone(),
+            )
+            .unwrap();
+
+        let response = second.save_vault(&vault_id).unwrap();
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                ..
+            })
+        ));
+        assert_eq!(
+            entry_fields(&second.get_entry_detail(&vault_id, &first_entry.id).unwrap()),
+            first_edit
+        );
+        assert_eq!(
+            entry_fields(
+                &second
+                    .get_entry_detail(&vault_id, &second_entry.id)
+                    .unwrap()
+            ),
+            second_edit
+        );
     }
 
     #[test]
