@@ -1294,18 +1294,24 @@ fn replace_file(temp: &Path, target: &Path, _backup: Option<&Path>) -> Result<()
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowsReplaceFileApi {
     MoveFileExWriteThrough,
+    ReplaceFile,
 }
 
 #[cfg(any(windows, test))]
-fn windows_replace_file_api(_backup: Option<&Path>) -> WindowsReplaceFileApi {
-    WindowsReplaceFileApi::MoveFileExWriteThrough
+fn windows_replace_file_api(backup: Option<&Path>) -> WindowsReplaceFileApi {
+    if backup.is_some() {
+        WindowsReplaceFileApi::ReplaceFile
+    } else {
+        WindowsReplaceFileApi::MoveFileExWriteThrough
+    }
 }
 
 #[cfg(windows)]
 fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(), ReplaceError> {
     use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
     use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW,
     };
 
     fn wide(path: &Path) -> Vec<u16> {
@@ -1314,22 +1320,62 @@ fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(),
 
     let target_wide = wide(target);
     let temp_wide = wide(temp);
-    let _ = windows_replace_file_api(backup);
+    let backup_wide = backup.map(wide);
+    let replacing_existing = target.exists();
     let result = unsafe {
-        MoveFileExW(
-            temp_wide.as_ptr(),
-            target_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
+        match windows_replace_file_api(backup) {
+            WindowsReplaceFileApi::ReplaceFile => ReplaceFileW(
+                target_wide.as_ptr(),
+                temp_wide.as_ptr(),
+                backup_wide
+                    .as_ref()
+                    .map_or(ptr::null(), |value| value.as_ptr()),
+                WINDOWS_REPLACE_FILE_FLAGS,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ),
+            WindowsReplaceFileApi::MoveFileExWriteThrough => MoveFileExW(
+                temp_wide.as_ptr(),
+                target_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            ),
+        }
     };
     if result == 0 {
+        let source = io::Error::last_os_error();
         Err(ReplaceError {
-            published: false,
-            source: io::Error::last_os_error(),
+            published: windows_replace_failure_is_outcome_unknown(
+                replacing_existing,
+                backup.is_some(),
+                source.raw_os_error(),
+            ),
+            source,
         })
     } else {
         Ok(())
     }
+}
+
+#[cfg(any(windows, test))]
+const WINDOWS_REPLACE_FILE_FLAGS: u32 = 0;
+
+#[cfg(any(windows, test))]
+const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT: i32 = 1176;
+#[cfg(any(windows, test))]
+const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
+
+#[cfg(any(windows, test))]
+fn windows_replace_failure_is_outcome_unknown(
+    replacing_existing: bool,
+    backup_supplied: bool,
+    raw_os_error: Option<i32>,
+) -> bool {
+    replacing_existing
+        && match raw_os_error {
+            Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT) => !backup_supplied,
+            Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) => true,
+            _ => false,
+        }
 }
 
 #[cfg(not(windows))]
@@ -1555,14 +1601,62 @@ mod tests {
     }
 
     #[test]
-    fn windows_publication_always_uses_write_through_move() {
+    fn windows_publication_uses_backup_capable_replace_when_requested() {
         assert_eq!(
             super::windows_replace_file_api(None),
             super::WindowsReplaceFileApi::MoveFileExWriteThrough
         );
         assert_eq!(
             super::windows_replace_file_api(Some(std::path::Path::new("backup"))),
-            super::WindowsReplaceFileApi::MoveFileExWriteThrough
+            super::WindowsReplaceFileApi::ReplaceFile
         );
+    }
+
+    #[test]
+    fn windows_replace_failure_classification_preserves_only_partial_failure_artifacts() {
+        assert_eq!(super::WINDOWS_REPLACE_FILE_FLAGS, 0);
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            false,
+            false,
+            Some(1176)
+        ));
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            true,
+            false,
+            Some(5)
+        ));
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            true,
+            false,
+            Some(32)
+        ));
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            true,
+            false,
+            Some(1175)
+        ));
+        assert!(super::windows_replace_failure_is_outcome_unknown(
+            true,
+            false,
+            Some(1176)
+        ));
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            true,
+            true,
+            Some(1176)
+        ));
+        assert!(super::windows_replace_failure_is_outcome_unknown(
+            true,
+            false,
+            Some(1177)
+        ));
+        assert!(super::windows_replace_failure_is_outcome_unknown(
+            true,
+            true,
+            Some(1177)
+        ));
+        assert!(!super::windows_replace_failure_is_outcome_unknown(
+            true, false, None
+        ));
     }
 }
