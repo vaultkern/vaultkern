@@ -163,6 +163,9 @@ pub enum RuntimeCommand {
     DeleteVaultReference {
         vault_ref_id: String,
     },
+    DeleteVaultReferenceIfNotCurrent {
+        vault_ref_id: String,
+    },
     UnlockCurrentVaultWithPassword {
         password: SensitiveString,
     },

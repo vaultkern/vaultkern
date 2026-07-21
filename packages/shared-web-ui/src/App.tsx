@@ -35,7 +35,8 @@ import {
   DEFAULT_EXTENSION_SETTINGS,
   createMemoryExtensionSettingsStore,
   normalizeBrowserExtensionSettings,
-  normalizeWindowsAppSettings
+  normalizeWindowsAppSettings,
+  sortRecentVaultsForRetention
 } from "./extensionSettings";
 import type {
   ExtensionSettings,
@@ -73,6 +74,7 @@ export interface RuntimeClientLike {
   setCurrentVault(vaultRefId: string): Promise<SessionStateLike>;
   retryVaultSourceSync(vaultId: string): Promise<VaultSourceStatus>;
   deleteRecentVault(vaultRefId: string): Promise<VaultReference[]>;
+  deleteRecentVaultIfNotCurrent(vaultRefId: string): Promise<VaultReference[]>;
   openLocalVault(path: string): Promise<VaultHandle>;
   unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
@@ -470,7 +472,7 @@ export function App({
     vaults: VaultReference[],
     reconciliationEpoch = recentVaultReconciliationEpoch.current
   ) {
-    let remainingVaults = [...vaults];
+    let remainingVaults = sortRecentVaultsForRetention(vaults);
 
     while (reconciliationEpoch === recentVaultReconciliationEpoch.current) {
       const desired = normalizeSettings(
@@ -479,20 +481,21 @@ export function App({
       if (reconciliationEpoch !== recentVaultReconciliationEpoch.current) {
         return;
       }
-      const sortedVaults = [...remainingVaults].sort(
-        (left, right) => (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0)
+      remainingVaults = sortRecentVaultsForRetention(
+        await client.listRecentVaults()
       );
+      if (reconciliationEpoch !== recentVaultReconciliationEpoch.current) {
+        return;
+      }
+      const sortedVaults = remainingVaults;
       const nextOverflowVault = sortedVaults[desired.recentVaultLimit];
       if (!nextOverflowVault) {
         setRecentVaults(sortedVaults);
         return;
       }
 
-      // No await may occur between this persisted desired-state check and
-      // starting the destructive operation.
-      await client.deleteRecentVault(nextOverflowVault.vaultRefId);
-      remainingVaults = sortedVaults.filter(
-        (vault) => vault.vaultRefId !== nextOverflowVault.vaultRefId
+      remainingVaults = await client.deleteRecentVaultIfNotCurrent(
+        nextOverflowVault.vaultRefId
       );
     }
   }

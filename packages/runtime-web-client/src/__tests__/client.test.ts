@@ -388,6 +388,27 @@ describe("RuntimeClient", () => {
     expect(vaults).toEqual([]);
   });
 
+  it("requests an atomic non-current guard when trimming a recent vault", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue({
+        type: "vault_reference_list",
+        vaults: []
+      })
+    };
+
+    const client = new RuntimeClient(transport);
+    const vaults = await client.deleteRecentVaultIfNotCurrent("vault-ref-1");
+
+    expect(transport.send).toHaveBeenCalledWith({
+      version: 1,
+      command: {
+        type: "delete_vault_reference_if_not_current",
+        vault_ref_id: "vault-ref-1"
+      }
+    });
+    expect(vaults).toEqual([]);
+  });
+
   it("requests entry detail through the configured transport", async () => {
     const transport = {
       send: vi.fn().mockResolvedValue({

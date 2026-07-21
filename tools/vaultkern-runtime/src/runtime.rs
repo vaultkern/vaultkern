@@ -1160,6 +1160,21 @@ impl Runtime {
     }
 
     pub fn delete_vault_reference(&mut self, vault_ref_id: &str) -> Result<VaultReferenceListDto> {
+        self.delete_vault_reference_with_current_policy(vault_ref_id, true)
+    }
+
+    pub fn delete_vault_reference_if_not_current(
+        &mut self,
+        vault_ref_id: &str,
+    ) -> Result<VaultReferenceListDto> {
+        self.delete_vault_reference_with_current_policy(vault_ref_id, false)
+    }
+
+    fn delete_vault_reference_with_current_policy(
+        &mut self,
+        vault_ref_id: &str,
+        allow_current: bool,
+    ) -> Result<VaultReferenceListDto> {
         let source = self.references.source_for(vault_ref_id)?;
         let vault_id = vault_id_for_stored_source(&source);
         let cache_keys = remote_cache_keys_for_stored_source(&source);
@@ -1167,9 +1182,21 @@ impl Runtime {
         for cache_key in &cache_keys {
             retirements.push(self.remote_cache.begin_retirement(cache_key)?);
         }
-        let deletion = self.references.delete(vault_ref_id);
+        let deletion = if allow_current {
+            self.references.delete(vault_ref_id).map(Some)
+        } else {
+            self.references
+                .delete_if_not_current(vault_ref_id)
+                .map(|cleanup| cleanup.map(|cleanup| (false, cleanup)))
+        };
         let (deleted_current, cleanup) = match deletion {
-            Ok(deletion) => deletion,
+            Ok(Some(deletion)) => deletion,
+            Ok(None) => {
+                for retirement in &retirements {
+                    retirement.cancel_retirement()?;
+                }
+                return self.list_recent_vaults();
+            }
             Err(error) => {
                 drop(retirements);
                 if let StoredVaultSource::OneDriveItem {
@@ -4354,6 +4381,9 @@ impl Runtime {
                 .map(RuntimeResponse::VaultSourceStatus),
             RuntimeCommand::DeleteVaultReference { vault_ref_id } => self
                 .delete_vault_reference(&vault_ref_id)
+                .map(RuntimeResponse::VaultReferenceList),
+            RuntimeCommand::DeleteVaultReferenceIfNotCurrent { vault_ref_id } => self
+                .delete_vault_reference_if_not_current(&vault_ref_id)
                 .map(RuntimeResponse::VaultReferenceList),
             RuntimeCommand::UnlockCurrentVaultWithPassword { password } => {
                 self.unlock_current_vault_with_password(&password)?;

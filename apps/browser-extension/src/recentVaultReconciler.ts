@@ -1,9 +1,18 @@
 import type { ExtensionSettingsStore } from "@vaultkern/shared-web-ui";
-import { normalizeBrowserExtensionSettings } from "@vaultkern/shared-web-ui";
+import {
+  normalizeBrowserExtensionSettings,
+  sortRecentVaultsForRetention
+} from "@vaultkern/shared-web-ui";
 
 interface RecentVaultClient {
-  listRecentVaults(): Promise<Array<{ vaultRefId: string; lastUsedAt?: number | null }>>;
-  deleteRecentVault(vaultRefId: string): Promise<unknown>;
+  listRecentVaults(): Promise<
+    Array<{ vaultRefId: string; lastUsedAt?: number | null; isCurrent?: boolean }>
+  >;
+  deleteRecentVaultIfNotCurrent(
+    vaultRefId: string
+  ): Promise<
+    Array<{ vaultRefId: string; lastUsedAt?: number | null; isCurrent?: boolean }>
+  >;
 }
 
 export function createRecentVaultReconciler(
@@ -14,8 +23,8 @@ export function createRecentVaultReconciler(
   let epoch = 0;
 
   async function reconcile(reconciliationEpoch: number) {
-    let remainingVaults = [...(await client.listRecentVaults())].sort(
-      (left, right) => (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0)
+    let remainingVaults = sortRecentVaultsForRetention(
+      await client.listRecentVaults()
     );
     if (reconciliationEpoch !== epoch) {
       return;
@@ -28,14 +37,19 @@ export function createRecentVaultReconciler(
       if (reconciliationEpoch !== epoch) {
         return;
       }
+      remainingVaults = sortRecentVaultsForRetention(
+        await client.listRecentVaults()
+      );
+      if (reconciliationEpoch !== epoch) {
+        return;
+      }
       const nextOverflowVault = remainingVaults[desired.recentVaultLimit];
       if (!nextOverflowVault) {
         return;
       }
 
-      await client.deleteRecentVault(nextOverflowVault.vaultRefId);
-      remainingVaults = remainingVaults.filter(
-        (vault) => vault.vaultRefId !== nextOverflowVault.vaultRefId
+      remainingVaults = await client.deleteRecentVaultIfNotCurrent(
+        nextOverflowVault.vaultRefId
       );
     }
   }

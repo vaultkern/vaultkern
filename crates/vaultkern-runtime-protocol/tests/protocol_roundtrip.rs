@@ -371,6 +371,9 @@ fn protocol_roundtrips_recent_vault_commands() {
     let delete = ProtocolEnvelope::new(RuntimeCommand::DeleteVaultReference {
         vault_ref_id: "vault-ref-1".into(),
     });
+    let guarded_delete = ProtocolEnvelope::new(RuntimeCommand::DeleteVaultReferenceIfNotCurrent {
+        vault_ref_id: "vault-ref-2".into(),
+    });
     let unlock = ProtocolEnvelope::new(RuntimeCommand::UnlockCurrentVaultWithPassword {
         password: "demo-password".into(),
     });
@@ -388,6 +391,11 @@ fn protocol_roundtrips_recent_vault_commands() {
         serde_json::from_str::<ProtocolEnvelope>(&serde_json::to_string(&set_current).unwrap())
             .unwrap(),
         set_current
+    );
+    assert_eq!(
+        serde_json::from_str::<ProtocolEnvelope>(&serde_json::to_string(&guarded_delete).unwrap())
+            .unwrap(),
+        guarded_delete
     );
     assert_eq!(
         serde_json::from_str::<ProtocolEnvelope>(&serde_json::to_string(&unlock).unwrap()).unwrap(),

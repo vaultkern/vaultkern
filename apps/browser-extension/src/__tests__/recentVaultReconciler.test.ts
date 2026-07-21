@@ -14,14 +14,18 @@ function createDeferred<T>() {
 }
 
 it("retries the saved recent-vault limit from the long-lived background owner", async () => {
+  let vaults = [
+    { vaultRefId: "new", lastUsedAt: 20 },
+    { vaultRefId: "old", lastUsedAt: 10 }
+  ];
   const listRecentVaults = vi
     .fn()
     .mockRejectedValueOnce(new Error("native host restarted"))
-    .mockResolvedValueOnce([
-      { vaultRefId: "new", lastUsedAt: 20 },
-      { vaultRefId: "old", lastUsedAt: 10 }
-    ]);
-  const deleteRecentVault = vi.fn(async () => undefined);
+    .mockImplementation(async () => vaults);
+  const deleteRecentVaultIfNotCurrent = vi.fn(async (vaultRefId: string) => {
+    vaults = vaults.filter((vault) => vault.vaultRefId !== vaultRefId);
+    return vaults;
+  });
   const reconciler = createRecentVaultReconciler(
     {
       async load() {
@@ -29,14 +33,14 @@ it("retries the saved recent-vault limit from the long-lived background owner", 
       },
       async save() {}
     },
-    { listRecentVaults, deleteRecentVault }
+    { listRecentVaults, deleteRecentVaultIfNotCurrent }
   );
 
   await expect(reconciler.schedule()).rejects.toThrow("native host restarted");
   await expect(reconciler.schedule()).resolves.toBeUndefined();
 
-  expect(deleteRecentVault).toHaveBeenCalledTimes(1);
-  expect(deleteRecentVault).toHaveBeenCalledWith("old");
+  expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledTimes(1);
+  expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledWith("old");
 });
 
 it("stops an older reconciliation when a newer desired state is scheduled", async () => {
@@ -50,7 +54,7 @@ it("stops an older reconciliation when a newer desired state is scheduled", asyn
     .fn()
     .mockReturnValueOnce(firstList.promise)
     .mockResolvedValue(vaults);
-  const deleteRecentVault = vi.fn(async () => undefined);
+  const deleteRecentVaultIfNotCurrent = vi.fn(async () => vaults);
   const settingsStore = {
     load: vi.fn(async () => savedSettings),
     save: vi.fn(async (next: typeof savedSettings) => {
@@ -59,7 +63,7 @@ it("stops an older reconciliation when a newer desired state is scheduled", asyn
   };
   const reconciler = createRecentVaultReconciler(settingsStore, {
     listRecentVaults,
-    deleteRecentVault
+    deleteRecentVaultIfNotCurrent
   });
 
   const olderReconciliation = reconciler.schedule();
@@ -70,7 +74,7 @@ it("stops an older reconciliation when a newer desired state is scheduled", asyn
   firstList.resolve(vaults);
 
   await Promise.all([olderReconciliation, newerReconciliation]);
-  expect(deleteRecentVault).not.toHaveBeenCalled();
+  expect(deleteRecentVaultIfNotCurrent).not.toHaveBeenCalled();
 });
 
 it("re-reads saved settings before each destructive delete", async () => {
@@ -80,11 +84,11 @@ it("re-reads saved settings before each destructive delete", async () => {
     { vaultRefId: "middle", lastUsedAt: 20 },
     { vaultRefId: "old", lastUsedAt: 10 }
   ];
-  const firstDelete = createDeferred<void>();
-  const deleteRecentVault = vi
+  const firstDelete = createDeferred<typeof vaults>();
+  const deleteRecentVaultIfNotCurrent = vi
     .fn()
     .mockReturnValueOnce(firstDelete.promise)
-    .mockResolvedValue(undefined);
+    .mockResolvedValue(vaults);
   const settingsStore = {
     load: vi.fn(async () => savedSettings),
     save: vi.fn(async (next: typeof savedSettings) => {
@@ -93,16 +97,82 @@ it("re-reads saved settings before each destructive delete", async () => {
   };
   const reconciler = createRecentVaultReconciler(settingsStore, {
     listRecentVaults: vi.fn(async () => vaults),
-    deleteRecentVault
+    deleteRecentVaultIfNotCurrent
   });
 
   const reconciliation = reconciler.schedule();
-  await vi.waitFor(() => expect(deleteRecentVault).toHaveBeenCalledTimes(1));
-  expect(deleteRecentVault).toHaveBeenCalledWith("middle");
+  await vi.waitFor(() =>
+    expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledTimes(1)
+  );
+  expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledWith("middle");
 
   await settingsStore.save({ ...savedSettings, recentVaultLimit: 3 });
-  firstDelete.resolve();
+  firstDelete.resolve([vaults[0]!, vaults[2]!]);
   await reconciliation;
 
-  expect(deleteRecentVault).toHaveBeenCalledTimes(1);
+  expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledTimes(1);
+});
+
+it("re-reads recent vaults before deleting after a concurrent selection", async () => {
+  const settingsRead = createDeferred<typeof DEFAULT_EXTENSION_SETTINGS>();
+  let liveVaults = [
+    { vaultRefId: "new", lastUsedAt: 20, isCurrent: true },
+    { vaultRefId: "old", lastUsedAt: 10, isCurrent: false }
+  ];
+  const listRecentVaults = vi.fn(async () => liveVaults.map((vault) => ({ ...vault })));
+  const deleteRecentVaultIfNotCurrent = vi.fn(async (vaultRefId: string) => {
+    liveVaults = liveVaults.filter((vault) => vault.vaultRefId !== vaultRefId);
+    return liveVaults;
+  });
+  const reconciler = createRecentVaultReconciler(
+    {
+      load: vi.fn(() => settingsRead.promise),
+      async save() {}
+    },
+    { listRecentVaults, deleteRecentVaultIfNotCurrent }
+  );
+
+  const reconciliation = reconciler.schedule();
+  await vi.waitFor(() => expect(listRecentVaults).toHaveBeenCalledTimes(1));
+
+  liveVaults = [
+    { vaultRefId: "old", lastUsedAt: 30, isCurrent: true },
+    { vaultRefId: "new", lastUsedAt: 20, isCurrent: false }
+  ];
+  settingsRead.resolve({ ...DEFAULT_EXTENSION_SETTINGS, recentVaultLimit: 1 });
+  await reconciliation;
+
+  expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledTimes(1);
+  expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledWith("new");
+  expect(liveVaults.map((vault) => vault.vaultRefId)).toEqual(["old"]);
+});
+
+it("never trims the current vault when its timestamp predates another record", async () => {
+  let liveVaults = [
+    { vaultRefId: "recent", lastUsedAt: 20, isCurrent: false },
+    { vaultRefId: "current", lastUsedAt: 10, isCurrent: true }
+  ];
+  const deleteRecentVaultIfNotCurrent = vi.fn(async (vaultRefId: string) => {
+    if (vaultRefId === "current") {
+      throw new Error("attempted to trim the current vault");
+    }
+    liveVaults = liveVaults.filter((vault) => vault.vaultRefId !== vaultRefId);
+    return liveVaults;
+  });
+  const reconciler = createRecentVaultReconciler(
+    {
+      async load() {
+        return { ...DEFAULT_EXTENSION_SETTINGS, recentVaultLimit: 1 };
+      },
+      async save() {}
+    },
+    {
+      listRecentVaults: vi.fn(async () => liveVaults),
+      deleteRecentVaultIfNotCurrent
+    }
+  );
+
+  await expect(reconciler.schedule()).resolves.toBeUndefined();
+  expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledTimes(1);
+  expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledWith("recent");
 });

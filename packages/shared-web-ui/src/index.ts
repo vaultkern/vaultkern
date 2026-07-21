@@ -7,12 +7,14 @@ export {
   createMemoryExtensionSettingsStore,
   normalizeBrowserExtensionSettings,
   normalizeExtensionSettings,
-  normalizeWindowsAppSettings
+  normalizeWindowsAppSettings,
+  sortRecentVaultsForRetention
 } from "./extensionSettings";
 export type {
   ExtensionSettings,
   ExtensionSettingsReconciliationReason,
   ExtensionSettingsStore,
+  RecentVaultRetentionRecord,
   SettingsSurface
 } from "./extensionSettings";
 export { I18nProvider, showMoreText, translate, useLanguage, useText } from "./i18n";

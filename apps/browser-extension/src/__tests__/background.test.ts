@@ -1935,6 +1935,10 @@ describe("background bridge", () => {
     const connectNative = vi.fn(() => port);
     const listeners: RuntimeMessageListener[] = [];
     let recentVaultLists = 0;
+    let recentVaults = [
+      { vaultRefId: "new", lastUsedAt: 20, isCurrent: true },
+      { vaultRefId: "old", lastUsedAt: 10, isCurrent: false }
+    ];
 
     port.postMessage.mockImplementation((message: unknown) => {
       const commandType = (
@@ -1964,20 +1968,23 @@ describe("background bridge", () => {
                 }
               : {
                   type: "vault_reference_list",
-                  vaults: [
-                    { vaultRefId: "new", lastUsedAt: 20 },
-                    { vaultRefId: "old", lastUsedAt: 10 }
-                  ]
+                  vaults: recentVaults
                 },
             requestId
           )
         );
-      } else if (commandType === "delete_vault_reference") {
+      } else if (commandType === "delete_vault_reference_if_not_current") {
+        const vaultRefId = (
+          message as { command?: { vault_ref_id?: unknown } }
+        ).command?.vault_ref_id;
+        recentVaults = recentVaults.filter(
+          (vault) => vault.vaultRefId !== vaultRefId
+        );
         queueMicrotask(() =>
           port.emitMessage(
             {
               type: "vault_reference_list",
-              vaults: [{ vaultRefId: "new", lastUsedAt: 20 }]
+              vaults: recentVaults
             },
             requestId
           )
@@ -2048,11 +2055,15 @@ describe("background bridge", () => {
     });
 
     await vi.waitFor(() => {
-      expect(postedCommandCount(port, "delete_vault_reference")).toBe(1);
+      expect(
+        postedCommandCount(port, "delete_vault_reference_if_not_current")
+      ).toBe(1);
     });
-    expect(postedCommands(port, "delete_vault_reference")[0]).toMatchObject({
+    expect(
+      postedCommands(port, "delete_vault_reference_if_not_current")[0]
+    ).toMatchObject({
       command: {
-        type: "delete_vault_reference",
+        type: "delete_vault_reference_if_not_current",
         vault_ref_id: "old"
       }
     });

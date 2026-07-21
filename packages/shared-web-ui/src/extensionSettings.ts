@@ -13,6 +13,23 @@ export interface ExtensionSettings {
 
 export type SettingsSurface = "browser" | "windows";
 
+export interface RecentVaultRetentionRecord {
+  vaultRefId: string;
+  lastUsedAt?: number | null;
+  isCurrent?: boolean;
+}
+
+export function sortRecentVaultsForRetention<T extends RecentVaultRetentionRecord>(
+  vaults: readonly T[]
+): T[] {
+  return [...vaults].sort(
+    (left, right) =>
+      Number(right.isCurrent === true) - Number(left.isCurrent === true) ||
+      (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0) ||
+      left.vaultRefId.localeCompare(right.vaultRefId)
+  );
+}
+
 export interface ExtensionSettingsStore {
   surface?: SettingsSurface;
   nativeReconciliationOwned?: boolean;

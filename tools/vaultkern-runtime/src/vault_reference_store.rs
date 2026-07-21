@@ -227,7 +227,28 @@ impl VaultReferenceStore {
     }
 
     pub fn delete(&mut self, vault_ref_id: &str) -> Result<(bool, PendingVaultCleanup)> {
+        self.delete_with_current_policy(vault_ref_id, true)?
+            .context("unconditional vault-reference delete was unexpectedly skipped")
+    }
+
+    pub fn delete_if_not_current(
+        &mut self,
+        vault_ref_id: &str,
+    ) -> Result<Option<PendingVaultCleanup>> {
+        Ok(self
+            .delete_with_current_policy(vault_ref_id, false)?
+            .map(|(_, cleanup)| cleanup))
+    }
+
+    fn delete_with_current_policy(
+        &mut self,
+        vault_ref_id: &str,
+        allow_current: bool,
+    ) -> Result<Option<(bool, PendingVaultCleanup)>> {
         self.mutate(|data| {
+            if !allow_current && data.current_vault_ref_id.as_deref() == Some(vault_ref_id) {
+                return Ok(None);
+            }
             let stored = data
                 .vaults
                 .iter()
@@ -248,7 +269,7 @@ impl VaultReferenceStore {
             data.pending_cleanups
                 .retain(|pending| pending.vault_ref_id != vault_ref_id);
             data.pending_cleanups.push(cleanup.clone());
-            Ok((deleted_current, cleanup))
+            Ok(Some((deleted_current, cleanup)))
         })
     }
 
@@ -614,5 +635,26 @@ mod tests {
         assert!(result.is_none());
         assert!(!ran.get());
         assert_eq!(cleanup_owner.list_recent_vaults().unwrap().vaults.len(), 1);
+    }
+
+    #[test]
+    fn guarded_delete_preserves_a_reference_selected_by_another_store_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault-references.json");
+        let mut trimmer = VaultReferenceStore::new_at(path.clone());
+        let mut selector = VaultReferenceStore::new_at(path);
+        let candidate = trimmer.upsert_local_path("old.kdbx", 10).unwrap();
+        trimmer.upsert_local_path("new.kdbx", 20).unwrap();
+
+        selector.mark_current(&candidate.vault_ref_id, 30).unwrap();
+        let deletion = trimmer
+            .delete_if_not_current(&candidate.vault_ref_id)
+            .unwrap();
+
+        assert!(deletion.is_none());
+        let vaults = trimmer.list_recent_vaults().unwrap().vaults;
+        assert_eq!(vaults.len(), 2);
+        assert_eq!(vaults[0].vault_ref_id, candidate.vault_ref_id);
+        assert!(vaults[0].is_current);
     }
 }

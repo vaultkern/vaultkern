@@ -147,6 +147,7 @@ function createVaultSelectionMethods() {
     listEntryHistory: vi.fn(async () => []),
     getEntryHistoryDetail: vi.fn(),
     deleteRecentVault: vi.fn(async () => []),
+    deleteRecentVaultIfNotCurrent: vi.fn(async () => []),
     setCurrentVault: vi.fn(async () => ({
       unlocked: false,
       activeVaultId: null,
@@ -1666,6 +1667,42 @@ it("trims recent vaults when the local recent database limit is lower", async ()
     idleLockMinutes: 0,
     clearClipboardSeconds: 30
   });
+  let vaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "One",
+      sourceKind: "local" as const,
+      sourceSummary: "one.kdbx",
+      lastUsedAt: 3,
+      availability: "ready" as const,
+      supportsQuickUnlock: false,
+      isCurrent: true
+    },
+    {
+      vaultRefId: "vault-ref-2",
+      displayName: "Two",
+      sourceKind: "local" as const,
+      sourceSummary: "two.kdbx",
+      lastUsedAt: 2,
+      availability: "ready" as const,
+      supportsQuickUnlock: false,
+      isCurrent: false
+    },
+    {
+      vaultRefId: "vault-ref-3",
+      displayName: "Three",
+      sourceKind: "local" as const,
+      sourceSummary: "three.kdbx",
+      lastUsedAt: 1,
+      availability: "ready" as const,
+      supportsQuickUnlock: false,
+      isCurrent: false
+    }
+  ];
+  const deleteRecentVaultIfNotCurrent = vi.fn(async (vaultRefId: string) => {
+    vaults = vaults.filter((vault) => vault.vaultRefId !== vaultRefId);
+    return vaults;
+  });
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -1673,46 +1710,65 @@ it("trims recent vaults when the local recent database limit is lower", async ()
       activeVaultId: null,
       currentVaultRefId: "vault-ref-1"
     }),
-    listRecentVaults: vi.fn(async () => [
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "One",
-        sourceKind: "local" as const,
-        sourceSummary: "one.kdbx",
-        lastUsedAt: 3,
-        availability: "ready" as const,
-        supportsQuickUnlock: false,
-        isCurrent: true
-      },
-      {
-        vaultRefId: "vault-ref-2",
-        displayName: "Two",
-        sourceKind: "local" as const,
-        sourceSummary: "two.kdbx",
-        lastUsedAt: 2,
-        availability: "ready" as const,
-        supportsQuickUnlock: false,
-        isCurrent: false
-      },
-      {
-        vaultRefId: "vault-ref-3",
-        displayName: "Three",
-        sourceKind: "local" as const,
-        sourceSummary: "three.kdbx",
-        lastUsedAt: 1,
-        availability: "ready" as const,
-        supportsQuickUnlock: false,
-        isCurrent: false
-      }
-    ]),
-    deleteRecentVault: vi.fn(async () => [])
+    listRecentVaults: vi.fn(async () => vaults),
+    deleteRecentVaultIfNotCurrent
   } satisfies RuntimeClientLike;
 
   render(<App client={client} extensionSettingsStore={settingsStore} />);
 
   await waitFor(() => {
-    expect(client.deleteRecentVault).toHaveBeenCalledWith("vault-ref-3");
+    expect(client.deleteRecentVaultIfNotCurrent).toHaveBeenCalledWith("vault-ref-3");
   });
+});
+
+it("never trims the current vault when its timestamp predates another record", async () => {
+  const settingsStore = createSettingsStore({ recentVaultLimit: 1 });
+  let vaults = [
+    {
+      vaultRefId: "vault-ref-recent",
+      displayName: "Recent",
+      sourceKind: "local" as const,
+      sourceSummary: "recent.kdbx",
+      lastUsedAt: 20,
+      availability: "ready" as const,
+      supportsQuickUnlock: false,
+      isCurrent: false
+    },
+    {
+      vaultRefId: "vault-ref-current",
+      displayName: "Current",
+      sourceKind: "local" as const,
+      sourceSummary: "current.kdbx",
+      lastUsedAt: 10,
+      availability: "ready" as const,
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  const deleteRecentVaultIfNotCurrent = vi.fn(async (vaultRefId: string) => {
+    if (vaultRefId === "vault-ref-current") {
+      throw new Error("attempted to trim the current vault");
+    }
+    vaults = vaults.filter((vault) => vault.vaultRefId !== vaultRefId);
+    return vaults;
+  });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-current"
+    }),
+    listRecentVaults: vi.fn(async () => vaults),
+    deleteRecentVaultIfNotCurrent
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  await waitFor(() => {
+    expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledWith("vault-ref-recent");
+  });
+  expect(deleteRecentVaultIfNotCurrent).not.toHaveBeenCalledWith("vault-ref-current");
 });
 
 it("does not let an older recent-vault reconciliation delete against superseded settings", async () => {
@@ -1752,7 +1808,7 @@ it("does not let an older recent-vault reconciliation delete against superseded 
       currentVaultRefId: "vault-ref-1"
     }),
     listRecentVaults,
-    deleteRecentVault: vi.fn(async () => [])
+    deleteRecentVaultIfNotCurrent: vi.fn(async () => [])
   } satisfies RuntimeClientLike;
 
   render(<App client={client} extensionSettingsStore={settingsStore} />);
@@ -1772,9 +1828,80 @@ it("does not let an older recent-vault reconciliation delete against superseded 
   });
 
   firstList.resolve(recentVaults);
-  await waitFor(() => expect(listRecentVaults).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(listRecentVaults).toHaveBeenCalledTimes(3));
 
-  expect(client.deleteRecentVault).not.toHaveBeenCalled();
+  expect(client.deleteRecentVaultIfNotCurrent).not.toHaveBeenCalled();
+});
+
+it("refreshes recent vaults before trimming after a concurrent selection", async () => {
+  const settings = {
+    ...DEFAULT_EXTENSION_SETTINGS,
+    recentVaultLimit: 1
+  };
+  const destructiveSettingsRead = createDeferred<typeof settings>();
+  let settingsLoads = 0;
+  const settingsStore: ExtensionSettingsStore = {
+    surface: "windows",
+    load: vi.fn(() => {
+      settingsLoads += 1;
+      return settingsLoads === 3
+        ? destructiveSettingsRead.promise
+        : Promise.resolve(settings);
+    }),
+    save: vi.fn(async () => undefined)
+  };
+  let liveVaults = [
+    {
+      vaultRefId: "vault-ref-new",
+      displayName: "New",
+      sourceKind: "local" as const,
+      sourceSummary: "new.kdbx",
+      lastUsedAt: 20,
+      availability: "ready" as const,
+      supportsQuickUnlock: false,
+      isCurrent: true
+    },
+    {
+      vaultRefId: "vault-ref-old",
+      displayName: "Old",
+      sourceKind: "local" as const,
+      sourceSummary: "old.kdbx",
+      lastUsedAt: 10,
+      availability: "ready" as const,
+      supportsQuickUnlock: false,
+      isCurrent: false
+    }
+  ];
+  const listRecentVaults = vi.fn(async () => liveVaults.map((vault) => ({ ...vault })));
+  const deleteRecentVaultIfNotCurrent = vi.fn(async (vaultRefId: string) => {
+    liveVaults = liveVaults.filter((vault) => vault.vaultRefId !== vaultRefId);
+    return liveVaults;
+  });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-new"
+    }),
+    listRecentVaults,
+    deleteRecentVaultIfNotCurrent
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+  await waitFor(() => expect(listRecentVaults).toHaveBeenCalledTimes(1));
+
+  liveVaults = [
+    { ...liveVaults[1]!, lastUsedAt: 30, isCurrent: true },
+    { ...liveVaults[0]!, lastUsedAt: 20, isCurrent: false }
+  ];
+  destructiveSettingsRead.resolve(settings);
+
+  await waitFor(() =>
+    expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledTimes(1)
+  );
+  expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledWith("vault-ref-new");
+  expect(liveVaults.map((vault) => vault.vaultRefId)).toEqual(["vault-ref-old"]);
 });
 
 it("locks an unlocked manager after local idle timeout", async () => {
@@ -3571,7 +3698,17 @@ it("shows a visible setup error when adding a local vault fails", async () => {
 });
 
 it("removes a recent vault record from manager setup without deleting the database file", async () => {
-  const deleteRecentVault = vi.fn(async () => [
+  let vaults = [
+    {
+      vaultRefId: "vault-ref-1",
+      displayName: "Personal",
+      sourceKind: "local",
+      sourceSummary: "personal.kdbx",
+      lastUsedAt: 1776500000,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    },
     {
       vaultRefId: "vault-ref-2",
       displayName: "Work",
@@ -3580,9 +3717,15 @@ it("removes a recent vault record from manager setup without deleting the databa
       lastUsedAt: 1776500010,
       availability: "ready",
       supportsQuickUnlock: false,
-      isCurrent: true
+      isCurrent: false
     }
-  ]);
+  ];
+  const deleteRecentVault = vi.fn(async (vaultRefId: string) => {
+    vaults = vaults
+      .filter((vault) => vault.vaultRefId !== vaultRefId)
+      .map((vault) => ({ ...vault, isCurrent: true }));
+    return vaults;
+  });
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -3590,28 +3733,7 @@ it("removes a recent vault record from manager setup without deleting the databa
       activeVaultId: null,
       currentVaultRefId: "vault-ref-1"
     }),
-    listRecentVaults: vi.fn(async () => [
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      },
-      {
-        vaultRefId: "vault-ref-2",
-        displayName: "Work",
-        sourceKind: "local",
-        sourceSummary: "work.kdbx",
-        lastUsedAt: 1776500010,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: false
-      }
-    ]),
+    listRecentVaults: vi.fn(async () => vaults),
     deleteRecentVault,
     listGroups: vi.fn(),
     listEntries: vi.fn(),

@@ -36,6 +36,9 @@ const unsupportedClient = {
   async deleteRecentVault() {
     return [];
   },
+  async deleteRecentVaultIfNotCurrent() {
+    return [];
+  },
   openLocalVault: unsupported,
   async unlockCurrentVaultWithPassword() {
     return { unlocked: false, activeVaultId: null, currentVaultRefId: null };

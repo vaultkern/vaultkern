@@ -471,6 +471,14 @@ export class RuntimeClient {
     return response.vaults;
   }
 
+  async deleteRecentVaultIfNotCurrent(vaultRefId: string): Promise<VaultReference[]> {
+    const response = await this.sendCommand<VaultReferenceList>({
+      type: "delete_vault_reference_if_not_current",
+      vault_ref_id: vaultRefId
+    });
+    return response.vaults;
+  }
+
   async openLocalVault(path: string): Promise<VaultHandle> {
     return this.sendCommand<VaultHandle>({
       type: "open_local_vault",
