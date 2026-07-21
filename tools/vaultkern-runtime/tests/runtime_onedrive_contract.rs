@@ -1737,6 +1737,91 @@ fn runtime_retries_etag_cas_with_a_fresh_three_way_patch() {
 }
 
 #[test]
+fn retention_that_cannot_keep_the_conflict_loser_uses_a_conflict_copy() {
+    let core = KeepassCore::new();
+    let mut initial = Vault::empty("Cloud Vault");
+    initial.history_max_items = Some(0);
+    let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
+    let initial_bytes = core
+        .save_kdbx(&initial, &key(), SaveProfile::recommended())
+        .unwrap();
+    let mut runtime = Runtime::for_tests_at_with_onedrive_item(
+        100,
+        "drive-1",
+        "item-1",
+        "Cloud Vault.kdbx",
+        "alice@example.com",
+        initial_bytes.clone(),
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("demo-password")
+        .unwrap();
+    let vault_id = runtime.session_state().active_vault_id.unwrap();
+    runtime
+        .handle(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            title: "Account".into(),
+            username: "alice".into(),
+            password: "local-password".into(),
+            url: "https://account.example".into(),
+            notes: String::new(),
+            totp_uri: None,
+            custom_fields: vec![],
+        })
+        .unwrap();
+
+    let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
+    core.update_entry_fields(
+        &mut remote,
+        &entry_id,
+        vaultkern_core::EntryUpdate {
+            title: None,
+            username: None,
+            password: Some("remote-password".into()),
+            url: None,
+            notes: None,
+        },
+    )
+    .unwrap();
+    core.update_entry_times(
+        &mut remote,
+        &entry_id,
+        EntryTimesUpdate {
+            created_at: None,
+            modified_at: Some(30),
+            last_accessed_at: None,
+            usage_count: None,
+            location_changed_at: None,
+        },
+    )
+    .unwrap();
+    let remote_bytes = core
+        .save_kdbx(&remote, &key(), SaveProfile::recommended())
+        .unwrap();
+    runtime.queue_test_onedrive_precondition_failure(Some(remote_bytes.clone()));
+
+    let response = runtime
+        .handle(RuntimeCommand::SaveVault { vault_id })
+        .unwrap();
+    assert!(matches!(
+        response,
+        RuntimeResponse::SaveVaultResult(result)
+            if result.status == SaveVaultStatusDto::ConflictCopy
+                && result.conflict_copy_path.is_some()
+    ));
+    assert_eq!(
+        runtime
+            .read_test_onedrive_item_bytes("drive-1", "item-1")
+            .unwrap(),
+        remote_bytes
+    );
+}
+
+#[test]
 fn runtime_refreshes_quick_unlock_after_remote_kdf_rotation_before_merging() {
     let core = KeepassCore::new();
     let mut initial = Vault::empty("Cloud Vault");

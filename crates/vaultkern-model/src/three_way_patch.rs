@@ -23,6 +23,13 @@ pub struct ThreeWayPatchReport {
 pub struct ThreeWayPatchResult {
     pub vault: Vault,
     pub report: ThreeWayPatchReport,
+    pub required_history_snapshots: Vec<ThreeWayPatchRecoverySnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreeWayPatchRecoverySnapshot {
+    pub entry_id: Uuid,
+    pub snapshot: Entry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -129,6 +136,7 @@ pub fn three_way_field_patch(
     let remotely_preserved_subtrees =
         changed_subtrees_deleted_from_other(&base_flat, &remote_flat, &local_flat);
     let mut report = ThreeWayPatchReport::default();
+    let mut required_history_snapshots = Vec::new();
     let mut groups = merge_groups(
         &base_flat,
         &local_flat,
@@ -147,6 +155,7 @@ pub fn three_way_field_patch(
         &locally_preserved_subtrees,
         &remotely_preserved_subtrees,
         &mut report,
+        &mut required_history_snapshots,
     )?;
     reconcile_entry_sibling_orders(&base_flat, &local_flat, &remote_flat, &mut entries)?;
     let root = rebuild_tree(base_flat.root_id, &groups, &entries, &mut BTreeSet::new())?;
@@ -156,7 +165,11 @@ pub fn three_way_field_patch(
         .retain(|deleted| !groups.contains_key(&deleted.id) && !entries.contains_key(&deleted.id));
     vault.root = root;
     normalize_group_attachment_content(&mut vault.root);
-    Ok(ThreeWayPatchResult { vault, report })
+    Ok(ThreeWayPatchResult {
+        vault,
+        report,
+        required_history_snapshots,
+    })
 }
 
 fn ensure_unique_modeled_meta_ids(
@@ -667,6 +680,7 @@ fn merge_entries(
     locally_preserved_subtrees: &BTreeSet<Uuid>,
     remotely_preserved_subtrees: &BTreeSet<Uuid>,
     report: &mut ThreeWayPatchReport,
+    required_history_snapshots: &mut Vec<ThreeWayPatchRecoverySnapshot>,
 ) -> Result<BTreeMap<Uuid, FlatEntry>, ThreeWayPatchError> {
     let ids = union_keys3(&base.entries, &local.entries, &remote.entries);
     let mut merged = BTreeMap::new();
@@ -700,8 +714,13 @@ fn merge_entries(
                 ))
             .then(|| remote_entry.clone()),
             (Some(base), Some(local), Some(remote)) => {
-                let (value, changed) =
-                    merge_entry(&base.value, &local.value, &remote.value, report);
+                let (value, changed) = merge_entry(
+                    &base.value,
+                    &local.value,
+                    &remote.value,
+                    report,
+                    required_history_snapshots,
+                );
                 let (parent, location_changed_at, location_conflict, location_prefers_local) =
                     merge_location(
                         base.parent,
@@ -721,6 +740,7 @@ fn merge_entries(
                             &local.value
                         },
                         report,
+                        required_history_snapshots,
                     );
                 }
                 if changed || parent != remote.parent || value != remote.value {
@@ -844,6 +864,7 @@ fn merge_entry(
     local: &Entry,
     remote: &Entry,
     report: &mut ThreeWayPatchReport,
+    required_history_snapshots: &mut Vec<ThreeWayPatchRecoverySnapshot>,
 ) -> (Entry, bool) {
     let prefer_local = local.modified_at > remote.modified_at;
     let mut state = FieldMerge::default();
@@ -986,6 +1007,7 @@ fn merge_entry(
             &mut merged,
             if prefer_local { remote } else { local },
             report,
+            required_history_snapshots,
         );
     }
     normalize_entry_slots(&mut merged);
@@ -1465,9 +1487,17 @@ fn add_losing_history_snapshot(
     merged: &mut Entry,
     losing: &Entry,
     report: &mut ThreeWayPatchReport,
+    required_history_snapshots: &mut Vec<ThreeWayPatchRecoverySnapshot>,
 ) {
     let mut snapshot = losing.clone();
     prepare_entry_history_snapshot(&mut snapshot);
+    let required = ThreeWayPatchRecoverySnapshot {
+        entry_id: merged.id,
+        snapshot: snapshot.clone(),
+    };
+    if !required_history_snapshots.contains(&required) {
+        required_history_snapshots.push(required);
+    }
     if !merged.history.contains(&snapshot) {
         merged.history.push(snapshot);
         report.history_snapshots_added += 1;

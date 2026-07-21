@@ -19,7 +19,8 @@ pub use canonical_serialization::{
     canonical_entry_bytes_v1, canonical_entry_content_hash_v1,
 };
 pub use three_way_patch::{
-    ThreeWayPatchError, ThreeWayPatchReport, ThreeWayPatchResult, three_way_field_patch,
+    ThreeWayPatchError, ThreeWayPatchRecoverySnapshot, ThreeWayPatchReport, ThreeWayPatchResult,
+    three_way_field_patch,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]

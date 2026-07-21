@@ -15,9 +15,10 @@ use url::form_urlencoded::byte_serialize;
 use uuid::Uuid;
 use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, Compression, CustomDataItemInput, Entry,
-    EntryAttachmentInput, EntryCreate, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher, KdbxError, KdbxVersion, KeepassCore,
-    PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchReport, TotpSpec, TransformedKey, Vault,
+    EntryAttachmentInput, EntryCreate, EntryCustomDataInput, EntryCustomFieldInput,
+    EntryTimesUpdate, EntryUpdate, ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher,
+    KdbxError, KdbxVersion, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile,
+    ThreeWayPatchRecoverySnapshot, ThreeWayPatchReport, TotpSpec, TransformedKey, Vault,
     VaultBinTemplateMetadataUpdate, VaultIdentityMetadataUpdate, VaultLifecycleMetadataUpdate,
     VaultMetadataUpdate, derive_transformed_key_with_policy, load_kdbx_with_transformed_key,
     load_kdbx_with_transformed_key_diagnostic, parse_key_file_bytes, required_version,
@@ -93,6 +94,8 @@ use crate::unlock::{
 use crate::vault_reference_store::{StoredVaultSource, VaultReferenceStore};
 
 const VAULTKERN_KDBX_GENERATOR: &str = "VaultKern";
+const PLATFORM_PASSKEY_RP_NAME_KEY: &str = "VaultKern.PlatformPasskey.RelyingPartyName";
+const PLATFORM_PASSKEY_USER_DISPLAY_NAME_KEY: &str = "VaultKern.PlatformPasskey.UserDisplayName";
 
 fn canonical_custom_fields(fields: &[EntryCustomFieldDto]) -> Option<BTreeMap<&str, (&str, bool)>> {
     let canonical = fields
@@ -344,6 +347,11 @@ impl Runtime {
                 .context("cannot merge concurrent encryption profile changes")?;
         let patched = three_way_field_patch(base_vault, local_vault, remote_vault)
             .context("changes cannot be represented as a field patch")?;
+        ensure_patch_conflict_history_is_recoverable(
+            &patched.vault,
+            &patched.required_history_snapshots,
+        )
+        .context("changes cannot be represented within vault history retention")?;
         Ok((patched.vault, merged_save_profile))
     }
 
@@ -2152,6 +2160,7 @@ impl Runtime {
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
             let passkey = dto_to_passkey_record(passkey)?;
             self.core.snapshot_entry_to_history(vault, entry_id)?;
+            clear_platform_passkey_display_labels(&self.core, vault, entry_id)?;
             self.core.set_entry_passkey(vault, entry_id, passkey)?;
             touch_entry_modified_at(&self.core, vault, entry_id, modified_at)?;
             enforce_history_limits(vault);
@@ -2201,8 +2210,19 @@ impl Runtime {
             vault.recycle_bin_enabled.unwrap_or(true),
             &mut |entry, passkey| {
                 if passkey.user_handle.is_some()
-                    && let Ok(credential) =
-                        platform_passkey_credential(passkey, &entry.title, &entry.username)
+                    && let Ok(credential) = platform_passkey_credential(
+                        passkey,
+                        entry
+                            .custom_data
+                            .get(PLATFORM_PASSKEY_RP_NAME_KEY)
+                            .map(String::as_str)
+                            .unwrap_or(&entry.title),
+                        entry
+                            .custom_data
+                            .get(PLATFORM_PASSKEY_USER_DISPLAY_NAME_KEY)
+                            .map(String::as_str)
+                            .unwrap_or(&entry.username),
+                    )
                 {
                     credentials.push(credential);
                 }
@@ -2299,6 +2319,13 @@ impl Runtime {
             self.core.snapshot_entry_to_history(vault, &entry_id)?;
             self.core
                 .set_entry_passkey(vault, &entry_id, registration.passkey)?;
+            set_platform_passkey_display_labels(
+                &self.core,
+                vault,
+                &entry_id,
+                &relying_party_name,
+                &user_display_name,
+            )?;
             if refresh_entry_title || refresh_entry_username {
                 self.core.update_entry_fields(
                     vault,
@@ -2316,8 +2343,8 @@ impl Runtime {
             enforce_history_limits(vault);
             (entry_id, rollback)
         } else {
-            let mut entry = Entry::new(relying_party_name);
-            entry.username = user_display_name;
+            let mut entry = Entry::new(relying_party_name.clone());
+            entry.username = user_display_name.clone();
             entry.password = String::new();
             entry.url = format!("https://{}", input.relying_party);
             entry.notes = "Created by system passkey provider".into();
@@ -2340,10 +2367,18 @@ impl Runtime {
             vault.root.entries.push(entry);
             self.core
                 .set_entry_passkey(vault, &entry_id, registration.passkey)?;
+            set_platform_passkey_display_labels(
+                &self.core,
+                vault,
+                &entry_id,
+                &relying_party_name,
+                &user_display_name,
+            )?;
             initialize_entry_creation_times(&self.core, vault, &entry_id, modified_at)?;
             (entry_id, rollback)
         };
 
+        let retained_credential_id = URL_SAFE_NO_PAD.encode(&credential.credential_id);
         let save_error = match self.save_vault(&vault_id) {
             Ok(RuntimeResponse::SaveVaultResult(result))
                 if result.status != SaveVaultStatusDto::ConflictCopy =>
@@ -2357,6 +2392,24 @@ impl Runtime {
             Ok(response) => Some(anyhow::anyhow!(
                 "platform passkey registration received an unexpected save response: {response:?}"
             )),
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<LocalFileCommitError>(),
+                    Some(LocalFileCommitError::OutcomeUnknown { .. })
+                ) =>
+            {
+                match self.reconcile_visible_platform_passkey_generation(
+                    &vault_id,
+                    &retained_credential_id,
+                    &credential.relying_party,
+                ) {
+                    Ok(true) => None,
+                    Ok(false) => Some(error),
+                    Err(reconcile_error) => Some(error.context(format!(
+                        "failed to reconcile the visible platform passkey generation: {reconcile_error:#}"
+                    ))),
+                }
+            }
             Err(error) => Some(error),
         };
         if let Some(save_error) = save_error {
@@ -2368,7 +2421,6 @@ impl Runtime {
             };
         }
 
-        let retained_credential_id = URL_SAFE_NO_PAD.encode(&credential.credential_id);
         let retained_vault = self.loaded_vault(&vault_id)?;
         find_unique_passkey_by_credential_id_and_relying_party(
             &retained_vault.root,
@@ -2384,6 +2436,54 @@ impl Runtime {
             credential,
             authenticator_data: registration.authenticator_data,
         })
+    }
+
+    fn reconcile_visible_platform_passkey_generation(
+        &mut self,
+        vault_id: &str,
+        credential_id: &str,
+        relying_party: &str,
+    ) -> Result<bool> {
+        let snapshot = self.read_current_snapshot(vault_id, None)?;
+        let bytes = snapshot
+            .bytes
+            .context("visible platform passkey generation did not include bytes")?;
+        let key = {
+            let loaded = self
+                .vault_session
+                .find_loaded(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            transformed_key_from_loaded_vault(loaded)?
+        };
+        let visible = Self::load_session_database(&bytes, &key)
+            .context("failed to parse the visible platform passkey generation")?
+            .vault;
+        if find_passkey_by_credential_id_and_relying_party(
+            &visible.root,
+            visible.recycle_bin_group,
+            visible.recycle_bin_enabled.unwrap_or(true),
+            credential_id,
+            Some(relying_party),
+        )
+        .is_none()
+        {
+            return Ok(false);
+        }
+        find_unique_passkey_by_credential_id_and_relying_party(
+            &visible.root,
+            visible.recycle_bin_group,
+            visible.recycle_bin_enabled.unwrap_or(true),
+            credential_id,
+            Some(relying_party),
+        )?;
+        self.install_committed_autofill_generation(
+            vault_id,
+            visible,
+            bytes,
+            snapshot.fingerprint,
+            None,
+        )?;
+        Ok(true)
     }
 
     pub fn create_platform_passkey_assertion(
@@ -5655,6 +5755,22 @@ impl Runtime {
                     );
                 }
             };
+            if let Err(error) = ensure_patch_conflict_history_is_recoverable(
+                &patched.vault,
+                &patched.required_history_snapshots,
+            ) {
+                return self.upload_or_persist_onedrive_conflict_copy(
+                    vault_id,
+                    drive_id,
+                    item_id,
+                    &display_name,
+                    &account_label,
+                    baseline_fingerprint,
+                    &local_bytes,
+                    Some(verified_local.clone()),
+                    &format!("concurrent changes exceed vault history retention: {error}"),
+                );
+            }
             let report = patched.report;
             let (bytes, verified_vault) = Self::serialize_and_verify_vault_candidate(
                 patched.vault,
@@ -7022,6 +7138,21 @@ impl Runtime {
                     );
                 }
             };
+            if let Err(error) = ensure_patch_conflict_history_is_recoverable(
+                &patched.vault,
+                &patched.required_history_snapshots,
+            ) {
+                let local_bytes = serialize_live_conflict_copy()?;
+                return self.upload_pending_onedrive_conflict_copy(
+                    vault_id,
+                    drive_id,
+                    item_id,
+                    cache_key,
+                    &pending,
+                    &local_bytes,
+                    &format!("pending changes exceed vault history retention: {error}"),
+                );
+            }
             let (bytes, verified_vault) = Self::serialize_and_verify_vault_candidate(
                 patched.vault,
                 &key,
@@ -7994,6 +8125,57 @@ fn platform_credential_label(value: &str, fallback: &str) -> String {
     }
 }
 
+fn set_platform_passkey_display_labels(
+    core: &KeepassCore,
+    vault: &mut Vault,
+    entry_id: &str,
+    relying_party_name: &str,
+    user_display_name: &str,
+) -> Result<()> {
+    for (key, value) in [
+        (PLATFORM_PASSKEY_RP_NAME_KEY, relying_party_name),
+        (PLATFORM_PASSKEY_USER_DISPLAY_NAME_KEY, user_display_name),
+    ] {
+        core.upsert_entry_custom_data(
+            vault,
+            entry_id,
+            EntryCustomDataInput {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn clear_platform_passkey_display_labels(
+    core: &KeepassCore,
+    vault: &mut Vault,
+    entry_id: &str,
+) -> Result<()> {
+    for key in [
+        PLATFORM_PASSKEY_RP_NAME_KEY,
+        PLATFORM_PASSKEY_USER_DISPLAY_NAME_KEY,
+    ] {
+        if entry_has_custom_data_key(&vault.root, entry_id, key) {
+            core.delete_entry_custom_data(vault, entry_id, key)?;
+        }
+    }
+    Ok(())
+}
+
+fn entry_has_custom_data_key(group: &vaultkern_core::Group, entry_id: &str, key: &str) -> bool {
+    group
+        .entries
+        .iter()
+        .find(|entry| entry.id.to_string() == entry_id)
+        .is_some_and(|entry| entry.custom_data.contains_key(key))
+        || group
+            .children
+            .iter()
+            .any(|child| entry_has_custom_data_key(child, entry_id, key))
+}
+
 fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> Result<PasskeyRecord> {
     validate_passkey_credential_id(&passkey.credential_id)?;
     if let Some(user_handle) = &passkey.user_handle {
@@ -8454,6 +8636,45 @@ fn enforce_history_limits(vault: &mut Vault) {
     {
         enforce_history_size_limit(vault, max_size);
     }
+}
+
+fn ensure_patch_conflict_history_is_recoverable(
+    patched: &Vault,
+    required_history_snapshots: &[ThreeWayPatchRecoverySnapshot],
+) -> Result<()> {
+    if required_history_snapshots.is_empty() {
+        return Ok(());
+    }
+
+    let mut retained = patched.clone();
+    enforce_history_limits(&mut retained);
+    let retained_entries = entries_by_id(&retained.root);
+
+    for required in required_history_snapshots {
+        let Some(retained_entry) = retained_entries.get(&required.entry_id) else {
+            anyhow::bail!("retention removed the entry holding a conflict recovery snapshot");
+        };
+        if !retained_entry.history.contains(&required.snapshot) {
+            anyhow::bail!(
+                "retention would discard a required conflict recovery snapshot for entry {}",
+                required.entry_id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn entries_by_id(group: &vaultkern_core::Group) -> BTreeMap<Uuid, &Entry> {
+    fn collect<'a>(group: &'a vaultkern_core::Group, entries: &mut BTreeMap<Uuid, &'a Entry>) {
+        entries.extend(group.entries.iter().map(|entry| (entry.id, entry)));
+        for child in &group.children {
+            collect(child, entries);
+        }
+    }
+
+    let mut entries = BTreeMap::new();
+    collect(group, &mut entries);
+    entries
 }
 
 fn enforce_history_item_limit(group: &mut vaultkern_core::Group, max_items: usize) {
@@ -9620,6 +9841,42 @@ mod tests {
         assert_eq!(
             reloaded.description.as_deref(),
             Some("edited without retaining the password")
+        );
+    }
+
+    #[test]
+    fn conflict_recovery_snapshot_is_required_even_when_it_already_existed_in_history() {
+        let mut base = Vault::empty("history retention");
+        base.history_max_items = Some(0);
+        let mut entry = Entry::new("account");
+        entry.password = "base".into();
+        entry.modified_at = 10;
+        let entry_id = entry.id;
+
+        let mut remote_loser = entry.clone();
+        remote_loser.password = "remote".into();
+        remote_loser.modified_at = 30;
+        let mut recovery_snapshot = remote_loser.clone();
+        vaultkern_core::prepare_entry_history_snapshot(&mut recovery_snapshot);
+        entry.history.push(recovery_snapshot);
+        base.root.entries.push(entry);
+
+        let mut local = base.clone();
+        local.root.entries[0].password = "local".into();
+        local.root.entries[0].modified_at = 40;
+        let mut remote = base.clone();
+        remote.root.entries[0].password = "remote".into();
+        remote.root.entries[0].modified_at = 30;
+
+        let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+        assert_eq!(patched.report.history_snapshots_added, 0);
+        assert!(
+            ensure_patch_conflict_history_is_recoverable(
+                &patched.vault,
+                &patched.required_history_snapshots,
+            )
+            .is_err(),
+            "retention must not erase the only recovery copy of the losing value for {entry_id}"
         );
     }
 
@@ -11164,6 +11421,106 @@ mod tests {
     }
 
     #[test]
+    fn platform_reregistration_persists_current_display_labels_independently_of_entry_fields() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let first = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                relying_party_name: "Example Inc".into(),
+                user_name: "alice@example.com".into(),
+                user_display_name: "Alice".into(),
+                user_handle: b"platform-label-user".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .unwrap();
+
+        let replacement = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                relying_party_name: "Example Corporation".into(),
+                user_name: "alice@example.com".into(),
+                user_display_name: "Alice Smith".into(),
+                user_handle: b"platform-label-user".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .unwrap();
+        assert_ne!(
+            replacement.credential.credential_id,
+            first.credential.credential_id
+        );
+
+        let entry = runtime
+            .get_entry_detail(&opened.vault_id, &replacement.entry_id)
+            .unwrap();
+        assert_eq!(entry.title, "Example Inc");
+        assert_eq!(entry.username, "Alice");
+        let credentials = runtime.list_platform_passkey_credentials().unwrap();
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].relying_party_name, "Example Corporation");
+        assert_eq!(credentials[0].user_display_name, "Alice Smith");
+
+        drop(runtime);
+        let mut reopened = Runtime::for_tests();
+        let handle = reopened.open_local_vault(&opened.vault_id).unwrap();
+        reopened
+            .unlock_vault(&handle.vault_id, Some("demo-password"), None)
+            .unwrap();
+        let credentials = reopened.list_platform_passkey_credentials().unwrap();
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].relying_party_name, "Example Corporation");
+        assert_eq!(credentials[0].user_display_name, "Alice Smith");
+    }
+
+    #[test]
+    fn manual_passkey_replacement_does_not_reuse_platform_display_labels() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let registration = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                relying_party_name: "Example Inc".into(),
+                user_name: "alice@example.com".into(),
+                user_display_name: "Alice".into(),
+                user_handle: b"platform-label-replacement".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .unwrap();
+        runtime
+            .update_entry_fields(
+                &opened.vault_id,
+                &registration.entry_id,
+                "Manual Login".into(),
+                "manual-user".into(),
+                String::new(),
+                "https://other.example".into(),
+                String::new(),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        let mut replacement = runtime
+            .get_entry_detail(&opened.vault_id, &registration.entry_id)
+            .unwrap()
+            .passkey
+            .unwrap();
+        replacement.relying_party = "other.example".into();
+        replacement.username = "manual-account".into();
+        replacement.credential_id = URL_SAFE_NO_PAD.encode(b"manual-platform-replacement");
+        runtime
+            .set_entry_passkey(&opened.vault_id, &registration.entry_id, replacement)
+            .unwrap();
+
+        let credentials = runtime.list_platform_passkey_credentials().unwrap();
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].relying_party_name, "Manual Login");
+        assert_eq!(credentials[0].user_display_name, "manual-user");
+    }
+
+    #[test]
     fn platform_plugin_registration_rolls_back_memory_when_durable_save_fails() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
@@ -11215,6 +11572,62 @@ mod tests {
         assert_eq!(
             detail.passkey.unwrap().credential_id,
             URL_SAFE_NO_PAD.encode(registration.credential.credential_id)
+        );
+    }
+
+    #[test]
+    fn platform_plugin_reregistration_keeps_a_visible_outcome_unknown_generation() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime
+            .vault_session
+            .find_loaded_mut(&opened.vault_id)
+            .unwrap()
+            .vault
+            .as_mut()
+            .unwrap()
+            .history_max_items = Some(0);
+
+        let first = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                relying_party_name: "Example".into(),
+                user_name: "alice@example.com".into(),
+                user_display_name: "Alice".into(),
+                user_handle: b"platform-user-outcome-unknown".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .unwrap();
+        arm_local_backup_loss_after_publish(&mut runtime, &opened.path);
+
+        let replacement = runtime
+            .register_platform_passkey(PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                relying_party_name: "Example".into(),
+                user_name: "alice@example.com".into(),
+                user_display_name: "Alice".into(),
+                user_handle: b"platform-user-outcome-unknown".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            })
+            .expect("the visible published replacement must complete registration");
+        assert_ne!(
+            replacement.credential.credential_id,
+            first.credential.credential_id
+        );
+
+        drop(runtime);
+        let mut reopened = Runtime::for_tests();
+        let handle = reopened.open_local_vault(&opened.vault_id).unwrap();
+        reopened
+            .unlock_vault(&handle.vault_id, Some("demo-password"), None)
+            .unwrap();
+        let credentials = reopened.list_platform_passkey_credentials().unwrap();
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(
+            credentials[0].credential_id,
+            replacement.credential.credential_id
         );
     }
 

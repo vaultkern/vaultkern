@@ -18,8 +18,9 @@ pub use vaultkern_model::{
     AttachmentContent, AttachmentContentId, AttachmentMap, AutoTypeAssociation, AutoTypeConfig,
     CustomField, CustomIcon, DeletedObject, Entry, EntryFieldProtection, Group, GroupFlags,
     GroupTimes, MemoryProtection, ModelError, PasskeyRecord, ThreeWayPatchError,
-    ThreeWayPatchReport, ThreeWayPatchResult, TotpAlgorithm, TotpSpec, Vault,
-    is_totp_persistent_attribute_key, prepare_entry_history_snapshot, three_way_field_patch,
+    ThreeWayPatchRecoverySnapshot, ThreeWayPatchReport, ThreeWayPatchResult, TotpAlgorithm,
+    TotpSpec, Vault, is_totp_persistent_attribute_key, prepare_entry_history_snapshot,
+    three_way_field_patch,
 };
 
 #[derive(Clone, PartialEq, Eq)]
