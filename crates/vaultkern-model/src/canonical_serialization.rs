@@ -1060,7 +1060,7 @@ mod tests {
             username: "alice".into(),
             credential_id: "credential".into(),
             generated_user_id: Some("generated".into()),
-            private_key_pem: "private-key".into(),
+            private_key_pem: String::from("private-key").into(),
             relying_party: "example.com".into(),
             user_handle: Some("handle".into()),
             backup_eligible: true,
@@ -1669,7 +1669,7 @@ mod tests {
             username: "alice".into(),
             credential_id: "credential-one".into(),
             generated_user_id: Some("generated".into()),
-            private_key_pem: "private-key-one".into(),
+            private_key_pem: String::from("private-key-one").into(),
             relying_party: "example.com".into(),
             user_handle: Some("handle".into()),
             backup_eligible: true,
@@ -1678,7 +1678,7 @@ mod tests {
         let mut second = first.clone();
         let second_passkey = second.passkey.as_mut().expect("passkey projection");
         second_passkey.credential_id = "credential-two".into();
-        second_passkey.private_key_pem = "private-key-two".into();
+        second_passkey.private_key_pem = String::from("private-key-two").into();
 
         assert_eq!(first.id, second.id);
         assert_eq!(first.modified_at, second.modified_at);
@@ -1693,7 +1693,7 @@ mod tests {
             username: "alice".into(),
             credential_id: "credential".into(),
             generated_user_id: Some("generated".into()),
-            private_key_pem: "private-key".into(),
+            private_key_pem: String::from("private-key").into(),
             relying_party: "example.com".into(),
             user_handle: Some("handle".into()),
             backup_eligible: true,

@@ -23,7 +23,12 @@ type TranslationKey =
   | "Needs repair in manager"
   | "Extension Settings"
   | "Local extension preferences. These are not stored in the KDBX database."
+  | "Browser Extension Settings"
+  | "Windows Settings"
+  | "Local browser extension preferences. These are not stored in the KDBX database."
+  | "Local Windows app preferences. These are not stored in the KDBX database."
   | "Save Extension Settings"
+  | "Save Windows Settings"
   | "Saving..."
   | "Database Settings"
   | "Recent Databases"
@@ -31,8 +36,16 @@ type TranslationKey =
   | "Clear Clipboard Seconds"
   | "Language"
   | "VaultKern passkey provider"
+  | "Browser passkey proxy"
+  | "Windows passkey provider"
   | "Page-load autofill"
   | "Quick Unlock"
+  | "Quick Unlock Master Password"
+  | "Quick Unlock Key File Path"
+  | "Enable Windows Hello"
+  | "Enrolling..."
+  | "Unlock this vault before enrolling Windows Hello."
+  | "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock."
   | "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret."
   | "Database"
   | "Loading database settings..."
@@ -154,6 +167,8 @@ type TranslationKey =
   | "This only removes the recent vault record."
   | "Back"
   | "Vault changed on disk. Merged and saved."
+  | "Vault changed on disk. Local edits were saved to a conflict copy:"
+  | "Vault changed on disk. Local edits were saved as a conflict copy."
   | "Saved to local cache. Remote sync pending."
   | "Using local cache."
   | "Using local cache. Remote sync failed."
@@ -165,13 +180,19 @@ type TranslationKey =
   | "Statistics description"
   | "You have unsaved changes"
   | "Save before leaving this entry, discard your edits, or continue editing."
+  | "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+  | "The database settings changed in this session but are not durable yet. Retry saving before leaving settings."
+  | "Save your database settings before leaving, discard your edits, or continue editing."
+  | "Save your extension settings before leaving, discard your edits, or continue editing."
   | "Discard changes"
   | "Continue editing"
   | "Delete this entry permanently?"
   | "This will remove the selected entry from the current vault."
   | "Delete permanently"
+  | "Retry save"
   | "Failed to save extension settings"
   | "Failed to update quick unlock"
+  | "Failed to reconcile Windows settings"
   | "Failed to add local vault"
   | "Failed to add OneDrive vault"
   | "Failed to save entry changes"
@@ -184,6 +205,7 @@ type TranslationKey =
   | "Failed to delete attachment"
   | "Failed to save database settings"
   | "Failed to load entry history"
+  | "Failed to load settings"
   | "Failed to load session state"
   | "Failed to load groups"
   | "Failed to load entries"
@@ -230,7 +252,12 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Needs repair in manager": "需要在管理器中修复",
   "Extension Settings": "插件设置",
   "Local extension preferences. These are not stored in the KDBX database.": "本地插件偏好设置，不会保存到 KDBX 数据库。",
+  "Browser Extension Settings": "浏览器插件设置",
+  "Windows Settings": "Windows 设置",
+  "Local browser extension preferences. These are not stored in the KDBX database.": "本地浏览器插件偏好设置，不会保存到 KDBX 数据库。",
+  "Local Windows app preferences. These are not stored in the KDBX database.": "本地 Windows 应用偏好设置，不会保存到 KDBX 数据库。",
   "Save Extension Settings": "保存插件设置",
+  "Save Windows Settings": "保存 Windows 设置",
   "Saving...": "保存中...",
   "Database Settings": "数据库设置",
   "Recent Databases": "最近数据库",
@@ -238,8 +265,16 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Clear Clipboard Seconds": "清空剪贴板秒数",
   Language: "语言",
   "VaultKern passkey provider": "VaultKern 通行密钥提供器",
+  "Browser passkey proxy": "浏览器通行密钥代理",
+  "Windows passkey provider": "Windows 通行密钥提供器",
   "Page-load autofill": "页面加载时自动填充",
   "Quick Unlock": "快速解锁",
+  "Quick Unlock Master Password": "快速解锁主密码",
+  "Quick Unlock Key File Path": "快速解锁密钥文件路径",
+  "Enable Windows Hello": "启用 Windows Hello",
+  "Enrolling...": "正在注册...",
+  "Unlock this vault before enrolling Windows Hello.": "请先解锁此数据库，再注册 Windows Hello。",
+  "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock.": "请一次性输入当前主凭据；VaultKern 会将其保留在受 Windows Hello 保护的存储中，用于快速解锁。",
   "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.": "剪贴板清空会在延迟后写入空字符串。浏览器 API 不允许后台可靠确认剪贴板仍包含刚复制的秘密。",
   Database: "数据库",
   "Loading database settings...": "正在加载数据库设置...",
@@ -361,6 +396,8 @@ const ZH_CN: Record<TranslationKey, string> = {
   "This only removes the recent vault record.": "这只会移除最近数据库记录。",
   Back: "返回",
   "Vault changed on disk. Merged and saved.": "数据库文件已在磁盘上变化，已合并并保存。",
+  "Vault changed on disk. Local edits were saved to a conflict copy:": "数据库文件已在磁盘上变化，本地编辑已保存到冲突副本：",
+  "Vault changed on disk. Local edits were saved as a conflict copy.": "数据库文件已在磁盘上变化，本地编辑已保存为冲突副本。",
   "Saved to local cache. Remote sync pending.": "已保存到本地缓存，等待远程同步。",
   "Using local cache.": "正在使用本地缓存。",
   "Using local cache. Remote sync failed.": "正在使用本地缓存，远程同步失败。",
@@ -372,13 +409,19 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Statistics description": "数据库统计会在分析功能接入共享管理器后显示。",
   "You have unsaved changes": "有未保存的更改",
   "Save before leaving this entry, discard your edits, or continue editing.": "离开条目前保存、丢弃更改，或继续编辑。",
+  "This entry changed in the current session but is not durable yet. Retry saving before leaving it.": "条目已在当前会话中更改，但尚未持久保存。请在离开前重试保存。",
+  "The database settings changed in this session but are not durable yet. Retry saving before leaving settings.": "数据库设置已在当前会话中更改，但尚未持久保存。请在离开设置页前重试保存。",
+  "Save your database settings before leaving, discard your edits, or continue editing.": "离开前保存数据库设置、丢弃更改，或继续编辑。",
+  "Save your extension settings before leaving, discard your edits, or continue editing.": "离开前保存扩展设置、丢弃更改，或继续编辑。",
   "Discard changes": "丢弃更改",
   "Continue editing": "继续编辑",
   "Delete this entry permanently?": "永久删除此条目？",
   "This will remove the selected entry from the current vault.": "这会从当前数据库中删除选中的条目。",
   "Delete permanently": "永久删除",
+  "Retry save": "重试保存",
   "Failed to save extension settings": "保存插件设置失败",
   "Failed to update quick unlock": "更新快速解锁失败",
+  "Failed to reconcile Windows settings": "协调 Windows 设置失败",
   "Failed to add local vault": "添加本地数据库失败",
   "Failed to add OneDrive vault": "添加 OneDrive 数据库失败",
   "Failed to save entry changes": "保存条目更改失败",
@@ -391,6 +434,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Failed to delete attachment": "删除附件失败",
   "Failed to save database settings": "保存数据库设置失败",
   "Failed to load entry history": "加载条目历史失败",
+  "Failed to load settings": "加载设置失败",
   "Failed to load session state": "加载会话状态失败",
   "Failed to load groups": "加载分组失败",
   "Failed to load entries": "加载条目失败",

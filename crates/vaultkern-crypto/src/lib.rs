@@ -12,14 +12,12 @@ use rust_argon2::{Config as Argon2Config, ThreadMode as Argon2ThreadMode};
 use salsa20::Salsa20;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
-use std::io::Cursor;
+use std::{fmt, io::Cursor};
 use thiserror::Error;
 use twofish::Twofish;
 use uuid::Uuid;
 use xmltree::{Element, XMLNode};
-
-pub mod journal;
-pub mod quick_unlock;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 #[derive(Debug, Error)]
 pub enum CryptoError {
@@ -43,22 +41,86 @@ pub enum CryptoError {
 
 pub type Result<T> = std::result::Result<T, CryptoError>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub enum KeyComponent {
-    Password(String),
+    Password(Vec<u8>),
     KeyFile(Vec<u8>),
     OpaqueProviderBytes(Vec<u8>),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+impl fmt::Debug for KeyComponent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Password(_) => "Password",
+            Self::KeyFile(_) => "KeyFile",
+            Self::OpaqueProviderBytes(_) => "OpaqueProviderBytes",
+        };
+        formatter.debug_tuple(name).field(&Redacted).finish()
+    }
+}
+
+impl Zeroize for KeyComponent {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Password(bytes) | Self::KeyFile(bytes) | Self::OpaqueProviderBytes(bytes) => {
+                bytes.zeroize()
+            }
+        }
+    }
+}
+
+impl Drop for KeyComponent {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for KeyComponent {}
+
+struct Redacted;
+
+impl fmt::Debug for Redacted {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+#[derive(Default, PartialEq, Eq)]
 pub struct CompositeKey {
     components: Vec<KeyComponent>,
 }
 
+impl fmt::Debug for CompositeKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CompositeKey")
+            .field("components", &self.components)
+            .finish()
+    }
+}
+
+impl Zeroize for CompositeKey {
+    fn zeroize(&mut self) {
+        self.components.zeroize();
+    }
+}
+
+impl Drop for CompositeKey {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for CompositeKey {}
+
 impl CompositeKey {
-    pub fn add_password(&mut self, password: impl Into<String>) {
+    pub fn add_password(&mut self, password: impl AsRef<str>) {
+        self.add_password_bytes(password.as_ref().as_bytes());
+    }
+
+    pub fn add_password_bytes(&mut self, password: impl AsRef<[u8]>) {
         self.components
-            .push(KeyComponent::Password(password.into()));
+            .push(KeyComponent::Password(password.as_ref().to_vec()));
     }
 
     pub fn add_key_file(&mut self, bytes: impl Into<Vec<u8>>) {
@@ -66,7 +128,8 @@ impl CompositeKey {
     }
 
     pub fn add_key_file_content(&mut self, bytes: &[u8]) -> Result<()> {
-        self.add_key_file(parse_key_file_bytes(bytes)?);
+        let contribution = parse_key_file_bytes(bytes)?;
+        self.add_key_file(contribution.as_ref());
         Ok(())
     }
 
@@ -79,20 +142,22 @@ impl CompositeKey {
         &self.components
     }
 
-    pub fn raw_key(&self) -> Result<[u8; 32]> {
-        let mut stream = Vec::new();
+    pub fn raw_key(&self) -> Result<Zeroizing<[u8; 32]>> {
+        let mut stream = Zeroizing::new(Vec::new());
         for component in &self.components {
             match component {
                 KeyComponent::Password(password) => {
-                    stream.extend(Sha256::digest(password.as_bytes()))
+                    let password_hash = Zeroizing::new(Sha256::digest(password));
+                    stream.extend_from_slice(&password_hash);
                 }
                 KeyComponent::KeyFile(bytes) | KeyComponent::OpaqueProviderBytes(bytes) => {
-                    stream.extend(bytes);
+                    stream.extend_from_slice(bytes);
                 }
             }
         }
 
-        Ok(Sha256::digest(stream).into())
+        let raw_key = Zeroizing::new(Sha256::digest(stream.as_slice()));
+        Ok(Zeroizing::new((*raw_key).into()))
     }
 }
 
@@ -121,7 +186,7 @@ pub enum KdfProfile {
 }
 
 impl KdfProfile {
-    pub fn derive_key(&self, raw_key: &[u8]) -> Result<[u8; 32]> {
+    pub fn derive_key(&self, raw_key: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
         match self {
             KdfProfile::AesKdbx3 { rounds, salt } | KdfProfile::AesKdbx4 { rounds, salt } => {
                 derive_aes_kdf(raw_key, *rounds, salt)
@@ -170,13 +235,13 @@ pub fn generate_totp(
     period_seconds: u64,
     unix_time: u64,
 ) -> Result<String> {
-    if secret.is_empty() || digits == 0 || period_seconds == 0 {
+    if secret.is_empty() || !(1..=9).contains(&digits) || period_seconds == 0 {
         return Err(CryptoError::InvalidTotpParameters);
     }
 
     let counter = unix_time / period_seconds;
     let counter_bytes = counter.to_be_bytes();
-    let digest = match algorithm {
+    let digest = Zeroizing::new(match algorithm {
         OtpAlgorithm::Sha1 => {
             let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(secret)
                 .map_err(|_| CryptoError::InvalidTotpParameters)?;
@@ -195,7 +260,7 @@ pub fn generate_totp(
             mac.update(&counter_bytes);
             mac.finalize().into_bytes().to_vec()
         }
-    };
+    });
 
     let offset = (digest[digest.len() - 1] & 0x0f) as usize;
     let code = ((u32::from(digest[offset]) & 0x7f) << 24)
@@ -214,7 +279,7 @@ pub fn sha256_bytes(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
 
-pub fn parse_key_file_bytes(bytes: &[u8]) -> Result<[u8; 32]> {
+pub fn parse_key_file_bytes(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     let trimmed = strip_utf8_bom(bytes);
     if looks_like_xml(trimmed) {
         parse_xml_key_file(trimmed)
@@ -263,29 +328,38 @@ fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
     }
 }
 
-fn parse_binary_key_file(bytes: &[u8]) -> Result<[u8; 32]> {
+fn parse_binary_key_file(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     if bytes.len() == 32 {
-        return bytes.try_into().map_err(|_| CryptoError::InvalidKeyFile);
+        let mut contribution = Zeroizing::new([0_u8; 32]);
+        contribution.copy_from_slice(bytes);
+        return Ok(contribution);
     }
 
-    let compact_hex: Vec<u8> = bytes
-        .iter()
-        .copied()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect();
+    let compact_hex = Zeroizing::new(
+        bytes
+            .iter()
+            .copied()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect::<Vec<_>>(),
+    );
     if compact_hex.len() == 64 && compact_hex.iter().all(u8::is_ascii_hexdigit) {
-        let decoded = HEXLOWER
-            .decode(&compact_hex)
-            .or_else(|_| HEXUPPER.decode(&compact_hex))
-            .map_err(|_| CryptoError::InvalidKeyFile)?;
-        return decoded.try_into().map_err(|_| CryptoError::InvalidKeyFile);
+        let decoded = Zeroizing::new(
+            HEXLOWER
+                .decode(&compact_hex)
+                .or_else(|_| HEXUPPER.decode(&compact_hex))
+                .map_err(|_| CryptoError::InvalidKeyFile)?,
+        );
+        return zeroizing_array_32(&decoded);
     }
 
-    Ok(sha256_bytes(bytes))
+    Ok(Zeroizing::new(sha256_bytes(bytes)))
 }
 
-fn parse_xml_key_file(bytes: &[u8]) -> Result<[u8; 32]> {
-    let root = Element::parse(Cursor::new(bytes)).map_err(|_| CryptoError::InvalidKeyFile)?;
+fn parse_xml_key_file(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    let root = ZeroizingKeyFileXml::new(
+        Element::parse(Cursor::new(bytes)).map_err(|_| CryptoError::InvalidKeyFile)?,
+    );
+    let root = root.element();
     if root.name != "KeyFile" {
         return Err(CryptoError::InvalidKeyFile);
     }
@@ -300,40 +374,90 @@ fn parse_xml_key_file(bytes: &[u8]) -> Result<[u8; 32]> {
     }
 }
 
-fn parse_xml_key_file_v1(root: &Element) -> Result<[u8; 32]> {
-    let data = child_text(root, &["Key", "Data"]).ok_or(CryptoError::InvalidKeyFile)?;
-    let decoded = STANDARD
-        .decode(data.trim().as_bytes())
-        .map_err(|_| CryptoError::InvalidKeyFile)?;
-    decoded.try_into().map_err(|_| CryptoError::InvalidKeyFile)
+fn parse_xml_key_file_v1(root: &Element) -> Result<Zeroizing<[u8; 32]>> {
+    let data = child_element(root, &["Key", "Data"])
+        .and_then(Element::get_text)
+        .ok_or(CryptoError::InvalidKeyFile)?;
+    let decoded = Zeroizing::new(
+        STANDARD
+            .decode(data.trim().as_bytes())
+            .map_err(|_| CryptoError::InvalidKeyFile)?,
+    );
+    zeroizing_array_32(&decoded)
 }
 
-fn parse_xml_key_file_v2(root: &Element) -> Result<[u8; 32]> {
+fn parse_xml_key_file_v2(root: &Element) -> Result<Zeroizing<[u8; 32]>> {
     let data_element = child_element(root, &["Key", "Data"]).ok_or(CryptoError::InvalidKeyFile)?;
-    let hex_text = data_element
-        .get_text()
-        .map(|text| {
-            text.chars()
-                .filter(|ch| !ch.is_whitespace())
-                .collect::<String>()
-        })
-        .ok_or(CryptoError::InvalidKeyFile)?;
-    let decoded = HEXUPPER
-        .decode(hex_text.as_bytes())
-        .or_else(|_| HEXLOWER.decode(hex_text.as_bytes()))
-        .map_err(|_| CryptoError::InvalidKeyFile)?;
-    let decoded: [u8; 32] = decoded
-        .try_into()
-        .map_err(|_| CryptoError::InvalidKeyFile)?;
+    let hex_text = Zeroizing::new(
+        data_element
+            .get_text()
+            .map(|text| {
+                text.chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .collect::<String>()
+            })
+            .ok_or(CryptoError::InvalidKeyFile)?,
+    );
+    let decoded = Zeroizing::new(
+        HEXUPPER
+            .decode(hex_text.as_bytes())
+            .or_else(|_| HEXLOWER.decode(hex_text.as_bytes()))
+            .map_err(|_| CryptoError::InvalidKeyFile)?,
+    );
+    let decoded = zeroizing_array_32(&decoded)?;
 
     if let Some(expected_hash) = data_element.attributes.get("Hash") {
-        let actual_hash = HEXUPPER.encode(&sha256_bytes(&decoded)[..4]);
+        let actual_hash = HEXUPPER.encode(&sha256_bytes(decoded.as_ref())[..4]);
         if !expected_hash.eq_ignore_ascii_case(&actual_hash) {
             return Err(CryptoError::KeyFileIntegrityMismatch);
         }
     }
 
     Ok(decoded)
+}
+
+fn zeroizing_array_32(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    if bytes.len() != 32 {
+        return Err(CryptoError::InvalidKeyFile);
+    }
+    let mut output = Zeroizing::new([0_u8; 32]);
+    output.copy_from_slice(bytes);
+    Ok(output)
+}
+
+struct ZeroizingKeyFileXml(Option<Element>);
+
+impl ZeroizingKeyFileXml {
+    fn new(element: Element) -> Self {
+        Self(Some(element))
+    }
+
+    fn element(&self) -> &Element {
+        self.0.as_ref().expect("live key-file XML guard")
+    }
+}
+
+impl Drop for ZeroizingKeyFileXml {
+    fn drop(&mut self) {
+        if let Some(element) = self.0.as_mut() {
+            zeroize_xml_element(element);
+        }
+    }
+}
+
+fn zeroize_xml_element(element: &mut Element) {
+    element.name.zeroize();
+    for (mut key, mut value) in std::mem::take(&mut element.attributes) {
+        key.zeroize();
+        value.zeroize();
+    }
+    for child in &mut element.children {
+        match child {
+            XMLNode::Element(child) => zeroize_xml_element(child),
+            XMLNode::Text(text) | XMLNode::CData(text) | XMLNode::Comment(text) => text.zeroize(),
+            _ => {}
+        }
+    }
 }
 
 fn child_element<'a>(element: &'a Element, path: &[&str]) -> Option<&'a Element> {
@@ -353,42 +477,58 @@ fn child_text(element: &Element, path: &[&str]) -> Option<String> {
 
 pub fn aes256_cbc_encrypt(key: &[u8; 32], iv: &[u8; 16], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = CbcEncryptor::<Aes256>::new(key.into(), iv.into());
-    let mut buffer = plaintext.to_vec();
+    let mut buffer = Zeroizing::new(plaintext.to_vec());
     let pos = buffer.len();
     buffer.resize(pos + 16, 0);
-    let out = cipher
+    let output_len = cipher
         .encrypt_padded_mut::<Pkcs7>(&mut buffer, pos)
-        .map_err(|_| CryptoError::InvalidCipherParameters)?;
-    Ok(out.to_vec())
+        .map_err(|_| CryptoError::InvalidCipherParameters)?
+        .len();
+    buffer.truncate(output_len);
+    Ok(std::mem::take(&mut *buffer))
 }
 
-pub fn aes256_cbc_decrypt(key: &[u8; 32], iv: &[u8; 16], ciphertext: &[u8]) -> Result<Vec<u8>> {
+pub fn aes256_cbc_decrypt(
+    key: &[u8; 32],
+    iv: &[u8; 16],
+    ciphertext: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
     let cipher = CbcDecryptor::<Aes256>::new(key.into(), iv.into());
-    let mut buffer = ciphertext.to_vec();
-    let out = cipher
+    let mut buffer = Zeroizing::new(ciphertext.to_vec());
+    let output_len = cipher
         .decrypt_padded_mut::<Pkcs7>(&mut buffer)
-        .map_err(|_| CryptoError::DecryptionFailed)?;
-    Ok(out.to_vec())
+        .map_err(|_| CryptoError::DecryptionFailed)?
+        .len();
+    buffer.truncate(output_len);
+    Ok(buffer)
 }
 
 pub fn twofish_cbc_encrypt(key: &[u8; 32], iv: &[u8; 16], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = CbcEncryptor::<Twofish>::new(key.into(), iv.into());
-    let mut buffer = plaintext.to_vec();
+    let mut buffer = Zeroizing::new(plaintext.to_vec());
     let pos = buffer.len();
     buffer.resize(pos + 16, 0);
-    let out = cipher
+    let output_len = cipher
         .encrypt_padded_mut::<Pkcs7>(&mut buffer, pos)
-        .map_err(|_| CryptoError::InvalidCipherParameters)?;
-    Ok(out.to_vec())
+        .map_err(|_| CryptoError::InvalidCipherParameters)?
+        .len();
+    buffer.truncate(output_len);
+    Ok(std::mem::take(&mut *buffer))
 }
 
-pub fn twofish_cbc_decrypt(key: &[u8; 32], iv: &[u8; 16], ciphertext: &[u8]) -> Result<Vec<u8>> {
+pub fn twofish_cbc_decrypt(
+    key: &[u8; 32],
+    iv: &[u8; 16],
+    ciphertext: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
     let cipher = CbcDecryptor::<Twofish>::new(key.into(), iv.into());
-    let mut buffer = ciphertext.to_vec();
-    let out = cipher
+    let mut buffer = Zeroizing::new(ciphertext.to_vec());
+    let output_len = cipher
         .decrypt_padded_mut::<Pkcs7>(&mut buffer)
-        .map_err(|_| CryptoError::DecryptionFailed)?;
-    Ok(out.to_vec())
+        .map_err(|_| CryptoError::DecryptionFailed)?
+        .len();
+    buffer.truncate(output_len);
+    Ok(buffer)
 }
 
 pub fn chacha20_ietf_encrypt(
@@ -397,17 +537,20 @@ pub fn chacha20_ietf_encrypt(
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
     let mut cipher = ChaCha20::new(key.into(), nonce.into());
-    let mut bytes = plaintext.to_vec();
+    let mut bytes = Zeroizing::new(plaintext.to_vec());
     cipher.apply_keystream(&mut bytes);
-    Ok(bytes)
+    Ok(std::mem::take(&mut *bytes))
 }
 
 pub fn chacha20_ietf_decrypt(
     key: &[u8; 32],
     nonce: &[u8; 12],
     ciphertext: &[u8],
-) -> Result<Vec<u8>> {
-    chacha20_ietf_encrypt(key, nonce, ciphertext)
+) -> Result<Zeroizing<Vec<u8>>> {
+    let mut cipher = ChaCha20::new(key.into(), nonce.into());
+    let mut bytes = Zeroizing::new(ciphertext.to_vec());
+    cipher.apply_keystream(&mut bytes);
+    Ok(bytes)
 }
 
 pub struct ChaCha20Stream {
@@ -442,13 +585,13 @@ impl Salsa20Stream {
     }
 }
 
-fn derive_aes_kdf(raw_key: &[u8], rounds: u64, salt: &[u8; 32]) -> Result<[u8; 32]> {
+fn derive_aes_kdf(raw_key: &[u8], rounds: u64, salt: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
     if raw_key.len() != 32 {
         return Err(CryptoError::InvalidKdfParameters);
     }
 
     let cipher = Aes256::new_from_slice(salt).map_err(|_| CryptoError::InvalidKdfParameters)?;
-    let mut transformed = raw_key.to_vec();
+    let mut transformed = Zeroizing::new(raw_key.to_vec());
     let (left, right) = transformed.split_at_mut(16);
     let left = GenericArray::from_mut_slice(left);
     let right = GenericArray::from_mut_slice(right);
@@ -458,7 +601,10 @@ fn derive_aes_kdf(raw_key: &[u8], rounds: u64, salt: &[u8; 32]) -> Result<[u8; 3
         cipher.encrypt_block(right);
     }
 
-    Ok(Sha256::digest(transformed).into())
+    let digest = Zeroizing::new(Sha256::digest(&*transformed));
+    let mut derived = Zeroizing::new([0_u8; 32]);
+    derived.copy_from_slice(&digest);
+    Ok(derived)
 }
 
 fn derive_argon2(
@@ -468,7 +614,7 @@ fn derive_argon2(
     memory_kib: u32,
     parallelism: u32,
     salt: &[u8],
-) -> Result<[u8; 32]> {
+) -> Result<Zeroizing<[u8; 32]>> {
     let config = Argon2Config {
         ad: &[],
         hash_length: 32,
@@ -480,11 +626,16 @@ fn derive_argon2(
         variant,
         version: rust_argon2::Version::Version13,
     };
-    let output = rust_argon2::hash_raw(raw_key, salt, &config)
-        .map_err(|_| CryptoError::InvalidKdfParameters)?;
-    output
-        .try_into()
-        .map_err(|_| CryptoError::InvalidKdfParameters)
+    let output = Zeroizing::new(
+        rust_argon2::hash_raw(raw_key, salt, &config)
+            .map_err(|_| CryptoError::InvalidKdfParameters)?,
+    );
+    let mut derived = Zeroizing::new([0_u8; 32]);
+    if output.len() != derived.len() {
+        return Err(CryptoError::InvalidKdfParameters);
+    }
+    derived.copy_from_slice(&output);
+    Ok(derived)
 }
 
 fn argon2_thread_mode(parallelism: u32) -> Argon2ThreadMode {
@@ -496,6 +647,154 @@ fn argon2_thread_mode_name_for_tests(parallelism: u32) -> &'static str {
     match argon2_thread_mode(parallelism) {
         Argon2ThreadMode::Sequential => "sequential",
         Argon2ThreadMode::Parallel => "parallel",
+    }
+}
+
+#[cfg(test)]
+mod password_bytes_tests {
+    use super::CompositeKey;
+
+    #[test]
+    fn password_bytes_have_the_same_composite_contribution_as_text() {
+        let mut text = CompositeKey::default();
+        text.add_password("密钥 password");
+        let mut bytes = CompositeKey::default();
+        bytes.add_password_bytes("密钥 password".as_bytes());
+
+        assert_eq!(bytes.raw_key().unwrap(), text.raw_key().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod totp_parameter_tests {
+    use super::{CryptoError, OtpAlgorithm, generate_totp};
+
+    #[test]
+    fn generation_rejects_digit_counts_that_overflow_the_decimal_modulus() {
+        assert!(matches!(
+            generate_totp(b"secret", OtpAlgorithm::Sha1, 10, 30, 0),
+            Err(CryptoError::InvalidTotpParameters)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod composite_key_memory_hygiene_tests {
+    use super::{
+        CompositeKey, KeyComponent, aes256_cbc_decrypt, aes256_cbc_encrypt, chacha20_ietf_decrypt,
+        chacha20_ietf_encrypt, twofish_cbc_decrypt, twofish_cbc_encrypt,
+    };
+    use zeroize::{Zeroize, ZeroizeOnDrop};
+
+    static_assertions::assert_not_impl_any!(KeyComponent: Clone);
+    static_assertions::assert_not_impl_any!(CompositeKey: Clone);
+
+    #[test]
+    fn key_component_debug_redacts_secret_bytes() {
+        let component = KeyComponent::Password(vec![240, 241, 242, 243]);
+
+        assert_eq!(format!("{component:?}"), "Password([REDACTED])");
+    }
+
+    #[test]
+    fn composite_key_debug_redacts_component_bytes() {
+        let mut key = CompositeKey::default();
+        key.add_password_bytes([240, 241, 242, 243]);
+
+        assert_eq!(
+            format!("{key:?}"),
+            "CompositeKey { components: [Password([REDACTED])] }"
+        );
+    }
+
+    #[test]
+    fn explicit_zeroize_removes_all_owned_key_material() {
+        let mut key = CompositeKey::default();
+        key.add_password_bytes([1, 2, 3, 4]);
+        key.add_key_file([5, 6, 7, 8]);
+        key.add_provider_bytes([9, 10, 11, 12]);
+
+        key.zeroize();
+
+        assert!(key.components().is_empty());
+    }
+
+    #[test]
+    fn owned_key_material_types_guarantee_zeroize_on_drop() {
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+        assert_zeroize_on_drop::<KeyComponent>();
+        assert_zeroize_on_drop::<CompositeKey>();
+    }
+
+    #[test]
+    fn raw_composite_key_is_returned_in_a_zeroizing_owner() {
+        fn assert_zeroizing_key(_: &zeroize::Zeroizing<[u8; 32]>) {}
+
+        let mut key = CompositeKey::default();
+        key.add_password_bytes([1, 2, 3, 4]);
+
+        let raw_key = key.raw_key().expect("raw key");
+
+        assert_zeroizing_key(&raw_key);
+    }
+
+    #[test]
+    fn every_kdf_returns_a_zeroizing_transformed_key_owner() {
+        fn assert_zeroizing_key(_: &zeroize::Zeroizing<[u8; 32]>) {}
+
+        let profile = super::KdfProfile::AesKdbx4 {
+            rounds: 1,
+            salt: [3_u8; 32],
+        };
+        let transformed = profile.derive_key(&[5_u8; 32]).expect("derive key");
+
+        assert_zeroizing_key(&transformed);
+    }
+
+    #[test]
+    fn key_file_parser_returns_a_zeroizing_key_owner() {
+        fn assert_zeroizing_key(_: &zeroize::Zeroizing<[u8; 32]>) {}
+
+        let parsed = super::parse_key_file_bytes(&[7_u8; 32]).expect("parse binary key file");
+
+        assert_zeroizing_key(&parsed);
+    }
+
+    #[test]
+    fn every_payload_decryptor_returns_a_zeroizing_plaintext_owner() {
+        fn assert_zeroizing_plaintext(_: &zeroize::Zeroizing<Vec<u8>>) {}
+
+        let key = [7_u8; 32];
+        let iv = [9_u8; 16];
+        let nonce = [11_u8; 12];
+        let plaintext = b"secret payload";
+
+        let aes = aes256_cbc_decrypt(
+            &key,
+            &iv,
+            &aes256_cbc_encrypt(&key, &iv, plaintext).unwrap(),
+        )
+        .unwrap();
+        let twofish = twofish_cbc_decrypt(
+            &key,
+            &iv,
+            &twofish_cbc_encrypt(&key, &iv, plaintext).unwrap(),
+        )
+        .unwrap();
+        let chacha = chacha20_ietf_decrypt(
+            &key,
+            &nonce,
+            &chacha20_ietf_encrypt(&key, &nonce, plaintext).unwrap(),
+        )
+        .unwrap();
+
+        assert_zeroizing_plaintext(&aes);
+        assert_zeroizing_plaintext(&twofish);
+        assert_zeroizing_plaintext(&chacha);
+        assert_eq!(aes.as_slice(), plaintext);
+        assert_eq!(twofish.as_slice(), plaintext);
+        assert_eq!(chacha.as_slice(), plaintext);
     }
 }
 

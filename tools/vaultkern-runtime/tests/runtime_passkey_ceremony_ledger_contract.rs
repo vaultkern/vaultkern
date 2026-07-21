@@ -4,8 +4,8 @@ use vaultkern_runtime::Runtime;
 use vaultkern_runtime_protocol::{
     PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto,
     PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto,
-    PasskeyCeremonyRegisteredDto, PasskeyFrameKindDto, PasskeyUserVerificationRequirementDto,
-    RuntimeCommand, RuntimeResponse,
+    PasskeyCeremonyRegisteredDto, PasskeyFrameKindDto, PasskeyUserVerificationMethodDto,
+    PasskeyUserVerificationRequirementDto, RuntimeCommand, RuntimeResponse,
 };
 
 #[test]
@@ -1412,6 +1412,15 @@ fn runtime_reconciliation_marks_disconnected_committed_passkey_ceremonies_unknow
             ceremony_token: "token-disconnected".into(),
             expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
             vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::VerifyPasskeyUser {
+            ceremony_token: "token-disconnected".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            vault_id: vault_id.clone(),
+            method: PasskeyUserVerificationMethodDto::MasterPassword,
+            password: Some("token-disconnected".into()),
         })
         .unwrap();
     runtime
@@ -3347,14 +3356,57 @@ fn create_mutated_passkey_registration_with_origin(
     origin: &str,
 ) -> (String, String, String) {
     let vault_id = open_unlocked_test_vault(runtime, token);
-    register_and_advance_to_s4(
-        runtime,
-        token,
-        PasskeyCeremonyKindDto::Create,
-        origin,
-        "example.com",
-        challenge_base64url,
-    );
+    runtime
+        .handle(register_command_with(
+            token,
+            PasskeyCeremonyKindDto::Create,
+            origin,
+            "example.com",
+            challenge_base64url,
+            1_000,
+            301_000,
+        ))
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::PreAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            related_origin_verified: false,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::BindPasskeyCeremonyVault {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            vault_id: vault_id.clone(),
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::VerifyPasskeyUser {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            vault_id: vault_id.clone(),
+            method: PasskeyUserVerificationMethodDto::MasterPassword,
+            password: Some(token.into()),
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            next_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            related_origin_verified: false,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+            ceremony_token: token.into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CredentialResolution,
+            next_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            related_origin_verified: false,
+        })
+        .unwrap();
     let client_data = format!(
         r#"{{"type":"webauthn.create","challenge":"{challenge_base64url}","origin":"{origin}","crossOrigin":false}}"#
     );

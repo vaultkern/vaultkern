@@ -17,6 +17,13 @@ type TabUpdatedListener = (
 type AlarmListener = (alarm: { name: string }) => void;
 
 const TEST_EXTENSION_ID = "vaultkern-test-extension";
+const RUNTIME_CAPABILITIES = [
+  "runtime-core",
+  "browser-extension",
+  "database-settings",
+  "one-drive",
+  "passkey-ceremonies"
+];
 
 function trustedExtensionPageSender() {
   const runtime = (
@@ -171,9 +178,47 @@ function createPort() {
       : null;
   }
 
+  function emitMessage(message: unknown, requestId?: string) {
+    const responseRequestId = requestId ?? latestPostedRequestId();
+    const response =
+      responseRequestId !== null &&
+      responseRequestId !== undefined &&
+      typeof message === "object" &&
+      message !== null &&
+      !("requestId" in message)
+        ? { ...message, requestId: responseRequestId }
+        : message;
+    for (const listener of messageListeners) {
+      listener(response);
+    }
+  }
+
   return {
     postMessage: vi.fn((message: unknown) => {
       postedMessages.push(message);
+      const commandType = (
+        message as { command?: { type?: unknown } }
+      )?.command?.type;
+      const requestId = (message as { requestId?: string })?.requestId;
+      if (commandType === "handshake") {
+        queueMicrotask(() =>
+          emitMessage(
+            {
+              type: "handshake",
+              protocolVersion: 1,
+              capabilities: RUNTIME_CAPABILITIES
+            },
+            requestId
+          )
+        );
+      } else if (commandType === "list_recent_vaults") {
+        queueMicrotask(() =>
+          emitMessage(
+            { type: "vault_reference_list", vaults: [] },
+            requestId
+          )
+        );
+      }
     }),
     onMessage: {
       addListener(listener: (message: unknown) => void) {
@@ -185,19 +230,7 @@ function createPort() {
         disconnectListeners.push(listener);
       }
     },
-    emitMessage(message: unknown) {
-      const requestId = latestPostedRequestId();
-      const response =
-        requestId !== null &&
-        typeof message === "object" &&
-        message !== null &&
-        !("requestId" in message)
-          ? { ...message, requestId }
-          : message;
-      for (const listener of messageListeners) {
-        listener(response);
-      }
-    },
+    emitMessage,
     emitDisconnect() {
       for (const listener of disconnectListeners) {
         listener();
@@ -206,25 +239,34 @@ function createPort() {
   };
 }
 
+function postedCommands(
+  port: ReturnType<typeof createPort>,
+  commandType: string
+) {
+  return port.postMessage.mock.calls
+    .map(([message]) => message)
+    .filter((message) => {
+      if (
+        typeof message !== "object" ||
+        message === null ||
+        !("command" in message)
+      ) {
+        return false;
+      }
+      const command = (message as { command?: unknown }).command;
+      return (
+        typeof command === "object" &&
+        command !== null &&
+        (command as { type?: unknown }).type === commandType
+      );
+    });
+}
+
 function postedCommandCount(
   port: ReturnType<typeof createPort>,
   commandType: string
 ) {
-  return port.postMessage.mock.calls.filter(([message]) => {
-    if (
-      typeof message !== "object" ||
-      message === null ||
-      !("command" in message)
-    ) {
-      return false;
-    }
-    const command = (message as { command?: unknown }).command;
-    return (
-      typeof command === "object" &&
-      command !== null &&
-      (command as { type?: unknown }).type === commandType
-    );
-  }).length;
+  return postedCommands(port, commandType).length;
 }
 
 async function completePasskeyLedgerReconciliation(
@@ -313,7 +355,7 @@ describe("background bridge", () => {
         idleLockMinutes: 10,
         clearClipboardSeconds: 30,
         autofillOnPageLoadEnabled: true,
-        passkeyProviderEnabled: false,
+        browserPasskeyProxyEnabled: false,
         quickUnlockEnabled: false
       },
       vaultkernWebAuthnDebugEnabled: true,
@@ -549,7 +591,7 @@ describe("background bridge", () => {
                   idleLockMinutes: 10,
                   clearClipboardSeconds: 30,
                   autofillOnPageLoadEnabled: true,
-                  passkeyProviderEnabled: false,
+                  browserPasskeyProxyEnabled: false,
                   quickUnlockEnabled: false
                 }
               });
@@ -676,7 +718,7 @@ describe("background bridge", () => {
           idleLockMinutes: 10,
           clearClipboardSeconds: 30,
           autofillOnPageLoadEnabled: true,
-          passkeyProviderEnabled: false,
+          browserPasskeyProxyEnabled: false,
           quickUnlockEnabled: false
         },
         vaultkernWebAuthnDebugEnabled: true,
@@ -835,7 +877,7 @@ describe("background bridge", () => {
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
                 autofillOnPageLoadEnabled: true,
-                passkeyProviderEnabled: false,
+                browserPasskeyProxyEnabled: false,
                 quickUnlockEnabled: false
               }
             });
@@ -940,7 +982,7 @@ describe("background bridge", () => {
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
                 autofillOnPageLoadEnabled: true,
-                passkeyProviderEnabled: false,
+                browserPasskeyProxyEnabled: false,
                 quickUnlockEnabled: false
               }
             });
@@ -1044,7 +1086,7 @@ describe("background bridge", () => {
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
                 autofillOnPageLoadEnabled: true,
-                passkeyProviderEnabled: false,
+                browserPasskeyProxyEnabled: false,
                 quickUnlockEnabled: false
               }
             });
@@ -1156,7 +1198,7 @@ describe("background bridge", () => {
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
                 autofillOnPageLoadEnabled: true,
-                passkeyProviderEnabled: false,
+                browserPasskeyProxyEnabled: false,
                 quickUnlockEnabled: false
               }
             });
@@ -1269,7 +1311,7 @@ describe("background bridge", () => {
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
                 autofillOnPageLoadEnabled,
-                passkeyProviderEnabled: false,
+                browserPasskeyProxyEnabled: false,
                 quickUnlockEnabled: false
               }
             });
@@ -1816,7 +1858,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: true
+                browserPasskeyProxyEnabled: true
               }
             });
           },
@@ -1858,6 +1900,10 @@ describe("background bridge", () => {
       command: { type: "get_session_state" }
     });
 
+    await vi.waitFor(() => {
+      expect(postedCommandCount(port, "get_session_state")).toBe(1);
+    });
+
     port.emitMessage({
       type: "session_state",
       unlocked: true,
@@ -1879,9 +1925,148 @@ describe("background bridge", () => {
       version: 1,
       command: { type: "get_session_state" }
     }));
-    expect(port.postMessage).toHaveBeenCalledTimes(3);
+    expect(postedCommandCount(port, "get_session_state")).toBe(2);
 
     vi.useRealTimers();
+  });
+
+  it("retries desired-state reconciliation after a successful unlock", async () => {
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const listeners: RuntimeMessageListener[] = [];
+    let recentVaultLists = 0;
+    let recentVaults = [
+      { vaultRefId: "new", lastUsedAt: 20, isCurrent: true },
+      { vaultRefId: "old", lastUsedAt: 10, isCurrent: false }
+    ];
+
+    port.postMessage.mockImplementation((message: unknown) => {
+      const commandType = (
+        message as { command?: { type?: unknown } }
+      )?.command?.type;
+      const requestId = (message as { requestId?: string })?.requestId;
+      if (commandType === "handshake") {
+        queueMicrotask(() =>
+          port.emitMessage(
+            {
+              type: "handshake",
+              protocolVersion: 1,
+              capabilities: RUNTIME_CAPABILITIES
+            },
+            requestId
+          )
+        );
+      } else if (commandType === "list_recent_vaults") {
+        recentVaultLists += 1;
+        queueMicrotask(() =>
+          port.emitMessage(
+            recentVaultLists === 1
+              ? {
+                  type: "error",
+                  code: "temporary",
+                  message: "native host was not ready"
+                }
+              : {
+                  type: "vault_reference_list",
+                  vaults: recentVaults
+                },
+            requestId
+          )
+        );
+      } else if (commandType === "delete_vault_reference_if_not_current") {
+        const vaultRefId = (
+          message as { command?: { vault_ref_id?: unknown } }
+        ).command?.vault_ref_id;
+        recentVaults = recentVaults.filter(
+          (vault) => vault.vaultRefId !== vaultRefId
+        );
+        queueMicrotask(() =>
+          port.emitMessage(
+            {
+              type: "vault_reference_list",
+              vaults: recentVaults
+            },
+            requestId
+          )
+        );
+      }
+    });
+
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        onMessage: {
+          addListener(fn: RuntimeMessageListener) {
+            listeners.push(fn);
+          }
+        }
+      },
+      storage: {
+        local: {
+          get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
+            callback({
+              vaultkernExtensionSettings: {
+                recentVaultLimit: 1,
+                language: "en",
+                idleLockMinutes: 10,
+                clearClipboardSeconds: 30,
+                browserPasskeyProxyEnabled: false
+              }
+            });
+          },
+          set() {}
+        },
+        onChanged: {
+          addListener() {}
+        }
+      }
+    };
+
+    await import("../background");
+    await vi.waitFor(() => expect(recentVaultLists).toBe(1));
+
+    const response = sendRuntimeMessage(listeners, {
+      version: 1,
+      command: {
+        type: "unlock_current_vault",
+        password: "demo-password",
+        key_file_path: null
+      }
+    });
+    await vi.waitFor(() => {
+      expect(postedCommandCount(port, "unlock_current_vault")).toBe(1);
+    });
+    const unlockMessage = postedCommands(port, "unlock_current_vault")[0] as {
+      requestId?: string;
+    };
+    port.emitMessage(
+      {
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "new",
+        supportsBiometricUnlock: false
+      },
+      unlockMessage.requestId
+    );
+    await expect(response.response()).resolves.toMatchObject({
+      type: "session_state",
+      unlocked: true
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        postedCommandCount(port, "delete_vault_reference_if_not_current")
+      ).toBe(1);
+    });
+    expect(
+      postedCommands(port, "delete_vault_reference_if_not_current")[0]
+    ).toMatchObject({
+      command: {
+        type: "delete_vault_reference_if_not_current",
+        vault_ref_id: "old"
+      }
+    });
   });
 
   it("stops native keep-alive and clears attach state when disabling fails to detach the proxy", async () => {
@@ -1891,7 +2076,7 @@ describe("background bridge", () => {
     const attach = vi.fn(async () => undefined);
     const detach = vi.fn(async () => "detach failed");
     const listeners: RuntimeMessageListener[] = [];
-    let passkeyProviderEnabled = true;
+    let browserPasskeyProxyEnabled = true;
     const storageListeners: StorageChangeListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -1912,7 +2097,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled
+                browserPasskeyProxyEnabled
               }
             });
           },
@@ -1939,6 +2124,9 @@ describe("background bridge", () => {
       version: 1,
       command: { type: "get_session_state" }
     });
+    await vi.waitFor(() => {
+      expect(postedCommandCount(port, "get_session_state")).toBe(1);
+    });
     port.emitMessage({
       type: "session_state",
       unlocked: true,
@@ -1952,7 +2140,7 @@ describe("background bridge", () => {
       activeVaultId: "vault-1"
     });
 
-    passkeyProviderEnabled = false;
+    browserPasskeyProxyEnabled = false;
     for (const listener of storageListeners) {
       listener({ vaultkernExtensionSettings: {} }, "local");
     }
@@ -1965,7 +2153,7 @@ describe("background bridge", () => {
 
     expect(port.postMessage).toHaveBeenCalledTimes(postedAfterDisable);
 
-    passkeyProviderEnabled = true;
+    browserPasskeyProxyEnabled = true;
     for (const listener of storageListeners) {
       listener({ vaultkernExtensionSettings: {} }, "local");
     }
@@ -2000,7 +2188,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: false
+                browserPasskeyProxyEnabled: false
               }
             });
           },
@@ -2028,6 +2216,10 @@ describe("background bridge", () => {
       command: { type: "get_session_state" }
     });
 
+    await vi.waitFor(() => {
+      expect(postedCommandCount(port, "get_session_state")).toBe(1);
+    });
+
     port.emitMessage({
       type: "session_state",
       unlocked: true,
@@ -2045,7 +2237,7 @@ describe("background bridge", () => {
 
     await vi.advanceTimersByTimeAsync(20_000);
 
-    expect(port.postMessage).toHaveBeenCalledTimes(1);
+    expect(postedCommandCount(port, "get_session_state")).toBe(1);
 
     vi.useRealTimers();
   });
@@ -2084,6 +2276,9 @@ describe("background bridge", () => {
       expect(handled).toBe(true);
     });
 
+    await vi.waitFor(() => {
+      expect(postedCommandCount(port, "get_session_state")).toBe(1);
+    });
     expect(connectNative).toHaveBeenCalledTimes(1);
     expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
@@ -2209,7 +2404,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: true
+                browserPasskeyProxyEnabled: true
               }
             };
             if (callback) {
@@ -2323,7 +2518,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: true
+                browserPasskeyProxyEnabled: true
               }
             };
             if (callback) {
@@ -2404,7 +2599,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: true
+                browserPasskeyProxyEnabled: true
               }
             };
             if (callback) {
@@ -2476,7 +2671,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: true
+                browserPasskeyProxyEnabled: true
               }
             };
             if (callback) {
@@ -2562,7 +2757,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: true
+                browserPasskeyProxyEnabled: true
               }
             };
             if (callback) {
@@ -2608,7 +2803,7 @@ describe("background bridge", () => {
       }));
     });
     const firstConnectionId = (
-      firstPort.postMessage.mock.calls[0][0] as {
+      postedCommands(firstPort, "reconcile_passkey_ceremony_ledger")[0] as {
         command: { active_connection_id: string };
       }
     ).command.active_connection_id;
@@ -2631,7 +2826,7 @@ describe("background bridge", () => {
       }));
     });
     const secondConnectionId = (
-      secondPort.postMessage.mock.calls[0][0] as {
+      postedCommands(secondPort, "reconcile_passkey_ceremony_ledger")[0] as {
         command: { active_connection_id: string };
       }
     ).command.active_connection_id;
@@ -2659,7 +2854,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: true
+                browserPasskeyProxyEnabled: true
               }
             };
             if (callback) {
@@ -2744,7 +2939,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: true
+                browserPasskeyProxyEnabled: true
               }
             };
             if (callback) {
@@ -2884,7 +3079,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: false
+                browserPasskeyProxyEnabled: false
               }
             });
           },
@@ -2920,6 +3115,9 @@ describe("background bridge", () => {
     const addGetListener = vi.fn();
     const addCreateListener = vi.fn();
     let resolveSettings: (items: Record<string, unknown>) => void = () => {};
+    const settingsLoad = new Promise<Record<string, unknown>>((resolve) => {
+      resolveSettings = resolve;
+    });
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -2931,9 +3129,7 @@ describe("background bridge", () => {
       storage: {
         local: {
           get(_key: unknown, callback: (items: Record<string, unknown>) => void) {
-            new Promise<Record<string, unknown>>((resolve) => {
-              resolveSettings = resolve;
-            }).then(callback);
+            void settingsLoad.then(callback);
           },
           set() {}
         },
@@ -2967,7 +3163,7 @@ describe("background bridge", () => {
         language: "en",
         idleLockMinutes: 10,
         clearClipboardSeconds: 30,
-        passkeyProviderEnabled: true
+        browserPasskeyProxyEnabled: true
       }
     });
 
@@ -2996,7 +3192,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: false
+                browserPasskeyProxyEnabled: false
               }
             });
           },
@@ -3038,7 +3234,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled: false
+                browserPasskeyProxyEnabled: false
               }
             });
           },
@@ -3066,7 +3262,7 @@ describe("background bridge", () => {
     const port = createPort();
     const attach = vi.fn(async () => undefined);
     const detach = vi.fn(async () => undefined);
-    let passkeyProviderEnabled = true;
+    let browserPasskeyProxyEnabled = true;
     const storageListeners: StorageChangeListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -3085,7 +3281,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled
+                browserPasskeyProxyEnabled
               }
             });
           },
@@ -3109,7 +3305,7 @@ describe("background bridge", () => {
     expect(attach).toHaveBeenCalledTimes(1);
     await completePasskeyLedgerReconciliation(port);
 
-    passkeyProviderEnabled = false;
+    browserPasskeyProxyEnabled = false;
     for (const listener of storageListeners) {
       listener({ vaultkernExtensionSettings: {} }, "local");
     }
@@ -3125,7 +3321,7 @@ describe("background bridge", () => {
     const scriptRegistry = createContentScriptRegistry();
     const executeScript = vi.fn(async () => undefined);
     const query = vi.fn(async () => [{ id: 7 }]);
-    let passkeyProviderEnabled = true;
+    let browserPasskeyProxyEnabled = true;
     const storageListeners: StorageChangeListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -3144,7 +3340,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled
+                browserPasskeyProxyEnabled
               }
             });
           },
@@ -3187,7 +3383,7 @@ describe("background bridge", () => {
     query.mockClear();
     scriptRegistry.unregisterContentScripts.mockClear();
 
-    passkeyProviderEnabled = false;
+    browserPasskeyProxyEnabled = false;
     for (const listener of storageListeners) {
       listener({ vaultkernExtensionSettings: {} }, "local");
     }
@@ -3230,7 +3426,7 @@ describe("background bridge", () => {
         })
     );
     const detach = vi.fn(async () => undefined);
-    let passkeyProviderEnabled = true;
+    let browserPasskeyProxyEnabled = true;
     const storageListeners: StorageChangeListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -3249,7 +3445,7 @@ describe("background bridge", () => {
                 language: "en",
                 idleLockMinutes: 10,
                 clearClipboardSeconds: 30,
-                passkeyProviderEnabled
+                browserPasskeyProxyEnabled
               }
             });
           },
@@ -3272,7 +3468,7 @@ describe("background bridge", () => {
       expect(attach).toHaveBeenCalledTimes(1);
     });
 
-    passkeyProviderEnabled = false;
+    browserPasskeyProxyEnabled = false;
     for (const listener of storageListeners) {
       listener({ vaultkernExtensionSettings: {} }, "local");
     }

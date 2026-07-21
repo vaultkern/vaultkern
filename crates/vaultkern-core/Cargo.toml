@@ -12,3 +12,4 @@ vaultkern-crypto = { path = "../vaultkern-crypto" }
 vaultkern-kdbx = { path = "../vaultkern-kdbx" }
 vaultkern-model = { path = "../vaultkern-model" }
 uuid.workspace = true
+zeroize.workspace = true

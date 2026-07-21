@@ -6,15 +6,16 @@ use vaultkern_core::{
 use vaultkern_runtime::Runtime;
 use vaultkern_runtime_protocol::{
     DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto,
-    DatabaseKdfSettingsDto, DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto,
-    DatabaseRecycleBinSettingsDto, DatabaseSettingsUpdateDto, MergeSummaryDto, RuntimeCommand,
-    RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto,
+    DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
+    DatabaseSettingsUpdateDto, OptionalSettingUpdateDto, RuntimeCommand, RuntimeResponse,
+    SaveVaultResultDto, SaveVaultStatusDto,
 };
 
 fn saved_response() -> RuntimeResponse {
     RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
         status: SaveVaultStatusDto::Saved,
         merge_summary: None,
+        conflict_copy_path: None,
     })
 }
 
@@ -55,10 +56,104 @@ fn create_entry_in_root(
 }
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
+    if let Some(root) = std::env::var_os("VAULTKERN_EXTERNAL_FIXTURES") {
+        return std::path::PathBuf::from(root).join(name);
+    }
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("fixtures/kdbx")
         .join(name)
+}
+
+#[test]
+fn runtime_opens_legacy_kdbx2_and_kdbx3_and_migrates_them_on_save() {
+    for fixture in ["Format200.kdbx", "Format300.kdbx"] {
+        let source = fixture_path(fixture);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(fixture);
+        std::fs::copy(source, &path).unwrap();
+
+        let mut runtime = Runtime::for_tests();
+        let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+        runtime
+            .unlock_with_password(&opened.vault_id, "a")
+            .unwrap_or_else(|error| panic!("{fixture} must stay on the password path: {error:#}"));
+        runtime.save_vault(&opened.vault_id).unwrap();
+
+        let migrated = std::fs::read(&path).unwrap();
+        let inspection = KeepassCore::new().inspect_database(&migrated).unwrap();
+        assert_eq!(
+            inspection.header.version,
+            vaultkern_core::KdbxVersion::V4_1,
+            "{fixture}"
+        );
+        let mut key = CompositeKey::default();
+        key.add_password("a");
+        KeepassCore::new()
+            .load_kdbx(&migrated, &key)
+            .unwrap_or_else(|error| panic!("migrated {fixture} must reopen: {error:#}"));
+    }
+}
+
+#[test]
+fn runtime_migrates_unchanged_legacy_onedrive_vault_on_save() {
+    let bytes = std::fs::read(fixture_path("Format300.kdbx")).unwrap();
+    let mut runtime = Runtime::for_tests_with_onedrive_item(
+        "drive-1",
+        "item-1",
+        "legacy.kdbx",
+        "alice@example.com",
+        bytes,
+    );
+    runtime
+        .add_onedrive_vault_reference("drive-1", "item-1")
+        .unwrap();
+    runtime
+        .unlock_current_vault_with_password("a")
+        .expect("KDBX 3 OneDrive vault unlock");
+    let vault_id = runtime
+        .session_state()
+        .active_vault_id
+        .expect("active OneDrive vault");
+
+    runtime.save_vault(&vault_id).unwrap();
+
+    let migrated = runtime
+        .read_test_onedrive_item_bytes("drive-1", "item-1")
+        .unwrap();
+    let inspection = KeepassCore::new().inspect_database(&migrated).unwrap();
+    assert_eq!(inspection.header.version, vaultkern_core::KdbxVersion::V4_1);
+    assert_eq!(runtime.test_onedrive_access_counts().writes, 1);
+}
+
+#[test]
+fn runtime_requires_legacy_migration_save_before_quick_unlock_enrollment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.kdbx");
+    std::fs::copy(fixture_path("Format300.kdbx"), &path).unwrap();
+    let mut runtime = Runtime::for_tests_with_quick_unlock();
+    let opened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime.unlock_with_password(&opened.vault_id, "a").unwrap();
+
+    let error = runtime
+        .enable_quick_unlock_for_current_vault(Some("a"), None)
+        .expect_err("legacy source must be saved before quick-unlock enrollment");
+
+    assert!(
+        error
+            .to_string()
+            .contains("save the migrated vault before enabling quick unlock"),
+        "{error:#}"
+    );
+
+    runtime.save_vault(&opened.vault_id).unwrap();
+    runtime
+        .enable_quick_unlock_for_current_vault(Some("a"), None)
+        .expect("saved migration can enroll quick unlock");
+    runtime.lock_session();
+    runtime
+        .unlock_current_vault_with_quick_unlock()
+        .expect("migrated vault can quick-unlock after enrollment");
 }
 
 #[test]
@@ -359,12 +454,14 @@ fn runtime_reports_saved_when_source_has_not_changed() {
 }
 
 #[test]
-fn runtime_updates_database_settings_and_rekeys_saved_vault() {
+fn runtime_updates_database_settings_without_retaining_master_credentials() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("old-password");
+    let mut initial = Vault::empty("settings");
+    initial.root.title = "Root Group".into();
     let bytes = core
-        .save_kdbx(&Vault::empty("settings"), &key, SaveProfile::recommended())
+        .save_kdbx(&initial, &key, SaveProfile::recommended())
         .expect("create vault");
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -385,6 +482,7 @@ fn runtime_updates_database_settings_and_rekeys_saved_vault() {
     assert_eq!(before.metadata.name, "settings");
     assert_eq!(before.encryption.compression, "gzip");
     assert!(before.has_password);
+    let retained_kdf = before.encryption.kdf.clone();
 
     let updated = runtime
         .update_database_settings(
@@ -408,19 +506,10 @@ fn runtime_updates_database_settings_and_rekeys_saved_vault() {
                 encryption: Some(DatabaseEncryptionSettingsDto {
                     compression: "none".into(),
                     cipher: "chacha20".into(),
-                    kdf: DatabaseKdfSettingsDto {
-                        algorithm: "aes_kdbx4".into(),
-                        transform_rounds: Some(12_000),
-                        iterations: None,
-                        memory_kib: None,
-                        parallelism: None,
-                    },
+                    kdf: retained_kdf.clone(),
                 }),
-                credentials: Some(DatabaseCredentialsUpdateDto {
-                    new_password: Some("new-password".into()),
-                    remove_password: false,
-                }),
-                autosave_delay_seconds: Some(45),
+                credentials: None,
+                autosave_delay_seconds: OptionalSettingUpdateDto::Set(45),
             },
         )
         .expect("update settings");
@@ -434,7 +523,7 @@ fn runtime_updates_database_settings_and_rekeys_saved_vault() {
     assert!(!updated.recycle_bin.enabled);
     assert_eq!(updated.encryption.compression, "none");
     assert_eq!(updated.encryption.cipher, "chacha20");
-    assert_eq!(updated.encryption.kdf.transform_rounds, Some(12_000));
+    assert_eq!(updated.encryption.kdf, retained_kdf);
     assert_eq!(updated.autosave_delay_seconds, Some(45));
 
     runtime
@@ -442,16 +531,11 @@ fn runtime_updates_database_settings_and_rekeys_saved_vault() {
         .expect("save with new settings");
 
     let saved = std::fs::read(&path).expect("read saved vault");
-    let mut old_key = CompositeKey::default();
-    old_key.add_password("old-password");
-    assert!(core.load_kdbx(&saved, &old_key).is_err());
-
-    let mut new_key = CompositeKey::default();
-    new_key.add_password("new-password");
     let reloaded = core
-        .load_database(&saved, &new_key)
-        .expect("reload with new password");
+        .load_database(&saved, &key)
+        .expect("reload with the original master credential");
     assert_eq!(reloaded.vault.name, "Engineering Vault");
+    assert_eq!(reloaded.vault.root.title, "Root Group");
     assert_eq!(
         reloaded.vault.description.as_deref(),
         Some("Database settings contract")
@@ -475,7 +559,102 @@ fn runtime_updates_database_settings_and_rekeys_saved_vault() {
 }
 
 #[test]
-fn runtime_can_remove_database_password_for_next_save() {
+fn runtime_clears_loaded_optional_database_metadata() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+    let mut initial = Vault::empty("settings-clear");
+    initial.description = Some("remove this description".into());
+    initial.default_username = Some("remove-this-user".into());
+    let bytes = core
+        .save_kdbx(&initial, &key, SaveProfile::recommended())
+        .expect("create vault with optional metadata");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("settings-clear.kdbx");
+    std::fs::write(&path, bytes).expect("write vault");
+
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("open vault");
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .expect("unlock vault");
+    runtime
+        .update_database_settings(
+            &handle.vault_id,
+            DatabaseSettingsUpdateDto {
+                metadata: Some(DatabaseMetadataSettingsDto {
+                    name: "settings-clear".into(),
+                    description: None,
+                    default_username: None,
+                }),
+                ..DatabaseSettingsUpdateDto::default()
+            },
+        )
+        .expect("clear optional metadata");
+    runtime.save_vault(&handle.vault_id).expect("save vault");
+
+    let saved = std::fs::read(path).expect("read saved vault");
+    let reloaded = core
+        .load_database(&saved, &key)
+        .expect("reload cleared vault");
+    assert_eq!(reloaded.vault.description, None);
+    assert_eq!(reloaded.vault.default_username, None);
+}
+
+#[test]
+fn runtime_rejects_invalid_database_name_without_partial_metadata_update() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+    let bytes = core
+        .save_kdbx(
+            &Vault::empty("settings-valid"),
+            &key,
+            SaveProfile::recommended(),
+        )
+        .expect("create vault");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("settings-valid.kdbx");
+    std::fs::write(&path, bytes).expect("write vault");
+
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime
+        .open_local_vault(path.to_str().unwrap())
+        .expect("open vault");
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .expect("unlock vault");
+    runtime
+        .update_database_settings(
+            &handle.vault_id,
+            DatabaseSettingsUpdateDto {
+                metadata: Some(DatabaseMetadataSettingsDto {
+                    name: "invalid\u{1}name".into(),
+                    description: Some("must not be applied".into()),
+                    default_username: Some("must-not-be-applied".into()),
+                }),
+                ..DatabaseSettingsUpdateDto::default()
+            },
+        )
+        .expect_err("invalid XML text must be rejected before mutation");
+
+    let settings = runtime
+        .get_database_settings(&handle.vault_id)
+        .expect("read unchanged settings");
+    assert_eq!(settings.metadata.name, "settings-valid");
+    assert_eq!(settings.metadata.description, None);
+    assert_eq!(settings.metadata.default_username, None);
+    runtime
+        .save_vault(&handle.vault_id)
+        .expect("rejected settings must not poison later saves");
+}
+
+#[test]
+fn runtime_rejects_password_removal_without_a_fresh_authenticated_flow() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("initial-password");
@@ -498,7 +677,7 @@ fn runtime_can_remove_database_password_for_next_save() {
     runtime
         .unlock_with_password(&handle.vault_id, "initial-password")
         .expect("unlock vault");
-    runtime
+    let error = runtime
         .update_database_settings(
             &handle.vault_id,
             DatabaseSettingsUpdateDto {
@@ -509,15 +688,22 @@ fn runtime_can_remove_database_password_for_next_save() {
                 ..DatabaseSettingsUpdateDto::default()
             },
         )
-        .expect("remove password");
+        .expect_err("password removal needs a fresh authenticated flow");
+    assert!(
+        error
+            .to_string()
+            .contains("fresh authenticated credential-update flow")
+    );
     runtime
         .save_vault(&handle.vault_id)
-        .expect("save passwordless vault");
+        .expect("save unchanged master credential");
 
     let empty_key = CompositeKey::default();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(core.load_database(&saved, &empty_key).is_err());
     let reloaded = core
-        .load_database(&std::fs::read(&path).unwrap(), &empty_key)
-        .expect("reload without password");
+        .load_database(&saved, &key)
+        .expect("reload with password");
     assert_eq!(reloaded.vault.name, "passwordless");
 }
 
@@ -677,7 +863,7 @@ fn runtime_history_settings_limit_total_history_size_after_updates() {
 }
 
 #[test]
-fn runtime_merges_changed_source_before_save_without_overwriting_external_entries() {
+fn runtime_writes_conflict_copy_without_overwriting_external_entries() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("demo-password");
@@ -724,44 +910,61 @@ fn runtime_merges_changed_source_before_save_without_overwriting_external_entrie
         })
         .unwrap();
 
-    match response {
-        RuntimeResponse::SaveVaultResult(result) => {
-            assert_eq!(result.status, SaveVaultStatusDto::Merged);
-            assert_eq!(
-                result.merge_summary,
-                Some(MergeSummaryDto {
-                    merged_entries: 1,
-                    history_snapshots_added: 0,
-                    meta_conflicts_resolved: 0,
-                    icon_conflicts_resolved: 0,
-                })
-            );
-        }
-        other => panic!("expected save vault result, got {other:?}"),
-    }
+    let RuntimeResponse::SaveVaultResult(result) = response else {
+        panic!("expected save vault result, got {response:?}");
+    };
+    assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+    assert_eq!(result.merge_summary, None);
+    let conflict_path = result
+        .conflict_copy_path
+        .expect("conflict copy path must be returned");
 
-    let mut reopened_runtime = Runtime::for_tests();
-    let reopened = reopened_runtime
-        .open_local_vault(path.to_str().unwrap())
-        .unwrap();
-    reopened_runtime
-        .unlock_with_password(&reopened.vault_id, "demo-password")
-        .unwrap();
-    let entries = reopened_runtime.list_entries(&reopened.vault_id).unwrap();
+    let source = core
+        .load_kdbx(&std::fs::read(&path).unwrap(), &key)
+        .expect("reload externally changed source");
+    assert!(
+        source
+            .root
+            .entries
+            .iter()
+            .any(|entry| entry.title == "Local")
+    );
+    assert!(
+        source
+            .root
+            .entries
+            .iter()
+            .any(|entry| entry.title == "External")
+    );
+    assert!(
+        !source
+            .root
+            .entries
+            .iter()
+            .any(|entry| entry.title == "Local Updated")
+    );
 
-    assert!(entries.iter().any(|entry| entry.title == "Local Updated"));
-    assert!(entries.iter().any(|entry| entry.title == "External"));
-
-    let second = runtime
-        .handle(RuntimeCommand::SaveVault {
-            vault_id: vault.vault_id.clone(),
-        })
-        .unwrap();
-    assert_eq!(second, saved_response());
+    let conflict = core
+        .load_kdbx(&std::fs::read(conflict_path).unwrap(), &key)
+        .expect("reload local conflict copy");
+    assert!(
+        conflict
+            .root
+            .entries
+            .iter()
+            .any(|entry| entry.title == "Local Updated")
+    );
+    assert!(
+        !conflict
+            .root
+            .entries
+            .iter()
+            .any(|entry| entry.title == "External")
+    );
 }
 
 #[test]
-fn runtime_save_merge_keeps_newer_local_mutation_over_older_external_entry() {
+fn runtime_conflict_copy_keeps_local_mutation_while_source_stays_external() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("demo-password");
@@ -825,20 +1028,36 @@ fn runtime_save_merge_keeps_newer_local_mutation_over_older_external_entry() {
         .unwrap();
     std::fs::write(&path, external_bytes).unwrap();
 
-    runtime
+    let response = runtime
         .handle(RuntimeCommand::SaveVault {
             vault_id: vault.vault_id.clone(),
         })
         .unwrap();
+    let RuntimeResponse::SaveVaultResult(result) = response else {
+        panic!("expected save vault result, got {response:?}");
+    };
+    assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+    let conflict_path = result
+        .conflict_copy_path
+        .expect("conflict copy path must be returned");
 
-    let merged = core
+    let source = core
         .load_kdbx(&std::fs::read(&path).unwrap(), &key)
-        .expect("reload merged vault");
-    let detail = core
-        .project_entry_detail(&merged, &entry_id)
-        .expect("project merged entry");
-    assert_eq!(detail.title, "Local Wins");
-    assert_eq!(detail.password, "local-secret");
+        .expect("reload external source");
+    let source_detail = core
+        .project_entry_detail(&source, &entry_id)
+        .expect("project external entry");
+    assert_eq!(source_detail.title, "External Older");
+    assert_eq!(source_detail.password, "external-secret");
+
+    let conflict = core
+        .load_kdbx(&std::fs::read(conflict_path).unwrap(), &key)
+        .expect("reload local conflict copy");
+    let conflict_detail = core
+        .project_entry_detail(&conflict, &entry_id)
+        .expect("project local conflict entry");
+    assert_eq!(conflict_detail.title, "Local Wins");
+    assert_eq!(conflict_detail.password, "local-secret");
 }
 
 #[test]

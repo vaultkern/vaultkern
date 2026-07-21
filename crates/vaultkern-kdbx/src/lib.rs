@@ -38,6 +38,11 @@ pub enum KdbxError {
     UnexpectedEof,
     #[error("invalid value")]
     InvalidValue,
+    #[error("invalid XML model at {location}: {rule}")]
+    InvalidXmlModel {
+        location: String,
+        rule: &'static str,
+    },
     #[error("header hash mismatch")]
     HeaderHashMismatch,
     #[error("header hmac mismatch")]
@@ -75,6 +80,64 @@ pub enum KdbxError {
 }
 
 pub type Result<T> = std::result::Result<T, KdbxError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KdbxLoadStage {
+    Header,
+    HeaderAuthentication,
+    PayloadBlocks,
+    Decryption,
+    Decompression,
+    InnerHeader,
+    XmlDocument,
+    XmlShape,
+    XmlProjection,
+}
+
+impl std::fmt::Display for KdbxLoadStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Header => "file header",
+            Self::HeaderAuthentication => "header authentication",
+            Self::PayloadBlocks => "payload block authentication",
+            Self::Decryption => "payload decryption",
+            Self::Decompression => "payload decompression",
+            Self::InnerHeader => "inner header",
+            Self::XmlDocument => "XML document parsing",
+            Self::XmlShape => "XML model validation",
+            Self::XmlProjection => "vault model projection",
+        })
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("KDBX load failed during {stage}: {source}")]
+pub struct KdbxLoadDiagnostic {
+    pub stage: KdbxLoadStage,
+    #[source]
+    pub source: KdbxError,
+}
+
+fn load_stage<T>(
+    stage: KdbxLoadStage,
+    result: Result<T>,
+) -> std::result::Result<T, KdbxLoadDiagnostic> {
+    result.map_err(|source| KdbxLoadDiagnostic { stage, source })
+}
+
+fn invalid_xml_model(location: impl Into<String>, rule: &'static str) -> KdbxError {
+    KdbxError::InvalidXmlModel {
+        location: location.into(),
+        rule,
+    }
+}
+
+fn normalize_xml_model_error(error: KdbxError) -> KdbxError {
+    match error {
+        KdbxError::InvalidXmlModel { .. } => KdbxError::InvalidValue,
+        error => error,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KdbxVersion {
@@ -374,6 +437,51 @@ pub struct KdbxHeaderSummary {
     pub public_custom_data: BTreeMap<String, Vec<u8>>,
 }
 
+/// A KDBX KDF result cached only for the lifetime of an unlocked session or
+/// inside a platform-protected unlock blob. It intentionally exposes no
+/// `Debug` or `Clone` implementation.
+pub struct TransformedKey(Zeroizing<[u8; 32]>);
+
+impl TransformedKey {
+    pub fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+mod transformed_key_memory_tests {
+    use super::{
+        InnerBinary, KdbxVersion, TransformedKey, build_inner_header, build_xml,
+        decode_block_stream, decode_legacy_block_stream, gzip_compress, gzip_decompress,
+    };
+    use zeroize::Zeroizing;
+
+    #[test]
+    fn transformed_key_can_take_zeroizing_array_ownership_without_a_plaintext_copy() {
+        fn assert_owning_constructor(_constructor: fn(Zeroizing<[u8; 32]>) -> TransformedKey) {}
+
+        assert_owning_constructor(TransformedKey::from_zeroizing);
+    }
+
+    #[test]
+    fn every_plaintext_buffer_helper_returns_a_zeroizing_owner() {
+        type PlaintextResult = super::Result<Zeroizing<Vec<u8>>>;
+        type AttachmentRefs = std::collections::HashMap<(usize, String), usize>;
+
+        let _: fn(&[u8], &[InnerBinary]) -> Zeroizing<Vec<u8>> = build_inner_header;
+        let _: fn(&vaultkern_model::Vault, &AttachmentRefs, &[u8], KdbxVersion) -> PlaintextResult =
+            build_xml;
+        let _: fn(&[u8]) -> PlaintextResult = gzip_compress;
+        let _: fn(&[u8]) -> PlaintextResult = gzip_decompress;
+        let _: fn(&[u8]) -> PlaintextResult = decode_legacy_block_stream;
+        let _: fn(&[u8; 64], &[u8]) -> PlaintextResult = decode_block_stream;
+    }
+}
+
 pub fn required_version(vault: &Vault) -> KdbxVersion {
     if custom_data_requires_41(&vault.meta_custom_data_blocks, &vault.meta_custom_data)
         || vault.custom_icons.iter().any(|icon| {
@@ -418,11 +526,157 @@ pub fn inspect_kdbx_header(bytes: &[u8]) -> Result<KdbxHeaderSummary> {
     }
 }
 
+pub fn derive_transformed_key(
+    bytes: &[u8],
+    composite_key: &CompositeKey,
+) -> Result<TransformedKey> {
+    derive_transformed_key_with_policy(
+        bytes,
+        composite_key,
+        &ExternalKdfPolicy::Mobile,
+        ExternalKdfConfirmation::Unconfirmed,
+    )
+}
+
+pub fn derive_transformed_key_with_policy(
+    bytes: &[u8],
+    composite_key: &CompositeKey,
+    policy: &dyn KdfPolicyEvaluator,
+    confirmation: ExternalKdfConfirmation,
+) -> Result<TransformedKey> {
+    if !matches!(
+        detect_file_version(bytes)?,
+        KdbxVersion::V4_0 | KdbxVersion::V4_1
+    ) {
+        return Err(KdbxError::UnsupportedVersion);
+    }
+
+    let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
+    let mut cursor = Cursor::new(&bytes[header_len..]);
+    let stored_header_hash = cursor.read_exact(32)?;
+    if sha256_bytes(&bytes[..header_len]).as_slice() != stored_header_hash {
+        return Err(KdbxError::HeaderHashMismatch);
+    }
+
+    let parameters = ExternalKdfParameters::decode_kdbx4(&header.kdf_parameters)?;
+    enforce_external_kdf_policy(&parameters, policy, confirmation)?;
+    let kdf = parameters.into_profile();
+    let raw_key = composite_key.raw_key()?;
+    Ok(TransformedKey::from_zeroizing(
+        kdf.derive_key(raw_key.as_ref())?,
+    ))
+}
+
+pub fn load_kdbx_with_transformed_key(bytes: &[u8], transformed: &TransformedKey) -> Result<Vault> {
+    load_kdbx_with_transformed_key_diagnostic(bytes, transformed)
+        .map_err(|error| normalize_xml_model_error(error.source))
+}
+
+pub fn load_kdbx_with_transformed_key_diagnostic(
+    bytes: &[u8],
+    transformed: &TransformedKey,
+) -> std::result::Result<Vault, KdbxLoadDiagnostic> {
+    let (header, header_len, stored_header_hash, stored_header_hmac, payload_bytes) = load_stage(
+        KdbxLoadStage::Header,
+        (|| {
+            if !matches!(
+                detect_file_version(bytes)?,
+                KdbxVersion::V4_0 | KdbxVersion::V4_1
+            ) {
+                return Err(KdbxError::UnsupportedVersion);
+            }
+
+            let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
+            let mut cursor = Cursor::new(&bytes[header_len..]);
+            let stored_header_hash = cursor.read_exact(32)?.to_vec();
+            let stored_header_hmac = cursor.read_exact(32)?.to_vec();
+            let payload_bytes = cursor.read_remaining().to_vec();
+            Ok((
+                header,
+                header_len,
+                stored_header_hash,
+                stored_header_hmac,
+                payload_bytes,
+            ))
+        })(),
+    )?;
+
+    let header_bytes = &bytes[..header_len];
+    load_stage(
+        KdbxLoadStage::HeaderAuthentication,
+        (|| {
+            if sha256_bytes(header_bytes).as_slice() != stored_header_hash.as_slice() {
+                return Err(KdbxError::HeaderHashMismatch);
+            }
+
+            let mac_seed = mac_seed(&header.master_seed, transformed.as_bytes());
+            if header_hmac(&mac_seed, header_bytes)?.as_slice() != stored_header_hmac.as_slice() {
+                return Err(KdbxError::HeaderHmacMismatch);
+            }
+            Ok(())
+        })(),
+    )?;
+
+    let encryption_key = sha256_seeded(&header.master_seed, transformed.as_bytes());
+    let mac_seed = mac_seed(&header.master_seed, transformed.as_bytes());
+    let encrypted_payload = load_stage(
+        KdbxLoadStage::PayloadBlocks,
+        decode_block_stream(&mac_seed, &payload_bytes),
+    )?;
+    let payload = load_stage(
+        KdbxLoadStage::Decryption,
+        decrypt_payload(
+            header.cipher,
+            &encryption_key,
+            &header.encryption_iv,
+            &encrypted_payload,
+        ),
+    )?;
+    let payload = match header.compression {
+        Compression::None => payload,
+        Compression::Gzip => load_stage(KdbxLoadStage::Decompression, gzip_decompress(&payload))?,
+    };
+
+    let (inner_algorithm, inner_key, binaries, consumed) =
+        load_stage(KdbxLoadStage::InnerHeader, parse_inner_header(&payload))?;
+    let root = load_stage(
+        KdbxLoadStage::XmlDocument,
+        parse_xml_document(&payload[consumed..]),
+    )?;
+    load_stage(
+        KdbxLoadStage::XmlShape,
+        validate_xml_model_shape(root.element()),
+    )?;
+    load_stage(
+        KdbxLoadStage::XmlProjection,
+        project_xml(root, &header, inner_algorithm, &inner_key, &binaries),
+    )
+}
+
 pub fn save_kdbx(
     vault: &Vault,
     composite_key: &CompositeKey,
     profile: &SaveProfile,
 ) -> Result<Vec<u8>> {
+    let (header, kdf) = prepare_save(vault, profile)?;
+    let raw_key = composite_key.raw_key()?;
+    let transformed = TransformedKey::from_zeroizing(kdf.derive_key(raw_key.as_ref())?);
+    encode_kdbx_with_transformed_key(vault, profile, header, &transformed)
+}
+
+pub fn save_kdbx_with_transformed_key(
+    vault: &Vault,
+    transformed: &TransformedKey,
+    profile: &SaveProfile,
+) -> Result<Vec<u8>> {
+    if profile.kdf.is_some() || vault.kdf_parameters.is_none() {
+        return Err(KdbxError::InvalidValue);
+    }
+    let (header, _) = prepare_save(vault, profile)?;
+    encode_kdbx_with_transformed_key(vault, profile, header, transformed)
+}
+
+fn prepare_save(vault: &Vault, profile: &SaveProfile) -> Result<(KdbxHeader, KdfProfile)> {
     if !matches!(profile.version, KdbxVersion::V4_0 | KdbxVersion::V4_1) {
         return Err(KdbxError::UnsupportedVersion);
     }
@@ -442,21 +696,27 @@ pub fn save_kdbx(
             .public_custom_data
             .insert(key.clone(), VariantValue::Bytes(value.clone()));
     }
+    Ok((header, kdf))
+}
 
-    let raw_key = composite_key.raw_key()?;
-    let transformed = kdf.derive_key(&raw_key)?;
-    let encryption_key = sha256_seeded(&header.master_seed, &transformed);
-    let mac_seed = mac_seed(&header.master_seed, &transformed);
+fn encode_kdbx_with_transformed_key(
+    vault: &Vault,
+    profile: &SaveProfile,
+    header: KdbxHeader,
+    transformed: &TransformedKey,
+) -> Result<Vec<u8>> {
+    let encryption_key = sha256_seeded(&header.master_seed, transformed.as_bytes());
+    let mac_seed = mac_seed(&header.master_seed, transformed.as_bytes());
 
     let mut binaries = Vec::new();
     let attachment_refs = collect_attachment_refs(vault, &mut binaries)?;
-    let inner_key = random_bytes(64);
+    let inner_key = Zeroizing::new(random_bytes(64));
     let inner_header = build_inner_header(&inner_key, &binaries);
     let xml = build_xml(vault, &attachment_refs, &inner_key, profile.version)?;
 
-    let mut payload = Vec::new();
-    payload.extend(inner_header);
-    payload.extend(xml);
+    let mut payload = Zeroizing::new(Vec::new());
+    payload.extend_from_slice(&inner_header);
+    payload.extend_from_slice(&xml);
 
     let payload = match profile.compression {
         Compression::None => payload,
@@ -514,44 +774,9 @@ fn load_kdbx4(
     policy: &dyn KdfPolicyEvaluator,
     confirmation: ExternalKdfConfirmation,
 ) -> Result<Vault> {
-    let (header, header_len) = KdbxHeader::decode_with_consumed(bytes)?;
-    let mut cursor = Cursor::new(&bytes[header_len..]);
-    let stored_header_hash = cursor.read_exact(32)?.to_vec();
-    let stored_header_hmac = cursor.read_exact(32)?.to_vec();
-    let payload_bytes = cursor.read_remaining().to_vec();
-
-    let header_bytes = &bytes[..header_len];
-    if sha256_bytes(header_bytes).as_slice() != stored_header_hash.as_slice() {
-        return Err(KdbxError::HeaderHashMismatch);
-    }
-
-    let parameters = ExternalKdfParameters::decode_kdbx4(&header.kdf_parameters)?;
-    enforce_external_kdf_policy(&parameters, policy, confirmation)?;
-    let kdf = parameters.into_profile();
-    let raw_key = composite_key.raw_key()?;
-    let transformed = kdf.derive_key(&raw_key)?;
-    let encryption_key = sha256_seeded(&header.master_seed, &transformed);
-    let mac_seed = mac_seed(&header.master_seed, &transformed);
-
-    if header_hmac(&mac_seed, header_bytes)?.as_slice() != stored_header_hmac.as_slice() {
-        return Err(KdbxError::HeaderHmacMismatch);
-    }
-
-    let encrypted_payload = decode_block_stream(&mac_seed, &payload_bytes)?;
-    let payload = decrypt_payload(
-        header.cipher,
-        &encryption_key,
-        &header.encryption_iv,
-        &encrypted_payload,
-    )?;
-    let payload = match header.compression {
-        Compression::None => payload,
-        Compression::Gzip => gzip_decompress(&payload)?,
-    };
-
-    let (inner_algorithm, inner_key, binaries, consumed) = parse_inner_header(&payload)?;
-    let xml_bytes = &payload[consumed..];
-    parse_xml(xml_bytes, &header, inner_algorithm, &inner_key, &binaries)
+    let transformed =
+        derive_transformed_key_with_policy(bytes, composite_key, policy, confirmation)?;
+    load_kdbx_with_transformed_key(bytes, &transformed)
 }
 
 fn load_kdbx3(
@@ -566,7 +791,7 @@ fn load_kdbx3(
     enforce_external_kdf_policy(&parameters, policy, confirmation)?;
     let kdf = parameters.into_profile();
     let raw_key = composite_key.raw_key()?;
-    let transformed = kdf.derive_key(&raw_key)?;
+    let transformed = kdf.derive_key(raw_key.as_ref())?;
     let encryption_key = sha256_seeded(&header.master_seed, &transformed);
     let encrypted_payload = &bytes[header_len..];
     let payload = decrypt_payload(
@@ -896,7 +1121,7 @@ fn decrypt_payload(
     key: &[u8; 32],
     iv: &[u8],
     payload: &[u8],
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     match cipher {
         KdbxCipher::Aes256 => aes256_cbc_decrypt(
             key,
@@ -919,12 +1144,12 @@ fn decrypt_payload(
     }
 }
 
-fn build_inner_header(inner_key: &[u8], binaries: &[InnerBinary]) -> Vec<u8> {
-    let mut bytes = Vec::new();
+fn build_inner_header(inner_key: &[u8], binaries: &[InnerBinary]) -> Zeroizing<Vec<u8>> {
+    let mut bytes = Zeroizing::new(Vec::new());
     write_field(&mut bytes, 1, &3_i32.to_le_bytes());
     write_field(&mut bytes, 2, inner_key);
     for binary in binaries {
-        let mut payload = Vec::with_capacity(binary.data.len() + 1);
+        let mut payload = Zeroizing::new(Vec::with_capacity(binary.data.len() + 1));
         payload.push(if binary.protect_in_memory { 0x01 } else { 0x00 });
         payload.extend(binary.data.as_bytes());
         write_field(&mut bytes, 3, &payload);
@@ -933,7 +1158,9 @@ fn build_inner_header(inner_key: &[u8], binaries: &[InnerBinary]) -> Vec<u8> {
     bytes
 }
 
-fn parse_inner_header(payload: &[u8]) -> Result<(u32, Vec<u8>, Vec<InnerBinary>, usize)> {
+fn parse_inner_header(
+    payload: &[u8],
+) -> Result<(u32, Zeroizing<Vec<u8>>, Vec<InnerBinary>, usize)> {
     let mut cursor = Cursor::new(payload);
     let mut inner_algorithm = 3_u32;
     let mut inner_key = None;
@@ -943,12 +1170,15 @@ fn parse_inner_header(payload: &[u8]) -> Result<(u32, Vec<u8>, Vec<InnerBinary>,
     loop {
         let field_id = cursor.read_u8()?;
         let len = cursor.read_i32()? as usize;
-        let data = cursor.read_exact(len)?.to_vec();
+        let data = Zeroizing::new(cursor.read_exact(len)?.to_vec());
         match field_id {
             0 => break,
             1 => {
-                inner_algorithm =
-                    u32::from_le_bytes(data.try_into().map_err(|_| KdbxError::InvalidValue)?);
+                inner_algorithm = u32::from_le_bytes(
+                    data.as_slice()
+                        .try_into()
+                        .map_err(|_| KdbxError::InvalidValue)?,
+                );
                 if inner_algorithm != 2 && inner_algorithm != 3 {
                     return Err(KdbxError::UnsupportedInnerStream);
                 }
@@ -981,7 +1211,7 @@ fn build_xml(
     attachment_refs: &HashMap<(usize, String), usize>,
     inner_key: &[u8],
     version: KdbxVersion,
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     if !matches!(version, KdbxVersion::V4_0 | KdbxVersion::V4_1) {
         return Err(KdbxError::UnsupportedVersion);
     }
@@ -1182,8 +1412,8 @@ fn build_xml(
     root.children.push(XMLNode::Element(root_node));
 
     validate_xml_text(root)?;
-    let mut bytes = Vec::new();
-    root.write(&mut bytes)
+    let mut bytes = Zeroizing::new(Vec::new());
+    root.write(&mut *bytes)
         .map_err(|error| KdbxError::Xml(error.to_string()))?;
     Ok(bytes)
 }
@@ -1919,6 +2149,10 @@ impl ZeroizingXmlElement {
         self.element.as_mut().expect("live XML guard")
     }
 
+    fn element(&self) -> &Element {
+        self.element.as_ref().expect("live XML guard")
+    }
+
     fn into_inner(mut self) -> Element {
         self.element.take().expect("live XML guard")
     }
@@ -1933,10 +2167,15 @@ impl Drop for ZeroizingXmlElement {
 }
 
 fn zeroize_xml_text(element: &mut Element) {
+    element.name.zeroize();
+    for (mut key, mut value) in std::mem::take(&mut element.attributes) {
+        key.zeroize();
+        value.zeroize();
+    }
     for child in &mut element.children {
         match child {
             XMLNode::Element(child) => zeroize_xml_text(child),
-            XMLNode::Text(text) | XMLNode::CData(text) => text.zeroize(),
+            XMLNode::Text(text) | XMLNode::CData(text) | XMLNode::Comment(text) => text.zeroize(),
             _ => {}
         }
     }
@@ -2011,12 +2250,21 @@ fn protect_xml_string(string: &mut Element, protected: &mut ProtectedStream) -> 
 
 fn validate_xml_model_shape(root: &Element) -> Result<()> {
     if root.name != "KeePassFile" {
-        return Err(KdbxError::InvalidValue);
+        return Err(invalid_xml_model(
+            "KeePassFile",
+            "unexpected document element",
+        ));
     }
-    validate_only_element_children(root, &["Meta", "Root"])?;
-    validate_child_multiplicity(root, &["Meta", "Root"], &["Meta", "Root"])?;
-    let meta = root.get_child("Meta").ok_or(KdbxError::InvalidValue)?;
-    let root_node = root.get_child("Root").ok_or(KdbxError::InvalidValue)?;
+    validate_only_element_children(root, &["Meta", "Root"])
+        .map_err(|_| invalid_xml_model("KeePassFile", "unexpected child element"))?;
+    validate_child_multiplicity(root, &["Meta", "Root"], &["Meta", "Root"])
+        .map_err(|_| invalid_xml_model("KeePassFile", "missing or duplicate required child"))?;
+    let meta = root
+        .get_child("Meta")
+        .ok_or_else(|| invalid_xml_model("KeePassFile/Meta", "missing required child"))?;
+    let root_node = root
+        .get_child("Root")
+        .ok_or_else(|| invalid_xml_model("KeePassFile/Root", "missing required child"))?;
     validate_meta_shape(meta)?;
     validate_root_shape(root_node)
 }
@@ -2024,7 +2272,6 @@ fn validate_xml_model_shape(root: &Element) -> Result<()> {
 fn validate_meta_shape(meta: &Element) -> Result<()> {
     const SINGLETONS: &[&str] = &[
         "Generator",
-        "SettingsChanged",
         "DatabaseName",
         "DatabaseNameChanged",
         "HeaderHash",
@@ -2051,12 +2298,20 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
         "HistoryMaxItems",
         "HistoryMaxSize",
     ];
-    validate_child_multiplicity(meta, SINGLETONS, &[])?;
+    if let Some(name) = first_duplicate_child(meta, SINGLETONS) {
+        return Err(invalid_xml_model(
+            format!("Meta/{name}"),
+            "duplicate singleton child",
+        ));
+    }
+    validate_child_multiplicity(meta, SINGLETONS, &[])
+        .map_err(|_| invalid_xml_model("Meta", "duplicate singleton child"))?;
     validate_known_scalar_children(
         meta,
         SINGLETONS,
         &["MemoryProtection", "CustomIcons", "Binaries"],
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "scalar field contains a child element"))?;
     for child in element_children(meta) {
         match child.name.as_str() {
             "MemoryProtection" => {
@@ -2068,8 +2323,15 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
                     "ProtectNotes",
                     "AutoEnableVisualHiding",
                 ];
-                validate_only_singletons(child, FIELDS, &[])?;
-                validate_known_scalar_children(child, FIELDS, &[])?;
+                validate_only_singletons(child, FIELDS, &[]).map_err(|_| {
+                    invalid_xml_model("Meta/MemoryProtection", "unexpected or duplicate child")
+                })?;
+                validate_known_scalar_children(child, FIELDS, &[]).map_err(|_| {
+                    invalid_xml_model(
+                        "Meta/MemoryProtection",
+                        "scalar field contains a child element",
+                    )
+                })?;
             }
             "CustomIcons" => validate_custom_icons_shape(child)?,
             "Binaries" => validate_legacy_binaries_shape(child)?,
@@ -2089,7 +2351,8 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
                 "AutoEnableVisualHiding",
             ],
             |value| parse_bool_text_strict(value).is_some(),
-        )?;
+        )
+        .map_err(|_| invalid_xml_model("Meta/MemoryProtection", "invalid boolean field"))?;
     }
     validate_typed_children(
         meta,
@@ -2103,17 +2366,20 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
             "MasterKeyChanged",
         ],
         |value| parse_datetime_i64(value).is_some(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "invalid timestamp field"))?;
     validate_typed_children(
         meta,
         &["RecycleBinEnabled", "MasterKeyChangeForceOnce"],
         |value| parse_bool_text_strict(value).is_some(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "invalid boolean field"))?;
     validate_typed_children(
         meta,
         &["MaintenanceHistoryDays", "HistoryMaxItems"],
         |value| value.trim().parse::<i32>().is_ok(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "invalid 32-bit integer field"))?;
     validate_typed_children(
         meta,
         &[
@@ -2122,7 +2388,8 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
             "HistoryMaxSize",
         ],
         |value| value.trim().parse::<i64>().is_ok(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "invalid 64-bit integer field"))?;
     validate_typed_children(
         meta,
         &[
@@ -2132,13 +2399,17 @@ fn validate_meta_shape(meta: &Element) -> Result<()> {
             "LastTopVisibleGroup",
         ],
         |value| parse_optional_uuid(value).is_ok(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Meta", "invalid UUID field"))?;
     Ok(())
 }
 
 fn validate_root_shape(root: &Element) -> Result<()> {
-    validate_child_multiplicity(root, &["Group", "DeletedObjects"], &["Group"])?;
-    let group = root.get_child("Group").ok_or(KdbxError::InvalidValue)?;
+    validate_child_multiplicity(root, &["Group", "DeletedObjects"], &["Group"])
+        .map_err(|_| invalid_xml_model("Root", "missing or duplicate singleton child"))?;
+    let group = root
+        .get_child("Group")
+        .ok_or_else(|| invalid_xml_model("Root/Group", "missing required child"))?;
     validate_group_shape(group)?;
     if let Some(deleted) = root.get_child("DeletedObjects") {
         validate_deleted_objects_shape(deleted)?;
@@ -2162,8 +2433,10 @@ fn validate_group_shape(group: &Element) -> Result<()> {
         "LastTopVisibleEntry",
         "PreviousParentGroup",
     ];
-    validate_child_multiplicity(group, SINGLETONS, &["UUID"])?;
-    validate_known_scalar_children(group, SINGLETONS, &["Times"])?;
+    validate_child_multiplicity(group, SINGLETONS, &["UUID"])
+        .map_err(|_| invalid_xml_model("Group", "missing or duplicate singleton child"))?;
+    validate_known_scalar_children(group, SINGLETONS, &["Times"])
+        .map_err(|_| invalid_xml_model("Group", "scalar field contains a child element"))?;
     for child in element_children(group) {
         match child.name.as_str() {
             "Times" => validate_times_shape(child)?,
@@ -2175,10 +2448,12 @@ fn validate_group_shape(group: &Element) -> Result<()> {
     }
     validate_typed_children(group, &["UUID"], |value| {
         decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Group/UUID", "invalid or nil UUID"))?;
     validate_typed_children(group, &["IconID"], |value| {
         value.trim().parse::<u32>().is_ok()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Group/IconID", "invalid unsigned integer"))?;
     validate_typed_children(
         group,
         &[
@@ -2187,13 +2462,16 @@ fn validate_group_shape(group: &Element) -> Result<()> {
             "PreviousParentGroup",
         ],
         |value| parse_optional_uuid(value).is_ok(),
-    )?;
+    )
+    .map_err(|_| invalid_xml_model("Group", "invalid optional UUID field"))?;
     validate_typed_children(group, &["IsExpanded"], |value| {
         parse_bool_text_strict(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Group/IsExpanded", "invalid boolean"))?;
     validate_typed_children(group, &["EnableAutoType", "EnableSearching"], |value| {
         parse_nullable_bool_strict(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Group", "invalid nullable boolean field"))?;
     Ok(())
 }
 
@@ -2212,43 +2490,76 @@ fn validate_entry_shape(entry: &Element) -> Result<()> {
         "AutoType",
         "History",
     ];
-    validate_child_multiplicity(entry, SINGLETONS, &["UUID"])?;
-    validate_known_scalar_children(entry, SINGLETONS, &["Times", "AutoType", "History"])?;
+    validate_child_multiplicity(entry, SINGLETONS, &["UUID"])
+        .map_err(|_| invalid_xml_model("Entry", "missing or duplicate singleton child"))?;
+    validate_known_scalar_children(entry, SINGLETONS, &["Times", "AutoType", "History"])
+        .map_err(|_| invalid_xml_model("Entry", "scalar field contains a child element"))?;
     let mut string_keys = BTreeSet::new();
     let mut binary_names = BTreeSet::new();
     for child in element_children(entry) {
         match child.name.as_str() {
             "Times" => validate_times_shape(child)?,
             "String" => {
-                validate_only_singletons(child, &["Key", "Value"], &["Key", "Value"])?;
-                validate_known_scalar_children(child, &["Key", "Value"], &[])?;
-                let key = child_text(child, "Key").ok_or(KdbxError::InvalidValue)?;
+                validate_only_singletons(child, &["Key", "Value"], &["Key", "Value"]).map_err(
+                    |_| {
+                        invalid_xml_model("Entry/String", "missing, duplicate, or unexpected child")
+                    },
+                )?;
+                validate_known_scalar_children(child, &["Key", "Value"], &[]).map_err(|_| {
+                    invalid_xml_model("Entry/String", "Key or Value contains a child element")
+                })?;
+                let key = child_text(child, "Key")
+                    .ok_or_else(|| invalid_xml_model("Entry/String/Key", "missing field key"))?;
                 if !string_keys.insert(key) {
-                    return Err(KdbxError::InvalidValue);
+                    return Err(invalid_xml_model("Entry/String", "duplicate field key"));
                 }
-                let value = child.get_child("Value").ok_or(KdbxError::InvalidValue)?;
-                validate_bool_attribute_if_present(value, "Protected")?;
+                let value = child
+                    .get_child("Value")
+                    .ok_or_else(|| invalid_xml_model("Entry/String/Value", "missing value"))?;
+                validate_bool_attribute_if_present(value, "Protected").map_err(|_| {
+                    invalid_xml_model("Entry/String/Value@Protected", "invalid boolean")
+                })?;
             }
             "Binary" => {
-                validate_only_singletons(child, &["Key", "Value"], &["Key", "Value"])?;
-                validate_known_scalar_children(child, &["Key", "Value"], &[])?;
-                let name = child_text(child, "Key").ok_or(KdbxError::InvalidValue)?;
+                validate_only_singletons(child, &["Key", "Value"], &["Key", "Value"]).map_err(
+                    |_| {
+                        invalid_xml_model("Entry/Binary", "missing, duplicate, or unexpected child")
+                    },
+                )?;
+                validate_known_scalar_children(child, &["Key", "Value"], &[]).map_err(|_| {
+                    invalid_xml_model("Entry/Binary", "Key or Value contains a child element")
+                })?;
+                let name = child_text(child, "Key")
+                    .ok_or_else(|| invalid_xml_model("Entry/Binary/Key", "missing name"))?;
                 if !binary_names.insert(name) {
-                    return Err(KdbxError::InvalidValue);
+                    return Err(invalid_xml_model(
+                        "Entry/Binary",
+                        "duplicate attachment name",
+                    ));
                 }
-                let value = child.get_child("Value").ok_or(KdbxError::InvalidValue)?;
-                validate_bool_attribute_if_present(value, "Protected")?;
-                validate_bool_attribute_if_present(value, "Compressed")?;
+                let value = child
+                    .get_child("Value")
+                    .ok_or_else(|| invalid_xml_model("Entry/Binary/Value", "missing value"))?;
+                validate_bool_attribute_if_present(value, "Protected").map_err(|_| {
+                    invalid_xml_model("Entry/Binary/Value@Protected", "invalid boolean")
+                })?;
+                validate_bool_attribute_if_present(value, "Compressed").map_err(|_| {
+                    invalid_xml_model("Entry/Binary/Value@Compressed", "invalid boolean")
+                })?;
                 if let Some(reference) = value.attributes.get("Ref")
                     && reference.trim().parse::<usize>().is_err()
                 {
-                    return Err(KdbxError::InvalidValue);
+                    return Err(invalid_xml_model(
+                        "Entry/Binary/Value@Ref",
+                        "invalid attachment index",
+                    ));
                 }
             }
             "AutoType" => validate_auto_type_shape(child)?,
             "CustomData" => validate_custom_data_shape(child)?,
             "History" => {
-                validate_only_element_children(child, &["Entry"])?;
+                validate_only_element_children(child, &["Entry"])
+                    .map_err(|_| invalid_xml_model("Entry/History", "unexpected child element"))?;
                 for history_entry in element_children(child) {
                     validate_entry_shape(history_entry)?;
                 }
@@ -2258,16 +2569,20 @@ fn validate_entry_shape(entry: &Element) -> Result<()> {
     }
     validate_typed_children(entry, &["UUID"], |value| {
         decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry/UUID", "invalid or nil UUID"))?;
     validate_typed_children(entry, &["IconID"], |value| {
         value.trim().is_empty() || value.trim().parse::<u32>().is_ok()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry/IconID", "invalid unsigned integer"))?;
     validate_typed_children(entry, &["CustomIconUUID", "PreviousParentGroup"], |value| {
         parse_optional_uuid(value).is_ok()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry", "invalid optional UUID field"))?;
     validate_typed_children(entry, &["QualityCheck"], |value| {
         parse_bool_text_strict(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry/QualityCheck", "invalid boolean"))?;
     Ok(())
 }
 
@@ -2281,105 +2596,190 @@ fn validate_times_shape(times: &Element) -> Result<()> {
         "UsageCount",
         "LocationChanged",
     ];
-    validate_only_singletons(times, FIELDS, &[])?;
-    validate_known_scalar_children(times, FIELDS, &[])?;
+    validate_only_singletons(times, FIELDS, &[])
+        .map_err(|_| invalid_xml_model("Times", "unexpected or duplicate child"))?;
+    validate_known_scalar_children(times, FIELDS, &[])
+        .map_err(|_| invalid_xml_model("Times", "scalar field contains a child element"))?;
     validate_typed_children(times, &["CreationTime", "LastModificationTime"], |value| {
         parse_datetime_value(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Times", "invalid required timestamp"))?;
     validate_typed_children(times, &["LastAccessTime", "LocationChanged"], |value| {
         value.trim().is_empty() || parse_datetime_value(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Times", "invalid optional timestamp"))?;
     validate_typed_children(times, &["ExpiryTime"], |value| {
         value.trim().is_empty() || parse_datetime_i64(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Times/ExpiryTime", "invalid timestamp"))?;
     validate_typed_children(times, &["Expires"], |value| {
         parse_bool_text_strict(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Times/Expires", "invalid boolean"))?;
     validate_typed_children(times, &["UsageCount"], |value| {
         value.trim().is_empty() || value.trim().parse::<u64>().is_ok()
     })
+    .map_err(|_| invalid_xml_model("Times/UsageCount", "invalid unsigned integer"))
 }
 
 fn validate_auto_type_shape(auto_type: &Element) -> Result<()> {
     const FIELDS: &[&str] = &["Enabled", "DataTransferObfuscation", "DefaultSequence"];
-    validate_child_multiplicity(auto_type, FIELDS, &[])?;
-    validate_known_scalar_children(auto_type, FIELDS, &[])?;
+    validate_child_multiplicity(auto_type, FIELDS, &[])
+        .map_err(|_| invalid_xml_model("Entry/AutoType", "duplicate singleton child"))?;
+    validate_known_scalar_children(auto_type, FIELDS, &[]).map_err(|_| {
+        invalid_xml_model("Entry/AutoType", "scalar field contains a child element")
+    })?;
     for child in element_children(auto_type) {
         match child.name.as_str() {
             "Enabled" | "DataTransferObfuscation" | "DefaultSequence" => {}
             "Association" => {
                 const ASSOCIATION_FIELDS: &[&str] = &["Window", "KeystrokeSequence"];
-                validate_only_singletons(child, ASSOCIATION_FIELDS, &[])?;
-                validate_known_scalar_children(child, ASSOCIATION_FIELDS, &[])?;
+                validate_only_singletons(child, ASSOCIATION_FIELDS, &[]).map_err(|_| {
+                    invalid_xml_model(
+                        "Entry/AutoType/Association",
+                        "unexpected or duplicate child",
+                    )
+                })?;
+                validate_known_scalar_children(child, ASSOCIATION_FIELDS, &[]).map_err(|_| {
+                    invalid_xml_model(
+                        "Entry/AutoType/Association",
+                        "scalar field contains a child element",
+                    )
+                })?;
             }
-            _ => return Err(KdbxError::InvalidValue),
+            _ => {
+                return Err(invalid_xml_model(
+                    "Entry/AutoType",
+                    "unexpected child element",
+                ));
+            }
         }
     }
     validate_typed_children(auto_type, &["Enabled"], |value| {
         parse_nullable_bool_strict(value).is_some()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry/AutoType/Enabled", "invalid nullable boolean"))?;
     validate_typed_children(auto_type, &["DataTransferObfuscation"], |value| {
         value.trim().is_empty() || value.trim().parse::<i32>().is_ok()
-    })?;
+    })
+    .map_err(|_| invalid_xml_model("Entry/AutoType/DataTransferObfuscation", "invalid integer"))?;
     Ok(())
 }
 
 fn validate_custom_data_shape(custom_data: &Element) -> Result<()> {
-    validate_only_element_children(custom_data, &["Item"])?;
+    validate_only_element_children(custom_data, &["Item"])
+        .map_err(|_| invalid_xml_model("CustomData", "unexpected child element"))?;
     for item in element_children(custom_data) {
         const FIELDS: &[&str] = &["Key", "Value", "LastModificationTime"];
-        validate_only_singletons(item, FIELDS, &["Key"])?;
-        validate_known_scalar_children(item, FIELDS, &[])?;
+        validate_only_singletons(item, FIELDS, &["Key"]).map_err(|_| {
+            invalid_xml_model("CustomData/Item", "missing, duplicate, or unexpected child")
+        })?;
+        validate_known_scalar_children(item, FIELDS, &[]).map_err(|_| {
+            invalid_xml_model("CustomData/Item", "scalar field contains a child element")
+        })?;
         validate_typed_children(item, &["LastModificationTime"], |value| {
             parse_datetime_i64(value).is_some()
+        })
+        .map_err(|_| {
+            invalid_xml_model("CustomData/Item/LastModificationTime", "invalid timestamp")
         })?;
     }
     Ok(())
 }
 
 fn validate_custom_icons_shape(custom_icons: &Element) -> Result<()> {
-    validate_only_element_children(custom_icons, &["Icon"])?;
+    validate_only_element_children(custom_icons, &["Icon"])
+        .map_err(|_| invalid_xml_model("Meta/CustomIcons", "unexpected child element"))?;
     for icon in element_children(custom_icons) {
         const FIELDS: &[&str] = &["UUID", "Data", "Name", "LastModificationTime"];
-        validate_only_singletons(icon, FIELDS, &["UUID", "Data"])?;
-        validate_known_scalar_children(icon, FIELDS, &[])?;
+        validate_only_singletons(icon, FIELDS, &["UUID", "Data"]).map_err(|_| {
+            invalid_xml_model(
+                "Meta/CustomIcons/Icon",
+                "missing, duplicate, or unexpected child",
+            )
+        })?;
+        validate_known_scalar_children(icon, FIELDS, &[]).map_err(|_| {
+            invalid_xml_model(
+                "Meta/CustomIcons/Icon",
+                "scalar field contains a child element",
+            )
+        })?;
         validate_typed_children(icon, &["UUID"], |value| {
             decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
-        })?;
+        })
+        .map_err(|_| invalid_xml_model("Meta/CustomIcons/Icon/UUID", "invalid or nil UUID"))?;
         validate_typed_children(icon, &["Data"], |value| {
             STANDARD.decode(value.trim().as_bytes()).is_ok()
-        })?;
+        })
+        .map_err(|_| invalid_xml_model("Meta/CustomIcons/Icon/Data", "invalid base64"))?;
         validate_typed_children(icon, &["LastModificationTime"], |value| {
             parse_datetime_i64(value).is_some()
+        })
+        .map_err(|_| {
+            invalid_xml_model(
+                "Meta/CustomIcons/Icon/LastModificationTime",
+                "invalid timestamp",
+            )
         })?;
     }
     Ok(())
 }
 
 fn validate_legacy_binaries_shape(binaries: &Element) -> Result<()> {
-    validate_only_element_children(binaries, &["Binary"])?;
+    validate_only_element_children(binaries, &["Binary"])
+        .map_err(|_| invalid_xml_model("Meta/Binaries", "unexpected child element"))?;
     let mut ids = BTreeSet::new();
     for binary in element_children(binaries) {
-        validate_scalar_element(binary)?;
-        let id = binary.attributes.get("ID").ok_or(KdbxError::InvalidValue)?;
+        validate_scalar_element(binary)
+            .map_err(|_| invalid_xml_model("Meta/Binaries/Binary", "contains a child element"))?;
+        let id = binary
+            .attributes
+            .get("ID")
+            .ok_or_else(|| invalid_xml_model("Meta/Binaries/Binary@ID", "missing binary ID"))?;
         if !ids.insert(id.as_str()) {
-            return Err(KdbxError::InvalidValue);
+            return Err(invalid_xml_model(
+                "Meta/Binaries/Binary@ID",
+                "duplicate binary ID",
+            ));
         }
     }
     Ok(())
 }
 
 fn validate_deleted_objects_shape(deleted: &Element) -> Result<()> {
-    validate_only_element_children(deleted, &["DeletedObject"])?;
+    validate_only_element_children(deleted, &["DeletedObject"])
+        .map_err(|_| invalid_xml_model("Root/DeletedObjects", "unexpected child element"))?;
     for object in element_children(deleted) {
         const FIELDS: &[&str] = &["UUID", "DeletionTime"];
-        validate_only_singletons(object, FIELDS, FIELDS)?;
-        validate_known_scalar_children(object, FIELDS, &[])?;
+        validate_only_singletons(object, FIELDS, FIELDS).map_err(|_| {
+            invalid_xml_model(
+                "Root/DeletedObjects/DeletedObject",
+                "missing, duplicate, or unexpected child",
+            )
+        })?;
+        validate_known_scalar_children(object, FIELDS, &[]).map_err(|_| {
+            invalid_xml_model(
+                "Root/DeletedObjects/DeletedObject",
+                "scalar field contains a child element",
+            )
+        })?;
         validate_typed_children(object, &["UUID"], |value| {
             decode_uuid(value.trim()).is_ok_and(|uuid| !uuid.is_nil())
+        })
+        .map_err(|_| {
+            invalid_xml_model(
+                "Root/DeletedObjects/DeletedObject/UUID",
+                "invalid or nil UUID",
+            )
         })?;
         validate_typed_children(object, &["DeletionTime"], |value| {
             parse_datetime_i64(value).is_some()
+        })
+        .map_err(|_| {
+            invalid_xml_model(
+                "Root/DeletedObjects/DeletedObject/DeletionTime",
+                "invalid timestamp",
+            )
         })?;
     }
     Ok(())
@@ -2419,6 +2819,15 @@ fn validate_child_multiplicity(
         return Err(KdbxError::InvalidValue);
     }
     Ok(())
+}
+
+fn first_duplicate_child<'a>(element: &Element, names: &'a [&'a str]) -> Option<&'a str> {
+    names.iter().copied().find(|name| {
+        element_children(element)
+            .filter(|child| child.name == *name)
+            .nth(1)
+            .is_some()
+    })
 }
 
 fn validate_known_scalar_children(
@@ -2475,21 +2884,23 @@ fn element_children(element: &Element) -> impl Iterator<Item = &Element> {
     })
 }
 
-fn parse_xml(
-    bytes: &[u8],
+fn parse_xml_document(bytes: &[u8]) -> Result<ZeroizingXmlElement> {
+    Element::parse(IoCursor::new(strip_utf8_bom(bytes)))
+        .map(ZeroizingXmlElement::from_element)
+        .map_err(|error| KdbxError::Xml(error.to_string()))
+}
+
+fn project_xml(
+    root: ZeroizingXmlElement,
     header: &KdbxHeader,
     inner_algorithm: u32,
     inner_key: &[u8],
     binaries: &[InnerBinary],
 ) -> Result<Vault> {
-    let root = Element::parse(IoCursor::new(strip_utf8_bom(bytes)))
-        .map_err(|error| KdbxError::Xml(error.to_string()))?;
-    validate_xml_model_shape(&root)?;
+    let root = root.element();
     let meta = child(&root, "Meta")?;
     let generator = child_text(&meta, "Generator");
-    let settings_changed = child_text(&meta, "SettingsChanged")
-        .as_deref()
-        .and_then(parse_optional_datetime);
+    let settings_changed = latest_child_datetime(&meta, "SettingsChanged");
     let name = child_text(&meta, "DatabaseName").unwrap_or_default();
     let database_name_changed = child_text(&meta, "DatabaseNameChanged")
         .as_deref()
@@ -2576,6 +2987,12 @@ fn parse_xml(
         entry_templates_group_raw: None,
     };
     let mut meta_opaque_xml = collect_meta_opaque_xml(&meta)?;
+    collapse_duplicate_node_occurrences(
+        &mut meta_custom_data_blocks,
+        &mut meta_opaque_xml,
+        &mut meta_raw_state.node_order,
+        "SettingsChanged",
+    )?;
     let mut collapsed_optional_nodes = Vec::new();
     for (element_name, value_is_none) in [
         ("Generator", generator.is_none()),
@@ -2663,10 +3080,13 @@ fn parse_kdbx3_xml(
     inner_random_stream_id: u32,
 ) -> Result<Vault> {
     let xml_bytes = strip_utf8_bom(bytes);
-    let root = Element::parse(IoCursor::new(xml_bytes))
-        .map_err(|error| KdbxError::Xml(error.to_string()))?;
-    validate_xml_model_shape(&root)?;
-    let meta = child(&root, "Meta")?;
+    let root = ZeroizingXmlElement::from_element(
+        Element::parse(IoCursor::new(xml_bytes))
+            .map_err(|error| KdbxError::Xml(error.to_string()))?,
+    );
+    validate_xml_model_shape(root.element()).map_err(normalize_xml_model_error)?;
+    let root = root.element();
+    let meta = child(root, "Meta")?;
 
     if let Some(header_hash) = child_text(&meta, "HeaderHash")
         && !header_hash.is_empty()
@@ -2681,9 +3101,7 @@ fn parse_kdbx3_xml(
 
     let name = child_text(&meta, "DatabaseName").unwrap_or_default();
     let generator = child_text(&meta, "Generator");
-    let settings_changed = child_text(&meta, "SettingsChanged")
-        .as_deref()
-        .and_then(parse_optional_datetime);
+    let settings_changed = latest_child_datetime(&meta, "SettingsChanged");
     let database_name_changed = child_text(&meta, "DatabaseNameChanged")
         .as_deref()
         .and_then(parse_optional_datetime);
@@ -2778,6 +3196,12 @@ fn parse_kdbx3_xml(
     let group = parse_group(&root_group, &binaries, &mut content_pool, &mut protected)?;
     let deleted_objects = parse_deleted_objects(&root)?;
     let mut meta_opaque_xml = collect_meta_opaque_xml(&meta)?;
+    collapse_duplicate_node_occurrences(
+        &mut meta_custom_data_blocks,
+        &mut meta_opaque_xml,
+        &mut meta_raw_state.node_order,
+        "SettingsChanged",
+    )?;
     let mut collapsed_optional_nodes = Vec::new();
     for (element_name, value_is_none) in [
         ("Generator", generator.is_none()),
@@ -2854,6 +3278,45 @@ fn retarget_legacy_meta_anchors(
     node_order: &mut Vec<String>,
 ) -> Result<()> {
     retarget_removed_scope_nodes(blocks, opaque, node_order, &["HeaderHash", "Binaries"])
+}
+
+fn collapse_duplicate_node_occurrences(
+    blocks: &mut [CustomDataBlock],
+    opaque: &mut [OpaqueXmlFragment],
+    node_order: &mut Vec<String>,
+    element_name: &str,
+) -> Result<()> {
+    let original_order = node_order.clone();
+    for anchor in blocks
+        .iter_mut()
+        .map(|block| &mut block.after)
+        .chain(opaque.iter_mut().map(|fragment| &mut fragment.after))
+    {
+        let Some(current) = anchor.as_ref() else {
+            continue;
+        };
+        if current.element_name != element_name || current.occurrence <= 1 {
+            continue;
+        }
+        let mut mapped = predecessor_anchor(&original_order, current)?;
+        while let Some(candidate) = mapped.as_ref()
+            && candidate.element_name == element_name
+            && candidate.occurrence > 1
+        {
+            mapped = predecessor_anchor(&original_order, candidate)?;
+        }
+        *anchor = mapped;
+    }
+    let mut seen = false;
+    node_order.retain(|name| {
+        if name != element_name {
+            return true;
+        }
+        let keep = !seen;
+        seen = true;
+        keep
+    });
+    Ok(())
 }
 
 fn retarget_removed_scope_nodes(
@@ -3300,9 +3763,11 @@ fn parse_kdbx3_binaries(
             .get_text()
             .map(|value| value.to_string())
             .unwrap_or_default();
-        let mut data = STANDARD
-            .decode(encoded.as_bytes())
-            .map_err(|_| KdbxError::InvalidValue)?;
+        let mut data = Zeroizing::new(
+            STANDARD
+                .decode(encoded.as_bytes())
+                .map_err(|_| KdbxError::InvalidValue)?,
+        );
         if protected_in_memory {
             protected.apply(&mut data);
         }
@@ -3312,7 +3777,7 @@ fn parse_kdbx3_binaries(
 
         let binary = InnerBinary {
             protect_in_memory: protected_in_memory,
-            data: content_pool.intern_vec(data)?,
+            data: content_pool.intern_vec(std::mem::take(&mut *data))?,
         };
         if binaries.insert(index, binary).is_some() {
             return Err(KdbxError::InvalidValue);
@@ -3654,9 +4119,11 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
                             .get_text()
                             .map(|text| text.to_string())
                             .unwrap_or_default();
-                        let mut data = STANDARD
-                            .decode(encoded.as_bytes())
-                            .map_err(|_| KdbxError::InvalidValue)?;
+                        let mut data = Zeroizing::new(
+                            STANDARD
+                                .decode(encoded.as_bytes())
+                                .map_err(|_| KdbxError::InvalidValue)?,
+                        );
                         if protected_in_memory {
                             protected.apply(&mut data);
                         }
@@ -3665,7 +4132,7 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
                         }
                         Attachment {
                             name: attachment_name.clone(),
-                            data: content_pool.intern_vec(data)?,
+                            data: content_pool.intern_vec(std::mem::take(&mut *data))?,
                             protect_in_memory: protected_in_memory,
                         }
                     };
@@ -3773,24 +4240,24 @@ fn parse_entry<B: BinaryLookup + ?Sized>(
         );
     }
 
-    if let Some(field) = raw_fields.remove("Title") {
-        entry.title = field.value;
+    if let Some(mut field) = raw_fields.remove("Title") {
+        entry.title = std::mem::take(&mut field.value);
         entry.field_protection.protect_title = field.protected;
     }
-    if let Some(field) = raw_fields.remove("UserName") {
-        entry.username = field.value;
+    if let Some(mut field) = raw_fields.remove("UserName") {
+        entry.username = std::mem::take(&mut field.value);
         entry.field_protection.protect_username = field.protected;
     }
-    if let Some(field) = raw_fields.remove("Password") {
-        entry.password = field.value;
+    if let Some(mut field) = raw_fields.remove("Password") {
+        entry.password = std::mem::take(&mut field.value);
         entry.field_protection.protect_password = field.protected;
     }
-    if let Some(field) = raw_fields.remove("URL") {
-        entry.url = field.value;
+    if let Some(mut field) = raw_fields.remove("URL") {
+        entry.url = std::mem::take(&mut field.value);
         entry.field_protection.protect_url = field.protected;
     }
-    if let Some(field) = raw_fields.remove("Notes") {
-        entry.notes = field.value;
+    if let Some(mut field) = raw_fields.remove("Notes") {
+        entry.notes = std::mem::take(&mut field.value);
         entry.field_protection.protect_notes = field.protected;
     }
 
@@ -4190,9 +4657,9 @@ fn entry_ref_key(entry: &Entry) -> usize {
     entry as *const Entry as usize
 }
 
-fn decode_legacy_block_stream(bytes: &[u8]) -> Result<Vec<u8>> {
+fn decode_legacy_block_stream(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let mut cursor = Cursor::new(bytes);
-    let mut plaintext = Vec::new();
+    let mut plaintext = Zeroizing::new(Vec::new());
     let mut index = 0_u32;
 
     loop {
@@ -4230,7 +4697,7 @@ fn encode_block_stream(mac_seed: &[u8; 64], encrypted_payload: &[u8]) -> Result<
         mac_input.extend(index_u64.to_le_bytes());
         mac_input.extend((chunk.len() as i32).to_le_bytes());
         mac_input.extend(chunk);
-        let mac = hmac_sha256(&hmac_key, &mac_input)?;
+        let mac = hmac_sha256(&hmac_key[..], &mac_input)?;
         bytes.extend(mac);
         bytes.extend((chunk.len() as i32).to_le_bytes());
         bytes.extend(chunk);
@@ -4241,15 +4708,15 @@ fn encode_block_stream(mac_seed: &[u8; 64], encrypted_payload: &[u8]) -> Result<
     let mut mac_input = Vec::with_capacity(12);
     mac_input.extend(terminator_index.to_le_bytes());
     mac_input.extend(0_i32.to_le_bytes());
-    let mac = hmac_sha256(&hmac_key, &mac_input)?;
+    let mac = hmac_sha256(&hmac_key[..], &mac_input)?;
     bytes.extend(mac);
     bytes.extend(0_i32.to_le_bytes());
     Ok(bytes)
 }
 
-fn decode_block_stream(mac_seed: &[u8; 64], bytes: &[u8]) -> Result<Vec<u8>> {
+fn decode_block_stream(mac_seed: &[u8; 64], bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let mut cursor = Cursor::new(bytes);
-    let mut plaintext = Vec::new();
+    let mut plaintext = Zeroizing::new(Vec::new());
     let mut index = 0_u64;
 
     loop {
@@ -4264,7 +4731,8 @@ fn decode_block_stream(mac_seed: &[u8; 64], bytes: &[u8]) -> Result<Vec<u8>> {
         mac_input.extend(index.to_le_bytes());
         mac_input.extend(size.to_le_bytes());
         mac_input.extend(&chunk);
-        let expected = hmac_sha256(&block_hmac_key(mac_seed, index), &mac_input)?;
+        let hmac_key = block_hmac_key(mac_seed, index);
+        let expected = hmac_sha256(&hmac_key[..], &mac_input)?;
         if expected.as_slice() != mac.as_slice() {
             return Err(KdbxError::PayloadHmacMismatch);
         }
@@ -4283,64 +4751,100 @@ fn decode_block_stream(mac_seed: &[u8; 64], bytes: &[u8]) -> Result<Vec<u8>> {
 fn header_hmac(mac_seed: &[u8; 64], header_bytes: &[u8]) -> Result<[u8; 32]> {
     let mut prefix = [0xFF_u8; 8];
     prefix.reverse();
-    let mut material = Vec::with_capacity(8 + mac_seed.len());
+    let mut material = Zeroizing::new(Vec::with_capacity(8 + mac_seed.len()));
     material.extend(prefix);
     material.extend(mac_seed);
-    let key = sha512_bytes(&material);
-    hmac_sha256(&key, header_bytes).map_err(KdbxError::from)
+    let key = Zeroizing::new(sha512_bytes(&material));
+    hmac_sha256(&key[..], header_bytes).map_err(KdbxError::from)
 }
 
-fn block_hmac_key(mac_seed: &[u8; 64], index: u64) -> [u8; 64] {
-    let mut material = Vec::with_capacity(8 + mac_seed.len());
+fn block_hmac_key(mac_seed: &[u8; 64], index: u64) -> Zeroizing<[u8; 64]> {
+    let mut material = Zeroizing::new(Vec::with_capacity(8 + mac_seed.len()));
     material.extend(index.to_le_bytes());
     material.extend(mac_seed);
-    sha512_bytes(&material)
+    Zeroizing::new(sha512_bytes(&material))
 }
 
-fn mac_seed(master_seed: &[u8; 32], transformed: &[u8; 32]) -> [u8; 64] {
-    let mut material = Vec::with_capacity(master_seed.len() + transformed.len() + 1);
+fn mac_seed(master_seed: &[u8; 32], transformed: &[u8; 32]) -> Zeroizing<[u8; 64]> {
+    let mut material = Zeroizing::new(Vec::with_capacity(
+        master_seed.len() + transformed.len() + 1,
+    ));
     material.extend(master_seed);
     material.extend(transformed);
     material.push(0x01);
-    sha512_bytes(&material)
+    let digest = Zeroizing::new(sha512_bytes(&material));
+    let mut seed = Zeroizing::new([0_u8; 64]);
+    seed.copy_from_slice(digest.as_ref());
+    seed
 }
 
-fn sha256_seeded(master_seed: &[u8; 32], transformed: &[u8; 32]) -> [u8; 32] {
-    let mut material = Vec::with_capacity(master_seed.len() + transformed.len());
+fn sha256_seeded(master_seed: &[u8; 32], transformed: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    let mut material = Zeroizing::new(Vec::with_capacity(master_seed.len() + transformed.len()));
     material.extend(master_seed);
     material.extend(transformed);
-    sha256_bytes(&material)
+    let digest = Zeroizing::new(sha256_bytes(&material));
+    let mut key = Zeroizing::new([0_u8; 32]);
+    key.copy_from_slice(digest.as_ref());
+    key
 }
 
-fn derive_chacha20_inner_stream_key(inner_key: &[u8]) -> Result<([u8; 32], [u8; 12])> {
+fn derive_chacha20_inner_stream_key(inner_key: &[u8]) -> Result<(Zeroizing<[u8; 32]>, [u8; 12])> {
     if inner_key.len() < 32 {
         return Err(KdbxError::InvalidValue);
     }
-    let digest = sha512_bytes(inner_key);
-    let key = digest[..32]
-        .try_into()
-        .map_err(|_| KdbxError::InvalidValue)?;
+    let digest = Zeroizing::new(sha512_bytes(inner_key));
+    let mut key = Zeroizing::new([0_u8; 32]);
+    key.copy_from_slice(&digest[..32]);
     let nonce = digest[32..44]
         .try_into()
         .map_err(|_| KdbxError::InvalidValue)?;
     Ok((key, nonce))
 }
 
-fn derive_salsa20_inner_stream_key(inner_key: &[u8]) -> [u8; 32] {
-    sha256_bytes(inner_key)
+fn derive_salsa20_inner_stream_key(inner_key: &[u8]) -> Zeroizing<[u8; 32]> {
+    let digest = Zeroizing::new(sha256_bytes(inner_key));
+    let mut key = Zeroizing::new([0_u8; 32]);
+    key.copy_from_slice(digest.as_ref());
+    key
 }
 
-fn gzip_compress(bytes: &[u8]) -> Result<Vec<u8>> {
-    let mut encoder = GzEncoder::new(Vec::new(), GzipCompression::default());
+struct ZeroizingWriter(Zeroizing<Vec<u8>>);
+
+impl ZeroizingWriter {
+    fn new() -> Self {
+        Self(Zeroizing::new(Vec::new()))
+    }
+
+    fn into_inner(self) -> Zeroizing<Vec<u8>> {
+        self.0
+    }
+}
+
+impl Write for ZeroizingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn gzip_compress(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let mut encoder = GzEncoder::new(ZeroizingWriter::new(), GzipCompression::default());
     encoder
         .write_all(bytes)
         .map_err(|_| KdbxError::InvalidValue)?;
-    encoder.finish().map_err(|_| KdbxError::InvalidValue)
+    encoder
+        .finish()
+        .map(ZeroizingWriter::into_inner)
+        .map_err(|_| KdbxError::InvalidValue)
 }
 
-fn gzip_decompress(bytes: &[u8]) -> Result<Vec<u8>> {
+fn gzip_decompress(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let mut decoder = GzDecoder::new(bytes);
-    let mut output = Vec::new();
+    let mut output = Zeroizing::new(Vec::new());
     decoder
         .read_to_end(&mut output)
         .map_err(|_| KdbxError::InvalidValue)?;
@@ -4405,6 +4909,14 @@ fn child_optional(element: &Element, name: &str) -> Option<Element> {
 
 fn child_text(element: &Element, name: &str) -> Option<String> {
     child_optional(element, name).and_then(|child| child.get_text().map(|text| text.to_string()))
+}
+
+fn latest_child_datetime(element: &Element, name: &str) -> Option<i64> {
+    element_children(element)
+        .filter(|child| child.name == name)
+        .filter_map(|child| child.get_text())
+        .filter_map(|value| parse_optional_datetime(&value))
+        .max()
 }
 
 fn child_text_preserve_empty(element: &Element, name: &str) -> Option<String> {
@@ -5307,6 +5819,7 @@ impl ProtectedStream {
 
     fn new_chacha(inner_key: &[u8]) -> Result<Self> {
         let (key, nonce) = derive_chacha20_inner_stream_key(inner_key)?;
+        let nonce = Zeroizing::new(nonce);
         Ok(Self {
             cipher: ProtectedStreamCipher::ChaCha20(ChaCha20Stream::new(&key, &nonce)),
         })
@@ -5850,12 +6363,13 @@ mod compatibility_tests {
     use std::collections::BTreeMap;
 
     use super::{
-        Compression, KdbxCipher, KdbxError, KdbxHeader, KdbxVersion, ProtectedStream, SaveKdf,
-        SaveProfile, binary_index_for_content_id, child_text, collect_attachment_refs,
-        decode_block_stream, decrypt_payload, encode_block_stream, entry_ref_key, gzip_compress,
-        gzip_decompress, header_hmac, kdf_from_variant_dict, load_kdbx, mac_seed,
+        Compression, KdbxCipher, KdbxError, KdbxHeader, KdbxLoadStage, KdbxVersion,
+        ProtectedStream, SaveKdf, SaveProfile, binary_index_for_content_id, child_text,
+        collect_attachment_refs, decode_block_stream, decrypt_payload, derive_transformed_key,
+        encode_block_stream, entry_ref_key, gzip_compress, gzip_decompress, header_hmac,
+        kdf_from_variant_dict, load_kdbx, load_kdbx_with_transformed_key_diagnostic, mac_seed,
         parse_inner_header, parse_kdbx3_binaries, required_version, save_kdbx, sha256_seeded,
-        text_element, validate_xml_model_shape,
+        text_element, validate_xml_model_shape, zeroize_xml_text,
     };
     use base64::Engine as _;
     use vaultkern_crypto::{CompositeKey, sha256_bytes};
@@ -5866,6 +6380,7 @@ mod compatibility_tests {
         canonical_entry_bytes_v1, canonical_entry_content_hash_v1,
     };
     use xmltree::{Element, XMLNode};
+    use zeroize::Zeroizing;
 
     fn fast_profile() -> SaveProfile {
         SaveProfile {
@@ -5880,6 +6395,42 @@ mod compatibility_tests {
         let mut key = CompositeKey::default();
         key.add_password(password);
         key
+    }
+
+    #[test]
+    fn xml_secret_guards_wipe_text_comments_names_and_attributes() {
+        let mut root = Element::new("secret-root-name");
+        root.attributes.insert(
+            "secret-attribute-key".into(),
+            "secret-attribute-value".into(),
+        );
+        root.children.push(XMLNode::Text("secret-text".into()));
+        root.children
+            .push(XMLNode::Comment("secret-comment".into()));
+        let mut child = Element::new("secret-child-name");
+        child.children.push(XMLNode::CData("secret-cdata".into()));
+        root.children.push(XMLNode::Element(child));
+
+        zeroize_xml_text(&mut root);
+
+        assert!(root.name.bytes().all(|byte| byte == 0));
+        assert!(root.attributes.is_empty());
+        for node in &root.children {
+            match node {
+                XMLNode::Text(value) | XMLNode::CData(value) | XMLNode::Comment(value) => {
+                    assert!(value.bytes().all(|byte| byte == 0));
+                }
+                XMLNode::Element(child) => {
+                    assert!(child.name.bytes().all(|byte| byte == 0));
+                    assert!(child.children.iter().all(|node| match node {
+                        XMLNode::Text(value) | XMLNode::CData(value) | XMLNode::Comment(value) =>
+                            value.bytes().all(|byte| byte == 0),
+                        _ => true,
+                    }));
+                }
+                _ => {}
+            }
+        }
     }
 
     #[test]
@@ -6359,7 +6910,7 @@ mod compatibility_tests {
 
         let raw_key = composite_key.raw_key()?;
         let kdf = kdf_from_variant_dict(&header.kdf_parameters)?;
-        let transformed = kdf.derive_key(&raw_key)?;
+        let transformed = kdf.derive_key(raw_key.as_ref())?;
         let encryption_key = sha256_seeded(&header.master_seed, &transformed);
         let mac_seed = mac_seed(&header.master_seed, &transformed);
         let encrypted_payload = decode_block_stream(&mac_seed, &payload_bytes)?;
@@ -6390,7 +6941,7 @@ mod compatibility_tests {
 
         let raw_key = composite_key.raw_key()?;
         let kdf = kdf_from_variant_dict(&header.kdf_parameters)?;
-        let transformed = kdf.derive_key(&raw_key)?;
+        let transformed = kdf.derive_key(raw_key.as_ref())?;
         let encryption_key = sha256_seeded(&header.master_seed, &transformed);
         let mac_seed = mac_seed(&header.master_seed, &transformed);
         let encrypted_payload = decode_block_stream(&mac_seed, &payload_bytes)?;
@@ -6416,7 +6967,7 @@ mod compatibility_tests {
         let mut new_payload = payload[..consumed].to_vec();
         new_payload.extend(xml_bytes);
         let payload = match header.compression {
-            Compression::None => new_payload,
+            Compression::None => Zeroizing::new(new_payload),
             Compression::Gzip => gzip_compress(&new_payload)?,
         };
         let encrypted_payload = super::encrypt_payload(
@@ -6514,7 +7065,10 @@ mod compatibility_tests {
             username: "alice@example.com".into(),
             credential_id: "credential-1".into(),
             generated_user_id: Some("generated-1".into()),
-            private_key_pem: "-----BEGIN PRIVATE KEY-----\nkey-1\n-----END PRIVATE KEY-----".into(),
+            private_key_pem: String::from(
+                "-----BEGIN PRIVATE KEY-----\nkey-1\n-----END PRIVATE KEY-----",
+            )
+            .into(),
             relying_party: "example.com".into(),
             user_handle: Some("user-handle-1".into()),
             backup_eligible: true,
@@ -6593,6 +7147,129 @@ mod compatibility_tests {
                 "duplicate {case} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn diagnostic_loader_reports_xml_shape_without_exposing_field_values() {
+        const SECRET_TITLE: &str = "diagnostic-secret-title";
+
+        let mut vault = Vault::empty("diagnostic fixture");
+        vault.root.entries.push(Entry::new(SECRET_TITLE));
+        let key = test_key("diagnostic-xml-shape");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save fixture");
+        let malformed = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let entry = first_live_entry_mut(root);
+            let title = entry
+                .children
+                .iter()
+                .find_map(|child| match child {
+                    XMLNode::Element(field)
+                        if field.name == "String"
+                            && child_text(field, "Key").as_deref() == Some("Title") =>
+                    {
+                        Some(field.clone())
+                    }
+                    _ => None,
+                })
+                .expect("Title field");
+            entry.children.push(XMLNode::Element(title));
+        })
+        .expect("duplicate String key");
+        let transformed = derive_transformed_key(&malformed, &key).expect("derive transformed key");
+
+        let error = load_kdbx_with_transformed_key_diagnostic(&malformed, &transformed)
+            .expect_err("malformed XML must fail");
+
+        assert_eq!(error.stage, KdbxLoadStage::XmlShape);
+        assert!(error.to_string().contains("XML model validation"));
+        assert!(error.to_string().contains("Entry/String"));
+        assert!(error.to_string().contains("duplicate field key"));
+        assert!(!error.to_string().contains(SECRET_TITLE));
+    }
+
+    #[test]
+    fn diagnostic_loader_names_duplicate_meta_element_without_exposing_its_value() {
+        const SECRET_DATABASE_NAME: &str = "diagnostic-secret-database-name";
+
+        let vault = Vault::empty(SECRET_DATABASE_NAME);
+        let key = test_key("diagnostic-meta-singleton");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save fixture");
+        let malformed = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let meta = root.get_mut_child("Meta").expect("Meta");
+            let database_name = meta
+                .get_child("DatabaseName")
+                .expect("DatabaseName")
+                .clone();
+            meta.children.push(XMLNode::Element(database_name));
+        })
+        .expect("duplicate DatabaseName");
+        let transformed = derive_transformed_key(&malformed, &key).expect("derive transformed key");
+
+        let error = load_kdbx_with_transformed_key_diagnostic(&malformed, &transformed)
+            .expect_err("duplicate Meta singleton must fail");
+
+        assert_eq!(error.stage, KdbxLoadStage::XmlShape);
+        assert!(error.to_string().contains("Meta/DatabaseName"));
+        assert!(error.to_string().contains("duplicate singleton child"));
+        assert!(!error.to_string().contains(SECRET_DATABASE_NAME));
+    }
+
+    #[test]
+    fn loader_migrates_duplicate_settings_changed_to_latest_single_value() {
+        let mut vault = Vault::empty("duplicate SettingsChanged migration");
+        vault.settings_changed = Some(100);
+        let key = test_key("duplicate-settings-changed");
+        let bytes = save_kdbx(&vault, &key, &fast_profile()).expect("save fixture");
+        let duplicated = rewrite_kdbx4_xml(&bytes, &key, |root| {
+            let meta = root.get_mut_child("Meta").expect("Meta");
+            let mut newer = meta
+                .get_child("SettingsChanged")
+                .expect("SettingsChanged")
+                .clone();
+            newer.children = vec![XMLNode::Text("200".into())];
+            meta.children.push(XMLNode::Element(newer));
+            meta.children.push(XMLNode::Element(
+                Element::parse(b"<FutureMeta>opaque</FutureMeta>".as_slice())
+                    .expect("future Meta element"),
+            ));
+            meta.children.push(XMLNode::Element(
+                Element::parse(
+                    b"<CustomData><Item><Key>migration-key</Key><Value>migration-value</Value></Item></CustomData>"
+                        .as_slice(),
+                )
+                .expect("CustomData block"),
+            ));
+        })
+        .expect("duplicate SettingsChanged");
+
+        let loaded = load_kdbx(&duplicated, &key).expect("migrate duplicate SettingsChanged");
+        assert_eq!(loaded.settings_changed, Some(200));
+        assert_eq!(
+            loaded.meta_custom_data.get("migration-key"),
+            Some(&"migration-value".to_string())
+        );
+
+        let rewritten = save_kdbx(&loaded, &key, &fast_profile()).expect("save migrated vault");
+        let rewritten_xml = extract_kdbx4_xml(&rewritten, &key).expect("extract rewritten XML");
+        let rewritten_root = Element::parse(rewritten_xml.as_bytes()).expect("parse rewritten XML");
+        let settings_changed_count = rewritten_root
+            .get_child("Meta")
+            .expect("Meta")
+            .children
+            .iter()
+            .filter(|child| {
+                matches!(child, XMLNode::Element(element) if element.name == "SettingsChanged")
+            })
+            .count();
+        assert_eq!(settings_changed_count, 1);
+        assert!(
+            rewritten_root
+                .get_child("Meta")
+                .expect("Meta")
+                .get_child("FutureMeta")
+                .is_some(),
+            "opaque Meta element was lost during migration"
+        );
     }
 
     #[test]
@@ -7836,7 +8513,10 @@ mod compatibility_tests {
                                     username: "matrix-user".into(),
                                     credential_id: "Y3JlZGVudGlhbA".into(),
                                     generated_user_id: None,
-                                    private_key_pem: "-----BEGIN PRIVATE KEY-----\nYWJj\n-----END PRIVATE KEY-----\n".into(),
+                                    private_key_pem: String::from(
+                                        "-----BEGIN PRIVATE KEY-----\nYWJj\n-----END PRIVATE KEY-----\n",
+                                    )
+                                    .into(),
                                     relying_party: "example.com".into(),
                                     user_handle: Some("aGFuZGxl".into()),
                                     backup_eligible: true,
@@ -9359,7 +10039,10 @@ mod compatibility_tests {
             username: "alice@example.com".into(),
             credential_id: "credential-1".into(),
             generated_user_id: None,
-            private_key_pem: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----".into(),
+            private_key_pem: String::from(
+                "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
+            )
+            .into(),
             relying_party: "example.com".into(),
             user_handle: Some("user-handle".into()),
             backup_eligible: true,
@@ -9398,7 +10081,7 @@ mod compatibility_tests {
         cursor.read_exact(32)?;
         let raw_key = composite_key.raw_key()?;
         let kdf = kdf_from_variant_dict(&header.kdf_parameters)?;
-        let transformed = kdf.derive_key(&raw_key)?;
+        let transformed = kdf.derive_key(raw_key.as_ref())?;
         let encryption_key = sha256_seeded(&header.master_seed, &transformed);
         let mac_seed = mac_seed(&header.master_seed, &transformed);
         let encrypted_payload = decode_block_stream(&mac_seed, cursor.read_remaining())?;
@@ -9412,8 +10095,76 @@ mod compatibility_tests {
             Compression::None => payload,
             Compression::Gzip => gzip_decompress(&payload)?,
         };
-        let (_, inner_key, _, _) = parse_inner_header(&payload)?;
-        Ok(inner_key)
+        let (_, mut inner_key, _, _) = parse_inner_header(&payload)?;
+        Ok(std::mem::take(&mut *inner_key))
+    }
+}
+
+#[cfg(test)]
+mod transformed_key_tests {
+    use super::{
+        Compression, KdbxCipher, KdbxError, KdbxVersion, SaveKdf, SaveProfile,
+        derive_transformed_key, load_kdbx_with_transformed_key, save_kdbx,
+        save_kdbx_with_transformed_key,
+    };
+    use vaultkern_crypto::CompositeKey;
+    use vaultkern_model::Vault;
+
+    fn fast_profile() -> SaveProfile {
+        SaveProfile {
+            version: KdbxVersion::V4_1,
+            cipher: KdbxCipher::Aes256,
+            compression: Compression::None,
+            kdf: Some(SaveKdf::AesKdbx4 { rounds: 16 }),
+        }
+    }
+
+    #[test]
+    fn transformed_key_cache_is_validated_by_file_hmac_and_refreshes_on_miss() {
+        let mut key = CompositeKey::default();
+        key.add_password("correct horse battery staple");
+        let first = save_kdbx(&Vault::empty("first"), &key, &fast_profile()).unwrap();
+        let second = save_kdbx(&Vault::empty("second"), &key, &fast_profile()).unwrap();
+
+        let cached = derive_transformed_key(&first, &key).unwrap();
+        let opened = load_kdbx_with_transformed_key(&first, &cached).unwrap();
+        assert_eq!(opened.name, "first");
+
+        assert!(matches!(
+            load_kdbx_with_transformed_key(&second, &cached),
+            Err(KdbxError::HeaderHmacMismatch)
+        ));
+
+        let refreshed = derive_transformed_key(&second, &key).unwrap();
+        let opened = load_kdbx_with_transformed_key(&second, &refreshed).unwrap();
+        assert_eq!(opened.name, "second");
+    }
+
+    #[test]
+    fn ordinary_save_reuses_loaded_kdf_and_the_session_transformed_key() {
+        let mut key = CompositeKey::default();
+        key.add_password("save password");
+        let initial = save_kdbx(&Vault::empty("before"), &key, &fast_profile()).unwrap();
+        let transformed = derive_transformed_key(&initial, &key).unwrap();
+        let mut vault = load_kdbx_with_transformed_key(&initial, &transformed).unwrap();
+        vault.name = "after".into();
+
+        let saved = save_kdbx_with_transformed_key(
+            &vault,
+            &transformed,
+            &SaveProfile {
+                kdf: None,
+                ..fast_profile()
+            },
+        )
+        .unwrap();
+
+        let reopened = load_kdbx_with_transformed_key(&saved, &transformed).unwrap();
+        assert_eq!(reopened.name, "after");
+
+        let error =
+            save_kdbx_with_transformed_key(&vault, &transformed, &fast_profile()).unwrap_err();
+        assert!(matches!(error, KdbxError::InvalidValue));
     }
 }
 
@@ -12915,7 +13666,7 @@ mod tests {
             rounds: header.transform_rounds,
             salt: header.transform_seed,
         }
-        .derive_key(&raw_key)?;
+        .derive_key(raw_key.as_ref())?;
         let encryption_key = sha256_seeded(&header.master_seed, &transformed);
         let encrypted_payload = &bytes[header_len..];
         let payload = decrypt_payload(
@@ -12955,7 +13706,7 @@ mod tests {
 
         let raw_key = composite_key.raw_key()?;
         let kdf = kdf_from_variant_dict(&header.kdf_parameters)?;
-        let transformed = kdf.derive_key(&raw_key)?;
+        let transformed = kdf.derive_key(raw_key.as_ref())?;
         let encryption_key = sha256_seeded(&header.master_seed, &transformed);
         let mac_seed = mac_seed(&header.master_seed, &transformed);
         let encrypted_payload = decode_block_stream(&mac_seed, &payload_bytes)?;
@@ -12986,7 +13737,7 @@ mod tests {
 
         let raw_key = composite_key.raw_key()?;
         let kdf = kdf_from_variant_dict(&header.kdf_parameters)?;
-        let transformed = kdf.derive_key(&raw_key)?;
+        let transformed = kdf.derive_key(raw_key.as_ref())?;
         let encryption_key = sha256_seeded(&header.master_seed, &transformed);
         let mac_seed = mac_seed(&header.master_seed, &transformed);
         let encrypted_payload = decode_block_stream(&mac_seed, &payload_bytes)?;

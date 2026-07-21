@@ -2,27 +2,30 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 
-#[cfg(any(windows, test))]
 use anyhow::Context;
 use anyhow::Result;
 #[cfg(any(windows, test))]
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
+use crate::providers::durable_file::{ExclusiveFileLock, remove_and_sync_absence};
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 
 #[cfg(windows)]
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, TargetExpectation, TempWriteFaultPoints,
     create_dir_all_durable, opened_file_identity, path_file_identity, publish_temp,
-    remove_if_exists, sync_parent, write_verified_temp,
+    remove_if_exists, sync_parent, sync_published_target, write_verified_temp,
 };
 #[cfg(any(windows, test))]
-use crate::providers::durable_file::{ExclusiveFileLock, VerifiedTemp, unique_sibling_path};
+use crate::providers::durable_file::{VerifiedTemp, unique_sibling_path};
+#[cfg(windows)]
+use crate::sync::durable_replace;
 
 const TOKEN_FILE_NAME: &str = "onedrive-refresh-token.dpapi";
 #[cfg(any(windows, test))]
 const MAX_PROTECTED_REFRESH_TOKEN_BYTES: usize = 64 * 1024;
+const TOKEN_STORE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub(crate) trait OneDriveRefreshTokenStore {
     fn load(&self) -> Result<Option<Zeroizing<String>>>;
@@ -77,7 +80,11 @@ fn is_safe_extension_id_path_component(extension_id: &str) -> bool {
 }
 
 fn production_store(path: PathBuf, scope: &str) -> Box<dyn OneDriveRefreshTokenStore> {
-    remove_legacy_plaintext_token(&path);
+    if let Err(error) = remove_legacy_plaintext_token(&path) {
+        return Box::new(FailedOneDriveRefreshTokenStore {
+            message: format!("failed to remove legacy plaintext OneDrive refresh token: {error:#}"),
+        });
+    }
     #[cfg(windows)]
     {
         Box::new(WindowsOneDriveRefreshTokenStore::new(path, scope))
@@ -89,19 +96,40 @@ fn production_store(path: PathBuf, scope: &str) -> Box<dyn OneDriveRefreshTokenS
     }
 }
 
-fn remove_legacy_plaintext_token(protected_path: &std::path::Path) {
-    if let Some(parent) = protected_path.parent() {
-        if validate_existing_directory_ancestry(parent).is_err() {
-            return;
+fn remove_legacy_plaintext_token(protected_path: &std::path::Path) -> Result<()> {
+    let Some(parent) = protected_path.parent() else {
+        return Ok(());
+    };
+    validate_existing_directory_ancestry(parent)?;
+    match fs::symlink_metadata(parent) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            anyhow::bail!("OneDrive refresh-token cleanup parent is not a real directory")
         }
-        let Ok(identity) = existing_directory_identity(parent) else {
-            return;
-        };
-        if validate_existing_directory_identity(parent, identity).is_err() {
-            return;
-        }
-        let _ = fs::remove_file(parent.join("onedrive-refresh-token"));
+        Ok(_) => {}
     }
+    let identity = existing_directory_identity(parent)?;
+    let legacy_path = parent.join("onedrive-refresh-token");
+    match fs::symlink_metadata(&legacy_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            anyhow::bail!(
+                "legacy OneDrive refresh-token path is not a regular file: {}",
+                legacy_path.display()
+            )
+        }
+        Ok(_) => {}
+    }
+    let _lock = acquire_token_store_lock(protected_path)?;
+    validate_existing_directory_identity(parent, identity)?;
+    remove_and_sync_absence(&legacy_path).with_context(|| {
+        format!(
+            "failed to durably delete legacy OneDrive refresh token: {}",
+            legacy_path.display()
+        )
+    })
 }
 
 #[cfg(unix)]
@@ -230,7 +258,6 @@ fn validate_existing_directory_ancestry(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(windows, test))]
 fn token_lock_path(path: &std::path::Path) -> Result<PathBuf> {
     let file_name = path
         .file_name()
@@ -275,10 +302,16 @@ fn token_target_exists(path: &std::path::Path) -> Result<bool> {
     Ok(true)
 }
 
-#[cfg(any(windows, test))]
 fn acquire_token_store_lock(path: &std::path::Path) -> Result<ExclusiveFileLock> {
+    acquire_token_store_lock_with_timeout(path, TOKEN_STORE_LOCK_TIMEOUT)
+}
+
+fn acquire_token_store_lock_with_timeout(
+    path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<ExclusiveFileLock> {
     let lock_path = token_lock_path(path)?;
-    ExclusiveFileLock::acquire(&lock_path).with_context(|| {
+    ExclusiveFileLock::acquire_with_timeout(&lock_path, timeout).with_context(|| {
         format!(
             "failed to acquire OneDrive refresh-token store lock: {}",
             lock_path.display()
@@ -291,6 +324,24 @@ pub(crate) struct EphemeralOneDriveRefreshTokenStore {
 }
 
 struct InvalidExtensionIdOneDriveRefreshTokenStore;
+
+struct FailedOneDriveRefreshTokenStore {
+    message: String,
+}
+
+impl OneDriveRefreshTokenStore for FailedOneDriveRefreshTokenStore {
+    fn load(&self) -> Result<Option<Zeroizing<String>>> {
+        anyhow::bail!(self.message.clone())
+    }
+
+    fn store(&self, _token: &str) -> Result<()> {
+        anyhow::bail!(self.message.clone())
+    }
+
+    fn delete(&self) -> Result<()> {
+        anyhow::bail!(self.message.clone())
+    }
+}
 
 impl OneDriveRefreshTokenStore for InvalidExtensionIdOneDriveRefreshTokenStore {
     fn load(&self) -> Result<Option<Zeroizing<String>>> {
@@ -481,33 +532,75 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
             DurableFaultPoint::ParentSynced,
         );
         if let Err(error) = publish {
-            let mut failure = anyhow::Error::new(error.source).context(format!(
+            let failure = anyhow::Error::new(error.source).context(format!(
                 "failed to publish protected OneDrive refresh token: {}",
                 self.path.display()
             ));
-            if error.published
-                && let Some(backup) = backup.as_deref()
-                && let Err(recovery_error) = restore_backup_if_target_missing(&self.path, backup)
-            {
-                failure = failure.context(format!(
-                    "failed to restore the previous protected OneDrive refresh token: {recovery_error:#}"
-                ));
+            if error.published {
+                let intended_visible = match read_regular_file(&self.path) {
+                    Ok(current) => {
+                        current.is_some_and(|current| current.as_slice() == protected.as_slice())
+                    }
+                    Err(read_error) => {
+                        if let Err(recovery_error) =
+                            restore_previous_token_state(&self.path, backup.as_deref())
+                        {
+                            return Err(failure.context(format!(
+                                "token publish readback failed ({read_error:#}) and rollback failed ({recovery_error:#})"
+                            )));
+                        }
+                        return Err(failure.context(format!(
+                            "token publish readback failed; the previous token state was restored: {read_error:#}"
+                        )));
+                    }
+                };
+                if intended_visible {
+                    match sync_published_target(&self.path)
+                        .and_then(|_| sync_parent(&self.path))
+                        .map_err(anyhow::Error::from)
+                        .and_then(|_| enforce_private_acl(&self.path, false))
+                    {
+                        Ok(()) => {
+                            let _ = cleanup_token_sidecars(&self.path);
+                            return Ok(());
+                        }
+                        Err(repair_error) => {
+                            if let Err(recovery_error) =
+                                restore_previous_token_state(&self.path, backup.as_deref())
+                            {
+                                return Err(failure.context(format!(
+                                    "new token became visible, durability or ACL repair failed ({repair_error:#}), and rollback failed ({recovery_error:#})"
+                                )));
+                            }
+                            return Err(failure.context(format!(
+                                "new token became visible but failed durability or ACL repair; the previous token state was restored: {repair_error:#}"
+                            )));
+                        }
+                    }
+                }
+                if let Err(recovery_error) =
+                    restore_previous_token_state(&self.path, backup.as_deref())
+                {
+                    return Err(failure.context(format!(
+                        "failed to restore the previous protected OneDrive refresh token: {recovery_error:#}"
+                    )));
+                }
             }
             return Err(failure);
         }
-        if let Some(backup) = backup {
-            remove_if_exists(&backup).with_context(|| {
+        if let Err(acl_error) = enforce_private_acl(&self.path, false) {
+            restore_previous_token_state(&self.path, backup.as_deref()).with_context(|| {
                 format!(
-                    "failed to remove protected OneDrive refresh-token backup: {}",
-                    backup.display()
+                    "protected token ACL validation failed ({acl_error:#}) and rollback also failed"
                 )
             })?;
-            sync_parent(&self.path)
-                .context("failed to sync OneDrive refresh-token directory after backup cleanup")?;
+            return Err(acl_error)
+                .context("protected OneDrive refresh token failed final ACL verification");
         }
-        enforce_private_acl(&self.path, false).context(
-            "protected OneDrive refresh token was published but final ACL verification failed",
-        )
+        if let Some(backup) = backup {
+            let _ = remove_if_exists(&backup).and_then(|_| sync_parent(&self.path));
+        }
+        Ok(())
     }
 
     fn delete(&self) -> Result<()> {
@@ -521,47 +614,61 @@ impl OneDriveRefreshTokenStore for WindowsOneDriveRefreshTokenStore {
         enforce_private_acl(parent, true)?;
         let _lock = acquire_token_store_lock(&self.path)?;
         enforce_private_acl(&token_lock_path(&self.path)?, false)?;
-        let existed = token_target_exists(&self.path)?;
-        if existed {
+        if token_target_exists(&self.path)? {
             enforce_private_acl(&self.path, false)?;
         }
-        remove_if_exists(&self.path).with_context(|| {
+        cleanup_token_sidecars(&self.path)?;
+        remove_and_sync_absence(&self.path).with_context(|| {
             format!(
                 "failed to delete protected OneDrive refresh token: {}",
                 self.path.display()
             )
         })?;
-        if existed {
-            sync_parent(&self.path).with_context(|| {
-                format!(
-                    "failed to sync OneDrive refresh-token directory: {}",
-                    self.path.display()
-                )
-            })?;
-        }
         Ok(())
     }
 }
 
 #[cfg(windows)]
-fn restore_backup_if_target_missing(
-    target: &std::path::Path,
-    backup: &std::path::Path,
-) -> Result<()> {
-    match fs::symlink_metadata(target) {
-        Ok(_) => return Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+fn cleanup_token_sidecars(path: &std::path::Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("OneDrive refresh-token path has no parent directory")?;
+    let name = path
+        .file_name()
+        .context("OneDrive refresh-token path has no file name")?
+        .to_string_lossy();
+    let temp_prefix = format!(".{name}.vaultkern.tmp.");
+    let backup_prefix = format!(".{name}.vaultkern.bak.");
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let entry_name = entry.file_name();
+        let entry_name = entry_name.to_string_lossy();
+        if entry_name.starts_with(&temp_prefix) || entry_name.starts_with(&backup_prefix) {
+            remove_if_exists(&entry.path())?;
+        }
     }
-    fs::rename(backup, target).with_context(|| {
-        format!(
-            "failed to restore OneDrive refresh-token backup {} to {}",
-            backup.display(),
-            target.display()
-        )
-    })?;
-    enforce_private_acl(target, false)?;
-    sync_parent(target)?;
+    sync_parent(path).context("failed to sync OneDrive refresh-token sidecar deletion")
+}
+
+#[cfg(windows)]
+fn restore_previous_token_state(
+    target: &std::path::Path,
+    backup: Option<&std::path::Path>,
+) -> Result<()> {
+    if let Some(backup) = backup {
+        let previous = read_regular_file(backup)?.with_context(|| {
+            format!(
+                "protected OneDrive refresh-token backup is missing: {}",
+                backup.display()
+            )
+        })?;
+        durable_replace(target, &previous)?;
+        enforce_private_acl(target, false)?;
+        remove_if_exists(backup)?;
+        sync_parent(target)?;
+    } else {
+        remove_and_sync_absence(target)?;
+    }
     Ok(())
 }
 
@@ -1319,10 +1426,10 @@ mod tests {
     use super::OneDriveRefreshTokenStore;
     use super::{
         MAX_PROTECTED_REFRESH_TOKEN_BYTES, PrivateAclEntry, TokenSecurityContext,
-        acquire_token_store_lock, enforce_temp_metadata_or_discard, private_acl_entries_match,
-        production_for_extension_id, production_store, read_bounded_protected_payload,
-        token_backup_path, token_lock_path, validate_protected_payload_size,
-        validate_single_link_count, zeroize_plaintext_bytes,
+        acquire_token_store_lock, acquire_token_store_lock_with_timeout,
+        enforce_temp_metadata_or_discard, private_acl_entries_match, production_for_extension_id,
+        production_store, read_bounded_protected_payload, token_backup_path, token_lock_path,
+        validate_protected_payload_size, validate_single_link_count, zeroize_plaintext_bytes,
     };
     #[cfg(unix)]
     use super::{token_target_exists, validate_existing_directory_identity};
@@ -1529,6 +1636,34 @@ mod tests {
     }
 
     #[test]
+    fn token_store_lock_contention_returns_instead_of_waiting_for_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("onedrive-refresh-token.dpapi");
+        let held = acquire_token_store_lock(&target).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            sender
+                .send(acquire_token_store_lock_with_timeout(
+                    &target,
+                    std::time::Duration::from_millis(40),
+                ))
+                .unwrap();
+        });
+
+        let result = receiver.recv_timeout(std::time::Duration::from_millis(250));
+        drop(held);
+        thread.join().unwrap();
+
+        let error = result
+            .expect("token-store contender waited indefinitely for the held lock")
+            .expect_err("token-store contender unexpectedly acquired the held lock");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
     fn invalid_extension_id_cannot_select_legacy_cleanup_path() {
         let dir = tempfile::tempdir().unwrap();
         let legacy_path = dir.path().join("onedrive-refresh-token");
@@ -1650,7 +1785,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_store_reports_post_publish_failure() {
+    fn windows_store_repairs_a_recoverable_post_publish_failure() {
         use super::WindowsOneDriveRefreshTokenStore;
 
         const OLD_TOKEN: &str = "fixture-refresh-token-before-failure";
@@ -1666,10 +1801,9 @@ mod tests {
             DurableFaultInjector::fail_once(DurableFaultPoint::TargetReplaced),
         );
 
-        let error = store
+        store
             .store(TOKEN)
-            .expect_err("post-publish durability failure must fail the store operation");
-        assert!(format!("{error:#}").contains("TargetReplaced"));
+            .expect("a visible replacement must be repaired and acknowledged");
         assert_eq!(
             store.load().unwrap().as_deref().map(String::as_str),
             Some(TOKEN)
@@ -1685,15 +1819,7 @@ mod tests {
                     .contains(".bak.")
             })
             .collect::<Vec<_>>();
-        assert_eq!(backups.len(), 1);
-        assert_eq!(
-            WindowsOneDriveRefreshTokenStore::new(backups[0].clone(), "test/default")
-                .load()
-                .unwrap()
-                .as_deref()
-                .map(String::as_str),
-            Some(OLD_TOKEN)
-        );
+        assert!(backups.is_empty());
     }
 
     #[cfg(windows)]

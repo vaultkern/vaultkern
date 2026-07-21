@@ -5,9 +5,18 @@ export { ExtensionSettingsPanel } from "./screens/ExtensionSettingsPanel";
 export {
   DEFAULT_EXTENSION_SETTINGS,
   createMemoryExtensionSettingsStore,
-  normalizeExtensionSettings
+  normalizeBrowserExtensionSettings,
+  normalizeExtensionSettings,
+  normalizeWindowsAppSettings,
+  sortRecentVaultsForRetention
 } from "./extensionSettings";
-export type { ExtensionSettings, ExtensionSettingsStore } from "./extensionSettings";
+export type {
+  ExtensionSettings,
+  ExtensionSettingsReconciliationReason,
+  ExtensionSettingsStore,
+  RecentVaultRetentionRecord,
+  SettingsSurface
+} from "./extensionSettings";
 export { I18nProvider, showMoreText, translate, useLanguage, useText } from "./i18n";
 export {
   DEFAULT_PASSWORD_GENERATOR_OPTIONS,

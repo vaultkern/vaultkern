@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createNegotiatedRuntimeTransport } from "@vaultkern/runtime-web-client";
 
 import { createNativeMessagingBridge } from "../nativeBridge";
 
@@ -146,7 +147,7 @@ describe("createNativeMessagingBridge", () => {
     await expect(second).resolves.toEqual({ type: "second_response" });
   });
 
-  it("accepts untagged success responses from a legacy native host", async () => {
+  it("rejects untagged responses instead of confusing request identity", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -159,16 +160,19 @@ describe("createNativeMessagingBridge", () => {
 
     const first = bridge.send({ version: 1, command: { type: "first" } });
     const second = bridge.send({ version: 1, command: { type: "second" } });
+    const firstResult = expect(first).rejects.toMatchObject({
+      code: "native_unknown",
+      message: "native response is missing its request ID"
+    });
+    const secondResult = expect(second).rejects.toMatchObject({
+      code: "native_unknown"
+    });
 
     port.emitRawMessage({ type: "first_response" });
 
-    await expect(first).resolves.toEqual({ type: "first_response" });
-    expect(port.disconnect).not.toHaveBeenCalled();
-    expect(port.postMessage).toHaveBeenCalledTimes(2);
-
-    port.emitMessage({ type: "second_response" });
-
-    await expect(second).resolves.toEqual({ type: "second_response" });
+    await firstResult;
+    await secondResult;
+    expect(port.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it("ignores native responses whose request id does not match the active request", async () => {
@@ -194,7 +198,7 @@ describe("createNativeMessagingBridge", () => {
     await expect(first).resolves.toEqual({ type: "first_response" });
   });
 
-  it("settles an uncorrelated native error response against the active request and continues", async () => {
+  it("rejects an uncorrelated native error and the invalid connection", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -207,6 +211,13 @@ describe("createNativeMessagingBridge", () => {
 
     const first = bridge.send({ version: 1, command: { type: "first" } });
     const second = bridge.send({ version: 1, command: { type: "second" } });
+    const firstResult = expect(first).rejects.toMatchObject({
+      code: "native_unknown",
+      message: "native response is missing its request ID"
+    });
+    const secondResult = expect(second).rejects.toMatchObject({
+      code: "native_unknown"
+    });
 
     port.emitRawMessage({
       type: "error",
@@ -214,16 +225,9 @@ describe("createNativeMessagingBridge", () => {
       message: "native message exceeds maximum length: 67108865 > 67108864"
     });
 
-    await expect(first).resolves.toMatchObject({
-      type: "error",
-      code: "invalid_request",
-      message: "native message exceeds maximum length: 67108865 > 67108864"
-    });
-    expect(port.postMessage).toHaveBeenCalledTimes(2);
-
-    port.emitMessage({ type: "second_response" });
-
-    await expect(second).resolves.toEqual({ type: "second_response" });
+    await firstResult;
+    await secondResult;
+    expect(port.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it("reconnects once when posting to a stale native port fails before delivery", async () => {
@@ -231,6 +235,7 @@ describe("createNativeMessagingBridge", () => {
     firstPort.postMessage.mockImplementation(() => {
       throw new Error("Native host has exited.");
     });
+    firstPort.disconnect.mockImplementation(() => firstPort.emitDisconnect());
     const secondPort = createPort();
     const connectNative = vi.fn(() =>
       connectNative.mock.calls.length === 1 ? firstPort : secondPort
@@ -249,6 +254,7 @@ describe("createNativeMessagingBridge", () => {
 
     expect(connectNative).toHaveBeenCalledTimes(2);
     expect(firstPort.postMessage).toHaveBeenCalledTimes(1);
+    expect(firstPort.disconnect).toHaveBeenCalledTimes(1);
     expect(secondPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "create_passkey_assertion" }
@@ -294,11 +300,44 @@ describe("createNativeMessagingBridge", () => {
     expect(firstPort.postMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("does not retry a post failure after a synchronous disconnect already settled it", async () => {
+    const firstPort = createPort();
+    firstPort.postMessage.mockImplementation(() => {
+      firstPort.emitDisconnect();
+      throw new Error("Native host has exited.");
+    });
+    const secondPort = createPort();
+    const connectNative = vi.fn(() =>
+      connectNative.mock.calls.length === 1 ? firstPort : secondPort
+    );
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative,
+        lastError: { message: "Native host has exited." }
+      }
+    };
+
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
+
+    await expect(
+      bridge.send({
+        version: 1,
+        command: { type: "create_passkey_assertion" }
+      })
+    ).rejects.toMatchObject({
+      code: "native_port_disconnected",
+      message: "Native host has exited."
+    });
+    expect(connectNative).toHaveBeenCalledTimes(1);
+    expect(secondPort.postMessage).not.toHaveBeenCalled();
+  });
+
   it("does not retry unclassified native post failures as stale ports", async () => {
     const port = createPort();
     port.postMessage.mockImplementation(() => {
       throw new Error("message serialization failed");
     });
+    port.disconnect.mockImplementation(() => port.emitDisconnect());
     const connectNative = vi.fn(() => port);
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -319,6 +358,7 @@ describe("createNativeMessagingBridge", () => {
     });
     expect(connectNative).toHaveBeenCalledTimes(1);
     expect(port.postMessage).toHaveBeenCalledTimes(1);
+    expect(port.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it("does not retry unrelated disconnected post failures as stale ports", async () => {
@@ -768,7 +808,7 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
-  it("interrupts active preload for a startup session request and restores it after startup", async () => {
+  it("cancels an active preload before serving a startup session request", async () => {
     const firstPort = createPort();
     const secondPort = createPort();
     const connectNative = vi.fn(() =>
@@ -786,6 +826,7 @@ describe("createNativeMessagingBridge", () => {
       version: 1,
       command: { type: "preload_current_vault" }
     });
+    const preloadFailure = preload.catch((error: unknown) => error);
 
     expect(firstPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
@@ -799,6 +840,10 @@ describe("createNativeMessagingBridge", () => {
 
     expect(firstPort.disconnect).toHaveBeenCalledTimes(1);
     expect(connectNative).toHaveBeenCalledTimes(2);
+    await expect(preloadFailure).resolves.toMatchObject({
+      code: "native_port_disconnected",
+      message: "preload canceled by startup request"
+    });
     expect(secondPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "get_session_state" }
@@ -815,17 +860,169 @@ describe("createNativeMessagingBridge", () => {
       type: "session_state",
       currentVaultRefId: "vault-ref-1"
     });
-    expect(secondPort.postMessage).toHaveBeenCalledTimes(2);
-    expect(secondPort.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+    expect(secondPort.postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("renegotiates before a startup request that interrupts an active preload", async () => {
+    const firstPort = createPort();
+    const secondPort = createPort();
+    const connectNative = vi.fn(() =>
+      connectNative.mock.calls.length === 1 ? firstPort : secondPort
+    );
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      runtime: {
+        connectNative
+      }
+    };
+
+    const rawBridge = createNativeMessagingBridge(
+      connectNative,
+      "com.vaultkern.runtime"
+    );
+    const bridge = createNegotiatedRuntimeTransport(rawBridge, [
+      "runtime-core",
+      "browser-extension"
+    ]);
+    const preload = bridge.send({
       version: 1,
       command: { type: "preload_current_vault" }
-    }));
+    });
+    const preloadFailure = preload.catch((error: unknown) => error);
 
-    secondPort.emitMessage({ type: "session_state", unlocked: true, activeVaultId: "vault-1" });
+    await vi.waitFor(() => {
+      expect(firstPort.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: expect.objectContaining({ type: "handshake" })
+        })
+      );
+    });
+    firstPort.emitMessage({
+      type: "handshake",
+      protocolVersion: 1,
+      capabilities: ["runtime-core", "browser-extension"]
+    });
+    await vi.waitFor(() => {
+      expect(firstPort.postMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          command: { type: "preload_current_vault" }
+        })
+      );
+    });
 
-    await expect(preload).resolves.toMatchObject({
+    const session = bridge.send({
+      version: 1,
+      command: { type: "get_session_state" }
+    });
+
+    await expect(preloadFailure).resolves.toMatchObject({
+      code: "native_port_disconnected",
+      message: "preload canceled by startup request"
+    });
+    expect(firstPort.disconnect).toHaveBeenCalledTimes(1);
+    expect(secondPort.postMessage).toHaveBeenCalledTimes(1);
+    expect(secondPort.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        command: expect.objectContaining({ type: "handshake" })
+      })
+    );
+
+    secondPort.emitMessage({
+      type: "handshake",
+      protocolVersion: 1,
+      capabilities: ["runtime-core", "browser-extension"]
+    });
+    await vi.waitFor(() => {
+      expect(secondPort.postMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          command: { type: "get_session_state" }
+        })
+      );
+    });
+    secondPort.emitMessage({
       type: "session_state",
-      activeVaultId: "vault-1"
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+
+    await expect(session).resolves.toMatchObject({
+      type: "session_state",
+      currentVaultRefId: "vault-ref-1"
+    });
+  });
+
+  it("renegotiates when a concurrent startup request interrupts preload after a shared handshake", async () => {
+    const firstPort = createPort();
+    const secondPort = createPort();
+    const connectNative = vi.fn(() =>
+      connectNative.mock.calls.length === 1 ? firstPort : secondPort
+    );
+    const rawBridge = createNativeMessagingBridge(
+      connectNative,
+      "com.vaultkern.runtime"
+    );
+    const bridge = createNegotiatedRuntimeTransport(rawBridge, [
+      "runtime-core",
+      "browser-extension"
+    ]);
+
+    const preload = bridge.send({
+      version: 1,
+      command: { type: "preload_current_vault" }
+    });
+    const preloadFailure = preload.catch((error: unknown) => error);
+    const session = bridge.send({
+      version: 1,
+      command: { type: "get_session_state" }
+    });
+
+    await vi.waitFor(() => {
+      expect(firstPort.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: expect.objectContaining({ type: "handshake" })
+        })
+      );
+    });
+    firstPort.emitMessage({
+      type: "handshake",
+      protocolVersion: 1,
+      capabilities: ["runtime-core", "browser-extension"]
+    });
+
+    await expect(preloadFailure).resolves.toMatchObject({
+      code: "native_port_disconnected",
+      message: "preload canceled by startup request"
+    });
+    await vi.waitFor(() => expect(secondPort.postMessage).toHaveBeenCalled());
+    expect(secondPort.postMessage).toHaveBeenCalledTimes(1);
+    expect(secondPort.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        command: expect.objectContaining({ type: "handshake" })
+      })
+    );
+
+    secondPort.emitMessage({
+      type: "handshake",
+      protocolVersion: 1,
+      capabilities: ["runtime-core", "browser-extension"]
+    });
+    await vi.waitFor(() => {
+      expect(secondPort.postMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          command: { type: "get_session_state" }
+        })
+      );
+    });
+    secondPort.emitMessage({
+      type: "session_state",
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+
+    await expect(session).resolves.toMatchObject({
+      type: "session_state",
+      currentVaultRefId: "vault-ref-1"
     });
   });
 

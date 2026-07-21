@@ -1,71 +1,115 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import type { CSSProperties } from "react";
+import type { UnlockCredentials } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
-import type { ExtensionSettings } from "../extensionSettings";
+import type { ExtensionSettings, SettingsSurface } from "../extensionSettings";
 import { useText } from "../i18n";
 
 interface ExtensionSettingsPanelProps {
   settings: ExtensionSettings;
+  surface?: SettingsSurface;
   saving: boolean;
   error: string | null;
   quickUnlockSupported?: boolean;
   quickUnlockEnabled?: boolean;
+  quickUnlockEnrolled?: boolean;
+  quickUnlockVaultUnlocked?: boolean;
   quickUnlockBusy?: boolean;
   quickUnlockError?: string | null;
+  reconciliationError?: string | null;
+  onEnrollQuickUnlock?(credentials: UnlockCredentials): Promise<void>;
   onSave(settings: ExtensionSettings): void;
+  onDraftChange?(settings: ExtensionSettings, dirty: boolean): void;
 }
 
 export function ExtensionSettingsPanel({
   settings,
+  surface = "windows",
   saving,
   error,
   quickUnlockSupported = true,
+  quickUnlockEnabled = false,
+  quickUnlockEnrolled = false,
+  quickUnlockVaultUnlocked = false,
   quickUnlockBusy = false,
   quickUnlockError = null,
-  onSave
+  reconciliationError = null,
+  onEnrollQuickUnlock,
+  onSave,
+  onDraftChange
 }: ExtensionSettingsPanelProps) {
   const text = useText();
   const [draft, setDraft] = useState(() => toDraft(settings));
+  const [quickUnlockPassword, setQuickUnlockPassword] = useState("");
+  const [quickUnlockKeyFilePath, setQuickUnlockKeyFilePath] = useState("");
   const quickUnlockAvailable = quickUnlockSupported !== false;
+  const providerEnabled =
+    surface === "browser"
+      ? draft.browserPasskeyProxyEnabled
+      : draft.windowsPasskeyProviderEnabled;
 
   useEffect(() => {
     setDraft(toDraft(settings));
   }, [settings]);
+
+  useEffect(() => {
+    if (quickUnlockEnrolled) {
+      setQuickUnlockPassword("");
+      setQuickUnlockKeyFilePath("");
+    }
+  }, [quickUnlockEnrolled]);
+
+  useLayoutEffect(() => {
+    const nextSettings = settingsFromDraft(
+      draft,
+      quickUnlockAvailable,
+      settings.quickUnlockEnabled
+    );
+    onDraftChange?.(nextSettings, !extensionSettingsMatch(nextSettings, settings));
+  }, [draft, onDraftChange, quickUnlockAvailable, settings]);
 
   return (
     <form
       style={panelStyle}
       onSubmit={(event) => {
         event.preventDefault();
-        onSave({
-          recentVaultLimit: parseBoundedInteger(draft.recentVaultLimit, 1, 50, 10),
-          language: draft.language,
-          idleLockMinutes: parseBoundedInteger(draft.idleLockMinutes, 0, 240, 10),
-          clearClipboardSeconds: parseBoundedInteger(
-            draft.clearClipboardSeconds,
-            0,
-            3600,
-            30
-          ),
-          autofillOnPageLoadEnabled: draft.autofillOnPageLoadEnabled,
-          passkeyProviderEnabled: draft.passkeyProviderEnabled,
-          quickUnlockEnabled: quickUnlockAvailable && draft.quickUnlockEnabled
-        });
+        onSave(
+          settingsFromDraft(
+            draft,
+            quickUnlockAvailable,
+            settings.quickUnlockEnabled
+          )
+        );
       }}
     >
       <div style={titleRowStyle}>
         <div>
-          <h2 style={headingStyle}>{text("Extension Settings")}</h2>
+          <h2 style={headingStyle}>
+            {text(surface === "browser" ? "Browser Extension Settings" : "Windows Settings")}
+          </h2>
           <p style={descriptionStyle}>
-            {text("Local extension preferences. These are not stored in the KDBX database.")}
+            {text(
+              surface === "browser"
+                ? "Local browser extension preferences. These are not stored in the KDBX database."
+                : "Local Windows app preferences. These are not stored in the KDBX database."
+            )}
           </p>
         </div>
         <button type="submit" disabled={saving} style={primaryButtonStyle}>
-          {saving ? text("Saving...") : text("Save Extension Settings")}
+          {saving
+            ? text("Saving...")
+            : text(
+                surface === "browser"
+                  ? "Save Extension Settings"
+                  : "Save Windows Settings"
+              )}
         </button>
       </div>
 
+      {reconciliationError ? <div role="alert">{reconciliationError}</div> : null}
+
+      <fieldset disabled={saving} style={settingsFieldsetStyle}>
       <div style={gridStyle}>
         <label style={fieldStyle}>
           {text("Recent Databases")}
@@ -130,18 +174,34 @@ export function ExtensionSettingsPanel({
         </div>
         <label style={checkboxFieldStyle}>
           <input
-            aria-label={text("VaultKern passkey provider")}
+            aria-label={text(
+              surface === "browser"
+                ? "Browser passkey proxy"
+                : "Windows passkey provider"
+            )}
             type="checkbox"
-            checked={draft.passkeyProviderEnabled}
+            checked={providerEnabled}
             onChange={(event) =>
-              setDraft({
-                ...draft,
-                passkeyProviderEnabled: event.target.checked
-              })
+              setDraft(
+                surface === "browser"
+                  ? {
+                      ...draft,
+                      browserPasskeyProxyEnabled: event.target.checked
+                    }
+                  : {
+                      ...draft,
+                      windowsPasskeyProviderEnabled: event.target.checked
+                    }
+              )
             }
           />
-          {text("VaultKern passkey provider")}
+          {text(
+            surface === "browser"
+              ? "Browser passkey proxy"
+              : "Windows passkey provider"
+          )}
         </label>
+        {surface === "browser" ? (
         <label style={checkboxFieldStyle}>
           <input
             aria-label={text("Page-load autofill")}
@@ -156,7 +216,9 @@ export function ExtensionSettingsPanel({
           />
           {text("Page-load autofill")}
         </label>
+        ) : null}
       </div>
+      {surface === "windows" ? (
       <label style={toggleRowStyle}>
         <input
           aria-label={text("Quick Unlock")}
@@ -169,6 +231,70 @@ export function ExtensionSettingsPanel({
         />
         <span>{text("Quick Unlock")}</span>
       </label>
+      ) : null}
+      {surface === "windows" &&
+      quickUnlockAvailable &&
+      quickUnlockEnabled &&
+      draft.quickUnlockEnabled &&
+      !quickUnlockEnrolled ? (
+        <div style={enrollmentStyle}>
+          <p style={noteStyle}>
+            {quickUnlockVaultUnlocked
+              ? text(
+                  "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock."
+                )
+              : text("Unlock this vault before enrolling Windows Hello.")}
+          </p>
+          {quickUnlockVaultUnlocked ? (
+            <>
+              <div style={gridStyle}>
+                <label style={fieldStyle}>
+                  {text("Quick Unlock Master Password")}
+                  <input
+                    aria-label={text("Quick Unlock Master Password")}
+                    type="password"
+                    value={quickUnlockPassword}
+                    onChange={(event) => setQuickUnlockPassword(event.target.value)}
+                    style={inputStyle}
+                  />
+                </label>
+                <label style={fieldStyle}>
+                  {text("Quick Unlock Key File Path")}
+                  <input
+                    aria-label={text("Quick Unlock Key File Path")}
+                    type="text"
+                    value={quickUnlockKeyFilePath}
+                    onChange={(event) => setQuickUnlockKeyFilePath(event.target.value)}
+                    style={inputStyle}
+                  />
+                </label>
+              </div>
+              <button
+                type="button"
+                disabled={
+                  quickUnlockBusy ||
+                  (!quickUnlockPassword.trim() && !quickUnlockKeyFilePath.trim())
+                }
+                style={primaryButtonStyle}
+                onClick={() => {
+                  const credentials = {
+                    password: quickUnlockPassword,
+                    keyFilePath: quickUnlockKeyFilePath
+                  };
+                  setQuickUnlockPassword("");
+                  setQuickUnlockKeyFilePath("");
+                  void onEnrollQuickUnlock?.(credentials);
+                }}
+              >
+                {quickUnlockBusy
+                  ? text("Enrolling...")
+                  : text("Enable Windows Hello")}
+              </button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+      </fieldset>
       {quickUnlockError ? <div role="alert">{quickUnlockError}</div> : null}
       <p style={noteStyle}>
         {text("Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.")}
@@ -185,9 +311,43 @@ function toDraft(settings: ExtensionSettings) {
     idleLockMinutes: String(settings.idleLockMinutes),
     clearClipboardSeconds: String(settings.clearClipboardSeconds),
     autofillOnPageLoadEnabled: settings.autofillOnPageLoadEnabled,
-    passkeyProviderEnabled: settings.passkeyProviderEnabled,
+    browserPasskeyProxyEnabled: settings.browserPasskeyProxyEnabled,
+    windowsPasskeyProviderEnabled: settings.windowsPasskeyProviderEnabled,
     quickUnlockEnabled: settings.quickUnlockEnabled
   };
+}
+
+function settingsFromDraft(
+  draft: ReturnType<typeof toDraft>,
+  quickUnlockAvailable: boolean,
+  retainedQuickUnlockEnabled: boolean
+): ExtensionSettings {
+  return {
+    recentVaultLimit: parseBoundedInteger(draft.recentVaultLimit, 1, 50, 10),
+    language: draft.language,
+    idleLockMinutes: parseBoundedInteger(draft.idleLockMinutes, 0, 240, 10),
+    clearClipboardSeconds: parseBoundedInteger(
+      draft.clearClipboardSeconds,
+      0,
+      3600,
+      30
+    ),
+    autofillOnPageLoadEnabled: draft.autofillOnPageLoadEnabled,
+    browserPasskeyProxyEnabled: draft.browserPasskeyProxyEnabled,
+    windowsPasskeyProviderEnabled: draft.windowsPasskeyProviderEnabled,
+    quickUnlockEnabled: quickUnlockAvailable
+      ? draft.quickUnlockEnabled
+      : retainedQuickUnlockEnabled
+  };
+}
+
+function extensionSettingsMatch(
+  left: ExtensionSettings,
+  right: ExtensionSettings
+): boolean {
+  return (Object.keys(left) as Array<keyof ExtensionSettings>).every(
+    (key) => left[key] === right[key]
+  );
 }
 
 function parseBoundedInteger(
@@ -219,6 +379,15 @@ const titleRowStyle: CSSProperties = {
   alignItems: "start",
   justifyContent: "space-between",
   gap: archiveTheme.spacing.md
+};
+
+const settingsFieldsetStyle: CSSProperties = {
+  display: "grid",
+  gap: archiveTheme.spacing.md,
+  minWidth: 0,
+  margin: 0,
+  padding: 0,
+  border: 0
 };
 
 const headingStyle: CSSProperties = {
@@ -305,4 +474,13 @@ const noteStyle: CSSProperties = {
   margin: 0,
   color: archiveTheme.colors.textMuted,
   lineHeight: 1.5
+};
+
+const enrollmentStyle: CSSProperties = {
+  display: "grid",
+  gap: archiveTheme.spacing.md,
+  padding: archiveTheme.spacing.md,
+  border: `1px solid ${archiveTheme.colors.line}`,
+  borderRadius: archiveTheme.radius.field,
+  background: archiveTheme.colors.surfaceMuted
 };

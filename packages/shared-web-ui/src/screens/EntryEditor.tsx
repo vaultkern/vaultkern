@@ -7,7 +7,8 @@ import type {
   EntryDetail,
   EntryHistoryDetail,
   EntryHistoryItem,
-  EntryPasskey
+  EntryPasskey,
+  EntryPasskeyUpdate
 } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
@@ -37,6 +38,7 @@ export function EntryEditor({
   draft,
   dirty,
   busy,
+  pendingSave,
   historyItems,
   historyDetail,
   historyError,
@@ -53,6 +55,7 @@ export function EntryEditor({
   onSelectHistoryItem,
   onSetPasskey,
   onClearPasskey,
+  onRetrySave,
   onSave,
   onCancel,
   onDelete
@@ -62,6 +65,7 @@ export function EntryEditor({
   draft: EntryDraftLike | null;
   dirty: boolean;
   busy?: boolean;
+  pendingSave?: boolean;
   historyItems?: EntryHistoryItem[];
   historyDetail?: EntryHistoryDetail | null;
   historyError?: string | null;
@@ -84,8 +88,9 @@ export function EntryEditor({
   onReplaceAttachment?: (name: string, file: File) => void;
   onDeleteAttachment?: (name: string) => void;
   onSelectHistoryItem?: (historyIndex: number) => void;
-  onSetPasskey?: (passkey: EntryPasskey) => void;
+  onSetPasskey?: (passkey: EntryPasskeyUpdate) => void;
   onClearPasskey?: () => void;
+  onRetrySave?: () => void;
   onSave: () => void;
   onCancel: () => void;
   onDelete?: () => void;
@@ -202,7 +207,12 @@ export function EntryEditor({
             }}
           >
             {mode === "view" && entry && onStartEdit ? (
-              <button type="button" onClick={onStartEdit} style={secondaryActionStyle}>
+              <button
+                type="button"
+                onClick={onStartEdit}
+                disabled={busy || pendingSave}
+                style={secondaryActionStyle}
+              >
                 {text("Edit")}
               </button>
             ) : null}
@@ -235,13 +245,22 @@ export function EntryEditor({
                         style={saveSpinnerStyle}
                       />
                     ) : null}
-                    {busy ? text("Saving...") : text("Save changes")}
+                    {busy
+                      ? text("Saving...")
+                      : pendingSave
+                        ? text("Retry save")
+                        : text("Save changes")}
                   </span>
                 </button>
               </>
             ) : null}
             {mode === "view" && entry && onDelete ? (
-              <button type="button" onClick={onDelete} style={dangerActionStyle}>
+              <button
+                type="button"
+                onClick={onDelete}
+                disabled={busy || pendingSave}
+                style={dangerActionStyle}
+              >
                 {text("Delete Entry")}
               </button>
             ) : null}
@@ -353,8 +372,10 @@ export function EntryEditor({
           entry={entry}
           text={text}
           busy={busy}
+          pendingSave={pendingSave}
           onSetPasskey={onSetPasskey}
           onClearPasskey={onClearPasskey}
+          onRetrySave={onRetrySave}
         />
       ) : null}
       {mode === "view" && entry ? (
@@ -377,6 +398,7 @@ export function EntryEditor({
         <EditableAttachments
           attachments={entry.attachments ?? []}
           text={text}
+          disabled={busy || pendingSave}
           onAdd={onAddAttachment}
           onRename={onRenameAttachment}
           onReplace={onReplaceAttachment}
@@ -578,6 +600,7 @@ function EditableCustomFields({
 function EditableAttachments({
   attachments,
   text,
+  disabled,
   onAdd,
   onRename,
   onReplace,
@@ -585,6 +608,7 @@ function EditableAttachments({
 }: {
   attachments: EntryAttachment[];
   text: ReturnType<typeof useText>;
+  disabled?: boolean;
   onAdd?: (file: File, protectInMemory: boolean) => void;
   onRename?: (oldName: string, newName: string, protectInMemory: boolean) => void;
   onReplace?: (name: string, file: File) => void;
@@ -600,6 +624,7 @@ function EditableAttachments({
           <input
             type="checkbox"
             checked={protectNewAttachment}
+            disabled={disabled}
             onChange={(event) => setProtectNewAttachment(event.target.checked)}
           />
           {text("Protect new attachment")}
@@ -609,6 +634,7 @@ function EditableAttachments({
           <input
             aria-label={text("Add attachment file")}
             type="file"
+            disabled={disabled}
             style={hiddenFileInputStyle}
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -632,6 +658,7 @@ function EditableAttachments({
                   aria-label={`Rename ${attachment.name}`}
                   type="text"
                   defaultValue={attachment.name}
+                  disabled={disabled}
                   onBlur={(event) => {
                     const newName = event.target.value.trim();
                     if (newName && newName !== attachment.name) {
@@ -651,6 +678,7 @@ function EditableAttachments({
                   aria-label={`Protect ${attachment.name}`}
                   type="checkbox"
                   checked={attachment.protectInMemory}
+                  disabled={disabled}
                   onChange={(event) =>
                     onRename?.(
                       attachment.name,
@@ -666,6 +694,7 @@ function EditableAttachments({
                 <input
                   aria-label={`Replace ${attachment.name}`}
                   type="file"
+                  disabled={disabled}
                   style={hiddenFileInputStyle}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
@@ -680,6 +709,7 @@ function EditableAttachments({
                 type="button"
                 aria-label={`Remove ${attachment.name}`}
                 onClick={() => onDelete?.(attachment.name)}
+                disabled={disabled}
                 style={dangerSmallButtonStyle}
               >
                 {text("Remove")}
@@ -696,18 +726,22 @@ function PasskeySection({
   entry,
   text,
   busy,
+  pendingSave,
   onSetPasskey,
-  onClearPasskey
+  onClearPasskey,
+  onRetrySave
 }: {
   entry: EntryDetail;
   text: ReturnType<typeof useText>;
   busy?: boolean;
-  onSetPasskey?: (passkey: EntryPasskey) => void;
+  pendingSave?: boolean;
+  onSetPasskey?: (passkey: EntryPasskeyUpdate) => void;
   onClearPasskey?: () => void;
+  onRetrySave?: () => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<EntryPasskey>(() =>
-    entry.passkey ?? emptyPasskey()
+  const [draft, setDraft] = useState<PasskeyDraft>(() =>
+    passkeyDraft(entry.passkey)
   );
   const [revealedPasskeyFields, setRevealedPasskeyFields] = useState<Set<string>>(
     () => new Set()
@@ -718,12 +752,12 @@ function PasskeySection({
 
   useEffect(() => {
     setEditing(false);
-    setDraft(entry.passkey ?? emptyPasskey());
+    setDraft(passkeyDraft(entry.passkey));
     setRevealedPasskeyFields(new Set());
     setRevealedDraftFields(new Set());
   }, [entry.id, entry.passkey]);
 
-  function updateDraft(field: keyof EntryPasskey, value: string | boolean) {
+  function updateDraft(field: keyof PasskeyDraft, value: string | boolean) {
     setDraft((current) => ({ ...current, [field]: value }));
   }
 
@@ -785,33 +819,20 @@ function PasskeySection({
 
   function renderSensitiveDraftInput(
     label: string,
-    field: "credentialId" | "generatedUserId" | "userHandle" | "privateKeyPem",
+    field: "credentialId" | "generatedUserId" | "userHandle",
     value: string,
-    updateField: keyof EntryPasskey
+    updateField: keyof PasskeyDraft
   ) {
     const revealed = revealedDraftFields.has(field);
-    const control =
-      field === "privateKeyPem" ? (
-        <textarea
-          aria-label={label}
-          value={value}
-          onChange={(event) => updateDraft(updateField, event.target.value)}
-          spellCheck={false}
-          style={
-            revealed
-              ? privateKeyPemDraftStyle
-              : concealedPrivateKeyPemDraftStyle
-          }
-        />
-      ) : (
-        <input
-          aria-label={label}
-          type={revealed ? "text" : "password"}
-          value={value}
-          onChange={(event) => updateDraft(updateField, event.target.value)}
-          style={fieldStyle}
-        />
-      );
+    const control = (
+      <input
+        aria-label={label}
+        type={revealed ? "text" : "password"}
+        value={value}
+        onChange={(event) => updateDraft(updateField, event.target.value)}
+        style={fieldStyle}
+      />
+    );
 
     return (
       <div style={sensitiveDraftFieldStyle}>
@@ -831,13 +852,12 @@ function PasskeySection({
     );
   }
 
-  function normalizedDraft(): EntryPasskey {
+  function normalizedDraft(): EntryPasskeyUpdate {
     return {
       ...draft,
       username: draft.username.trim(),
       credentialId: draft.credentialId.trim(),
       generatedUserId: emptyStringAsNull(draft.generatedUserId),
-      privateKeyPem: draft.privateKeyPem.trim(),
       relyingParty: draft.relyingParty.trim(),
       userHandle: emptyStringAsNull(draft.userHandle)
     };
@@ -846,11 +866,7 @@ function PasskeySection({
   const passkey = entry.passkey;
 
   function draftIsValid() {
-    return (
-      draft.credentialId.trim() !== "" &&
-      draft.relyingParty.trim() !== "" &&
-      privateKeyPemLooksValid(draft.privateKeyPem, passkey?.privateKeyPem)
-    );
+    return draft.credentialId.trim() !== "" && draft.relyingParty.trim() !== "";
   }
 
   return (
@@ -858,28 +874,43 @@ function PasskeySection({
       <div style={sectionHeaderStyle}>
         <h3 style={sectionTitleStyle}>{text("Passkey")}</h3>
         <div style={inlineActionsStyle}>
-          <button
-            type="button"
-            onClick={() => {
-              setDraft(passkey ?? emptyPasskey());
-              setRevealedDraftFields(new Set());
-              setEditing((current) => !current);
-            }}
-            disabled={busy}
-            style={secondaryActionStyle}
-          >
-            {passkey ? text("Edit passkey") : text("Add passkey")}
-          </button>
-          {passkey ? (
+          {pendingSave ? (
             <button
               type="button"
-              onClick={() => onClearPasskey?.()}
+              onClick={() => onRetrySave?.()}
               disabled={busy}
-              style={dangerSmallButtonStyle}
+              style={primaryActionStyle}
             >
-              {text("Clear passkey")}
+              {text("Retry save")}
             </button>
-          ) : null}
+          ) : (
+            <>
+              {passkey ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraft(passkeyDraft(passkey));
+                    setRevealedDraftFields(new Set());
+                    setEditing((current) => !current);
+                  }}
+                  disabled={busy}
+                  style={secondaryActionStyle}
+                >
+                  {text("Edit passkey")}
+                </button>
+              ) : null}
+              {passkey ? (
+                <button
+                  type="button"
+                  onClick={() => onClearPasskey?.()}
+                  disabled={busy}
+                  style={dangerSmallButtonStyle}
+                >
+                  {text("Clear passkey")}
+                </button>
+              ) : null}
+            </>
+          )}
         </div>
       </div>
       {passkey ? (
@@ -906,11 +937,6 @@ function PasskeySection({
             text("User Handle"),
             "userHandle",
             passkey.userHandle
-          )}
-          {renderSensitivePasskeyRow(
-            text("Private Key PEM"),
-            "privateKeyPem",
-            passkey.privateKeyPem
           )}
           <div style={detailRowStyle}>
             <div style={detailKeyStyle}>{text("Backup eligible")}</div>
@@ -962,12 +988,6 @@ function PasskeySection({
             draft.userHandle ?? "",
             "userHandle"
           )}
-          {renderSensitiveDraftInput(
-            text("Private Key PEM"),
-            "privateKeyPem",
-            draft.privateKeyPem,
-            "privateKeyPem"
-          )}
           <div style={inlineActionsStyle}>
             <label style={checkboxFieldStyle}>
               <input
@@ -1006,7 +1026,7 @@ function PasskeySection({
               type="button"
               disabled={busy}
               onClick={() => {
-                setDraft(passkey ?? emptyPasskey());
+                setDraft(passkeyDraft(passkey));
                 setEditing(false);
               }}
               style={secondaryActionStyle}
@@ -1020,38 +1040,25 @@ function PasskeySection({
   );
 }
 
-function emptyPasskey(): EntryPasskey {
+type PasskeyDraft = EntryPasskey;
+
+function passkeyDraft(passkey: EntryPasskey | null | undefined): PasskeyDraft {
+  if (passkey) {
+    return { ...passkey };
+  }
+  return emptyPasskey();
+}
+
+function emptyPasskey(): PasskeyDraft {
   return {
     username: "",
     credentialId: "",
     generatedUserId: null,
-    privateKeyPem: "",
     relyingParty: "",
     userHandle: null,
     backupEligible: false,
     backupState: false
   };
-}
-
-function privateKeyPemLooksValid(value: string, existingValue?: string) {
-  const trimmed = value.trim();
-  if (
-    existingValue !== undefined &&
-    trimmed === existingValue.trim() &&
-    privateKeyPemHasMatchingEnvelope(trimmed)
-  ) {
-    return true;
-  }
-  return /^-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----$/u.test(
-    trimmed
-  );
-}
-
-function privateKeyPemHasMatchingEnvelope(value: string) {
-  const match = value.match(
-    /^-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]+-----END \1-----$/u
-  );
-  return Boolean(match);
 }
 
 function emptyStringAsNull(value: string | null): string | null {
@@ -1311,19 +1318,6 @@ const notesStyle = {
   ...fieldStyle,
   minHeight: "130px",
   resize: "vertical" as const
-};
-
-const privateKeyPemDraftStyle = {
-  ...fieldStyle,
-  minHeight: "150px",
-  resize: "vertical" as const,
-  fontFamily: "monospace",
-  whiteSpace: "pre-wrap" as const
-};
-
-const concealedPrivateKeyPemDraftStyle = {
-  ...privateKeyPemDraftStyle,
-  WebkitTextSecurity: "disc"
 };
 
 const fieldLabelStyle = {

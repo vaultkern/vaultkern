@@ -3,7 +3,7 @@ import type {
   EntryDetail,
   EntryHistoryDetail,
   EntryHistoryItem,
-  EntryPasskey
+  EntryPasskeyUpdate
 } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
@@ -17,6 +17,7 @@ export function EntryDetailPane({
   draft,
   dirty,
   busy,
+  pendingSave,
   error,
   historyItems,
   historyDetail,
@@ -35,6 +36,7 @@ export function EntryDetailPane({
   onSelectHistoryItem,
   onSetPasskey,
   onClearPasskey,
+  onRetrySave,
   onSave,
   onCancel,
   onDelete
@@ -52,6 +54,7 @@ export function EntryDetailPane({
   } | null;
   dirty: boolean;
   busy?: boolean;
+  pendingSave?: boolean;
   error?: string | null;
   historyItems?: EntryHistoryItem[];
   historyDetail?: EntryHistoryDetail | null;
@@ -76,8 +79,9 @@ export function EntryDetailPane({
   onReplaceAttachment?: (name: string, file: File) => void;
   onDeleteAttachment?: (name: string) => void;
   onSelectHistoryItem?: (historyIndex: number) => void;
-  onSetPasskey?: (passkey: EntryPasskey) => void;
+  onSetPasskey?: (passkey: EntryPasskeyUpdate) => void;
   onClearPasskey?: () => void;
+  onRetrySave?: () => void;
   onSave: () => void;
   onCancel: () => void;
   onDelete?: () => void;
@@ -130,6 +134,7 @@ export function EntryDetailPane({
         draft={draft}
         dirty={dirty}
         busy={busy}
+        pendingSave={pendingSave}
         historyItems={historyItems}
         historyDetail={historyDetail}
         historyError={historyError}
@@ -146,6 +151,7 @@ export function EntryDetailPane({
         onSelectHistoryItem={onSelectHistoryItem}
         onSetPasskey={onSetPasskey}
         onClearPasskey={onClearPasskey}
+        onRetrySave={onRetrySave}
         onSave={onSave}
         onCancel={onCancel}
         onDelete={onDelete}

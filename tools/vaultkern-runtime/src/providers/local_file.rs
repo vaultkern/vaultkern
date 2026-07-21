@@ -2,7 +2,7 @@ use super::durable_file::{
     DurableFaultInjector, DurableFaultPoint, DurableFileIdentity, ExclusiveFileLock,
     TargetExpectation, TempWriteFaultPoints, VerifiedTemp, opened_file_identity,
     path_file_identity, publish_temp, remove_if_exists, sha256_hex, sync_parent,
-    unique_sibling_path, write_verified_temp,
+    sync_published_target, unique_sibling_path, write_verified_temp,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
@@ -11,7 +11,9 @@ use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
+
+const LOCAL_WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalFileSnapshot {
@@ -26,11 +28,22 @@ pub struct VaultSourceFingerprint {
     pub modified_at: Option<u64>,
 }
 
-#[derive(Default)]
 pub struct LocalFileVaultSourceProvider {
     write_faults: DurableFaultInjector,
+    writer_lock_timeout: Duration,
     #[cfg(test)]
     before_write: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl Default for LocalFileVaultSourceProvider {
+    fn default() -> Self {
+        Self {
+            write_faults: DurableFaultInjector::default(),
+            writer_lock_timeout: LOCAL_WRITER_LOCK_TIMEOUT,
+            #[cfg(test)]
+            before_write: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -85,16 +98,6 @@ impl std::error::Error for LocalFileCommitError {
     }
 }
 
-impl LocalFileCommitError {
-    fn into_io_error(self) -> io::Error {
-        let kind = match self {
-            Self::Conflict { .. } => io::ErrorKind::WouldBlock,
-            Self::BeforePublish { .. } | Self::OutcomeUnknown { .. } => io::ErrorKind::Other,
-        };
-        io::Error::new(kind, self)
-    }
-}
-
 impl LocalFileVaultSourceProvider {
     #[cfg(test)]
     pub(crate) fn with_before_write_hook(
@@ -102,6 +105,7 @@ impl LocalFileVaultSourceProvider {
     ) -> Self {
         Self {
             write_faults: DurableFaultInjector::default(),
+            writer_lock_timeout: LOCAL_WRITER_LOCK_TIMEOUT,
             before_write: Some(before_write),
         }
     }
@@ -110,7 +114,16 @@ impl LocalFileVaultSourceProvider {
     pub(crate) fn with_write_faults(write_faults: DurableFaultInjector) -> Self {
         Self {
             write_faults,
+            writer_lock_timeout: LOCAL_WRITER_LOCK_TIMEOUT,
             before_write: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_writer_lock_timeout(writer_lock_timeout: Duration) -> Self {
+        Self {
+            writer_lock_timeout,
+            ..Self::default()
         }
     }
 
@@ -127,7 +140,7 @@ impl LocalFileVaultSourceProvider {
     pub fn begin_write(&self, path: &str) -> io::Result<(LocalFileWriteTxn, LocalFileSnapshot)> {
         let target = fs::canonicalize(path)?;
         let lock_path = local_lock_path(&target)?;
-        let lock = ExclusiveFileLock::acquire(&lock_path)?;
+        let lock = ExclusiveFileLock::acquire_with_timeout(&lock_path, self.writer_lock_timeout)?;
         cleanup_pre_publish_hardlink_backups(&target)?;
         let opened = read_opened_snapshot(&target, true)?;
         let OpenedSnapshot {
@@ -145,14 +158,6 @@ impl LocalFileVaultSourceProvider {
             initial_metadata: metadata,
         };
         Ok((transaction, snapshot))
-    }
-
-    pub fn write(&self, path: &str, bytes: &[u8]) -> std::io::Result<()> {
-        let (transaction, snapshot) = self.begin_write(path)?;
-        transaction
-            .commit(&snapshot.fingerprint, bytes)
-            .map(|_| ())
-            .map_err(LocalFileCommitError::into_io_error)
     }
 
     pub fn write_if_unchanged(
@@ -263,9 +268,43 @@ impl LocalFileWriteTxn {
         );
         if let Err(error) = publish_result {
             if error.published {
-                return Err(LocalFileCommitError::OutcomeUnknown {
-                    source: error.source,
-                });
+                return match reconcile_published_commit(
+                    &self.target,
+                    &backup,
+                    self.initial_identity,
+                    &self.initial_fingerprint,
+                    bytes,
+                    faults,
+                ) {
+                    Ok(commit) => Ok(commit),
+                    Err(reconcile_error) => match rollback_published_commit(
+                        &self.target,
+                        &backup,
+                        self.initial_identity,
+                        &self.initial_fingerprint,
+                        bytes,
+                        faults,
+                    ) {
+                        Ok(()) => Err(LocalFileCommitError::BeforePublish {
+                            source: io::Error::new(
+                                reconcile_error.kind(),
+                                format!(
+                                    "{}; published-generation reconciliation failed ({reconcile_error}); the previous generation was restored",
+                                    error.source
+                                ),
+                            ),
+                        }),
+                        Err(rollback_error) => Err(LocalFileCommitError::OutcomeUnknown {
+                            source: io::Error::new(
+                                reconcile_error.kind(),
+                                format!(
+                                    "{}; published-generation reconciliation failed ({reconcile_error}) and rollback failed ({rollback_error})",
+                                    error.source
+                                ),
+                            ),
+                        }),
+                    },
+                };
             }
             let _ = remove_if_exists(&backup);
             let _ = sync_parent(&self.target);
@@ -279,36 +318,72 @@ impl LocalFileWriteTxn {
             });
         }
 
-        // The final target hash closes every testable pre-rename window. This
-        // old-inode check also prevents a measured non-cooperating write from
-        // being reported as success. No portable rename API can linearize an
-        // arbitrary write through an already-open third-party descriptor, so
-        // the sidecar lock remains the contract for cooperative writers.
-        if let Err(source) =
-            verify_backup_generation(&backup, self.initial_identity, &self.initial_fingerprint)
-        {
-            return Err(LocalFileCommitError::OutcomeUnknown { source });
-        }
+        let final_readback = faults
+            .check(DurableFaultPoint::LocalFinalReadback)
+            .and_then(|_| read_opened_snapshot(&self.target, false));
+        let snapshot = match final_readback {
+            Ok(opened) if opened.snapshot.bytes == bytes => opened.snapshot,
+            result => {
+                let mismatch = match result {
+                    Ok(_) => io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "published local vault does not match intended bytes",
+                    ),
+                    Err(error) => error,
+                };
+                match reconcile_published_commit(
+                    &self.target,
+                    &backup,
+                    self.initial_identity,
+                    &self.initial_fingerprint,
+                    bytes,
+                    faults,
+                ) {
+                    Ok(mut commit) => {
+                        commit.warnings.push(format!(
+                            "initial final readback failed, but an independent readback reconciled the durable published generation: {mismatch}"
+                        ));
+                        return Ok(commit);
+                    }
+                    Err(reconcile_error) => {
+                        return match persist_local_recovery_candidate(&self.target, &backup, bytes)
+                        {
+                            Ok(recovery) => Err(LocalFileCommitError::OutcomeUnknown {
+                                source: io::Error::new(
+                                    mismatch.kind(),
+                                    format!(
+                                        "{mismatch}; independent published-generation reconciliation failed ({reconcile_error}); the intended candidate was retained at {}",
+                                        recovery.display()
+                                    ),
+                                ),
+                            }),
+                            Err(recovery_error) => Err(LocalFileCommitError::OutcomeUnknown {
+                                source: io::Error::new(
+                                    mismatch.kind(),
+                                    format!(
+                                        "{mismatch}; independent published-generation reconciliation failed ({reconcile_error}); failed to retain the intended candidate: {recovery_error}"
+                                    ),
+                                ),
+                            }),
+                        };
+                    }
+                }
+            }
+        };
 
         let mut warnings = Vec::new();
-        if let Err(source) = faults.check(DurableFaultPoint::Cleanup) {
+        let backup_is_original =
+            verify_backup_generation(&backup, self.initial_identity, &self.initial_fingerprint);
+        if let Err(source) = backup_is_original {
+            warnings.push(format!(
+                "pre-save generation was unavailable or externally changed after publish: {source}"
+            ));
+        } else if let Err(source) = faults.check(DurableFaultPoint::Cleanup) {
             warnings.push(format!("retained durable backup: {source}"));
         } else if let Err(source) =
             remove_if_exists(&backup).and_then(|_| sync_parent(&self.target))
         {
             warnings.push(format!("could not remove durable backup: {source}"));
-        }
-
-        let snapshot = read_opened_snapshot(&self.target, false)
-            .map_err(|source| LocalFileCommitError::OutcomeUnknown { source })?
-            .snapshot;
-        if snapshot.bytes != bytes {
-            return Err(LocalFileCommitError::OutcomeUnknown {
-                source: io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "published local vault does not match intended bytes",
-                ),
-            });
         }
         Ok(DurableCommit {
             fingerprint: snapshot.fingerprint,
@@ -360,13 +435,45 @@ impl LocalFileWriteTxn {
                 let _ = sync_parent(&self.target);
                 return Err(error);
             }
-            return Ok(backup);
+            Ok(backup)
         }
         #[cfg(windows)]
         {
-            let backup = unique_sibling_path(&self.target, "bak")?;
-            faults.check(DurableFaultPoint::BackupPublished)?;
-            return Ok(backup);
+            let mut published = None;
+            for _ in 0..128 {
+                let backup = unique_sibling_path(&self.target, "bak")?;
+                let mut backup_file = match OpenOptions::new()
+                    .create_new(true)
+                    .read(true)
+                    .write(true)
+                    .open(&backup)
+                {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                };
+                let copy_result = (|| {
+                    let mut source = File::open(&self.target)?;
+                    io::copy(&mut source, &mut backup_file)?;
+                    backup_file.sync_all()?;
+                    sync_parent(&self.target)?;
+                    faults.check(DurableFaultPoint::BackupPublished)
+                })();
+                if let Err(error) = copy_result {
+                    drop(backup_file);
+                    let _ = remove_if_exists(&backup);
+                    let _ = sync_parent(&self.target);
+                    return Err(error);
+                }
+                published = Some(backup);
+                break;
+            }
+            published.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "could not create a unique local vault backup",
+                )
+            })
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -381,6 +488,184 @@ impl LocalFileWriteTxn {
             Ok(backup)
         }
     }
+}
+
+fn reconcile_published_commit(
+    target: &Path,
+    backup: &Path,
+    initial_identity: DurableFileIdentity,
+    initial_fingerprint: &VaultSourceFingerprint,
+    intended_bytes: &[u8],
+    faults: &DurableFaultInjector,
+) -> io::Result<DurableCommit> {
+    let opened = read_opened_snapshot(target, false)?;
+    if opened.snapshot.bytes != intended_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "visible local vault does not match the intended published generation",
+        ));
+    }
+
+    faults.check(DurableFaultPoint::LocalPublishedRepair)?;
+    sync_published_target(target)?;
+    sync_parent(target)?;
+
+    let mut warnings = Vec::new();
+    if let Err(source) = verify_backup_generation(backup, initial_identity, initial_fingerprint) {
+        warnings.push(format!(
+            "retained an unavailable or externally changed pre-save generation while reconciling the published vault: {source}"
+        ));
+    } else if let Err(source) = remove_if_exists(backup).and_then(|_| sync_parent(target)) {
+        warnings.push(format!(
+            "could not remove durable backup after reconciling published generation: {source}"
+        ));
+    }
+
+    let snapshot = read_opened_snapshot(target, false)?.snapshot;
+    if snapshot.bytes != intended_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "local vault changed while reconciling the published generation",
+        ));
+    }
+
+    Ok(DurableCommit {
+        fingerprint: snapshot.fingerprint,
+        warnings,
+    })
+}
+
+fn rollback_published_commit(
+    target: &Path,
+    backup: &Path,
+    initial_identity: DurableFileIdentity,
+    initial_fingerprint: &VaultSourceFingerprint,
+    intended_bytes: &[u8],
+    faults: &DurableFaultInjector,
+) -> io::Result<()> {
+    verify_backup_generation(backup, initial_identity, initial_fingerprint)?;
+    let current = read_opened_snapshot(target, false)?;
+    if current.snapshot.bytes != intended_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "local vault changed before the previous generation could be restored",
+        ));
+    }
+    let previous = read_opened_snapshot(backup, false)?;
+    let replaced_candidate_backup = unique_sibling_path(target, "rollback")?;
+    let rollback_faults = DurableFaultInjector::default();
+    let mut temp = write_verified_temp(
+        target,
+        &previous.snapshot.bytes,
+        &rollback_faults,
+        TempWriteFaultPoints {
+            created: DurableFaultPoint::TempCreated,
+            written: DurableFaultPoint::TempWritten,
+            synced: DurableFaultPoint::TempSynced,
+            verified: DurableFaultPoint::TempReadbackVerified,
+        },
+    )?;
+    if let Err(error) = preserve_file_metadata(&mut temp, &previous.file, &previous.metadata)
+        .and_then(|_| faults.check(DurableFaultPoint::LocalRollbackPublished))
+    {
+        let _ = temp.discard();
+        return Err(error);
+    }
+    if let Err(error) = publish_temp(
+        temp,
+        target,
+        TargetExpectation::IdentityAndContent {
+            identity: current.identity,
+            content_sha256: current.snapshot.fingerprint.content_sha256,
+            size_bytes: current.snapshot.fingerprint.size_bytes,
+            modified_at: current.metadata.modified().ok(),
+        },
+        Some(&replaced_candidate_backup),
+        &rollback_faults,
+        DurableFaultPoint::BeforeTargetReplace,
+        DurableFaultPoint::TargetReplaced,
+        DurableFaultPoint::ParentSynced,
+    ) {
+        if !error.published
+            || read_opened_snapshot(target, false)
+                .ok()
+                .is_none_or(|opened| opened.snapshot.bytes != previous.snapshot.bytes)
+        {
+            return Err(error.source);
+        }
+        sync_published_target(target)?;
+        sync_parent(target)?;
+    }
+    let restored = read_opened_snapshot(target, false)?;
+    if !same_content(&restored.snapshot.fingerprint, initial_fingerprint) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "restored local vault does not match the previous generation",
+        ));
+    }
+    remove_if_exists(backup)?;
+    remove_if_exists(&replaced_candidate_backup)?;
+    sync_parent(target)
+}
+
+fn persist_local_recovery_candidate(
+    target: &Path,
+    original_backup: &Path,
+    intended_bytes: &[u8],
+) -> io::Result<PathBuf> {
+    let recovery = unique_sibling_path(target, "recovery")?;
+    fs::copy(original_backup, &recovery)?;
+    File::open(&recovery)?.sync_all()?;
+    sync_parent(&recovery)?;
+    let placeholder = read_opened_snapshot(&recovery, false)?;
+    let faults = DurableFaultInjector::default();
+    let mut temp = write_verified_temp(
+        &recovery,
+        intended_bytes,
+        &faults,
+        TempWriteFaultPoints {
+            created: DurableFaultPoint::TempCreated,
+            written: DurableFaultPoint::TempWritten,
+            synced: DurableFaultPoint::TempSynced,
+            verified: DurableFaultPoint::TempReadbackVerified,
+        },
+    )?;
+    preserve_file_metadata(&mut temp, &placeholder.file, &placeholder.metadata)?;
+    let replaced_placeholder = unique_sibling_path(&recovery, "bak")?;
+    if let Err(error) = publish_temp(
+        temp,
+        &recovery,
+        TargetExpectation::IdentityAndContent {
+            identity: placeholder.identity,
+            content_sha256: placeholder.snapshot.fingerprint.content_sha256,
+            size_bytes: placeholder.snapshot.fingerprint.size_bytes,
+            modified_at: placeholder.metadata.modified().ok(),
+        },
+        Some(&replaced_placeholder),
+        &faults,
+        DurableFaultPoint::BeforeTargetReplace,
+        DurableFaultPoint::TargetReplaced,
+        DurableFaultPoint::ParentSynced,
+    ) {
+        if !error.published
+            || read_opened_snapshot(&recovery, false)
+                .ok()
+                .is_none_or(|opened| opened.snapshot.bytes != intended_bytes)
+        {
+            return Err(error.source);
+        }
+        sync_published_target(&recovery)?;
+        sync_parent(&recovery)?;
+    }
+    let verified = read_opened_snapshot(&recovery, false)?;
+    if verified.snapshot.bytes != intended_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "local recovery copy does not match the intended candidate",
+        ));
+    }
+    let _ = remove_if_exists(&replaced_placeholder).and_then(|_| sync_parent(&recovery));
+    Ok(recovery)
 }
 
 #[derive(Debug)]
@@ -417,6 +702,7 @@ fn read_opened_snapshot(path: &Path, reject_hard_links: bool) -> io::Result<Open
     }
     let mut file = options.open(path)?;
     let before = file.metadata()?;
+    reject_unsafe_opened_link_count(&file, reject_hard_links)?;
     let before_identity = opened_file_identity(&file, &before)?;
     if !before.is_file() || before_identity != path_file_identity(path, &path_metadata)? {
         return Err(io::Error::new(
@@ -707,6 +993,34 @@ fn reject_unsafe_link_count(_metadata: &Metadata, _reject: bool) -> io::Result<(
 }
 
 #[cfg(windows)]
+fn reject_unsafe_opened_link_count(file: &File, reject: bool) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    if !reject {
+        return Ok(());
+    }
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if information.nNumberOfLinks > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "local vault target has multiple hard links",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn reject_unsafe_opened_link_count(_file: &File, _reject: bool) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
 fn reject_reparse_point(metadata: &Metadata) -> io::Result<()> {
     use std::os::windows::fs::MetadataExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
@@ -828,11 +1142,14 @@ fn pick_local_vault_path() -> anyhow::Result<Option<String>> {
 mod tests {
     use super::{
         LocalFileCommitError, LocalFileVaultSourceProvider, VaultSourceFingerprint,
-        decode_picker_stdout,
+        decode_picker_stdout, local_lock_path,
     };
-    use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
+    use crate::providers::durable_file::{
+        DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, sha256_hex,
+    };
     use std::fs;
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     fn sidecar_artifacts(dir: &std::path::Path) -> Vec<String> {
         let mut names = fs::read_dir(dir)
@@ -859,6 +1176,16 @@ mod tests {
             .path();
         fs::remove_file(&temp).unwrap();
         fs::write(temp, bytes).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn write_current(path: &std::path::Path, bytes: &[u8]) {
+        let provider = LocalFileVaultSourceProvider::default();
+        let path = path.to_str().unwrap();
+        let snapshot = provider.read_snapshot(path).unwrap();
+        provider
+            .write_if_unchanged(path, &snapshot.fingerprint, bytes)
+            .unwrap();
     }
 
     #[test]
@@ -984,6 +1311,38 @@ mod tests {
     }
 
     #[test]
+    fn writer_lock_contention_fails_fast_instead_of_waiting_for_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        fs::write(&path, b"generation-a").unwrap();
+        let provider =
+            LocalFileVaultSourceProvider::with_writer_lock_timeout(Duration::from_millis(100));
+        let baseline = provider.read_snapshot(path.to_str().unwrap()).unwrap();
+        let canonical = fs::canonicalize(&path).unwrap();
+        let holder = ExclusiveFileLock::acquire(&local_lock_path(&canonical).unwrap()).unwrap();
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _ = released.recv_timeout(Duration::from_secs(1));
+            drop(holder);
+        });
+
+        let started = Instant::now();
+        let result = provider.write_if_unchanged(
+            path.to_str().unwrap(),
+            &baseline.fingerprint,
+            b"generation-b",
+        );
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        holder.join().unwrap();
+        let error = result.expect_err("writer-lock contention must time out");
+
+        assert!(matches!(error, LocalFileCommitError::Conflict { .. }));
+        assert!(elapsed < Duration::from_millis(750), "waited {elapsed:?}");
+        assert_eq!(fs::read(path).unwrap(), b"generation-a");
+    }
+
+    #[test]
     fn prepublish_faults_leave_the_original_generation_and_no_temporary_files() {
         let points = [
             DurableFaultPoint::TempCreated,
@@ -1016,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_sync_failure_reports_unknown_and_keeps_a_complete_backup() {
+    fn post_publish_faults_reconcile_the_visible_generation() {
         for point in [
             DurableFaultPoint::TargetReplaced,
             DurableFaultPoint::ParentSynced,
@@ -1027,23 +1386,113 @@ mod tests {
             let provider = LocalFileVaultSourceProvider::default();
             let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
 
-            let error = transaction
+            let committed = transaction
                 .commit_with_faults(
                     &snapshot.fingerprint,
                     b"new-generation",
                     &DurableFaultInjector::fail_once(point),
                 )
-                .expect_err("post-replace failure is outcome unknown");
+                .expect("a visible intended generation should reconcile");
 
-            assert!(matches!(error, LocalFileCommitError::OutcomeUnknown { .. }));
             assert_eq!(fs::read(&path).unwrap(), b"new-generation");
-            let backups = sidecar_artifacts(dir.path());
-            assert_eq!(backups.len(), 1);
             assert_eq!(
-                fs::read(dir.path().join(&backups[0])).unwrap(),
-                b"old-generation"
+                committed.fingerprint,
+                provider
+                    .read_snapshot(path.to_str().unwrap())
+                    .unwrap()
+                    .fingerprint
             );
+            assert!(sidecar_artifacts(dir.path()).is_empty());
         }
+    }
+
+    #[test]
+    fn failed_post_publish_repair_restores_the_original_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        fs::write(&path, b"old-generation").unwrap();
+        let provider = LocalFileVaultSourceProvider::default();
+        let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
+
+        let error = transaction
+            .commit_with_faults(
+                &snapshot.fingerprint,
+                b"new-generation",
+                &DurableFaultInjector::fail_in_order([
+                    DurableFaultPoint::TargetReplaced,
+                    DurableFaultPoint::LocalPublishedRepair,
+                ]),
+            )
+            .expect_err("a failed durability repair must not leave a reported-failed publish");
+
+        assert!(matches!(error, LocalFileCommitError::BeforePublish { .. }));
+        assert_eq!(fs::read(&path).unwrap(), b"old-generation");
+        assert!(sidecar_artifacts(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn third_generation_before_final_readback_retains_the_candidate_recovery_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let path = root.join("vault.kdbx");
+        fs::write(&path, b"old-generation").unwrap();
+        let provider = LocalFileVaultSourceProvider::default();
+        let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
+        let target = path.clone();
+
+        let error = transaction
+            .commit_with_faults(
+                &snapshot.fingerprint,
+                b"candidate-generation",
+                &DurableFaultInjector::run_once(DurableFaultPoint::LocalFinalReadback, move || {
+                    fs::write(&target, b"external-generation").unwrap()
+                }),
+            )
+            .expect_err("a third generation must make the commit outcome unknown");
+
+        assert!(matches!(error, LocalFileCommitError::OutcomeUnknown { .. }));
+        assert_eq!(fs::read(&path).unwrap(), b"external-generation");
+        let recoveries = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".vaultkern.recovery.")
+            })
+            .map(|entry| fs::read(entry.path()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            recoveries
+                .iter()
+                .any(|bytes| bytes == b"candidate-generation"),
+            "the displaced candidate must remain recoverable"
+        );
+    }
+
+    #[test]
+    fn final_readback_fault_reconciles_the_visible_candidate_without_recovery_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.kdbx");
+        fs::write(&path, b"old-generation").unwrap();
+        let provider = LocalFileVaultSourceProvider::default();
+        let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
+
+        let commit = transaction
+            .commit_with_faults(
+                &snapshot.fingerprint,
+                b"candidate-generation",
+                &DurableFaultInjector::fail_once(DurableFaultPoint::LocalFinalReadback),
+            )
+            .expect("an independent readback must reconcile the visible candidate");
+
+        assert_eq!(fs::read(&path).unwrap(), b"candidate-generation");
+        assert_eq!(
+            commit.fingerprint.content_sha256,
+            sha256_hex(b"candidate-generation")
+        );
+        assert!(sidecar_artifacts(dir.path()).is_empty());
     }
 
     #[cfg(unix)]
@@ -1073,9 +1522,7 @@ mod tests {
             assert_was_abruptly_killed(status, point);
             assert_eq!(fs::metadata(&path).unwrap().nlink(), 2, "{point:?}");
 
-            LocalFileVaultSourceProvider::default()
-                .write(path.to_str().unwrap(), b"retry-generation")
-                .expect("retry must clean only the pre-publish hard-link backup");
+            write_current(&path, b"retry-generation");
 
             assert_eq!(fs::read(&path).unwrap(), b"retry-generation");
             assert_eq!(fs::metadata(&path).unwrap().nlink(), 1);
@@ -1111,7 +1558,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn post_replace_change_to_the_old_inode_is_never_reported_as_success() {
+    fn post_replace_change_to_the_old_inode_does_not_hide_a_durable_target() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let path = root.join("vault.kdbx");
@@ -1119,7 +1566,7 @@ mod tests {
         let provider = LocalFileVaultSourceProvider::default();
         let (transaction, snapshot) = provider.begin_write(path.to_str().unwrap()).unwrap();
 
-        let error = transaction
+        let committed = transaction
             .commit_with_faults(
                 &snapshot.fingerprint,
                 b"candidate-generation",
@@ -1138,11 +1585,11 @@ mod tests {
                     fs::write(backup, b"external-generation").unwrap();
                 }),
             )
-            .expect_err("a changed pre-publish inode makes the outcome unknown");
+            .expect("the intended target is durable even if the old inode changed");
 
-        assert!(matches!(error, LocalFileCommitError::OutcomeUnknown { .. }));
         assert_eq!(fs::read(&path).unwrap(), b"candidate-generation");
         assert_eq!(sidecar_artifacts(dir.path()).len(), 1);
+        assert_eq!(committed.warnings.len(), 1);
     }
 
     #[test]
@@ -1210,9 +1657,7 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 
         fs::remove_file(alias).unwrap();
-        provider
-            .write(path.to_str().unwrap(), b"new-generation")
-            .unwrap();
+        write_current(&path, b"new-generation");
         assert_eq!(fs::read(&path).unwrap(), b"new-generation");
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -1291,9 +1736,7 @@ mod tests {
             0o640
         );
 
-        LocalFileVaultSourceProvider::default()
-            .write(path.to_str().unwrap(), b"new-generation")
-            .unwrap();
+        write_current(&path, b"new-generation");
 
         assert_eq!(get_xattr(&path, "system.posix_acl_access"), acl);
         assert_eq!(get_xattr(&path, "user.vaultkern.test"), b"preserve-me");
@@ -1369,9 +1812,7 @@ mod tests {
         fs::write(&target, b"old-generation").unwrap();
         symlink(&target, &link).unwrap();
 
-        LocalFileVaultSourceProvider::default()
-            .write(link.to_str().unwrap(), b"new-generation")
-            .unwrap();
+        write_current(&link, b"new-generation");
 
         assert_eq!(fs::read(&target).unwrap(), b"new-generation");
         assert!(

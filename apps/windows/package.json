@@ -1,0 +1,16 @@
+{
+  "name": "@vaultkern/windows",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@vaultkern/runtime-web-client": "file:../../packages/runtime-web-client",
+    "@vaultkern/shared-web-ui": "file:../../packages/shared-web-ui",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "test": "vitest run"
+  }
+}

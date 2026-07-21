@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type {
   DatabaseSettings,
+  DatabaseSettingsCommitResult,
   DatabaseSettingsUpdate,
   EntryAttachmentContent,
   EntryAttachmentContentUpdate,
@@ -13,6 +14,7 @@ import type {
   EntryHistoryDetail,
   EntryHistoryItem,
   EntryPasskey,
+  EntryPasskeyUpdate,
   EntrySummary,
   GroupNode,
   GroupTree,
@@ -32,9 +34,15 @@ import { errorMessage } from "./error";
 import {
   DEFAULT_EXTENSION_SETTINGS,
   createMemoryExtensionSettingsStore,
-  normalizeExtensionSettings
+  normalizeBrowserExtensionSettings,
+  normalizeWindowsAppSettings,
+  sortRecentVaultsForRetention
 } from "./extensionSettings";
-import type { ExtensionSettings, ExtensionSettingsStore } from "./extensionSettings";
+import type {
+  ExtensionSettings,
+  ExtensionSettingsReconciliationReason,
+  ExtensionSettingsStore
+} from "./extensionSettings";
 import { I18nProvider, deleteEntryDescription, translate } from "./i18n";
 import { DatabaseSettingsPage } from "./screens/DatabaseSettingsPage";
 import { ExtensionSettingsPanel } from "./screens/ExtensionSettingsPanel";
@@ -60,21 +68,17 @@ export interface RuntimeClientLike {
   listRecentVaults(): Promise<VaultReference[]>;
   addLocalVaultReference(path?: string): Promise<VaultReference>;
   beginOneDriveLogin(): Promise<OneDriveAuthSession>;
-  completeOneDriveLogin(input: {
-    code: string;
-    redirectUri: string;
-    codeVerifier: string;
-  }): Promise<OneDriveAuthStatus>;
   completePendingOneDriveLogin(): Promise<OneDriveAuthStatus>;
   listOneDriveChildren(parentItemId?: string | null): Promise<OneDriveItem[]>;
   addOneDriveVaultReference(driveId: string, itemId: string): Promise<VaultReference>;
   setCurrentVault(vaultRefId: string): Promise<SessionStateLike>;
   retryVaultSourceSync(vaultId: string): Promise<VaultSourceStatus>;
   deleteRecentVault(vaultRefId: string): Promise<VaultReference[]>;
+  deleteRecentVaultIfNotCurrent(vaultRefId: string): Promise<VaultReference[]>;
   openLocalVault(path: string): Promise<VaultHandle>;
   unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
-  enableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
+  enableQuickUnlockForCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
   unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
   disableQuickUnlockForCurrentVault(): Promise<SessionStateLike>;
   unlockWithPassword(vaultId: string, password: string): Promise<SessionStateLike>;
@@ -88,7 +92,7 @@ export interface RuntimeClientLike {
   setEntryPasskey(
     vaultId: string,
     entryId: string,
-    passkey: EntryPasskey
+    passkey: EntryPasskeyUpdate
   ): Promise<EntryDetail>;
   clearEntryPasskey(vaultId: string, entryId: string): Promise<EntryDetail>;
   deleteEntry(vaultId: string, entryId: string): Promise<void>;
@@ -97,7 +101,7 @@ export interface RuntimeClientLike {
   updateDatabaseSettings(
     vaultId: string,
     update: DatabaseSettingsUpdate
-  ): Promise<DatabaseSettings>;
+  ): Promise<DatabaseSettingsCommitResult>;
   getEntryAttachmentContent(
     vaultId: string,
     entryId: string,
@@ -151,6 +155,17 @@ type SessionStateLike = Pick<
   supportsBiometricUnlock?: boolean;
 };
 
+function actualCurrentVaultReference(
+  vaults: VaultReference[],
+  session: SessionStateLike | null
+) {
+  return (
+    vaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
+    vaults.find((vault) => vault.isCurrent) ??
+    null
+  );
+}
+
 interface FillHooks {
   findCandidates(vaultId: string): Promise<EntrySummary[]>;
   fillEntry(vaultId: string, entryId: string): Promise<void>;
@@ -164,11 +179,27 @@ type PendingAction =
   | { type: "search"; value: string }
   | { type: "open-stats" }
   | { type: "open-database-settings" }
-  | { type: "open-extension-settings" };
+  | { type: "close-database-settings" }
+  | { type: "open-extension-settings" }
+  | { type: "close-extension-settings" };
 
 type DialogState =
   | { type: "unsaved"; action: PendingAction }
   | { type: "delete-entry"; entryId: string; title: string };
+
+interface PendingEntrySave {
+  vaultId: string;
+  detail: EntryDetail;
+}
+
+interface PendingEntryDelete {
+  vaultId: string;
+  entryId: string;
+}
+
+interface PendingAttachmentSave extends PendingEntrySave {
+  fallbackMessage: string;
+}
 
 const COMPACT_BREAKPOINT = 1180;
 const STACKED_BREAKPOINT = 760;
@@ -258,7 +289,7 @@ const APP_LABELS = {
       globalSearch: "Global Search",
       searchPlaceholder: "Search the archive",
       settings: "Database Settings",
-      extensionSettings: "Extension Settings",
+      extensionSettings: "Windows Settings",
       statistics: "Statistics"
     },
     unlock: {
@@ -271,7 +302,7 @@ const APP_LABELS = {
       unlocking: "Unlocking...",
       unlockWithWindowsHello: "Unlock with Windows Hello",
       manageVaults: "Manage vaults",
-      extensionSettings: "Extension Settings",
+      extensionSettings: "Windows Settings",
       noRecentVaults: "No recent vaults",
       addFirstVault: "Open manager setup to add your first local vault.",
       local: "Local",
@@ -284,7 +315,7 @@ const APP_LABELS = {
       globalSearch: "全局搜索",
       searchPlaceholder: "搜索数据库",
       settings: "数据库设置",
-      extensionSettings: "插件设置",
+      extensionSettings: "Windows 设置",
       statistics: "统计"
     },
     unlock: {
@@ -297,7 +328,7 @@ const APP_LABELS = {
       unlocking: "解锁中...",
       unlockWithWindowsHello: "使用 Windows Hello 解锁",
       manageVaults: "管理数据库",
-      extensionSettings: "插件设置",
+      extensionSettings: "Windows 设置",
       noRecentVaults: "没有最近数据库",
       addFirstVault: "打开管理器设置并添加第一个本地数据库。",
       local: "本地",
@@ -320,6 +351,11 @@ export function App({
   const [localExtensionSettingsStore] = useState(() =>
     extensionSettingsStore ?? createMemoryExtensionSettingsStore()
   );
+  const settingsSurface = localExtensionSettingsStore.surface ?? "windows";
+  const normalizeSettings =
+    settingsSurface === "browser"
+      ? normalizeBrowserExtensionSettings
+      : normalizeWindowsAppSettings;
   const [session, setSession] = useState<SessionStateLike | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [sessionErrorCause, setSessionErrorCause] = useState<unknown>(null);
@@ -334,6 +370,9 @@ export function App({
   const [databaseSettings, setDatabaseSettings] = useState<DatabaseSettings | null>(null);
   const [databaseSettingsError, setDatabaseSettingsError] = useState<string | null>(null);
   const [databaseSettingsBusy, setDatabaseSettingsBusy] = useState(false);
+  const databaseSettingsDraftUpdate = useRef<DatabaseSettingsUpdate | null>(null);
+  const [databaseSettingsDraftDirty, setDatabaseSettingsDraftDirty] = useState(false);
+  const databaseSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
   const [databaseName, setDatabaseName] = useState<string | null>(null);
   const [groupTree, setGroupTree] = useState<GroupTree | null>(null);
   const [groupsError, setGroupsError] = useState<string | null>(null);
@@ -349,11 +388,29 @@ export function App({
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [editorMode, setEditorMode] = useState<EntryEditorMode>("view");
   const [draft, setDraft] = useState<EntryDraft | null>(null);
+  const [pendingEntrySave, setPendingEntrySave] = useState<PendingEntrySave | null>(
+    null
+  );
+  const [pendingPasskeySave, setPendingPasskeySave] = useState<PendingEntrySave | null>(
+    null
+  );
+  const [pendingAttachmentSave, setPendingAttachmentSave] =
+    useState<PendingAttachmentSave | null>(null);
+  const [pendingEntryDelete, setPendingEntryDelete] =
+    useState<PendingEntryDelete | null>(null);
   const [entryActionError, setEntryActionError] = useState<string | null>(null);
   const [dialogState, setDialogState] = useState<DialogState | null>(null);
   const [entryActionBusy, setEntryActionBusy] = useState(false);
+  const [saveAndContinueBusy, setSaveAndContinueBusy] = useState(false);
+  const saveDraftInFlight = useRef<Promise<boolean> | null>(null);
+  const entryDraftBaseline = useRef<EntryDetail | null>(null);
+  const secretViewEpoch = useRef(0);
+  const historyDetailRequestEpoch = useRef(0);
+  const saveAndContinueInFlight = useRef(false);
   const [showEntryListWithDetail, setShowEntryListWithDetail] = useState(false);
   const [workspaceReloadKey, setWorkspaceReloadKey] = useState(0);
+  const [sourceDetailReloadKey, setSourceDetailReloadKey] = useState(0);
+  const handledSourceDetailReloadKey = useRef(0);
   const [fillCandidates, setFillCandidates] = useState<EntrySummary[]>([]);
   const [fillError, setFillError] = useState<string | null>(null);
   const [recentVaults, setRecentVaults] = useState<VaultReference[]>([]);
@@ -376,9 +433,31 @@ export function App({
     null
   );
   const [extensionSettingsSaving, setExtensionSettingsSaving] = useState(false);
+  const extensionSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
+  const settingsReconciliationTail = useRef<Promise<void>>(Promise.resolve());
+  const recentVaultReconciliationEpoch = useRef(0);
+  const extensionSettingsDraft = useRef<ExtensionSettings | null>(null);
+  const [extensionSettingsDraftDirty, setExtensionSettingsDraftDirty] =
+    useState(false);
+  const [settingsDraftEpoch, setSettingsDraftEpoch] = useState(0);
   const [quickUnlockBusy, setQuickUnlockBusy] = useState(false);
   const [quickUnlockError, setQuickUnlockError] = useState<string | null>(null);
-  const quickUnlockAutoSyncAttempt = useRef<string | null>(null);
+  const [settingsReconciliationError, setSettingsReconciliationError] =
+    useState<string | null>(null);
+  const handleDatabaseSettingsDraftChange = useCallback(
+    (update: DatabaseSettingsUpdate | null, dirty: boolean) => {
+      databaseSettingsDraftUpdate.current = update;
+      setDatabaseSettingsDraftDirty(dirty);
+    },
+    []
+  );
+  const handleExtensionSettingsDraftChange = useCallback(
+    (settings: ExtensionSettings, dirty: boolean) => {
+      extensionSettingsDraft.current = settings;
+      setExtensionSettingsDraftDirty(dirty);
+    },
+    []
+  );
 
   async function reloadLockedState() {
     const [nextSession, nextRecentVaults] = await Promise.all([
@@ -386,43 +465,66 @@ export function App({
       client.listRecentVaults()
     ]);
     setSession(nextSession);
-    await applyRecentVaultLimit(nextRecentVaults, extensionSettings);
+    await applyRecentVaultLimit(nextRecentVaults);
   }
 
   async function applyRecentVaultLimit(
     vaults: VaultReference[],
-    settings: ExtensionSettings
+    reconciliationEpoch = recentVaultReconciliationEpoch.current
   ) {
-    const limit = settings.recentVaultLimit;
-    const sortedVaults = [...vaults].sort(
-      (left, right) => (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0)
-    );
-    const overflowVaults = sortedVaults.slice(limit);
+    let remainingVaults = sortRecentVaultsForRetention(vaults);
 
-    if (overflowVaults.length > 0) {
-      await Promise.all(
-        overflowVaults.map((vault) => client.deleteRecentVault(vault.vaultRefId))
+    while (reconciliationEpoch === recentVaultReconciliationEpoch.current) {
+      const desired = normalizeSettings(
+        await localExtensionSettingsStore.load()
       );
-      setRecentVaults(sortedVaults.slice(0, limit));
-      return;
-    }
+      if (reconciliationEpoch !== recentVaultReconciliationEpoch.current) {
+        return;
+      }
+      remainingVaults = sortRecentVaultsForRetention(
+        await client.listRecentVaults()
+      );
+      if (reconciliationEpoch !== recentVaultReconciliationEpoch.current) {
+        return;
+      }
+      const sortedVaults = remainingVaults;
+      const nextOverflowVault = sortedVaults[desired.recentVaultLimit];
+      if (!nextOverflowVault) {
+        setRecentVaults(sortedVaults);
+        return;
+      }
 
-    setRecentVaults(sortedVaults);
+      remainingVaults = await client.deleteRecentVaultIfNotCurrent(
+        nextOverflowVault.vaultRefId
+      );
+    }
   }
 
-  async function saveExtensionSettings(nextSettings: ExtensionSettings) {
+  function saveExtensionSettings(nextSettings: ExtensionSettings) {
+    if (extensionSettingsSaveInFlight.current) {
+      return extensionSettingsSaveInFlight.current;
+    }
+
+    const operation = persistExtensionSettings(nextSettings);
+    extensionSettingsSaveInFlight.current = operation;
+    void operation.finally(() => {
+      if (extensionSettingsSaveInFlight.current === operation) {
+        extensionSettingsSaveInFlight.current = null;
+      }
+    });
+    return operation;
+  }
+
+  async function persistExtensionSettings(nextSettings: ExtensionSettings) {
     setExtensionSettingsSaving(true);
     setExtensionSettingsError(null);
 
     try {
-      const normalizedSettings = normalizeExtensionSettings(nextSettings);
+      const normalizedSettings = normalizeSettings(nextSettings);
       await localExtensionSettingsStore.save(normalizedSettings);
       setExtensionSettings(normalizedSettings);
-      await applyRecentVaultLimit(await client.listRecentVaults(), normalizedSettings);
-      await syncQuickUnlockPreferenceToCurrentVault(
-        normalizedSettings.quickUnlockEnabled,
-        normalizedSettings
-      );
+      void reconcileSavedSettings("settings-commit", session);
+      return true;
     } catch (saveFailure) {
       setExtensionSettingsError(
         errorMessage(
@@ -430,31 +532,51 @@ export function App({
           translate(extensionSettings.language, "Failed to save extension settings")
         )
       );
+      return false;
     } finally {
       setExtensionSettingsSaving(false);
     }
   }
 
-  async function syncQuickUnlockPreferenceToCurrentVault(
-    enabled: boolean,
-    settingsForReload: ExtensionSettings
-  ) {
-    const currentVault =
-      recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
-      recentVaults.find((vault) => vault.isCurrent) ??
-      null;
-
-    if (!currentVault || currentVault.supportsQuickUnlock === enabled) {
-      return;
+  function reconcileSavedSettings(
+    reason: ExtensionSettingsReconciliationReason,
+    currentSession: SessionStateLike | null,
+    credentials?: UnlockCredentials
+  ): Promise<void> {
+    if (
+      reason === "manual" &&
+      credentials &&
+      localExtensionSettingsStore.nativeReconciliationOwned === true &&
+      localExtensionSettingsStore.queueQuickUnlockEnrollment
+    ) {
+      return handoffNativeQuickUnlockEnrollment(credentials);
     }
 
+    const reconciliationEpoch = ++recentVaultReconciliationEpoch.current;
+    const run = () =>
+      runSavedSettingsReconciliation(
+        currentSession,
+        credentials,
+        reconciliationEpoch
+      );
+    const operation = settingsReconciliationTail.current.then(run, run);
+    settingsReconciliationTail.current = operation.catch(() => undefined);
+    return operation;
+  }
+
+  async function handoffNativeQuickUnlockEnrollment(
+    credentials: UnlockCredentials
+  ): Promise<void> {
+    setQuickUnlockError(null);
     setQuickUnlockBusy(true);
     try {
-      const nextSession = enabled
-        ? await client.enableQuickUnlockForCurrentVault()
-        : await client.disableQuickUnlockForCurrentVault();
-      setSession(nextSession);
-      await applyRecentVaultLimit(await client.listRecentVaults(), settingsForReload);
+      const desired = normalizeSettings(
+        await localExtensionSettingsStore.load()
+      );
+      if (!desired.quickUnlockEnabled) {
+        return;
+      }
+      await localExtensionSettingsStore.queueQuickUnlockEnrollment!(credentials);
     } catch (quickUnlockFailure) {
       setQuickUnlockError(
         errorMessage(
@@ -467,14 +589,136 @@ export function App({
     }
   }
 
+  async function runSavedSettingsReconciliation(
+    currentSession: SessionStateLike | null,
+    credentials: UnlockCredentials | undefined,
+    reconciliationEpoch: number
+  ): Promise<void> {
+    setQuickUnlockError(null);
+    setSettingsReconciliationError(null);
+    let desired: ExtensionSettings;
+    try {
+      desired = normalizeSettings(await localExtensionSettingsStore.load());
+    } catch (loadFailure) {
+      console.error("failed to read desired settings for reconciliation", loadFailure);
+      return;
+    }
+
+    const platformOwnsQuickUnlock =
+      localExtensionSettingsStore.nativeReconciliationOwned === true;
+
+    let vaults: VaultReference[];
+    try {
+      vaults = await client.listRecentVaults();
+    } catch (vaultListFailure) {
+      console.error("settings reconciliation could not list recent vaults", vaultListFailure);
+      return;
+    }
+    try {
+      await applyRecentVaultLimit(vaults, reconciliationEpoch);
+    } catch (recentVaultFailure) {
+      console.error("settings reconciliation could not trim recent vaults", recentVaultFailure);
+    }
+
+    if (settingsSurface === "browser") {
+      return;
+    }
+
+    if (platformOwnsQuickUnlock) {
+      return;
+    }
+
+    const currentVault = actualCurrentVaultReference(vaults, currentSession);
+    const enabled = desired.quickUnlockEnabled;
+    if (
+      !currentVault ||
+      currentVault.supportsQuickUnlock === enabled ||
+      (enabled && (!currentSession?.unlocked || !credentials))
+    ) {
+      return;
+    }
+    try {
+      const latestDesired = normalizeSettings(
+        await localExtensionSettingsStore.load()
+      );
+      if (latestDesired.quickUnlockEnabled !== enabled) {
+        return;
+      }
+    } catch (loadFailure) {
+      console.error(
+        "settings reconciliation could not confirm quick unlock state",
+        loadFailure
+      );
+      return;
+    }
+
+    setQuickUnlockBusy(true);
+    try {
+      let nextSession: SessionStateLike;
+      if (enabled) {
+        const enrollmentCredentials = credentials;
+        if (!enrollmentCredentials) {
+          return;
+        }
+        nextSession = await client.enableQuickUnlockForCurrentVault(
+          enrollmentCredentials
+        );
+      } else {
+        nextSession = await client.disableQuickUnlockForCurrentVault();
+      }
+      setSession(nextSession);
+    } catch (quickUnlockFailure) {
+      setQuickUnlockError(
+        errorMessage(
+          quickUnlockFailure,
+          translate(extensionSettings.language, "Failed to update quick unlock")
+        )
+      );
+    } finally {
+      setQuickUnlockBusy(false);
+    }
+    try {
+      await applyRecentVaultLimit(
+        await client.listRecentVaults(),
+        reconciliationEpoch
+      );
+    } catch (vaultRefreshFailure) {
+      console.error(
+        "settings reconciliation could not refresh recent vaults",
+        vaultRefreshFailure
+      );
+    }
+  }
+
   function resetEditorState(nextMode: EntryEditorMode = "view") {
+    entryDraftBaseline.current = null;
     setEditorMode(nextMode);
     setDraft(null);
+    setPendingEntrySave(null);
     setEntryActionError(null);
     setDialogState(null);
   }
 
+  function resetDatabaseSettingsDraftState() {
+    databaseSettingsDraftUpdate.current = null;
+    setDatabaseSettingsDraftDirty(false);
+  }
+
+  function resetExtensionSettingsDraftState() {
+    extensionSettingsDraft.current = null;
+    setExtensionSettingsDraftDirty(false);
+  }
+
+  function discardAllDrafts() {
+    resetEditorState();
+    resetDatabaseSettingsDraftState();
+    resetExtensionSettingsDraftState();
+    setSettingsDraftEpoch((current) => current + 1);
+  }
+
   function clearDetailSelection() {
+    secretViewEpoch.current += 1;
+    historyDetailRequestEpoch.current += 1;
     setEntryDetail(null);
     setDetailError(null);
     setHistoryItems([]);
@@ -486,10 +730,19 @@ export function App({
   }
 
   function handleSaveResult(result: SaveVaultResult | void) {
+    if (
+      result &&
+      (result.status === "saved" ||
+        result.status === "merged" ||
+        result.status === "saved_to_cache")
+    ) {
+      void reconcileSavedSettings("vault-save", session);
+    }
     if (result?.status === "merged") {
       setSaveTip(
         translate(extensionSettings.language, "Vault changed on disk. Merged and saved.")
       );
+      setSourceDetailReloadKey((current) => current + 1);
     } else if (result?.status === "saved_to_cache") {
       setSaveTip(
         translate(extensionSettings.language, "Saved to local cache. Remote sync pending.")
@@ -508,6 +761,18 @@ export function App({
             }
           : current
       );
+    } else if (result?.status === "conflict_copy") {
+      setSaveTip(
+        result.conflictCopyPath
+          ? `${translate(
+              extensionSettings.language,
+              "Vault changed on disk. Local edits were saved to a conflict copy:"
+            )} ${result.conflictCopyPath}`
+          : translate(
+              extensionSettings.language,
+              "Vault changed on disk. Local edits were saved as a conflict copy."
+            )
+      );
     }
   }
 
@@ -523,6 +788,8 @@ export function App({
       const sourceStatus = await client.retryVaultSourceSync(session.activeVaultId);
       setSession((current) => (current ? { ...current, sourceStatus } : current));
       if (sourceStatus.remoteState === "online") {
+        setWorkspaceReloadKey((current) => current + 1);
+        setSourceDetailReloadKey((current) => current + 1);
         setSaveTip(translate(extensionSettings.language, "Remote sync restored."));
       } else if (sourceStatus.lastError) {
         setSourceSyncError(sourceStatus.lastError);
@@ -677,14 +944,35 @@ export function App({
     }
   }
 
-  const dirty =
+  const pendingDetailSave = pendingAttachmentSave || pendingPasskeySave;
+  const hasPendingEntrySave = Boolean(pendingEntrySave || pendingDetailSave);
+  const hasPendingDurableSave = hasPendingEntrySave || Boolean(pendingEntryDelete);
+  const draftDirty =
     editorMode === "create-pending"
       ? hasDraftChangesFromEmpty(draft)
       : editorMode === "edit" && entryDetail && draft
         ? !draftMatchesEntry(draft, entryDetail)
         : false;
+  const dirty =
+    hasPendingDurableSave ||
+    draftDirty ||
+    (showDatabaseSettingsPage && databaseSettingsDraftDirty) ||
+    (showExtensionSettingsPage && extensionSettingsDraftDirty);
+  const idleLockBlocked =
+    dirty ||
+    entryActionBusy ||
+    saveAndContinueBusy ||
+    databaseSettingsBusy ||
+    extensionSettingsSaving ||
+    sourceSyncBusy ||
+    setupAddBusy ||
+    unlockBusy ||
+    quickUnlockBusy;
 
   function performAction(action: PendingAction) {
+    setDialogState(null);
+    secretViewEpoch.current += 1;
+    historyDetailRequestEpoch.current += 1;
     switch (action.type) {
       case "select-entry":
         setEntryDetail(null);
@@ -736,6 +1024,8 @@ export function App({
       case "open-stats":
         setShowEntryListWithDetail(false);
         resetEditorState();
+        resetDatabaseSettingsDraftState();
+        resetExtensionSettingsDraftState();
         setShowDatabaseSettingsPage(false);
         setShowExtensionSettingsPage(false);
         setShowStatsPage(true);
@@ -743,16 +1033,28 @@ export function App({
       case "open-database-settings":
         setShowEntryListWithDetail(false);
         resetEditorState();
+        resetDatabaseSettingsDraftState();
+        resetExtensionSettingsDraftState();
         setShowStatsPage(false);
         setShowExtensionSettingsPage(false);
         setShowDatabaseSettingsPage(true);
         break;
+      case "close-database-settings":
+        resetDatabaseSettingsDraftState();
+        setShowDatabaseSettingsPage(false);
+        break;
       case "open-extension-settings":
         setShowEntryListWithDetail(false);
         resetEditorState();
+        resetDatabaseSettingsDraftState();
+        resetExtensionSettingsDraftState();
         setShowStatsPage(false);
         setShowDatabaseSettingsPage(false);
         setShowExtensionSettingsPage(true);
+        break;
+      case "close-extension-settings":
+        resetExtensionSettingsDraftState();
+        setShowExtensionSettingsPage(false);
         break;
     }
   }
@@ -778,35 +1080,63 @@ export function App({
     requestAction({ type: "search", value });
   }
 
-  async function saveDraft() {
+  function saveDraft() {
+    if (saveDraftInFlight.current) {
+      return saveDraftInFlight.current;
+    }
+
+    const operation = saveDraftOnce();
+    saveDraftInFlight.current = operation;
+    void operation.finally(() => {
+      if (saveDraftInFlight.current === operation) {
+        saveDraftInFlight.current = null;
+      }
+    });
+    return operation;
+  }
+
+  async function saveDraftOnce() {
     if (!session?.activeVaultId || !draft) {
       return false;
     }
 
+    const vaultId = session.activeVaultId;
+    const wasCreating = editorMode === "create-pending";
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      if (editorMode === "create-pending") {
-        const detail = await client.createEntry(session.activeVaultId, {
+      let detail: EntryDetail;
+
+      if (pendingEntrySave) {
+        if (pendingEntrySave.vaultId !== vaultId) {
+          throw new Error("The pending entry belongs to another vault");
+        }
+
+        detail = pendingEntrySave.detail;
+        if (!draftMatchesEntry(draft, detail)) {
+          detail = await client.updateEntryFields(vaultId, detail.id, draft);
+          setPendingEntrySave({ vaultId, detail });
+        }
+      } else if (wasCreating) {
+        detail = await client.createEntry(vaultId, {
           parentGroupId: selectedGroupId ?? groupTree?.root.id ?? "",
           ...draft
         });
-        handleSaveResult(await client.saveVault(session.activeVaultId));
-        setEntryDetail(detail);
-        setSelectedEntryId(detail.id);
-        setShowEntryListWithDetail(true);
       } else if (editorMode === "edit" && selectedEntryId) {
-        const detail = await client.updateEntryFields(
-          session.activeVaultId,
-          selectedEntryId,
-          draft
-        );
-        handleSaveResult(await client.saveVault(session.activeVaultId));
-        setEntryDetail(detail);
-        setShowEntryListWithDetail(false);
+        detail = await client.updateEntryFields(vaultId, selectedEntryId, draft);
       } else {
         return false;
+      }
+
+      setPendingEntrySave({ vaultId, detail });
+      handleSaveResult(await client.saveVault(vaultId));
+      setEntryDetail(detail);
+      if (wasCreating) {
+        setSelectedEntryId(detail.id);
+        setShowEntryListWithDetail(true);
+      } else {
+        setShowEntryListWithDetail(false);
       }
 
       resetEditorState();
@@ -826,26 +1156,128 @@ export function App({
   }
 
   async function handleSaveAndContinue(action: PendingAction) {
-    const saved = await saveDraft();
-
-    if (saved) {
-      performAction(action);
+    if (saveAndContinueInFlight.current) {
+      return;
     }
+    saveAndContinueInFlight.current = true;
+    setSaveAndContinueBusy(true);
+
+    try {
+      const pendingDelete = pendingEntryDelete;
+      const hadDatabaseSettingsDraft = Boolean(
+        showDatabaseSettingsPage &&
+          databaseSettingsDraftDirty &&
+          databaseSettingsDraftUpdate.current
+      );
+      const handledDatabaseSettings = hadDatabaseSettingsDraft;
+      const hadExtensionSettingsDraft = Boolean(
+        showExtensionSettingsPage &&
+          extensionSettingsDraftDirty &&
+          extensionSettingsDraft.current
+      );
+      let saved = hadDatabaseSettingsDraft
+        ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate.current!)
+        : hadExtensionSettingsDraft
+            ? await saveExtensionSettings(extensionSettingsDraft.current!)
+            : pendingDelete
+              ? await handleDeleteEntry(pendingDelete.entryId)
+            : pendingDetailSave
+              ? await retryPendingDetailSave()
+              : true;
+      if (
+        saved &&
+        !handledDatabaseSettings &&
+        !hadExtensionSettingsDraft &&
+        !pendingDelete &&
+        (draftDirty || !pendingDetailSave)
+      ) {
+        saved = await saveDraft();
+      }
+
+      if (saved) {
+        performAction(action);
+      }
+    } finally {
+      saveAndContinueInFlight.current = false;
+      setSaveAndContinueBusy(false);
+    }
+  }
+
+  function renderUnsavedChangesDialog() {
+    if (dialogState?.type !== "unsaved") {
+      return null;
+    }
+
+    return (
+      <ConfirmationDialog
+        title={translate(extensionSettings.language, "You have unsaved changes")}
+        description={translate(
+          extensionSettings.language,
+          showDatabaseSettingsPage && databaseSettingsDraftDirty
+              ? "Save your database settings before leaving, discard your edits, or continue editing."
+              : showExtensionSettingsPage && extensionSettingsDraftDirty
+                ? "Save your extension settings before leaving, discard your edits, or continue editing."
+                : hasPendingEntrySave || pendingEntryDelete
+                  ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+                  : "Save before leaving this entry, discard your edits, or continue editing."
+        )}
+        actions={[
+          {
+            label: translate(extensionSettings.language, "Save changes"),
+            variant: "primary",
+            disabled: saveAndContinueBusy,
+            onClick: () => {
+              void handleSaveAndContinue(dialogState.action);
+            }
+          },
+          ...(hasPendingDurableSave
+            ? []
+            : [
+                {
+                  label: translate(extensionSettings.language, "Discard changes"),
+                  disabled: saveAndContinueBusy,
+                  onClick: () => {
+                    discardAllDrafts();
+                    performAction(dialogState.action);
+                  }
+                }
+              ]),
+          {
+            label: translate(extensionSettings.language, "Continue editing"),
+            disabled: saveAndContinueBusy,
+            onClick: () => setDialogState(null)
+          }
+        ]}
+      />
+    );
   }
 
   async function handleDeleteEntry(entryId: string) {
     if (!session?.activeVaultId) {
-      return;
+      return false;
     }
 
+    const vaultId = session.activeVaultId;
+    let mutationApplied =
+      pendingEntryDelete?.vaultId === vaultId && pendingEntryDelete.entryId === entryId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      await client.deleteEntry(session.activeVaultId, entryId);
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      if (pendingEntryDelete && !mutationApplied) {
+        throw new Error("Another entry deletion is pending");
+      }
+      if (!mutationApplied) {
+        await client.deleteEntry(vaultId, entryId);
+        mutationApplied = true;
+        setPendingEntryDelete({ vaultId, entryId });
+      }
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingEntryDelete(null);
       clearDetailSelection();
       setWorkspaceReloadKey((current) => current + 1);
+      setDialogState(null);
+      return true;
     } catch (deleteError) {
       setEntryActionError(
         errorMessage(
@@ -853,28 +1285,31 @@ export function App({
           translate(extensionSettings.language, "Failed to delete entry")
         )
       );
+      if (!mutationApplied) {
+        setDialogState(null);
+      }
+      return false;
     } finally {
       setEntryActionBusy(false);
-      setDialogState(null);
     }
   }
 
-  async function handleSetEntryPasskey(passkey: EntryPasskey) {
+  async function handleSetEntryPasskey(passkey: EntryPasskeyUpdate) {
     if (!session?.activeVaultId || !selectedEntryId) {
       return;
     }
 
+    const vaultId = session.activeVaultId;
+    const entryId = selectedEntryId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      const detail = await client.setEntryPasskey(
-        session.activeVaultId,
-        selectedEntryId,
-        passkey
-      );
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      const detail = await client.setEntryPasskey(vaultId, entryId, passkey);
       setEntryDetail(detail);
+      setPendingPasskeySave({ vaultId, detail });
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingPasskeySave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (passkeyError) {
       setEntryActionError(
@@ -893,16 +1328,17 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
+    const entryId = selectedEntryId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      const detail = await client.clearEntryPasskey(
-        session.activeVaultId,
-        selectedEntryId
-      );
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      const detail = await client.clearEntryPasskey(vaultId, entryId);
       setEntryDetail(detail);
+      setPendingPasskeySave({ vaultId, detail });
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingPasskeySave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (passkeyError) {
       setEntryActionError(
@@ -916,12 +1352,39 @@ export function App({
     }
   }
 
+  async function retryPendingPasskeySave() {
+    if (!pendingPasskeySave) {
+      return false;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      handleSaveResult(await client.saveVault(pendingPasskeySave.vaultId));
+      setPendingPasskeySave(null);
+      setWorkspaceReloadKey((current) => current + 1);
+      return true;
+    } catch (passkeyError) {
+      setEntryActionError(
+        errorMessage(
+          passkeyError,
+          translate(extensionSettings.language, "Failed to save entry passkey")
+        )
+      );
+      return false;
+    } finally {
+      setEntryActionBusy(false);
+    }
+  }
+
   async function handleDownloadAttachment(name: string) {
     if (!session?.activeVaultId || !selectedEntryId) {
       return;
     }
 
     setEntryActionError(null);
+    const requestEpoch = secretViewEpoch.current;
 
     try {
       const content = await client.getEntryAttachmentContent(
@@ -929,6 +1392,9 @@ export function App({
         selectedEntryId,
         name
       );
+      if (requestEpoch !== secretViewEpoch.current) {
+        return;
+      }
       triggerAttachmentDownload(content);
     } catch (downloadError) {
       setEntryActionError(
@@ -948,19 +1414,55 @@ export function App({
       return;
     }
 
+    const vaultId = session.activeVaultId;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
       const detail = await operation();
-      handleSaveResult(await client.saveVault(session.activeVaultId));
       setEntryDetail(detail);
+      setPendingAttachmentSave({ vaultId, detail, fallbackMessage });
+      handleSaveResult(await client.saveVault(vaultId));
+      setPendingAttachmentSave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (attachmentError) {
       setEntryActionError(errorMessage(attachmentError, fallbackMessage));
     } finally {
       setEntryActionBusy(false);
     }
+  }
+
+  async function retryPendingAttachmentSave() {
+    if (!pendingAttachmentSave) {
+      return false;
+    }
+
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      handleSaveResult(await client.saveVault(pendingAttachmentSave.vaultId));
+      setPendingAttachmentSave(null);
+      setWorkspaceReloadKey((current) => current + 1);
+      return true;
+    } catch (attachmentError) {
+      setEntryActionError(
+        errorMessage(attachmentError, pendingAttachmentSave.fallbackMessage)
+      );
+      return false;
+    } finally {
+      setEntryActionBusy(false);
+    }
+  }
+
+  async function retryPendingDetailSave() {
+    if (pendingAttachmentSave) {
+      return retryPendingAttachmentSave();
+    }
+    if (pendingPasskeySave) {
+      return retryPendingPasskeySave();
+    }
+    return false;
   }
 
   async function handleAddAttachment(file: File, protectInMemory: boolean) {
@@ -1027,21 +1529,46 @@ export function App({
     );
   }
 
-  async function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
-    if (!session?.activeVaultId) {
-      return;
+  function runDatabaseSettingsSave(operation: () => Promise<boolean>) {
+    if (databaseSettingsSaveInFlight.current) {
+      return databaseSettingsSaveInFlight.current;
     }
 
+    const promise = operation();
+    databaseSettingsSaveInFlight.current = promise;
+    void promise.finally(() => {
+      if (databaseSettingsSaveInFlight.current === promise) {
+        databaseSettingsSaveInFlight.current = null;
+      }
+    });
+    return promise;
+  }
+
+  function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
+    return runDatabaseSettingsSave(() => saveDatabaseSettings(update));
+  }
+
+  async function saveDatabaseSettings(update: DatabaseSettingsUpdate) {
+    if (!session?.activeVaultId) {
+      return false;
+    }
+
+    const vaultId = session.activeVaultId;
     setDatabaseSettingsBusy(true);
     setDatabaseSettingsError(null);
 
     try {
-      const settings = await client.updateDatabaseSettings(session.activeVaultId, update);
-      setDatabaseSettings(settings);
-      setDatabaseName(settings.metadata.name);
-      handleSaveResult(await client.saveVault(session.activeVaultId));
+      const result = await client.updateDatabaseSettings(vaultId, update);
+      setDatabaseSettings(result.settings);
+      setDatabaseName(result.settings.metadata.name);
+      resetDatabaseSettingsDraftState();
+      setSettingsDraftEpoch((current) => current + 1);
+      handleSaveResult(result.saveResult);
       setWorkspaceReloadKey((current) => current + 1);
-      setSaveTip(translate(extensionSettings.language, "Database settings saved."));
+      if (result.saveResult.status === "saved") {
+        setSaveTip(translate(extensionSettings.language, "Database settings saved."));
+      }
+      return true;
     } catch (settingsError) {
       setDatabaseSettingsError(
         errorMessage(
@@ -1049,6 +1576,7 @@ export function App({
           translate(extensionSettings.language, "Failed to save database settings")
         )
       );
+      return false;
     } finally {
       setDatabaseSettingsBusy(false);
     }
@@ -1060,6 +1588,8 @@ export function App({
     }
 
     setHistoryError(null);
+    const requestEpoch = secretViewEpoch.current;
+    const historyRequestEpoch = ++historyDetailRequestEpoch.current;
 
     try {
       const detail = await client.getEntryHistoryDetail(
@@ -1067,8 +1597,20 @@ export function App({
         selectedEntryId,
         historyIndex
       );
+      if (
+        requestEpoch !== secretViewEpoch.current ||
+        historyRequestEpoch !== historyDetailRequestEpoch.current
+      ) {
+        return;
+      }
       setHistoryDetail(detail);
     } catch (loadError) {
+      if (
+        requestEpoch !== secretViewEpoch.current ||
+        historyRequestEpoch !== historyDetailRequestEpoch.current
+      ) {
+        return;
+      }
       setHistoryDetail(null);
       setHistoryError(
         errorMessage(
@@ -1110,37 +1652,54 @@ export function App({
     setSessionError(null);
     setSessionErrorCause(null);
 
-    localExtensionSettingsStore
-      .load()
-      .then(async (loadedSettings) => {
-        const normalizedSettings = normalizeExtensionSettings(loadedSettings);
-        if (!cancelled) {
-          setExtensionSettings(normalizedSettings);
+    void (async () => {
+      let desiredSettingsAvailable = false;
+      try {
+        const loadedSettings = await localExtensionSettingsStore.load();
+        if (cancelled) {
+          return;
         }
-        const vaults = await client.listRecentVaults();
-        if (!cancelled) {
-          await applyRecentVaultLimit(vaults, normalizedSettings);
+        const normalizedSettings = normalizeSettings(loadedSettings);
+        desiredSettingsAvailable = true;
+        setExtensionSettings(normalizedSettings);
+        setExtensionSettingsError(null);
+        void reconcileSavedSettings("startup", null);
+      } catch (settingsLoadError) {
+        if (cancelled) {
+          return;
         }
-        return client.getSessionState();
-      })
-      .then((state) => {
-        if (!cancelled) {
-          setSession(state);
-          setSessionErrorCause(null);
+        setExtensionSettingsError(
+          errorMessage(
+            settingsLoadError,
+            translate(extensionSettings.language, "Failed to load settings")
+          )
+        );
+      }
+
+      try {
+        const state = await client.getSessionState();
+        if (cancelled) {
+          return;
         }
-      })
-      .catch((loadError) => {
-        if (!cancelled) {
-          setSession(null);
-          setSessionErrorCause(loadError);
-          setSessionError(
-            errorMessage(
-              loadError,
-              translate(extensionSettings.language, "Failed to load session state")
-            )
-          );
+        setSession(state);
+        setSessionErrorCause(null);
+        if (state.unlocked && desiredSettingsAvailable) {
+          void reconcileSavedSettings("startup", state);
         }
-      });
+      } catch (sessionLoadError) {
+        if (cancelled) {
+          return;
+        }
+        setSession(null);
+        setSessionErrorCause(sessionLoadError);
+        setSessionError(
+          errorMessage(
+            sessionLoadError,
+            translate(extensionSettings.language, "Failed to load session state")
+          )
+        );
+      }
+    })();
 
     return () => {
       cancelled = true;
@@ -1151,12 +1710,15 @@ export function App({
     if (
       typeof window === "undefined" ||
       !session?.unlocked ||
-      !client.lockSession ||
       extensionSettings.idleLockMinutes <= 0
     ) {
       return undefined;
     }
+    if (!client.lockSession) return undefined;
+    const requestLock = () => client.lockSession!();
 
+    let disposed = false;
+    let lockPending = false;
     let timer = window.setTimeout(handleTimeout, extensionSettings.idleLockMinutes * 60_000);
 
     function resetTimer() {
@@ -1165,9 +1727,25 @@ export function App({
     }
 
     function handleTimeout() {
-      void client.lockSession?.().then((nextSession) => {
-        setSession(nextSession);
-      });
+      if (idleLockBlocked || lockPending) {
+        resetTimer();
+        return;
+      }
+      lockPending = true;
+      clearDetailSelection();
+      setFillCandidates([]);
+      void requestLock()
+        .then((nextSession) => {
+          if (!disposed) {
+            setSession(nextSession);
+          }
+        })
+        .catch(() => {
+          lockPending = false;
+          if (!disposed) {
+            resetTimer();
+          }
+        });
     }
 
     const events = ["pointerdown", "keydown", "wheel", "scroll"];
@@ -1176,54 +1754,15 @@ export function App({
     }
 
     return () => {
+      disposed = true;
       window.clearTimeout(timer);
       for (const eventName of events) {
         window.removeEventListener(eventName, resetTimer);
       }
     };
-  }, [client, extensionSettings.idleLockMinutes, session?.unlocked]);
+  }, [client, extensionSettings.idleLockMinutes, idleLockBlocked, session?.unlocked]);
 
-  useEffect(() => {
-    if (quickUnlockBusy) {
-      return;
-    }
-
-    const currentVault =
-      recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
-      recentVaults.find((vault) => vault.isCurrent) ??
-      null;
-
-    if (
-      !currentVault ||
-      currentVault.supportsQuickUnlock === extensionSettings.quickUnlockEnabled ||
-      (extensionSettings.quickUnlockEnabled &&
-        session?.supportsBiometricUnlock !== true)
-    ) {
-      return;
-    }
-
-    const syncKey = `${currentVault.vaultRefId}:${
-      session?.unlocked === true ? "unlocked" : "locked"
-    }:${extensionSettings.quickUnlockEnabled ? "enable" : "disable"}`;
-    if (quickUnlockAutoSyncAttempt.current === syncKey) {
-      return;
-    }
-
-    quickUnlockAutoSyncAttempt.current = syncKey;
-    void syncQuickUnlockPreferenceToCurrentVault(
-      extensionSettings.quickUnlockEnabled,
-      extensionSettings
-    );
-  }, [
-    extensionSettings,
-    quickUnlockBusy,
-    recentVaults,
-    session?.currentVaultRefId,
-    session?.supportsBiometricUnlock,
-    session?.unlocked
-  ]);
-
-  useEffect(() => {
+  useLayoutEffect(() => {
     setSearchValue("");
     setShowStatsPage(false);
     setShowDatabaseSettingsPage(false);
@@ -1355,9 +1894,13 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [fillHooks, session?.activeVaultId]);
+  }, [fillHooks, session?.activeVaultId, workspaceReloadKey]);
 
   useEffect(() => {
+    const forceSourceReload =
+      handledSourceDetailReloadKey.current !== sourceDetailReloadKey;
+    handledSourceDetailReloadKey.current = sourceDetailReloadKey;
+
     if (!session?.activeVaultId || !selectedEntryId) {
       setEntryDetail(null);
       setDetailError(null);
@@ -1367,26 +1910,31 @@ export function App({
       return;
     }
 
-    if (entryDetail?.id === selectedEntryId) {
+    if (!forceSourceReload && entryDetail?.id === selectedEntryId) {
       setDetailError(null);
       return;
     }
 
-    setEntryDetail(null);
+    if (!forceSourceReload) {
+      setEntryDetail(null);
+    }
     setDetailError(null);
 
     let cancelled = false;
+    const requestEpoch = secretViewEpoch.current;
 
     client
       .getEntryDetail(session.activeVaultId, selectedEntryId)
       .then((detail) => {
-        if (!cancelled) {
+        if (!cancelled && requestEpoch === secretViewEpoch.current) {
           setEntryDetail(detail);
         }
       })
       .catch((loadError) => {
         if (!cancelled) {
-          setEntryDetail(null);
+          if (!forceSourceReload) {
+            setEntryDetail(null);
+          }
           setDetailError(
             errorMessage(
               loadError,
@@ -1399,7 +1947,32 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [client, entryDetail?.id, selectedEntryId, session?.activeVaultId]);
+  }, [
+    client,
+    entryDetail?.id,
+    selectedEntryId,
+    session?.activeVaultId,
+    sourceDetailReloadKey
+  ]);
+
+  useEffect(() => {
+    if (editorMode !== "edit" || !entryDetail) {
+      return;
+    }
+    const baseline = entryDraftBaseline.current;
+    if (!baseline || baseline.id !== entryDetail.id) {
+      entryDraftBaseline.current = entryDetail;
+      return;
+    }
+    if (baseline === entryDetail) {
+      return;
+    }
+
+    entryDraftBaseline.current = entryDetail;
+    setDraft((current) =>
+      current ? rebaseEntryDraft(baseline, current, entryDetail) : current
+    );
+  }, [editorMode, entryDetail]);
 
   useEffect(() => {
     if (!session?.activeVaultId) {
@@ -1449,7 +2022,6 @@ export function App({
       })
       .catch((loadError) => {
         if (!cancelled) {
-          setDatabaseSettings(null);
           setDatabaseSettingsBusy(false);
           setDatabaseSettingsError(
             errorMessage(
@@ -1463,9 +2035,10 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [client, session?.activeVaultId, showDatabaseSettingsPage]);
+  }, [client, session?.activeVaultId, showDatabaseSettingsPage, workspaceReloadKey]);
 
   useEffect(() => {
+    historyDetailRequestEpoch.current += 1;
     if (!entryDetail || !session?.activeVaultId || !selectedEntryId) {
       setHistoryItems([]);
       setHistoryDetail(null);
@@ -1500,7 +2073,13 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [client, entryDetail?.id, selectedEntryId, session?.activeVaultId]);
+  }, [
+    client,
+    entryDetail?.id,
+    selectedEntryId,
+    session?.activeVaultId,
+    workspaceReloadKey
+  ]);
 
   if (!session) {
     if (sessionError) {
@@ -1521,37 +2100,44 @@ export function App({
     );
   }
 
-  const currentVaultReference =
-    recentVaults.find((vault) => vault.vaultRefId === session.currentVaultRefId) ??
-    recentVaults.find((vault) => vault.isCurrent) ??
-    null;
+  const currentVaultReference = actualCurrentVaultReference(recentVaults, session);
 
   if (showExtensionSettingsPage) {
     return (
       <I18nProvider language={extensionSettings.language}>
-        <div style={messageShellStyle}>
+        <div aria-hidden={dialogState !== null} style={messageShellStyle}>
           <div style={settingsPageShellStyle}>
             <button
               type="button"
-              onClick={() => setShowExtensionSettingsPage(false)}
+              onClick={() => requestAction({ type: "close-extension-settings" })}
               style={backButtonStyle}
             >
               {translate(extensionSettings.language, "Back")}
             </button>
             <ExtensionSettingsPanel
+              key={`extension-settings-${settingsDraftEpoch}`}
               settings={extensionSettings}
+              surface={settingsSurface}
               saving={extensionSettingsSaving}
               error={extensionSettingsError}
               quickUnlockSupported={session?.supportsBiometricUnlock !== false}
               quickUnlockEnabled={extensionSettings.quickUnlockEnabled}
+              quickUnlockEnrolled={Boolean(currentVaultReference?.supportsQuickUnlock)}
+              quickUnlockVaultUnlocked={session.unlocked}
               quickUnlockBusy={quickUnlockBusy}
               quickUnlockError={quickUnlockError}
+              reconciliationError={settingsReconciliationError}
+              onEnrollQuickUnlock={async (credentials) => {
+                await reconcileSavedSettings("manual", session, credentials);
+              }}
               onSave={(settings) => {
                 void saveExtensionSettings(settings);
               }}
+              onDraftChange={handleExtensionSettingsDraftChange}
             />
           </div>
         </div>
+        {renderUnsavedChangesDialog()}
       </I18nProvider>
     );
   }
@@ -1574,7 +2160,7 @@ export function App({
             onSelectOneDriveVault={handleSelectOneDriveVault}
             onDeleteVault={async (vaultRefId) => {
               const nextVaults = await client.deleteRecentVault(vaultRefId);
-              await applyRecentVaultLimit(nextVaults, extensionSettings);
+              await applyRecentVaultLimit(nextVaults);
               setSession((current) =>
                 current?.currentVaultRefId === vaultRefId
                   ? { ...current, currentVaultRefId: null }
@@ -1589,7 +2175,9 @@ export function App({
               setOneDriveBrowserPath([]);
               setShowSetup(false);
             }}
-            onOpenExtensionSettings={() => setShowExtensionSettingsPage(true)}
+            onOpenExtensionSettings={() =>
+              requestAction({ type: "open-extension-settings" })
+            }
             addLocalVaultBusy={setupAddBusy}
             addLocalVaultError={setupAddError}
             addLocalVaultErrorCause={setupAddErrorCause}
@@ -1609,7 +2197,7 @@ export function App({
           setUnlockErrorCause(null);
           const nextSession = await client.setCurrentVault(vaultRefId);
           setSession(nextSession);
-          await applyRecentVaultLimit(await client.listRecentVaults(), extensionSettings);
+          await reconcileSavedSettings("vault-selection", nextSession);
         }}
         onUnlock={async ({ password, keyFilePath }) => {
           setUnlockBusy(true);
@@ -1621,6 +2209,10 @@ export function App({
               keyFilePath
             });
             setSession(nextSession);
+            await reconcileSavedSettings("unlock", nextSession, {
+              password,
+              keyFilePath
+            });
           } catch (unlockFailure) {
             setUnlockError(
               errorMessage(
@@ -1640,6 +2232,7 @@ export function App({
           try {
             const nextSession = await client.unlockCurrentVaultWithQuickUnlock();
             setSession(nextSession);
+            await reconcileSavedSettings("unlock", nextSession);
           } catch (unlockFailure) {
             setUnlockError(
               errorMessage(
@@ -1648,13 +2241,18 @@ export function App({
               )
             );
             setUnlockErrorCause(unlockFailure);
+            try {
+              await applyRecentVaultLimit(await client.listRecentVaults());
+            } catch {
+              // Preserve the original quick-unlock error when status refresh also fails.
+            }
           } finally {
             setUnlockBusy(false);
           }
         }}
         quickUnlockSupported={Boolean(session.supportsBiometricUnlock)}
         onOpenSetup={() => setShowSetup(true)}
-        onOpenExtensionSettings={() => setShowExtensionSettingsPage(true)}
+        onOpenExtensionSettings={() => requestAction({ type: "open-extension-settings" })}
         error={unlockError}
         errorCause={unlockErrorCause}
         busy={unlockBusy}
@@ -1798,16 +2396,18 @@ export function App({
               draft={draft}
               dirty={dirty}
               busy={entryActionBusy}
+              pendingSave={Boolean(pendingDetailSave)}
               error={entryActionError ?? detailError}
               historyItems={historyItems}
               historyDetail={historyDetail}
               historyError={historyError}
               onBack={viewMode === "expanded" ? undefined : handleBackToEntries}
               onStartEdit={() => {
-                if (!entryDetail) {
+                if (!entryDetail || pendingDetailSave) {
                   return;
                 }
 
+                entryDraftBaseline.current = entryDetail;
                 setDraft(entryToDraft(entryDetail));
                 setShowEntryListWithDetail(true);
                 setEditorMode("edit");
@@ -1882,8 +2482,11 @@ export function App({
               onClearPasskey={() => {
                 void handleClearEntryPasskey();
               }}
+              onRetrySave={() => {
+                void retryPendingDetailSave();
+              }}
               onSave={() => {
-                void saveDraft();
+                void (pendingDetailSave ? retryPendingDetailSave() : saveDraft());
               }}
               onCancel={() => {
                 if (editorMode === "create-pending") {
@@ -1922,7 +2525,7 @@ export function App({
               <div style={{ display: "grid", gap: archiveTheme.spacing.lg }}>
                 <button
                   type="button"
-                  onClick={() => setShowDatabaseSettingsPage(false)}
+                  onClick={() => requestAction({ type: "close-database-settings" })}
                   style={{
                     justifySelf: "start",
                     border: `1px solid ${archiveTheme.colors.line}`,
@@ -1937,6 +2540,7 @@ export function App({
                   {translate(extensionSettings.language, "Back to archive")}
                 </button>
                 <DatabaseSettingsPage
+                  key={`database-settings-${settingsDraftEpoch}`}
                   settings={databaseSettings}
                   loading={databaseSettingsBusy && !databaseSettings}
                   saving={databaseSettingsBusy && Boolean(databaseSettings)}
@@ -1944,6 +2548,7 @@ export function App({
                   onSave={(update) => {
                     void handleSaveDatabaseSettings(update);
                   }}
+                  onDraftChange={handleDatabaseSettingsDraftChange}
                 />
               </div>
             ) : undefined
@@ -1951,35 +2556,7 @@ export function App({
           showEntryListWithDetail={showEntryListWithDetail || editorMode !== "view"}
         />
       </div>
-      {dialogState?.type === "unsaved" ? (
-        <ConfirmationDialog
-          title={translate(extensionSettings.language, "You have unsaved changes")}
-          description={translate(
-            extensionSettings.language,
-            "Save before leaving this entry, discard your edits, or continue editing."
-          )}
-          actions={[
-            {
-              label: translate(extensionSettings.language, "Save changes"),
-              variant: "primary",
-              onClick: () => {
-                void handleSaveAndContinue(dialogState.action);
-              }
-            },
-            {
-              label: translate(extensionSettings.language, "Discard changes"),
-              onClick: () => {
-                resetEditorState();
-                performAction(dialogState.action);
-              }
-            },
-            {
-              label: translate(extensionSettings.language, "Continue editing"),
-              onClick: () => setDialogState(null)
-            }
-          ]}
-        />
-      ) : null}
+      {renderUnsavedChangesDialog()}
       {dialogState?.type === "delete-entry" ? (
         <ConfirmationDialog
           title={translate(extensionSettings.language, "Delete this entry permanently?")}
@@ -1993,16 +2570,25 @@ export function App({
           }
           actions={[
             {
-              label: translate(extensionSettings.language, "Delete permanently"),
-              variant: "danger",
+              label: translate(
+                extensionSettings.language,
+                pendingEntryDelete ? "Retry save" : "Delete permanently"
+              ),
+              variant: pendingEntryDelete ? "primary" : "danger",
+              disabled: entryActionBusy,
               onClick: () => {
                 void handleDeleteEntry(dialogState.entryId);
               }
             },
-            {
-              label: translate(extensionSettings.language, "Cancel"),
-              onClick: () => setDialogState(null)
-            }
+            ...(pendingEntryDelete
+              ? []
+              : [
+                  {
+                    label: translate(extensionSettings.language, "Cancel"),
+                    disabled: entryActionBusy,
+                    onClick: () => setDialogState(null)
+                  }
+                ])
           ]}
         />
       ) : null}
@@ -2150,6 +2736,98 @@ function entryToDraft(entry: EntryDetail): EntryDraft {
   };
 }
 
+function rebaseEntryDraft(
+  previousEntry: EntryDetail,
+  current: EntryDraft,
+  nextEntry: EntryDetail
+): EntryDraft {
+  const previous = entryToDraft(previousEntry);
+  const next = entryToDraft(nextEntry);
+  return {
+    title: current.title === previous.title ? next.title : current.title,
+    username:
+      current.username === previous.username ? next.username : current.username,
+    password:
+      current.password === previous.password ? next.password : current.password,
+    url: current.url === previous.url ? next.url : current.url,
+    notes: current.notes === previous.notes ? next.notes : current.notes,
+    totpUri:
+      (current.totpUri ?? null) === (previous.totpUri ?? null)
+        ? next.totpUri
+        : current.totpUri,
+    customFields: rebaseCustomFields(
+      previous.customFields,
+      current.customFields,
+      next.customFields
+    )
+  };
+}
+
+function rebaseCustomFields(
+  previous: EntryDraft["customFields"],
+  current: EntryDraft["customFields"],
+  next: EntryDraft["customFields"]
+): EntryDraft["customFields"] {
+  const previousByKey = uniqueCustomFieldsByKey(previous);
+  const currentByKey = uniqueCustomFieldsByKey(current);
+  const nextByKey = uniqueCustomFieldsByKey(next);
+  if (!previousByKey || !currentByKey || !nextByKey) {
+    return current.map((field) => ({ ...field }));
+  }
+
+  const deletedLocally = new Set(
+    previous
+      .filter((field) => !currentByKey.has(field.key))
+      .map((field) => field.key)
+  );
+  const rebased = next
+    .filter((field) => !deletedLocally.has(field.key))
+    .map((field) => ({ ...field }));
+  const rebasedIndexes = new Map(
+    rebased.map((field, index) => [field.key, index] as const)
+  );
+
+  for (const field of current) {
+    const previousField = previousByKey.get(field.key);
+    if (previousField && customFieldMatches(field, previousField)) {
+      continue;
+    }
+    const localField = { ...field };
+    const rebasedIndex = rebasedIndexes.get(field.key);
+    if (rebasedIndex === undefined) {
+      rebasedIndexes.set(field.key, rebased.length);
+      rebased.push(localField);
+    } else {
+      rebased[rebasedIndex] = localField;
+    }
+  }
+  return rebased;
+}
+
+function uniqueCustomFieldsByKey(
+  fields: EntryDraft["customFields"]
+): Map<string, EntryDraft["customFields"][number]> | null {
+  const byKey = new Map<string, EntryDraft["customFields"][number]>();
+  for (const field of fields) {
+    if (byKey.has(field.key)) {
+      return null;
+    }
+    byKey.set(field.key, field);
+  }
+  return byKey;
+}
+
+function customFieldMatches(
+  left: EntryDraft["customFields"][number],
+  right: EntryDraft["customFields"][number]
+): boolean {
+  return (
+    left.key === right.key &&
+    left.value === right.value &&
+    left.protected === right.protected
+  );
+}
+
 function draftMatchesEntry(draft: EntryDraft, entry: EntryDetail): boolean {
   return (
     draft.title === entry.title &&
@@ -2211,6 +2889,7 @@ function ConfirmationDialog({
     label: string;
     onClick: () => void;
     variant?: "primary" | "danger" | "secondary";
+    disabled?: boolean;
   }>;
 }) {
   return (
@@ -2254,6 +2933,7 @@ function ConfirmationDialog({
               key={action.label}
               type="button"
               onClick={action.onClick}
+              disabled={action.disabled}
               style={dialogActionStyle(action.variant ?? "secondary")}
             >
               {action.label}

@@ -4,10 +4,14 @@ use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 static UNIQUE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static PROCESS_NONCE: LazyLock<String> = LazyLock::new(process_nonce);
@@ -23,6 +27,9 @@ pub(crate) enum DurableFaultPoint {
     BeforeTargetReplace,
     TargetReplaced,
     ParentSynced,
+    LocalPublishedRepair,
+    LocalRollbackPublished,
+    LocalFinalReadback,
     Cleanup,
     GenerationTempCreated,
     GenerationTempWritten,
@@ -44,7 +51,7 @@ pub(crate) enum DurableFaultPoint {
 #[derive(Clone, Default)]
 pub(crate) struct DurableFaultInjector {
     #[cfg(test)]
-    action: Option<Arc<Mutex<Option<DurableFaultAction>>>>,
+    action: Option<Arc<Mutex<VecDeque<DurableFaultAction>>>>,
     #[cfg(test)]
     callback: Option<Arc<Mutex<Option<DurableFaultCallback>>>>,
 }
@@ -73,12 +80,12 @@ impl DurableFaultInjector {
         if let Some(action) = &self.action {
             let selected = {
                 let mut action = action.lock().expect("durable fault lock");
-                match *action {
+                match action.front().copied() {
                     Some(DurableFaultAction::Fail(selected))
                     | Some(DurableFaultAction::Crash(selected))
                         if selected == point =>
                     {
-                        action.take()
+                        action.pop_front()
                     }
                     _ => None,
                 }
@@ -117,7 +124,19 @@ impl DurableFaultInjector {
     #[cfg(test)]
     pub(crate) fn fail_once(point: DurableFaultPoint) -> Self {
         Self {
-            action: Some(Arc::new(Mutex::new(Some(DurableFaultAction::Fail(point))))),
+            action: Some(Arc::new(Mutex::new(VecDeque::from([
+                DurableFaultAction::Fail(point),
+            ])))),
+            callback: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_in_order(points: impl IntoIterator<Item = DurableFaultPoint>) -> Self {
+        Self {
+            action: Some(Arc::new(Mutex::new(
+                points.into_iter().map(DurableFaultAction::Fail).collect(),
+            ))),
             callback: None,
         }
     }
@@ -125,7 +144,9 @@ impl DurableFaultInjector {
     #[cfg(test)]
     pub(crate) fn crash_once(point: DurableFaultPoint) -> Self {
         Self {
-            action: Some(Arc::new(Mutex::new(Some(DurableFaultAction::Crash(point))))),
+            action: Some(Arc::new(Mutex::new(VecDeque::from([
+                DurableFaultAction::Crash(point),
+            ])))),
             callback: None,
         }
     }
@@ -179,6 +200,9 @@ impl DurableFaultPoint {
             "BeforeTargetReplace" => Self::BeforeTargetReplace,
             "TargetReplaced" => Self::TargetReplaced,
             "ParentSynced" => Self::ParentSynced,
+            "LocalPublishedRepair" => Self::LocalPublishedRepair,
+            "LocalRollbackPublished" => Self::LocalRollbackPublished,
+            "LocalFinalReadback" => Self::LocalFinalReadback,
             "Cleanup" => Self::Cleanup,
             "GenerationTempCreated" => Self::GenerationTempCreated,
             "GenerationTempWritten" => Self::GenerationTempWritten,
@@ -206,6 +230,7 @@ pub(crate) struct ExclusiveFileLock {
 }
 
 impl ExclusiveFileLock {
+    #[allow(dead_code)]
     pub(crate) fn acquire(path: &Path) -> io::Result<Self> {
         let file = open_validated_lock_file(path)?;
         file.lock()?;
@@ -281,7 +306,7 @@ fn open_validated_lock_file(path: &Path) -> io::Result<File> {
             ));
         }
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        return Ok(file);
+        Ok(file)
     }
     #[cfg(windows)]
     {
@@ -306,7 +331,7 @@ fn open_validated_lock_file(path: &Path) -> io::Result<File> {
                 "durable lock path is not a private regular file",
             ));
         }
-        return Ok(file);
+        Ok(file)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -422,10 +447,10 @@ pub(crate) fn path_file_identity(
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return Ok(DurableFileIdentity {
+        Ok(DurableFileIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
-        });
+        })
     }
     #[cfg(not(any(unix, windows)))]
     Ok(DurableFileIdentity {
@@ -488,6 +513,52 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(windows)]
+pub(crate) fn durable_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let slash = b'\\' as u16;
+    let alternate_slash = b'/' as u16;
+    for value in &mut wide {
+        if *value == alternate_slash {
+            *value = slash;
+        }
+    }
+    let verbatim_prefix = [slash, slash, b'?' as u16, slash];
+    let device_prefix = [slash, slash, b'.' as u16, slash];
+    if wide.starts_with(&verbatim_prefix) || wide.starts_with(&device_prefix) {
+        return path.to_path_buf();
+    }
+
+    let prefixed = if wide.len() >= 3 && wide[1] == b':' as u16 && wide[2] == slash {
+        verbatim_prefix.into_iter().chain(wide).collect::<Vec<_>>()
+    } else if wide.starts_with(&[slash, slash]) {
+        [
+            slash,
+            slash,
+            b'?' as u16,
+            slash,
+            b'U' as u16,
+            b'N' as u16,
+            b'C' as u16,
+            slash,
+        ]
+        .into_iter()
+        .chain(wide.into_iter().skip(2))
+        .collect::<Vec<_>>()
+    } else {
+        return path.to_path_buf();
+    };
+    PathBuf::from(OsString::from_wide(&prefixed))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn durable_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 fn process_nonce() -> String {
@@ -758,195 +829,6 @@ pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
     sync_directory(parent)
 }
 
-pub(crate) fn rename_missing_target_durable(
-    source: &Path,
-    target: &Path,
-    expected_source_identity: DurableFileIdentity,
-) -> Result<(), PublishError> {
-    rename_missing_target_durable_inner(
-        source,
-        target,
-        expected_source_identity,
-        &mut || Ok(()),
-        &mut sync_parent,
-    )
-}
-
-fn rename_missing_target_durable_inner(
-    source: &Path,
-    target: &Path,
-    expected_source_identity: DurableFileIdentity,
-    before_rename: &mut dyn FnMut() -> io::Result<()>,
-    sync_parent: &mut dyn FnMut(&Path) -> io::Result<()>,
-) -> Result<(), PublishError> {
-    if source.parent() != target.parent() {
-        return Err(PublishError {
-            published: false,
-            target_conflict: false,
-            source: io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "durable rename requires source and target in the same directory",
-            ),
-        });
-    }
-    verify_target_expectation(
-        source,
-        TargetExpectation::Identity(expected_source_identity),
-    )
-    .map_err(|source| PublishError {
-        published: false,
-        target_conflict: false,
-        source,
-    })?;
-    verify_single_link(source).map_err(|source| PublishError {
-        published: false,
-        target_conflict: false,
-        source,
-    })?;
-    verify_target_expectation(target, TargetExpectation::Missing).map_err(|source| {
-        PublishError {
-            published: false,
-            target_conflict: source.kind() == io::ErrorKind::AlreadyExists,
-            source,
-        }
-    })?;
-    before_rename().map_err(|source| PublishError {
-        published: false,
-        target_conflict: false,
-        source,
-    })?;
-    rename_missing_target(source, target).map_err(|source| PublishError {
-        published: false,
-        target_conflict: source.kind() == io::ErrorKind::AlreadyExists,
-        source,
-    })?;
-    verify_target_expectation(
-        target,
-        TargetExpectation::Identity(expected_source_identity),
-    )
-    .map_err(|source| PublishError {
-        published: true,
-        target_conflict: false,
-        source,
-    })?;
-    verify_single_link(target).map_err(|source| PublishError {
-        published: true,
-        target_conflict: false,
-        source,
-    })?;
-    sync_parent(target).map_err(|source| PublishError {
-        published: true,
-        target_conflict: false,
-        source,
-    })
-}
-
-#[cfg(unix)]
-fn verify_single_link(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    if fs::symlink_metadata(path)?.nlink() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "durable publish source has a hardlink alias",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn verify_single_link(path: &Path) -> io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    let file = options.open(path)?;
-    if windows_file_information(&file)?.nNumberOfLinks != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "durable publish source has a hardlink alias",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn verify_single_link(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn rename_missing_target(source: &Path, target: &Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
-    let target = CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            target.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_vendor = "apple")]
-fn rename_missing_target(source: &Path, target: &Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
-    let target = CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
-    let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn rename_missing_target(source: &Path, target: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
-
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
-    let result = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
-    target_vendor = "apple",
-    windows
-)))]
-fn rename_missing_target(_source: &Path, _target: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "durable no-replace rename is unavailable on this platform",
-    ))
-}
-
 pub(crate) fn create_dir_all_durable(path: &Path) -> io::Result<()> {
     use std::path::Component;
 
@@ -1026,7 +908,7 @@ fn validate_trusted_directory_component(metadata: &Metadata) -> io::Result<()> {
         ));
     }
     let mode = metadata.mode();
-    if mode & 0o022 != 0 && mode & libc::S_ISVTX as u32 == 0 {
+    if mode & 0o022 != 0 && mode & libc::S_ISVTX == 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "private durable directory ancestry is writable without sticky protection",
@@ -1093,10 +975,58 @@ pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-pub(crate) fn sync_directory(_path: &Path) -> io::Result<()> {
-    // The published target is flushed explicitly. MoveFileExW also uses
-    // WRITE_THROUGH when publishing to a previously missing target.
-    Ok(())
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+
+    let share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    let mut directory_options = OpenOptions::new();
+    directory_options
+        .read(true)
+        .write(true)
+        .share_mode(share_mode)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_WRITE_THROUGH);
+    if let Ok(directory) = directory_options.open(path)
+        && directory.sync_all().is_ok()
+    {
+        return Ok(());
+    }
+
+    // Some Windows file systems reject FlushFileBuffers on a directory
+    // handle. A write-through, delete-on-close marker forces a later metadata
+    // transaction in the same directory without leaving durable clutter.
+    for _ in 0..128 {
+        let marker = unique_sibling_path(&path.join(".vaultkern-dir-sync"), "flush")?;
+        let mut marker_options = OpenOptions::new();
+        marker_options
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(share_mode)
+            .custom_flags(
+                FILE_ATTRIBUTE_HIDDEN
+                    | FILE_ATTRIBUTE_TEMPORARY
+                    | FILE_FLAG_DELETE_ON_CLOSE
+                    | FILE_FLAG_WRITE_THROUGH,
+            );
+        match marker_options.open(&marker) {
+            Ok(mut file) => {
+                file.write_all(&[0])?;
+                file.sync_all()?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a Windows directory-sync marker",
+    ))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1114,6 +1044,7 @@ pub(crate) fn publish_temp(
     after_replace: DurableFaultPoint,
     parent_sync: DurableFaultPoint,
 ) -> Result<(), PublishError> {
+    let target_must_be_missing = matches!(&target_expectation, TargetExpectation::Missing);
     if let Err(source) = faults
         .check(DurableFaultPoint::BeforeTempPublishValidation)
         .and_then(|_| temp.verify_for_publish())
@@ -1145,7 +1076,15 @@ pub(crate) fn publish_temp(
     // handle must be closed for the duration of the path-based replacement.
     #[cfg(windows)]
     temp.close_before_replace();
-    if let Err(error) = replace_file(temp.path(), target, backup) {
+    let publish_result = if target_must_be_missing {
+        publish_file_no_replace(temp.path(), target)
+    } else {
+        replace_file(temp.path(), target, backup)
+    };
+    if let Err(error) = publish_result {
+        let target_conflict = target_must_be_missing
+            && !error.published
+            && error.source.kind() == io::ErrorKind::AlreadyExists;
         if error.published {
             drop(temp);
         } else {
@@ -1153,7 +1092,7 @@ pub(crate) fn publish_temp(
         }
         return Err(PublishError {
             published: error.published,
-            target_conflict: false,
+            target_conflict,
             source: error.source,
         });
     }
@@ -1216,6 +1155,41 @@ pub(crate) fn publish_temp(
         source,
     })?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn publish_file_no_replace(temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    fs::hard_link(temp, target).map_err(|source| ReplaceError {
+        published: false,
+        source,
+    })?;
+    fs::remove_file(temp).map_err(|source| ReplaceError {
+        published: true,
+        source,
+    })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn publish_file_no_replace(temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let target = wide(target);
+    let temp = wide(temp);
+    let result = unsafe { MoveFileExW(temp.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if result == 0 {
+        Err(ReplaceError {
+            published: false,
+            source: io::Error::last_os_error(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn verify_target_expectation(target: &Path, expectation: TargetExpectation) -> io::Result<()> {
@@ -1340,14 +1314,14 @@ fn replace_file(temp: &Path, target: &Path, _backup: Option<&Path>) -> Result<()
     })
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowsReplaceFileApi {
     MoveFileExWriteThrough,
     ReplaceFile,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn windows_replace_file_api(backup: Option<&Path>) -> WindowsReplaceFileApi {
     if backup.is_some() {
         WindowsReplaceFileApi::ReplaceFile
@@ -1394,8 +1368,6 @@ fn replace_file(temp: &Path, target: &Path, backup: Option<&Path>) -> Result<(),
     if result == 0 {
         let source = io::Error::last_os_error();
         Err(ReplaceError {
-            // Only the documented partial-failure states can have moved the
-            // original or replacement. Preserve their recovery artifacts.
             published: windows_replace_failure_is_outcome_unknown(
                 replacing_existing,
                 backup.is_some(),
@@ -1431,12 +1403,12 @@ fn windows_replace_failure_is_outcome_unknown(
 }
 
 #[cfg(not(windows))]
-fn sync_published_target(_target: &Path) -> io::Result<()> {
+pub(crate) fn sync_published_target(_target: &Path) -> io::Result<()> {
     Ok(())
 }
 
 #[cfg(windows)]
-fn sync_published_target(target: &Path) -> io::Result<()> {
+pub(crate) fn sync_published_target(target: &Path) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     let mut options = OpenOptions::new();
@@ -1456,6 +1428,14 @@ pub(crate) fn remove_if_exists(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+pub(crate) fn remove_and_sync_absence(path: &Path) -> io::Result<()> {
+    remove_if_exists(path)?;
+    if path.parent().is_some_and(Path::exists) {
+        sync_parent(path)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1616,140 +1596,6 @@ mod tests {
         temp.discard().unwrap();
     }
 
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn no_replace_publish_rejects_hardlinked_source() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("segment");
-        let alias = dir.path().join("alias");
-        let target = dir.path().join("segment.sealed");
-        fs::write(&source, b"journal bytes").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-        fs::hard_link(&source, &alias).unwrap();
-
-        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
-
-        assert!(!error.published);
-        assert_eq!(error.source.kind(), io::ErrorKind::Unsupported);
-        assert!(source.exists());
-        assert!(!target.exists());
-        assert_eq!(fs::read(&alias).unwrap(), b"journal bytes");
-    }
-
-    #[test]
-    fn no_replace_publish_rejects_existing_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("segment");
-        let target = dir.path().join("segment.sealed");
-        fs::write(&source, b"journal bytes").unwrap();
-        fs::write(&target, b"winner").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-
-        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
-
-        assert!(!error.published);
-        assert!(error.target_conflict);
-        assert_eq!(fs::read(&source).unwrap(), b"journal bytes");
-        assert_eq!(fs::read(&target).unwrap(), b"winner");
-    }
-
-    #[test]
-    fn no_replace_publish_rejects_cross_directory_target() {
-        let source_dir = tempfile::tempdir().unwrap();
-        let target_dir = tempfile::tempdir().unwrap();
-        let source = source_dir.path().join("segment");
-        let target = target_dir.path().join("segment.sealed");
-        fs::write(&source, b"journal bytes").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-
-        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
-
-        assert!(!error.published);
-        assert_eq!(error.source.kind(), io::ErrorKind::InvalidInput);
-        assert!(source.exists());
-        assert!(!target.exists());
-    }
-
-    #[test]
-    fn no_replace_publish_rejects_changed_source_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("segment");
-        let replacement = dir.path().join("replacement");
-        let target = dir.path().join("segment.sealed");
-        fs::write(&source, b"original").unwrap();
-        fs::write(&replacement, b"replacement").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-        fs::remove_file(&source).unwrap();
-        fs::rename(&replacement, &source).unwrap();
-
-        let error = super::rename_missing_target_durable(&source, &target, identity).unwrap_err();
-
-        assert!(!error.published);
-        assert_eq!(error.source.kind(), io::ErrorKind::WouldBlock);
-        assert_eq!(fs::read(&source).unwrap(), b"replacement");
-        assert!(!target.exists());
-    }
-
-    #[test]
-    fn no_replace_publish_never_clobbers_target_appearing_after_precheck() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("segment");
-        let target = dir.path().join("segment.sealed");
-        fs::write(&source, b"journal bytes").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-        let mut create_target = || {
-            fs::write(&target, b"winner")?;
-            Ok(())
-        };
-        let mut sync_parent = super::sync_parent;
-
-        let error = super::rename_missing_target_durable_inner(
-            &source,
-            &target,
-            identity,
-            &mut create_target,
-            &mut sync_parent,
-        )
-        .unwrap_err();
-
-        assert!(!error.published);
-        assert!(error.target_conflict);
-        assert_eq!(fs::read(&source).unwrap(), b"journal bytes");
-        assert_eq!(fs::read(&target).unwrap(), b"winner");
-    }
-
-    #[test]
-    fn no_replace_publish_reports_parent_sync_failure_after_publication() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("segment");
-        let target = dir.path().join("segment.sealed");
-        fs::write(&source, b"journal bytes").unwrap();
-        let metadata = fs::symlink_metadata(&source).unwrap();
-        let identity = super::path_file_identity(&source, &metadata).unwrap();
-        let mut before_rename = || Ok(());
-        let mut fail_parent_sync =
-            |_: &std::path::Path| Err(io::Error::other("injected parent sync failure"));
-
-        let error = super::rename_missing_target_durable_inner(
-            &source,
-            &target,
-            identity,
-            &mut before_rename,
-            &mut fail_parent_sync,
-        )
-        .unwrap_err();
-
-        assert!(error.published);
-        assert!(!error.target_conflict);
-        assert!(!source.exists());
-        assert_eq!(fs::read(&target).unwrap(), b"journal bytes");
-    }
-
     #[cfg(windows)]
     #[test]
     fn windows_publish_closes_and_reopens_the_verified_replacement() {
@@ -1786,9 +1632,8 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"new");
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_backup_free_publication_uses_write_through_move() {
+    fn windows_publication_uses_backup_capable_replace_when_requested() {
         assert_eq!(
             super::windows_replace_file_api(None),
             super::WindowsReplaceFileApi::MoveFileExWriteThrough

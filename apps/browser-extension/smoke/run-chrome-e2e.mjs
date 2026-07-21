@@ -1555,7 +1555,7 @@ async function setPageLoadAutofillEnabled(extensionPage) {
         language: "en",
         idleLockMinutes: 10,
         clearClipboardSeconds: 30,
-        passkeyProviderEnabled: false,
+        browserPasskeyProxyEnabled: false,
         quickUnlockEnabled: false,
         ...current,
         autofillOnPageLoadEnabled: true
@@ -3264,7 +3264,7 @@ async function enablePasskeyProvider(extensionPage) {
       language: "en",
       idleLockMinutes: 10,
       clearClipboardSeconds: 30,
-      passkeyProviderEnabled: true
+      browserPasskeyProxyEnabled: true
     }
   );
   await extensionPage.waitForFunction(

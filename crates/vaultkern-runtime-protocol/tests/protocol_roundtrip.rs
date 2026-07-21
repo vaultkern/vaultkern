@@ -4,11 +4,12 @@ use vaultkern_runtime_protocol::{
     AutofillPersistPlanDto, AutofillPersistResultDto, DatabaseCredentialsUpdateDto,
     DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseKdfSettingsDto,
     DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
-    DatabaseSettingsDto, DatabaseSettingsUpdateDto, EntryAttachmentContentDto, EntryDetailDto,
-    EntryFieldsDto, EntryHistoryDetailDto, EntryHistoryItemDto, EntryHistoryListDto,
-    EntryPasskeyDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto,
+    DatabaseSettingsCommitResultDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
+    EntryAttachmentContentDto, EntryDetailDto, EntryFieldsDto, EntryHistoryDetailDto,
+    EntryHistoryItemDto, EntryHistoryListDto, EntryPasskeyDto, EntryPasskeyUpdateDto,
+    EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, HandshakeDto,
     MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
-    OneDriveItemListDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
+    OneDriveItemListDto, OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
     PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
     PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
     PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto,
@@ -19,6 +20,35 @@ use vaultkern_runtime_protocol::{
     SaveVaultStatusDto, SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
     VaultSourceStatusDto,
 };
+
+static_assertions::assert_not_impl_any!(RuntimeResponse: Clone);
+static_assertions::assert_not_impl_any!(EntryDetailDto: Clone);
+static_assertions::assert_not_impl_any!(EntryFieldsDto: Clone);
+static_assertions::assert_not_impl_any!(AutofillPersistPlanDto: Clone);
+static_assertions::assert_not_impl_any!(EntryHistoryDetailDto: Clone);
+static_assertions::assert_not_impl_any!(vaultkern_runtime_protocol::EntryCustomFieldDto: Clone);
+static_assertions::assert_not_impl_any!(EntryAttachmentContentDto: Clone);
+static_assertions::assert_not_impl_any!(EntryPasskeyDto: Clone);
+
+#[test]
+fn protocol_roundtrips_the_version_and_capability_handshake() {
+    let envelope = ProtocolEnvelope::new(RuntimeCommand::Handshake {
+        protocol_version: 1,
+        capabilities: vec!["runtime-core".into(), "browser-extension".into()],
+    });
+    let decoded: ProtocolEnvelope =
+        serde_json::from_str(&serde_json::to_string(&envelope).unwrap()).unwrap();
+    assert_eq!(decoded, envelope);
+
+    let response = RuntimeResponse::Handshake(HandshakeDto {
+        protocol_version: 1,
+        capabilities: vec!["runtime-core".into()],
+    });
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["type"], "handshake");
+    assert_eq!(json["protocolVersion"], 1);
+    assert_eq!(json["capabilities"], serde_json::json!(["runtime-core"]));
+}
 
 #[test]
 fn protocol_envelope_serializes_open_local_vault_command() {
@@ -31,6 +61,30 @@ fn protocol_envelope_serializes_open_local_vault_command() {
     assert!(json.contains("\"version\":1"));
     assert!(json.contains("\"open_local_vault\""));
     assert!(json.contains("/tmp/demo.kdbx"));
+}
+
+#[test]
+fn database_optional_setting_updates_distinguish_unchanged_clear_and_set() {
+    let unchanged = serde_json::to_value(DatabaseSettingsUpdateDto::default()).unwrap();
+    assert!(unchanged.get("autosaveDelaySeconds").is_none());
+
+    let clear: DatabaseSettingsUpdateDto =
+        serde_json::from_value(serde_json::json!({ "autosaveDelaySeconds": null })).unwrap();
+    assert_eq!(
+        clear.autosave_delay_seconds,
+        OptionalSettingUpdateDto::Clear
+    );
+    assert_eq!(
+        serde_json::to_value(&clear).unwrap()["autosaveDelaySeconds"],
+        serde_json::Value::Null
+    );
+
+    let set: DatabaseSettingsUpdateDto =
+        serde_json::from_value(serde_json::json!({ "autosaveDelaySeconds": 30 })).unwrap();
+    assert_eq!(
+        set.autosave_delay_seconds,
+        OptionalSettingUpdateDto::Set(30)
+    );
 }
 
 #[test]
@@ -95,10 +149,10 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
                 new_password: Some("new-secret".into()),
                 remove_password: false,
             }),
-            autosave_delay_seconds: Some(30),
+            autosave_delay_seconds: OptionalSettingUpdateDto::Set(30),
         },
     });
-    let response = RuntimeResponse::DatabaseSettings(DatabaseSettingsDto {
+    let settings = DatabaseSettingsDto {
         metadata: DatabaseMetadataSettingsDto {
             name: "Project Vault".into(),
             description: Some("Shared engineering secrets".into()),
@@ -127,7 +181,8 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
         },
         autosave_delay_seconds: Some(30),
         has_password: true,
-    });
+    };
+    let response = RuntimeResponse::DatabaseSettings(settings.clone());
 
     for envelope in [get, update] {
         assert_eq!(
@@ -147,6 +202,24 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
 
     let decoded: RuntimeResponse = serde_json::from_value(value).expect("deserialize response");
     assert_eq!(decoded, response);
+
+    let commit_response =
+        RuntimeResponse::DatabaseSettingsCommitResult(DatabaseSettingsCommitResultDto {
+            settings,
+            save_result: SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                merge_summary: None,
+                conflict_copy_path: None,
+            },
+        });
+    let value = serde_json::to_value(&commit_response).expect("serialize commit response");
+    assert_eq!(value["type"], "database_settings_commit_result");
+    assert_eq!(value["settings"]["metadata"]["name"], "Project Vault");
+    assert_eq!(value["saveResult"]["status"], "saved");
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(value).expect("deserialize commit response"),
+        commit_response
+    );
 }
 
 #[test]
@@ -228,6 +301,7 @@ fn protocol_roundtrips_save_vault_result_response() {
             meta_conflicts_resolved: 1,
             icon_conflicts_resolved: 1,
         }),
+        conflict_copy_path: None,
     });
 
     let value = serde_json::to_value(&response).expect("serialize response");
@@ -255,6 +329,7 @@ fn protocol_roundtrips_local_cache_save_result_response() {
     let response = RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
         status: SaveVaultStatusDto::SavedToCache,
         merge_summary: None,
+        conflict_copy_path: None,
     });
 
     let value = serde_json::to_value(&response).expect("serialize response");
@@ -267,6 +342,26 @@ fn protocol_roundtrips_local_cache_save_result_response() {
 }
 
 #[test]
+fn protocol_roundtrips_conflict_copy_save_result() {
+    let response = RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+        status: SaveVaultStatusDto::ConflictCopy,
+        merge_summary: None,
+        conflict_copy_path: Some(r"C:\Vaults\personal (VaultKern conflict 1).kdbx".into()),
+    });
+
+    let value = serde_json::to_value(&response).expect("serialize response");
+    assert_eq!(value["status"], "conflict_copy");
+    assert_eq!(
+        value["conflictCopyPath"],
+        r"C:\Vaults\personal (VaultKern conflict 1).kdbx"
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(value).unwrap(),
+        response
+    );
+}
+
+#[test]
 fn protocol_roundtrips_recent_vault_commands() {
     let list = ProtocolEnvelope::new(RuntimeCommand::ListRecentVaults);
     let preload = ProtocolEnvelope::new(RuntimeCommand::PreloadCurrentVault);
@@ -275,6 +370,9 @@ fn protocol_roundtrips_recent_vault_commands() {
     });
     let delete = ProtocolEnvelope::new(RuntimeCommand::DeleteVaultReference {
         vault_ref_id: "vault-ref-1".into(),
+    });
+    let guarded_delete = ProtocolEnvelope::new(RuntimeCommand::DeleteVaultReferenceIfNotCurrent {
+        vault_ref_id: "vault-ref-2".into(),
     });
     let unlock = ProtocolEnvelope::new(RuntimeCommand::UnlockCurrentVaultWithPassword {
         password: "demo-password".into(),
@@ -295,6 +393,11 @@ fn protocol_roundtrips_recent_vault_commands() {
         set_current
     );
     assert_eq!(
+        serde_json::from_str::<ProtocolEnvelope>(&serde_json::to_string(&guarded_delete).unwrap())
+            .unwrap(),
+        guarded_delete
+    );
+    assert_eq!(
         serde_json::from_str::<ProtocolEnvelope>(&serde_json::to_string(&unlock).unwrap()).unwrap(),
         unlock
     );
@@ -307,11 +410,6 @@ fn protocol_roundtrips_recent_vault_commands() {
 #[test]
 fn protocol_roundtrips_onedrive_commands() {
     let begin = ProtocolEnvelope::new(RuntimeCommand::BeginOneDriveLogin);
-    let complete = ProtocolEnvelope::new(RuntimeCommand::CompleteOneDriveLogin {
-        code: "auth-code".into(),
-        redirect_uri: "http://127.0.0.1:53121/callback".into(),
-        code_verifier: "verifier".into(),
-    });
     let complete_pending = ProtocolEnvelope::new(RuntimeCommand::CompletePendingOneDriveLogin);
     let list = ProtocolEnvelope::new(RuntimeCommand::ListOneDriveChildren {
         parent_item_id: Some("folder-1".into()),
@@ -321,7 +419,7 @@ fn protocol_roundtrips_onedrive_commands() {
         item_id: "item-1".into(),
     });
 
-    for envelope in [begin, complete, complete_pending, list, add] {
+    for envelope in [begin, complete_pending, list, add] {
         assert_eq!(
             serde_json::from_str::<ProtocolEnvelope>(&serde_json::to_string(&envelope).unwrap())
                 .unwrap(),
@@ -335,7 +433,6 @@ fn protocol_roundtrips_onedrive_responses() {
     let auth = RuntimeResponse::OneDriveAuthSession(OneDriveAuthSessionDto {
         auth_url: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize".into(),
         redirect_uri: "http://127.0.0.1:53121/callback".into(),
-        code_verifier: "verifier".into(),
         expires_in_seconds: 600,
     });
     let status = RuntimeResponse::OneDriveAuthStatus(OneDriveAuthStatusDto {
@@ -359,6 +456,10 @@ fn protocol_roundtrips_onedrive_responses() {
         "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
     );
     assert_eq!(auth_json["expiresInSeconds"], 600);
+    assert!(
+        auth_json.get("codeVerifier").is_none(),
+        "the PKCE verifier must remain inside the runtime"
+    );
     assert_eq!(
         serde_json::from_value::<RuntimeResponse>(auth_json).unwrap(),
         auth
@@ -449,8 +550,6 @@ fn protocol_roundtrips_entry_detail_response_shape() {
             username: "alice@example.com".into(),
             credential_id: "credential-base64url".into(),
             generated_user_id: Some("generated-user".into()),
-            private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
-                .into(),
             relying_party: "example.com".into(),
             user_handle: Some("user-handle".into()),
             backup_eligible: true,
@@ -495,6 +594,10 @@ fn protocol_roundtrips_entry_detail_response_shape() {
     assert_eq!(passkey.get("username").unwrap(), "alice@example.com");
     assert_eq!(passkey.get("credentialId").unwrap(), "credential-base64url");
     assert_eq!(passkey.get("generatedUserId").unwrap(), "generated-user");
+    assert!(
+        !passkey.contains_key("privateKeyPem"),
+        "entry detail responses must never release a passkey private key"
+    );
     assert_eq!(passkey.get("relyingParty").unwrap(), "example.com");
     assert_eq!(passkey.get("userHandle").unwrap(), "user-handle");
     assert_eq!(passkey.get("backupEligible").unwrap(), true);
@@ -516,21 +619,264 @@ fn protocol_roundtrips_entry_detail_response_shape() {
 }
 
 #[test]
-fn protocol_roundtrips_entry_passkey_commands() {
+fn protocol_debug_redacts_master_credentials() {
+    let secret = "master-password-must-not-appear-in-debug";
+    let envelope = ProtocolEnvelope::new(RuntimeCommand::EnableQuickUnlockForCurrentVault {
+        password: Some(secret.into()),
+        key_file_path: None,
+    });
+
+    let debug = format!("{envelope:?}");
+
+    assert!(
+        !debug.contains(secret),
+        "master credentials must be redacted from protocol Debug output"
+    );
+}
+
+#[test]
+fn protocol_debug_redacts_all_entry_secret_bearing_dtos() {
+    fn fields(password: &str) -> EntryFieldsDto {
+        EntryFieldsDto {
+            title: "title".into(),
+            username: "username".into(),
+            password: password.into(),
+            url: "https://example.com".into(),
+            notes: "notes".into(),
+            totp_uri: None,
+            custom_fields: Vec::new(),
+        }
+    }
+
+    let command = RuntimeCommand::CreateEntry {
+        vault_id: "vault-1".into(),
+        parent_group_id: "group-1".into(),
+        title: "title".into(),
+        username: "username".into(),
+        password: "command-password-secret".into(),
+        url: "https://example.com".into(),
+        notes: "notes".into(),
+        totp_uri: None,
+    };
+    let plan = AutofillPersistPlanDto::Update {
+        entry_id: "entry-1".into(),
+        expected_fields: fields("expected-fields-secret"),
+        desired_fields: fields("desired-fields-secret"),
+    };
+    let custom_field = vaultkern_runtime_protocol::EntryCustomFieldDto {
+        key: "RecoveryCode".into(),
+        value: "custom-field-secret".into(),
+        protected: true,
+    };
+    let detail = EntryDetailDto {
+        id: "entry-1".into(),
+        title: "title".into(),
+        username: "username".into(),
+        password: "entry-detail-secret".into(),
+        url: "https://example.com".into(),
+        notes: "notes".into(),
+        modified_at: 42,
+        totp: Some("totp-code-secret".into()),
+        totp_uri: None,
+        passkey: None,
+        field_protection: vaultkern_runtime_protocol::EntryFieldProtectionDto {
+            protect_title: false,
+            protect_username: false,
+            protect_password: true,
+            protect_url: false,
+            protect_notes: false,
+        },
+        custom_fields: Vec::new(),
+        attachments: Vec::new(),
+    };
+    let history = EntryHistoryDetailDto {
+        entry_id: "entry-1".into(),
+        history_index: 0,
+        title: "title".into(),
+        username: "username".into(),
+        url: "https://example.com".into(),
+        notes: "notes".into(),
+        modified_at: 42,
+        custom_fields: Vec::new(),
+        attachments: Vec::new(),
+    };
+    let attachment = EntryAttachmentContentDto {
+        name: "secret.txt".into(),
+        data_base64: "attachment-content-secret".into(),
+        protect_in_memory: true,
+    };
     let passkey = EntryPasskeyDto {
+        username: "alice@example.com".into(),
+        credential_id: "passkey-credential-secret".into(),
+        generated_user_id: Some("generated-user".into()),
+        relying_party: "example.com".into(),
+        user_handle: Some("user-handle".into()),
+        backup_eligible: false,
+        backup_state: false,
+    };
+
+    let debug_outputs = [
+        format!("{command:?}"),
+        format!("{plan:?}"),
+        format!("{custom_field:?}"),
+        format!("{detail:?}"),
+        format!("{history:?}"),
+        format!("{attachment:?}"),
+        format!("{passkey:?}"),
+    ];
+    for debug in debug_outputs {
+        for secret in [
+            "command-password-secret",
+            "expected-fields-secret",
+            "desired-fields-secret",
+            "custom-field-secret",
+            "entry-detail-secret",
+            "totp-code-secret",
+            "history-detail-secret",
+            "attachment-content-secret",
+            "passkey-credential-secret",
+        ] {
+            assert!(!debug.contains(secret), "Debug leaked {secret}: {debug}");
+        }
+    }
+}
+
+#[test]
+fn protocol_secret_dtos_explicitly_zeroize_owned_buffers() {
+    use zeroize::Zeroize;
+
+    fn fields(password: &str) -> EntryFieldsDto {
+        EntryFieldsDto {
+            title: "title".into(),
+            username: "username".into(),
+            password: password.into(),
+            url: "https://example.com".into(),
+            notes: "notes".into(),
+            totp_uri: Some("otpauth://totp/Test?secret=SECRET".into()),
+            custom_fields: vec![vaultkern_runtime_protocol::EntryCustomFieldDto {
+                key: "RecoveryCode".into(),
+                value: "custom-secret".into(),
+                protected: true,
+            }],
+        }
+    }
+
+    let mut nested_fields = fields("nested-secret");
+    let mut detail = EntryDetailDto {
+        id: "entry-1".into(),
+        title: "title".into(),
+        username: "username".into(),
+        password: "detail-secret".into(),
+        url: "https://example.com".into(),
+        notes: "notes".into(),
+        modified_at: 42,
+        totp: Some("123456".into()),
+        totp_uri: Some("otpauth://totp/Test?secret=SECRET".into()),
+        passkey: None,
+        field_protection: vaultkern_runtime_protocol::EntryFieldProtectionDto {
+            protect_title: false,
+            protect_username: false,
+            protect_password: true,
+            protect_url: false,
+            protect_notes: false,
+        },
+        custom_fields: std::mem::take(&mut nested_fields.custom_fields),
+        attachments: Vec::new(),
+    };
+    let mut history = EntryHistoryDetailDto {
+        entry_id: "entry-1".into(),
+        history_index: 0,
+        title: "title".into(),
+        username: "username".into(),
+        url: "https://example.com".into(),
+        notes: "notes".into(),
+        modified_at: 42,
+        custom_fields: Vec::new(),
+        attachments: Vec::new(),
+    };
+    let mut attachment = EntryAttachmentContentDto {
+        name: "secret.txt".into(),
+        data_base64: "attachment-secret".into(),
+        protect_in_memory: true,
+    };
+    let mut plan = AutofillPersistPlanDto::Update {
+        entry_id: "entry-1".into(),
+        expected_fields: fields("expected-secret"),
+        desired_fields: fields("desired-secret"),
+    };
+
+    detail.zeroize();
+    history.zeroize();
+    attachment.zeroize();
+    plan.zeroize();
+
+    assert!(detail.password.is_empty());
+    assert!(detail.totp.is_none());
+    assert!(detail.totp_uri.is_none());
+    assert!(detail.custom_fields.is_empty());
+    assert!(history.custom_fields.is_empty());
+    assert!(attachment.data_base64.is_empty());
+    let AutofillPersistPlanDto::Update {
+        expected_fields,
+        desired_fields,
+        ..
+    } = &plan
+    else {
+        panic!("expected update plan");
+    };
+    assert!(expected_fields.password.is_empty());
+    assert!(expected_fields.custom_fields.is_empty());
+    assert!(desired_fields.password.is_empty());
+    assert!(desired_fields.custom_fields.is_empty());
+}
+
+#[test]
+fn protocol_secret_dtos_guarantee_zeroize_on_drop() {
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+    assert_zeroize_on_drop::<EntryDetailDto>();
+    assert_zeroize_on_drop::<EntryFieldsDto>();
+    assert_zeroize_on_drop::<AutofillPersistPlanDto>();
+    assert_zeroize_on_drop::<EntryHistoryDetailDto>();
+    assert_zeroize_on_drop::<vaultkern_runtime_protocol::EntryCustomFieldDto>();
+    assert_zeroize_on_drop::<EntryAttachmentContentDto>();
+    assert_zeroize_on_drop::<RuntimeCommand>();
+    assert_zeroize_on_drop::<RuntimeResponse>();
+    assert_zeroize_on_drop::<vaultkern_runtime_protocol::SensitiveString>();
+}
+
+#[test]
+fn passkey_metadata_update_rejects_private_key_material() {
+    let request = serde_json::json!({
+        "username": "alice@example.com",
+        "credentialId": "credential-base64url",
+        "generatedUserId": "generated-user",
+        "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+        "relyingParty": "example.com",
+        "userHandle": "user-handle",
+        "backupEligible": true,
+        "backupState": false
+    });
+
+    assert!(serde_json::from_value::<EntryPasskeyUpdateDto>(request).is_err());
+}
+
+#[test]
+fn protocol_roundtrips_entry_passkey_commands() {
+    let passkey = EntryPasskeyUpdateDto {
         username: "alice@example.com".into(),
         credential_id: "credential-base64url".into(),
         generated_user_id: Some("generated-user".into()),
-        private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
         relying_party: "example.com".into(),
         user_handle: Some("user-handle".into()),
         backup_eligible: true,
         backup_state: false,
     };
+    assert_eq!(format!("{passkey:?}"), "EntryPasskeyUpdateDto([REDACTED])");
     let set = ProtocolEnvelope::new(RuntimeCommand::SetEntryPasskey {
         vault_id: "vault-1".into(),
         entry_id: "entry-1".into(),
-        passkey: passkey.clone(),
+        passkey,
     });
     let clear = ProtocolEnvelope::new(RuntimeCommand::ClearEntryPasskey {
         vault_id: "vault-1".into(),
@@ -692,7 +1038,10 @@ fn protocol_roundtrips_key_file_unlock_commands() {
 
 #[test]
 fn protocol_roundtrips_quick_unlock_commands() {
-    let enable = ProtocolEnvelope::new(RuntimeCommand::EnableQuickUnlockForCurrentVault);
+    let enable = ProtocolEnvelope::new(RuntimeCommand::EnableQuickUnlockForCurrentVault {
+        password: Some("demo-password".into()),
+        key_file_path: Some("/tmp/demo.keyx".into()),
+    });
     let unlock = ProtocolEnvelope::new(RuntimeCommand::UnlockCurrentVaultWithQuickUnlock);
     let disable = ProtocolEnvelope::new(RuntimeCommand::DisableQuickUnlockForCurrentVault);
 
@@ -701,6 +1050,8 @@ fn protocol_roundtrips_quick_unlock_commands() {
         enable_json["command"]["type"],
         "enable_quick_unlock_for_current_vault"
     );
+    assert_eq!(enable_json["command"]["password"], "demo-password");
+    assert_eq!(enable_json["command"]["key_file_path"], "/tmp/demo.keyx");
 
     let unlock_json = serde_json::to_value(&unlock).unwrap();
     assert_eq!(
@@ -752,19 +1103,17 @@ fn protocol_roundtrips_list_groups_command() {
 
 #[test]
 fn protocol_roundtrips_entry_mutation_commands() {
-    let expected_fields = EntryFieldsDto {
-        title: "Example".into(),
-        username: "alice".into(),
-        password: "secret".into(),
-        url: "https://example.com".into(),
-        notes: "demo".into(),
-        totp_uri: None,
-        custom_fields: vec![],
-    };
-    let desired_fields = EntryFieldsDto {
-        password: "secret-2".into(),
-        ..expected_fields.clone()
-    };
+    fn fields(password: &str) -> EntryFieldsDto {
+        EntryFieldsDto {
+            title: "Example".into(),
+            username: "alice".into(),
+            password: password.into(),
+            url: "https://example.com".into(),
+            notes: "demo".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }
+    }
     let create = ProtocolEnvelope::new(RuntimeCommand::CreateEntry {
         vault_id: "vault-1".into(),
         parent_group_id: "group-root".into(),
@@ -795,8 +1144,8 @@ fn protocol_roundtrips_entry_mutation_commands() {
     let compare_and_update = ProtocolEnvelope::new(RuntimeCommand::CompareAndUpdateEntryFields {
         vault_id: "vault-1".into(),
         entry_id: "entry-1".into(),
-        expected_fields: expected_fields.clone(),
-        desired_fields: desired_fields.clone(),
+        expected_fields: fields("secret"),
+        desired_fields: fields("secret-2"),
     });
     let clear_totp = ProtocolEnvelope::new(RuntimeCommand::ClearEntryTotp {
         vault_id: "vault-1".into(),
@@ -858,27 +1207,26 @@ fn protocol_accepts_runtime_web_client_atomic_entry_field_shape() {
 
 #[test]
 fn protocol_roundtrips_atomic_autofill_persist_plans_with_snake_case_commands() {
-    let expected_fields = EntryFieldsDto {
-        title: "Example".into(),
-        username: "alice".into(),
-        password: "old-secret".into(),
-        url: "https://example.com/login".into(),
-        notes: String::new(),
-        totp_uri: None,
-        custom_fields: vec![],
-    };
-    let desired_fields = EntryFieldsDto {
-        password: "new-secret".into(),
-        ..expected_fields.clone()
-    };
+    fn fields(password: &str) -> EntryFieldsDto {
+        EntryFieldsDto {
+            title: "Example".into(),
+            username: "alice".into(),
+            password: password.into(),
+            url: "https://example.com/login".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }
+    }
+
     let update = ProtocolEnvelope::new(RuntimeCommand::PersistAutofillMutation {
         transaction_id: "transaction-1".into(),
         operation_id: "operation-1".into(),
         vault_id: "vault-1".into(),
         plan: AutofillPersistPlanDto::Update {
             entry_id: "entry-1".into(),
-            expected_fields: expected_fields.clone(),
-            desired_fields: desired_fields.clone(),
+            expected_fields: fields("old-secret"),
+            desired_fields: fields("new-secret"),
         },
     });
     let create = ProtocolEnvelope::new(RuntimeCommand::PersistAutofillMutation {
@@ -889,7 +1237,7 @@ fn protocol_roundtrips_atomic_autofill_persist_plans_with_snake_case_commands() 
             parent_group_id: "group-root".into(),
             planned_entry_id: "12345678-1234-4abc-8def-1234567890ab".into(),
             expected_matching_entry_ids: vec!["entry-existing".into()],
-            desired_fields,
+            desired_fields: fields("new-secret"),
         },
     });
 
@@ -1905,13 +2253,12 @@ fn protocol_roundtrips_entry_history_commands_and_responses() {
         history_index: 0,
         title: "Old Example".into(),
         username: "alice".into(),
-        password: "old-secret".into(),
         url: "https://example.com".into(),
         notes: "old note".into(),
         modified_at: 43,
         custom_fields: vec![vaultkern_runtime_protocol::EntryCustomFieldDto {
             key: "RecoveryCode".into(),
-            value: "old-code".into(),
+            value: "".into(),
             protected: true,
         }],
         attachments: vec![vaultkern_runtime_protocol::EntryAttachmentDto {
@@ -1926,7 +2273,13 @@ fn protocol_roundtrips_entry_history_commands_and_responses() {
     assert_eq!(detail_object.get("type").unwrap(), "entry_history_detail");
     assert_eq!(detail_object.get("entryId").unwrap(), "entry-1");
     assert_eq!(detail_object.get("historyIndex").unwrap(), 0);
-    assert_eq!(detail_object.get("password").unwrap(), "old-secret");
+    assert!(
+        !detail_object.contains_key("password"),
+        "history display responses must never serialize historical passwords"
+    );
+    let protected_field = &detail_object["customFields"].as_array().unwrap()[0];
+    assert_eq!(protected_field["value"], "");
+    assert_eq!(protected_field["protected"], true);
     assert_eq!(detail_object.get("modifiedAt").unwrap(), 43);
 
     assert_eq!(

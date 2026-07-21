@@ -36,7 +36,6 @@ struct EntryProjectionDigest {
         String,
         Option<String>,
         String,
-        String,
         Option<String>,
         bool,
         bool,
@@ -256,14 +255,13 @@ fn collect_entry_projection_digest(
                 value.account_name,
             )
         }),
-        passkey: passkey.map(|value| {
+        passkey: passkey.as_ref().map(|value| {
             (
-                value.username,
-                value.credential_id,
-                value.generated_user_id,
-                value.private_key_pem,
-                value.relying_party,
-                value.user_handle,
+                value.username.clone(),
+                value.credential_id.clone(),
+                value.generated_user_id.clone(),
+                value.relying_party.clone(),
+                value.user_handle.clone(),
                 value.backup_eligible,
                 value.backup_state,
             )
@@ -346,7 +344,6 @@ fn collect_raw_entry_projection_digest(entry: &vaultkern_core::Entry) -> EntryPr
                 value.username.clone(),
                 value.credential_id.clone(),
                 value.generated_user_id.clone(),
-                value.private_key_pem.clone(),
                 value.relying_party.clone(),
                 value.user_handle.clone(),
                 value.backup_eligible,

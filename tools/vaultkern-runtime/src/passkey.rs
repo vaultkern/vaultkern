@@ -13,6 +13,7 @@ use uuid::Uuid;
 use vaultkern_core::PasskeyRecord;
 use vaultkern_runtime_protocol::PasskeyAssertionDto;
 use vaultkern_runtime_protocol::PasskeyRegistrationDto;
+use zeroize::Zeroizing;
 
 const ES256_COSE_ALGORITHM: i32 = -7;
 const AUTH_DATA_FLAG_USER_PRESENT: u8 = 0x01;
@@ -20,6 +21,9 @@ const AUTH_DATA_FLAG_USER_VERIFIED: u8 = 0x04;
 const AUTH_DATA_FLAG_BACKUP_ELIGIBLE: u8 = 0x08;
 const AUTH_DATA_FLAG_BACKUP_STATE: u8 = 0x10;
 const AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA: u8 = 0x40;
+const WINDOWS_PLUGIN_AUTHENTICATOR_AAGUID: [u8; 16] = [
+    0xc8, 0xb2, 0xf4, 0xa1, 0x7d, 0x31, 0x4e, 0x59, 0x9a, 0x62, 0x0f, 0xd3, 0xb6, 0xe4, 0xc7, 0x21,
+];
 
 pub struct PasskeyAssertionRequest<'a> {
     pub relying_party: &'a str,
@@ -52,6 +56,85 @@ pub struct PasskeyRegistrationRequest<'a> {
 pub struct PasskeyRegistration {
     pub passkey: PasskeyRecord,
     pub dto: PasskeyRegistrationDto,
+}
+
+pub struct PlatformPasskeyRegistrationRequest<'a> {
+    pub relying_party: &'a str,
+    pub user_name: &'a str,
+    pub user_handle: &'a [u8],
+    pub public_key_algorithm: i32,
+    pub user_verified: bool,
+}
+
+#[derive(Debug)]
+pub struct PlatformPasskeyRegistration {
+    pub passkey: PasskeyRecord,
+    pub authenticator_data: Vec<u8>,
+}
+
+pub struct PlatformPasskeyAssertionRequest<'a> {
+    pub relying_party: &'a str,
+    pub credential_id: &'a [u8],
+    pub client_data_hash: &'a [u8],
+    pub user_verified: bool,
+}
+
+#[derive(Debug)]
+pub struct PlatformPasskeyAssertion {
+    pub credential_id: Vec<u8>,
+    pub authenticator_data: Vec<u8>,
+    pub signature_der: Vec<u8>,
+    pub user_handle: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformPasskeyCredential {
+    pub credential_id: Vec<u8>,
+    pub relying_party: String,
+    pub relying_party_name: String,
+    pub user_handle: Vec<u8>,
+    pub user_name: String,
+    pub user_display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformPasskeyRegistrationInput {
+    pub relying_party: String,
+    pub relying_party_name: String,
+    pub user_name: String,
+    pub user_display_name: String,
+    pub user_handle: Vec<u8>,
+    pub public_key_algorithm: i32,
+    pub user_verified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformPasskeyRegistrationOutput {
+    pub entry_id: String,
+    pub credential: PlatformPasskeyCredential,
+    pub authenticator_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformPasskeyAssertionInput {
+    pub relying_party: String,
+    pub allowed_credential_ids: Vec<Vec<u8>>,
+    pub client_data_hash: Vec<u8>,
+    pub user_verified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformPasskeyAssertionOutput {
+    pub credential_id: Vec<u8>,
+    pub authenticator_data: Vec<u8>,
+    pub signature_der: Vec<u8>,
+    pub user_handle: Vec<u8>,
+}
+
+struct PasskeyRegistrationMaterial {
+    passkey: PasskeyRecord,
+    authenticator_data: Vec<u8>,
+    public_key_der: Vec<u8>,
 }
 
 pub fn generate_passkey_credential_id() -> String {
@@ -91,22 +174,19 @@ pub fn create_assertion(
         request.ancestor_origins,
     )?;
 
-    let authenticator_data =
-        authenticator_data(request.relying_party, passkey, request.user_verified);
     let client_data_hash = Sha256::digest(&client_data_json);
-    let mut signed_payload = authenticator_data.clone();
-    signed_payload.extend_from_slice(&client_data_hash);
-
-    let signing_key = SigningKey::from_pkcs8_pem(&passkey.private_key_pem)
-        .context("invalid passkey private key")?;
-    let signature: Signature = signing_key.sign(&signed_payload);
-    let signature_der = signature.to_der();
+    let (authenticator_data, signature_der) = sign_assertion(
+        passkey,
+        request.relying_party,
+        request.user_verified,
+        &client_data_hash,
+    )?;
 
     Ok(PasskeyAssertionDto {
         credential_id: passkey.credential_id.clone(),
         authenticator_data_base64url: URL_SAFE_NO_PAD.encode(authenticator_data),
         client_data_json_base64url: request.client_data_json_base64url.to_owned(),
-        signature_base64url: URL_SAFE_NO_PAD.encode(signature_der.as_bytes()),
+        signature_base64url: URL_SAFE_NO_PAD.encode(signature_der),
         user_handle_base64url: if request.discoverable {
             passkey.user_handle.clone()
         } else {
@@ -143,56 +223,187 @@ pub fn create_registration_with_credential_id(
         request.top_origin,
         request.ancestor_origins,
     )?;
-    validate_public_key_algorithm(request.public_key_algorithm)?;
-    validate_user_handle(request.user_handle_base64url)?;
-
-    let signing_key = SigningKey::random(&mut OsRng);
-    let private_key_pem = signing_key
-        .to_pkcs8_pem(LineEnding::LF)
-        .context("failed to encode passkey private key")?
-        .to_string();
-    let verifying_key = signing_key.verifying_key();
-    let public_key = verifying_key.to_encoded_point(false);
-    let public_key_der = verifying_key
-        .to_public_key_der()
-        .context("failed to encode passkey public key")?;
-    let public_key_cose = cose_es256_public_key(&public_key)?;
-    let credential_id_bytes = URL_SAFE_NO_PAD
-        .decode(&credential_id)
-        .context("generated passkey credential id was not base64url")?;
-    let authenticator_data = attested_authenticator_data(
+    let material = create_registration_material(
         request.relying_party,
-        &credential_id_bytes,
-        &public_key_cose,
+        request.user_name,
+        request.user_handle_base64url,
+        request.public_key_algorithm,
         request.user_verified,
+        credential_id,
+        [0; 16],
     );
-    let attestation_object = attestation_object(&authenticator_data);
-
-    let passkey = PasskeyRecord {
-        username: request.user_name.to_owned(),
-        credential_id: credential_id.clone(),
-        generated_user_id: None,
-        private_key_pem,
-        relying_party: request.relying_party.to_owned(),
-        user_handle: Some(request.user_handle_base64url.to_owned()),
-        backup_eligible: true,
-        backup_state: true,
-    };
+    let material = material?;
+    let attestation_object = attestation_object(&material.authenticator_data);
 
     Ok(PasskeyRegistration {
-        passkey,
+        passkey: material.passkey,
         dto: PasskeyRegistrationDto {
             entry_id: String::new(),
-            credential_id,
+            credential_id: URL_SAFE_NO_PAD.encode(credential_id_bytes_from_authenticator_data(
+                &material.authenticator_data,
+            )?),
             created: true,
-            authenticator_data_base64url: URL_SAFE_NO_PAD.encode(authenticator_data),
+            authenticator_data_base64url: URL_SAFE_NO_PAD.encode(&material.authenticator_data),
             attestation_object_base64url: URL_SAFE_NO_PAD.encode(attestation_object),
             client_data_json_base64url: request.client_data_json_base64url.to_owned(),
-            public_key_base64url: URL_SAFE_NO_PAD.encode(public_key_der.as_bytes()),
+            public_key_base64url: URL_SAFE_NO_PAD.encode(material.public_key_der),
             public_key_algorithm: ES256_COSE_ALGORITHM,
             user_handle_base64url: request.user_handle_base64url.to_owned(),
         },
     })
+}
+
+pub fn create_platform_registration_with_credential_id(
+    request: PlatformPasskeyRegistrationRequest<'_>,
+    credential_id: Vec<u8>,
+) -> Result<PlatformPasskeyRegistration> {
+    validate_platform_relying_party(request.relying_party)?;
+    if !request.user_verified {
+        anyhow::bail!("platform passkey user verification was not verified");
+    }
+    let user_handle_base64url = URL_SAFE_NO_PAD.encode(request.user_handle);
+    let material = create_registration_material(
+        request.relying_party,
+        request.user_name,
+        &user_handle_base64url,
+        request.public_key_algorithm,
+        request.user_verified,
+        URL_SAFE_NO_PAD.encode(credential_id),
+        WINDOWS_PLUGIN_AUTHENTICATOR_AAGUID,
+    )?;
+    Ok(PlatformPasskeyRegistration {
+        passkey: material.passkey,
+        authenticator_data: material.authenticator_data,
+    })
+}
+
+pub fn create_platform_assertion(
+    passkey: &PasskeyRecord,
+    request: PlatformPasskeyAssertionRequest<'_>,
+) -> Result<PlatformPasskeyAssertion> {
+    validate_platform_relying_party(request.relying_party)?;
+    if !request.user_verified {
+        anyhow::bail!("platform passkey user verification was not verified");
+    }
+    if request.client_data_hash.len() != 32 {
+        anyhow::bail!("platform passkey clientDataHash must be a SHA-256 digest");
+    }
+    if passkey.relying_party != request.relying_party {
+        anyhow::bail!("passkey relying party mismatch");
+    }
+    let credential_id = URL_SAFE_NO_PAD
+        .decode(&passkey.credential_id)
+        .context("stored passkey credential id was not base64url")?;
+    if credential_id != request.credential_id {
+        anyhow::bail!("passkey credential id mismatch");
+    }
+    let (authenticator_data, signature_der) = sign_assertion(
+        passkey,
+        request.relying_party,
+        request.user_verified,
+        request.client_data_hash,
+    )?;
+    let user_handle = passkey
+        .user_handle
+        .as_deref()
+        .map(|value| {
+            URL_SAFE_NO_PAD
+                .decode(value)
+                .context("stored passkey user handle was not base64url")
+        })
+        .transpose()?;
+    Ok(PlatformPasskeyAssertion {
+        credential_id,
+        authenticator_data,
+        signature_der,
+        user_handle,
+    })
+}
+
+fn create_registration_material(
+    relying_party: &str,
+    user_name: &str,
+    user_handle_base64url: &str,
+    public_key_algorithm: i32,
+    user_verified: bool,
+    credential_id: String,
+    authenticator_aaguid: [u8; 16],
+) -> Result<PasskeyRegistrationMaterial> {
+    validate_public_key_algorithm(public_key_algorithm)?;
+    validate_user_handle(user_handle_base64url)?;
+    let credential_id_bytes = URL_SAFE_NO_PAD
+        .decode(&credential_id)
+        .context("generated passkey credential id was not base64url")?;
+    if credential_id_bytes.is_empty() || credential_id_bytes.len() > u16::MAX as usize {
+        anyhow::bail!("passkey credential id has an invalid length");
+    }
+
+    let signing_key = SigningKey::random(&mut OsRng);
+    let private_key_pem = encode_private_key_pem(&signing_key)?;
+    let verifying_key = signing_key.verifying_key();
+    let public_key = verifying_key.to_encoded_point(false);
+    let public_key_der = verifying_key
+        .to_public_key_der()
+        .context("failed to encode passkey public key")?
+        .as_bytes()
+        .to_vec();
+    let public_key_cose = cose_es256_public_key(&public_key)?;
+    let authenticator_data = attested_authenticator_data(
+        relying_party,
+        &credential_id_bytes,
+        &public_key_cose,
+        user_verified,
+        &authenticator_aaguid,
+    );
+    Ok(PasskeyRegistrationMaterial {
+        passkey: PasskeyRecord {
+            username: user_name.to_owned(),
+            credential_id,
+            generated_user_id: None,
+            private_key_pem,
+            relying_party: relying_party.to_owned(),
+            user_handle: Some(user_handle_base64url.to_owned()),
+            backup_eligible: true,
+            backup_state: true,
+        },
+        authenticator_data,
+        public_key_der,
+    })
+}
+
+fn encode_private_key_pem(signing_key: &SigningKey) -> Result<Zeroizing<String>> {
+    signing_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .context("failed to encode passkey private key")
+}
+
+fn credential_id_bytes_from_authenticator_data(authenticator_data: &[u8]) -> Result<&[u8]> {
+    const CREDENTIAL_LENGTH_OFFSET: usize = 53;
+    const CREDENTIAL_OFFSET: usize = 55;
+    let length_bytes: [u8; 2] = authenticator_data
+        .get(CREDENTIAL_LENGTH_OFFSET..CREDENTIAL_OFFSET)
+        .context("passkey authenticator data is missing credential length")?
+        .try_into()
+        .expect("credential length slice has a fixed size");
+    let length = u16::from_be_bytes(length_bytes) as usize;
+    authenticator_data
+        .get(CREDENTIAL_OFFSET..CREDENTIAL_OFFSET + length)
+        .context("passkey authenticator data is missing credential id")
+}
+
+fn sign_assertion(
+    passkey: &PasskeyRecord,
+    relying_party: &str,
+    user_verified: bool,
+    client_data_hash: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let authenticator_data = authenticator_data(relying_party, passkey, user_verified);
+    let mut signed_payload = authenticator_data.clone();
+    signed_payload.extend_from_slice(client_data_hash);
+    let signing_key = SigningKey::from_pkcs8_pem(&passkey.private_key_pem)
+        .context("invalid passkey private key")?;
+    let signature: Signature = signing_key.sign(&signed_payload);
+    Ok((authenticator_data, signature.to_der().as_bytes().to_vec()))
 }
 
 fn authenticator_data(
@@ -270,6 +481,22 @@ fn validate_origin_for_relying_party(
     }
 
     anyhow::bail!("passkey origin does not match relying party")
+}
+
+fn validate_platform_relying_party(relying_party: &str) -> Result<()> {
+    if relying_party.trim().is_empty()
+        || relying_party != normalize_host(relying_party)
+        || relying_party.ends_with('.')
+    {
+        anyhow::bail!("invalid platform passkey relying party");
+    }
+    if is_loopback_host(relying_party) || is_ip_address(relying_party) {
+        return Ok(());
+    }
+    if psl::domain_str(relying_party).is_none() {
+        anyhow::bail!("invalid platform passkey relying party");
+    }
+    Ok(())
 }
 
 fn origin_host_matches_relying_party(host: &str, relying_party: &str) -> bool {
@@ -421,6 +648,7 @@ fn attested_authenticator_data(
     credential_id: &[u8],
     public_key_cose: &[u8],
     user_verified: bool,
+    authenticator_aaguid: &[u8; 16],
 ) -> Vec<u8> {
     let mut auth_data = Vec::new();
     auth_data.extend_from_slice(&Sha256::digest(relying_party.as_bytes()));
@@ -437,7 +665,7 @@ fn attested_authenticator_data(
             | AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA,
     );
     auth_data.extend_from_slice(&0_u32.to_be_bytes());
-    auth_data.extend_from_slice(&[0; 16]);
+    auth_data.extend_from_slice(authenticator_aaguid);
     auth_data.extend_from_slice(&(credential_id.len() as u16).to_be_bytes());
     auth_data.extend_from_slice(credential_id);
     auth_data.extend_from_slice(public_key_cose);
@@ -452,7 +680,7 @@ fn attestation_object(auth_data: &[u8]) -> Vec<u8> {
     cbor_text(&mut object, "attStmt");
     cbor_map_len(&mut object, 0);
     cbor_text(&mut object, "authData");
-    cbor_bytes(&mut object, &auth_data);
+    cbor_bytes(&mut object, auth_data);
     object
 }
 
@@ -523,10 +751,28 @@ fn cbor_major(output: &mut Vec<u8>, major: u8, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PasskeyAssertionRequest, PasskeyRegistrationRequest, create_assertion, create_registration,
+        PasskeyAssertionRequest, PasskeyRegistrationRequest, PlatformPasskeyAssertionRequest,
+        PlatformPasskeyRegistrationRequest, create_assertion, create_platform_assertion,
+        create_platform_registration_with_credential_id, create_registration,
+        encode_private_key_pem,
     };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use p256::{
+        ecdsa::{Signature, SigningKey, signature::Verifier},
+        pkcs8::DecodePrivateKey,
+    };
+    use sha2::Digest;
     use vaultkern_core::PasskeyRecord;
+
+    #[test]
+    fn generated_private_key_pem_stays_in_zeroizing_ownership() {
+        fn assert_zeroizing_encoder(
+            _: fn(&SigningKey) -> anyhow::Result<zeroize::Zeroizing<String>>,
+        ) {
+        }
+
+        assert_zeroizing_encoder(encode_private_key_pem);
+    }
 
     #[test]
     fn registration_rejects_public_suffix_relying_party() {
@@ -888,7 +1134,7 @@ mod tests {
             username: "alice@example.com".into(),
             credential_id: "Y3JlZGVudGlhbA".into(),
             generated_user_id: None,
-            private_key_pem: String::new(),
+            private_key_pem: String::new().into(),
             relying_party: "example.com".into(),
             user_handle: Some("dXNlci0x".into()),
             backup_eligible: false,
@@ -908,7 +1154,7 @@ mod tests {
             username: "alice@example.com".into(),
             credential_id: "Y3JlZGVudGlhbA".into(),
             generated_user_id: None,
-            private_key_pem: String::new(),
+            private_key_pem: String::new().into(),
             relying_party: "example.com".into(),
             user_handle: Some("dXNlci0x".into()),
             backup_eligible: true,
@@ -927,7 +1173,7 @@ mod tests {
             username: "alice@example.com".into(),
             credential_id: "Y3JlZGVudGlhbA".into(),
             generated_user_id: None,
-            private_key_pem: String::new(),
+            private_key_pem: String::new().into(),
             relying_party: "example.com".into(),
             user_handle: Some("dXNlci0x".into()),
             backup_eligible: true,
@@ -940,12 +1186,143 @@ mod tests {
     }
 
     #[test]
+    fn platform_registration_builds_the_kpex_record_and_attested_authenticator_data() {
+        let credential_id = vec![0x42; 16];
+        let registration = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "alice@example.com",
+                user_handle: b"user-1",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            credential_id.clone(),
+        )
+        .expect("platform registration");
+
+        assert_eq!(
+            registration.passkey.credential_id,
+            URL_SAFE_NO_PAD.encode(&credential_id)
+        );
+        assert_eq!(registration.passkey.relying_party, "example.com");
+        assert_eq!(
+            registration.passkey.user_handle.as_deref(),
+            Some(URL_SAFE_NO_PAD.encode(b"user-1").as_str())
+        );
+        let rp_id_hash = sha2::Sha256::digest(b"example.com");
+        assert_eq!(
+            &registration.authenticator_data[..32],
+            rp_id_hash.as_slice()
+        );
+        assert_eq!(
+            registration.authenticator_data[32]
+                & (super::AUTH_DATA_FLAG_USER_PRESENT
+                    | super::AUTH_DATA_FLAG_USER_VERIFIED
+                    | super::AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA),
+            super::AUTH_DATA_FLAG_USER_PRESENT
+                | super::AUTH_DATA_FLAG_USER_VERIFIED
+                | super::AUTH_DATA_FLAG_ATTESTED_CREDENTIAL_DATA
+        );
+        assert_eq!(
+            &registration.authenticator_data[37..53],
+            super::WINDOWS_PLUGIN_AUTHENTICATOR_AAGUID
+        );
+        assert_eq!(
+            &registration.authenticator_data[53..55],
+            &(16_u16.to_be_bytes())
+        );
+        assert_eq!(&registration.authenticator_data[55..71], credential_id);
+    }
+
+    #[test]
+    fn platform_assertion_signs_authenticator_data_and_supplied_client_data_hash() {
+        let registration = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "alice@example.com",
+                user_handle: b"user-1",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            vec![0x24; 16],
+        )
+        .expect("platform registration");
+        let client_data_hash = [0x91; 32];
+
+        let assertion = create_platform_assertion(
+            &registration.passkey,
+            PlatformPasskeyAssertionRequest {
+                relying_party: "example.com",
+                credential_id: &[0x24; 16],
+                client_data_hash: &client_data_hash,
+                user_verified: true,
+            },
+        )
+        .expect("platform assertion");
+
+        let mut signed_payload = assertion.authenticator_data.clone();
+        signed_payload.extend_from_slice(&client_data_hash);
+        let signature = Signature::from_der(&assertion.signature_der).expect("DER signature");
+        let signing_key = SigningKey::from_pkcs8_pem(&registration.passkey.private_key_pem)
+            .expect("stored signing key");
+        signing_key
+            .verifying_key()
+            .verify(&signed_payload, &signature)
+            .expect("signature verifies over the platform clientDataHash");
+        assert_eq!(assertion.credential_id, vec![0x24; 16]);
+        assert_eq!(assertion.user_handle.as_deref(), Some(b"user-1".as_slice()));
+        assert_ne!(
+            assertion.authenticator_data[32] & super::AUTH_DATA_FLAG_USER_VERIFIED,
+            0
+        );
+    }
+
+    #[test]
+    fn platform_passkey_operations_require_hello_uv_and_a_sha256_client_data_hash() {
+        let registration_error = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "alice@example.com",
+                user_handle: b"user-1",
+                public_key_algorithm: -7,
+                user_verified: false,
+            },
+            vec![0x33; 16],
+        )
+        .expect_err("platform registration without UV must fail");
+        assert!(registration_error.to_string().contains("user verification"));
+
+        let registration = create_platform_registration_with_credential_id(
+            PlatformPasskeyRegistrationRequest {
+                relying_party: "example.com",
+                user_name: "alice@example.com",
+                user_handle: b"user-1",
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+            vec![0x33; 16],
+        )
+        .expect("platform registration");
+        let assertion_error = create_platform_assertion(
+            &registration.passkey,
+            PlatformPasskeyAssertionRequest {
+                relying_party: "example.com",
+                credential_id: &[0x33; 16],
+                client_data_hash: &[0_u8; 31],
+                user_verified: true,
+            },
+        )
+        .expect_err("non-SHA256 clientDataHash must fail");
+        assert!(assertion_error.to_string().contains("clientDataHash"));
+    }
+
+    #[test]
     fn assertion_flags_set_user_verified_only_when_requested() {
         let passkey = PasskeyRecord {
             username: "alice@example.com".into(),
             credential_id: "Y3JlZGVudGlhbA".into(),
             generated_user_id: None,
-            private_key_pem: String::new(),
+            private_key_pem: String::new().into(),
             relying_party: "example.com".into(),
             user_handle: Some("dXNlci0x".into()),
             backup_eligible: true,

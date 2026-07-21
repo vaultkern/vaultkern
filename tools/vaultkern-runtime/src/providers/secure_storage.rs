@@ -21,10 +21,13 @@ use aes_gcm::{
 #[cfg(windows)]
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
-use crate::state_paths::{extension_state_dir, runtime_state_dir};
+#[cfg(any(windows, test))]
+use crate::state_paths::extension_state_dir;
+use crate::state_paths::runtime_state_dir;
 
 #[cfg(any(windows, test))]
 use crate::providers::durable_file::{
@@ -35,30 +38,44 @@ use crate::providers::durable_file::{
 };
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-const QUICK_UNLOCK_ENVELOPE_VERSION: u8 = 2;
+const QUICK_UNLOCK_ENVELOPE_VERSION: u8 = 4;
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-const QUICK_UNLOCK_ENVELOPE_SCHEME: &str =
-    "windows-cng-rsa-oaep-sha256-aes-256-gcm-windows-hello-v2";
+const QUICK_UNLOCK_ENVELOPE_SCHEME: &str = "windows-passport-rsa-pkcs1-aes-256-gcm-hello-v4";
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-const QUICK_UNLOCK_KEY_STORAGE_PROVIDER: &str = "Microsoft Platform Crypto Provider";
+const QUICK_UNLOCK_KEY_STORAGE_PROVIDER: &str = "Microsoft Passport Key Storage Provider";
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-const QUICK_UNLOCK_KEY_UI_POLICY_FLAG: u32 = 4;
+const QUICK_UNLOCK_NGC_AUTH_MANDATORY: u32 = 1;
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+const QUICK_UNLOCK_GESTURE_REQUIRED: u32 = 1;
 #[cfg(any(windows, test))]
 const QUICK_UNLOCK_RECORD_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(any(windows, test))]
 const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
+#[cfg(any(windows, test))]
+const NTE_BAD_LEN: u32 = 0x8009_0004;
+#[cfg(any(windows, test))]
+const NTE_BAD_DATA: u32 = 0x8009_0005;
+#[cfg(any(windows, test))]
+const NTE_BAD_SIGNATURE: u32 = 0x8009_0006;
+#[cfg(any(windows, test))]
+const NTE_BAD_KEY_STATE: u32 = 0x8009_000b;
+#[cfg(any(windows, test))]
+const NTE_NO_KEY: u32 = 0x8009_000d;
+#[cfg(any(windows, test))]
+const NTE_BAD_KEYSET: u32 = 0x8009_0016;
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 #[derive(Deserialize, Serialize)]
 struct QuickUnlockEnvelope {
     version: u8,
     scheme: String,
+    public_key_sha256: String,
     wrapped_key: String,
     nonce: String,
     ciphertext: String,
 }
 
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[allow(dead_code)]
 fn is_quick_unlock_envelope(bytes: &[u8]) -> bool {
     serde_json::from_slice::<QuickUnlockEnvelope>(bytes)
         .map(|envelope| {
@@ -74,8 +91,25 @@ fn quick_unlock_key_storage_provider_name() -> &'static str {
 }
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-fn quick_unlock_key_ui_policy_flag() -> u32 {
-    QUICK_UNLOCK_KEY_UI_POLICY_FLAG
+fn quick_unlock_ngc_cache_type() -> u32 {
+    QUICK_UNLOCK_NGC_AUTH_MANDATORY
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn quick_unlock_gesture_required() -> u32 {
+    QUICK_UNLOCK_GESTURE_REQUIRED
+}
+
+#[cfg(any(windows, test))]
+fn quick_unlock_persistent_key_name(user_sid: &str, dir: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(dir.to_string_lossy().as_bytes());
+    let suffix = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{user_sid}//VaultKern/QuickUnlock/{suffix}")
 }
 
 #[cfg(any(windows, test))]
@@ -335,6 +369,30 @@ fn cleanup_quick_unlock_sidecars(path: &Path) -> Result<()> {
 }
 
 #[cfg(any(windows, test))]
+fn delete_quick_unlock_record(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("quick unlock record path has no parent directory");
+    };
+    if !parent.exists() {
+        return Ok(());
+    }
+    let parent_guard = QuickUnlockParentGuard::acquire(parent)?;
+    let lock_path = quick_unlock_record_lock_path(path)?;
+    let _lock =
+        ExclusiveFileLock::acquire_with_timeout(&lock_path, QUICK_UNLOCK_RECORD_LOCK_TIMEOUT)?;
+    parent_guard.validate(parent)?;
+    remove_if_exists(path)?;
+    cleanup_quick_unlock_sidecars(path)?;
+    parent_guard.validate(parent)?;
+    sync_parent(path).with_context(|| {
+        format!(
+            "failed to make quick unlock record deletion durable: {}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(any(windows, test))]
 fn quick_unlock_target_expectation(path: &Path) -> Result<TargetExpectation> {
     let metadata = match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -365,15 +423,160 @@ fn quick_unlock_target_expectation(path: &Path) -> Result<TargetExpectation> {
     )?))
 }
 
+#[derive(Debug)]
+pub(crate) struct SecureStorageError {
+    kind: SecureStorageErrorKind,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecureStorageErrorKind {
+    Cancelled,
+    #[cfg(any(windows, test))]
+    HelloKeyInvalidated,
+    #[cfg(any(windows, test))]
+    RecordInvalidated,
+}
+
+impl SecureStorageError {
+    #[cfg(any(windows, test))]
+    pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            kind: SecureStorageErrorKind::Cancelled,
+            message: message.into(),
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    fn hello_key_invalidated(message: impl Into<String>) -> Self {
+        Self {
+            kind: SecureStorageErrorKind::HelloKeyInvalidated,
+            message: message.into(),
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn record_invalidated(message: impl Into<String>) -> Self {
+        Self {
+            kind: SecureStorageErrorKind::RecordInvalidated,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SecureStorageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SecureStorageError {}
+
+pub(crate) fn is_secure_storage_cancelled(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<SecureStorageError>()
+            .is_some_and(|error| error.kind == SecureStorageErrorKind::Cancelled)
+    })
+}
+
+pub(crate) fn is_secure_storage_invalidated(error: &anyhow::Error) -> bool {
+    #[cfg(any(windows, test))]
+    {
+        return error.chain().any(|cause| {
+            cause
+                .downcast_ref::<SecureStorageError>()
+                .is_some_and(|error| {
+                    matches!(
+                        error.kind,
+                        SecureStorageErrorKind::HelloKeyInvalidated
+                            | SecureStorageErrorKind::RecordInvalidated
+                    )
+                })
+        });
+    }
+    #[cfg(not(any(windows, test)))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+#[cfg(any(windows, test))]
+fn is_hello_key_invalidated(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<SecureStorageError>()
+            .is_some_and(|error| error.kind == SecureStorageErrorKind::HelloKeyInvalidated)
+    })
+}
+
+#[cfg(any(windows, test))]
+fn is_hello_key_invalidated_status(status: u32) -> bool {
+    matches!(status, NTE_BAD_KEY_STATE | NTE_NO_KEY | NTE_BAD_KEYSET)
+}
+
+#[cfg(any(windows, test))]
+fn is_quick_unlock_record_invalidated_status(status: u32) -> bool {
+    matches!(status, NTE_BAD_LEN | NTE_BAD_DATA | NTE_BAD_SIGNATURE)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelloKeyOpenDisposition {
+    UseOpened,
+    CreateMissing,
+    ReturnError,
+}
+
+#[cfg(any(windows, test))]
+fn hello_key_open_disposition(status: u32, create_if_missing: bool) -> HelloKeyOpenDisposition {
+    if status == 0 {
+        HelloKeyOpenDisposition::UseOpened
+    } else if matches!(status, NTE_NO_KEY | NTE_BAD_KEYSET) && create_if_missing {
+        HelloKeyOpenDisposition::CreateMissing
+    } else {
+        HelloKeyOpenDisposition::ReturnError
+    }
+}
+
+#[cfg(any(windows, test))]
+fn verify_or_recreate_hello_key<T>(
+    verify: impl FnOnce() -> Result<T>,
+    recreate: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    match verify() {
+        Ok(value) => Ok(value),
+        Err(verification_error) if is_hello_key_invalidated(&verification_error) => recreate()
+            .with_context(|| {
+            format!(
+                "failed to replace an invalidated Windows Hello key after verification failed: {verification_error:#}"
+            )
+        }),
+        Err(error) => Err(error),
+    }
+}
+
 #[allow(dead_code)]
 pub trait SecureStorageProvider {
+    fn set_parent_window_handle(&mut self, _parent_window: Option<usize>) {}
+
+    fn authorize_store_user_presence(&self) -> Result<()> {
+        Ok(())
+    }
     fn store(&self, key: &str, value: &[u8]) -> Result<()>;
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>>;
     fn contains(&self, key: &str) -> Result<bool>;
+    fn store_requires_user_presence(&self) -> bool {
+        false
+    }
     fn load_requires_user_presence(&self) -> bool {
         false
     }
     fn delete(&self, key: &str) -> Result<()>;
+    fn purge_quick_unlock_records(&self) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 pub struct UnsupportedSecureStorageProvider;
@@ -383,7 +586,7 @@ impl SecureStorageProvider for UnsupportedSecureStorageProvider {
         anyhow::bail!("secure storage is not implemented on this host")
     }
 
-    fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, _key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(None)
     }
 
@@ -397,78 +600,116 @@ impl SecureStorageProvider for UnsupportedSecureStorageProvider {
 }
 
 pub(crate) fn default_secure_storage_provider() -> Box<dyn SecureStorageProvider> {
-    default_secure_storage_provider_for_extension_id(None)
-}
-
-pub(crate) fn default_secure_storage_provider_for_extension_id(
-    extension_id: Option<&str>,
-) -> Box<dyn SecureStorageProvider> {
     #[cfg(windows)]
     {
         Box::new(WindowsHelloSecureStorageProvider::new(
-            quick_unlock_storage_dir(extension_id),
+            quick_unlock_storage_dir(),
         ))
     }
     #[cfg(not(windows))]
     {
-        let _ = extension_id;
         Box::new(UnsupportedSecureStorageProvider)
     }
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn quick_unlock_storage_dir(extension_id: Option<&str>) -> PathBuf {
-    extension_id
-        .map(|id| extension_state_dir(id).join("quick-unlock"))
-        .unwrap_or_else(|| runtime_state_dir().join("quick-unlock"))
+pub(crate) fn quick_unlock_storage_dir() -> PathBuf {
+    runtime_state_dir().join("quick-unlock")
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn purge_legacy_extension_quick_unlock_storage(extension_id: &str) -> Result<()> {
+    let legacy = extension_state_dir(extension_id).join("quick-unlock");
+    match fs::symlink_metadata(&legacy) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            anyhow::bail!("legacy extension quick-unlock path is not a private directory")
+        }
+        Ok(_) => {
+            fs::remove_dir_all(&legacy)?;
+            sync_parent(&legacy)?;
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(any(windows, test)))]
+pub(crate) fn purge_legacy_extension_quick_unlock_storage(_extension_id: &str) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(windows)]
 pub(crate) struct WindowsHelloSecureStorageProvider {
     dir: PathBuf,
+    parent_window: Option<usize>,
 }
 
 #[cfg(windows)]
 impl WindowsHelloSecureStorageProvider {
     pub(crate) fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            parent_window: None,
+        }
     }
 
     fn path_for(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.bin"))
     }
 
-    fn wrapping_key_name(&self) -> Vec<u16> {
-        let mut hasher = Sha256::new();
-        hasher.update(self.dir.to_string_lossy().as_bytes());
-        let digest = hasher.finalize();
-        let suffix = digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        wide_null(&format!("VaultKern Quick Unlock Hello v2 {suffix}"))
+    fn wrapping_key_name(&self) -> Result<Vec<u16>> {
+        let sid = current_user_sid()?;
+        Ok(wide_null(&quick_unlock_persistent_key_name(
+            &sid, &self.dir,
+        )))
     }
 }
 
 #[cfg(windows)]
 impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
+    fn set_parent_window_handle(&mut self, parent_window: Option<usize>) {
+        self.parent_window = parent_window.filter(|handle| *handle != 0);
+    }
+
+    fn authorize_store_user_presence(&self) -> Result<()> {
+        let key_name = self.wrapping_key_name()?;
+        verify_or_recreate_hello_key(
+            || {
+                with_hello_key(&key_name, true, self.parent_window, |key, created| {
+                    verify_hello_key_for_enrollment(key, created)
+                })
+            },
+            || recreate_hello_key(&key_name, self.parent_window),
+        )
+    }
+
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
-        let mut data_key = [0u8; 32];
+        let mut data_key = Zeroizing::new([0u8; 32]);
         let mut nonce = [0u8; 12];
-        fill_random(&mut data_key)?;
+        fill_random(&mut data_key[..])?;
         fill_random(&mut nonce)?;
 
-        let cipher = Aes256Gcm::new_from_slice(&data_key)
+        let cipher = Aes256Gcm::new_from_slice(&data_key[..])
             .map_err(|_| anyhow::anyhow!("failed to initialize quick unlock cipher"))?;
         let ciphertext = cipher
             .encrypt(Nonce::from_slice(&nonce), value)
             .map_err(|_| anyhow::anyhow!("failed to encrypt quick unlock credentials"))?;
-        let wrapped_key = with_hello_key(&self.wrapping_key_name(), true, |key| {
-            ncrypt_encrypt_oaep_sha256(key, &data_key)
-        })?;
+        let (wrapped_key, public_key_sha256) = with_hello_key(
+            &self.wrapping_key_name()?,
+            false,
+            self.parent_window,
+            |key, _created| {
+                Ok((
+                    ncrypt_encrypt_pkcs1(key, &data_key[..])?,
+                    hello_public_key_sha256(key)?,
+                ))
+            },
+        )?;
         let envelope = QuickUnlockEnvelope {
             version: QUICK_UNLOCK_ENVELOPE_VERSION,
             scheme: QUICK_UNLOCK_ENVELOPE_SCHEME.into(),
+            public_key_sha256,
             wrapped_key: BASE64_STANDARD.encode(wrapped_key),
             nonce: BASE64_STANDARD.encode(nonce),
             ciphertext: BASE64_STANDARD.encode(ciphertext),
@@ -478,40 +719,83 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
         publish_quick_unlock_record(&self.path_for(key), &bytes)
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let path = self.path_for(key);
         if !path.is_file() {
             return Ok(None);
         }
         let bytes = fs::read(path)?;
-        let envelope: QuickUnlockEnvelope = serde_json::from_slice(&bytes)
-            .context("quick unlock credentials use an unsupported legacy format")?;
+        let envelope: QuickUnlockEnvelope = serde_json::from_slice(&bytes).map_err(|error| {
+            SecureStorageError::record_invalidated(format!(
+                "quick unlock credentials use an unsupported legacy format: {error}"
+            ))
+        })?;
         if envelope.version != QUICK_UNLOCK_ENVELOPE_VERSION
             || envelope.scheme != QUICK_UNLOCK_ENVELOPE_SCHEME
         {
-            anyhow::bail!("quick unlock credentials use an unsupported envelope");
+            return Err(SecureStorageError::record_invalidated(
+                "quick unlock credentials use an unsupported envelope",
+            )
+            .into());
         }
         let wrapped_key = BASE64_STANDARD
             .decode(envelope.wrapped_key)
-            .context("failed to decode wrapped quick unlock key")?;
-        let nonce = BASE64_STANDARD
-            .decode(envelope.nonce)
-            .context("failed to decode quick unlock nonce")?;
+            .map_err(|error| {
+                SecureStorageError::record_invalidated(format!(
+                    "failed to decode wrapped quick unlock key: {error}"
+                ))
+            })?;
+        let nonce = BASE64_STANDARD.decode(envelope.nonce).map_err(|error| {
+            SecureStorageError::record_invalidated(format!(
+                "failed to decode quick unlock nonce: {error}"
+            ))
+        })?;
         let ciphertext = BASE64_STANDARD
             .decode(envelope.ciphertext)
-            .context("failed to decode encrypted quick unlock credentials")?;
+            .map_err(|error| {
+                SecureStorageError::record_invalidated(format!(
+                    "failed to decode encrypted quick unlock credentials: {error}"
+                ))
+            })?;
         if nonce.len() != 12 {
-            anyhow::bail!("quick unlock credential envelope has an invalid nonce");
+            return Err(SecureStorageError::record_invalidated(
+                "quick unlock credential envelope has an invalid nonce",
+            )
+            .into());
         }
 
-        let data_key = with_hello_key(&self.wrapping_key_name(), false, |key| {
-            ncrypt_decrypt_oaep_sha256(key, &wrapped_key)
+        let data_key = with_hello_key(
+            &self.wrapping_key_name()?,
+            false,
+            self.parent_window,
+            |key, _created| {
+                if hello_public_key_sha256(key)? != envelope.public_key_sha256 {
+                    return Err(SecureStorageError::record_invalidated(
+                        "quick unlock credentials were encrypted by an earlier Windows Hello enrollment",
+                    )
+                    .into());
+                }
+                require_fresh_hello_gesture(
+                    key,
+                    "Verify with Windows Hello to unlock this VaultKern vault",
+                )?;
+                ncrypt_decrypt_pkcs1(key, &wrapped_key)
+            },
+        )?;
+        let cipher = Aes256Gcm::new_from_slice(&data_key).map_err(|_| {
+            SecureStorageError::record_invalidated(
+                "decrypted quick unlock data key has an invalid length",
+            )
         })?;
-        let cipher = Aes256Gcm::new_from_slice(&data_key)
-            .map_err(|_| anyhow::anyhow!("failed to initialize quick unlock cipher"))?;
-        let plaintext = cipher
-            .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
-            .map_err(|_| anyhow::anyhow!("failed to decrypt quick unlock credentials"))?;
+        let plaintext = Zeroizing::new(
+            cipher
+                .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+                .map_err(|_| {
+                    SecureStorageError::record_invalidated(
+                        "failed to decrypt quick unlock credentials",
+                    )
+                })?,
+        );
         Ok(Some(plaintext))
     }
 
@@ -520,16 +804,116 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
         if !path.is_file() {
             return Ok(false);
         }
-        Ok(is_quick_unlock_envelope(&fs::read(path)?))
+        let bytes = fs::read(path)?;
+        let Ok(envelope) = serde_json::from_slice::<QuickUnlockEnvelope>(&bytes) else {
+            return Ok(false);
+        };
+        if envelope.version != QUICK_UNLOCK_ENVELOPE_VERSION
+            || envelope.scheme != QUICK_UNLOCK_ENVELOPE_SCHEME
+        {
+            return Ok(false);
+        }
+        match with_hello_key(
+            &self.wrapping_key_name()?,
+            false,
+            self.parent_window,
+            |key, _created| hello_public_key_sha256(key),
+        ) {
+            Ok(current) => Ok(current == envelope.public_key_sha256),
+            Err(error) if is_hello_key_invalidated(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn store_requires_user_presence(&self) -> bool {
+        true
+    }
+
+    fn load_requires_user_presence(&self) -> bool {
+        true
     }
 
     fn delete(&self, key: &str) -> Result<()> {
         let path = self.path_for(key);
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-        Ok(())
+        delete_quick_unlock_record(&path)
     }
+
+    fn purge_quick_unlock_records(&self) -> Result<usize> {
+        purge_quick_unlock_record_directory(&self.dir)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn purge_quick_unlock_record_directory(dir: &Path) -> Result<usize> {
+    match fs::symlink_metadata(dir) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            anyhow::bail!("quick unlock storage path is not a private directory")
+        }
+        Ok(_) => {}
+    }
+    let mut records = std::collections::BTreeSet::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if is_quick_unlock_record_file_name(&name) {
+            records.insert(entry.path());
+            continue;
+        }
+        let Some(candidate) = name
+            .strip_prefix('.')
+            .and_then(|name| name.split_once(".vaultkern."))
+            .map(|(candidate, _)| candidate)
+        else {
+            continue;
+        };
+        if is_quick_unlock_record_file_name(candidate) {
+            records.insert(dir.join(candidate));
+        }
+    }
+    let count = records.len();
+    for record in records {
+        delete_quick_unlock_record(&record)?;
+    }
+    Ok(count)
+}
+
+#[cfg(any(windows, test))]
+fn is_quick_unlock_record_file_name(name: &str) -> bool {
+    let Some(digest) = name
+        .strip_prefix("quick_unlock_")
+        .and_then(|name| name.strip_suffix(".bin"))
+    else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(windows)]
+fn verify_hello_key_for_enrollment(
+    key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+    created: bool,
+) -> Result<()> {
+    if created {
+        return Ok(());
+    }
+    let mut challenge = [0u8; 32];
+    fill_random(&mut challenge)?;
+    let wrapped_challenge = ncrypt_encrypt_pkcs1(key, &challenge)?;
+    require_fresh_hello_gesture(
+        key,
+        "Verify with Windows Hello to enable quick unlock for this VaultKern vault",
+    )?;
+    let unwrapped = ncrypt_decrypt_pkcs1(key, &wrapped_challenge)?;
+    if unwrapped.as_slice() != challenge {
+        anyhow::bail!("Windows Hello quick unlock key verification failed");
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -559,49 +943,175 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
 fn with_hello_key<T>(
     key_name: &[u16],
     create_if_missing: bool,
-    operation: impl FnOnce(windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE) -> Result<T>,
+    parent_window: Option<usize>,
+    operation: impl FnOnce(
+        windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+        bool,
+    ) -> Result<T>,
 ) -> Result<T> {
     use windows_sys::Win32::Security::Cryptography::{
-        NCRYPT_OVERWRITE_KEY_FLAG, NCRYPT_PROV_HANDLE, NCRYPT_RSA_ALGORITHM,
-        NCryptCreatePersistedKey, NCryptFinalizeKey, NCryptOpenKey, NCryptOpenStorageProvider,
+        NCRYPT_PROV_HANDLE, NCRYPT_RSA_ALGORITHM, NCryptCreatePersistedKey, NCryptFinalizeKey,
+        NCryptOpenKey, NCryptOpenStorageProvider,
     };
 
     let mut provider: NCRYPT_PROV_HANDLE = 0;
     let provider_name = wide_null(quick_unlock_key_storage_provider_name());
     check_ncrypt(
         unsafe { NCryptOpenStorageProvider(&mut provider, provider_name.as_ptr(), 0) },
-        "failed to open TPM platform key storage provider",
+        "failed to open Microsoft Passport key storage provider",
     )?;
     let _provider = NcryptHandle(provider);
 
     let mut key = 0;
+    let mut created = false;
     let open_status = unsafe { NCryptOpenKey(provider, &mut key, key_name.as_ptr(), 0, 0) };
-    if open_status != 0 {
-        if !create_if_missing {
+    match hello_key_open_disposition(open_status as u32, create_if_missing) {
+        HelloKeyOpenDisposition::UseOpened => {}
+        HelloKeyOpenDisposition::CreateMissing => {
+            check_ncrypt(
+                unsafe {
+                    NCryptCreatePersistedKey(
+                        provider,
+                        &mut key,
+                        NCRYPT_RSA_ALGORITHM,
+                        key_name.as_ptr(),
+                        0,
+                        0,
+                    )
+                },
+                "failed to create quick unlock Windows Hello key",
+            )?;
+            created = true;
+        }
+        HelloKeyOpenDisposition::ReturnError => {
             check_ncrypt(open_status, "failed to open quick unlock Windows Hello key")?;
         }
-        check_ncrypt(
-            unsafe {
-                NCryptCreatePersistedKey(
-                    provider,
-                    &mut key,
-                    NCRYPT_RSA_ALGORITHM,
-                    key_name.as_ptr(),
-                    0,
-                    NCRYPT_OVERWRITE_KEY_FLAG,
-                )
-            },
-            "failed to create quick unlock Windows Hello key",
-        )?;
+    }
+
+    with_owned_ncrypt_handle(key, |key| {
+        set_hello_parent_window(key, parent_window)?;
+        if created {
+            configure_hello_key(key)?;
+            check_ncrypt(
+                unsafe { NCryptFinalizeKey(key, 0) },
+                "failed to finalize quick unlock Windows Hello key",
+            )?;
+        }
+
+        operation(key, created)
+    })
+}
+
+#[cfg(windows)]
+fn hello_public_key_sha256(
+    key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+) -> Result<String> {
+    use windows_sys::Win32::Security::Cryptography::{BCRYPT_RSAPUBLIC_BLOB, NCryptExportKey};
+
+    let mut required = 0u32;
+    check_ncrypt(
+        unsafe {
+            NCryptExportKey(
+                key,
+                0,
+                BCRYPT_RSAPUBLIC_BLOB,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+                &mut required,
+                0,
+            )
+        },
+        "failed to size the Windows Hello public key",
+    )?;
+    let mut public_key = vec![0u8; required as usize];
+    check_ncrypt(
+        unsafe {
+            NCryptExportKey(
+                key,
+                0,
+                BCRYPT_RSAPUBLIC_BLOB,
+                std::ptr::null(),
+                public_key.as_mut_ptr(),
+                required,
+                &mut required,
+                0,
+            )
+        },
+        "failed to export the Windows Hello public key",
+    )?;
+    public_key.truncate(required as usize);
+    Ok(Sha256::digest(&public_key)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+#[cfg(windows)]
+fn recreate_hello_key(key_name: &[u16], parent_window: Option<usize>) -> Result<()> {
+    use windows_sys::Win32::Security::Cryptography::{
+        NCRYPT_OVERWRITE_KEY_FLAG, NCRYPT_PROV_HANDLE, NCRYPT_RSA_ALGORITHM,
+        NCryptCreatePersistedKey, NCryptFinalizeKey, NCryptOpenStorageProvider,
+    };
+
+    let mut provider: NCRYPT_PROV_HANDLE = 0;
+    let provider_name = wide_null(quick_unlock_key_storage_provider_name());
+    check_ncrypt(
+        unsafe { NCryptOpenStorageProvider(&mut provider, provider_name.as_ptr(), 0) },
+        "failed to open Microsoft Passport key storage provider",
+    )?;
+    let _provider = NcryptHandle(provider);
+
+    let mut key = 0;
+    check_ncrypt(
+        unsafe {
+            NCryptCreatePersistedKey(
+                provider,
+                &mut key,
+                NCRYPT_RSA_ALGORITHM,
+                key_name.as_ptr(),
+                0,
+                NCRYPT_OVERWRITE_KEY_FLAG,
+            )
+        },
+        "failed to replace invalidated quick unlock Windows Hello key",
+    )?;
+    with_owned_ncrypt_handle(key, |key| {
+        set_hello_parent_window(key, parent_window)?;
         configure_hello_key(key)?;
         check_ncrypt(
             unsafe { NCryptFinalizeKey(key, 0) },
-            "failed to finalize quick unlock Windows Hello key",
-        )?;
-    }
-    let _key = NcryptHandle(key);
+            "failed to finalize replacement quick unlock Windows Hello key",
+        )
+    })
+}
 
-    operation(key)
+#[cfg(windows)]
+fn set_hello_parent_window(
+    key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+    parent_window: Option<usize>,
+) -> Result<()> {
+    use windows_sys::Win32::Security::Cryptography::{
+        NCRYPT_WINDOW_HANDLE_PROPERTY, NCryptSetProperty,
+    };
+
+    let Some(parent_window) = parent_window else {
+        return Ok(());
+    };
+    let window_handle = parent_window as windows_sys::Win32::Foundation::HWND;
+    let window_handle_bytes = bytes_of(&window_handle);
+    check_ncrypt(
+        unsafe {
+            NCryptSetProperty(
+                key,
+                NCRYPT_WINDOW_HANDLE_PROPERTY,
+                window_handle_bytes.as_ptr(),
+                u32::try_from(window_handle_bytes.len())?,
+                0,
+            )
+        },
+        "failed to set the Windows Hello parent window",
+    )
 }
 
 #[cfg(windows)]
@@ -609,8 +1119,8 @@ fn configure_hello_key(
     key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
 ) -> Result<()> {
     use windows_sys::Win32::Security::Cryptography::{
-        NCRYPT_ALLOW_DECRYPT_FLAG, NCRYPT_KEY_USAGE_PROPERTY, NCRYPT_LENGTH_PROPERTY,
-        NCRYPT_UI_POLICY, NCRYPT_UI_POLICY_PROPERTY, NCryptSetProperty,
+        NCRYPT_ALLOW_DECRYPT_FLAG, NCRYPT_ALLOW_SIGNING_FLAG, NCRYPT_KEY_USAGE_PROPERTY,
+        NCRYPT_LENGTH_PROPERTY, NCryptSetProperty,
     };
 
     let length = 2048u32;
@@ -627,7 +1137,7 @@ fn configure_hello_key(
         },
         "failed to set quick unlock key length",
     )?;
-    let usage = NCRYPT_ALLOW_DECRYPT_FLAG;
+    let usage = NCRYPT_ALLOW_DECRYPT_FLAG | NCRYPT_ALLOW_SIGNING_FLAG;
     let usage_bytes = bytes_of(&usage);
     check_ncrypt(
         unsafe {
@@ -642,45 +1152,79 @@ fn configure_hello_key(
         "failed to set quick unlock key usage",
     )?;
 
-    let title = wide_null("VaultKern Quick Unlock");
-    let friendly_name = wide_null("VaultKern Quick Unlock");
-    let description = wide_null("Protect saved vault credentials with Windows Hello");
-    let policy = NCRYPT_UI_POLICY {
-        dwVersion: 1,
-        dwFlags: quick_unlock_key_ui_policy_flag(),
-        pszCreationTitle: title.as_ptr(),
-        pszFriendlyName: friendly_name.as_ptr(),
-        pszDescription: description.as_ptr(),
+    let cache_type = quick_unlock_ngc_cache_type();
+    let cache_type_bytes = bytes_of(&cache_type);
+    let primary = wide_null("NgcCacheType");
+    let mut status = unsafe {
+        NCryptSetProperty(
+            key,
+            primary.as_ptr(),
+            cache_type_bytes.as_ptr(),
+            u32::try_from(cache_type_bytes.len())?,
+            0,
+        )
     };
-    let policy_bytes = bytes_of(&policy);
+    if status != 0 {
+        let deprecated = wide_null("NgcCacheTypeProperty");
+        status = unsafe {
+            NCryptSetProperty(
+                key,
+                deprecated.as_ptr(),
+                cache_type_bytes.as_ptr(),
+                u32::try_from(cache_type_bytes.len())?,
+                0,
+            )
+        };
+    }
+    check_ncrypt(status, "failed to require Windows Hello authentication")
+}
+
+#[cfg(windows)]
+fn require_fresh_hello_gesture(
+    key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+    context: &str,
+) -> Result<()> {
+    use windows_sys::Win32::Security::Cryptography::{
+        NCRYPT_USE_CONTEXT_PROPERTY, NCryptSetProperty,
+    };
+
+    let gesture_required = quick_unlock_gesture_required();
+    let gesture_bytes = bytes_of(&gesture_required);
+    let gesture_property = wide_null("PinCacheIsGestureRequired");
     check_ncrypt(
         unsafe {
             NCryptSetProperty(
                 key,
-                NCRYPT_UI_POLICY_PROPERTY,
-                policy_bytes.as_ptr(),
-                u32::try_from(policy_bytes.len())?,
+                gesture_property.as_ptr(),
+                gesture_bytes.as_ptr(),
+                u32::try_from(gesture_bytes.len())?,
                 0,
             )
         },
-        "failed to set quick unlock Windows Hello policy",
+        "failed to require a fresh Windows Hello gesture",
+    )?;
+    let context = wide_null(context);
+    check_ncrypt(
+        unsafe {
+            NCryptSetProperty(
+                key,
+                NCRYPT_USE_CONTEXT_PROPERTY,
+                context.as_ptr().cast::<u8>(),
+                u32::try_from(context.len() * std::mem::size_of::<u16>())?,
+                0,
+            )
+        },
+        "failed to set Windows Hello use context",
     )
 }
 
 #[cfg(windows)]
-fn ncrypt_encrypt_oaep_sha256(
+fn ncrypt_encrypt_pkcs1(
     key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
     value: &[u8],
 ) -> Result<Vec<u8>> {
-    use windows_sys::Win32::Security::Cryptography::{
-        BCRYPT_OAEP_PADDING_INFO, BCRYPT_SHA256_ALGORITHM, NCRYPT_PAD_OAEP_FLAG, NCryptEncrypt,
-    };
+    use windows_sys::Win32::Security::Cryptography::{NCRYPT_PAD_PKCS1_FLAG, NCryptEncrypt};
 
-    let mut padding = BCRYPT_OAEP_PADDING_INFO {
-        pszAlgId: BCRYPT_SHA256_ALGORITHM,
-        pbLabel: std::ptr::null_mut(),
-        cbLabel: 0,
-    };
     let mut output_len = 0u32;
     check_ncrypt(
         unsafe {
@@ -688,11 +1232,11 @@ fn ncrypt_encrypt_oaep_sha256(
                 key,
                 value.as_ptr(),
                 u32::try_from(value.len()).context("quick unlock key is too large")?,
-                (&mut padding as *mut BCRYPT_OAEP_PADDING_INFO).cast(),
+                std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 0,
                 &mut output_len,
-                NCRYPT_PAD_OAEP_FLAG,
+                NCRYPT_PAD_PKCS1_FLAG,
             )
         },
         "failed to measure wrapped quick unlock key",
@@ -704,11 +1248,11 @@ fn ncrypt_encrypt_oaep_sha256(
                 key,
                 value.as_ptr(),
                 u32::try_from(value.len()).context("quick unlock key is too large")?,
-                (&mut padding as *mut BCRYPT_OAEP_PADDING_INFO).cast(),
+                std::ptr::null_mut(),
                 output.as_mut_ptr(),
                 output_len,
                 &mut output_len,
-                NCRYPT_PAD_OAEP_FLAG,
+                NCRYPT_PAD_PKCS1_FLAG,
             )
         },
         "failed to wrap quick unlock key",
@@ -718,53 +1262,158 @@ fn ncrypt_encrypt_oaep_sha256(
 }
 
 #[cfg(windows)]
-fn ncrypt_decrypt_oaep_sha256(
+fn ncrypt_decrypt_pkcs1(
     key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
     value: &[u8],
-) -> Result<Vec<u8>> {
-    use windows_sys::Win32::Security::Cryptography::{
-        BCRYPT_OAEP_PADDING_INFO, BCRYPT_SHA256_ALGORITHM, NCRYPT_PAD_OAEP_FLAG, NCryptDecrypt,
-    };
+) -> Result<Zeroizing<Vec<u8>>> {
+    use windows_sys::Win32::Security::Cryptography::{NCRYPT_PAD_PKCS1_FLAG, NCryptDecrypt};
 
-    let mut padding = BCRYPT_OAEP_PADDING_INFO {
-        pszAlgId: BCRYPT_SHA256_ALGORITHM,
-        pbLabel: std::ptr::null_mut(),
-        cbLabel: 0,
-    };
     let mut output_len = 0u32;
-    check_ncrypt(
+    check_ncrypt_decrypt(
         unsafe {
             NCryptDecrypt(
                 key,
                 value.as_ptr(),
                 u32::try_from(value.len()).context("wrapped quick unlock key is too large")?,
-                (&mut padding as *mut BCRYPT_OAEP_PADDING_INFO).cast(),
+                std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 0,
                 &mut output_len,
-                NCRYPT_PAD_OAEP_FLAG,
+                NCRYPT_PAD_PKCS1_FLAG,
             )
         },
         "failed to measure unwrapped quick unlock key",
     )?;
-    let mut output = vec![0u8; usize::try_from(output_len)?];
-    check_ncrypt(
+    let mut output = Zeroizing::new(vec![0u8; usize::try_from(output_len)?]);
+    check_ncrypt_decrypt(
         unsafe {
             NCryptDecrypt(
                 key,
                 value.as_ptr(),
                 u32::try_from(value.len()).context("wrapped quick unlock key is too large")?,
-                (&mut padding as *mut BCRYPT_OAEP_PADDING_INFO).cast(),
+                std::ptr::null_mut(),
                 output.as_mut_ptr(),
                 output_len,
                 &mut output_len,
-                NCRYPT_PAD_OAEP_FLAG,
+                NCRYPT_PAD_PKCS1_FLAG,
             )
         },
         "failed to unwrap quick unlock key with Windows Hello",
     )?;
     output.truncate(usize::try_from(output_len)?);
     Ok(output)
+}
+
+#[cfg(windows)]
+fn current_user_sid() -> Result<String> {
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError, LocalFree};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        anyhow::bail!("failed to open current process token: {}", unsafe {
+            GetLastError()
+        });
+    }
+    let _token = WindowsHandle(token);
+
+    let mut required = 0u32;
+    unsafe {
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required);
+    }
+    if required == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        anyhow::bail!("failed to measure current user SID: {}", unsafe {
+            GetLastError()
+        });
+    }
+    let word_bytes = std::mem::size_of::<usize>();
+    let mut buffer = vec![0usize; usize::try_from(required)?.div_ceil(word_bytes)];
+    if unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    } == 0
+    {
+        anyhow::bail!("failed to read current user SID: {}", unsafe {
+            GetLastError()
+        });
+    }
+    let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let mut sid_text = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(token_user.User.Sid, &mut sid_text) } == 0 {
+        anyhow::bail!("failed to format current user SID: {}", unsafe {
+            GetLastError()
+        });
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *sid_text.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let sid = String::from_utf16(unsafe { std::slice::from_raw_parts(sid_text, len) })
+        .context("current user SID is not valid UTF-16")?;
+    unsafe {
+        LocalFree(sid_text.cast());
+    }
+    Ok(sid)
+}
+
+#[cfg(windows)]
+struct WindowsHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for WindowsHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+struct OwnedResource<H: Copy, C: FnMut(H)> {
+    handle: H,
+    close: C,
+}
+
+#[cfg(any(windows, test))]
+impl<H: Copy, C: FnMut(H)> Drop for OwnedResource<H, C> {
+    fn drop(&mut self) {
+        (self.close)(self.handle);
+    }
+}
+
+#[cfg(any(windows, test))]
+fn with_owned_resource<T, H: Copy, C: FnMut(H)>(
+    handle: H,
+    close: C,
+    operation: impl FnOnce(H) -> Result<T>,
+) -> Result<T> {
+    let _resource = OwnedResource { handle, close };
+    operation(handle)
+}
+
+#[cfg(windows)]
+fn with_owned_ncrypt_handle<T>(
+    handle: windows_sys::Win32::Security::Cryptography::NCRYPT_HANDLE,
+    operation: impl FnOnce(windows_sys::Win32::Security::Cryptography::NCRYPT_HANDLE) -> Result<T>,
+) -> Result<T> {
+    with_owned_resource(
+        handle,
+        |handle| unsafe {
+            windows_sys::Win32::Security::Cryptography::NCryptFreeObject(handle);
+        },
+        operation,
+    )
 }
 
 #[cfg(windows)]
@@ -785,8 +1434,28 @@ impl Drop for NcryptHandle {
 fn check_ncrypt(status: windows_sys::core::HRESULT, message: &str) -> Result<()> {
     if status == 0 {
         Ok(())
+    } else if matches!(status as u32, 0x8009_0036 | 0x8007_04c7) {
+        Err(SecureStorageError::cancelled(format!("{message}: 0x{:08x}", status as u32)).into())
+    } else if is_hello_key_invalidated_status(status as u32) {
+        Err(SecureStorageError::hello_key_invalidated(format!(
+            "{message}: 0x{:08x}",
+            status as u32
+        ))
+        .into())
     } else {
         anyhow::bail!("{message}: 0x{:08x}", status as u32)
+    }
+}
+
+#[cfg(windows)]
+fn check_ncrypt_decrypt(status: windows_sys::core::HRESULT, message: &str) -> Result<()> {
+    if is_quick_unlock_record_invalidated_status(status as u32) {
+        Err(
+            SecureStorageError::record_invalidated(format!("{message}: 0x{:08x}", status as u32))
+                .into(),
+        )
+    } else {
+        check_ncrypt(status, message)
     }
 }
 
@@ -803,7 +1472,7 @@ fn wide_null(value: &str) -> Vec<u16> {
 }
 
 pub(crate) struct MemorySecureStorageProvider {
-    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    values: RefCell<BTreeMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl MemorySecureStorageProvider {
@@ -818,11 +1487,11 @@ impl SecureStorageProvider for MemorySecureStorageProvider {
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
         self.values
             .borrow_mut()
-            .insert(key.to_owned(), value.to_owned());
+            .insert(key.to_owned(), Zeroizing::new(value.to_owned()));
         Ok(())
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(self.values.borrow().get(key).cloned())
     }
 
@@ -834,52 +1503,16 @@ impl SecureStorageProvider for MemorySecureStorageProvider {
         self.values.borrow_mut().remove(key);
         Ok(())
     }
-}
 
-pub(crate) struct FailingStoreSecureStorageProvider {
-    values: RefCell<BTreeMap<String, Vec<u8>>>,
-    stores_before_failure: RefCell<usize>,
-}
-
-impl FailingStoreSecureStorageProvider {
-    pub(crate) fn new(stores_before_failure: usize) -> Self {
-        Self {
-            values: RefCell::new(BTreeMap::new()),
-            stores_before_failure: RefCell::new(stores_before_failure),
-        }
-    }
-}
-
-impl SecureStorageProvider for FailingStoreSecureStorageProvider {
-    fn store(&self, key: &str, value: &[u8]) -> Result<()> {
-        let mut stores_before_failure = self.stores_before_failure.borrow_mut();
-        if *stores_before_failure == 0 {
-            anyhow::bail!("injected secure storage store failure");
-        }
-
-        *stores_before_failure -= 1;
-        self.values
-            .borrow_mut()
-            .insert(key.to_owned(), value.to_owned());
-        Ok(())
-    }
-
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.values.borrow().get(key).cloned())
-    }
-
-    fn contains(&self, key: &str) -> Result<bool> {
-        Ok(self.values.borrow().contains_key(key))
-    }
-
-    fn delete(&self, key: &str) -> Result<()> {
-        self.values.borrow_mut().remove(key);
-        Ok(())
+    fn purge_quick_unlock_records(&self) -> Result<usize> {
+        let count = self.values.borrow().len();
+        self.values.borrow_mut().clear();
+        Ok(count)
     }
 }
 
 pub(crate) struct FailingContainsSecureStorageProvider {
-    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    values: RefCell<BTreeMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl FailingContainsSecureStorageProvider {
@@ -894,11 +1527,11 @@ impl SecureStorageProvider for FailingContainsSecureStorageProvider {
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
         self.values
             .borrow_mut()
-            .insert(key.to_owned(), value.to_owned());
+            .insert(key.to_owned(), Zeroizing::new(value.to_owned()));
         Ok(())
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(self.values.borrow().get(key).cloned())
     }
 
@@ -910,10 +1543,16 @@ impl SecureStorageProvider for FailingContainsSecureStorageProvider {
         self.values.borrow_mut().remove(key);
         Ok(())
     }
+
+    fn purge_quick_unlock_records(&self) -> Result<usize> {
+        let count = self.values.borrow().len();
+        self.values.borrow_mut().clear();
+        Ok(count)
+    }
 }
 
 pub(crate) struct FailingDeleteSecureStorageProvider {
-    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    values: RefCell<BTreeMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl FailingDeleteSecureStorageProvider {
@@ -928,11 +1567,11 @@ impl SecureStorageProvider for FailingDeleteSecureStorageProvider {
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
         self.values
             .borrow_mut()
-            .insert(key.to_owned(), value.to_owned());
+            .insert(key.to_owned(), Zeroizing::new(value.to_owned()));
         Ok(())
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(self.values.borrow().get(key).cloned())
     }
 
@@ -943,21 +1582,210 @@ impl SecureStorageProvider for FailingDeleteSecureStorageProvider {
     fn delete(&self, _key: &str) -> Result<()> {
         anyhow::bail!("injected secure storage delete failure")
     }
+
+    fn purge_quick_unlock_records(&self) -> Result<usize> {
+        anyhow::bail!("injected secure storage delete failure")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        is_quick_unlock_envelope, publish_quick_unlock_record, publish_quick_unlock_record_with,
-        quick_unlock_key_storage_provider_name, quick_unlock_key_ui_policy_flag,
-        quick_unlock_record_lock_path, quick_unlock_replacement_outcome_is_unknown,
-        quick_unlock_storage_dir,
+        MemorySecureStorageProvider, SecureStorageError, SecureStorageProvider,
+        delete_quick_unlock_record, is_quick_unlock_envelope, is_secure_storage_cancelled,
+        publish_quick_unlock_record, publish_quick_unlock_record_with,
+        purge_quick_unlock_record_directory, quick_unlock_gesture_required,
+        quick_unlock_key_storage_provider_name, quick_unlock_ngc_cache_type,
+        quick_unlock_persistent_key_name, quick_unlock_record_lock_path,
+        quick_unlock_replacement_outcome_is_unknown, quick_unlock_storage_dir,
+        verify_or_recreate_hello_key, with_owned_resource,
     };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock,
     };
+    use zeroize::Zeroizing;
+
+    #[test]
+    fn loaded_secure_storage_bytes_have_zeroizing_ownership() {
+        fn assert_zeroizing(_: &Zeroizing<Vec<u8>>) {}
+
+        let storage = MemorySecureStorageProvider::new();
+        storage.store("vault", b"secret").unwrap();
+        let loaded = storage.load("vault").unwrap().unwrap();
+
+        assert_zeroizing(&loaded);
+        assert_eq!(loaded.as_slice(), b"secret");
+    }
+
+    #[test]
+    fn deleting_quick_unlock_removes_target_and_recovery_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.bin");
+        let temp = dir.path().join(".vault.bin.vaultkern.tmp.test");
+        let backup = dir.path().join(".vault.bin.vaultkern.bak.test");
+        std::fs::write(&path, b"current-secret").unwrap();
+        std::fs::write(&temp, b"temporary-secret").unwrap();
+        std::fs::write(&backup, b"previous-secret").unwrap();
+
+        delete_quick_unlock_record(&path).unwrap();
+
+        assert!(!path.exists());
+        assert!(!temp.exists());
+        assert!(!backup.exists());
+        delete_quick_unlock_record(&path).expect("repeated deletion is durable and idempotent");
+    }
+
+    #[test]
+    fn purging_quick_unlock_uses_the_actual_record_directory_not_a_reference_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let digest = "a".repeat(64);
+        let record = dir.path().join(format!("quick_unlock_{digest}.bin"));
+        let backup = dir
+            .path()
+            .join(format!(".quick_unlock_{digest}.bin.vaultkern.bak.test"));
+        let unrelated = dir.path().join("unrelated.bin");
+        std::fs::write(&record, b"record").unwrap();
+        std::fs::write(&backup, b"backup").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        assert_eq!(purge_quick_unlock_record_directory(dir.path()).unwrap(), 1);
+        assert!(!record.exists());
+        assert!(!backup.exists());
+        assert!(unrelated.exists());
+    }
     use crate::state_paths::{extension_state_dir, runtime_state_dir};
     use std::time::Duration;
+
+    #[test]
+    fn owned_resource_closes_once_when_setup_fails() {
+        let closes = std::cell::Cell::new(0);
+
+        let error = with_owned_resource(
+            7usize,
+            |_| closes.set(closes.get() + 1),
+            |_| -> anyhow::Result<()> { anyhow::bail!("injected setup failure") },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("injected setup failure"));
+        assert_eq!(closes.get(), 1);
+    }
+
+    #[test]
+    fn hello_reenrollment_recreates_an_invalidated_persisted_key() {
+        let recreated = std::cell::Cell::new(false);
+
+        let result = verify_or_recreate_hello_key(
+            || {
+                Err::<_, anyhow::Error>(
+                    SecureStorageError::hello_key_invalidated(
+                        "persisted Hello key was invalidated",
+                    )
+                    .into(),
+                )
+            },
+            || {
+                recreated.set(true);
+                Ok("replacement key")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, "replacement key");
+        assert!(recreated.get());
+    }
+
+    #[test]
+    fn hello_reenrollment_does_not_replace_a_key_after_a_transient_verification_failure() {
+        let recreated = std::cell::Cell::new(false);
+
+        let error = verify_or_recreate_hello_key(
+            || anyhow::bail!("Microsoft Passport KSP is temporarily unavailable"),
+            || {
+                recreated.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("temporarily unavailable"));
+        assert!(!recreated.get());
+    }
+
+    #[test]
+    fn hello_reenrollment_does_not_replace_a_key_when_the_user_cancels() {
+        let recreated = std::cell::Cell::new(false);
+
+        let error = verify_or_recreate_hello_key(
+            || Err::<(), _>(SecureStorageError::cancelled("Windows Hello was cancelled").into()),
+            || {
+                recreated.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(is_secure_storage_cancelled(&error));
+        assert!(!recreated.get());
+    }
+
+    #[test]
+    fn only_definitive_hello_key_failures_trigger_reenrollment() {
+        assert!(super::is_hello_key_invalidated_status(
+            super::NTE_BAD_KEY_STATE
+        ));
+        assert!(super::is_hello_key_invalidated_status(super::NTE_NO_KEY));
+        assert!(super::is_hello_key_invalidated_status(
+            super::NTE_BAD_KEYSET
+        ));
+        assert!(!super::is_hello_key_invalidated_status(0x8009_0010));
+        assert!(!super::is_hello_key_invalidated_status(0x8009_0030));
+    }
+
+    #[test]
+    fn corrupt_wrapped_key_statuses_invalidate_only_the_unlock_record() {
+        for status in [0x8009_0004, 0x8009_0005, 0x8009_0006] {
+            assert!(super::is_quick_unlock_record_invalidated_status(status));
+            assert!(!super::is_hello_key_invalidated_status(status));
+        }
+        assert!(!super::is_quick_unlock_record_invalidated_status(
+            super::NTE_BAD_KEY_STATE
+        ));
+        assert!(!super::is_quick_unlock_record_invalidated_status(
+            0x8009_0030
+        ));
+    }
+
+    #[test]
+    fn hello_key_creation_only_follows_a_definitive_missing_key_status() {
+        use super::HelloKeyOpenDisposition::{CreateMissing, ReturnError, UseOpened};
+
+        assert_eq!(super::hello_key_open_disposition(0, true), UseOpened);
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_NO_KEY, true),
+            CreateMissing
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_BAD_KEYSET, true),
+            CreateMissing
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_BAD_KEY_STATE, true),
+            ReturnError
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(0x8009_0030, true),
+            ReturnError
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_NO_KEY, false),
+            ReturnError
+        );
+        assert_eq!(
+            super::hello_key_open_disposition(super::NTE_BAD_KEYSET, false),
+            ReturnError
+        );
+    }
 
     #[test]
     fn quick_unlock_record_publication_creates_and_atomically_replaces_complete_bytes() {
@@ -1425,14 +2253,14 @@ mod tests {
     }
 
     #[test]
-    fn quick_unlock_storage_dir_is_scoped_by_extension_id() {
+    fn quick_unlock_storage_dir_has_one_resident_owner() {
         assert_eq!(
-            quick_unlock_storage_dir(Some("kblgblkjghklighdgmejjfondchkjcgf")),
-            extension_state_dir("kblgblkjghklighdgmejjfondchkjcgf").join("quick-unlock")
-        );
-        assert_eq!(
-            quick_unlock_storage_dir(None),
+            quick_unlock_storage_dir(),
             runtime_state_dir().join("quick-unlock")
+        );
+        assert_ne!(
+            quick_unlock_storage_dir(),
+            extension_state_dir("kblgblkjghklighdgmejjfondchkjcgf").join("quick-unlock")
         );
     }
 
@@ -1440,7 +2268,7 @@ mod tests {
     fn quick_unlock_presence_marker_rejects_legacy_dpapi_blobs() {
         assert!(!is_quick_unlock_envelope(b"legacy-dpapi-ciphertext"));
         assert!(is_quick_unlock_envelope(
-            br#"{"version":2,"scheme":"windows-cng-rsa-oaep-sha256-aes-256-gcm-windows-hello-v2","wrapped_key":"","nonce":"","ciphertext":""}"#
+            br#"{"version":4,"scheme":"windows-passport-rsa-pkcs1-aes-256-gcm-hello-v4","public_key_sha256":"fixture","wrapped_key":"","nonce":"","ciphertext":""}"#
         ));
         assert!(!is_quick_unlock_envelope(
             br#"{"version":1,"scheme":"windows-cng-rsa-oaep-sha256-aes-256-gcm","wrapped_key":"","nonce":"","ciphertext":""}"#
@@ -1448,25 +2276,23 @@ mod tests {
     }
 
     #[test]
-    fn quick_unlock_uses_tpm_platform_key_storage_provider() {
+    fn quick_unlock_uses_passport_ksp_and_sid_scoped_key_name() {
         assert_eq!(
             quick_unlock_key_storage_provider_name(),
-            "Microsoft Platform Crypto Provider"
+            "Microsoft Passport Key Storage Provider"
         );
+        let name = quick_unlock_persistent_key_name(
+            "S-1-5-21-111-222-333-1001",
+            std::path::Path::new(r"C:\Users\test\VaultKern\quick-unlock"),
+        );
+        let prefix = "S-1-5-21-111-222-333-1001//VaultKern/QuickUnlock/";
+        assert!(name.starts_with(prefix));
+        assert_eq!(name.len(), prefix.len() + 64);
     }
 
     #[test]
-    fn quick_unlock_key_policy_does_not_request_a_second_key_password() {
-        const NCRYPT_UI_FORCE_HIGH_PROTECTION_FLAG: u32 = 2;
-        const NCRYPT_UI_FINGERPRINT_PROTECTION_FLAG: u32 = 4;
-
-        assert_eq!(
-            quick_unlock_key_ui_policy_flag(),
-            NCRYPT_UI_FINGERPRINT_PROTECTION_FLAG
-        );
-        assert_ne!(
-            quick_unlock_key_ui_policy_flag(),
-            NCRYPT_UI_FORCE_HIGH_PROTECTION_FLAG
-        );
+    fn quick_unlock_requires_auth_mandatory_and_a_fresh_gesture() {
+        assert_eq!(quick_unlock_ngc_cache_type(), 1);
+        assert_eq!(quick_unlock_gesture_required(), 1);
     }
 }
