@@ -23,7 +23,6 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 #[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
-#[cfg(windows)]
 use zeroize::Zeroizing;
 
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
@@ -528,7 +527,7 @@ pub trait SecureStorageProvider {
         Ok(())
     }
     fn store(&self, key: &str, value: &[u8]) -> Result<()>;
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>>;
     fn contains(&self, key: &str) -> Result<bool>;
     fn store_requires_user_presence(&self) -> bool {
         false
@@ -546,7 +545,7 @@ impl SecureStorageProvider for UnsupportedSecureStorageProvider {
         anyhow::bail!("secure storage is not implemented on this host")
     }
 
-    fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, _key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(None)
     }
 
@@ -632,12 +631,12 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
     }
 
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
-        let mut data_key = [0u8; 32];
+        let mut data_key = Zeroizing::new([0u8; 32]);
         let mut nonce = [0u8; 12];
-        fill_random(&mut data_key)?;
+        fill_random(&mut data_key[..])?;
         fill_random(&mut nonce)?;
 
-        let cipher = Aes256Gcm::new_from_slice(&data_key)
+        let cipher = Aes256Gcm::new_from_slice(&data_key[..])
             .map_err(|_| anyhow::anyhow!("failed to initialize quick unlock cipher"))?;
         let ciphertext = cipher
             .encrypt(Nonce::from_slice(&nonce), value)
@@ -646,7 +645,7 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
             &self.wrapping_key_name()?,
             false,
             self.parent_window,
-            |key, _created| ncrypt_encrypt_pkcs1(key, &data_key),
+            |key, _created| ncrypt_encrypt_pkcs1(key, &data_key[..]),
         )?;
         let envelope = QuickUnlockEnvelope {
             version: QUICK_UNLOCK_ENVELOPE_VERSION,
@@ -660,7 +659,7 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
         publish_quick_unlock_record(&self.path_for(key), &bytes)
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let path = self.path_for(key);
         if !path.is_file() {
             return Ok(None);
@@ -722,11 +721,15 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
                 "decrypted quick unlock data key has an invalid length",
             )
         })?;
-        let plaintext = cipher
-            .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
-            .map_err(|_| {
-                SecureStorageError::record_invalidated("failed to decrypt quick unlock credentials")
-            })?;
+        let plaintext = Zeroizing::new(
+            cipher
+                .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+                .map_err(|_| {
+                    SecureStorageError::record_invalidated(
+                        "failed to decrypt quick unlock credentials",
+                    )
+                })?,
+        );
         Ok(Some(plaintext))
     }
 
@@ -749,7 +752,8 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
     fn delete(&self, key: &str) -> Result<()> {
         let path = self.path_for(key);
         if path.exists() {
-            fs::remove_file(path)?;
+            fs::remove_file(&path)?;
+            sync_parent(&path)?;
         }
         Ok(())
     }
@@ -770,7 +774,7 @@ fn verify_hello_key_for_enrollment(
         key,
         "Verify with Windows Hello to enable quick unlock for this VaultKern vault",
     )?;
-    let unwrapped = Zeroizing::new(ncrypt_decrypt_pkcs1(key, &wrapped_challenge)?);
+    let unwrapped = ncrypt_decrypt_pkcs1(key, &wrapped_challenge)?;
     if unwrapped.as_slice() != challenge {
         anyhow::bail!("Windows Hello quick unlock key verification failed");
     }
@@ -1081,7 +1085,7 @@ fn ncrypt_encrypt_pkcs1(
 fn ncrypt_decrypt_pkcs1(
     key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
     value: &[u8],
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     use windows_sys::Win32::Security::Cryptography::{NCRYPT_PAD_PKCS1_FLAG, NCryptDecrypt};
 
     let mut output_len = 0u32;
@@ -1100,7 +1104,7 @@ fn ncrypt_decrypt_pkcs1(
         },
         "failed to measure unwrapped quick unlock key",
     )?;
-    let mut output = vec![0u8; usize::try_from(output_len)?];
+    let mut output = Zeroizing::new(vec![0u8; usize::try_from(output_len)?]);
     check_ncrypt(
         unsafe {
             NCryptDecrypt(
@@ -1276,7 +1280,7 @@ fn wide_null(value: &str) -> Vec<u16> {
 }
 
 pub(crate) struct MemorySecureStorageProvider {
-    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    values: RefCell<BTreeMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl MemorySecureStorageProvider {
@@ -1291,11 +1295,11 @@ impl SecureStorageProvider for MemorySecureStorageProvider {
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
         self.values
             .borrow_mut()
-            .insert(key.to_owned(), value.to_owned());
+            .insert(key.to_owned(), Zeroizing::new(value.to_owned()));
         Ok(())
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(self.values.borrow().get(key).cloned())
     }
 
@@ -1310,7 +1314,7 @@ impl SecureStorageProvider for MemorySecureStorageProvider {
 }
 
 pub(crate) struct FailingContainsSecureStorageProvider {
-    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    values: RefCell<BTreeMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl FailingContainsSecureStorageProvider {
@@ -1325,11 +1329,11 @@ impl SecureStorageProvider for FailingContainsSecureStorageProvider {
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
         self.values
             .borrow_mut()
-            .insert(key.to_owned(), value.to_owned());
+            .insert(key.to_owned(), Zeroizing::new(value.to_owned()));
         Ok(())
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(self.values.borrow().get(key).cloned())
     }
 
@@ -1344,7 +1348,7 @@ impl SecureStorageProvider for FailingContainsSecureStorageProvider {
 }
 
 pub(crate) struct FailingDeleteSecureStorageProvider {
-    values: RefCell<BTreeMap<String, Vec<u8>>>,
+    values: RefCell<BTreeMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 impl FailingDeleteSecureStorageProvider {
@@ -1359,11 +1363,11 @@ impl SecureStorageProvider for FailingDeleteSecureStorageProvider {
     fn store(&self, key: &str, value: &[u8]) -> Result<()> {
         self.values
             .borrow_mut()
-            .insert(key.to_owned(), value.to_owned());
+            .insert(key.to_owned(), Zeroizing::new(value.to_owned()));
         Ok(())
     }
 
-    fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(self.values.borrow().get(key).cloned())
     }
 
@@ -1379,16 +1383,30 @@ impl SecureStorageProvider for FailingDeleteSecureStorageProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        SecureStorageError, is_quick_unlock_envelope, is_secure_storage_cancelled,
-        publish_quick_unlock_record, publish_quick_unlock_record_with,
-        quick_unlock_gesture_required, quick_unlock_key_storage_provider_name,
-        quick_unlock_ngc_cache_type, quick_unlock_persistent_key_name,
-        quick_unlock_record_lock_path, quick_unlock_replacement_outcome_is_unknown,
-        quick_unlock_storage_dir, verify_or_recreate_hello_key, with_owned_resource,
+        MemorySecureStorageProvider, SecureStorageError, SecureStorageProvider,
+        is_quick_unlock_envelope, is_secure_storage_cancelled, publish_quick_unlock_record,
+        publish_quick_unlock_record_with, quick_unlock_gesture_required,
+        quick_unlock_key_storage_provider_name, quick_unlock_ngc_cache_type,
+        quick_unlock_persistent_key_name, quick_unlock_record_lock_path,
+        quick_unlock_replacement_outcome_is_unknown, quick_unlock_storage_dir,
+        verify_or_recreate_hello_key, with_owned_resource,
     };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock,
     };
+    use zeroize::Zeroizing;
+
+    #[test]
+    fn loaded_secure_storage_bytes_have_zeroizing_ownership() {
+        fn assert_zeroizing(_: &Zeroizing<Vec<u8>>) {}
+
+        let storage = MemorySecureStorageProvider::new();
+        storage.store("vault", b"secret").unwrap();
+        let loaded = storage.load("vault").unwrap().unwrap();
+
+        assert_zeroizing(&loaded);
+        assert_eq!(loaded.as_slice(), b"secret");
+    }
     use crate::state_paths::{extension_state_dir, runtime_state_dir};
     use std::time::Duration;
 

@@ -382,9 +382,41 @@ impl LocalFileWriteTxn {
         }
         #[cfg(windows)]
         {
-            let backup = unique_sibling_path(&self.target, "bak")?;
-            faults.check(DurableFaultPoint::BackupPublished)?;
-            Ok(backup)
+            let mut published = None;
+            for _ in 0..128 {
+                let backup = unique_sibling_path(&self.target, "bak")?;
+                let mut backup_file = match OpenOptions::new()
+                    .create_new(true)
+                    .read(true)
+                    .write(true)
+                    .open(&backup)
+                {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                };
+                let copy_result = (|| {
+                    let mut source = File::open(&self.target)?;
+                    io::copy(&mut source, &mut backup_file)?;
+                    backup_file.sync_all()?;
+                    sync_parent(&self.target)?;
+                    faults.check(DurableFaultPoint::BackupPublished)
+                })();
+                if let Err(error) = copy_result {
+                    drop(backup_file);
+                    let _ = remove_if_exists(&backup);
+                    let _ = sync_parent(&self.target);
+                    return Err(error);
+                }
+                published = Some(backup);
+                break;
+            }
+            published.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "could not create a unique local vault backup",
+                )
+            })
         }
         #[cfg(not(any(unix, windows)))]
         {

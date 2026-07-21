@@ -243,7 +243,6 @@ fn unlock_from_blob_with_cache_policy(
             .context("failed to delete malformed unlock blob")?;
         return Ok(UnlockAttempt::NotEnrolled);
     }
-    let encoded = Zeroizing::new(encoded);
     let blob = match UnlockBlob::decode(&encoded) {
         Ok(blob) => blob,
         Err(_) => {
@@ -338,6 +337,7 @@ mod tests {
         CompositeKey, Compression, KdbxCipher, KdbxVersion, SaveKdf, SaveProfile, TransformedKey,
         Vault, derive_transformed_key, save_kdbx_bytes,
     };
+    use zeroize::Zeroizing;
 
     #[derive(Default)]
     struct CountingStore {
@@ -376,9 +376,9 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, _key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        fn load(&self, _key: &str) -> anyhow::Result<Option<Zeroizing<Vec<u8>>>> {
             match self.failure.get() {
-                LoadFailure::None => Ok(self.value.borrow().clone()),
+                LoadFailure::None => Ok(self.value.borrow().clone().map(Zeroizing::new)),
                 LoadFailure::Cancelled => {
                     Err(SecureStorageError::cancelled("user cancelled").into())
                 }
@@ -412,8 +412,8 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, _key: &str) -> anyhow::Result<Option<Vec<u8>>> {
-            Ok(self.value.borrow().clone())
+        fn load(&self, _key: &str) -> anyhow::Result<Option<Zeroizing<Vec<u8>>>> {
+            Ok(self.value.borrow().clone().map(Zeroizing::new))
         }
 
         fn contains(&self, _key: &str) -> anyhow::Result<bool> {

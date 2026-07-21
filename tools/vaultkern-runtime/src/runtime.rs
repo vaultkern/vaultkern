@@ -91,6 +91,8 @@ use crate::unlock::{
 };
 use crate::vault_reference_store::{StoredVaultSource, VaultReferenceStore};
 
+const VAULTKERN_KDBX_GENERATOR: &str = "VaultKern";
+
 fn canonical_custom_fields(fields: &[EntryCustomFieldDto]) -> Option<BTreeMap<&str, (&str, bool)>> {
     let canonical = fields
         .iter()
@@ -256,6 +258,11 @@ struct SessionLoadedDatabase {
     vault: Vault,
 }
 
+enum SourceRefreshConflictDisposition {
+    UploadedConflictCopy { warning: String },
+    Pending { status: VaultSourceStatusDto },
+}
+
 pub struct Runtime {
     core: KeepassCore,
     vault_session: VaultSession,
@@ -269,7 +276,6 @@ pub struct Runtime {
     secure_storage: Box<dyn SecureStorageProvider>,
     allow_unlock_kdf: bool,
     passkey_ceremonies: BTreeMap<String, PasskeyCeremonyLedgerEntry>,
-    recent_unlock_user_verification: Option<PasskeyUserVerificationProof>,
     passkey_credential_id_generator: Box<dyn FnMut() -> String>,
     fixed_unix_time: Option<u64>,
     fixed_unix_time_ms: Option<u64>,
@@ -319,6 +325,25 @@ impl Runtime {
             return Ok(local);
         }
         anyhow::bail!("KDBX encryption profile changed concurrently")
+    }
+
+    fn prepare_source_refresh_rebase(
+        base_vault: &Vault,
+        local_vault: &Vault,
+        remote_vault: &Vault,
+        base_save_profile: &SaveProfile,
+        local_save_profile: &SaveProfile,
+        remote_save_profile: &SaveProfile,
+    ) -> Result<(Vault, SaveProfile)> {
+        if !has_vaultkern_sync_lineage(base_vault, remote_vault) {
+            anyhow::bail!("current generation has foreign or unclear writer lineage");
+        }
+        let merged_save_profile =
+            Self::merge_save_profile(base_save_profile, local_save_profile, remote_save_profile)
+                .context("cannot merge concurrent encryption profile changes")?;
+        let patched = three_way_field_patch(base_vault, local_vault, remote_vault)
+            .context("changes cannot be represented as a field patch")?;
+        Ok((patched.vault, merged_save_profile))
     }
 
     pub fn new() -> Self {
@@ -373,7 +398,6 @@ impl Runtime {
             secure_storage,
             allow_unlock_kdf,
             passkey_ceremonies: BTreeMap::new(),
-            recent_unlock_user_verification: None,
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
             fixed_unix_time_ms: None,
@@ -402,7 +426,6 @@ impl Runtime {
             secure_storage: Box::new(UnsupportedSecureStorageProvider),
             allow_unlock_kdf: true,
             passkey_ceremonies: BTreeMap::new(),
-            recent_unlock_user_verification: None,
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
             fixed_unix_time_ms: None,
@@ -574,6 +597,10 @@ impl Runtime {
         } else {
             OneDriveMemoryWriteBehavior::OutcomeUnknownNotCommitted
         });
+    }
+
+    pub fn fail_next_test_onedrive_conflict_copy(&self) {
+        self.one_drive.fail_next_memory_conflict_copy();
     }
 
     pub fn open_local_vault(&mut self, path: &str) -> Result<VaultHandleDto> {
@@ -1074,7 +1101,6 @@ impl Runtime {
         loaded.save_profile = save_profile;
         loaded.requires_source_migration = requires_source_migration;
         loaded.name = name;
-        self.recent_unlock_user_verification = None;
         Ok(())
     }
 
@@ -1150,7 +1176,6 @@ impl Runtime {
             }
         }
         self.vault_session.lock_all();
-        self.recent_unlock_user_verification = None;
     }
 
     pub fn enable_quick_unlock_for_current_vault(
@@ -1286,10 +1311,6 @@ impl Runtime {
             .context("vault disappeared after quick unlock")?;
         loaded.save_profile = save_profile;
         loaded.name = handle.name;
-        self.record_recent_unlock_user_verification(
-            &handle.vault_id,
-            PasskeyUserVerificationMethodDto::QuickUnlock,
-        );
         Ok(())
     }
 
@@ -1372,7 +1393,7 @@ impl Runtime {
             anyhow::bail!("passkey user verification vault mismatch");
         }
         let validation_epoch_ms = self.current_unix_time_ms();
-        let recent_unlock_verified = {
+        {
             let entry = self
                 .passkey_ceremonies
                 .get(ceremony_token)
@@ -1382,26 +1403,16 @@ impl Runtime {
             }
             validate_passkey_ceremony_not_expired(entry, validation_epoch_ms)?;
             validate_passkey_ceremony_vault_binding(entry, vault_id)?;
-            self.recent_unlock_user_verification_matches(
-                entry,
-                vault_id,
-                method,
-                validation_epoch_ms,
-            )
-        };
+        }
 
         match method {
             PasskeyUserVerificationMethodDto::MasterPassword => {
-                if !recent_unlock_verified {
-                    let password =
-                        password.context("passkey user verification password is required")?;
-                    self.verify_passkey_user_with_master_password(vault_id, password)?;
-                }
+                let password =
+                    password.context("passkey user verification password is required")?;
+                self.verify_passkey_user_with_master_password(vault_id, password)?;
             }
             PasskeyUserVerificationMethodDto::QuickUnlock => {
-                if !recent_unlock_verified {
-                    self.verify_passkey_user_with_quick_unlock(vault_id)?;
-                }
+                self.verify_passkey_user_with_quick_unlock(vault_id)?;
             }
         }
 
@@ -1425,37 +1436,6 @@ impl Runtime {
             method,
             verified_at_epoch_ms: verified_at_epoch_ms as i64,
         })
-    }
-
-    fn record_recent_unlock_user_verification(
-        &mut self,
-        vault_id: &str,
-        method: PasskeyUserVerificationMethodDto,
-    ) {
-        let now_epoch_ms = self.current_unix_time_ms();
-        self.recent_unlock_user_verification = Some(PasskeyUserVerificationProof {
-            vault_id: vault_id.to_owned(),
-            method,
-            verified_at_epoch_ms: now_epoch_ms,
-        });
-    }
-
-    fn recent_unlock_user_verification_matches(
-        &self,
-        entry: &PasskeyCeremonyLedgerEntry,
-        vault_id: &str,
-        method: PasskeyUserVerificationMethodDto,
-        now_epoch_ms: u64,
-    ) -> bool {
-        self.recent_unlock_user_verification
-            .as_ref()
-            .is_some_and(|proof| {
-                proof.vault_id == vault_id
-                    && proof.method == method
-                    && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
-                    && proof.verified_at_epoch_ms <= now_epoch_ms
-                    && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
-            })
     }
 
     fn verify_passkey_user_with_master_password(
@@ -2441,14 +2421,16 @@ impl Runtime {
             Some(discoverable),
             client_data_json_base64url,
         )?;
-        let user_verified = self.passkey_ceremony_user_verified(ceremony_token, vault_id)?;
         let credential_id = credential_id.context("passkey assertion credential id is required")?;
-        let effective_user_presence_verified = user_presence_verified || user_verified;
+        let effective_user_presence_verified = user_presence_verified
+            || self.passkey_ceremony_user_verification_is_valid(ceremony_token, vault_id)?;
         if !effective_user_presence_verified {
             anyhow::bail!("passkey user presence was not verified");
         }
         let _ = self.loaded_vault(vault_id)?;
         self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
+        self.consume_passkey_ceremony_user_verification(ceremony_token, vault_id)?;
+        let user_verified = true;
         let vault = self.loaded_vault(vault_id)?;
         let passkey = find_unique_passkey_by_credential_id_and_relying_party(
             &vault.root,
@@ -2528,23 +2510,44 @@ impl Runtime {
         })
     }
 
-    fn passkey_ceremony_user_verified(&self, ceremony_token: &str, vault_id: &str) -> Result<bool> {
+    fn passkey_ceremony_user_verification_is_valid(
+        &self,
+        ceremony_token: &str,
+        vault_id: &str,
+    ) -> Result<bool> {
         let now_epoch_ms = self.current_unix_time_ms();
         let entry = self
             .passkey_ceremonies
             .get(ceremony_token)
             .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
-        let verified = entry.user_verification.as_ref().is_some_and(|proof| {
+        Ok(entry.user_verification.as_ref().is_some_and(|proof| {
             proof.vault_id == vault_id
                 && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
                 && proof.verified_at_epoch_ms <= now_epoch_ms
+                && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
+        }))
+    }
+
+    fn consume_passkey_ceremony_user_verification(
+        &mut self,
+        ceremony_token: &str,
+        vault_id: &str,
+    ) -> Result<()> {
+        let now_epoch_ms = self.current_unix_time_ms();
+        let entry = self
+            .passkey_ceremonies
+            .get_mut(ceremony_token)
+            .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
+        let verified = entry.user_verification.take().is_some_and(|proof| {
+            proof.vault_id == vault_id
+                && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
+                && proof.verified_at_epoch_ms <= now_epoch_ms
+                && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
         });
-        if entry.identity.user_verification == PasskeyUserVerificationRequirementDto::Required
-            && !verified
-        {
+        if !verified {
             anyhow::bail!("passkey user verification was not verified");
         }
-        Ok(verified)
+        Ok(())
     }
 
     pub fn passkey_credential_status(
@@ -3055,7 +3058,7 @@ impl Runtime {
             None,
             client_data_json_base64url,
         )?;
-        let user_verified = self.passkey_ceremony_user_verified(ceremony_token, vault_id)?;
+        let user_verified = true;
         let modified_at = self.current_unix_time();
         let credential_id = (self.passkey_credential_id_generator)();
         let registration = create_registration_with_credential_id(
@@ -3121,6 +3124,7 @@ impl Runtime {
         if credential_id_collision_count > allowed_collision_count {
             anyhow::bail!("passkey credential id collision");
         }
+        self.consume_passkey_ceremony_user_verification(ceremony_token, vault_id)?;
         if let Some((entry_id, rollback_entry)) = existing {
             let refresh_entry_username = rollback_entry
                 .passkey
@@ -5505,25 +5509,50 @@ impl Runtime {
                         .refresh_transformed_key_from_unlock_blob(vault_id, &remote_bytes)
                         .context("failed to refresh quick unlock after the OneDrive KDF changed")?
                     else {
-                        return self.upload_onedrive_conflict_copy(
+                        return self.upload_or_persist_onedrive_conflict_copy(
+                            vault_id,
                             drive_id,
                             item_id,
                             &display_name,
+                            &account_label,
+                            baseline_fingerprint,
                             &local_bytes,
+                            Some(verified_local.clone()),
+                            "current OneDrive generation uses a different vault key",
                         );
                     };
                     key = refreshed_key;
                     vault
                 }
-                Err(_) => {
-                    return self.upload_onedrive_conflict_copy(
+                Err(error) => {
+                    return self.upload_or_persist_onedrive_conflict_copy(
+                        vault_id,
                         drive_id,
                         item_id,
                         &display_name,
+                        &account_label,
+                        baseline_fingerprint,
                         &local_bytes,
+                        Some(verified_local.clone()),
+                        &format!("current OneDrive generation cannot be parsed: {error}"),
                     );
                 }
             };
+            if !state.matches_fingerprint(baseline_fingerprint)
+                && !has_vaultkern_sync_lineage(&base_vault, &remote_vault)
+            {
+                return self.upload_or_persist_onedrive_conflict_copy(
+                    vault_id,
+                    drive_id,
+                    item_id,
+                    &display_name,
+                    &account_label,
+                    baseline_fingerprint,
+                    &local_bytes,
+                    Some(verified_local.clone()),
+                    "current OneDrive generation has foreign or unclear writer lineage",
+                );
+            }
             let remote_save_profile = self
                 .inspected_save_profile(&remote_bytes)
                 .context("failed to inspect the current OneDrive generation")?;
@@ -5533,23 +5562,35 @@ impl Runtime {
                 &remote_save_profile,
             ) {
                 Ok(profile) => profile,
-                Err(_) => {
-                    return self.upload_onedrive_conflict_copy(
+                Err(error) => {
+                    return self.upload_or_persist_onedrive_conflict_copy(
+                        vault_id,
                         drive_id,
                         item_id,
                         &display_name,
+                        &account_label,
+                        baseline_fingerprint,
                         &local_bytes,
+                        Some(verified_local.clone()),
+                        &format!(
+                            "concurrent OneDrive encryption profile cannot be merged: {error}"
+                        ),
                     );
                 }
             };
             let patched = match three_way_field_patch(&base_vault, &local_vault, &remote_vault) {
                 Ok(patched) => patched,
-                Err(_) => {
-                    return self.upload_onedrive_conflict_copy(
+                Err(error) => {
+                    return self.upload_or_persist_onedrive_conflict_copy(
+                        vault_id,
                         drive_id,
                         item_id,
                         &display_name,
+                        &account_label,
+                        baseline_fingerprint,
                         &local_bytes,
+                        Some(verified_local.clone()),
+                        &format!("concurrent changes cannot be represented: {error}"),
                     );
                 }
             };
@@ -5609,11 +5650,16 @@ impl Runtime {
                     continue;
                 }
                 Ok(OneDriveConditionalWriteOutcome::PreconditionFailed) => {
-                    return self.upload_onedrive_conflict_copy(
+                    return self.upload_or_persist_onedrive_conflict_copy(
+                        vault_id,
                         drive_id,
                         item_id,
                         &display_name,
+                        &account_label,
+                        baseline_fingerprint,
                         &bytes,
+                        Some(verified_vault),
+                        "OneDrive CAS retry budget was exhausted",
                     );
                 }
                 Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown { message }) => {
@@ -5903,6 +5949,101 @@ impl Runtime {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn upload_or_persist_onedrive_conflict_copy(
+        &mut self,
+        vault_id: &str,
+        drive_id: &str,
+        item_id: &str,
+        display_name: &str,
+        account_label: &str,
+        baseline_fingerprint: &VaultSourceFingerprint,
+        bytes: &[u8],
+        pending_vault: Option<Vault>,
+        reason: &str,
+    ) -> Result<RuntimeResponse> {
+        match self.upload_onedrive_conflict_copy(drive_id, item_id, display_name, bytes) {
+            Ok(response) => Ok(response),
+            Err(upload_error) => {
+                let response = self.save_remote_vault_to_pending_cache(
+                    vault_id,
+                    VaultSource::OneDriveItem {
+                        drive_id: drive_id.to_owned(),
+                        item_id: item_id.to_owned(),
+                    },
+                    bytes.to_vec(),
+                    baseline_fingerprint,
+                    display_name.to_owned(),
+                    Some(account_label.to_owned()),
+                    format!(
+                        "{reason}; conflict-copy upload failed and remains pending: {upload_error:#}"
+                    ),
+                )?;
+                if let Some(vault) = pending_vault {
+                    self.install_pending_vault_candidate(vault_id, vault)?;
+                }
+                Ok(response)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn preserve_source_refresh_conflict(
+        &mut self,
+        vault_id: &str,
+        drive_id: &str,
+        item_id: &str,
+        display_name: &str,
+        account_label: &str,
+        baseline_fingerprint: &VaultSourceFingerprint,
+        local_vault: &Vault,
+        local_save_profile: &SaveProfile,
+        key: &TransformedKey,
+        reason: &str,
+    ) -> Result<SourceRefreshConflictDisposition> {
+        let (bytes, verified_local) = Self::serialize_and_verify_vault_candidate(
+            local_vault.clone(),
+            key,
+            local_save_profile.clone(),
+        )
+        .context("failed to serialize the source-refresh conflict copy")?;
+        let name = onedrive_conflict_copy_name(display_name, self.current_unix_time());
+        match self
+            .one_drive
+            .upload_sibling_conflict_copy(drive_id, item_id, &name, &bytes)
+        {
+            Ok(item) => Ok(SourceRefreshConflictDisposition::UploadedConflictCopy {
+                warning: format!(
+                    "{reason}; local changes were saved to onedrive:{}",
+                    item.name
+                ),
+            }),
+            Err(upload_error) => {
+                self.save_remote_vault_to_pending_cache(
+                    vault_id,
+                    VaultSource::OneDriveItem {
+                        drive_id: drive_id.to_owned(),
+                        item_id: item_id.to_owned(),
+                    },
+                    bytes,
+                    baseline_fingerprint,
+                    display_name.to_owned(),
+                    Some(account_label.to_owned()),
+                    format!(
+                        "{reason}; conflict-copy upload failed and remains pending: {upload_error:#}"
+                    ),
+                )?;
+                self.install_pending_vault_candidate(vault_id, verified_local)?;
+                let status = self
+                    .vault_session
+                    .find_loaded(vault_id)
+                    .and_then(|loaded| loaded.source_status.clone())
+                    .context("pending source-refresh conflict did not install a source status")?;
+                Ok(SourceRefreshConflictDisposition::Pending { status })
+            }
+        }
+    }
+
     fn save_loaded_vault_bytes(
         &mut self,
         vault_id: &str,
@@ -6076,6 +6217,8 @@ impl Runtime {
                 let remote_save_profile = self
                     .inspected_save_profile(&snapshot.bytes)
                     .context("failed to inspect OneDrive generation during source refresh")?;
+                let display_name = display_name_for_cloud_name(&snapshot.name);
+                let mut refresh_warning = None;
                 let patched_vault = match (
                     self.vault_session.find_loaded(vault_id).and_then(|loaded| {
                         loaded
@@ -6118,26 +6261,43 @@ impl Runtime {
                                 );
                             }
                         };
-                        let merged_save_profile = Self::merge_save_profile(
+                        let selected = match Self::prepare_source_refresh_rebase(
+                            &base_vault,
+                            &local_vault,
+                            &remote_vault,
                             &base_save_profile,
                             &local_save_profile,
                             &remote_save_profile,
-                        )
-                        .context(
-                            "OneDrive refresh cannot merge concurrent encryption profile changes",
-                        )?;
-                        Some((
-                            three_way_field_patch(&base_vault, &local_vault, &remote_vault)
-                                .context("OneDrive refresh cannot be represented as a field patch")?
-                                .vault,
-                            key,
-                            merged_save_profile,
-                        ))
+                        ) {
+                            Ok((patched, merged_save_profile)) => (patched, merged_save_profile),
+                            Err(error) => match self.preserve_source_refresh_conflict(
+                                vault_id,
+                                &drive_id,
+                                &item_id,
+                                &display_name,
+                                &snapshot.account_label,
+                                &baseline_fingerprint,
+                                &local_vault,
+                                &local_save_profile,
+                                key.as_ref(),
+                                &format!("OneDrive source refresh conflict: {error:#}"),
+                            )? {
+                                SourceRefreshConflictDisposition::UploadedConflictCopy {
+                                    warning,
+                                } => {
+                                    refresh_warning = Some(warning);
+                                    (remote_vault, remote_save_profile.clone())
+                                }
+                                SourceRefreshConflictDisposition::Pending { status } => {
+                                    return Ok(status);
+                                }
+                            },
+                        };
+                        Some((selected.0, key, selected.1))
                     }
                     _ => None,
                 };
                 let cached_at = self.current_unix_time() as i64;
-                let display_name = display_name_for_cloud_name(&snapshot.name);
                 self.remote_cache.write(
                     &cache_key,
                     RemoteVaultCacheEntry {
@@ -6160,7 +6320,7 @@ impl Runtime {
                     remote_state: "online".into(),
                     last_sync_at: Some(cached_at),
                     cached_at: Some(cached_at),
-                    last_error: None,
+                    last_error: refresh_warning,
                 };
 
                 let loaded = self
@@ -6752,6 +6912,18 @@ impl Runtime {
                     );
                 }
             };
+            if !has_vaultkern_sync_lineage(&base_vault, &remote_vault) {
+                let local_bytes = serialize_live_conflict_copy()?;
+                return self.upload_pending_onedrive_conflict_copy(
+                    vault_id,
+                    drive_id,
+                    item_id,
+                    cache_key,
+                    &pending,
+                    &local_bytes,
+                    "current OneDrive generation has foreign or unclear writer lineage",
+                );
+            }
             let remote_save_profile = self
                 .inspected_save_profile(&remote.bytes)
                 .context("failed to inspect current OneDrive generation during pending sync")?;
@@ -8123,6 +8295,7 @@ fn save_kdbx_with_history_limits_transformed(
     transformed_key: &TransformedKey,
     mut save_profile: SaveProfile,
 ) -> std::result::Result<Vec<u8>, KdbxError> {
+    vault.generator = Some(VAULTKERN_KDBX_GENERATOR.into());
     if required_version(vault) == KdbxVersion::V4_1 {
         save_profile.version = KdbxVersion::V4_1;
     }
@@ -8141,6 +8314,12 @@ fn save_kdbx_with_history_limits_transformed(
     let header = vaultkern_core::KdbxHeader::decode(&bytes)?;
     vault.kdf_parameters = Some(header.kdf_parameters.encode()?);
     Ok(bytes)
+}
+
+fn has_vaultkern_sync_lineage(base: &Vault, remote: &Vault) -> bool {
+    base.root.id == remote.root.id
+        && base.generator.as_deref() == Some(VAULTKERN_KDBX_GENERATOR)
+        && remote.generator.as_deref() == Some(VAULTKERN_KDBX_GENERATOR)
 }
 
 fn clone_entry_histories(group: &vaultkern_core::Group) -> Vec<Vec<Entry>> {
@@ -9248,6 +9427,7 @@ mod tests {
         AutofillPersistOutcomeDto, AutofillPersistPlanDto, AutofillPersistResultDto,
         DatabaseCredentialsUpdateDto,
     };
+    use zeroize::Zeroizing;
 
     #[test]
     fn external_open_uses_desktop_unconfirmed_kdf_policy() {
@@ -9466,10 +9646,10 @@ mod tests {
         assert_eq!(local.root.times, base.root.times);
 
         let mut remote = base.clone();
-        remote.name = "Earlier remote name".into();
-        remote.database_name_changed = Some(100);
+        remote.maintenance_history_days = Some(42);
         let merged = three_way_field_patch(&base, &local, &remote).unwrap();
         assert_eq!(merged.vault.name, "Local name");
+        assert_eq!(merged.vault.maintenance_history_days, Some(42));
     }
 
     #[test]
@@ -9611,7 +9791,7 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+        fn load(&self, _key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
             anyhow::bail!("quick unlock secret should not be decrypted while listing vaults")
         }
 
@@ -9645,8 +9825,8 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            Ok(self.values.borrow().get(key).cloned())
+        fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+            Ok(self.values.borrow().get(key).cloned().map(Zeroizing::new))
         }
 
         fn contains(&self, key: &str) -> Result<bool> {
@@ -9687,8 +9867,8 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            Ok(self.values.borrow().get(key).cloned())
+        fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+            Ok(self.values.borrow().get(key).cloned().map(Zeroizing::new))
         }
 
         fn contains(&self, key: &str) -> Result<bool> {
@@ -9739,8 +9919,8 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            Ok(self.values.borrow().get(key).cloned())
+        fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+            Ok(self.values.borrow().get(key).cloned().map(Zeroizing::new))
         }
 
         fn contains(&self, key: &str) -> Result<bool> {
@@ -9774,7 +9954,7 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+        fn load(&self, _key: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
             Ok(None)
         }
 
@@ -16613,7 +16793,7 @@ mod tests {
     }
 
     #[test]
-    fn passkey_quick_unlock_user_verification_reuses_same_ceremony_unlock() {
+    fn passkey_quick_unlock_user_verification_requires_a_fresh_prompt() {
         let core = KeepassCore::new();
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
@@ -16700,6 +16880,7 @@ mod tests {
             [
                 "Enable quick unlock for this vault".to_owned(),
                 "Unlock this vault".to_owned(),
+                "Verify user for passkey".to_owned(),
             ]
         );
     }

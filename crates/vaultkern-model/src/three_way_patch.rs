@@ -150,7 +150,7 @@ pub fn three_way_field_patch(
     )?;
     reconcile_entry_sibling_orders(&base_flat, &local_flat, &remote_flat, &mut entries)?;
     let root = rebuild_tree(base_flat.root_id, &groups, &entries, &mut BTreeSet::new())?;
-    let mut vault = merge_meta(base, local, remote, &mut report);
+    let mut vault = merge_meta(base, local, remote, &mut report)?;
     vault
         .deleted_objects
         .retain(|deleted| !groups.contains_key(&deleted.id) && !entries.contains_key(&deleted.id));
@@ -785,11 +785,12 @@ fn merge_groups(
                 let local_timestamp = group_modified_at(&local_group.value);
                 let remote_timestamp = group_modified_at(&remote_group.value);
                 let (mut value, changed) = merge_group_fields(
+                    id,
                     &base_group.value,
                     &local_group.value,
                     &remote_group.value,
                     local_timestamp > remote_timestamp,
-                );
+                )?;
                 let (parent, location_changed_at, _, location_prefers_local) =
                     match (base_group.parent, local_group.parent, remote_group.parent) {
                         (None, None, None) => {
@@ -992,11 +993,12 @@ fn merge_entry(
 }
 
 fn merge_group_fields(
+    id: Uuid,
     base: &Group,
     local: &Group,
     remote: &Group,
     prefer_local: bool,
-) -> (Group, bool) {
+) -> Result<(Group, bool), ThreeWayPatchError> {
     let mut state = FieldMerge::default();
     let mut merged = remote.clone();
     merged.entries.clear();
@@ -1047,7 +1049,14 @@ fn merge_group_fields(
         &merged.custom_data,
         None,
     );
-    (merged, state.changed_from_remote || state.conflict)
+    if state.conflict {
+        return Err(ThreeWayPatchError::FidelityConflict {
+            object: "group",
+            id: Some(id),
+            field: "modeled field",
+        });
+    }
+    Ok((merged, state.changed_from_remote))
 }
 
 fn merge_meta(
@@ -1055,7 +1064,7 @@ fn merge_meta(
     local: &Vault,
     remote: &Vault,
     report: &mut ThreeWayPatchReport,
-) -> Vault {
+) -> Result<Vault, ThreeWayPatchError> {
     let prefer_local = local.settings_changed.unwrap_or(0) > remote.settings_changed.unwrap_or(0);
     let mut state = FieldMerge::default();
     let mut merged = remote.clone();
@@ -1160,9 +1169,13 @@ fn merge_meta(
     merged.custom_icons = icons;
     report.icon_conflicts_resolved += icon_conflicts;
     if state.conflict {
-        report.meta_conflicts_resolved += 1;
+        return Err(ThreeWayPatchError::FidelityConflict {
+            object: "meta",
+            id: None,
+            field: "modeled field",
+        });
     }
-    merged
+    Ok(merged)
 }
 
 fn merge_value<T: Clone + Eq>(
@@ -1307,12 +1320,19 @@ fn subtree_changed(base: &FlatVault, side: &FlatVault, root: Uuid) -> bool {
             return true;
         }
     }
-    side.groups
-        .iter()
-        .any(|(id, _)| !base.groups.contains_key(id) && group_is_below_or_same(side, *id, root))
-        || side.entries.iter().any(|(id, entry)| {
-            !base.entries.contains_key(id) && group_is_below_or_same(side, entry.parent, root)
-        })
+    side.groups.iter().any(|(id, group)| {
+        group_is_below_or_same(side, *id, root)
+            && base
+                .groups
+                .get(id)
+                .is_none_or(|base_group| !same_group_record(base_group, group))
+    }) || side.entries.iter().any(|(id, entry)| {
+        group_is_below_or_same(side, entry.parent, root)
+            && base
+                .entries
+                .get(id)
+                .is_none_or(|base_entry| !same_entry_record(base_entry, entry))
+    })
 }
 
 fn changed_subtrees_deleted_from_other(

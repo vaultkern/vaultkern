@@ -1536,7 +1536,7 @@ impl Vault {
     pub fn empty(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
-            generator: None,
+            generator: Some("VaultKern".into()),
             settings_changed: None,
             root: Group::new(name.clone()),
             name,
