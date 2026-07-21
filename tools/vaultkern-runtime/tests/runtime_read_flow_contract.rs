@@ -10,13 +10,19 @@ use vaultkern_core::{
 };
 use vaultkern_runtime::Runtime;
 use vaultkern_runtime_protocol::{
-    DatabaseCredentialsUpdateDto, DatabaseSettingsUpdateDto, PasskeyCeremonyDeliveryStateDto,
-    PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
-    PasskeyCeremonyPhaseDto, PasskeyFrameKindDto, PasskeyUserVerificationMethodDto,
-    PasskeyUserVerificationRequirementDto, RuntimeCommand, RuntimeResponse,
+    DatabaseCredentialsUpdateDto, DatabaseSettingsUpdateDto, EntryPasskeyDto,
+    EntryPasskeyUpdateDto, PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto,
+    PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyFrameKindDto,
+    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto, RuntimeCommand,
+    RuntimeResponse,
 };
 
 const TEST_PASSKEY_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgCrpkgmenhRkrdg3Y\n7G0+YmeyFRGgpisH5R5e75gwVHGhRANCAASOCmJegf0Fo1V7ixK+W5u/Jx8bpbIq\nCY0G7WFVp5KD6xMSKPekuRmz+kxK2wiZrN6MrH8kbCDmwLZRxnM73nXs\n-----END PRIVATE KEY-----\n";
+
+fn clone_test_passkey_update(passkey: &EntryPasskeyUpdateDto) -> EntryPasskeyUpdateDto {
+    serde_json::from_value(serde_json::to_value(passkey).expect("serialize test passkey update"))
+        .expect("deserialize test passkey update")
+}
 
 #[test]
 fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked_local_vault() {
@@ -869,28 +875,37 @@ fn runtime_sets_and_clears_entry_passkey() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
-    let passkey = vaultkern_runtime_protocol::EntryPasskeyDto {
+    let passkey = EntryPasskeyUpdateDto {
         username: "alice@example.com".into(),
         credential_id: "credential-base64url".into(),
         generated_user_id: Some("generated-user".into()),
-        private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
+        private_key_pem: Some("-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into()),
         relying_party: "example.com".into(),
         user_handle: Some("dXNlci0x".into()),
         backup_eligible: true,
         backup_state: false,
+    };
+    let expected_passkey = EntryPasskeyDto {
+        username: passkey.username.clone(),
+        credential_id: passkey.credential_id.clone(),
+        generated_user_id: passkey.generated_user_id.clone(),
+        relying_party: passkey.relying_party.clone(),
+        user_handle: passkey.user_handle.clone(),
+        backup_eligible: passkey.backup_eligible,
+        backup_state: passkey.backup_state,
     };
 
     let updated = runtime
         .handle(RuntimeCommand::SetEntryPasskey {
             vault_id: handle.vault_id.clone(),
             entry_id: entry_id.clone(),
-            passkey: passkey.clone(),
+            passkey: clone_test_passkey_update(&passkey),
         })
         .unwrap();
     match updated {
         RuntimeResponse::EntryDetail(detail) => {
             assert_eq!(detail.id, entry_id);
-            assert_eq!(detail.passkey, Some(passkey.clone()));
+            assert_eq!(detail.passkey, Some(expected_passkey.clone()));
         }
         other => panic!("expected entry detail, got {other:?}"),
     }
@@ -903,7 +918,7 @@ fn runtime_sets_and_clears_entry_passkey() {
         .unwrap();
     match detail {
         RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.passkey, Some(passkey));
+            assert_eq!(detail.passkey, Some(expected_passkey));
         }
         other => panic!("expected entry detail, got {other:?}"),
     }
@@ -975,11 +990,11 @@ fn runtime_set_and_clear_entry_passkey_enforces_history_limit() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
-    let passkey = vaultkern_runtime_protocol::EntryPasskeyDto {
+    let passkey = EntryPasskeyUpdateDto {
         username: "alice@example.com".into(),
         credential_id: "credential-base64url".into(),
         generated_user_id: Some("generated-user".into()),
-        private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
+        private_key_pem: Some("-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into()),
         relying_party: "example.com".into(),
         user_handle: Some("dXNlci0x".into()),
         backup_eligible: true,
@@ -990,7 +1005,7 @@ fn runtime_set_and_clear_entry_passkey_enforces_history_limit() {
         .handle(RuntimeCommand::SetEntryPasskey {
             vault_id: handle.vault_id.clone(),
             entry_id: entry_id.clone(),
-            passkey: passkey.clone(),
+            passkey: clone_test_passkey_update(&passkey),
         })
         .unwrap();
     runtime
@@ -2288,7 +2303,13 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
     assert_eq!(passkey.user_handle, Some("dXNlci0x".into()));
     assert!(passkey.backup_eligible);
     assert!(passkey.backup_state);
-    assert!(passkey.private_key_pem.contains("BEGIN PRIVATE KEY"));
+    assert!(
+        !serde_json::to_value(&passkey)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("privateKeyPem")
+    );
 
     runtime
         .handle(RuntimeCommand::SaveVault {
@@ -2305,6 +2326,14 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
         .iter()
         .find(|entry| entry.id.to_string() == registration.entry_id)
         .expect("created passkey entry");
+    assert!(
+        created_entry
+            .passkey
+            .as_ref()
+            .expect("saved KPEX payload")
+            .private_key_pem
+            .contains("BEGIN PRIVATE KEY")
+    );
     assert_eq!(created_entry.created_at, 59);
     assert_eq!(created_entry.modified_at, 59);
     assert_eq!(created_entry.expiry_time, Some(59));
@@ -5082,7 +5111,7 @@ fn register_ceremony_at_s3_with_discoverable_and_user_verification(
                 expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
                 vault_id,
                 method: PasskeyUserVerificationMethodDto::MasterPassword,
-                password: verification_password.map(str::to_owned),
+                password: verification_password.map(Into::into),
             })
             .unwrap();
     }

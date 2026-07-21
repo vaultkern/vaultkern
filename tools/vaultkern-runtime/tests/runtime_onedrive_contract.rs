@@ -1258,8 +1258,24 @@ fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
         "alice@example.com",
         initial_bytes.clone(),
     );
-    for _ in 0..3 {
-        runtime.queue_test_onedrive_precondition_failure(Some(initial_bytes.clone()));
+    for attempt in 1..=3 {
+        let mut raced_remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
+        core.update_entry_fields(
+            &mut raced_remote,
+            &entry_id,
+            vaultkern_core::EntryUpdate {
+                title: None,
+                username: None,
+                password: None,
+                url: None,
+                notes: Some(format!("final-cas-race-{attempt}")),
+            },
+        )
+        .unwrap();
+        let raced_remote_bytes = core
+            .save_kdbx(&raced_remote, &key(), SaveProfile::recommended())
+            .unwrap();
+        runtime.queue_test_onedrive_precondition_failure(Some(raced_remote_bytes));
     }
     runtime.reset_test_onedrive_access_counts();
 
@@ -1271,11 +1287,19 @@ fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
     let RuntimeResponse::VaultSourceStatus(status) = response else {
         panic!("expected source status");
     };
-    assert_eq!(status.remote_state, "pending_sync");
+    assert_eq!(status.remote_state, "online");
     let error = status.last_error.expect("conflict-copy recovery message");
     assert!(error.contains("onedrive:"), "{error}");
     assert!(error.contains("VaultKern conflict"), "{error}");
     assert_eq!(runtime.test_onedrive_access_counts().writes, 4);
+    assert_eq!(
+        runtime
+            .get_entry_detail(&vault_id, &entry_id)
+            .unwrap()
+            .notes,
+        "final-cas-race-3",
+        "the terminal state must adopt the head that caused the final CAS failure"
+    );
 
     let list = runtime
         .handle(RuntimeCommand::ListOneDriveChildren {
@@ -1297,6 +1321,30 @@ fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
     let vault = core.load_database(&bytes, &key()).unwrap().vault;
     let entry = core.project_entry_detail(&vault, &entry_id).unwrap();
     assert_eq!(entry.password, "pending-password");
+
+    let retry = runtime
+        .handle(RuntimeCommand::RetryVaultSourceSync { vault_id })
+        .unwrap();
+    assert!(matches!(
+        retry,
+        RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
+    ));
+    let list = runtime
+        .handle(RuntimeCommand::ListOneDriveChildren {
+            parent_item_id: None,
+        })
+        .unwrap();
+    let RuntimeResponse::OneDriveItemList(list) = list else {
+        panic!("expected OneDrive list");
+    };
+    assert_eq!(
+        list.items
+            .iter()
+            .filter(|item| item.name.contains("VaultKern conflict"))
+            .count(),
+        1,
+        "a terminal conflict fallback must not upload duplicate copies"
+    );
 }
 
 #[test]

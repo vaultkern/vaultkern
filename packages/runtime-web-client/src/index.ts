@@ -146,11 +146,14 @@ export interface EntryPasskey {
   username: string;
   credentialId: string;
   generatedUserId: string | null;
-  privateKeyPem: string;
   relyingParty: string;
   userHandle: string | null;
   backupEligible: boolean;
   backupState: boolean;
+}
+
+export interface EntryPasskeyUpdate extends EntryPasskey {
+  privateKeyPem: string | null;
 }
 
 export interface EntryFieldProtection {
@@ -673,7 +676,7 @@ export class RuntimeClient {
   async setEntryPasskey(
     vaultId: string,
     entryId: string,
-    passkey: EntryPasskey
+    passkey: EntryPasskeyUpdate
   ): Promise<EntryDetail> {
     return this.sendCommand<EntryDetail>({
       type: "set_entry_passkey",

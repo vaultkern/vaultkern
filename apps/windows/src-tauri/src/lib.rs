@@ -1,7 +1,9 @@
+mod desktop_settings;
 #[cfg(any(windows, test))]
 mod plugin_operation_state;
 mod runtime_bridge;
 
+pub use desktop_settings::{DesktopSettingsStore, DesktopSettingsStoreError};
 pub use runtime_bridge::RuntimeBridge;
 
 pub fn launch_requests_visible_window(arguments: &[String]) -> bool {
@@ -41,6 +43,28 @@ pub fn should_refresh_platform_passkeys(
                 | "save_vault"
         )
     )
+}
+
+pub fn platform_passkey_refresh_command_type(
+    command: &vaultkern_runtime_protocol::RuntimeCommand,
+) -> Option<&'static str> {
+    use vaultkern_runtime_protocol::RuntimeCommand;
+
+    match command {
+        RuntimeCommand::AddLocalVaultReference { .. } => Some("add_local_vault_reference"),
+        RuntimeCommand::AddOneDriveVaultReference { .. } => Some("add_one_drive_vault_reference"),
+        RuntimeCommand::OpenLocalVault { .. } => Some("open_local_vault"),
+        RuntimeCommand::DeleteVaultReference { .. } => Some("delete_vault_reference"),
+        RuntimeCommand::RetryVaultSourceSync { .. } => Some("retry_vault_source_sync"),
+        RuntimeCommand::SetEntryPasskey { .. } => Some("set_entry_passkey"),
+        RuntimeCommand::ClearEntryPasskey { .. } => Some("clear_entry_passkey"),
+        RuntimeCommand::SavePasskeyRegistration { .. } => Some("save_passkey_registration"),
+        RuntimeCommand::AbortPasskeyRegistration { .. } => Some("abort_passkey_registration"),
+        RuntimeCommand::CommitPasskeyRegistration { .. } => Some("commit_passkey_registration"),
+        RuntimeCommand::DeleteEntry { .. } => Some("delete_entry"),
+        RuntimeCommand::SaveVault { .. } => Some("save_vault"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -113,13 +113,7 @@ impl RuntimeBridge {
 
     pub fn request(&self, message: Value) -> Value {
         let envelope = match serde_json::from_value::<ProtocolEnvelope>(message) {
-            Ok(envelope) if envelope.version == 1 => envelope,
-            Ok(envelope) => {
-                return error_value(
-                    "unsupported_version",
-                    format!("unsupported runtime protocol version: {}", envelope.version),
-                );
-            }
+            Ok(envelope) => envelope,
             Err(error) => {
                 return error_value(
                     "invalid_request",
@@ -127,6 +121,19 @@ impl RuntimeBridge {
                 );
             }
         };
+        self.request_envelope(envelope)
+    }
+
+    pub fn request_envelope(&self, envelope: ProtocolEnvelope) -> Value {
+        match envelope.version {
+            1 => {}
+            version => {
+                return error_value(
+                    "unsupported_version",
+                    format!("unsupported runtime protocol version: {version}"),
+                );
+            }
+        }
 
         let (response, receiver) = mpsc::channel();
         if self

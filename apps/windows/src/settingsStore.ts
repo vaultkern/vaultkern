@@ -1,51 +1,26 @@
-import {
-  DEFAULT_EXTENSION_SETTINGS,
-  normalizeExtensionSettings
-} from "@vaultkern/shared-web-ui";
+import { normalizeExtensionSettings } from "@vaultkern/shared-web-ui";
 import type {
   ExtensionSettings,
   ExtensionSettingsReconciliationContext,
   ExtensionSettingsStore
 } from "@vaultkern/shared-web-ui";
 
-const SETTINGS_KEY = "vaultkern.desktop.settings.v1";
-
 export function createDesktopSettingsStore(
-  storage: Pick<Storage, "getItem" | "setItem" | "removeItem">,
-  reconcilePasskeyProviderSetting: (
-    enabled: boolean,
+  loadDesiredSettings: () => Promise<unknown>,
+  saveDesiredSettings: (settings: ExtensionSettings) => Promise<unknown>,
+  reconcileNativeSettings: (
     context: ExtensionSettingsReconciliationContext
   ) => Promise<unknown> = async () => undefined
 ): ExtensionSettingsStore {
   return {
     async load() {
-      return readDesktopSettings(storage);
+      return normalizeExtensionSettings(await loadDesiredSettings());
     },
     async save(settings) {
-      const normalized = normalizeExtensionSettings(settings);
-      storage.setItem(SETTINGS_KEY, JSON.stringify(normalized));
+      await saveDesiredSettings(normalizeExtensionSettings(settings));
     },
     async reconcile(context) {
-      const desired = readDesktopSettings(storage);
-      await reconcilePasskeyProviderSetting(
-        desired.passkeyProviderEnabled,
-        context
-      );
+      await reconcileNativeSettings(context);
     }
   };
-}
-
-function readDesktopSettings(
-  storage: Pick<Storage, "getItem" | "removeItem">
-): ExtensionSettings {
-  const value = storage.getItem(SETTINGS_KEY);
-  if (value === null) {
-    return DEFAULT_EXTENSION_SETTINGS;
-  }
-  try {
-    return normalizeExtensionSettings(JSON.parse(value) as Partial<ExtensionSettings>);
-  } catch {
-    storage.removeItem(SETTINGS_KEY);
-    return DEFAULT_EXTENSION_SETTINGS;
-  }
 }

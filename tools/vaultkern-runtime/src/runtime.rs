@@ -33,18 +33,18 @@ use vaultkern_runtime_protocol::{
     DatabaseSettingsCommitResultDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
     EntryAttachmentContentDto, EntryAttachmentDto, EntryCustomFieldDto, EntryDetailDto,
     EntryFieldProtectionDto, EntryFieldsDto, EntryHistoryDetailDto, EntryHistoryItemDto,
-    EntryHistoryListDto, EntryIdListDto, EntryListDto, EntryPasskeyDto, EntrySummaryDto, ErrorDto,
-    FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto, OptionalSettingUpdateDto,
-    PasskeyAssertionDto, PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto,
-    PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
-    PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto,
-    PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto, PasskeyCredentialCandidateDto,
-    PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto,
-    PasskeyFrameKindDto, PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto,
-    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto,
-    PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-    SaveVaultStatusDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
-    VaultSourceStatusDto,
+    EntryHistoryListDto, EntryIdListDto, EntryListDto, EntryPasskeyDto, EntryPasskeyUpdateDto,
+    EntrySummaryDto, ErrorDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto,
+    OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
+    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
+    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
+    PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto,
+    PasskeyCredentialCandidateDto, PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto,
+    PasskeyCredentialStatusDto, PasskeyFrameKindDto, PasskeyRegistrationDto,
+    PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
+    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse,
+    SaveVaultResultDto, SaveVaultStatusDto, SensitiveString, VaultHandleDto, VaultReferenceDto,
+    VaultReferenceListDto, VaultSourceStatusDto,
 };
 
 use crate::autofill_persist::{
@@ -1815,13 +1815,7 @@ impl Runtime {
             })
         })();
 
-        let should_restore_previous = result.as_ref().err().is_some_and(|error| {
-            !matches!(
-                error.downcast_ref::<LocalFileCommitError>(),
-                Some(LocalFileCommitError::OutcomeUnknown { .. })
-            )
-        });
-        if should_restore_previous
+        if result.is_err()
             && let Some(loaded) = self.vault_session.find_loaded_mut(vault_id)
         {
             *loaded = previous;
@@ -2146,7 +2140,7 @@ impl Runtime {
         &mut self,
         vault_id: &str,
         entry_id: &str,
-        passkey: EntryPasskeyDto,
+        passkey: EntryPasskeyUpdateDto,
     ) -> Result<EntryDetailDto> {
         let modified_at = self.current_unix_time();
         {
@@ -2158,7 +2152,10 @@ impl Runtime {
                 .vault
                 .as_mut()
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
-            let passkey = dto_to_passkey_record(passkey)?;
+            let retained_private_key = cloned_entry_by_id(&vault.root, entry_id)
+                .and_then(|entry| entry.passkey)
+                .map(|passkey| passkey.private_key_pem);
+            let passkey = dto_to_passkey_record(passkey, retained_private_key)?;
             self.core.snapshot_entry_to_history(vault, entry_id)?;
             clear_platform_passkey_display_labels(&self.core, vault, entry_id)?;
             self.core.set_entry_passkey(vault, entry_id, passkey)?;
@@ -7070,6 +7067,7 @@ impl Runtime {
                             cache_key,
                             &pending,
                             &local_bytes,
+                            key.clone(),
                             "current OneDrive generation uses a different vault key",
                         );
                     };
@@ -7085,6 +7083,7 @@ impl Runtime {
                         cache_key,
                         &pending,
                         &local_bytes,
+                        key.clone(),
                         &format!("current OneDrive generation cannot be parsed: {error}"),
                     );
                 }
@@ -7098,6 +7097,7 @@ impl Runtime {
                     cache_key,
                     &pending,
                     &local_bytes,
+                    key.clone(),
                     "current OneDrive generation has foreign or unclear writer lineage",
                 );
             }
@@ -7119,6 +7119,7 @@ impl Runtime {
                         cache_key,
                         &pending,
                         &local_bytes,
+                        key.clone(),
                         &error.to_string(),
                     );
                 }
@@ -7134,6 +7135,7 @@ impl Runtime {
                         cache_key,
                         &pending,
                         &local_bytes,
+                        key.clone(),
                         &format!("pending changes cannot be represented: {error}"),
                     );
                 }
@@ -7150,6 +7152,7 @@ impl Runtime {
                     cache_key,
                     &pending,
                     &local_bytes,
+                    key.clone(),
                     &format!("pending changes exceed vault history retention: {error}"),
                 );
             }
@@ -7237,6 +7240,7 @@ impl Runtime {
                         cache_key,
                         &pending,
                         &bytes,
+                        key.clone(),
                         &error.to_string(),
                     );
                 }
@@ -7255,27 +7259,84 @@ impl Runtime {
         cache_key: &RemoteCacheKey,
         pending: &RemoteVaultCacheEntry,
         bytes: &[u8],
+        key: Arc<TransformedKey>,
         reason: &str,
     ) -> Result<VaultSourceStatusDto> {
         let name = onedrive_conflict_copy_name(&pending.display_name, self.current_unix_time());
         let item = self
             .one_drive
             .upload_sibling_conflict_copy(drive_id, item_id, &name, bytes)?;
-        let status = VaultSourceStatusDto {
-            source_kind: cache_key.provider_kind.clone(),
-            remote_state: "pending_sync".into(),
-            last_sync_at: None,
-            cached_at: Some(pending.cached_at),
-            last_error: Some(format!(
-                "{reason}; local changes were saved to onedrive:{}",
-                item.name
-            )),
+        let remote_state = self.one_drive.remote_state(drive_id, item_id)?;
+        let remote = self
+            .one_drive
+            .read_snapshot_from_state(drive_id, item_id, &remote_state)?;
+        let (remote_vault, adoption_error) = match Self::load_session_database(&remote.bytes, &key)
+        {
+            Ok(database) => {
+                self.inspected_save_profile(&remote.bytes).context(
+                    "failed to inspect the current OneDrive head after conflict fallback",
+                )?;
+                (Some(database.vault), None)
+            }
+            Err(error) => (None, Some(error.to_string())),
         };
-        let loaded = self
-            .vault_session
-            .find_loaded_mut(vault_id)
-            .with_context(|| format!("vault not opened: {vault_id}"))?;
-        loaded.source_status = Some(status.clone());
+        let cached_at = self.current_unix_time() as i64;
+        let completion = self.remote_cache.complete_generic_pending(
+            cache_key,
+            &pending.fingerprint,
+            RemoteVaultCacheEntry {
+                bytes: remote.bytes.clone(),
+                fingerprint: remote.fingerprint.clone(),
+                display_name: remote.name.clone(),
+                account_label: remote.account_label.clone(),
+                cached_at,
+                pending_sync: false,
+            },
+        )?;
+        let mut last_error = format!(
+            "{reason}; local changes were saved to onedrive:{}",
+            item.name
+        );
+        if let Some(error) = adoption_error {
+            last_error.push_str(&format!(
+                "; current OneDrive head could not be adopted: {error}"
+            ));
+        }
+        if matches!(completion, PendingRemoteCacheCompletion::DurabilityUnknown) {
+            last_error.push_str("; remote cache completion is visible but durability is unknown");
+        }
+        let mut status = VaultSourceStatusDto {
+            source_kind: cache_key.provider_kind.clone(),
+            remote_state: if remote_vault.is_some() {
+                "online".into()
+            } else {
+                "conflict_copy".into()
+            },
+            last_sync_at: remote_vault.as_ref().map(|_| cached_at),
+            cached_at: Some(cached_at),
+            last_error: Some(last_error),
+        };
+        if let Some(remote_vault) = remote_vault {
+            self.install_committed_autofill_generation(
+                vault_id,
+                remote_vault,
+                remote.bytes.clone(),
+                remote.fingerprint.clone(),
+                Some(status.clone()),
+            )?;
+            self.replace_session_transformed_key(vault_id, key)?;
+            status = self
+                .vault_session
+                .find_loaded(vault_id)
+                .and_then(|loaded| loaded.source_status.clone())
+                .unwrap_or(status);
+        } else {
+            let loaded = self
+                .vault_session
+                .find_loaded_mut(vault_id)
+                .with_context(|| format!("vault not opened: {vault_id}"))?;
+            loaded.source_status = Some(status.clone());
+        }
         Ok(status)
     }
 
@@ -7346,11 +7407,20 @@ impl Runtime {
         let VaultSource::LocalPath(path) = source else {
             anyhow::bail!("OneDrive writes require the CAS save path")
         };
-        let commit = self
-            .local_files
-            .write_if_unchanged(&path, expected, bytes)?;
-        self.record_local_save_warnings(commit.warnings);
-        Ok(commit.fingerprint)
+        match self.local_files.write_if_unchanged(&path, expected, bytes) {
+            Ok(commit) => {
+                self.record_local_save_warnings(commit.warnings);
+                Ok(commit.fingerprint)
+            }
+            Err(error @ LocalFileCommitError::OutcomeUnknown { .. }) => {
+                let visible = self.local_files.read_snapshot(&path);
+                match visible {
+                    Ok(snapshot) if snapshot.bytes == bytes => Ok(snapshot.fingerprint),
+                    _ => Err(error.into()),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn record_local_save_warnings(&mut self, warnings: Vec<String>) {
@@ -8077,7 +8147,6 @@ fn entry_passkey_to_dto(passkey: vaultkern_core::EntryPasskeyView) -> EntryPassk
         username: passkey.username,
         credential_id: passkey.credential_id,
         generated_user_id: passkey.generated_user_id,
-        private_key_pem: passkey.private_key_pem,
         relying_party: passkey.relying_party,
         user_handle: passkey.user_handle,
         backup_eligible: passkey.backup_eligible,
@@ -8176,17 +8245,30 @@ fn entry_has_custom_data_key(group: &vaultkern_core::Group, entry_id: &str, key:
             .any(|child| entry_has_custom_data_key(child, entry_id, key))
 }
 
-fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> Result<PasskeyRecord> {
+fn dto_to_passkey_record(
+    passkey: EntryPasskeyUpdateDto,
+    retained_private_key: Option<String>,
+) -> Result<PasskeyRecord> {
     validate_passkey_credential_id(&passkey.credential_id)?;
     if let Some(user_handle) = &passkey.user_handle {
         validate_passkey_user_handle(user_handle)?;
+    }
+
+    let private_key_pem = passkey
+        .private_key_pem
+        .map(SensitiveString::into_zeroizing)
+        .map(|value| value.to_string())
+        .or(retained_private_key)
+        .context("a new passkey requires private key material")?;
+    if private_key_pem.trim().is_empty() {
+        anyhow::bail!("passkey private key material is empty");
     }
 
     Ok(PasskeyRecord {
         username: passkey.username,
         credential_id: passkey.credential_id,
         generated_user_id: passkey.generated_user_id,
-        private_key_pem: passkey.private_key_pem,
+        private_key_pem,
         relying_party: passkey.relying_party,
         user_handle: passkey.user_handle,
         backup_eligible: passkey.backup_eligible,
@@ -9733,9 +9815,16 @@ mod tests {
     use vaultkern_runtime_protocol::{
         AutofillCacheStateDto, AutofillPersistDispositionDto, AutofillPersistDurabilityDto,
         AutofillPersistOutcomeDto, AutofillPersistPlanDto, AutofillPersistResultDto,
-        DatabaseCredentialsUpdateDto,
+        DatabaseCredentialsUpdateDto, EntryPasskeyUpdateDto,
     };
     use zeroize::Zeroizing;
+
+    fn clone_test_command(command: &RuntimeCommand) -> RuntimeCommand {
+        serde_json::from_value(
+            serde_json::to_value(command).expect("serialize test runtime command"),
+        )
+        .expect("deserialize test runtime command")
+    }
 
     #[test]
     fn external_open_uses_desktop_unconfirmed_kdf_policy() {
@@ -10079,7 +10168,7 @@ mod tests {
     }
 
     #[test]
-    fn database_settings_command_keeps_the_pending_model_when_persistence_is_indeterminate() {
+    fn database_settings_command_reconciles_a_visible_publish_as_success() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         arm_local_backup_loss_after_publish(&mut runtime, &opened.path);
@@ -10098,10 +10187,11 @@ mod tests {
             })
             .expect("indeterminate settings saves are protocol responses");
 
-        let RuntimeResponse::Error(error) = response else {
-            panic!("expected indeterminate persistence response, got {response:?}");
+        let RuntimeResponse::DatabaseSettingsCommitResult(result) = response else {
+            panic!("expected the visible settings generation to reconcile, got {response:?}");
         };
-        assert_eq!(error.code, "persist_outcome_unknown");
+        assert_eq!(result.save_result.status, SaveVaultStatusDto::Saved);
+        assert_eq!(result.settings.metadata.name, "published but indeterminate");
         assert_eq!(
             runtime
                 .get_database_settings(&opened.vault_id)
@@ -10120,6 +10210,24 @@ mod tests {
             )
             .expect("load visible published settings");
         assert_eq!(persisted.name, "published but indeterminate");
+
+        let second = runtime
+            .handle(RuntimeCommand::UpdateDatabaseSettings {
+                vault_id: opened.vault_id.clone(),
+                update: DatabaseSettingsUpdateDto {
+                    metadata: Some(DatabaseMetadataSettingsDto {
+                        name: "second durable settings commit".into(),
+                        description: None,
+                        default_username: None,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            })
+            .expect("a reconciled visible generation must become the next baseline");
+        assert!(matches!(
+            second,
+            RuntimeResponse::DatabaseSettingsCommitResult(_)
+        ));
     }
 
     #[test]
@@ -11353,11 +11461,11 @@ mod tests {
             .set_entry_passkey(
                 &opened.vault_id,
                 &non_discoverable.id,
-                EntryPasskeyDto {
+                EntryPasskeyUpdateDto {
                     username: "legacy@example.net".into(),
                     credential_id: URL_SAFE_NO_PAD.encode(b"legacy-credential"),
                     generated_user_id: None,
-                    private_key_pem: "legacy-private-key".into(),
+                    private_key_pem: Some("legacy-private-key".into()),
                     relying_party: "example.net".into(),
                     user_handle: None,
                     backup_eligible: false,
@@ -11502,14 +11610,21 @@ mod tests {
                 Vec::new(),
             )
             .unwrap();
-        let mut replacement = runtime
+        let replacement = runtime
             .get_entry_detail(&opened.vault_id, &registration.entry_id)
             .unwrap()
             .passkey
             .unwrap();
-        replacement.relying_party = "other.example".into();
-        replacement.username = "manual-account".into();
-        replacement.credential_id = URL_SAFE_NO_PAD.encode(b"manual-platform-replacement");
+        let replacement = EntryPasskeyUpdateDto {
+            username: "manual-account".into(),
+            credential_id: URL_SAFE_NO_PAD.encode(b"manual-platform-replacement"),
+            generated_user_id: replacement.generated_user_id,
+            private_key_pem: None,
+            relying_party: "other.example".into(),
+            user_handle: replacement.user_handle,
+            backup_eligible: replacement.backup_eligible,
+            backup_state: replacement.backup_state,
+        };
         runtime
             .set_entry_passkey(&opened.vault_id, &registration.entry_id, replacement)
             .unwrap();
@@ -12400,11 +12515,11 @@ mod tests {
             .set_entry_passkey(
                 &opened.vault_id,
                 &created.id,
-                EntryPasskeyDto {
+                EntryPasskeyUpdateDto {
                     username: "alice@example.com".into(),
                     credential_id: "Y3JlZC0x".into(),
                     generated_user_id: Some("generated-user".into()),
-                    private_key_pem: "pem".into(),
+                    private_key_pem: Some("pem".into()),
                     relying_party: "example.com".into(),
                     user_handle: Some("dXNlci0x".into()),
                     backup_eligible: true,
@@ -12625,7 +12740,7 @@ mod tests {
             },
         };
 
-        let committed = runtime.handle(command.clone()).unwrap();
+        let committed = runtime.handle(clone_test_command(&command)).unwrap();
         let RuntimeResponse::AutofillPersistResult(committed) = committed else {
             panic!("expected durable autofill result, got {committed:?}");
         };
@@ -12657,7 +12772,7 @@ mod tests {
         );
         let committed_bytes = std::fs::read(&opened.path).unwrap();
 
-        let replayed = runtime.handle(command.clone()).unwrap();
+        let replayed = runtime.handle(clone_test_command(&command)).unwrap();
         let RuntimeResponse::AutofillPersistResult(replayed) = replayed else {
             panic!("expected replay result, got {replayed:?}");
         };
@@ -12683,7 +12798,7 @@ mod tests {
         restarted
             .unlock_vault(&reopened.vault_id, Some("demo-password"), None)
             .unwrap();
-        let replayed_after_restart = restarted.handle(command.clone()).unwrap();
+        let replayed_after_restart = restarted.handle(clone_test_command(&command)).unwrap();
         assert!(matches!(
             replayed_after_restart,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -12972,7 +13087,7 @@ mod tests {
             },
         };
 
-        let committed = runtime.handle(command.clone()).unwrap();
+        let committed = runtime.handle(clone_test_command(&command)).unwrap();
         assert!(matches!(
             committed,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -13305,7 +13420,7 @@ mod tests {
                 },
             },
         };
-        let committed = runtime.handle(command.clone()).unwrap();
+        let committed = runtime.handle(clone_test_command(&command)).unwrap();
         assert!(
             matches!(committed, RuntimeResponse::AutofillPersistResult(_)),
             "unexpected initial persist response: {committed:?}"
@@ -13330,7 +13445,7 @@ mod tests {
         external.delete_entry(&opened.vault_id, &entry.id).unwrap();
         external.save_vault(&opened.vault_id).unwrap();
 
-        let replayed = runtime.handle(command.clone()).unwrap();
+        let replayed = runtime.handle(clone_test_command(&command)).unwrap();
 
         assert!(matches!(
             replayed,
@@ -13467,7 +13582,7 @@ mod tests {
             },
         };
 
-        let committed = runtime.handle(command.clone()).unwrap();
+        let committed = runtime.handle(clone_test_command(&command)).unwrap();
         assert!(matches!(
             committed,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -13488,7 +13603,7 @@ mod tests {
             desired_fields
         );
 
-        let replayed = runtime.handle(command.clone()).unwrap();
+        let replayed = runtime.handle(clone_test_command(&command)).unwrap();
         assert!(matches!(
             replayed,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -13804,7 +13919,7 @@ mod tests {
             },
         };
 
-        let response = runtime.handle(command.clone()).unwrap();
+        let response = runtime.handle(clone_test_command(&command)).unwrap();
 
         assert!(matches!(
             response,
@@ -14449,7 +14564,7 @@ mod tests {
                 },
             };
             first.queue_test_onedrive_ambiguous_write(remote_was_committed);
-            let response = first.handle(command.clone()).unwrap();
+            let response = first.handle(clone_test_command(&command)).unwrap();
             assert!(matches!(
                 response,
                 RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -14760,7 +14875,7 @@ mod tests {
                 desired_fields: desired_fields.clone(),
             },
         };
-        let response = runtime.handle(command.clone()).unwrap();
+        let response = runtime.handle(clone_test_command(&command)).unwrap();
         assert!(matches!(
             response,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -14799,7 +14914,7 @@ mod tests {
             .replace_session_transformed_key(&vault_id, stale_session_key.clone())
             .unwrap();
         authorizations.borrow_mut().clear();
-        let adopted = runtime.handle(command.clone()).unwrap();
+        let adopted = runtime.handle(clone_test_command(&command)).unwrap();
         assert!(matches!(
             adopted,
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
@@ -14814,7 +14929,7 @@ mod tests {
         assert_eq!(authorizations.borrow().len(), 1);
 
         runtime.allow_unlock_kdf = false;
-        let replayed = runtime.handle(command.clone()).unwrap();
+        let replayed = runtime.handle(clone_test_command(&command)).unwrap();
         assert!(
             matches!(
                 replayed,
@@ -15789,7 +15904,7 @@ mod tests {
         };
         first.queue_test_onedrive_ambiguous_write(false);
         assert!(matches!(
-            first.handle(command.clone()).unwrap(),
+            first.handle(clone_test_command(&command)).unwrap(),
             RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
                 outcome: AutofillPersistOutcomeDto::Durable {
                     durability: AutofillPersistDurabilityDto::PendingRemoteCache,
@@ -16120,15 +16235,17 @@ mod tests {
 
         let status = runtime.retry_vault_source_sync(&vault_id).unwrap();
 
-        assert_eq!(status.remote_state, "pending_sync");
-        let conflict = runtime
+        assert_eq!(status.remote_state, "online");
+        let conflicts = runtime
             .one_drive
             .list_children(None)
             .unwrap()
             .items
             .into_iter()
-            .find(|item| item.item_id.starts_with("vaultkern-conflict-"))
-            .expect("pending conflict copy");
+            .filter(|item| item.item_id.starts_with("vaultkern-conflict-"))
+            .collect::<Vec<_>>();
+        assert_eq!(conflicts.len(), 1);
+        let conflict = &conflicts[0];
         let conflict_bytes = runtime
             .read_test_onedrive_item_bytes(&conflict.drive_id, &conflict.item_id)
             .unwrap();
@@ -16140,6 +16257,18 @@ mod tests {
             entry_fields_for_vault(&runtime.core, &conflict_vault, &target.id).unwrap(),
             live_fields
         );
+
+        let retry = runtime.retry_vault_source_sync(&vault_id).unwrap();
+        assert_eq!(retry.remote_state, "online");
+        let conflict_count = runtime
+            .one_drive
+            .list_children(None)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|item| item.item_id.starts_with("vaultkern-conflict-"))
+            .count();
+        assert_eq!(conflict_count, 1, "conflict fallback must be idempotent");
     }
 
     #[test]
@@ -16338,7 +16467,7 @@ mod tests {
             },
         };
         first.queue_test_onedrive_ambiguous_write(false);
-        let pending = first.handle(command.clone()).unwrap();
+        let pending = first.handle(clone_test_command(&command)).unwrap();
         assert!(
             matches!(
                 &pending,
@@ -16840,11 +16969,11 @@ mod tests {
             .set_entry_passkey(
                 &opened.vault_id,
                 &entry.id,
-                EntryPasskeyDto {
+                EntryPasskeyUpdateDto {
                     username: "alice@example.com".into(),
                     credential_id: "Y3JlZC0x".into(),
                     generated_user_id: None,
-                    private_key_pem: "pem".into(),
+                    private_key_pem: Some("pem".into()),
                     relying_party: "example.com".into(),
                     user_handle: Some("alice@example.com".into()),
                     backup_eligible: true,
@@ -16869,11 +16998,11 @@ mod tests {
             .set_entry_passkey(
                 &opened.vault_id,
                 &entry.id,
-                EntryPasskeyDto {
+                EntryPasskeyUpdateDto {
                     username: "alice@example.com".into(),
                     credential_id: "not base64url!".into(),
                     generated_user_id: None,
-                    private_key_pem: "pem".into(),
+                    private_key_pem: Some("pem".into()),
                     relying_party: "example.com".into(),
                     user_handle: Some("dXNlci0x".into()),
                     backup_eligible: true,

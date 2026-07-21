@@ -5,24 +5,26 @@ use serde_json::{Value, json};
 #[cfg(windows)]
 use tauri::{Manager, State};
 #[cfg(windows)]
+use vaultkern_runtime_protocol::ProtocolEnvelope;
+#[cfg(windows)]
 use vaultkern_windows::{
-    PasskeyPluginServer, RuntimeBridge, launch_requests_visible_window,
-    should_refresh_platform_passkeys,
+    DesktopSettingsStore, PasskeyPluginServer, RuntimeBridge, launch_requests_visible_window,
+    platform_passkey_refresh_command_type, should_refresh_platform_passkeys,
 };
 
 #[cfg(windows)]
 #[tauri::command]
 async fn runtime_send(
-    message: Value,
+    message: ProtocolEnvelope,
     bridge: State<'_, RuntimeBridge>,
     passkey_plugin: State<'_, PasskeyPluginServer>,
 ) -> Result<Value, String> {
-    let command_type = message
-        .pointer("/command/type")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+    let command_type = platform_passkey_refresh_command_type(&message.command);
     let bridge = bridge.inner().clone();
-    let response = match tauri::async_runtime::spawn_blocking(move || bridge.request(message)).await
+    let response = match tauri::async_runtime::spawn_blocking(move || {
+        bridge.request_envelope(message)
+    })
+    .await
     {
         Ok(response) => response,
         Err(error) => json!({
@@ -31,7 +33,7 @@ async fn runtime_send(
             "message": format!("runtime task failed: {error}")
         }),
     };
-    if should_refresh_platform_passkeys(command_type.as_deref(), &response) {
+    if should_refresh_platform_passkeys(command_type, &response) {
         if let Err(error) = passkey_plugin.sync_credentials() {
             eprintln!("passkey credential cache refresh failed: {error}");
         }
@@ -42,11 +44,38 @@ async fn runtime_send(
 #[cfg(windows)]
 #[tauri::command]
 fn reconcile_settings(
-    enabled: bool,
     vault_unlocked: bool,
+    settings: State<'_, DesktopSettingsStore>,
     passkey_plugin: State<'_, PasskeyPluginServer>,
 ) -> Result<bool, String> {
+    reconcile_desktop_settings(&settings, &passkey_plugin, vault_unlocked)
+}
+
+#[cfg(windows)]
+fn reconcile_desktop_settings(
+    settings: &DesktopSettingsStore,
+    passkey_plugin: &PasskeyPluginServer,
+    vault_unlocked: bool,
+) -> Result<bool, String> {
+    let enabled = settings
+        .passkey_provider_enabled()
+        .map_err(|error| error.to_string())?;
     passkey_plugin.reconcile_settings(enabled, vault_unlocked)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn load_desktop_settings(settings: State<'_, DesktopSettingsStore>) -> Result<Value, String> {
+    settings.load().map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn save_desktop_settings(
+    desired: Value,
+    settings: State<'_, DesktopSettingsStore>,
+) -> Result<(), String> {
+    settings.save(&desired).map_err(|error| error.to_string())
 }
 
 #[cfg(windows)]
@@ -72,14 +101,24 @@ fn main() {
             },
         ))
         .setup(move |app| {
-            if show_window_on_start {
-                show_main_window(app.handle(), &window_bridge).map_err(std::io::Error::other)?;
-            }
+            let settings_path = app
+                .path()
+                .app_data_dir()
+                .map_err(std::io::Error::other)?
+                .join("desktop-settings.json");
+            let settings = DesktopSettingsStore::new(settings_path);
             let plugin = PasskeyPluginServer::start(plugin_bridge.clone());
             if let Some(error) = plugin.start_error() {
                 eprintln!("passkey COM server unavailable: {error}");
             }
+            if let Err(error) = reconcile_desktop_settings(&settings, &plugin, false) {
+                eprintln!("startup settings reconciliation failed: {error}");
+            }
+            app.manage(settings);
             app.manage(plugin);
+            if show_window_on_start {
+                show_main_window(app.handle(), &window_bridge).map_err(std::io::Error::other)?;
+            }
             Ok(())
         })
         .on_window_event(move |window, event| {
@@ -96,7 +135,12 @@ fn main() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![runtime_send, reconcile_settings])
+        .invoke_handler(tauri::generate_handler![
+            runtime_send,
+            load_desktop_settings,
+            save_desktop_settings,
+            reconcile_settings
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run VaultKern");
 }

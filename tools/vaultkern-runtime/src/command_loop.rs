@@ -3,6 +3,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use anyhow::{Context, Result};
 use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse};
+use zeroize::Zeroizing;
 
 use crate::Runtime;
 
@@ -221,7 +222,7 @@ fn read_native_message_or_eof_with_limit<T: serde::de::DeserializeOwned>(
             max_length: max_message_bytes,
         });
     }
-    let mut payload = vec![0_u8; length];
+    let mut payload = Zeroizing::new(vec![0_u8; length]);
     reader
         .read_exact(&mut payload)
         .context("failed to read message payload")?;

@@ -6,18 +6,19 @@ use vaultkern_runtime_protocol::{
     DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
     DatabaseSettingsCommitResultDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
     EntryAttachmentContentDto, EntryDetailDto, EntryFieldsDto, EntryHistoryDetailDto,
-    EntryHistoryItemDto, EntryHistoryListDto, EntryPasskeyDto, EntrySummaryDto,
-    FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto, OneDriveAuthSessionDto,
-    OneDriveAuthStatusDto, OneDriveItemDto, OneDriveItemListDto, OptionalSettingUpdateDto,
-    PasskeyAssertionDto, PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto,
-    PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
-    PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto,
-    PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto, PasskeyCredentialListDto,
-    PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
-    PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
-    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, ProtocolEnvelope,
-    RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
-    VaultHandleDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
+    EntryHistoryItemDto, EntryHistoryListDto, EntryPasskeyDto, EntryPasskeyUpdateDto,
+    EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto,
+    OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto, OneDriveItemListDto,
+    OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
+    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
+    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
+    PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto,
+    PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto,
+    PasskeyFrameKindDto, PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto,
+    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto,
+    PasskeyUserVerifiedDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
+    SaveVaultStatusDto, SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
+    VaultSourceStatusDto,
 };
 
 #[test]
@@ -514,8 +515,6 @@ fn protocol_roundtrips_entry_detail_response_shape() {
             username: "alice@example.com".into(),
             credential_id: "credential-base64url".into(),
             generated_user_id: Some("generated-user".into()),
-            private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
-                .into(),
             relying_party: "example.com".into(),
             user_handle: Some("user-handle".into()),
             backup_eligible: true,
@@ -560,6 +559,10 @@ fn protocol_roundtrips_entry_detail_response_shape() {
     assert_eq!(passkey.get("username").unwrap(), "alice@example.com");
     assert_eq!(passkey.get("credentialId").unwrap(), "credential-base64url");
     assert_eq!(passkey.get("generatedUserId").unwrap(), "generated-user");
+    assert!(
+        !passkey.contains_key("privateKeyPem"),
+        "entry detail responses must never release a passkey private key"
+    );
     assert_eq!(passkey.get("relyingParty").unwrap(), "example.com");
     assert_eq!(passkey.get("userHandle").unwrap(), "user-handle");
     assert_eq!(passkey.get("backupEligible").unwrap(), true);
@@ -581,12 +584,28 @@ fn protocol_roundtrips_entry_detail_response_shape() {
 }
 
 #[test]
+fn protocol_debug_redacts_master_credentials() {
+    let secret = "master-password-must-not-appear-in-debug";
+    let envelope = ProtocolEnvelope::new(RuntimeCommand::EnableQuickUnlockForCurrentVault {
+        password: Some(secret.into()),
+        key_file_path: None,
+    });
+
+    let debug = format!("{envelope:?}");
+
+    assert!(
+        !debug.contains(secret),
+        "master credentials must be redacted from protocol Debug output"
+    );
+}
+
+#[test]
 fn protocol_roundtrips_entry_passkey_commands() {
-    let passkey = EntryPasskeyDto {
+    let passkey = EntryPasskeyUpdateDto {
         username: "alice@example.com".into(),
         credential_id: "credential-base64url".into(),
         generated_user_id: Some("generated-user".into()),
-        private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
+        private_key_pem: Some("-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into()),
         relying_party: "example.com".into(),
         user_handle: Some("user-handle".into()),
         backup_eligible: true,
@@ -595,7 +614,7 @@ fn protocol_roundtrips_entry_passkey_commands() {
     let set = ProtocolEnvelope::new(RuntimeCommand::SetEntryPasskey {
         vault_id: "vault-1".into(),
         entry_id: "entry-1".into(),
-        passkey: passkey.clone(),
+        passkey,
     });
     let clear = ProtocolEnvelope::new(RuntimeCommand::ClearEntryPasskey {
         vault_id: "vault-1".into(),

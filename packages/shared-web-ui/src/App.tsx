@@ -14,6 +14,7 @@ import type {
   EntryHistoryDetail,
   EntryHistoryItem,
   EntryPasskey,
+  EntryPasskeyUpdate,
   EntrySummary,
   GroupNode,
   GroupTree,
@@ -93,7 +94,7 @@ export interface RuntimeClientLike {
   setEntryPasskey(
     vaultId: string,
     entryId: string,
-    passkey: EntryPasskey
+    passkey: EntryPasskeyUpdate
   ): Promise<EntryDetail>;
   clearEntryPasskey(vaultId: string, entryId: string): Promise<EntryDetail>;
   deleteEntry(vaultId: string, entryId: string): Promise<void>;
@@ -1208,7 +1209,7 @@ export function App({
     }
   }
 
-  async function handleSetEntryPasskey(passkey: EntryPasskey) {
+  async function handleSetEntryPasskey(passkey: EntryPasskeyUpdate) {
     if (!session?.activeVaultId || !selectedEntryId) {
       return;
     }

@@ -1,6 +1,76 @@
-use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::Deref;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use zeroize::Zeroizing;
+
+pub struct SensitiveString(Zeroizing<String>);
+
+impl SensitiveString {
+    pub fn into_zeroizing(self) -> Zeroizing<String> {
+        self.0
+    }
+}
+
+impl fmt::Debug for SensitiveString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+impl PartialEq for SensitiveString {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for SensitiveString {}
+
+impl Deref for SensitiveString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
+    }
+}
+
+impl AsRef<str> for SensitiveString {
+    fn as_ref(&self) -> &str {
+        self
+    }
+}
+
+impl From<String> for SensitiveString {
+    fn from(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+}
+
+impl From<&str> for SensitiveString {
+    fn from(value: &str) -> Self {
+        value.to_owned().into()
+    }
+}
+
+impl Serialize for SensitiveString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for SensitiveString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolEnvelope {
     pub version: u32,
     #[serde(default, rename = "requestId", skip_serializing_if = "Option::is_none")]
@@ -18,7 +88,7 @@ impl ProtocolEnvelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeCommand {
     GetSessionState,
@@ -51,14 +121,14 @@ pub enum RuntimeCommand {
         vault_ref_id: String,
     },
     UnlockCurrentVaultWithPassword {
-        password: String,
+        password: SensitiveString,
     },
     UnlockCurrentVault {
-        password: Option<String>,
+        password: Option<SensitiveString>,
         key_file_path: Option<String>,
     },
     EnableQuickUnlockForCurrentVault {
-        password: Option<String>,
+        password: Option<SensitiveString>,
         key_file_path: Option<String>,
     },
     UnlockCurrentVaultWithQuickUnlock,
@@ -69,11 +139,11 @@ pub enum RuntimeCommand {
     LockSession,
     UnlockWithPassword {
         vault_id: String,
-        password: String,
+        password: SensitiveString,
     },
     UnlockVault {
         vault_id: String,
-        password: Option<String>,
+        password: Option<SensitiveString>,
         key_file_path: Option<String>,
     },
     ListGroups {
@@ -135,7 +205,7 @@ pub enum RuntimeCommand {
     SetEntryPasskey {
         vault_id: String,
         entry_id: String,
-        passkey: EntryPasskeyDto,
+        passkey: EntryPasskeyUpdateDto,
     },
     ClearEntryPasskey {
         vault_id: String,
@@ -147,7 +217,7 @@ pub enum RuntimeCommand {
         expected_phase: PasskeyCeremonyPhaseDto,
         vault_id: String,
         method: PasskeyUserVerificationMethodDto,
-        password: Option<String>,
+        password: Option<SensitiveString>,
     },
     ListPasskeyCredentials {
         ceremony_token: String,
@@ -459,7 +529,7 @@ pub struct DatabaseSettingsCommitResultDto {
     pub save_result: SaveVaultResultDto,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseSettingsUpdateDto {
     #[serde(default)]
@@ -572,10 +642,10 @@ pub struct DatabaseKdfSettingsDto {
     pub parallelism: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseCredentialsUpdateDto {
-    pub new_password: Option<String>,
+    pub new_password: Option<SensitiveString>,
     pub remove_password: bool,
 }
 
@@ -671,7 +741,19 @@ pub struct EntryPasskeyDto {
     pub username: String,
     pub credential_id: String,
     pub generated_user_id: Option<String>,
-    pub private_key_pem: String,
+    pub relying_party: String,
+    pub user_handle: Option<String>,
+    pub backup_eligible: bool,
+    pub backup_state: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryPasskeyUpdateDto {
+    pub username: String,
+    pub credential_id: String,
+    pub generated_user_id: Option<String>,
+    pub private_key_pem: Option<SensitiveString>,
     pub relying_party: String,
     pub user_handle: Option<String>,
     pub backup_eligible: bool,

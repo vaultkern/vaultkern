@@ -5859,6 +5859,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]
@@ -5874,6 +5875,7 @@ dependencies = [
  "vaultkern-core",
  "vaultkern-runtime",
  "vaultkern-runtime-protocol",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

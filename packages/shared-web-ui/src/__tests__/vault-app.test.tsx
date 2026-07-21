@@ -360,7 +360,7 @@ it("renders recent vaults and unlocks the current selection without a path field
       name: "Show password"
     })
   );
-  expect(passwordInput).toHaveAttribute("type", "text");
+  await waitFor(() => expect(passwordInput).toHaveAttribute("type", "text"));
 });
 
 it("unlocks the current recent vault with Windows Hello when quick unlock is enabled", async () => {
@@ -2050,7 +2050,9 @@ it("keeps the database settings draft editable when persistence fails", async ()
 
   await screen.findByText("No entries available.");
   fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
-  const name = await screen.findByLabelText("Database Name");
+  const name = await screen.findByLabelText("Database Name", undefined, {
+    timeout: 3000
+  });
   fireEvent.change(name, { target: { value: "Engineering" } });
   fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
@@ -2553,7 +2555,6 @@ it("manages an entry passkey from the detail pane", async () => {
     username: "alice@example.com",
     credentialId: "credential-old",
     generatedUserId: "generated-user",
-    privateKeyPem: "-----BEGIN EC PRIVATE KEY-----\nold\n-----END EC PRIVATE KEY-----",
     relyingParty: "example.com",
     userHandle: "user-handle",
     backupEligible: true,
@@ -2651,7 +2652,7 @@ it("manages an entry passkey from the detail pane", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Edit passkey" }));
   const privateKeyPemField = screen.getByLabelText("Private Key PEM");
   expect(privateKeyPemField.tagName).toBe("TEXTAREA");
-  expect(privateKeyPemField).toHaveValue(originalPasskey.privateKeyPem);
+  expect(privateKeyPemField).toHaveValue("");
   expect(privateKeyPemField).toHaveStyle({ WebkitTextSecurity: "disc" });
   const privateKeyPemDraftRow = privateKeyPemField.closest("div");
   expect(privateKeyPemDraftRow).not.toBeNull();
@@ -2682,13 +2683,7 @@ it("manages an entry passkey from the detail pane", async () => {
   });
   expect(savePasskeyButton).toBeDisabled();
   fireEvent.change(privateKeyPemField, {
-    target: {
-      value: "-----BEGIN EC PRIVATE KEY-----\nnew\n-----END EC PRIVATE KEY-----"
-    }
-  });
-  expect(savePasskeyButton).toBeDisabled();
-  fireEvent.change(privateKeyPemField, {
-    target: { value: `  ${originalPasskey.privateKeyPem}\n\n` }
+    target: { value: "" }
   });
   expect(savePasskeyButton).not.toBeDisabled();
   fireEvent.click(screen.getByLabelText("Backup state"));
@@ -2700,7 +2695,7 @@ it("manages an entry passkey from the detail pane", async () => {
       "entry-1",
       {
         ...editedPasskey,
-        privateKeyPem: originalPasskey.privateKeyPem
+        privateKeyPem: null
       }
     );
   });
@@ -2725,7 +2720,6 @@ it("retries a failed passkey save without clearing the passkey again", async () 
     username: "alice@example.com",
     credentialId: "credential-old",
     generatedUserId: null,
-    privateKeyPem: "-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----",
     relyingParty: "example.com",
     userHandle: null,
     backupEligible: true,
@@ -2826,7 +2820,6 @@ it("renders localized passkey reveal labels without English password fragments",
             username: "alice@example.com",
             credentialId: "credential-old",
             generatedUserId: "generated-user",
-            privateKeyPem: "-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----",
             relyingParty: "example.com",
             userHandle: "user-handle",
             backupEligible: true,

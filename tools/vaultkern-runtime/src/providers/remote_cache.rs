@@ -644,7 +644,6 @@ impl RemoteVaultCache {
         )?)
     }
 
-    #[cfg(test)]
     pub(crate) fn complete_generic_pending(
         &self,
         key: &RemoteCacheKey,

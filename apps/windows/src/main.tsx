@@ -14,10 +14,10 @@ if (!rootElement) {
 
 const client = new RuntimeClient(createTauriTransport(invoke));
 const settingsStore = createDesktopSettingsStore(
-  window.localStorage,
-  (enabled, context) =>
+  () => invoke("load_desktop_settings"),
+  (desired) => invoke("save_desktop_settings", { desired }),
+  (context) =>
     invoke("reconcile_settings", {
-      enabled,
       vaultUnlocked: context.vaultUnlocked
     })
 );
