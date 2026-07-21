@@ -1785,7 +1785,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_store_reports_post_publish_failure() {
+    fn windows_store_repairs_a_recoverable_post_publish_failure() {
         use super::WindowsOneDriveRefreshTokenStore;
 
         const OLD_TOKEN: &str = "fixture-refresh-token-before-failure";
@@ -1801,10 +1801,9 @@ mod tests {
             DurableFaultInjector::fail_once(DurableFaultPoint::TargetReplaced),
         );
 
-        let error = store
+        store
             .store(TOKEN)
-            .expect_err("post-publish durability failure must fail the store operation");
-        assert!(format!("{error:#}").contains("TargetReplaced"));
+            .expect("a visible replacement must be repaired and acknowledged");
         assert_eq!(
             store.load().unwrap().as_deref().map(String::as_str),
             Some(TOKEN)
@@ -1820,15 +1819,7 @@ mod tests {
                     .contains(".bak.")
             })
             .collect::<Vec<_>>();
-        assert_eq!(backups.len(), 1);
-        assert_eq!(
-            WindowsOneDriveRefreshTokenStore::new(backups[0].clone(), "test/default")
-                .load()
-                .unwrap()
-                .as_deref()
-                .map(String::as_str),
-            Some(OLD_TOKEN)
-        );
+        assert!(backups.is_empty());
     }
 
     #[cfg(windows)]
