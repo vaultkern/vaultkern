@@ -99,7 +99,9 @@ pub struct PlatformPasskeyCredential {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformPasskeyRegistrationInput {
     pub relying_party: String,
+    pub relying_party_name: String,
     pub user_name: String,
+    pub user_display_name: String,
     pub user_handle: Vec<u8>,
     pub public_key_algorithm: i32,
     pub user_verified: bool,

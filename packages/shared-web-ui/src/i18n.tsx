@@ -38,7 +38,7 @@ type TranslationKey =
   | "Enable Windows Hello"
   | "Enrolling..."
   | "Unlock this vault before enrolling Windows Hello."
-  | "Enter the current master credentials once. VaultKern does not retain them after enrollment."
+  | "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock."
   | "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret."
   | "Database"
   | "Loading database settings..."
@@ -258,7 +258,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Enable Windows Hello": "启用 Windows Hello",
   "Enrolling...": "正在注册...",
   "Unlock this vault before enrolling Windows Hello.": "请先解锁此数据库，再注册 Windows Hello。",
-  "Enter the current master credentials once. VaultKern does not retain them after enrollment.": "请一次性输入当前主凭据；注册完成后 VaultKern 不会保留它们。",
+  "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock.": "请一次性输入当前主凭据；VaultKern 会将其保留在受 Windows Hello 保护的存储中，用于快速解锁。",
   "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.": "剪贴板清空会在延迟后写入空字符串。浏览器 API 不允许后台可靠确认剪贴板仍包含刚复制的秘密。",
   Database: "数据库",
   "Loading database settings...": "正在加载数据库设置...",

@@ -1807,7 +1807,13 @@ impl Runtime {
             })
         })();
 
-        if result.is_err()
+        let should_restore_previous = result.as_ref().err().is_some_and(|error| {
+            !matches!(
+                error.downcast_ref::<LocalFileCommitError>(),
+                Some(LocalFileCommitError::OutcomeUnknown { .. })
+            )
+        });
+        if should_restore_previous
             && let Some(loaded) = self.vault_session.find_loaded_mut(vault_id)
         {
             *loaded = previous;
@@ -2188,18 +2194,21 @@ impl Runtime {
     pub fn list_platform_passkey_credentials(&self) -> Result<Vec<PlatformPasskeyCredential>> {
         let vault_id = self.active_platform_passkey_vault_id()?;
         let vault = self.loaded_vault(&vault_id)?;
-        let mut passkeys = Vec::new();
-        visit_passkeys(
+        let mut credentials = Vec::new();
+        visit_passkey_entries(
             &vault.root,
             vault.recycle_bin_group,
             vault.recycle_bin_enabled.unwrap_or(true),
-            &mut |passkey| passkeys.push(passkey),
+            &mut |entry, passkey| {
+                if passkey.user_handle.is_some()
+                    && let Ok(credential) =
+                        platform_passkey_credential(passkey, &entry.title, &entry.username)
+                {
+                    credentials.push(credential);
+                }
+            },
         );
-        Ok(passkeys
-            .into_iter()
-            .filter(|passkey| passkey.user_handle.is_some())
-            .filter_map(|passkey| platform_passkey_credential(passkey).ok())
-            .collect())
+        Ok(credentials)
     }
 
     pub fn register_platform_passkey(
@@ -2207,6 +2216,10 @@ impl Runtime {
         input: PlatformPasskeyRegistrationInput,
     ) -> Result<PlatformPasskeyRegistrationOutput> {
         let vault_id = self.active_platform_passkey_vault_id()?;
+        let relying_party_name =
+            platform_credential_label(&input.relying_party_name, &input.relying_party);
+        let user_display_name =
+            platform_credential_label(&input.user_display_name, &input.user_name);
         let credential_id = URL_SAFE_NO_PAD
             .decode((self.passkey_credential_id_generator)())
             .context("generated platform passkey credential id was not base64url")?;
@@ -2220,7 +2233,11 @@ impl Runtime {
             },
             credential_id,
         )?;
-        let credential = platform_passkey_credential(&registration.passkey)?;
+        let credential = platform_passkey_credential(
+            &registration.passkey,
+            &relying_party_name,
+            &user_display_name,
+        )?;
         let modified_at = self.current_unix_time();
 
         let (existing, credential_id_collision_count) = {
@@ -2256,11 +2273,14 @@ impl Runtime {
         }
 
         let (entry_id, rollback) = if let Some((entry_id, rollback_entry)) = existing {
+            let refresh_entry_title = rollback_entry
+                .passkey
+                .as_ref()
+                .is_some_and(|passkey| rollback_entry.title == passkey.relying_party);
             let refresh_entry_username = rollback_entry
                 .passkey
                 .as_ref()
                 .is_some_and(|passkey| rollback_entry.username == passkey.username);
-            let next_username = registration.passkey.username.clone();
             let rollback = PasskeyRegistrationRollbackState {
                 vault_id: vault_id.clone(),
                 entry_id: entry_id.clone(),
@@ -2279,13 +2299,13 @@ impl Runtime {
             self.core.snapshot_entry_to_history(vault, &entry_id)?;
             self.core
                 .set_entry_passkey(vault, &entry_id, registration.passkey)?;
-            if refresh_entry_username {
+            if refresh_entry_title || refresh_entry_username {
                 self.core.update_entry_fields(
                     vault,
                     &entry_id,
                     EntryUpdate {
-                        title: None,
-                        username: Some(next_username),
+                        title: refresh_entry_title.then_some(relying_party_name.clone()),
+                        username: refresh_entry_username.then_some(user_display_name.clone()),
                         password: None,
                         url: None,
                         notes: None,
@@ -2296,8 +2316,8 @@ impl Runtime {
             enforce_history_limits(vault);
             (entry_id, rollback)
         } else {
-            let mut entry = Entry::new(input.relying_party.clone());
-            entry.username = input.user_name;
+            let mut entry = Entry::new(relying_party_name);
+            entry.username = user_display_name;
             entry.password = String::new();
             entry.url = format!("https://{}", input.relying_party);
             entry.notes = "Created by system passkey provider".into();
@@ -7934,7 +7954,11 @@ fn entry_passkey_to_dto(passkey: vaultkern_core::EntryPasskeyView) -> EntryPassk
     }
 }
 
-fn platform_passkey_credential(passkey: &PasskeyRecord) -> Result<PlatformPasskeyCredential> {
+fn platform_passkey_credential(
+    passkey: &PasskeyRecord,
+    relying_party_name: &str,
+    user_display_name: &str,
+) -> Result<PlatformPasskeyCredential> {
     let credential_id = URL_SAFE_NO_PAD
         .decode(&passkey.credential_id)
         .context("stored platform passkey credential id was not base64url")?;
@@ -7955,11 +7979,19 @@ fn platform_passkey_credential(passkey: &PasskeyRecord) -> Result<PlatformPasske
     Ok(PlatformPasskeyCredential {
         credential_id,
         relying_party: passkey.relying_party.clone(),
-        relying_party_name: passkey.relying_party.clone(),
+        relying_party_name: platform_credential_label(relying_party_name, &passkey.relying_party),
         user_handle,
         user_name: passkey.username.clone(),
-        user_display_name: passkey.username.clone(),
+        user_display_name: platform_credential_label(user_display_name, &passkey.username),
     })
+}
+
+fn platform_credential_label(value: &str, fallback: &str) -> String {
+    if value.trim().is_empty() {
+        fallback.to_owned()
+    } else {
+        value.to_owned()
+    }
 }
 
 fn dto_to_passkey_record(passkey: EntryPasskeyDto) -> Result<PasskeyRecord> {
@@ -8122,7 +8154,21 @@ fn visit_passkeys<'a>(
     recycle_bin_enabled: bool,
     visitor: &mut impl FnMut(&'a PasskeyRecord),
 ) {
-    visit_passkeys_in_group(
+    visit_passkey_entries(
+        group,
+        recycle_bin_group,
+        recycle_bin_enabled,
+        &mut |_, passkey| visitor(passkey),
+    );
+}
+
+fn visit_passkey_entries<'a>(
+    group: &'a vaultkern_core::Group,
+    recycle_bin_group: Option<Uuid>,
+    recycle_bin_enabled: bool,
+    visitor: &mut impl FnMut(&'a Entry, &'a PasskeyRecord),
+) {
+    visit_passkey_entries_in_group(
         group,
         recycle_bin_group,
         recycle_bin_enabled,
@@ -8131,12 +8177,12 @@ fn visit_passkeys<'a>(
     );
 }
 
-fn visit_passkeys_in_group<'a>(
+fn visit_passkey_entries_in_group<'a>(
     group: &'a vaultkern_core::Group,
     recycle_bin_group: Option<Uuid>,
     recycle_bin_enabled: bool,
     ancestor_recycled: bool,
-    visitor: &mut impl FnMut(&'a PasskeyRecord),
+    visitor: &mut impl FnMut(&'a Entry, &'a PasskeyRecord),
 ) {
     let group_recycled = group_is_recycled(
         group,
@@ -8148,12 +8194,12 @@ fn visit_passkeys_in_group<'a>(
         if !entry_is_recycled(entry, group_recycled)
             && let Some(passkey) = entry.passkey.as_ref()
         {
-            visitor(passkey);
+            visitor(entry, passkey);
         }
     }
 
     for child in &group.children {
-        visit_passkeys_in_group(
+        visit_passkey_entries_in_group(
             child,
             recycle_bin_group,
             recycle_bin_enabled,
@@ -9776,6 +9822,50 @@ mod tests {
     }
 
     #[test]
+    fn database_settings_command_keeps_the_pending_model_when_persistence_is_indeterminate() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        arm_local_backup_loss_after_publish(&mut runtime, &opened.path);
+
+        let response = runtime
+            .handle(RuntimeCommand::UpdateDatabaseSettings {
+                vault_id: opened.vault_id.clone(),
+                update: DatabaseSettingsUpdateDto {
+                    metadata: Some(DatabaseMetadataSettingsDto {
+                        name: "published but indeterminate".into(),
+                        description: None,
+                        default_username: None,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            })
+            .expect("indeterminate settings saves are protocol responses");
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected indeterminate persistence response, got {response:?}");
+        };
+        assert_eq!(error.code, "persist_outcome_unknown");
+        assert_eq!(
+            runtime
+                .get_database_settings(&opened.vault_id)
+                .expect("pending database settings")
+                .metadata
+                .name,
+            "published but indeterminate"
+        );
+
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        let persisted = KeepassCore::new()
+            .load_kdbx(
+                &std::fs::read(&opened.path).expect("read indeterminate source"),
+                &key,
+            )
+            .expect("load visible published settings");
+        assert_eq!(persisted.name, "published but indeterminate");
+    }
+
+    #[test]
     fn database_settings_command_returns_only_after_the_settings_are_durable() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
@@ -10331,6 +10421,27 @@ mod tests {
     fn arm_local_write_fault(runtime: &mut Runtime, point: DurableFaultPoint) {
         runtime.local_files =
             LocalFileVaultSourceProvider::with_write_faults(DurableFaultInjector::fail_once(point));
+    }
+
+    fn arm_local_backup_loss_after_publish(runtime: &mut Runtime, source_path: &str) {
+        let parent = Path::new(source_path)
+            .parent()
+            .expect("vault source parent")
+            .to_owned();
+        runtime.local_files = LocalFileVaultSourceProvider::with_write_faults(
+            DurableFaultInjector::run_once(DurableFaultPoint::TargetReplaced, move || {
+                let backup = std::fs::read_dir(&parent)
+                    .expect("read vault source parent")
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .find(|path| {
+                        path.file_name()
+                            .is_some_and(|name| name.to_string_lossy().contains(".bak."))
+                    })
+                    .expect("published local backup");
+                std::fs::remove_file(backup).expect("remove published local backup");
+            }),
+        );
     }
 
     #[test]
@@ -10921,7 +11032,9 @@ mod tests {
         let registration = runtime
             .register_platform_passkey(PlatformPasskeyRegistrationInput {
                 relying_party: "example.com".into(),
+                relying_party_name: "example.com".into(),
                 user_name: "alice@example.com".into(),
+                user_display_name: "alice@example.com".into(),
                 user_handle: b"platform-user-1".to_vec(),
                 public_key_algorithm: -7,
                 user_verified: true,
@@ -10970,7 +11083,9 @@ mod tests {
         let registration = runtime
             .register_platform_passkey(PlatformPasskeyRegistrationInput {
                 relying_party: "example.com".into(),
+                relying_party_name: "example.com".into(),
                 user_name: "alice@example.com".into(),
+                user_display_name: "alice@example.com".into(),
                 user_handle: b"platform-user".to_vec(),
                 public_key_algorithm: -7,
                 user_verified: true,
@@ -11008,7 +11123,9 @@ mod tests {
         let registration = runtime
             .register_platform_passkey(PlatformPasskeyRegistrationInput {
                 relying_party: "example.com".into(),
+                relying_party_name: "example.com".into(),
                 user_name: "alice@example.com".into(),
+                user_display_name: "alice@example.com".into(),
                 user_handle: b"platform-user".to_vec(),
                 public_key_algorithm: -7,
                 user_verified: true,
@@ -11055,7 +11172,9 @@ mod tests {
         let error = runtime
             .register_platform_passkey(PlatformPasskeyRegistrationInput {
                 relying_party: "example.com".into(),
+                relying_party_name: "example.com".into(),
                 user_name: "alice@example.com".into(),
+                user_display_name: "alice@example.com".into(),
                 user_handle: b"platform-user-2".to_vec(),
                 public_key_algorithm: -7,
                 user_verified: true,
@@ -11075,7 +11194,9 @@ mod tests {
         let registration = runtime
             .register_platform_passkey(PlatformPasskeyRegistrationInput {
                 relying_party: "example.com".into(),
+                relying_party_name: "example.com".into(),
                 user_name: "alice@example.com".into(),
+                user_display_name: "alice@example.com".into(),
                 user_handle: b"platform-user-ambiguous".to_vec(),
                 public_key_algorithm: -7,
                 user_verified: true,
@@ -11180,7 +11301,9 @@ mod tests {
 
         let result = runtime.register_platform_passkey(PlatformPasskeyRegistrationInput {
             relying_party: "example.com".into(),
+            relying_party_name: "example.com".into(),
             user_name: "alice@example.com".into(),
+            user_display_name: "alice@example.com".into(),
             user_handle: b"shared-user".to_vec(),
             public_key_algorithm: -7,
             user_verified: true,
@@ -11211,7 +11334,9 @@ mod tests {
         let error = runtime
             .register_platform_passkey(PlatformPasskeyRegistrationInput {
                 relying_party: "example.com".into(),
+                relying_party_name: "example.com".into(),
                 user_name: "alice@example.com".into(),
+                user_display_name: "alice@example.com".into(),
                 user_handle: b"platform-user-conflict".to_vec(),
                 public_key_algorithm: -7,
                 user_verified: true,
@@ -11235,7 +11360,9 @@ mod tests {
         let first = runtime
             .register_platform_passkey(PlatformPasskeyRegistrationInput {
                 relying_party: "example.com".into(),
+                relying_party_name: "example.com".into(),
                 user_name: "alice@example.com".into(),
+                user_display_name: "alice@example.com".into(),
                 user_handle: b"user-a".to_vec(),
                 public_key_algorithm: -7,
                 user_verified: true,
@@ -11244,7 +11371,9 @@ mod tests {
         let second = runtime
             .register_platform_passkey(PlatformPasskeyRegistrationInput {
                 relying_party: "example.com".into(),
+                relying_party_name: "example.com".into(),
                 user_name: "bob@example.com".into(),
+                user_display_name: "bob@example.com".into(),
                 user_handle: b"user-b".to_vec(),
                 public_key_algorithm: -7,
                 user_verified: true,

@@ -238,7 +238,9 @@ fn runtime_bridge_runs_platform_passkeys_on_the_same_resident_runtime_thread() {
     let registration = bridge
         .register_platform_passkey(PlatformPasskeyRegistrationInput {
             relying_party: "example.com".into(),
+            relying_party_name: "example.com".into(),
             user_name: "alice@example.com".into(),
+            user_display_name: "alice@example.com".into(),
             user_handle: b"bridge-user".to_vec(),
             public_key_algorithm: -7,
             user_verified: true,

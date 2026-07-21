@@ -189,7 +189,7 @@ export function ExtensionSettingsPanel({
           <p style={noteStyle}>
             {quickUnlockVaultUnlocked
               ? text(
-                  "Enter the current master credentials once. VaultKern does not retain them after enrollment."
+                  "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock."
                 )
               : text("Unlock this vault before enrolling Windows Hello.")}
           </p>

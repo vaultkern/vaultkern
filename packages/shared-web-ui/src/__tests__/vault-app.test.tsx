@@ -804,6 +804,11 @@ it("toggles quick unlock for the current vault from extension settings", async (
   });
   expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).toBeChecked();
   expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+  expect(
+    screen.getByText(
+      "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock."
+    )
+  ).toBeInTheDocument();
 
   fireEvent.change(screen.getByLabelText("Quick Unlock Master Password"), {
     target: { value: "demo-password" }

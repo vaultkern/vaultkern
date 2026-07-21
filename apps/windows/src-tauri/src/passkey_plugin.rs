@@ -406,7 +406,15 @@ extern "system" fn make_credential_callback(
             Ok(value) => value,
             Err(status) => return status,
         };
+        let rp_name = match wide_string(input.rp_name) {
+            Ok(value) => value,
+            Err(status) => return status,
+        };
         let user_name = match wide_string(input.user_name) {
+            Ok(value) => value,
+            Err(status) => return status,
+        };
+        let user_display_name = match wide_string(input.user_display_name) {
             Ok(value) => value,
             Err(status) => return status,
         };
@@ -441,7 +449,9 @@ extern "system" fn make_credential_callback(
                 .bridge
                 .register_platform_passkey(PlatformPasskeyRegistrationInput {
                     relying_party: rp_id,
+                    relying_party_name: rp_name,
                     user_name,
+                    user_display_name,
                     user_handle,
                     public_key_algorithm: input.public_key_algorithm,
                     user_verified: true,
@@ -683,14 +693,20 @@ fn hresult_message(operation: &str, status: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CallbackContext, NTE_NOT_FOUND, S_OK, VkOwnedBytes, free_owned_bytes, owned_bytes,
-        release_context_callback, retain_context_callback, runtime_error_hresult,
+        CallbackContext, NTE_NOT_FOUND, S_OK, VkBytes, VkMakeCredentialInput,
+        VkMakeCredentialOutput, VkOwnedBytes, empty_owned_bytes, free_owned_bytes,
+        make_credential_callback, nul_terminated_wide, owned_bytes, release_context_callback,
+        retain_context_callback, runtime_error_hresult,
         vaultkern_plugin_test_can_select_second_matching_credential,
         vaultkern_plugin_test_replaces_cached_account_credential,
     };
     use crate::RuntimeBridge;
     use crate::plugin_operation_state::PluginOperationState;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex, atomic::AtomicBool};
+    use vaultkern_core::{CompositeKey, KeepassCore, SaveProfile, Vault};
+
+    static NATIVE_CREDENTIAL_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn ffi_context_lease_keeps_the_runtime_context_alive() {
@@ -726,6 +742,7 @@ mod tests {
 
     #[test]
     fn replacing_an_account_credential_evicts_the_old_cached_id() {
+        let _guard = NATIVE_CREDENTIAL_CACHE_TEST_LOCK.lock().unwrap();
         assert_eq!(
             unsafe { vaultkern_plugin_test_replaces_cached_account_credential() },
             S_OK
@@ -734,10 +751,90 @@ mod tests {
 
     #[test]
     fn discoverable_account_selection_can_choose_a_nonfirst_credential() {
+        let _guard = NATIVE_CREDENTIAL_CACHE_TEST_LOCK.lock().unwrap();
         assert_eq!(
             unsafe { vaultkern_plugin_test_can_select_second_matching_credential() },
             S_OK
         );
+    }
+
+    #[test]
+    fn native_registration_display_names_survive_later_credential_syncs() {
+        let scratch = tempfile::tempdir().unwrap();
+        let database_path = scratch.path().join("native-display-names.kdbx");
+        let mut key = CompositeKey::default();
+        key.add_password("demo-password");
+        std::fs::write(
+            &database_path,
+            KeepassCore::new()
+                .save_kdbx(
+                    &Vault::empty("Native Display Names"),
+                    &key,
+                    SaveProfile::recommended(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+
+        let bridge = RuntimeBridge::new_for_tests();
+        bridge.request(json!({
+            "version": 1,
+            "command": {
+                "type": "add_local_vault_reference",
+                "path": database_path.to_string_lossy()
+            }
+        }));
+        bridge.request(json!({
+            "version": 1,
+            "command": {
+                "type": "unlock_current_vault",
+                "password": "demo-password",
+                "key_file_path": null
+            }
+        }));
+
+        let context = Arc::new(CallbackContext {
+            bridge: bridge.clone(),
+            operations: PluginOperationState::default(),
+            enabled: Arc::new(AtomicBool::new(true)),
+        });
+        let rp_id = nul_terminated_wide("example.com");
+        let rp_name = nul_terminated_wide("Example Incorporated");
+        let user_name = nul_terminated_wide("alice@example.com");
+        let user_display_name = nul_terminated_wide("Alice Example");
+        let user_handle = b"native-display-user";
+        let input = VkMakeCredentialInput {
+            rp_id: rp_id.as_ptr(),
+            rp_name: rp_name.as_ptr(),
+            user_name: user_name.as_ptr(),
+            user_display_name: user_display_name.as_ptr(),
+            user_handle: VkBytes {
+                data: user_handle.as_ptr(),
+                len: user_handle.len() as u32,
+            },
+            public_key_algorithm: -7,
+            excluded_credential_ids: std::ptr::null(),
+            excluded_credential_count: 0,
+        };
+        let mut output = VkMakeCredentialOutput {
+            credential_id: empty_owned_bytes(),
+            authenticator_data: empty_owned_bytes(),
+        };
+
+        let status =
+            make_credential_callback(Arc::as_ptr(&context).cast_mut().cast(), &input, &mut output);
+        assert_eq!(status, S_OK);
+        unsafe {
+            free_owned_bytes(output.credential_id);
+            free_owned_bytes(output.authenticator_data);
+        }
+
+        let credentials = bridge
+            .list_platform_passkey_credentials()
+            .expect("credential metadata after registration");
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].relying_party_name, "Example Incorporated");
+        assert_eq!(credentials[0].user_display_name, "Alice Example");
     }
 
     #[test]
