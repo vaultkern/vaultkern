@@ -4,7 +4,6 @@ use vaultkern_runtime::{
     PlatformPasskeyAssertionInput, PlatformPasskeyRegistrationInput,
     QuickUnlockReconciliationCredentials,
 };
-use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeResponse};
 use vaultkern_windows::{RuntimeBridge, SettingsReconciliationRequest};
 
 fn quick_unlock_bridge_with_current_vault(name: &str) -> (tempfile::TempDir, RuntimeBridge) {
@@ -38,14 +37,10 @@ trait RuntimeBridgeTestRequest {
 
 impl RuntimeBridgeTestRequest for RuntimeBridge {
     fn request(&self, message: Value) -> Value {
-        let response = match serde_json::from_value::<ProtocolEnvelope>(message) {
-            Ok(envelope) => self.request_envelope(envelope),
-            Err(error) => RuntimeResponse::Error(ErrorDto {
-                code: "invalid_request".into(),
-                message: format!("invalid runtime request: {error}"),
-            }),
-        };
-        serde_json::to_value(response).expect("serialize test runtime response")
+        self.request_cancellable(
+            message,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
     }
 }
 
@@ -682,6 +677,59 @@ fn runtime_bridge_reconciles_quick_unlock_from_desired_state_while_locked() {
             .as_bool()
             .unwrap()
     );
+}
+
+#[test]
+fn resident_idle_lock_survives_when_all_ui_clients_are_gone() {
+    let scratch = tempfile::tempdir().unwrap();
+    let database_path = scratch.path().join("resident-idle-lock.kdbx");
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+    std::fs::write(
+        &database_path,
+        core.save_kdbx(
+            &Vault::empty("Resident Idle Lock"),
+            &key,
+            SaveProfile::recommended(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let bridge = RuntimeBridge::new_for_tests();
+    bridge.request(json!({
+        "version": 1,
+        "command": {
+            "type": "add_local_vault_reference",
+            "path": database_path.to_string_lossy()
+        }
+    }));
+    let unlocked = bridge.request(json!({
+        "version": 1,
+        "command": {
+            "type": "unlock_current_vault",
+            "password": "demo-password",
+            "key_file_path": null
+        }
+    }));
+    assert_eq!(
+        unlocked["unlocked"], true,
+        "unexpected unlock response: {unlocked}"
+    );
+
+    bridge
+        .set_idle_lock_timeout(Some(std::time::Duration::from_millis(20)))
+        .unwrap();
+    let detached_client = bridge.clone();
+    drop(detached_client);
+    std::thread::sleep(std::time::Duration::from_millis(80));
+
+    let session = bridge.request(json!({
+        "version": 1,
+        "command": { "type": "get_session_state" }
+    }));
+    assert_eq!(session["unlocked"], false);
 }
 
 #[test]

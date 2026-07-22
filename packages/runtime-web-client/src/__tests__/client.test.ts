@@ -330,6 +330,27 @@ describe("RuntimeClient", () => {
     expect(session.activeVaultId).toBeNull();
   });
 
+  it("records foreground user activity without changing session state", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1",
+        supportsBiometricUnlock: true
+      })
+    };
+
+    const client = new RuntimeClient(transport);
+    const session = await client.recordUserActivity();
+
+    expect(transport.send).toHaveBeenCalledWith({
+      version: 1,
+      command: { type: "record_user_activity" }
+    });
+    expect(session.unlocked).toBe(true);
+  });
+
   it("sets the current vault and unlocks it by current selection", async () => {
     const transport = {
       send: vi

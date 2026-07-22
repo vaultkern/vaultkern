@@ -1,12 +1,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use vaultkern_runtime::{
     PlatformPasskeyAssertionInput, PlatformPasskeyAssertionOutput, PlatformPasskeyCredential,
     PlatformPasskeyRegistrationInput, PlatformPasskeyRegistrationOutput,
-    QuickUnlockReconciliationCredentials, Runtime,
+    QuickUnlockReconciliationCredentials, Runtime, RuntimeProtocolDispatch, RuntimeProtocolSession,
 };
 use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse};
 
@@ -14,6 +15,7 @@ use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeCommand, Run
 pub struct RuntimeBridge {
     requests: Sender<RuntimeRequest>,
     reconciliation_notifier: Arc<Mutex<Option<SyncSender<SettingsReconciliationRequest>>>>,
+    desktop_protocol_session: Arc<Mutex<RuntimeProtocolSession>>,
 }
 
 pub struct SettingsReconciliationRequest {
@@ -34,6 +36,10 @@ enum RuntimeRequest {
     SetParentWindowHandle {
         parent_window: Option<usize>,
         response: Option<Sender<()>>,
+    },
+    SetIdleLockTimeout {
+        timeout: Option<Duration>,
+        response: Sender<()>,
     },
     Protocol {
         command: RuntimeCommand,
@@ -86,6 +92,44 @@ enum RuntimeRequest {
     },
 }
 
+struct ResidentIdleLock {
+    timeout: Option<Duration>,
+    last_activity: Instant,
+}
+
+impl ResidentIdleLock {
+    fn new() -> Self {
+        Self {
+            timeout: Some(Duration::from_secs(10 * 60)),
+            last_activity: Instant::now(),
+        }
+    }
+
+    fn wait_duration(&self, unlocked: bool) -> Option<Duration> {
+        if !unlocked {
+            return None;
+        }
+        self.timeout
+            .map(|timeout| (self.last_activity + timeout).saturating_duration_since(Instant::now()))
+    }
+
+    fn deadline_reached(&self, unlocked: bool) -> bool {
+        unlocked
+            && self
+                .timeout
+                .is_some_and(|timeout| self.last_activity.elapsed() >= timeout)
+    }
+
+    fn record_activity(&mut self) {
+        self.last_activity = Instant::now();
+    }
+
+    fn set_timeout(&mut self, timeout: Option<Duration>) {
+        self.timeout = timeout;
+        self.record_activity();
+    }
+}
+
 impl RuntimeBridge {
     pub fn new() -> Self {
         Self::spawn(Runtime::new)
@@ -105,7 +149,29 @@ impl RuntimeBridge {
             .name("vaultkern-runtime".to_owned())
             .spawn(move || {
                 let mut runtime = factory();
-                while let Ok(request) = receiver.recv() {
+                let mut idle_lock = ResidentIdleLock::new();
+                loop {
+                    let unlocked = runtime.platform_passkey_is_unlocked();
+                    if idle_lock.deadline_reached(unlocked) {
+                        runtime.lock_session();
+                        idle_lock.record_activity();
+                        continue;
+                    }
+                    let request = match idle_lock.wait_duration(unlocked) {
+                        Some(wait) => match receiver.recv_timeout(wait) {
+                            Ok(request) => request,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                runtime.lock_session();
+                                idle_lock.record_activity();
+                                continue;
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        },
+                        None => match receiver.recv() {
+                            Ok(request) => request,
+                            Err(_) => break,
+                        },
+                    };
                     match request {
                         #[cfg(test)]
                         RuntimeRequest::PanicAfterMutation { response } => {
@@ -124,6 +190,10 @@ impl RuntimeBridge {
                                 let _ = response.send(());
                             }
                         }
+                        RuntimeRequest::SetIdleLockTimeout { timeout, response } => {
+                            idle_lock.set_timeout(timeout);
+                            let _ = response.send(());
+                        }
                         RuntimeRequest::Protocol {
                             command,
                             cancelled,
@@ -132,6 +202,15 @@ impl RuntimeBridge {
                             parent_window,
                             response,
                         } => {
+                            let records_activity = matches!(
+                                &command,
+                                RuntimeCommand::RecordUserActivity
+                                    | RuntimeCommand::UnlockCurrentVaultWithPassword { .. }
+                                    | RuntimeCommand::UnlockCurrentVault { .. }
+                                    | RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
+                                    | RuntimeCommand::UnlockWithPassword { .. }
+                                    | RuntimeCommand::UnlockVault { .. }
+                            );
                             execution_started.store(true, Ordering::Release);
                             let (value, quick_unlock_credentials) =
                                 if cancelled.load(Ordering::Acquire) {
@@ -169,6 +248,11 @@ impl RuntimeBridge {
                                         ),
                                     }
                                 };
+                            if records_activity
+                                && !matches!(&value, RuntimeResponse::Error(_))
+                            {
+                                idle_lock.record_activity();
+                            }
                             let _ = response.send(RuntimeProtocolResponse {
                                 response: value,
                                 quick_unlock_credentials,
@@ -187,6 +271,12 @@ impl RuntimeBridge {
                                 runtime
                                     .prepare_platform_passkey_operation(operation_id, parent_window)
                             });
+                            if result
+                                .as_ref()
+                                .is_ok_and(|(_, freshly_unlocked)| *freshly_unlocked)
+                            {
+                                idle_lock.record_activity();
+                            }
                             let _ = response.send(result);
                         }
                         RuntimeRequest::EndPlatformPasskeyOperation { operation_id } => {
@@ -267,6 +357,7 @@ impl RuntimeBridge {
         Self {
             requests,
             reconciliation_notifier: Arc::new(Mutex::new(None)),
+            desktop_protocol_session: Arc::new(Mutex::new(RuntimeProtocolSession::resident_app())),
         }
     }
 
@@ -328,8 +419,27 @@ impl RuntimeBridge {
     }
 
     pub fn request_envelope(&self, envelope: ProtocolEnvelope) -> RuntimeResponse {
+        if envelope.version != vaultkern_runtime_protocol::PROTOCOL_VERSION {
+            return error_response(
+                "unsupported_version",
+                format!("unsupported runtime protocol version: {}", envelope.version),
+            );
+        }
+        let dispatch = match self.desktop_protocol_session.lock() {
+            Ok(mut session) => session.accept(envelope.command),
+            Err(_) => {
+                return error_response(
+                    "runtime_unavailable",
+                    "the Tauri protocol session is unavailable",
+                );
+            }
+        };
+        let command = match dispatch {
+            RuntimeProtocolDispatch::Respond(response) => return response,
+            RuntimeProtocolDispatch::Dispatch(command) => command,
+        };
         self.request_protocol(
-            envelope,
+            ProtocolEnvelope::new(command),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             false,
@@ -403,6 +513,16 @@ impl RuntimeBridge {
                 parent_window,
                 response: Some(response),
             })
+            .map_err(|_| "the in-process runtime is unavailable".to_owned())?;
+        receiver
+            .recv()
+            .map_err(|_| "the in-process runtime stopped responding".to_owned())
+    }
+
+    pub fn set_idle_lock_timeout(&self, timeout: Option<Duration>) -> Result<(), String> {
+        let (response, receiver) = mpsc::channel();
+        self.requests
+            .send(RuntimeRequest::SetIdleLockTimeout { timeout, response })
             .map_err(|_| "the in-process runtime is unavailable".to_owned())?;
         receiver
             .recv()
@@ -688,19 +808,61 @@ fn response_schedules_reconciliation(
 #[cfg(test)]
 mod tests {
     use super::{
-        RuntimeBridge, RuntimeRequest, reconciliation_reasons, response_schedules_reconciliation,
+        ResidentIdleLock, RuntimeBridge, RuntimeRequest, reconciliation_reasons,
+        response_schedules_reconciliation,
     };
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use vaultkern_runtime_protocol::{
         ProtocolEnvelope, RuntimeCommand, RuntimeResponse, VaultSourceStatusDto,
     };
 
     fn response(value: serde_json::Value) -> RuntimeResponse {
         serde_json::from_value(value).expect("deserialize test runtime response")
+    }
+
+    #[test]
+    fn tauri_runtime_transport_requires_its_own_resident_session_handshake() {
+        let bridge = RuntimeBridge::new_for_tests();
+
+        let RuntimeResponse::Error(error) =
+            bridge.request_envelope(ProtocolEnvelope::new(RuntimeCommand::GetSessionState))
+        else {
+            panic!("business commands before the Tauri handshake must be rejected");
+        };
+        assert_eq!(error.code, "protocol_handshake_required");
+
+        let RuntimeResponse::Handshake(handshake) =
+            bridge.request_envelope(ProtocolEnvelope::new(RuntimeCommand::Handshake {
+                protocol_version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
+                capabilities: vec![
+                    "runtime-core".into(),
+                    "resident-app".into(),
+                    "quick-unlock".into(),
+                ],
+            }))
+        else {
+            panic!("Tauri handshake must be handled by its protocol session");
+        };
+        assert!(handshake.capabilities.contains(&"resident-app".into()));
+        assert!(!handshake.capabilities.contains(&"browser-extension".into()));
+        assert!(matches!(
+            bridge.request_envelope(ProtocolEnvelope::new(RuntimeCommand::GetSessionState)),
+            RuntimeResponse::SessionState(_)
+        ));
+    }
+
+    #[test]
+    fn an_elapsed_resident_idle_deadline_is_detected_before_queued_work() {
+        let mut idle_lock = ResidentIdleLock::new();
+        idle_lock.set_timeout(Some(Duration::from_millis(1)));
+        idle_lock.last_activity = Instant::now() - Duration::from_secs(1);
+
+        assert!(idle_lock.deadline_reached(true));
+        assert!(!idle_lock.deadline_reached(false));
     }
 
     #[test]

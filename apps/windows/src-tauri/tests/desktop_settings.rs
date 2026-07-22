@@ -21,6 +21,7 @@ fn native_settings_are_available_before_the_webview_starts() {
     let desired = store.desired_state().unwrap();
     assert!(desired.passkey_provider_enabled);
     assert!(!desired.quick_unlock_enabled);
+    assert_eq!(desired.idle_lock_minutes, 10);
 }
 
 #[test]

@@ -28,6 +28,7 @@ const runtimeClientMocks = vi.hoisted(() => ({
   setCurrentVault: vi.fn(),
   openLocalVault: vi.fn(),
   lockSession: vi.fn(),
+  recordUserActivity: vi.fn(),
   unlockCurrentVault: vi.fn(),
   enableQuickUnlockForCurrentVault: vi.fn(),
   unlockCurrentVaultWithQuickUnlock: vi.fn(),
@@ -175,6 +176,7 @@ beforeEach(() => {
   runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockReset();
   runtimeClientMocks.unlockWithPassword.mockReset();
   runtimeClientMocks.lockSession.mockReset();
+  runtimeClientMocks.recordUserActivity.mockReset();
   runtimeClientMocks.listGroups.mockReset();
   runtimeClientMocks.listEntries.mockReset();
   runtimeClientMocks.getEntryDetail.mockReset();
@@ -185,6 +187,11 @@ beforeEach(() => {
   runtimeClientMocks.compareAndUpdateEntryFields.mockReset();
   runtimeClientMocks.saveVault.mockReset();
   runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReset();
+  runtimeClientMocks.recordUserActivity.mockResolvedValue({
+    unlocked: true,
+    activeVaultId: "vault-1",
+    currentVaultRefId: "vault-ref-1"
+  });
   runtimeClientMocks.listRecentVaults.mockResolvedValue([]);
   runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
     unlocked: false,
@@ -4417,6 +4424,33 @@ describe("PopupShell fill flow", () => {
 
     expect(await screen.findByText("Selected record")).toBeInTheDocument();
     expect(screen.getAllByText("backup@example.com")).toHaveLength(2);
+  });
+
+  it("reports popup activity to the resident idle-lock owner", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query: vi.fn(async () => []),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+    render(createElement(PopupShell));
+    await screen.findByRole("button", { name: "Lock" });
+
+    fireEvent.pointerDown(window);
+
+    await waitFor(() => {
+      expect(runtimeClientMocks.recordUserActivity).toHaveBeenCalledTimes(1);
+    });
+    expect(runtimeClientMocks.lockSession).not.toHaveBeenCalled();
   });
 
   it("locks the popup session and returns to the unlock form", async () => {

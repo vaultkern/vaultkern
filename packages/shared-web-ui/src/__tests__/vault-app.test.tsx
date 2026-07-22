@@ -1660,7 +1660,7 @@ it("renders database and entry workspace labels in Chinese when selected", async
   expect(screen.queryByText("凭据")).not.toBeInTheDocument();
 });
 
-it("trims recent vaults when the local recent database limit is lower", async () => {
+it("applies the recent database limit without deleting resident vault references", async () => {
   const settingsStore = createSettingsStore({
     recentVaultLimit: 2,
     language: "en",
@@ -1716,195 +1716,13 @@ it("trims recent vaults when the local recent database limit is lower", async ()
 
   render(<App client={client} extensionSettingsStore={settingsStore} />);
 
-  await waitFor(() => {
-    expect(client.deleteRecentVaultIfNotCurrent).toHaveBeenCalledWith("vault-ref-3");
-  });
-});
-
-it("never trims the current vault when its timestamp predates another record", async () => {
-  const settingsStore = createSettingsStore({ recentVaultLimit: 1 });
-  let vaults = [
-    {
-      vaultRefId: "vault-ref-recent",
-      displayName: "Recent",
-      sourceKind: "local" as const,
-      sourceSummary: "recent.kdbx",
-      lastUsedAt: 20,
-      availability: "ready" as const,
-      supportsQuickUnlock: false,
-      isCurrent: false
-    },
-    {
-      vaultRefId: "vault-ref-current",
-      displayName: "Current",
-      sourceKind: "local" as const,
-      sourceSummary: "current.kdbx",
-      lastUsedAt: 10,
-      availability: "ready" as const,
-      supportsQuickUnlock: false,
-      isCurrent: true
-    }
-  ];
-  const deleteRecentVaultIfNotCurrent = vi.fn(async (vaultRefId: string) => {
-    if (vaultRefId === "vault-ref-current") {
-      throw new Error("attempted to trim the current vault");
-    }
-    vaults = vaults.filter((vault) => vault.vaultRefId !== vaultRefId);
-    return vaults;
-  });
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: async () => ({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-current"
-    }),
-    listRecentVaults: vi.fn(async () => vaults),
-    deleteRecentVaultIfNotCurrent
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-
-  await waitFor(() => {
-    expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledWith("vault-ref-recent");
-  });
-  expect(deleteRecentVaultIfNotCurrent).not.toHaveBeenCalledWith("vault-ref-current");
-});
-
-it("does not let an older recent-vault reconciliation delete against superseded settings", async () => {
-  const settingsStore = createSettingsStore({ recentVaultLimit: 1 });
-  const recentVaults = [
-    {
-      vaultRefId: "vault-ref-1",
-      displayName: "One",
-      sourceKind: "local" as const,
-      sourceSummary: "one.kdbx",
-      lastUsedAt: 2,
-      availability: "ready" as const,
-      supportsQuickUnlock: false,
-      isCurrent: true
-    },
-    {
-      vaultRefId: "vault-ref-2",
-      displayName: "Two",
-      sourceKind: "local" as const,
-      sourceSummary: "two.kdbx",
-      lastUsedAt: 1,
-      availability: "ready" as const,
-      supportsQuickUnlock: false,
-      isCurrent: false
-    }
-  ];
-  const firstList = createDeferred<typeof recentVaults>();
-  const listRecentVaults = vi
-    .fn()
-    .mockReturnValueOnce(firstList.promise)
-    .mockResolvedValue(recentVaults);
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: async () => ({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    }),
-    listRecentVaults,
-    deleteRecentVaultIfNotCurrent: vi.fn(async () => [])
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-
-  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
-  await waitFor(() => expect(listRecentVaults).toHaveBeenCalledTimes(1));
-
-  fireEvent.click(screen.getByRole("button", { name: "Windows Settings" }));
-  fireEvent.change(await screen.findByLabelText("Recent Databases"), {
-    target: { value: "2" }
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Save Windows Settings" }));
-  await waitFor(() => {
-    expect(settingsStore.save).toHaveBeenCalledWith(
-      expect.objectContaining({ recentVaultLimit: 2 })
-    );
-  });
-
-  firstList.resolve(recentVaults);
-  await waitFor(() => expect(listRecentVaults).toHaveBeenCalledTimes(3));
-
+  expect(await screen.findByText("One")).toBeInTheDocument();
+  expect(await screen.findByText("Two")).toBeInTheDocument();
+  expect(screen.queryByText("Three")).not.toBeInTheDocument();
   expect(client.deleteRecentVaultIfNotCurrent).not.toHaveBeenCalled();
 });
 
-it("refreshes recent vaults before trimming after a concurrent selection", async () => {
-  const settings = {
-    ...DEFAULT_EXTENSION_SETTINGS,
-    recentVaultLimit: 1
-  };
-  const destructiveSettingsRead = createDeferred<typeof settings>();
-  let settingsLoads = 0;
-  const settingsStore: ExtensionSettingsStore = {
-    surface: "windows",
-    load: vi.fn(() => {
-      settingsLoads += 1;
-      return settingsLoads === 3
-        ? destructiveSettingsRead.promise
-        : Promise.resolve(settings);
-    }),
-    save: vi.fn(async () => undefined)
-  };
-  let liveVaults = [
-    {
-      vaultRefId: "vault-ref-new",
-      displayName: "New",
-      sourceKind: "local" as const,
-      sourceSummary: "new.kdbx",
-      lastUsedAt: 20,
-      availability: "ready" as const,
-      supportsQuickUnlock: false,
-      isCurrent: true
-    },
-    {
-      vaultRefId: "vault-ref-old",
-      displayName: "Old",
-      sourceKind: "local" as const,
-      sourceSummary: "old.kdbx",
-      lastUsedAt: 10,
-      availability: "ready" as const,
-      supportsQuickUnlock: false,
-      isCurrent: false
-    }
-  ];
-  const listRecentVaults = vi.fn(async () => liveVaults.map((vault) => ({ ...vault })));
-  const deleteRecentVaultIfNotCurrent = vi.fn(async (vaultRefId: string) => {
-    liveVaults = liveVaults.filter((vault) => vault.vaultRefId !== vaultRefId);
-    return liveVaults;
-  });
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: async () => ({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-new"
-    }),
-    listRecentVaults,
-    deleteRecentVaultIfNotCurrent
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-  await waitFor(() => expect(listRecentVaults).toHaveBeenCalledTimes(1));
-
-  liveVaults = [
-    { ...liveVaults[1]!, lastUsedAt: 30, isCurrent: true },
-    { ...liveVaults[0]!, lastUsedAt: 20, isCurrent: false }
-  ];
-  destructiveSettingsRead.resolve(settings);
-
-  await waitFor(() =>
-    expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledTimes(1)
-  );
-  expect(deleteRecentVaultIfNotCurrent).toHaveBeenCalledWith("vault-ref-new");
-  expect(liveVaults.map((vault) => vault.vaultRefId)).toEqual(["vault-ref-old"]);
-});
-
-it("locks an unlocked manager after local idle timeout", async () => {
+it("reports foreground activity to the resident instead of owning the idle deadline", async () => {
   vi.useFakeTimers();
   const settingsStore = createSettingsStore({
     recentVaultLimit: 10,
@@ -1926,8 +1744,15 @@ it("locks an unlocked manager after local idle timeout", async () => {
       }
     })),
     listEntries: vi.fn(async () => []),
-    getEntryDetail: vi.fn()
-  } satisfies RuntimeClientLike;
+    getEntryDetail: vi.fn(),
+    recordUserActivity: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }))
+  } satisfies RuntimeClientLike & {
+    recordUserActivity(): Promise<SessionStateLike>;
+  };
 
   render(<App client={client} extensionSettingsStore={settingsStore} />);
   await act(async () => {
@@ -1937,245 +1762,12 @@ it("locks an unlocked manager after local idle timeout", async () => {
   });
   expect(screen.getByText("No entries available.")).toBeInTheDocument();
 
-  await act(async () => {
-    vi.advanceTimersByTime(60_000);
-    await Promise.resolve();
-  });
-
-  expect(client.lockSession).toHaveBeenCalledTimes(1);
-});
-
-it("preserves the runtime client receiver when idle locking", async () => {
-  vi.useFakeTimers();
-  const settingsStore = createSettingsStore({ idleLockMinutes: 1 });
-  const client = {
-    ...createVaultSelectionMethods(),
-    lockCalls: 0,
-    getSessionState: vi.fn(async () => ({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    })),
-    listGroups: vi.fn(async () => ({
-      type: "group_tree" as const,
-      root: {
-        id: "group-root",
-        title: "Archive",
-        entryCount: 0,
-        childCount: 0,
-        children: []
-      }
-    })),
-    listEntries: vi.fn(async () => []),
-    getEntryDetail: vi.fn(),
-    async lockSession() {
-      this.lockCalls += 1;
-      return {
-        unlocked: false,
-        activeVaultId: null,
-        currentVaultRefId: "vault-ref-1"
-      };
-    }
-  } satisfies RuntimeClientLike & { lockCalls: number };
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-
-  await act(async () => {
-    vi.advanceTimersByTime(60_000);
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-
-  expect(client.lockCalls).toBe(1);
-  expect(screen.getByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
-});
-
-it("redacts loaded entry secrets before an idle-lock request completes", async () => {
-  vi.useFakeTimers();
-  const settingsStore = createSettingsStore({ idleLockMinutes: 1 });
-  const lock = createDeferred<{
-    unlocked: boolean;
-    activeVaultId: null;
-    currentVaultRefId: string;
-  }>();
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: vi.fn(async () => ({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    })),
-    listEntries: vi.fn(async () => [
-      {
-        id: "entry-1",
-        title: "Example",
-        username: "alice",
-        url: "https://example.com",
-        groupId: "group-root"
-      }
-    ]),
-    getEntryDetail: vi.fn(async () => ({
-      type: "entry_detail" as const,
-      id: "entry-1",
-      title: "Example",
-      username: "alice",
-      password: "idle-secret",
-      url: "https://example.com",
-      notes: "",
-      totp: null
-    })),
-    lockSession: vi.fn(() => lock.promise)
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Example" }));
+  fireEvent.pointerDown(window);
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
   });
-  expect(screen.getByDisplayValue("idle-secret")).toBeInTheDocument();
-
-  await act(async () => {
-    vi.advanceTimersByTime(60_000);
-    await Promise.resolve();
-  });
-
-  expect(client.lockSession).toHaveBeenCalledTimes(1);
-  expect(screen.queryByDisplayValue("idle-secret")).not.toBeInTheDocument();
-
-  lock.resolve({
-    unlocked: false,
-    activeVaultId: null,
-    currentVaultRefId: "vault-ref-1"
-  });
-});
-
-it("retries idle locking after a transient runtime failure", async () => {
-  vi.useFakeTimers();
-  const settingsStore = createSettingsStore({ idleLockMinutes: 1 });
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: vi.fn(async () => ({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    })),
-    listGroups: vi.fn(async () => ({
-      type: "group_tree" as const,
-      root: {
-        id: "group-root",
-        title: "Archive",
-        entryCount: 0,
-        childCount: 0,
-        children: []
-      }
-    })),
-    listEntries: vi.fn(async () => []),
-    getEntryDetail: vi.fn(),
-    lockSession: vi
-      .fn()
-      .mockRejectedValueOnce(new Error("runtime temporarily unavailable"))
-      .mockResolvedValueOnce({
-        unlocked: false,
-        activeVaultId: null,
-        currentVaultRefId: "vault-ref-1"
-      })
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-
-  await act(async () => {
-    vi.advanceTimersByTime(60_000);
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  expect(client.lockSession).toHaveBeenCalledTimes(1);
-
-  await act(async () => {
-    vi.advanceTimersByTime(60_000);
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-
-  expect(client.lockSession).toHaveBeenCalledTimes(2);
-  expect(screen.getByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
-});
-
-it("does not idle-lock while an entry draft has unsaved changes", async () => {
-  vi.useFakeTimers();
-  const settingsStore = createSettingsStore({ idleLockMinutes: 1 });
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: vi.fn(async () => ({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    })),
-    listGroups: vi.fn(async () => ({
-      type: "group_tree" as const,
-      root: {
-        id: "group-root",
-        title: "Archive",
-        entryCount: 1,
-        childCount: 0,
-        children: []
-      }
-    })),
-    listEntries: vi.fn(async () => [
-      {
-        id: "entry-1",
-        title: "Example",
-        username: "alice",
-        url: "https://example.com",
-        groupId: "group-root"
-      }
-    ]),
-    getEntryDetail: vi.fn(async () => ({
-      type: "entry_detail" as const,
-      id: "entry-1",
-      title: "Example",
-      username: "alice",
-      password: "secret",
-      url: "https://example.com",
-      notes: "",
-      totp: null,
-      totpUri: null,
-      customFields: [],
-      attachments: []
-    }))
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Example" }));
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-  fireEvent.change(screen.getByLabelText("Title"), {
-    target: { value: "Unsaved title" }
-  });
+  expect(client.recordUserActivity).toHaveBeenCalledTimes(1);
 
   await act(async () => {
     vi.advanceTimersByTime(60_000);
@@ -2183,83 +1775,6 @@ it("does not idle-lock while an entry draft has unsaved changes", async () => {
   });
 
   expect(client.lockSession).not.toHaveBeenCalled();
-  expect(screen.getByLabelText("Title")).toHaveValue("Unsaved title");
-});
-
-it("does not idle-lock while a vault mutation is still in flight", async () => {
-  vi.useFakeTimers();
-  const settingsStore = createSettingsStore({ idleLockMinutes: 1 });
-  const deletion = createDeferred<void>();
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: vi.fn(async () => ({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    })),
-    listGroups: vi.fn(async () => ({
-      type: "group_tree" as const,
-      root: {
-        id: "group-root",
-        title: "Archive",
-        entryCount: 1,
-        childCount: 0,
-        children: []
-      }
-    })),
-    listEntries: vi.fn(async () => [
-      {
-        id: "entry-1",
-        title: "Example",
-        username: "alice",
-        url: "https://example.com",
-        groupId: "group-root"
-      }
-    ]),
-    getEntryDetail: vi.fn(async () => ({
-      type: "entry_detail" as const,
-      id: "entry-1",
-      title: "Example",
-      username: "alice",
-      password: "secret",
-      url: "https://example.com",
-      notes: "",
-      totp: null,
-      totpUri: null,
-      customFields: [],
-      attachments: []
-    })),
-    deleteEntry: vi.fn(() => deletion.promise),
-    saveVault: vi.fn(async () => undefined)
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Example" }));
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Delete Entry" }));
-  fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
-  expect(client.deleteEntry).toHaveBeenCalledWith("vault-1", "entry-1");
-
-  await act(async () => {
-    vi.advanceTimersByTime(60_000);
-    await Promise.resolve();
-  });
-
-  expect(client.lockSession).not.toHaveBeenCalled();
-  deletion.resolve();
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-  });
 });
 
 it("shows progress while unlocking a recent vault", async () => {

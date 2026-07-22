@@ -230,7 +230,7 @@ describe("createNativeMessagingBridge", () => {
     expect(port.disconnect).toHaveBeenCalledTimes(1);
   });
 
-  it("reconnects once when posting to a stale native port fails before delivery", async () => {
+  it("rejects a stale-port post instead of replaying it on a fresh connection", async () => {
     const firstPort = createPort();
     firstPort.postMessage.mockImplementation(() => {
       throw new Error("Native host has exited.");
@@ -247,25 +247,20 @@ describe("createNativeMessagingBridge", () => {
     };
 
     const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime");
-    const request = bridge.send({
-      version: 1,
-      command: { type: "create_passkey_assertion" }
+    await expect(
+      bridge.send({
+        version: 1,
+        command: { type: "create_passkey_assertion" }
+      })
+    ).rejects.toMatchObject({
+      code: "native_port_disconnected",
+      message: "Native host has exited."
     });
 
-    expect(connectNative).toHaveBeenCalledTimes(2);
+    expect(connectNative).toHaveBeenCalledTimes(1);
     expect(firstPort.postMessage).toHaveBeenCalledTimes(1);
     expect(firstPort.disconnect).toHaveBeenCalledTimes(1);
-    expect(secondPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      version: 1,
-      command: { type: "create_passkey_assertion" }
-    }));
-
-    secondPort.emitMessage({ type: "passkey_assertion", credentialId: "credential-1" });
-
-    await expect(request).resolves.toEqual({
-      type: "passkey_assertion",
-      credentialId: "credential-1"
-    });
+    expect(secondPort.postMessage).not.toHaveBeenCalled();
   });
 
   it("does not retry forever when reconnecting after a stale post fails", async () => {
@@ -296,7 +291,7 @@ describe("createNativeMessagingBridge", () => {
       code: "native_port_disconnected",
       message: "Native host has exited."
     });
-    expect(connectNative).toHaveBeenCalledTimes(2);
+    expect(connectNative).toHaveBeenCalledTimes(1);
     expect(firstPort.postMessage).toHaveBeenCalledTimes(1);
   });
 
@@ -388,7 +383,7 @@ describe("createNativeMessagingBridge", () => {
     expect(port.postMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects a silent request after a timeout and continues with queued requests", async () => {
+  it("rejects all requests from a timed-out connection instead of replaying queued work", async () => {
     vi.useFakeTimers();
 
     const firstPort = createPort();
@@ -409,26 +404,36 @@ describe("createNativeMessagingBridge", () => {
     const first = bridge.send({ version: 1, command: { type: "first" } });
     const second = bridge.send({ version: 1, command: { type: "second" } });
     const firstFailure = first.catch((error: unknown) => error);
+    const secondFailure = second.catch((error: unknown) => error);
+    let firstSettled = false;
+    void first.then(
+      () => {
+        firstSettled = true;
+      },
+      () => {
+        firstSettled = true;
+      }
+    );
 
     expect(connectNative).toHaveBeenCalledTimes(1);
     expect(firstPort.postMessage).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(25);
 
+    expect(firstSettled).toBe(false);
+    expect(firstPort.disconnect).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
     await expect(firstFailure).resolves.toMatchObject({
       code: "native_timeout",
       message: "native messaging timed out"
     });
-    expect(connectNative).toHaveBeenCalledTimes(2);
-    expect(secondPort.postMessage).toHaveBeenCalledTimes(1);
-    expect(secondPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      version: 1,
-      command: { type: "second" }
-    }));
-
-    secondPort.emitMessage({ type: "second_response" });
-
-    await expect(second).resolves.toEqual({ type: "second_response" });
+    await expect(secondFailure).resolves.toMatchObject({
+      code: "native_timeout"
+    });
+    expect(connectNative).toHaveBeenCalledTimes(1);
+    expect(secondPort.postMessage).not.toHaveBeenCalled();
 
     vi.useRealTimers();
   });
@@ -848,7 +853,7 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
-  it("defers an active preload until after serving a startup session request", async () => {
+  it("cancels an active preload instead of replaying it on the startup connection", async () => {
     const firstPort = createPort();
     const secondPort = createPort();
     const connectNative = vi.fn(() =>
@@ -866,6 +871,7 @@ describe("createNativeMessagingBridge", () => {
       version: 1,
       command: { type: "preload_current_vault" }
     });
+    const preloadFailure = preload.catch((error: unknown) => error);
 
     expect(firstPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
@@ -895,20 +901,11 @@ describe("createNativeMessagingBridge", () => {
       type: "session_state",
       currentVaultRefId: "vault-ref-1"
     });
-    expect(secondPort.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
-      version: 1,
-      command: { type: "preload_current_vault" }
-    }));
-    secondPort.emitMessage({
-      type: "session_state",
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
+    await expect(preloadFailure).resolves.toMatchObject({
+      code: "native_port_disconnected",
+      message: "preload canceled by startup request"
     });
-    await expect(preload).resolves.toMatchObject({
-      type: "session_state",
-      currentVaultRefId: "vault-ref-1"
-    });
+    expect(secondPort.postMessage).toHaveBeenCalledTimes(1);
   });
 
   it("renegotiates before a startup request that interrupts an active preload", async () => {
@@ -935,6 +932,7 @@ describe("createNativeMessagingBridge", () => {
       version: 1,
       command: { type: "preload_current_vault" }
     });
+    const preloadFailure = preload.catch((error: unknown) => error);
 
     await vi.waitFor(() => {
       expect(firstPort.postMessage).toHaveBeenCalledWith(
@@ -992,23 +990,11 @@ describe("createNativeMessagingBridge", () => {
       type: "session_state",
       currentVaultRefId: "vault-ref-1"
     });
-    await vi.waitFor(() => {
-      expect(secondPort.postMessage).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          command: { type: "preload_current_vault" }
-        })
-      );
+    await expect(preloadFailure).resolves.toMatchObject({
+      code: "native_port_disconnected",
+      message: "preload canceled by startup request"
     });
-    secondPort.emitMessage({
-      type: "session_state",
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    await expect(preload).resolves.toMatchObject({
-      type: "session_state",
-      currentVaultRefId: "vault-ref-1"
-    });
+    expect(secondPort.postMessage).toHaveBeenCalledTimes(2);
   });
 
   it("renegotiates when a concurrent startup request interrupts preload after a shared handshake", async () => {
@@ -1030,6 +1016,7 @@ describe("createNativeMessagingBridge", () => {
       version: 1,
       command: { type: "preload_current_vault" }
     });
+    const preloadFailure = preload.catch((error: unknown) => error);
     const session = bridge.send({
       version: 1,
       command: { type: "get_session_state" }
@@ -1079,26 +1066,14 @@ describe("createNativeMessagingBridge", () => {
       type: "session_state",
       currentVaultRefId: "vault-ref-1"
     });
-    await vi.waitFor(() => {
-      expect(secondPort.postMessage).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          command: { type: "preload_current_vault" }
-        })
-      );
+    await expect(preloadFailure).resolves.toMatchObject({
+      code: "native_port_disconnected",
+      message: "preload canceled by startup request"
     });
-    secondPort.emitMessage({
-      type: "session_state",
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    await expect(preload).resolves.toMatchObject({
-      type: "session_state",
-      currentVaultRefId: "vault-ref-1"
-    });
+    expect(secondPort.postMessage).toHaveBeenCalledTimes(2);
   });
 
-  it("defers an interrupted preload behind queued mutations and the startup read", async () => {
+  it("never replays an interrupted preload behind queued work", async () => {
     const firstPort = createPort();
     const secondPort = createPort();
     const connectNative = vi.fn(() =>
@@ -1110,6 +1085,7 @@ describe("createNativeMessagingBridge", () => {
       version: 1,
       command: { type: "preload_current_vault" }
     });
+    const preloadFailure = preload.catch((error: unknown) => error);
     const save = bridge.send({
       version: 1,
       command: { type: "save_vault", vault_id: "vault-1" }
@@ -1141,20 +1117,11 @@ describe("createNativeMessagingBridge", () => {
       type: "session_state",
       activeVaultId: "vault-1"
     });
-    expect(secondPort.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
-      version: 1,
-      command: { type: "preload_current_vault" }
-    }));
-
-    secondPort.emitMessage({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
+    await expect(preloadFailure).resolves.toMatchObject({
+      code: "native_port_disconnected",
+      message: "preload canceled by startup request"
     });
-    await expect(preload).resolves.toMatchObject({
-      type: "session_state",
-      activeVaultId: "vault-1"
-    });
+    expect(secondPort.postMessage).toHaveBeenCalledTimes(2);
   });
 
   it("drops queued preload before serving a new startup session request", async () => {

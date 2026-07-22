@@ -125,20 +125,22 @@ export function ExtensionSettingsPanel({
             style={inputStyle}
           />
         </label>
-        <label style={fieldStyle}>
-          {text("Idle Lock Minutes")}
-          <input
-            aria-label={text("Idle Lock Minutes")}
-            type="number"
-            min={0}
-            max={240}
-            value={draft.idleLockMinutes}
-            onChange={(event) =>
-              setDraft({ ...draft, idleLockMinutes: event.target.value })
-            }
-            style={inputStyle}
-          />
-        </label>
+        {surface === "windows" ? (
+          <label style={fieldStyle}>
+            {text("Idle Lock Minutes")}
+            <input
+              aria-label={text("Idle Lock Minutes")}
+              type="number"
+              min={0}
+              max={240}
+              value={draft.idleLockMinutes}
+              onChange={(event) =>
+                setDraft({ ...draft, idleLockMinutes: event.target.value })
+              }
+              style={inputStyle}
+            />
+          </label>
+        ) : null}
         <label style={fieldStyle}>
           {text("Clear Clipboard Seconds")}
           <input

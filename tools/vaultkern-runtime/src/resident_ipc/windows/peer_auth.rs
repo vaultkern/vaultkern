@@ -34,11 +34,17 @@ use windows_sys::Win32::UI::Shell::{
     FOLDERID_LocalAppData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, SHGetKnownFolderPath,
 };
 
-const RESIDENT_EXECUTABLE_NAME: &str = "vaultkern-windows.exe";
-const RESIDENT_PACKAGE_NAME: &str = "VaultKern.Windows";
-const RESIDENT_PACKAGE_PUBLISHER: &str = "CN=VaultKern Development";
-const RESIDENT_PACKAGE_PUBLISHER_ID: &str = "bf7at9bmb1e94";
-const RESIDENT_PACKAGE_FAMILY_NAME: &str = "VaultKern.Windows_bf7at9bmb1e94";
+const RESIDENT_PACKAGE_MANIFEST: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../apps/windows/src-tauri/windows/Package.appxmanifest"
+));
+
+#[derive(Clone, Copy, Debug)]
+struct ExpectedResidentPackageIdentity {
+    executable_name: &'static str,
+    package_name: &'static str,
+    package_publisher: &'static str,
+}
 
 #[derive(Clone, Debug)]
 struct AuthenticodeIdentity {
@@ -160,16 +166,32 @@ pub(super) fn authenticate_browser_process(process_id: u32) -> Result<()> {
 }
 
 fn authenticate_resident_server_identity(identity: &ResidentServerIdentity) -> Result<()> {
+    let expected = expected_resident_package_identity()?;
     if !identity
         .executable_name
-        .eq_ignore_ascii_case(RESIDENT_EXECUTABLE_NAME)
+        .eq_ignore_ascii_case(expected.executable_name)
     {
         anyhow::bail!("resident IPC server executable name is not trusted");
     }
-    if identity.package_name.as_deref() != Some(RESIDENT_PACKAGE_NAME)
-        || identity.package_publisher.as_deref() != Some(RESIDENT_PACKAGE_PUBLISHER)
-        || identity.package_publisher_id.as_deref() != Some(RESIDENT_PACKAGE_PUBLISHER_ID)
-        || identity.package_family_name.as_deref() != Some(RESIDENT_PACKAGE_FAMILY_NAME)
+    let (
+        Some(package_name),
+        Some(package_publisher),
+        Some(package_publisher_id),
+        Some(package_family_name),
+    ) = (
+        identity.package_name.as_deref(),
+        identity.package_publisher.as_deref(),
+        identity.package_publisher_id.as_deref(),
+        identity.package_family_name.as_deref(),
+    )
+    else {
+        anyhow::bail!("resident IPC server has no trusted package identity");
+    };
+    let expected_family_name = format!("{package_name}_{package_publisher_id}");
+    if package_name != expected.package_name
+        || package_publisher != expected.package_publisher
+        || package_publisher_id.is_empty()
+        || package_family_name != expected_family_name
     {
         anyhow::bail!("resident IPC server has no trusted package identity");
     }
@@ -177,7 +199,7 @@ fn authenticate_resident_server_identity(identity: &ResidentServerIdentity) -> R
         .package_signer
         .as_ref()
         .context("resident IPC server package has no valid package signature")?;
-    if package_signer.subject != RESIDENT_PACKAGE_PUBLISHER
+    if package_signer.subject != expected.package_publisher
         || !valid_sha256_thumbprint(package_signer)
     {
         anyhow::bail!("resident IPC server package signature does not match its identity");
@@ -195,7 +217,7 @@ fn authenticate_resident_server_identity(identity: &ResidentServerIdentity) -> R
         .executable_path
         .as_deref()
         .context("resident IPC server has no process image path")?;
-    let expected_path = Path::new(install_root).join(RESIDENT_EXECUTABLE_NAME);
+    let expected_path = Path::new(install_root).join(expected.executable_name);
     let expected_path = expected_path
         .to_str()
         .context("resident IPC server package path is not valid UTF-8")?;
@@ -203,6 +225,47 @@ fn authenticate_resident_server_identity(identity: &ResidentServerIdentity) -> R
         anyhow::bail!("resident IPC server image is outside its OS package install root");
     }
     Ok(())
+}
+
+fn expected_resident_package_identity() -> Result<ExpectedResidentPackageIdentity> {
+    Ok(ExpectedResidentPackageIdentity {
+        package_name: manifest_element_attribute(RESIDENT_PACKAGE_MANIFEST, "Identity", "Name")
+            .context("resident package manifest has no Identity Name")?,
+        package_publisher: manifest_element_attribute(
+            RESIDENT_PACKAGE_MANIFEST,
+            "Identity",
+            "Publisher",
+        )
+        .context("resident package manifest has no Identity Publisher")?,
+        executable_name: manifest_element_attribute(
+            RESIDENT_PACKAGE_MANIFEST,
+            "Application",
+            "Executable",
+        )
+        .context("resident package manifest has no Application Executable")?,
+    })
+}
+
+fn manifest_element_attribute(
+    document: &'static str,
+    element: &str,
+    attribute: &str,
+) -> Option<&'static str> {
+    let element_prefix = format!("<{element}");
+    let attribute_prefix = format!("{attribute}=\"");
+    for (element_start, _) in document.match_indices(&element_prefix) {
+        let element_name_end = element_start + element_prefix.len();
+        let next = document[element_name_end..].chars().next()?;
+        if !next.is_ascii_whitespace() && next != '>' {
+            continue;
+        }
+        let tag_end = element_start + document[element_start..].find('>')?;
+        let tag = &document[element_start..tag_end];
+        let value_start = element_start + tag.find(&attribute_prefix)? + attribute_prefix.len();
+        let value_end = value_start + document[value_start..tag_end].find('"')?;
+        return Some(&document[value_start..value_end]);
+    }
+    None
 }
 
 fn authenticate_native_shim_identity(
@@ -908,8 +971,9 @@ mod tests {
     }
 
     fn signer(thumbprint_byte: &str) -> AuthenticodeIdentity {
+        let expected = expected_resident_package_identity().expect("resident package identity");
         AuthenticodeIdentity {
-            subject: RESIDENT_PACKAGE_PUBLISHER.into(),
+            subject: expected.package_publisher.into(),
             organization: Some("VaultKern Development".into()),
             sha256_thumbprint: thumbprint_byte.repeat(32),
             machine_chain_trusted: false,
@@ -917,19 +981,38 @@ mod tests {
     }
 
     fn server_identity() -> ResidentServerIdentity {
+        let expected = expected_resident_package_identity().expect("resident package identity");
+        let publisher_id = "bf7at9bmb1e94";
+        let family_name = format!("{}_{publisher_id}", expected.package_name);
         let root = r"C:\Program Files\WindowsApps\VaultKern.Windows_0.1.0.0_x64__bf7at9bmb1e94";
         ResidentServerIdentity {
-            executable_name: RESIDENT_EXECUTABLE_NAME.into(),
-            package_name: Some(RESIDENT_PACKAGE_NAME.into()),
-            package_publisher: Some(RESIDENT_PACKAGE_PUBLISHER.into()),
-            package_publisher_id: Some(RESIDENT_PACKAGE_PUBLISHER_ID.into()),
-            package_family_name: Some(RESIDENT_PACKAGE_FAMILY_NAME.into()),
+            executable_name: expected.executable_name.into(),
+            package_name: Some(expected.package_name.into()),
+            package_publisher: Some(expected.package_publisher.into()),
+            package_publisher_id: Some(publisher_id.into()),
+            package_family_name: Some(family_name),
             package_signer: Some(signer("11")),
             package_signature_kind: Some(1),
             package_is_development_mode: Some(false),
             package_install_root: Some(root.into()),
-            executable_path: Some(format!(r"{root}\{RESIDENT_EXECUTABLE_NAME}")),
+            executable_path: Some(format!(r"{root}\{}", expected.executable_name)),
         }
+    }
+
+    #[test]
+    fn resident_identity_expectations_come_from_the_shipped_package_manifest() {
+        let expected = expected_resident_package_identity()
+            .expect("the checked-in package manifest must define the resident identity");
+
+        assert!(RESIDENT_PACKAGE_MANIFEST.contains(&format!("Name=\"{}\"", expected.package_name)));
+        assert!(
+            RESIDENT_PACKAGE_MANIFEST
+                .contains(&format!("Publisher=\"{}\"", expected.package_publisher))
+        );
+        assert!(
+            RESIDENT_PACKAGE_MANIFEST
+                .contains(&format!("Executable=\"{}\"", expected.executable_name))
+        );
     }
 
     #[test]
@@ -1109,7 +1192,10 @@ mod tests {
             signer: None,
         };
 
-        let error = authenticate_native_shim_identity(&peer, path, RESIDENT_PACKAGE_PUBLISHER)
+        let publisher = expected_resident_package_identity()
+            .expect("resident package identity")
+            .package_publisher;
+        let error = authenticate_native_shim_identity(&peer, path, publisher)
             .expect_err("an unsigned direct client must not authenticate as the native shim");
         assert!(error.to_string().contains("signature"));
     }
@@ -1134,7 +1220,10 @@ mod tests {
             signer: Some(signer("11")),
         };
 
-        authenticate_native_shim_identity(&peer, path, RESIDENT_PACKAGE_PUBLISHER)
+        let publisher = expected_resident_package_identity()
+            .expect("resident package identity")
+            .package_publisher;
+        authenticate_native_shim_identity(&peer, path, publisher)
             .expect("the signed shim self-authenticates stdio before connecting to the server");
     }
 

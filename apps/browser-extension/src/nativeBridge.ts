@@ -23,7 +23,6 @@ type PendingRequest = {
   resolve: (response: unknown) => void;
   reject: (error: Error) => void;
   timeoutId: ReturnType<typeof setTimeout> | null;
-  postMessageAttempts: number;
 };
 
 type NativeBridgeEvent = {
@@ -112,6 +111,8 @@ function disconnectError() {
 function timeoutError() {
   return new NativeMessagingError("native_timeout", "native messaging timed out");
 }
+
+const NATIVE_RESPONSE_GRACE_MS = 1_000;
 
 function commandTypeFromMessage(message: unknown) {
   if (
@@ -260,7 +261,6 @@ export function createNativeMessagingBridge(
   let port: NativePort | null = null;
   let activeRequest: PendingRequest | null = null;
   const queuedRequests: PendingRequest[] = [];
-  const deferredPreloads: PendingRequest[] = [];
   let nextRequestId = 0;
   let connectionGeneration = 0;
 
@@ -325,11 +325,6 @@ export function createNativeMessagingBridge(
       request?.reject(error);
     }
 
-    while (deferredPreloads.length > 0) {
-      const request = deferredPreloads.shift();
-      clearRequestTimeout(request ?? null);
-      request?.reject(error);
-    }
   }
 
   function detachPort() {
@@ -353,15 +348,14 @@ export function createNativeMessagingBridge(
     }
 
     activeRequest = null;
-    request.postMessageAttempts = 0;
     clearRequestTimeout(request);
     detachPort();
-    deferredPreloads.push(request);
+    request.reject(preloadCanceledError());
 
     try {
       requestPort?.disconnect();
     } catch {
-      // The interrupted read will be retried after the new connection handshake.
+      // The interrupted preload was already rejected and will not be replayed.
     }
   }
 
@@ -411,7 +405,6 @@ export function createNativeMessagingBridge(
     }
 
     queuedRequests.splice(insertionIndex, 0, request);
-    queuedRequests.push(...deferredPreloads.splice(0));
   }
 
   function onNativeMessage(attachedPort: NativePort, response: unknown) {
@@ -495,26 +488,22 @@ export function createNativeMessagingBridge(
     activeRequest = request;
 
     try {
-      request.postMessageAttempts += 1;
       const requestPort = ensurePort();
       request.timeoutId = setTimeout(() => {
         if (activeRequest !== request || port !== requestPort) {
           return;
         }
 
-        activeRequest = null;
-        clearRequestTimeout(request);
+        const error = timeoutError();
         detachPort();
+        rejectAll(error);
 
         try {
           requestPort.disconnect();
         } catch {
-          // Ignore disconnect failures after timeout; the request is already rejected.
+          // The timed-out connection and all work queued behind it are already rejected.
         }
-
-        request.reject(timeoutError());
-        flushQueue();
-      }, timeoutForMessage(request.message));
+      }, timeoutForMessage(request.message) + NATIVE_RESPONSE_GRACE_MS);
       emitEvent({
         event: "post",
         commandType: commandTypeFromMessage(request.message)
@@ -526,7 +515,6 @@ export function createNativeMessagingBridge(
         return;
       }
       const failedPort = port;
-      activeRequest = null;
       detachPort();
       try {
         failedPort?.disconnect();
@@ -540,20 +528,7 @@ export function createNativeMessagingBridge(
         code: nativeError.code,
         message: nativeError.message
       });
-      if (
-        nativeError.code === "native_port_disconnected" &&
-        request.postMessageAttempts < 2
-      ) {
-        queuedRequests.unshift(request);
-        flushQueue();
-        return;
-      }
-
-      request.reject(nativeError);
-
-      if (queuedRequests.length > 0) {
-        flushQueue();
-      }
+      rejectAll(nativeError);
     }
   }
 
@@ -573,8 +548,7 @@ export function createNativeMessagingBridge(
           requestId,
           resolve,
           reject,
-          timeoutId: null,
-          postMessageAttempts: 0
+          timeoutId: null
         });
         flushQueue();
       });

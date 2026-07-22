@@ -55,6 +55,7 @@ export interface PopupClientLike {
   addLocalVaultReference(path?: string): Promise<VaultReference>;
   setCurrentVault(vaultRefId: string): Promise<SessionStateLike>;
   lockSession(): Promise<SessionStateLike>;
+  recordUserActivity(): Promise<SessionStateLike>;
   unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
   unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
   enableQuickUnlockForCurrentVault(
@@ -657,39 +658,46 @@ export function PopupApp({
   ]);
 
   useEffect(() => {
-    if (
-      typeof window === "undefined" ||
-      !session?.unlocked ||
-      extensionSettings.idleLockMinutes <= 0
-    ) {
+    if (typeof window === "undefined" || !session?.unlocked) {
       return undefined;
     }
 
-    let timer = window.setTimeout(handleTimeout, extensionSettings.idleLockMinutes * 60_000);
+    let disposed = false;
+    let reportPending = false;
+    let lastReportedAt = 0;
 
-    function resetTimer() {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(handleTimeout, extensionSettings.idleLockMinutes * 60_000);
-    }
-
-    function handleTimeout() {
-      void client.lockSession().then((nextSession) => {
-        setSession(nextSession);
-      });
+    function reportActivity() {
+      const now = Date.now();
+      if (reportPending || now - lastReportedAt < 15_000) {
+        return;
+      }
+      reportPending = true;
+      lastReportedAt = now;
+      void client
+        .recordUserActivity()
+        .then((nextSession) => {
+          if (!disposed) {
+            setSession(nextSession);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          reportPending = false;
+        });
     }
 
     const events = ["pointerdown", "keydown", "wheel", "scroll"];
     for (const eventName of events) {
-      window.addEventListener(eventName, resetTimer, { passive: true });
+      window.addEventListener(eventName, reportActivity, { passive: true });
     }
 
     return () => {
-      window.clearTimeout(timer);
+      disposed = true;
       for (const eventName of events) {
-        window.removeEventListener(eventName, resetTimer);
+        window.removeEventListener(eventName, reportActivity);
       }
     };
-  }, [client, extensionSettings.idleLockMinutes, session?.unlocked]);
+  }, [client, session?.unlocked]);
 
   useEffect(() => {
     if (webAuthnCeremonyPrompt) {

@@ -283,8 +283,6 @@ pub struct Runtime {
     secure_storage: Box<dyn SecureStorageProvider>,
     parent_window_handle: Option<usize>,
     allow_unlock_kdf: bool,
-    require_protocol_handshake: bool,
-    negotiated_capabilities: Option<Vec<String>>,
     pending_quick_unlock_enrollment: Option<PendingQuickUnlockEnrollment>,
     session_generation: u64,
     platform_passkey_operations: BTreeMap<Vec<u8>, PlatformPasskeyOperationLease>,
@@ -355,19 +353,6 @@ struct PlatformPasskeyOperationLease {
 }
 
 impl Runtime {
-    fn authorize_negotiated_command(&self, command: &RuntimeCommand) -> Result<()> {
-        let capabilities = self
-            .negotiated_capabilities
-            .as_ref()
-            .context("runtime protocol handshake is required before business commands")?;
-        for capability in required_command_capabilities(command) {
-            if !capabilities.iter().any(|granted| granted == capability) {
-                anyhow::bail!("runtime command requires negotiated capability: {capability}");
-            }
-        }
-        Ok(())
-    }
-
     fn external_open_kdf_policy(&self) -> (ExternalKdfPolicy, ExternalKdfConfirmation) {
         let policy = if self.allow_unlock_kdf {
             ExternalKdfPolicy::Desktop
@@ -498,8 +483,6 @@ impl Runtime {
             secure_storage,
             parent_window_handle: None,
             allow_unlock_kdf,
-            require_protocol_handshake: !allow_unlock_kdf,
-            negotiated_capabilities: None,
             pending_quick_unlock_enrollment: None,
             session_generation: 0,
             platform_passkey_operations: BTreeMap::new(),
@@ -539,8 +522,6 @@ impl Runtime {
             secure_storage: Box::new(UnsupportedSecureStorageProvider),
             parent_window_handle: None,
             allow_unlock_kdf: true,
-            require_protocol_handshake: false,
-            negotiated_capabilities: None,
             pending_quick_unlock_enrollment: None,
             session_generation: 0,
             platform_passkey_operations: BTreeMap::new(),
@@ -4349,40 +4330,9 @@ impl Runtime {
     }
 
     fn handle_inner(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
-        if self.require_protocol_handshake && !matches!(&command, RuntimeCommand::Handshake { .. })
-        {
-            self.authorize_negotiated_command(&command)?;
-        }
         match command {
-            RuntimeCommand::Handshake {
-                protocol_version,
-                capabilities,
-            } => {
-                if protocol_version != vaultkern_runtime_protocol::PROTOCOL_VERSION {
-                    anyhow::bail!("unsupported runtime protocol version: {protocol_version}");
-                }
-                let mut supported = vec![
-                    "runtime-core",
-                    "database-settings",
-                    "one-drive",
-                    "passkey-ceremonies",
-                ];
-                if self.allow_unlock_kdf {
-                    supported.extend(["quick-unlock", "resident-app"]);
-                } else {
-                    supported.push("browser-extension");
-                }
-                let capabilities = capabilities
-                    .into_iter()
-                    .filter(|capability| supported.contains(&capability.as_str()))
-                    .collect::<Vec<_>>();
-                self.negotiated_capabilities = Some(capabilities.clone());
-                Ok(RuntimeResponse::Handshake(
-                    vaultkern_runtime_protocol::HandshakeDto {
-                        protocol_version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
-                        capabilities,
-                    },
-                ))
+            RuntimeCommand::Handshake { .. } => {
+                anyhow::bail!("runtime handshake reached the business-state dispatcher")
             }
             RuntimeCommand::GetSessionState => {
                 Ok(RuntimeResponse::SessionState(self.session_state()))
@@ -4459,6 +4409,9 @@ impl Runtime {
                 .map(RuntimeResponse::VaultOpened),
             RuntimeCommand::LockSession => {
                 self.lock_session();
+                Ok(RuntimeResponse::SessionState(self.session_state()))
+            }
+            RuntimeCommand::RecordUserActivity => {
                 Ok(RuntimeResponse::SessionState(self.session_state()))
             }
             RuntimeCommand::UnlockWithPassword { vault_id, password } => {
@@ -8642,6 +8595,7 @@ fn browser_command_authorization(command: &RuntimeCommand) -> BrowserCommandAuth
         | RuntimeCommand::UnlockCurrentVault { .. }
         | RuntimeCommand::OpenLocalVault { .. }
         | RuntimeCommand::LockSession
+        | RuntimeCommand::RecordUserActivity
         | RuntimeCommand::UnlockWithPassword { .. }
         | RuntimeCommand::UnlockVault { .. }
         | RuntimeCommand::ListGroups { .. }
@@ -10524,58 +10478,6 @@ fn quick_unlock_storage_key(vault_ref_id: &str) -> String {
         key.push_str(&format!("{byte:02x}"));
     }
     key
-}
-
-fn required_command_capabilities(command: &RuntimeCommand) -> Vec<&'static str> {
-    let mut required = vec!["runtime-core"];
-    if matches!(
-        command,
-        RuntimeCommand::BeginOneDriveLogin
-            | RuntimeCommand::CompletePendingOneDriveLogin
-            | RuntimeCommand::ListOneDriveChildren { .. }
-            | RuntimeCommand::AddOneDriveVaultReference { .. }
-            | RuntimeCommand::RetryVaultSourceSync { .. }
-    ) {
-        required.push("one-drive");
-    }
-    if matches!(
-        command,
-        RuntimeCommand::SetEntryPasskey { .. }
-            | RuntimeCommand::ClearEntryPasskey { .. }
-            | RuntimeCommand::GetPasskeyUserVerificationCapability
-            | RuntimeCommand::VerifyPasskeyUser { .. }
-            | RuntimeCommand::ListPasskeyCredentials { .. }
-            | RuntimeCommand::RegisterPasskeyCeremony { .. }
-            | RuntimeCommand::AdvancePasskeyCeremonyPhase { .. }
-            | RuntimeCommand::BindPasskeyCeremonyVault { .. }
-            | RuntimeCommand::QueryPasskeyCeremonyLedger { .. }
-            | RuntimeCommand::ReconcilePasskeyCeremonyLedger { .. }
-            | RuntimeCommand::MarkPasskeyCeremonyUnknownDelivery { .. }
-            | RuntimeCommand::CreatePasskeyAssertion { .. }
-            | RuntimeCommand::CreatePasskeyRegistration { .. }
-            | RuntimeCommand::SavePasskeyRegistration { .. }
-            | RuntimeCommand::AbortPasskeyRegistration { .. }
-            | RuntimeCommand::CommitPasskeyRegistration { .. }
-            | RuntimeCommand::PasskeyCredentialStatus { .. }
-            | RuntimeCommand::PasskeyCredentialStatusBatch { .. }
-    ) {
-        required.push("passkey-ceremonies");
-    }
-    if matches!(
-        command,
-        RuntimeCommand::EnableQuickUnlockForCurrentVault { .. }
-            | RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
-            | RuntimeCommand::DisableQuickUnlockForCurrentVault
-    ) {
-        required.push("quick-unlock");
-    }
-    if matches!(
-        command,
-        RuntimeCommand::GetDatabaseSettings { .. } | RuntimeCommand::UpdateDatabaseSettings { .. }
-    ) {
-        required.push("database-settings");
-    }
-    required
 }
 
 fn write_local_save_warning(destination: &mut impl std::io::Write, warning: &str) {

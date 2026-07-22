@@ -42,7 +42,8 @@ use zeroize::{Zeroize, Zeroizing};
 use super::{
     PendingRequest, PendingRequests, RESIDENT_IPC_DEFAULT_TIMEOUT_MS, ResidentIpcFrame,
     ResidentIpcRequestHandler, client_hello, negotiate_client_hello,
-    validate_configured_browser_origin, validate_request, validate_server_hello, write_frame,
+    prepare_runtime_protocol_request, request_deadline_error, validate_configured_browser_origin,
+    validate_request, validate_server_hello, write_frame,
 };
 use crate::command_loop::{
     MAX_NATIVE_REQUEST_BYTES, MAX_NATIVE_RESPONSE_BYTES, NativeMessage,
@@ -288,6 +289,7 @@ fn serve_connection(
     send_frame(&writer, &ResidentIpcFrame::ServerHello(hello))?;
 
     let pending = PendingRequests::default();
+    let mut protocol_session = crate::RuntimeProtocolSession::browser_extension();
     loop {
         let frame = match reader.try_read_frame() {
             Ok(frame) => frame,
@@ -317,6 +319,14 @@ fn serve_connection(
                     )?;
                     continue;
                 }
+                let message = match prepare_runtime_protocol_request(&mut protocol_session, message)
+                {
+                    Ok(message) => message,
+                    Err(response) => {
+                        send_runtime_response(&writer, request_id, response)?;
+                        continue;
+                    }
+                };
                 let request = match pending.register(&request_id) {
                     Ok(request) => request,
                     Err(error) => {
@@ -404,32 +414,26 @@ fn dispatch_request(
         .name("vaultkern-resident-ipc-response".into())
         .spawn(move || {
             let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-            let mut enforce_deadline = true;
             loop {
                 if response_request.response_claimed() {
                     return;
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                if enforce_deadline && remaining.is_zero() {
-                    if response_request.cancel_before_execution() {
+                if remaining.is_zero() {
+                    if let Some(execution_started) = response_request.claim_deadline_response() {
+                        let error = request_deadline_error(execution_started);
                         let _ = send_frame(
                             &response_writer,
                             &ResidentIpcFrame::Error {
                                 request_id: Some(response_request_id),
-                                code: "request_timeout".into(),
-                                message: "the resident IPC request timed out".into(),
+                                code: error.code,
+                                message: error.message,
                             },
                         );
-                        return;
                     }
-                    enforce_deadline = false;
-                    continue;
+                    return;
                 }
-                let wait = if enforce_deadline {
-                    remaining.min(REQUEST_POLL_INTERVAL)
-                } else {
-                    REQUEST_POLL_INTERVAL
-                };
+                let wait = remaining.min(REQUEST_POLL_INTERVAL);
                 match result_receiver.recv_timeout(wait) {
                     Ok(Ok(message)) => {
                         if response_request.claim_response() {
@@ -1319,7 +1323,9 @@ mod tests {
 
     use super::*;
     use crate::resident_ipc::read_frame;
-    use vaultkern_runtime_protocol::{EntryAttachmentContentDto, RuntimeCommand, SessionStateDto};
+    use vaultkern_runtime_protocol::{
+        EntryAttachmentContentDto, PROTOCOL_VERSION, RuntimeCommand, SessionStateDto,
+    };
 
     const EXTENSION_ORIGIN: &str = "chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/";
     static PIPE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1435,6 +1441,10 @@ mod tests {
         let handler_cancellations = observed_cancellations.clone();
         let running_mutation_started = Arc::new(AtomicBool::new(false));
         let handler_mutation_started = running_mutation_started.clone();
+        let deadline_mutation_started = Arc::new(AtomicBool::new(false));
+        let handler_deadline_mutation_started = deadline_mutation_started.clone();
+        let deadline_mutation_committed = Arc::new(AtomicBool::new(false));
+        let handler_deadline_mutation_committed = deadline_mutation_committed.clone();
         let consumed_blob_length = Arc::new(AtomicUsize::new(0));
         let handler_consumed_blob_length = consumed_blob_length.clone();
         let server = start_windows_resident_ipc_server_with_authenticator(
@@ -1482,6 +1492,15 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(50));
                         RuntimeResponse::Saved
                     }
+                    RuntimeCommand::SaveVault { vault_id }
+                        if vault_id == "commit-after-deadline" =>
+                    {
+                        execution_started.store(true, Ordering::Release);
+                        handler_deadline_mutation_started.store(true, Ordering::Release);
+                        std::thread::sleep(Duration::from_millis(750));
+                        handler_deadline_mutation_committed.store(true, Ordering::Release);
+                        RuntimeResponse::Saved
+                    }
                     command => panic!("unexpected test command: {command:?}"),
                 },
             ),
@@ -1524,6 +1543,36 @@ mod tests {
         let pipe = Arc::new(pipe);
         let mut writer = PipeWriter(pipe.clone());
         let mut reader = PipeReader(pipe);
+
+        write_frame(
+            &mut writer,
+            &request_frame(
+                "native-runtime-handshake-1",
+                5_000,
+                RuntimeCommand::Handshake {
+                    protocol_version: PROTOCOL_VERSION,
+                    capabilities: vec![
+                        "runtime-core".into(),
+                        "browser-extension".into(),
+                        "database-settings".into(),
+                        "one-drive".into(),
+                        "passkey-ceremonies".into(),
+                        "quick-unlock".into(),
+                    ],
+                },
+            ),
+        )
+        .expect("send runtime protocol handshake");
+        match read_frame(&mut reader)
+            .expect("read runtime protocol handshake")
+            .expect("runtime protocol handshake before EOF")
+        {
+            ResidentIpcFrame::Response {
+                request_id,
+                message: RuntimeResponse::Handshake(_),
+            } => assert_eq!(request_id, "native-runtime-handshake-1"),
+            _ => panic!("expected correlated runtime protocol handshake"),
+        }
 
         write_frame(
             &mut writer,
@@ -1700,6 +1749,38 @@ mod tests {
             }
             _ => panic!("expected committed mutation response"),
         }
+
+        write_frame(
+            &mut writer,
+            &request_frame(
+                "native-running-timeout-1",
+                250,
+                RuntimeCommand::SaveVault {
+                    vault_id: "commit-after-deadline".into(),
+                },
+            ),
+        )
+        .expect("send mutation that outlives its response deadline");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !deadline_mutation_started.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(deadline_mutation_started.load(Ordering::Acquire));
+        assert_request_error(
+            read_frame(&mut reader)
+                .expect("read unknown mutation outcome")
+                .expect("unknown mutation outcome before EOF"),
+            "native-running-timeout-1",
+            "request_outcome_unknown",
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !deadline_mutation_committed.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            deadline_mutation_committed.load(Ordering::Acquire),
+            "the response deadline must not cancel an already-started mutation"
+        );
 
         write_frame(
             &mut writer,

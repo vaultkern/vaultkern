@@ -22,7 +22,8 @@ const RUNTIME_CAPABILITIES = [
   "browser-extension",
   "database-settings",
   "one-drive",
-  "passkey-ceremonies"
+  "passkey-ceremonies",
+  "quick-unlock"
 ];
 
 function trustedExtensionPageSender() {
@@ -1930,7 +1931,7 @@ describe("background bridge", () => {
     vi.useRealTimers();
   });
 
-  it("retries desired-state reconciliation after a successful unlock", async () => {
+  it("does not turn the recent-vault display limit into background deletion", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     const listeners: RuntimeMessageListener[] = [];
@@ -2023,7 +2024,8 @@ describe("background bridge", () => {
     };
 
     await import("../background");
-    await vi.waitFor(() => expect(recentVaultLists).toBe(1));
+    await flushMicrotasks();
+    expect(recentVaultLists).toBe(0);
 
     const response = sendRuntimeMessage(listeners, {
       version: 1,
@@ -2054,19 +2056,11 @@ describe("background bridge", () => {
       unlocked: true
     });
 
-    await vi.waitFor(() => {
-      expect(
-        postedCommandCount(port, "delete_vault_reference_if_not_current")
-      ).toBe(1);
-    });
+    await flushMicrotasks();
+    expect(recentVaultLists).toBe(0);
     expect(
-      postedCommands(port, "delete_vault_reference_if_not_current")[0]
-    ).toMatchObject({
-      command: {
-        type: "delete_vault_reference_if_not_current",
-        vault_ref_id: "old"
-      }
-    });
+      postedCommandCount(port, "delete_vault_reference_if_not_current")
+    ).toBe(0);
   });
 
   it("stops native keep-alive and clears attach state when disabling fails to detach the proxy", async () => {
@@ -2280,6 +2274,12 @@ describe("background bridge", () => {
       expect(postedCommandCount(port, "get_session_state")).toBe(1);
     });
     expect(connectNative).toHaveBeenCalledTimes(1);
+    expect(postedCommands(port, "handshake")[0]).toMatchObject({
+      command: {
+        type: "handshake",
+        capabilities: expect.arrayContaining(["browser-extension", "quick-unlock"])
+      }
+    });
     expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       version: 1,
       command: { type: "get_session_state" }

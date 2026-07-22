@@ -1,4 +1,7 @@
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -6,6 +9,7 @@ const HOST_NAME: &str = "com.vaultkern.runtime";
 const RUNTIME_DIR_NAME: &str = "vaultkern-runtime";
 const RUNTIME_FILE_NAME: &str = "vaultkern-runtime.exe";
 pub const DEFAULT_EXTENSION_ID_ENV: &str = "VAULTKERN_DEFAULT_EXTENSION_ID";
+static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn built_in_extension_id() -> Option<&'static str> {
     option_env!("VAULTKERN_DEFAULT_EXTENSION_ID").and_then(non_empty_trimmed)
@@ -135,13 +139,23 @@ impl BrowserSetupConfig {
             return RegistrationStatus::BrowserMissing;
         }
 
-        if let Some(content) = probe.manifest_content.as_deref() {
-            let extension_origin = self.extension_origin_for_validation();
-            if native_host_manifest_is_usable(content, extension_origin.as_deref())
-                && probe.registered_runtime_exists != Some(false)
-            {
-                return RegistrationStatus::Registered;
-            }
+        let registry_uses_setup_manifest = probe
+            .registry_manifest_path
+            .as_deref()
+            .is_some_and(|path| paths_match(path, &self.manifest_path()));
+        let manifest_matches_setup = probe.manifest_content.as_deref().is_some_and(|content| {
+            native_host_manifest_matches_config(
+                content,
+                self.runtime_path(),
+                self.extension_origin_for_validation().as_deref(),
+            )
+        });
+        if registry_uses_setup_manifest
+            && manifest_matches_setup
+            && probe.registered_runtime_exists == Some(true)
+            && probe.setup_runtime_exists
+        {
+            return RegistrationStatus::Registered;
         }
 
         if probe.registry_manifest_path.is_none() {
@@ -315,22 +329,146 @@ pub fn install_runtime_payload(local_app_data: &Path, payload: &[u8]) -> Result<
     }
 
     let runtime_path = runtime_install_path(local_app_data);
-    if let Some(parent) = runtime_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    std::fs::write(&runtime_path, payload).map_err(|error| error.to_string())?;
+    atomic_write_file(&runtime_path, payload).map_err(|error| error.to_string())?;
     Ok(runtime_path)
 }
 
-fn native_host_manifest_is_usable(content: &str, expected_origin: Option<&str>) -> bool {
+fn atomic_write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    atomic_write_file_with_publish(path, contents, atomic_replace_file)
+}
+
+fn atomic_write_file_with_publish<F>(path: &Path, contents: &[u8], publish: F) -> io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic write target has no file name",
+        )
+    })?;
+
+    let (temporary_path, mut temporary_file) = (0..128)
+        .find_map(|_| {
+            let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let candidate = parent.join(format!(
+                ".{}.{}.{}.tmp",
+                file_name.to_string_lossy(),
+                std::process::id(),
+                sequence
+            ));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => Some(Ok((candidate, file))),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "could not allocate an atomic write temporary file",
+            )
+        })?;
+
+    let prepare_result = temporary_file
+        .write_all(contents)
+        .and_then(|()| temporary_file.sync_all());
+    drop(temporary_file);
+    if let Err(error) = prepare_result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+
+    if let Err(error) = publish(&temporary_path, path) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+
+    sync_parent_directory(parent)
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(source, target)
+}
+
+#[cfg(windows)]
+fn atomic_replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn sync_parent_directory(parent: &Path) -> io::Result<()> {
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+fn native_host_manifest_matches_config(
+    content: &str,
+    expected_runtime_path: &Path,
+    expected_origin: Option<&str>,
+) -> bool {
     let Ok(manifest) = serde_json::from_str::<NativeHostManifestDocument>(content) else {
         return false;
     };
 
     manifest.name == HOST_NAME
         && manifest.type_field == "stdio"
-        && !manifest.path.trim().is_empty()
+        && paths_match(Path::new(&manifest.path), expected_runtime_path)
         && allowed_origins_match(&manifest.allowed_origins, expected_origin)
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 
 #[cfg(windows)]
@@ -342,12 +480,14 @@ fn native_host_manifest_runtime_path(content: &str) -> Option<PathBuf> {
 
 fn allowed_origins_match(allowed_origins: &[String], expected_origin: Option<&str>) -> bool {
     match expected_origin {
-        Some(expected_origin) => allowed_origins
-            .iter()
-            .any(|origin| origin.eq_ignore_ascii_case(expected_origin)),
-        None => allowed_origins
-            .iter()
-            .any(|origin| origin.starts_with("chrome-extension://") && origin.ends_with('/')),
+        Some(expected_origin) => {
+            allowed_origins.len() == 1 && allowed_origins[0] == expected_origin
+        }
+        None => {
+            allowed_origins.len() == 1
+                && allowed_origins[0].starts_with("chrome-extension://")
+                && allowed_origins[0].ends_with('/')
+        }
     }
 }
 
@@ -362,8 +502,8 @@ pub mod windows_setup {
 
     use crate::{
         BrowserDiagnosis, BrowserKind, BrowserRegistrationProbe, BrowserSetupConfig,
-        RegistrationStatus, browser_install_candidates_for_roots, built_in_extension_id,
-        install_runtime_payload, runtime_install_path,
+        RegistrationStatus, atomic_write_file, browser_install_candidates_for_roots,
+        built_in_extension_id, install_runtime_payload, runtime_install_path,
     };
 
     const RUNTIME_PAYLOAD: &[u8] =
@@ -438,10 +578,8 @@ pub mod windows_setup {
         install_embedded_runtime(config)?;
 
         let manifest_path = config.manifest_path();
-        if let Some(parent) = manifest_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        fs::write(&manifest_path, config.expected_manifest()).map_err(|error| error.to_string())?;
+        atomic_write_file(&manifest_path, config.expected_manifest().as_bytes())
+            .map_err(|error| error.to_string())?;
         write_registry_manifest_path(config.browser(), &manifest_path)?;
         Ok(())
     }
@@ -558,9 +696,9 @@ mod tests {
 
     use crate::{
         BrowserKind, BrowserRegistrationProbe, BrowserSetupConfig, DEFAULT_EXTENSION_ID_ENV,
-        RegistrationStatus, browser_install_candidates_for_roots, built_in_extension_id,
-        install_runtime_payload, render_native_host_manifest, resolve_extension_id,
-        resolve_extension_id_with_default, runtime_install_path,
+        RegistrationStatus, atomic_write_file_with_publish, browser_install_candidates_for_roots,
+        built_in_extension_id, install_runtime_payload, render_native_host_manifest,
+        resolve_extension_id, resolve_extension_id_with_default, runtime_install_path,
     };
 
     #[test]
@@ -691,6 +829,23 @@ mod tests {
     }
 
     #[test]
+    fn failed_atomic_publish_preserves_the_installed_generation_and_cleans_up() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("vaultkern-runtime.exe");
+        fs::write(&target, b"old-runtime").unwrap();
+
+        let error =
+            atomic_write_file_with_publish(&target, b"new-runtime", |_temporary, _target| {
+                Err(std::io::Error::other("injected publish failure"))
+            })
+            .expect_err("publish failure must be surfaced");
+
+        assert!(error.to_string().contains("injected publish failure"));
+        assert_eq!(fs::read(&target).unwrap(), b"old-runtime");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn browser_install_candidates_include_local_app_data_user_installs() {
         let candidates = browser_install_candidates_for_roots(
             BrowserKind::Chrome,
@@ -748,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnosis_accepts_existing_valid_manifest_outside_setup_path() {
+    fn diagnosis_requires_the_registry_to_point_at_the_setup_owned_manifest() {
         let expected = BrowserSetupConfig::new(
             BrowserKind::Chrome,
             "kblgblkjghklighdgmejjfondchkjcgf",
@@ -770,12 +925,63 @@ mod tests {
                 registered_runtime_exists: Some(true),
                 setup_runtime_exists: true,
             }),
-            RegistrationStatus::Registered
+            RegistrationStatus::NeedsRepair
         );
     }
 
     #[test]
-    fn diagnosis_accepts_existing_manifest_without_extension_id_when_origin_is_valid() {
+    fn diagnosis_rejects_a_manifest_that_grants_an_extra_extension_origin() {
+        let expected = BrowserSetupConfig::new(
+            BrowserKind::Chrome,
+            "kblgblkjghklighdgmejjfondchkjcgf",
+            PathBuf::from(r"C:\Setup\vaultkern-runtime.exe"),
+            PathBuf::from("/home/alice/AppData/Local"),
+        );
+        let manifest_with_extra_origin = format!(
+            r#"{{"name":"com.vaultkern.runtime","path":"{}","type":"stdio","allowed_origins":["{}","chrome-extension://attacker/"]}}"#,
+            expected.runtime_path().display(),
+            expected.extension_origin()
+        );
+
+        assert_eq!(
+            expected.diagnose(BrowserRegistrationProbe {
+                browser_installed: true,
+                registry_manifest_path: Some(expected.manifest_path()),
+                manifest_content: Some(manifest_with_extra_origin),
+                registered_runtime_exists: Some(true),
+                setup_runtime_exists: true,
+            }),
+            RegistrationStatus::NeedsRepair
+        );
+    }
+
+    #[test]
+    fn diagnosis_requires_the_exact_configured_extension_origin() {
+        let expected = BrowserSetupConfig::new(
+            BrowserKind::Chrome,
+            "kblgblkjghklighdgmejjfondchkjcgf",
+            PathBuf::from(r"C:\Setup\vaultkern-runtime.exe"),
+            PathBuf::from("/home/alice/AppData/Local"),
+        );
+        let wrong_case_manifest = render_native_host_manifest(
+            &expected.runtime_path().to_string_lossy(),
+            "chrome-extension://KBLGBLKJGHKLIGHDGMEJJFONDCHKJCGF/",
+        );
+
+        assert_eq!(
+            expected.diagnose(BrowserRegistrationProbe {
+                browser_installed: true,
+                registry_manifest_path: Some(expected.manifest_path()),
+                manifest_content: Some(wrong_case_manifest),
+                registered_runtime_exists: Some(true),
+                setup_runtime_exists: true,
+            }),
+            RegistrationStatus::NeedsRepair
+        );
+    }
+
+    #[test]
+    fn diagnosis_without_an_extension_id_still_requires_the_setup_owned_paths() {
         let expected = BrowserSetupConfig::new(
             BrowserKind::Chrome,
             "",
@@ -795,7 +1001,7 @@ mod tests {
                 registered_runtime_exists: Some(true),
                 setup_runtime_exists: false,
             }),
-            RegistrationStatus::Registered
+            RegistrationStatus::RuntimeMissing
         );
     }
 

@@ -1,7 +1,7 @@
 #[cfg(windows)]
 use vaultkern_runtime::resident_ipc::run_windows_native_messaging_shim;
 #[cfg(not(windows))]
-use vaultkern_runtime::{Runtime, run_stdio_loop};
+use vaultkern_runtime::{Runtime, run_browser_stdio_loop, run_stdio_loop};
 use vaultkern_runtime::{is_supported_browser_origin, render_manifest};
 
 const USAGE: &str = "usage: vaultkern-runtime [--help] [--print-native-host-manifest <binary-path> <extension-origin>]";
@@ -52,10 +52,10 @@ fn run_native_host(
     browser_origin: Option<&str>,
     _parent_window: Option<usize>,
 ) -> anyhow::Result<()> {
-    let runtime = browser_origin
-        .map(Runtime::new_for_browser_origin)
-        .unwrap_or_else(Runtime::new);
-    run_stdio_loop(runtime)
+    match browser_origin {
+        Some(origin) => run_browser_stdio_loop(Runtime::new_for_browser_origin(origin)),
+        None => run_stdio_loop(Runtime::new()),
+    }
 }
 
 #[cfg(windows)]

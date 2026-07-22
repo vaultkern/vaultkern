@@ -183,6 +183,7 @@ pub enum RuntimeCommand {
         path: String,
     },
     LockSession,
+    RecordUserActivity,
     UnlockWithPassword {
         vault_id: String,
         password: SensitiveString,

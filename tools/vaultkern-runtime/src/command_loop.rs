@@ -5,13 +5,24 @@ use anyhow::{Context, Result};
 use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse};
 use zeroize::Zeroizing;
 
-use crate::Runtime;
+use crate::{Runtime, RuntimeProtocolDispatch, RuntimeProtocolSession};
 
 pub(crate) const MAX_NATIVE_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_NATIVE_REQUEST_ID_BYTES: usize = 256;
 
 pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
+    run_stdio_loop_with_session(runtime, RuntimeProtocolSession::legacy_native_host())
+}
+
+pub fn run_browser_stdio_loop(runtime: Runtime) -> Result<()> {
+    run_stdio_loop_with_session(runtime, RuntimeProtocolSession::browser_extension())
+}
+
+fn run_stdio_loop_with_session(
+    runtime: Runtime,
+    protocol_session: RuntimeProtocolSession,
+) -> Result<()> {
     install_redacted_panic_hook();
     configure_stdio_for_native_messaging()?;
 
@@ -20,7 +31,7 @@ pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
     let mut stdin = stdin.lock();
     let mut stdout = stdout.lock();
 
-    run_loop_with_io(runtime, &mut stdin, &mut stdout)
+    run_loop_with_io_with_session(runtime, protocol_session, &mut stdin, &mut stdout)
 }
 
 pub fn install_redacted_panic_hook() {
@@ -41,16 +52,39 @@ pub fn install_redacted_panic_hook() {
     });
 }
 
+#[cfg(test)]
 fn run_loop_with_io(
     runtime: Runtime,
     stdin: &mut impl Read,
     stdout: &mut impl Write,
 ) -> Result<()> {
-    run_loop_with_io_with_limit(runtime, stdin, stdout, MAX_NATIVE_REQUEST_BYTES)
+    run_loop_with_io_with_limit(
+        runtime,
+        RuntimeProtocolSession::legacy_native_host(),
+        stdin,
+        stdout,
+        MAX_NATIVE_REQUEST_BYTES,
+    )
+}
+
+fn run_loop_with_io_with_session(
+    runtime: Runtime,
+    protocol_session: RuntimeProtocolSession,
+    stdin: &mut impl Read,
+    stdout: &mut impl Write,
+) -> Result<()> {
+    run_loop_with_io_with_limit(
+        runtime,
+        protocol_session,
+        stdin,
+        stdout,
+        MAX_NATIVE_REQUEST_BYTES,
+    )
 }
 
 fn run_loop_with_io_with_limit(
     mut runtime: Runtime,
+    mut protocol_session: RuntimeProtocolSession,
     stdin: &mut impl Read,
     stdout: &mut impl Write,
     max_message_bytes: usize,
@@ -89,7 +123,14 @@ fn run_loop_with_io_with_limit(
                     )?;
                     continue;
                 }
-                let outcome = handle_command_response(&mut runtime, envelope.command);
+                let command = match protocol_session.accept(envelope.command) {
+                    RuntimeProtocolDispatch::Respond(response) => {
+                        write_native_message(stdout, &response, request_id.as_deref())?;
+                        continue;
+                    }
+                    RuntimeProtocolDispatch::Dispatch(command) => command,
+                };
+                let outcome = handle_command_response(&mut runtime, command);
                 #[cfg(debug_assertions)]
                 maybe_abort_after_autofill_source_commit(&outcome.response);
                 write_native_message(stdout, &outcome.response, request_id.as_deref())?;
@@ -434,7 +475,7 @@ mod tests {
         request_id_from_native_payload, run_loop_with_io, run_loop_with_io_with_limit,
         write_native_message,
     };
-    use crate::Runtime;
+    use crate::{Runtime, RuntimeProtocolSession};
 
     fn durable_autofill_response(
         disposition: AutofillPersistDispositionDto,
@@ -635,8 +676,14 @@ mod tests {
         let mut input = std::io::Cursor::new(input);
         let mut output = Vec::new();
 
-        run_loop_with_io_with_limit(Runtime::for_tests(), &mut input, &mut output, max_length)
-            .expect("native loop should continue after oversized command");
+        run_loop_with_io_with_limit(
+            Runtime::for_tests(),
+            RuntimeProtocolSession::legacy_native_host(),
+            &mut input,
+            &mut output,
+            max_length,
+        )
+        .expect("native loop should continue after oversized command");
 
         let mut output = std::io::Cursor::new(output);
         let first = read_response_from(&mut output);

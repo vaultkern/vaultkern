@@ -1,7 +1,6 @@
 import { RuntimeClient, createNegotiatedRuntimeTransport } from "@vaultkern/runtime-web-client";
 
 import { createNativeMessagingBridge } from "./nativeBridge";
-import { createRecentVaultReconciler } from "./recentVaultReconciler";
 import {
   EXTENSION_SETTINGS_STORAGE_KEY,
   createChromeExtensionSettingsStore
@@ -1061,24 +1060,14 @@ const nativeBridge = rawNativeBridge
       "browser-extension",
       "database-settings",
       "one-drive",
-      "passkey-ceremonies"
+      "passkey-ceremonies",
+      "quick-unlock"
     ])
   : null;
 nativeRuntimeClient = nativeBridge
   ? new RuntimeClient({ send: (message) => sendRuntimeMessage(message) })
   : null;
-const recentVaultReconciler = nativeRuntimeClient
-  ? createRecentVaultReconciler(extensionSettingsStore, nativeRuntimeClient)
-  : null;
-
-function scheduleRecentVaultReconciliation() {
-  void recentVaultReconciler?.schedule().catch((error) => {
-    console.error("failed to reconcile the recent-vault limit", error);
-  });
-}
-
 function scheduleSavedSettingsReconciliation() {
-  scheduleRecentVaultReconciliation();
   if (chromeApi?.webAuthenticationProxy) {
     void syncWebAuthnProxy().catch((error) => {
       console.error("failed to reconcile the WebAuthn proxy", error);

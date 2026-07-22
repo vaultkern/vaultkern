@@ -492,6 +492,12 @@ export class RuntimeClient {
     });
   }
 
+  async recordUserActivity(): Promise<SessionState> {
+    return this.sendCommand<SessionState>({
+      type: "record_user_activity"
+    });
+  }
+
   async unlockCurrentVaultWithPassword(password: string): Promise<SessionState> {
     return this.sendCommand<SessionState>({
       type: "unlock_current_vault_with_password",

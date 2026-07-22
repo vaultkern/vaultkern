@@ -17,7 +17,8 @@ const RUNTIME_CAPABILITIES = [
   "browser-extension",
   "database-settings",
   "one-drive",
-  "passkey-ceremonies"
+  "passkey-ceremonies",
+  "quick-unlock"
 ];
 
 function fields(password = "new-secret") {
@@ -83,6 +84,19 @@ function nativePort() {
     postMessage: vi.fn((message: unknown) => {
       posted.push(message);
       const command = (message as { command?: { type?: unknown } })?.command;
+      if (command?.type === "handshake") {
+        const requestId = (message as { requestId?: string }).requestId;
+        queueMicrotask(() =>
+          emit(
+            {
+              type: "handshake",
+              protocolVersion: 1,
+              capabilities: RUNTIME_CAPABILITIES
+            },
+            requestId
+          )
+        );
+      }
       if (command?.type === "list_recent_vaults") {
         const requestId = (message as { requestId?: string }).requestId;
         queueMicrotask(() =>
@@ -192,20 +206,6 @@ async function setup(options: {
     alarms
   };
   await import("../background");
-  await flush();
-
-  const handshake = commandCalls(port, "handshake").at(-1)?.[0] as
-    | { requestId?: string }
-    | undefined;
-  expect(handshake?.requestId).toEqual(expect.any(String));
-  port.emit(
-    {
-      type: "handshake",
-      protocolVersion: 1,
-      capabilities: RUNTIME_CAPABILITIES
-    },
-    handshake?.requestId
-  );
   await flush();
   return { listeners, port, session, alarms };
 }

@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 
 use crate::command_loop::encode_zeroizing_json;
 use crate::state_paths::extension_id_from_browser_origin;
+use crate::{RuntimeProtocolDispatch, RuntimeProtocolSession};
 
 #[cfg(windows)]
 mod windows;
@@ -125,12 +126,10 @@ impl PendingRequest {
         self.state.cancelled.load(Ordering::Acquire)
     }
 
-    pub(crate) fn cancel_before_execution(&self) -> bool {
+    pub(crate) fn claim_deadline_response(&self) -> Option<bool> {
         self.state.cancelled.store(true, Ordering::Release);
-        if self.state.execution_started.load(Ordering::Acquire) {
-            return false;
-        }
-        self.claim_response()
+        let execution_started = self.state.execution_started.load(Ordering::Acquire);
+        self.claim_response().then_some(execution_started)
     }
 
     pub(crate) fn response_claimed(&self) -> bool {
@@ -152,6 +151,22 @@ impl PendingRequest {
             entries.remove(&self.request_id);
         }
         true
+    }
+}
+
+pub(crate) fn request_deadline_error(
+    execution_started: bool,
+) -> vaultkern_runtime_protocol::ErrorDto {
+    if execution_started {
+        vaultkern_runtime_protocol::ErrorDto {
+            code: "request_outcome_unknown".into(),
+            message: "the resident IPC request deadline expired after execution started; refresh state before deciding whether to retry".into(),
+        }
+    } else {
+        vaultkern_runtime_protocol::ErrorDto {
+            code: "request_timeout".into(),
+            message: "the resident IPC request timed out before execution".into(),
+        }
     }
 }
 
@@ -200,6 +215,29 @@ pub(crate) fn client_hello(client_origin: String, parent_window: Option<usize>) 
         capabilities: resident_ipc_capabilities(),
         client_origin,
         parent_window: parent_window.map(|value| value as u64),
+    }
+}
+
+pub(crate) fn prepare_runtime_protocol_request(
+    session: &mut RuntimeProtocolSession,
+    envelope: ProtocolEnvelope,
+) -> std::result::Result<ProtocolEnvelope, RuntimeResponse> {
+    if envelope.version != vaultkern_runtime_protocol::PROTOCOL_VERSION {
+        return Err(RuntimeResponse::Error(
+            vaultkern_runtime_protocol::ErrorDto {
+                code: "unsupported_version".into(),
+                message: format!("unsupported runtime protocol version: {}", envelope.version),
+            },
+        ));
+    }
+    let request_id = envelope.request_id;
+    match session.accept(envelope.command) {
+        RuntimeProtocolDispatch::Respond(response) => Err(response),
+        RuntimeProtocolDispatch::Dispatch(command) => Ok(ProtocolEnvelope {
+            version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
+            request_id,
+            command,
+        }),
     }
 }
 
@@ -367,7 +405,7 @@ mod tests {
     use super::{
         ClientHello, PendingRequests, RESIDENT_IPC_MAX_FRAME_BYTES, RESIDENT_IPC_PROTOCOL_VERSION,
         ResidentIpcFrame, encode_frame, negotiate_client_hello, read_frame_with_limit,
-        validate_browser_origin_for_extension, write_frame,
+        request_deadline_error, validate_browser_origin_for_extension, write_frame,
     };
 
     const EXTENSION_ORIGIN: &str = "chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/";
@@ -600,6 +638,12 @@ mod tests {
         assert!(!pending.cancel("native-running"));
         assert!(request.cancelled());
         assert!(request.claim_response());
+    }
+
+    #[test]
+    fn an_expired_started_mutation_reports_unknown_outcome_instead_of_waiting_forever() {
+        assert_eq!(request_deadline_error(false).code, "request_timeout");
+        assert_eq!(request_deadline_error(true).code, "request_outcome_unknown");
     }
 
     #[test]

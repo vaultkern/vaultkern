@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 pub struct DesktopDesiredState {
     pub passkey_provider_enabled: bool,
     pub quick_unlock_enabled: bool,
+    pub idle_lock_minutes: u64,
 }
 
 #[derive(Debug)]
@@ -148,6 +149,11 @@ impl DesktopSettingsStore {
                 .get("quickUnlockEnabled")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            idle_lock_minutes: settings
+                .get("idleLockMinutes")
+                .and_then(Value::as_u64)
+                .unwrap_or(10)
+                .min(240),
         })
     }
 }

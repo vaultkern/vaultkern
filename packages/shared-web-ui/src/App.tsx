@@ -84,6 +84,7 @@ export interface RuntimeClientLike {
   unlockWithPassword(vaultId: string, password: string): Promise<SessionStateLike>;
   unlockVault(vaultId: string, credentials: UnlockCredentials): Promise<SessionStateLike>;
   lockSession?(): Promise<SessionStateLike>;
+  recordUserActivity?(): Promise<SessionStateLike>;
   listGroups(vaultId: string): Promise<GroupTree>;
   listEntries(vaultId: string): Promise<EntrySummary[]>;
   getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
@@ -435,7 +436,6 @@ export function App({
   const [extensionSettingsSaving, setExtensionSettingsSaving] = useState(false);
   const extensionSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
   const settingsReconciliationTail = useRef<Promise<void>>(Promise.resolve());
-  const recentVaultReconciliationEpoch = useRef(0);
   const extensionSettingsDraft = useRef<ExtensionSettings | null>(null);
   const [extensionSettingsDraftDirty, setExtensionSettingsDraftDirty] =
     useState(false);
@@ -468,36 +468,11 @@ export function App({
     await applyRecentVaultLimit(nextRecentVaults);
   }
 
-  async function applyRecentVaultLimit(
-    vaults: VaultReference[],
-    reconciliationEpoch = recentVaultReconciliationEpoch.current
-  ) {
-    let remainingVaults = sortRecentVaultsForRetention(vaults);
-
-    while (reconciliationEpoch === recentVaultReconciliationEpoch.current) {
-      const desired = normalizeSettings(
-        await localExtensionSettingsStore.load()
-      );
-      if (reconciliationEpoch !== recentVaultReconciliationEpoch.current) {
-        return;
-      }
-      remainingVaults = sortRecentVaultsForRetention(
-        await client.listRecentVaults()
-      );
-      if (reconciliationEpoch !== recentVaultReconciliationEpoch.current) {
-        return;
-      }
-      const sortedVaults = remainingVaults;
-      const nextOverflowVault = sortedVaults[desired.recentVaultLimit];
-      if (!nextOverflowVault) {
-        setRecentVaults(sortedVaults);
-        return;
-      }
-
-      remainingVaults = await client.deleteRecentVaultIfNotCurrent(
-        nextOverflowVault.vaultRefId
-      );
-    }
+  async function applyRecentVaultLimit(vaults: VaultReference[]) {
+    const desired = normalizeSettings(await localExtensionSettingsStore.load());
+    setRecentVaults(
+      sortRecentVaultsForRetention(vaults).slice(0, desired.recentVaultLimit)
+    );
   }
 
   function saveExtensionSettings(nextSettings: ExtensionSettings) {
@@ -552,12 +527,10 @@ export function App({
       return handoffNativeQuickUnlockEnrollment(credentials);
     }
 
-    const reconciliationEpoch = ++recentVaultReconciliationEpoch.current;
     const run = () =>
       runSavedSettingsReconciliation(
         currentSession,
-        credentials,
-        reconciliationEpoch
+        credentials
       );
     const operation = settingsReconciliationTail.current.then(run, run);
     settingsReconciliationTail.current = operation.catch(() => undefined);
@@ -591,8 +564,7 @@ export function App({
 
   async function runSavedSettingsReconciliation(
     currentSession: SessionStateLike | null,
-    credentials: UnlockCredentials | undefined,
-    reconciliationEpoch: number
+    credentials: UnlockCredentials | undefined
   ): Promise<void> {
     setQuickUnlockError(null);
     setSettingsReconciliationError(null);
@@ -615,9 +587,12 @@ export function App({
       return;
     }
     try {
-      await applyRecentVaultLimit(vaults, reconciliationEpoch);
+      await applyRecentVaultLimit(vaults);
     } catch (recentVaultFailure) {
-      console.error("settings reconciliation could not trim recent vaults", recentVaultFailure);
+      console.error(
+        "settings reconciliation could not apply the recent-vault presentation limit",
+        recentVaultFailure
+      );
     }
 
     if (settingsSurface === "browser") {
@@ -678,10 +653,7 @@ export function App({
       setQuickUnlockBusy(false);
     }
     try {
-      await applyRecentVaultLimit(
-        await client.listRecentVaults(),
-        reconciliationEpoch
-      );
+      await applyRecentVaultLimit(await client.listRecentVaults());
     } catch (vaultRefreshFailure) {
       console.error(
         "settings reconciliation could not refresh recent vaults",
@@ -958,17 +930,6 @@ export function App({
     draftDirty ||
     (showDatabaseSettingsPage && databaseSettingsDraftDirty) ||
     (showExtensionSettingsPage && extensionSettingsDraftDirty);
-  const idleLockBlocked =
-    dirty ||
-    entryActionBusy ||
-    saveAndContinueBusy ||
-    databaseSettingsBusy ||
-    extensionSettingsSaving ||
-    sourceSyncBusy ||
-    setupAddBusy ||
-    unlockBusy ||
-    quickUnlockBusy;
-
   function performAction(action: PendingAction) {
     setDialogState(null);
     secretViewEpoch.current += 1;
@@ -1710,57 +1671,45 @@ export function App({
     if (
       typeof window === "undefined" ||
       !session?.unlocked ||
-      extensionSettings.idleLockMinutes <= 0
+      !client.recordUserActivity
     ) {
       return undefined;
     }
-    if (!client.lockSession) return undefined;
-    const requestLock = () => client.lockSession!();
-
     let disposed = false;
-    let lockPending = false;
-    let timer = window.setTimeout(handleTimeout, extensionSettings.idleLockMinutes * 60_000);
+    let reportPending = false;
+    let lastReportedAt = 0;
 
-    function resetTimer() {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(handleTimeout, extensionSettings.idleLockMinutes * 60_000);
-    }
-
-    function handleTimeout() {
-      if (idleLockBlocked || lockPending) {
-        resetTimer();
+    function reportActivity() {
+      const now = Date.now();
+      if (reportPending || now - lastReportedAt < 15_000) {
         return;
       }
-      lockPending = true;
-      clearDetailSelection();
-      setFillCandidates([]);
-      void requestLock()
+      reportPending = true;
+      lastReportedAt = now;
+      void client.recordUserActivity!()
         .then((nextSession) => {
           if (!disposed) {
             setSession(nextSession);
           }
         })
-        .catch(() => {
-          lockPending = false;
-          if (!disposed) {
-            resetTimer();
-          }
+        .catch(() => undefined)
+        .finally(() => {
+          reportPending = false;
         });
     }
 
     const events = ["pointerdown", "keydown", "wheel", "scroll"];
     for (const eventName of events) {
-      window.addEventListener(eventName, resetTimer, { passive: true });
+      window.addEventListener(eventName, reportActivity, { passive: true });
     }
 
     return () => {
       disposed = true;
-      window.clearTimeout(timer);
       for (const eventName of events) {
-        window.removeEventListener(eventName, resetTimer);
+        window.removeEventListener(eventName, reportActivity);
       }
     };
-  }, [client, extensionSettings.idleLockMinutes, idleLockBlocked, session?.unlocked]);
+  }, [client, session?.unlocked]);
 
   useLayoutEffect(() => {
     setSearchValue("");

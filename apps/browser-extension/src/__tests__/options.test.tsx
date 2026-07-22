@@ -91,7 +91,23 @@ it("persists browser desired state without invoking resident runtime effects", a
   expect(chromeStorage.connectNative).not.toHaveBeenCalled();
 });
 
-it("persists the recent vault limit for background reconciliation", async () => {
+it("does not expose the resident-owned idle deadline as a browser setting", async () => {
+  installChromeStorage({
+    recentVaultLimit: 10,
+    language: "en",
+    idleLockMinutes: 0,
+    clearClipboardSeconds: 30,
+    browserPasskeyProxyEnabled: false,
+    quickUnlockEnabled: false
+  });
+
+  await renderOptionsPage();
+
+  expect(await screen.findByText("Browser Extension Settings")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Idle Lock Minutes")).not.toBeInTheDocument();
+});
+
+it("persists the recent vault presentation limit", async () => {
   const chromeStorage = installChromeStorage({
     recentVaultLimit: 10,
     language: "en",

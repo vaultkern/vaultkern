@@ -66,6 +66,12 @@ fn reconcile_desktop_settings(
     let vault_unlocked = bridge.platform_passkey_is_unlocked();
     let mut failures = Vec::new();
 
+    let idle_timeout = (desired.idle_lock_minutes > 0)
+        .then(|| std::time::Duration::from_secs(desired.idle_lock_minutes.saturating_mul(60)));
+    if let Err(error) = bridge.set_idle_lock_timeout(idle_timeout) {
+        failures.push(error);
+    }
+
     let quick_unlock_result = bridge
         .reconcile_quick_unlock(desired.quick_unlock_enabled, quick_unlock_credentials)
         .map(|_| ());
