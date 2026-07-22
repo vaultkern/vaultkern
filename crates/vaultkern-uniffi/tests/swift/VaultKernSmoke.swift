@@ -58,7 +58,7 @@ let vault = FileManager.default.temporaryDirectory
 try FileManager.default.copyItem(at: fixture, to: vault)
 defer { try? FileManager.default.removeItem(at: vault) }
 
-let adapter = FakeUnlockBlobAdapter()
+private let adapter = FakeUnlockBlobAdapter()
 let session = VaultSession(unlockBlobAdapter: adapter)
 let unlock = session.unlock()
 let opened = try session.openVault(path: vault.path)
