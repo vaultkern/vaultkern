@@ -1,5 +1,7 @@
 package org.vaultkern.android
 
+import java.nio.CharBuffer
+import java.nio.charset.CodingErrorAction
 import org.vaultkern.android.unlock.ResidentUnlockPort
 import org.vaultkern.android.unlock.UnlockAttemptOutcome
 import org.vaultkern.core.UnlockBlobStatusDto
@@ -38,6 +40,24 @@ class VaultKernResidentUnlockPort(
     }
 
     private fun sensitiveCredential(chars: CharArray): VaultKernSensitiveString {
-        return VaultKernSensitiveString.fromString(String(chars))
+        return withClearableUtf8Bytes(chars, VaultKernSensitiveString::fromUtf8Bytes)
+    }
+}
+
+internal fun <T> withClearableUtf8Bytes(
+    value: CharArray,
+    use: (ByteArray) -> T,
+): T {
+    val encoded = Charsets.UTF_8.newEncoder()
+        .onMalformedInput(CodingErrorAction.REPLACE)
+        .onUnmappableCharacter(CodingErrorAction.REPLACE)
+        .encode(CharBuffer.wrap(value))
+    val bytes = ByteArray(encoded.remaining())
+    encoded.get(bytes)
+    return try {
+        use(bytes)
+    } finally {
+        bytes.fill(0)
+        if (encoded.hasArray()) encoded.array().fill(0)
     }
 }
