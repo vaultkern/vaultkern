@@ -30,7 +30,6 @@ type TranslationKey =
   | "Database Settings"
   | "Recent Databases"
   | "Idle Lock Minutes"
-  | "Clear Clipboard Seconds"
   | "Language"
   | "VaultKern passkey provider"
   | "Browser passkey proxy"
@@ -43,7 +42,6 @@ type TranslationKey =
   | "Enrolling..."
   | "Unlock this vault before enrolling Windows Hello."
   | "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock."
-  | "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret."
   | "Database"
   | "Loading database settings..."
   | "Back to archive"
@@ -259,7 +257,6 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Database Settings": "数据库设置",
   "Recent Databases": "最近数据库",
   "Idle Lock Minutes": "闲置锁定分钟数",
-  "Clear Clipboard Seconds": "清空剪贴板秒数",
   Language: "语言",
   "VaultKern passkey provider": "VaultKern 通行密钥提供器",
   "Browser passkey proxy": "浏览器通行密钥代理",
@@ -272,7 +269,6 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Enrolling...": "正在注册...",
   "Unlock this vault before enrolling Windows Hello.": "请先解锁此数据库，再注册 Windows Hello。",
   "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock.": "请一次性输入当前主凭据；VaultKern 会将其保留在受 Windows Hello 保护的存储中，用于快速解锁。",
-  "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.": "剪贴板清空会在延迟后写入空字符串。浏览器 API 不允许后台可靠确认剪贴板仍包含刚复制的秘密。",
   Database: "数据库",
   "Loading database settings...": "正在加载数据库设置...",
   "Back to archive": "返回数据库",

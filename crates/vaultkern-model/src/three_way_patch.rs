@@ -103,6 +103,12 @@ struct PasskeyUnit {
     attributes: BTreeMap<String, CustomField>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct CustomDataUnit {
+    value: String,
+    last_modified: Option<i64>,
+}
+
 /// Applies this device's `diff(base, local)` to the current remote head.
 ///
 /// This is deliberately a model-only operation. Callers must serialize and
@@ -218,13 +224,14 @@ fn ensure_fidelity_conflicts_representable(
         None,
         "opaque XML",
     )?;
-    ensure_fidelity_field(
+    ensure_custom_data_rebase_representable(
+        &base.meta_custom_data,
         &base.meta_custom_data_blocks,
+        &local.meta_custom_data,
         &local.meta_custom_data_blocks,
         &remote.meta_custom_data_blocks,
         "meta",
         None,
-        "CustomData fidelity",
     )?;
 
     for (id, base_entry) in &base_flat.entries {
@@ -241,13 +248,14 @@ fn ensure_fidelity_conflicts_representable(
             Some(*id),
             "opaque XML",
         )?;
-        ensure_fidelity_field(
+        ensure_custom_data_rebase_representable(
+            &base_entry.value.custom_data,
             &base_entry.value.custom_data_blocks,
+            &local_entry.value.custom_data,
             &local_entry.value.custom_data_blocks,
             &remote_entry.value.custom_data_blocks,
             "entry",
             Some(*id),
-            "CustomData fidelity",
         )?;
     }
     for (id, base_group) in &base_flat.groups {
@@ -264,16 +272,181 @@ fn ensure_fidelity_conflicts_representable(
             Some(*id),
             "opaque XML",
         )?;
-        ensure_fidelity_field(
+        ensure_custom_data_rebase_representable(
+            &base_group.value.custom_data,
             &base_group.value.custom_data_blocks,
+            &local_group.value.custom_data,
             &local_group.value.custom_data_blocks,
             &remote_group.value.custom_data_blocks,
             "group",
             Some(*id),
-            "CustomData fidelity",
         )?;
     }
     Ok(())
+}
+
+fn ensure_custom_data_rebase_representable(
+    base: &BTreeMap<String, String>,
+    base_blocks: &[CustomDataBlock],
+    local: &BTreeMap<String, String>,
+    local_blocks: &[CustomDataBlock],
+    remote_blocks: &[CustomDataBlock],
+    object: &'static str,
+    id: Option<Uuid>,
+) -> Result<(), ThreeWayPatchError> {
+    if local_blocks == base_blocks
+        || remote_blocks == base_blocks
+        || local_blocks == remote_blocks
+        || custom_data_blocks_are_replayable(base, base_blocks, local, local_blocks)
+    {
+        return Ok(());
+    }
+    Err(ThreeWayPatchError::FidelityConflict {
+        object,
+        id,
+        field: "CustomData fidelity",
+    })
+}
+
+fn custom_data_blocks_are_replayable(
+    base: &BTreeMap<String, String>,
+    base_blocks: &[CustomDataBlock],
+    local: &BTreeMap<String, String>,
+    local_blocks: &[CustomDataBlock],
+) -> bool {
+    let local_units = custom_data_units(local, local_blocks);
+    let mut expected = base_blocks.to_vec();
+    let mut opaque_xml = Vec::new();
+    let mut node_order = Vec::new();
+    let mut applied = local
+        .iter()
+        .filter(|(key, _)| base.contains_key(*key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    reconcile_custom_data_blocks(
+        &mut expected,
+        &mut opaque_xml,
+        &mut node_order,
+        &applied,
+        None,
+    );
+    apply_custom_data_last_modified(&mut expected, &local_units);
+
+    let mut added = BTreeSet::new();
+    for block in local_blocks {
+        for item in &block.items {
+            if base.contains_key(&item.key) || !local.contains_key(&item.key) {
+                continue;
+            }
+            if !added.insert(item.key.clone()) {
+                return false;
+            }
+            applied.insert(item.key.clone(), item.value.clone());
+            reconcile_custom_data_blocks(
+                &mut expected,
+                &mut opaque_xml,
+                &mut node_order,
+                &applied,
+                Some((&item.key, item.last_modified)),
+            );
+        }
+    }
+    apply_custom_data_last_modified(&mut expected, &local_units);
+    expected == local_blocks
+}
+
+fn custom_data_units(
+    values: &BTreeMap<String, String>,
+    blocks: &[CustomDataBlock],
+) -> BTreeMap<String, CustomDataUnit> {
+    let mut last_modified = BTreeMap::new();
+    for block in blocks {
+        for item in &block.items {
+            last_modified.insert(item.key.clone(), item.last_modified);
+        }
+    }
+    values
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                CustomDataUnit {
+                    value: value.clone(),
+                    last_modified: last_modified.get(key).copied().flatten(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn apply_custom_data_last_modified(
+    blocks: &mut [CustomDataBlock],
+    units: &BTreeMap<String, CustomDataUnit>,
+) {
+    let mut last_positions = BTreeMap::new();
+    for (block_index, block) in blocks.iter().enumerate() {
+        for (item_index, item) in block.items.iter().enumerate() {
+            last_positions.insert(item.key.clone(), (block_index, item_index));
+        }
+    }
+    for (key, (block_index, item_index)) in last_positions {
+        if let Some(unit) = units.get(&key) {
+            blocks[block_index].items[item_index].last_modified = unit.last_modified;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_custom_data_fields(
+    base: &BTreeMap<String, String>,
+    base_blocks: &[CustomDataBlock],
+    local: &BTreeMap<String, String>,
+    local_blocks: &[CustomDataBlock],
+    remote: &BTreeMap<String, String>,
+    remote_blocks: &[CustomDataBlock],
+    prefer_local: bool,
+    state: &mut FieldMerge,
+    merged_blocks: &mut Vec<CustomDataBlock>,
+    merged_opaque_xml: &mut [OpaqueXmlFragment],
+    merged_node_order: &mut Vec<String>,
+) -> BTreeMap<String, String> {
+    let base_units = custom_data_units(base, base_blocks);
+    let local_units = custom_data_units(local, local_blocks);
+    let remote_units = custom_data_units(remote, remote_blocks);
+    let mut merged_units = BTreeMap::new();
+    for key in union_keys3(&base_units, &local_units, &remote_units) {
+        if let Some(unit) = merge_value(
+            &base_units.get(&key).cloned(),
+            &local_units.get(&key).cloned(),
+            &remote_units.get(&key).cloned(),
+            prefer_local,
+            state,
+        ) {
+            merged_units.insert(key, unit);
+        }
+    }
+
+    let local_fidelity_only = local_blocks != base_blocks
+        && remote_blocks == base_blocks
+        && !custom_data_blocks_are_replayable(base, base_blocks, local, local_blocks);
+    if local_fidelity_only {
+        *merged_blocks = local_blocks.to_vec();
+    } else {
+        *merged_blocks = remote_blocks.to_vec();
+    }
+    let merged = merged_units
+        .iter()
+        .map(|(key, unit)| (key.clone(), unit.value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    reconcile_custom_data_blocks(
+        merged_blocks,
+        merged_opaque_xml,
+        merged_node_order,
+        &merged,
+        None,
+    );
+    apply_custom_data_last_modified(merged_blocks, &merged_units);
+    merged
 }
 
 fn ensure_fidelity_field<T: Eq>(
@@ -900,7 +1073,6 @@ fn merge_entry(
     field!(exclude_from_reports);
     field!(raw_state);
     field!(opaque_xml);
-    field!(custom_data_blocks);
 
     merged.field_protection.protect_title = merge_value(
         &base.field_protection.protect_title,
@@ -984,21 +1156,20 @@ fn merge_entry(
         &mut state,
         |_| true,
     ));
-    merged.custom_data = merge_keyed_map_filtered(
+    let custom_data = merge_custom_data_fields(
         &base.custom_data,
+        &base.custom_data_blocks,
         &local.custom_data,
+        &local.custom_data_blocks,
         &remote.custom_data,
+        &remote.custom_data_blocks,
         prefer_local,
         &mut state,
-        |_| true,
-    );
-    reconcile_custom_data_blocks(
         &mut merged.custom_data_blocks,
         &mut merged.opaque_xml,
         &mut merged.raw_state.node_order,
-        &merged.custom_data,
-        None,
     );
+    merged.custom_data = custom_data;
 
     merged.history = history_union(&base.history, &local.history, &remote.history);
     merged.modified_at = local.modified_at.max(remote.modified_at);
@@ -1046,7 +1217,6 @@ fn merge_group_fields(
     field!(previous_parent);
     field!(raw_state);
     field!(opaque_xml);
-    field!(custom_data_blocks);
     let (icon_id, custom_icon_id) = merge_value(
         &(base.icon_id, base.custom_icon_id),
         &(local.icon_id, local.custom_icon_id),
@@ -1056,21 +1226,20 @@ fn merge_group_fields(
     );
     merged.icon_id = icon_id;
     merged.custom_icon_id = custom_icon_id;
-    merged.custom_data = merge_keyed_map_filtered(
+    let custom_data = merge_custom_data_fields(
         &base.custom_data,
+        &base.custom_data_blocks,
         &local.custom_data,
+        &local.custom_data_blocks,
         &remote.custom_data,
+        &remote.custom_data_blocks,
         prefer_local,
         &mut state,
-        |_| true,
-    );
-    reconcile_custom_data_blocks(
         &mut merged.custom_data_blocks,
         &mut merged.opaque_xml,
         &mut merged.raw_state.node_order,
-        &merged.custom_data,
-        None,
     );
+    merged.custom_data = custom_data;
     if state.conflict {
         return Err(ThreeWayPatchError::FidelityConflict {
             object: "group",
@@ -1159,25 +1328,23 @@ fn merge_meta(
     field!(entry_templates_group_changed);
     field!(meta_opaque_xml);
     field!(root_opaque_xml);
-    field!(meta_custom_data_blocks);
     // The remote KDF header is the generation being rebased onto.
     merged.kdf_parameters = remote.kdf_parameters.clone();
 
-    merged.meta_custom_data = merge_keyed_map_filtered(
+    let meta_custom_data = merge_custom_data_fields(
         &base.meta_custom_data,
+        &base.meta_custom_data_blocks,
         &local.meta_custom_data,
+        &local.meta_custom_data_blocks,
         &remote.meta_custom_data,
+        &remote.meta_custom_data_blocks,
         prefer_local,
         &mut state,
-        |_| true,
-    );
-    reconcile_custom_data_blocks(
         &mut merged.meta_custom_data_blocks,
         &mut merged.meta_opaque_xml,
         &mut merged.meta_raw_state.node_order,
-        &merged.meta_custom_data,
-        None,
     );
+    merged.meta_custom_data = meta_custom_data;
     merged.deleted_objects = merge_deleted_objects(
         &base.deleted_objects,
         &local.deleted_objects,

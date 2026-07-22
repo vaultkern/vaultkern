@@ -18,8 +18,8 @@ use vaultkern_runtime_protocol::{
 };
 #[cfg(windows)]
 use vaultkern_windows::{
-    DesktopSettingsStore, PasskeyPluginServer, RuntimeBridge, SettingsReconciliationRequest,
-    SettingsReconciliationStatus, launch_requests_visible_window,
+    DesktopDesiredState, DesktopSettingsStore, PasskeyPluginServer, RuntimeBridge,
+    SettingsReconciliationRequest, SettingsReconciliationStatus, launch_requests_visible_window,
 };
 
 #[cfg(windows)]
@@ -54,8 +54,8 @@ fn reconcile_desktop_settings(
         quick_unlock_credentials,
         quick_unlock_completion,
     } = request;
-    let desired = match settings.desired_state() {
-        Ok(desired) => desired,
+    let saved_settings = match settings.load() {
+        Ok(settings) => settings,
         Err(error) => {
             drop(quick_unlock_credentials);
             let error = error.to_string();
@@ -65,6 +65,7 @@ fn reconcile_desktop_settings(
             return Err(error);
         }
     };
+    let desired = DesktopDesiredState::from_settings(&saved_settings);
     let vault_unlocked = bridge.platform_passkey_is_unlocked();
     let mut failures = Vec::new();
 
@@ -85,9 +86,10 @@ fn reconcile_desktop_settings(
     }
 
     match passkey_plugin.reconcile_settings(desired.passkey_provider_enabled, vault_unlocked) {
-        Ok(true) | Ok(false) if !desired.passkey_provider_enabled => {}
-        Ok(true) => {}
-        Ok(false) => failures
+        Ok(None) => {}
+        Ok(Some(true)) | Ok(Some(false)) if !desired.passkey_provider_enabled => {}
+        Ok(Some(true)) => {}
+        Ok(Some(false)) => failures
             .push("passkey provider is registered but disabled in Windows Settings".to_owned()),
         Err(error) => failures.push(error),
     }
@@ -124,9 +126,16 @@ fn save_desktop_settings(
     desired: Value,
     settings: State<'_, Arc<DesktopSettingsStore>>,
     bridge: State<'_, RuntimeBridge>,
+    passkey_plugin: State<'_, Arc<PasskeyPluginServer>>,
 ) -> Result<(), String> {
-    settings.save(&desired).map_err(|error| error.to_string())?;
-    bridge.set_browser_integration_settings(&desired);
+    settings
+        .save_and_publish(&desired, |committed| {
+            let desired_state = DesktopDesiredState::from_settings(committed);
+            bridge.set_quick_unlock_enabled(desired_state.quick_unlock_enabled);
+            passkey_plugin.apply_desired_state(desired_state.passkey_provider_enabled);
+            bridge.set_browser_integration_settings(&desired_state.browser_integration);
+        })
+        .map_err(|error| error.to_string())?;
     bridge.schedule_reconciliation();
     Ok(())
 }
@@ -190,8 +199,12 @@ fn main() {
                 .join("desktop-settings.json");
             let settings = Arc::new(DesktopSettingsStore::new(settings_path));
             let initial_settings = settings.load().map_err(std::io::Error::other)?;
-            plugin_bridge.set_browser_integration_settings(&initial_settings);
+            let initial_desired_state = DesktopDesiredState::from_settings(&initial_settings);
+            plugin_bridge.set_quick_unlock_enabled(initial_desired_state.quick_unlock_enabled);
+            plugin_bridge
+                .set_browser_integration_settings(&initial_desired_state.browser_integration);
             let plugin = Arc::new(PasskeyPluginServer::start(plugin_bridge.clone()));
+            plugin.apply_desired_state(initial_desired_state.passkey_provider_enabled);
             if let Some(error) = plugin.start_error() {
                 eprintln!("passkey COM server unavailable: {error}");
             }

@@ -4,6 +4,7 @@ use p256::{
     pkcs8::DecodePrivateKey,
 };
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, atomic::AtomicBool};
 use vaultkern_core::{
     Attachment, CompositeKey, CustomField, Entry, EntryFieldProtection, Group, KeepassCore,
     PasskeyRecord, SaveProfile, TotpSpec, Vault,
@@ -234,8 +235,11 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
     assert_eq!(scoped_fields.id, entry_id);
     assert_eq!(scoped_fields.fields.username, "alice");
     assert_eq!(scoped_fields.fields.password, "secret");
-    assert_eq!(scoped_fields.fields.notes, "runtime contract");
-    assert_eq!(scoped_fields.fields.custom_fields.len(), 1);
+    let scoped_json = serde_json::to_value(&scoped_fields).unwrap();
+    let fields = scoped_json["fields"].as_object().unwrap();
+    assert!(!fields.contains_key("notes"));
+    assert!(!fields.contains_key("totpUri"));
+    assert!(!fields.contains_key("customFields"));
 
     let create_context = runtime
         .handle(RuntimeCommand::GetAutofillCreateContext {
@@ -360,6 +364,7 @@ fn runtime_unlocks_current_vault_with_device_quick_unlock() {
         })
     );
 
+    runtime.bind_quick_unlock_policy_gate(Arc::new(AtomicBool::new(false)));
     assert!(runtime.reconcile_quick_unlock(false, None).unwrap());
     let recent = runtime.handle(RuntimeCommand::ListRecentVaults).unwrap();
     let RuntimeResponse::VaultReferenceList(recent) = recent else {

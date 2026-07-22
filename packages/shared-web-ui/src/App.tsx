@@ -767,27 +767,13 @@ export function App({
     reason: ExtensionSettingsReconciliationReason,
     credentials?: UnlockCredentials
   ): Promise<void> {
-    if (
-      reason === "manual" &&
-      credentials &&
-      localExtensionSettingsStore.nativeReconciliationOwned === true &&
-      localExtensionSettingsStore.queueQuickUnlockEnrollment
-    ) {
+    if (reason === "manual" && credentials) {
       return handoffNativeQuickUnlockEnrollment(credentials);
     }
 
-    const credentialsEpoch = credentials
-      ? residentSessionEpoch.current
-      : null;
     const run = () => {
       const reconciliationEpoch = residentSessionEpoch.current;
-      return runSavedSettingsReconciliation(
-        sessionRef.current,
-        credentialsEpoch === null || credentialsEpoch === reconciliationEpoch
-          ? credentials
-          : undefined,
-        reconciliationEpoch
-      );
+      return refreshSavedSettingsProjection(reconciliationEpoch);
     };
     const operation = settingsReconciliationTail.current.then(run, run);
     settingsReconciliationTail.current = operation.catch(() => undefined);
@@ -805,6 +791,9 @@ export function App({
     setQuickUnlockError(null);
     setQuickUnlockBusy(true);
     try {
+      if (!localExtensionSettingsStore.queueQuickUnlockEnrollment) {
+        throw new Error("Quick unlock enrollment is unavailable");
+      }
       const desired = normalizeSettings(
         await localExtensionSettingsStore.load()
       );
@@ -815,7 +804,7 @@ export function App({
       ) {
         return;
       }
-      await localExtensionSettingsStore.queueQuickUnlockEnrollment!(
+      await localExtensionSettingsStore.queueQuickUnlockEnrollment(
         credentials,
         expectedVaultRefId
       );
@@ -835,37 +824,29 @@ export function App({
     }
   }
 
-  async function runSavedSettingsReconciliation(
-    currentSession: SessionStateLike | null,
-    credentials: UnlockCredentials | undefined,
+  async function refreshSavedSettingsProjection(
     requestEpoch: number
   ): Promise<void> {
     if (requestEpoch !== residentSessionEpoch.current) {
       return;
     }
-    setQuickUnlockError(null);
-    if (localExtensionSettingsStore.nativeReconciliationOwned !== true) {
-      setSettingsReconciliationError(null);
-    }
-    let desired: ExtensionSettings;
+    let desiredSettingsAvailable = false;
     try {
-      desired = normalizeSettings(await localExtensionSettingsStore.load());
+      normalizeSettings(await localExtensionSettingsStore.load());
+      desiredSettingsAvailable = true;
     } catch (loadFailure) {
-      console.error("failed to read desired settings for reconciliation", loadFailure);
+      console.error("failed to read desired settings for projection refresh", loadFailure);
       return;
     }
-    if (requestEpoch !== residentSessionEpoch.current) {
+    if (!desiredSettingsAvailable || requestEpoch !== residentSessionEpoch.current) {
       return;
     }
-
-    const platformOwnsQuickUnlock =
-      localExtensionSettingsStore.nativeReconciliationOwned === true;
 
     let vaults: VaultReference[];
     try {
       vaults = await client.listRecentVaults();
     } catch (vaultListFailure) {
-      console.error("settings reconciliation could not list recent vaults", vaultListFailure);
+      console.error("settings projection could not list recent vaults", vaultListFailure);
       return;
     }
     try {
@@ -874,90 +855,8 @@ export function App({
       }
     } catch (recentVaultFailure) {
       console.error(
-        "settings reconciliation could not apply the recent-vault presentation limit",
+        "settings projection could not apply the recent-vault presentation limit",
         recentVaultFailure
-      );
-    }
-
-    if (platformOwnsQuickUnlock) {
-      return;
-    }
-
-    const currentVault = actualCurrentVaultReference(vaults, currentSession);
-    const enabled = desired.quickUnlockEnabled;
-    if (
-      !currentVault ||
-      currentVault.supportsQuickUnlock === enabled ||
-      (enabled && (!currentSession?.unlocked || !credentials))
-    ) {
-      return;
-    }
-    try {
-      const latestDesired = normalizeSettings(
-        await localExtensionSettingsStore.load()
-      );
-      if (
-        requestEpoch !== residentSessionEpoch.current ||
-        latestDesired.quickUnlockEnabled !== enabled
-      ) {
-        return;
-      }
-    } catch (loadFailure) {
-      console.error(
-        "settings reconciliation could not confirm quick unlock state",
-        loadFailure
-      );
-      return;
-    }
-
-    if (requestEpoch !== residentSessionEpoch.current) {
-      return;
-    }
-    setQuickUnlockBusy(true);
-    let refreshEpoch = requestEpoch;
-    try {
-      let nextSession: SessionStateLike;
-      if (enabled) {
-        const enrollmentCredentials = credentials;
-        if (!enrollmentCredentials) {
-          return;
-        }
-        nextSession = await client.enableQuickUnlockForCurrentVault(
-          enrollmentCredentials
-        );
-      } else {
-        nextSession = await client.disableQuickUnlockForCurrentVault();
-      }
-      if (!acceptSessionResponse(nextSession, requestEpoch)) {
-        return;
-      }
-      refreshEpoch = residentSessionEpoch.current;
-    } catch (quickUnlockFailure) {
-      if (requestEpoch === residentSessionEpoch.current) {
-        setQuickUnlockError(
-          errorMessage(
-            quickUnlockFailure,
-            translate(extensionSettings.language, "Failed to update quick unlock")
-          )
-        );
-      }
-    } finally {
-      if (requestEpoch === residentSessionEpoch.current) {
-        setQuickUnlockBusy(false);
-      }
-    }
-    if (refreshEpoch !== residentSessionEpoch.current) {
-      return;
-    }
-    try {
-      await applyRecentVaultLimit(
-        await client.listRecentVaults(),
-        refreshEpoch
-      );
-    } catch (vaultRefreshFailure) {
-      console.error(
-        "settings reconciliation could not refresh recent vaults",
-        vaultRefreshFailure
       );
     }
   }
@@ -3040,10 +2939,7 @@ export function App({
               keyFilePath
             });
             if (acceptSessionResponse(nextSession, requestEpoch)) {
-              await reconcileSavedSettings("unlock", {
-                password,
-                keyFilePath
-              });
+              await reconcileSavedSettings("unlock");
             }
           } catch (unlockFailure) {
             if (requestEpoch === residentSessionEpoch.current) {

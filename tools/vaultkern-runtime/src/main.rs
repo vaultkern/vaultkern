@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(windows)]
 use vaultkern_runtime::resident_ipc::run_windows_native_messaging_shim;
 #[cfg(not(windows))]

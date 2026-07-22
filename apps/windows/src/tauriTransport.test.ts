@@ -10,7 +10,7 @@ it("forwards runtime envelopes through the in-process Tauri command", async () =
     if (envelope?.command?.type === "handshake") {
       return {
         type: "handshake",
-        protocolVersion: 1,
+        protocolVersion: 2,
         capabilities: envelope.command.capabilities ?? []
       };
     }
@@ -24,7 +24,7 @@ it("forwards runtime envelopes through the in-process Tauri command", async () =
   });
   const transport = createTauriTransport(invoke);
   const message = {
-    version: 1,
+    version: 2,
     command: { type: "get_session_state" }
   };
 

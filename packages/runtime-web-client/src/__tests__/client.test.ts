@@ -27,7 +27,7 @@ describe("RuntimeClient", () => {
     const session = await client.getSessionState();
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: { type: "get_session_state" }
     });
     expect(session.unlocked).toBe(false);
@@ -47,7 +47,7 @@ describe("RuntimeClient", () => {
     const handle = await client.openLocalVault("/tmp/demo.kdbx");
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: { type: "open_local_vault", path: "/tmp/demo.kdbx" }
     });
     expect(handle).toEqual({
@@ -81,7 +81,7 @@ describe("RuntimeClient", () => {
     const vaults = await client.listRecentVaults();
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: { type: "list_recent_vaults" }
     });
     expect(vaults[0]?.vaultRefId).toBe("vault-ref-1");
@@ -102,7 +102,7 @@ describe("RuntimeClient", () => {
     const session = await client.preloadCurrentVault();
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: { type: "preload_current_vault" }
     });
     expect(session.currentVaultRefId).toBe("vault-ref-1");
@@ -127,7 +127,7 @@ describe("RuntimeClient", () => {
     await client.addLocalVaultReference();
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: { type: "add_local_vault_reference", path: undefined }
     });
   });
@@ -186,19 +186,19 @@ describe("RuntimeClient", () => {
     ).resolves.toMatchObject({ sourceKind: "onedrive" });
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       command: { type: "begin_one_drive_login" }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
+      version: 2,
       command: { type: "complete_pending_one_drive_login" }
     });
     expect(transport.send).toHaveBeenNthCalledWith(3, {
-      version: 1,
+      version: 2,
       command: { type: "list_one_drive_children", parent_item_id: "folder-1" }
     });
     expect(transport.send).toHaveBeenNthCalledWith(4, {
-      version: 1,
+      version: 2,
       command: {
         type: "add_one_drive_vault_reference",
         drive_id: "drive-1",
@@ -222,7 +222,7 @@ describe("RuntimeClient", () => {
     const session = await client.unlockWithPassword("vault-1", "demo-password");
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "unlock_with_password",
         vault_id: "vault-1",
@@ -254,7 +254,7 @@ describe("RuntimeClient", () => {
     });
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       command: {
         type: "unlock_vault",
         vault_id: "vault-1",
@@ -263,7 +263,7 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
+      version: 2,
       command: {
         type: "unlock_current_vault",
         password: "demo-password",
@@ -292,7 +292,7 @@ describe("RuntimeClient", () => {
     await client.disableQuickUnlockForCurrentVault();
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       command: {
         type: "enable_quick_unlock_for_current_vault",
         password: "demo-password",
@@ -300,11 +300,11 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
+      version: 2,
       command: { type: "unlock_current_vault_with_quick_unlock" }
     });
     expect(transport.send).toHaveBeenNthCalledWith(3, {
-      version: 1,
+      version: 2,
       command: { type: "disable_quick_unlock_for_current_vault" }
     });
   });
@@ -324,7 +324,7 @@ describe("RuntimeClient", () => {
     const session = await client.lockSession();
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: { type: "lock_session" }
     });
     expect(session.unlocked).toBe(false);
@@ -346,7 +346,7 @@ describe("RuntimeClient", () => {
     const session = await client.recordUserActivity();
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: { type: "record_user_activity" }
     });
     expect(session.unlocked).toBe(true);
@@ -377,11 +377,11 @@ describe("RuntimeClient", () => {
     await client.unlockCurrentVaultWithPassword("demo-password");
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       command: { type: "set_current_vault", vault_ref_id: "vault-ref-2" }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
+      version: 2,
       command: {
         type: "unlock_current_vault_with_password",
         password: "demo-password"
@@ -401,7 +401,7 @@ describe("RuntimeClient", () => {
     const vaults = await client.deleteRecentVault("vault-ref-1");
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "delete_vault_reference",
         vault_ref_id: "vault-ref-1"
@@ -422,7 +422,7 @@ describe("RuntimeClient", () => {
     const vaults = await client.deleteRecentVaultIfNotCurrent("vault-ref-1");
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "delete_vault_reference_if_not_current",
         vault_ref_id: "vault-ref-1"
@@ -451,7 +451,7 @@ describe("RuntimeClient", () => {
     const detail = await client.getEntryDetail("vault-1", "entry-1");
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "get_entry_detail",
         vault_id: "vault-1",
@@ -484,7 +484,7 @@ describe("RuntimeClient", () => {
     );
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "get_autofill_credential",
         vault_id: "vault-1",
@@ -533,7 +533,7 @@ describe("RuntimeClient", () => {
     await client.getAutofillCreateContext("vault-1");
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       command: {
         type: "get_autofill_entry_fields",
         vault_id: "vault-1",
@@ -542,7 +542,7 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
+      version: 2,
       command: {
         type: "get_autofill_create_context",
         vault_id: "vault-1"
@@ -559,7 +559,7 @@ describe("RuntimeClient", () => {
     await client.activateResidentApp("settings");
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "activate_resident_app",
         route: "settings"
@@ -584,7 +584,7 @@ describe("RuntimeClient", () => {
       browserPasskeyProxyEnabled: true
     });
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: { type: "get_browser_integration_settings" }
     });
   });
@@ -615,7 +615,7 @@ describe("RuntimeClient", () => {
     const groups = await client.listGroups("vault-1");
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "list_groups",
         vault_id: "vault-1"
@@ -647,7 +647,7 @@ describe("RuntimeClient", () => {
     );
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "find_fill_candidates",
         vault_id: "vault-1",
@@ -686,7 +686,7 @@ describe("RuntimeClient", () => {
 
     expect(transport.send).toHaveBeenCalledTimes(1);
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: { type: "list_entries", vault_id: "vault-1" }
     });
     expect(entries).toEqual([
@@ -728,7 +728,7 @@ describe("RuntimeClient", () => {
     });
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: {
         type: "create_entry",
@@ -783,7 +783,7 @@ describe("RuntimeClient", () => {
     });
     expect(first.command.entry_id).toBe(first.operationId);
     expect(transport.send.mock.calls[2]?.[0]).toEqual({
-      version: 1,
+      version: 2,
       operationId: first.operationId,
       command: { type: "save_vault", vault_id: "vault-1" }
     });
@@ -929,7 +929,7 @@ describe("RuntimeClient", () => {
     await client.deleteEntry("vault-1", "entry-1");
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: {
         type: "update_entry_fields",
@@ -951,12 +951,12 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: { type: "save_vault", vault_id: "vault-1" }
     });
     expect(transport.send).toHaveBeenNthCalledWith(3, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: {
         type: "delete_entry",
@@ -965,7 +965,7 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(4, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: { type: "save_vault", vault_id: "vault-1" }
     });
@@ -1005,7 +1005,7 @@ describe("RuntimeClient", () => {
     ).resolves.toEqual(["entry-existing"]);
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: {
         type: "compare_and_update_entry_fields",
@@ -1032,12 +1032,12 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: { type: "save_vault", vault_id: "vault-1" }
     });
     expect(transport.send).toHaveBeenNthCalledWith(3, {
-      version: 1,
+      version: 2,
       command: {
         type: "find_exact_matching_entry_ids",
         vault_id: "vault-1",
@@ -1080,13 +1080,9 @@ describe("RuntimeClient", () => {
     };
     const client = new RuntimeClient(transport);
     const expectedFields = {
-      title: "Example",
       username: "alice",
       password: "old-secret",
-      url: "https://example.com/login",
-      notes: "",
-      totpUri: null,
-      customFields: []
+      url: "https://example.com/login"
     };
 
     await expect(
@@ -1109,7 +1105,7 @@ describe("RuntimeClient", () => {
 
     expect(transport.send).toHaveBeenCalledTimes(1);
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "persist_autofill_mutation",
         transaction_id: "transaction-1",
@@ -1119,22 +1115,14 @@ describe("RuntimeClient", () => {
           mode: "update",
           entry_id: "entry-1",
           expected_fields: {
-            title: "Example",
             username: "alice",
             password: "old-secret",
-            url: "https://example.com/login",
-            notes: "",
-            totpUri: null,
-            customFields: []
+            url: "https://example.com/login"
           },
           desired_fields: {
-            title: "Example",
             username: "alice",
             password: "new-secret",
-            url: "https://example.com/login",
-            notes: "",
-            totpUri: null,
-            customFields: []
+            url: "https://example.com/login"
           }
         }
       }
@@ -1190,7 +1178,7 @@ describe("RuntimeClient", () => {
     ).resolves.toMatchObject({ disposition: "replayed", entryId: plannedEntryId });
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "persist_autofill_mutation",
         transaction_id: "transaction-2",
@@ -1595,7 +1583,7 @@ describe("RuntimeClient", () => {
     await client.clearEntryPasskey("vault-1", "entry-1");
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: {
         type: "set_entry_passkey",
@@ -1605,12 +1593,12 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: { type: "save_vault", vault_id: "vault-1" }
     });
     expect(transport.send).toHaveBeenNthCalledWith(3, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: {
         type: "clear_entry_passkey",
@@ -1619,7 +1607,7 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(4, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: { type: "save_vault", vault_id: "vault-1" }
     });
@@ -1648,7 +1636,7 @@ describe("RuntimeClient", () => {
     });
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "save_vault",
         vault_id: "vault-1"
@@ -1774,7 +1762,7 @@ describe("RuntimeClient", () => {
     });
 
     expect(transport.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "retry_vault_source_sync",
         vault_id: "vault-1"
@@ -1829,7 +1817,7 @@ describe("RuntimeClient", () => {
     await client.deleteEntryAttachment("vault-1", "entry-1", "backup-renamed.txt");
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       command: {
         type: "get_entry_attachment_content",
         vault_id: "vault-1",
@@ -1838,7 +1826,7 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: {
         type: "add_entry_attachment",
@@ -1850,12 +1838,12 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(3, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: { type: "save_vault", vault_id: "vault-1" }
     });
     expect(transport.send).toHaveBeenNthCalledWith(4, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: {
         type: "update_entry_attachment_metadata",
@@ -1867,7 +1855,7 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(6, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: {
         type: "replace_entry_attachment_content",
@@ -1878,7 +1866,7 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(8, {
-      version: 1,
+      version: 2,
       operationId: expect.any(String),
       command: {
         type: "delete_entry_attachment",
@@ -1924,7 +1912,7 @@ describe("RuntimeClient", () => {
     await client.getEntryHistoryDetail("vault-1", "entry-1", 0);
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       command: {
         type: "list_entry_history",
         vault_id: "vault-1",
@@ -1932,7 +1920,7 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 1,
+      version: 2,
       command: {
         type: "get_entry_history_detail",
         vault_id: "vault-1",

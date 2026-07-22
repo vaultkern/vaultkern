@@ -33,12 +33,18 @@ export interface PendingAutofillDesiredFields {
   customFields: Array<{ key: string; value: string; protected: boolean }>;
 }
 
+export interface PendingAutofillUpdateFields {
+  username: string;
+  password: string;
+  url: string;
+}
+
 export type PendingAutofillPlan =
   | {
       mode: "update";
       entryId: string;
-      expectedFields: PendingAutofillDesiredFields;
-      desiredFields: PendingAutofillDesiredFields;
+      expectedFields: PendingAutofillUpdateFields;
+      desiredFields: PendingAutofillUpdateFields;
     }
   | {
       mode: "create";
@@ -330,6 +336,44 @@ function entryFieldsFromUnknown(
   };
 }
 
+function updateFieldsFromUnknown(
+  value: unknown,
+  allowEmptyPassword = false,
+  rejectUnknownFields = false
+): PendingAutofillUpdateFields | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  if (
+    rejectUnknownFields &&
+    Object.keys(value).some(
+      (key) => key !== "username" && key !== "password" && key !== "url"
+    )
+  ) {
+    return null;
+  }
+  const candidate = value as Partial<PendingAutofillUpdateFields>;
+  if (
+    typeof candidate.username !== "string" ||
+    typeof candidate.password !== "string" ||
+    (!allowEmptyPassword && candidate.password === "") ||
+    typeof candidate.url !== "string" ||
+    canonicalHttpOrigin(candidate.url) === null
+  ) {
+    return null;
+  }
+  for (const field of [candidate.username, candidate.password, candidate.url]) {
+    if (boundedUtf8Length(field, MAX_FIELD_BYTES) === null) {
+      return null;
+    }
+  }
+  return {
+    username: candidate.username,
+    password: candidate.password,
+    url: candidate.url
+  };
+}
+
 export function pendingAutofillPlanFromUnknown(
   value: unknown
 ): PendingAutofillPlan | null {
@@ -345,13 +389,14 @@ export function pendingAutofillPlanFromUnknown(
     expectedFields?: unknown;
     desiredFields?: unknown;
   };
-  const desiredFields = entryFieldsFromUnknown(candidate.desiredFields);
-  if (!desiredFields) {
-    return null;
-  }
   if (candidate.mode === "update") {
-    const expectedFields = entryFieldsFromUnknown(candidate.expectedFields, true);
-    if (!isCanonicalNonNilUuid(candidate.entryId) || !expectedFields) {
+    const expectedFields = updateFieldsFromUnknown(candidate.expectedFields, true);
+    const desiredFields = updateFieldsFromUnknown(candidate.desiredFields);
+    if (
+      !isCanonicalNonNilUuid(candidate.entryId) ||
+      !expectedFields ||
+      !desiredFields
+    ) {
       return null;
     }
     return {
@@ -360,6 +405,10 @@ export function pendingAutofillPlanFromUnknown(
       expectedFields,
       desiredFields
     };
+  }
+  const desiredFields = entryFieldsFromUnknown(candidate.desiredFields);
+  if (!desiredFields) {
+    return null;
   }
   if (
     candidate.mode !== "create" ||
@@ -396,13 +445,42 @@ export function pendingAutofillPlanInputFromUnknown(
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
   }
-  const candidate = value as { mode?: unknown };
+  const candidate = value as {
+    mode?: unknown;
+    entryId?: unknown;
+    expectedFields?: unknown;
+    desiredFields?: unknown;
+  };
   if (candidate.mode === "update") {
-    return pendingAutofillPlanFromUnknown(value);
+    const expectedFields = updateFieldsFromUnknown(
+      candidate.expectedFields,
+      true,
+      true
+    );
+    const desiredFields = updateFieldsFromUnknown(
+      candidate.desiredFields,
+      false,
+      true
+    );
+    if (
+      !isCanonicalNonNilUuid(candidate.entryId) ||
+      !expectedFields ||
+      !desiredFields
+    ) {
+      return null;
+    }
+    return {
+      mode: "update",
+      entryId: candidate.entryId,
+      expectedFields,
+      desiredFields
+    };
   }
   return pendingAutofillPlanFromUnknown({
     ...value,
-    plannedEntryId
+    plannedEntryId:
+      plannedEntryId ??
+      (value as { plannedEntryId?: unknown }).plannedEntryId
   });
 }
 

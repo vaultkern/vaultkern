@@ -288,7 +288,6 @@ function createSettingsStore(settings: Partial<ExtensionSettings> = {}): Extensi
 
 it("leaves startup and unlock reconciliation to the native runtime owner", async () => {
   const settingsStore = createSettingsStore({ windowsPasskeyProviderEnabled: true });
-  settingsStore.nativeReconciliationOwned = true;
   const recentVaults = [
     {
       vaultRefId: "vault-ref-1",
@@ -345,7 +344,6 @@ it("leaves startup and unlock reconciliation to the native runtime owner", async
 
 it("loads desired settings even when startup session loading fails", async () => {
   const settingsStore = createSettingsStore({ windowsPasskeyProviderEnabled: true });
-  settingsStore.nativeReconciliationOwned = true;
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: vi.fn(async () => {
@@ -361,7 +359,6 @@ it("loads desired settings even when startup session loading fails", async () =>
 
 it("does not duplicate quick-unlock side effects owned by a platform reconciler", async () => {
   const settingsStore = createSettingsStore({ quickUnlockEnabled: false });
-  settingsStore.nativeReconciliationOwned = true;
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: vi.fn(async () => ({
@@ -393,6 +390,55 @@ it("does not duplicate quick-unlock side effects owned by a platform reconciler"
   expect(client.disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 });
 
+it("never reconciles quick unlock from the renderer when the settings store omits platform metadata", async () => {
+  const settingsStore = createSettingsStore({ quickUnlockEnabled: false });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1",
+      supportsBiometricUnlock: true
+    })),
+    listRecentVaults: vi.fn(async () => [
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Personal",
+        sourceKind: "local" as const,
+        sourceSummary: "personal.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready" as const,
+        supportsQuickUnlock: true,
+        isCurrent: true
+      }
+    ])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  await screen.findByRole("heading", { name: "Unlock your vault" });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(client.disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
+});
+
+it("does not expose a clipboard timer when the resident UI has no copy action", () => {
+  render(
+    <I18nProvider language="en">
+      <ExtensionSettingsPanel
+        settings={DEFAULT_EXTENSION_SETTINGS}
+        saving={false}
+        error={null}
+        onSave={vi.fn()}
+      />
+    </I18nProvider>
+  );
+
+  expect(screen.queryByLabelText("Clear Clipboard Seconds")).not.toBeInTheDocument();
+});
+
 it("does not enqueue stale quick-unlock enrollment after desired state is disabled", async () => {
   let desired = {
     ...DEFAULT_EXTENSION_SETTINGS,
@@ -402,7 +448,6 @@ it("does not enqueue stale quick-unlock enrollment after desired state is disabl
   const blockedLoad = createDeferred<ExtensionSettings>();
   const queueQuickUnlockEnrollment = vi.fn(async () => undefined);
   const settingsStore: ExtensionSettingsStore = {
-    nativeReconciliationOwned: true,
     queueQuickUnlockEnrollment,
     load: vi.fn(() =>
       blockNextLoad ? blockedLoad.promise : Promise.resolve(desired)
@@ -462,7 +507,6 @@ it("hands quick-unlock credentials to the native owner without waiting behind re
   };
   const queueQuickUnlockEnrollment = vi.fn(async () => undefined);
   const settingsStore: ExtensionSettingsStore = {
-    nativeReconciliationOwned: true,
     queueQuickUnlockEnrollment,
     load: vi.fn(async () => desired),
     save: vi.fn(async () => undefined)
@@ -1197,7 +1241,10 @@ it("unlocks the current recent vault with Windows Hello when quick unlock is ena
   expect(await screen.findByText("No entries available.")).toBeInTheDocument();
 });
 
-it("refreshes an invalidated Hello enrollment and re-enrolls after password unlock", async () => {
+it("refreshes an invalidated Hello enrollment without duplicating the native credential handoff", async () => {
+  const settingsStore = createSettingsStore({ quickUnlockEnabled: true });
+  const queueQuickUnlockEnrollment = vi.fn(async () => undefined);
+  settingsStore.queueQuickUnlockEnrollment = queueQuickUnlockEnrollment;
   const recentVaults = [
     {
       vaultRefId: "vault-ref-1",
@@ -1228,22 +1275,13 @@ it("refreshes an invalidated Hello enrollment and re-enrolls after password unlo
       activeVaultId: "vault-1",
       currentVaultRefId: "vault-ref-1",
       supportsBiometricUnlock: true
-    })),
-    enableQuickUnlockForCurrentVault: vi.fn(async () => {
-      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
-      return {
-        unlocked: true,
-        activeVaultId: "vault-1",
-        currentVaultRefId: "vault-ref-1",
-        supportsBiometricUnlock: true
-      };
-    })
+    }))
   } satisfies RuntimeClientLike;
 
   render(
     <App
       client={client}
-      extensionSettingsStore={createSettingsStore({ quickUnlockEnabled: true })}
+      extensionSettingsStore={settingsStore}
     />
   );
 
@@ -1264,13 +1302,8 @@ it("refreshes an invalidated Hello enrollment and re-enrolls after password unlo
   });
   fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
 
-  await waitFor(() => {
-    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledWith({
-      password: "demo-password",
-      keyFilePath: ""
-    });
-  });
   expect(await screen.findByText("No entries available.")).toBeInTheDocument();
+  expect(queueQuickUnlockEnrollment).not.toHaveBeenCalled();
 });
 
 it("opens Windows settings while locked and owns browser integration preferences", async () => {
@@ -1297,9 +1330,6 @@ it("opens Windows settings while locked and owns browser integration preferences
   fireEvent.change(screen.getByLabelText("Idle Lock Minutes"), {
     target: { value: "7" }
   });
-  fireEvent.change(screen.getByLabelText("Clear Clipboard Seconds"), {
-    target: { value: "12" }
-  });
   fireEvent.click(screen.getByLabelText("Page-load autofill"));
   fireEvent.click(screen.getByLabelText("Browser passkey proxy"));
   expect(screen.getByLabelText("Windows passkey provider")).not.toBeChecked();
@@ -1312,7 +1342,6 @@ it("opens Windows settings while locked and owns browser integration preferences
       recentVaultLimit: 4,
       language: "zh-CN",
       idleLockMinutes: 7,
-      clearClipboardSeconds: 12,
       autofillOnPageLoadEnabled: true,
       browserPasskeyProxyEnabled: true,
       windowsPasskeyProviderEnabled: false,
@@ -1325,7 +1354,6 @@ it("opens Windows settings while locked and owns browser integration preferences
 it("shows native reconciliation failures without turning settings persistence into a failure", async () => {
   let publishReconciliationError!: (error: string | null) => void;
   const settingsStore = Object.assign(createSettingsStore(), {
-    nativeReconciliationOwned: true,
     loadReconciliationError: vi.fn(async () => "provider registration failed"),
     subscribeReconciliationError: vi.fn(
       async (listener: (error: string | null) => void) => {
@@ -1359,7 +1387,6 @@ it("shows native reconciliation failures without turning settings persistence in
 it("keeps a reconciliation subscription failure visible after a null status refresh", async () => {
   const reconciliationStatus = createDeferred<string | null>();
   const settingsStore = Object.assign(createSettingsStore(), {
-    nativeReconciliationOwned: true,
     loadReconciliationError: vi.fn(() => reconciliationStatus.promise),
     subscribeReconciliationError: vi.fn(async () => {
       throw new Error("reconciliation event stream unavailable");
@@ -1427,7 +1454,6 @@ it("keeps the vault session usable when desired settings cannot be read", async 
 
 it("persists the latest desired state without running platform effects in the renderer", async () => {
   const settingsStore = createSettingsStore();
-  settingsStore.nativeReconciliationOwned = true;
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -1592,7 +1618,6 @@ it("does not save quick unlock as enabled when the host does not support it", as
       recentVaultLimit: 10,
       language: "en",
       idleLockMinutes: 10,
-      clearClipboardSeconds: 30,
       autofillOnPageLoadEnabled: false,
       browserPasskeyProxyEnabled: false,
       windowsPasskeyProviderEnabled: false,
@@ -1641,156 +1666,6 @@ it("preserves an enabled quick-unlock desire while the host is temporarily unava
     );
   });
   expect(client.disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
-});
-
-it("toggles quick unlock for the current vault from extension settings", async () => {
-  const settingsStore = createSettingsStore();
-  const recentVaults = [
-    {
-      vaultRefId: "vault-ref-1",
-      displayName: "Personal",
-      sourceKind: "local",
-      sourceSummary: "personal.kdbx",
-      lastUsedAt: 1776500000,
-      availability: "ready",
-      supportsQuickUnlock: false,
-      isCurrent: true
-    }
-  ];
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: async () => ({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    }),
-    listRecentVaults: vi.fn(async () => recentVaults),
-    listGroups: vi.fn(async () => ({
-      type: "group_tree" as const,
-      root: {
-        id: "group-root",
-        title: "Archive",
-        entryCount: 0,
-        childCount: 0,
-        children: []
-      }
-    })),
-    listEntries: vi.fn(async () => []),
-    getEntryDetail: vi.fn(),
-    enableQuickUnlockForCurrentVault: vi.fn(async () => {
-      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
-      return {
-        unlocked: true,
-        activeVaultId: "vault-1",
-        currentVaultRefId: "vault-ref-1",
-        supportsBiometricUnlock: true
-      };
-    }),
-    disableQuickUnlockForCurrentVault: vi.fn(async () => {
-      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: false };
-      return {
-        unlocked: true,
-        activeVaultId: "vault-1",
-        currentVaultRefId: "vault-ref-1",
-        supportsBiometricUnlock: true
-      };
-    })
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-
-  expect(await screen.findByText("No entries available.")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Windows Settings" }));
-
-  const quickUnlock = await screen.findByRole("checkbox", {
-    name: "Quick Unlock"
-  });
-  expect(quickUnlock).not.toBeChecked();
-
-  fireEvent.click(quickUnlock);
-  fireEvent.click(screen.getByRole("button", { name: "Save Windows Settings" }));
-  await waitFor(() => {
-    expect(settingsStore.save).toHaveBeenCalled();
-  });
-  expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).toBeChecked();
-  expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
-  expect(
-    screen.getByText(
-      "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock."
-    )
-  ).toBeInTheDocument();
-
-  fireEvent.change(screen.getByLabelText("Quick Unlock Master Password"), {
-    target: { value: "demo-password" }
-  });
-  fireEvent.change(screen.getByLabelText("Quick Unlock Key File Path"), {
-    target: { value: "/tmp/demo.keyx" }
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Enable Windows Hello" }));
-  await waitFor(() => {
-    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledWith({
-      password: "demo-password",
-      keyFilePath: "/tmp/demo.keyx"
-    });
-  });
-
-  fireEvent.click(screen.getByRole("checkbox", { name: "Quick Unlock" }));
-  fireEvent.click(screen.getByRole("button", { name: "Save Windows Settings" }));
-  await waitFor(() => {
-    expect(client.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
-  });
-  expect(await screen.findByRole("checkbox", { name: "Quick Unlock" })).not.toBeChecked();
-});
-
-it("persists desired quick unlock state when blob revocation reconciliation fails", async () => {
-  const settingsStore = createSettingsStore({ quickUnlockEnabled: true });
-  const recentVaults = [
-    {
-      vaultRefId: "vault-ref-1",
-      displayName: "Personal",
-      sourceKind: "local",
-      sourceSummary: "personal.kdbx",
-      lastUsedAt: 1776500000,
-      availability: "ready",
-      supportsQuickUnlock: true,
-      isCurrent: true
-    }
-  ];
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: async () => ({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    }),
-    listRecentVaults: vi.fn(async () => recentVaults),
-    disableQuickUnlockForCurrentVault: vi.fn(async () => {
-      throw new Error("simulated quick unlock revocation failure");
-    })
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-
-  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Windows Settings" }));
-  const quickUnlock = await screen.findByRole("checkbox", { name: "Quick Unlock" });
-  expect(quickUnlock).toBeChecked();
-
-  fireEvent.click(quickUnlock);
-  fireEvent.click(screen.getByRole("button", { name: "Save Windows Settings" }));
-
-  expect(
-    await screen.findByText("simulated quick unlock revocation failure")
-  ).toBeInTheDocument();
-  expect(client.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
-  expect(settingsStore.save).toHaveBeenCalledTimes(1);
-  expect(vi.mocked(settingsStore.save).mock.invocationCallOrder[0]).toBeLessThan(
-    client.disableQuickUnlockForCurrentVault.mock.invocationCallOrder[0]!
-  );
-  expect((await settingsStore.load()).quickUnlockEnabled).toBe(false);
-  expect(recentVaults[0]?.supportsQuickUnlock).toBe(true);
 });
 
 it("leaves both desired quick unlock and its blob unchanged when settings persistence fails", async () => {
@@ -1846,171 +1721,8 @@ it("leaves both desired quick unlock and its blob unchanged when settings persis
   expect(screen.getByRole("checkbox", { name: "Quick Unlock" })).not.toBeChecked();
 });
 
-it("does not apply a stale quick unlock revocation after desired state changes", async () => {
-  const settingsStore = createSettingsStore({ quickUnlockEnabled: false });
-  const vaultList = createDeferred<Awaited<ReturnType<RuntimeClientLike["listRecentVaults"]>>>();
-  const recentVaults = [
-    {
-      vaultRefId: "vault-ref-1",
-      displayName: "Personal",
-      sourceKind: "local",
-      sourceSummary: "personal.kdbx",
-      lastUsedAt: 1776500000,
-      availability: "ready",
-      supportsQuickUnlock: true,
-      isCurrent: true
-    }
-  ];
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: async () => ({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    }),
-    listRecentVaults: vi.fn(() => vaultList.promise),
-    disableQuickUnlockForCurrentVault: vi.fn(async () => ({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    }))
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-
-  await waitFor(() => expect(client.listRecentVaults).toHaveBeenCalledTimes(1));
-  await settingsStore.save({
-    ...DEFAULT_EXTENSION_SETTINGS,
-    quickUnlockEnabled: true
-  });
-  vaultList.resolve(recentVaults);
-
-  expect(await screen.findByText("Personal")).toBeInTheDocument();
-  expect(client.disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
-});
-
-it("does not reconcile an obsolete session after a replacement runtime fails to load", async () => {
-  const settingsStore = createSettingsStore({ quickUnlockEnabled: false });
-  const staleVaultList = createDeferred<
-    Awaited<ReturnType<RuntimeClientLike["listRecentVaults"]>>
-  >();
-  const disableQuickUnlockForCurrentVault = vi.fn(async () => ({
-    unlocked: false,
-    activeVaultId: null,
-    currentVaultRefId: "vault-ref-1",
-    supportsBiometricUnlock: true
-  }));
-  const firstClient = {
-    ...createVaultSelectionMethods(),
-    getSessionState: vi.fn(async () => ({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    })),
-    listRecentVaults: vi.fn(() => staleVaultList.promise),
-    disableQuickUnlockForCurrentVault
-  } satisfies RuntimeClientLike;
-  const failedClient = {
-    ...createVaultSelectionMethods(),
-    getSessionState: vi.fn(async () => {
-      throw new Error("replacement runtime unavailable");
-    })
-  } satisfies RuntimeClientLike;
-
-  const { rerender } = render(
-    <App client={firstClient} extensionSettingsStore={settingsStore} />
-  );
-  await waitFor(() => expect(firstClient.listRecentVaults).toHaveBeenCalledTimes(1));
-
-  rerender(<App client={failedClient} extensionSettingsStore={settingsStore} />);
-  expect(await screen.findByText("replacement runtime unavailable")).toBeInTheDocument();
-
-  staleVaultList.resolve([
-    {
-      vaultRefId: "vault-ref-1",
-      displayName: "Obsolete vault",
-      sourceKind: "local",
-      sourceSummary: "obsolete.kdbx",
-      lastUsedAt: 1776500000,
-      availability: "ready",
-      supportsQuickUnlock: true,
-      isCurrent: true
-    }
-  ]);
-  await act(async () => {
-    await staleVaultList.promise;
-    await Promise.resolve();
-  });
-
-  expect(disableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
-  expect(screen.queryByText("Obsolete vault")).not.toBeInTheDocument();
-});
-
-it("reconciles quick unlock against the runtime session target when the persisted selection changed elsewhere", async () => {
-  const settingsStore = createSettingsStore({ quickUnlockEnabled: false });
-  const recentVaults = [
-    {
-      vaultRefId: "vault-ref-1",
-      displayName: "Old selection",
-      sourceKind: "local",
-      sourceSummary: "old.kdbx",
-      lastUsedAt: 1776500000,
-      availability: "ready",
-      supportsQuickUnlock: true,
-      isCurrent: false
-    },
-    {
-      vaultRefId: "vault-ref-2",
-      displayName: "Current selection",
-      sourceKind: "local",
-      sourceSummary: "current.kdbx",
-      lastUsedAt: 1776500001,
-      availability: "ready",
-      supportsQuickUnlock: false,
-      isCurrent: true
-    }
-  ];
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: async () => ({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    }),
-    listRecentVaults: vi.fn(async () => recentVaults),
-    disableQuickUnlockForCurrentVault: vi.fn(async () => {
-      recentVaults[0].supportsQuickUnlock = false;
-      return {
-        unlocked: false,
-        activeVaultId: null,
-        currentVaultRefId: "vault-ref-1",
-        supportsBiometricUnlock: true
-      };
-    })
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-
-  expect(await screen.findByText("Current selection")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Windows Settings" }));
-  fireEvent.change(await screen.findByLabelText("Recent Databases"), {
-    target: { value: "9" }
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Save Windows Settings" }));
-
-  await waitFor(() => expect(settingsStore.save).toHaveBeenCalledTimes(1));
-  await waitFor(() =>
-    expect(client.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1)
-  );
-});
-
 it("renders quick-unlock enrollment from the runtime session target", async () => {
   const settingsStore = createSettingsStore({ quickUnlockEnabled: true });
-  settingsStore.nativeReconciliationOwned = true;
   settingsStore.queueQuickUnlockEnrollment = vi.fn(async () => undefined);
   const client = {
     ...createVaultSelectionMethods(),
@@ -2109,10 +1821,12 @@ it("stores the quick unlock preference without enrolling a locked vault", async 
   ).toBeInTheDocument();
 });
 
-it("enrolls quick unlock with the credentials from a successful vault unlock", async () => {
+it("leaves successful-unlock credential handoff to the native runtime bridge", async () => {
   const settingsStore = createSettingsStore({
     quickUnlockEnabled: true
   });
+  const queueQuickUnlockEnrollment = vi.fn(async () => undefined);
+  settingsStore.queueQuickUnlockEnrollment = queueQuickUnlockEnrollment;
   const recentVaults = [
     {
       vaultRefId: "vault-ref-1",
@@ -2139,34 +1853,20 @@ it("enrolls quick unlock with the credentials from a successful vault unlock", a
       activeVaultId: "vault-1",
       currentVaultRefId: "vault-ref-1",
       supportsBiometricUnlock: true
-    })),
-    enableQuickUnlockForCurrentVault: vi.fn(async () => {
-      recentVaults[0] = { ...recentVaults[0], supportsQuickUnlock: true };
-      return {
-        unlocked: true,
-        activeVaultId: "vault-1",
-        currentVaultRefId: "vault-ref-1",
-        supportsBiometricUnlock: true
-      };
-    })
+    }))
   } satisfies RuntimeClientLike;
 
   render(<App client={client} extensionSettingsStore={settingsStore} />);
 
   expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
-  expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 
   fireEvent.change(screen.getByLabelText("Master Password"), {
     target: { value: "demo-password" }
   });
   fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
 
-  await waitFor(() => {
-    expect(client.enableQuickUnlockForCurrentVault).toHaveBeenCalledWith({
-      password: "demo-password",
-      keyFilePath: ""
-    });
-  });
+  expect(await screen.findByText("No entries available.")).toBeInTheDocument();
+  expect(queueQuickUnlockEnrollment).not.toHaveBeenCalled();
 });
 
 it("does not auto-enable quick unlock in the manager when biometric unlock is unsupported", async () => {
@@ -2207,78 +1907,11 @@ it("does not auto-enable quick unlock in the manager when biometric unlock is un
   expect(client.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
 });
 
-it("syncs the off quick unlock preference when switching to another current vault", async () => {
-  const settingsStore = createSettingsStore({
-    quickUnlockEnabled: false
-  });
-  const recentVaults = [
-    {
-      vaultRefId: "vault-ref-1",
-      displayName: "Personal",
-      sourceKind: "local",
-      sourceSummary: "personal.kdbx",
-      lastUsedAt: 1776500000,
-      availability: "ready",
-      supportsQuickUnlock: false,
-      isCurrent: true
-    },
-    {
-      vaultRefId: "vault-ref-2",
-      displayName: "Work",
-      sourceKind: "local",
-      sourceSummary: "work.kdbx",
-      lastUsedAt: 1776500010,
-      availability: "ready",
-      supportsQuickUnlock: true,
-      isCurrent: false
-    }
-  ];
-  const client = {
-    ...createVaultSelectionMethods(),
-    getSessionState: async () => ({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    }),
-    listRecentVaults: vi.fn(async () => recentVaults),
-    setCurrentVault: vi.fn(async (vaultRefId: string) => {
-      recentVaults[0] = { ...recentVaults[0], isCurrent: false };
-      recentVaults[1] = { ...recentVaults[1], isCurrent: true };
-      return {
-        unlocked: false,
-        activeVaultId: null,
-        currentVaultRefId: vaultRefId,
-        supportsBiometricUnlock: true
-      };
-    }),
-    disableQuickUnlockForCurrentVault: vi.fn(async () => {
-      recentVaults[1] = { ...recentVaults[1], supportsQuickUnlock: false };
-      return {
-        unlocked: false,
-        activeVaultId: null,
-        currentVaultRefId: "vault-ref-2",
-        supportsBiometricUnlock: true
-      };
-    })
-  } satisfies RuntimeClientLike;
-
-  render(<App client={client} extensionSettingsStore={settingsStore} />);
-
-  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /Work/ }));
-
-  await waitFor(() => {
-    expect(client.disableQuickUnlockForCurrentVault).toHaveBeenCalledTimes(1);
-  });
-});
-
 it("renders database and entry workspace labels in Chinese when selected", async () => {
   const settingsStore = createSettingsStore({
     recentVaultLimit: 10,
     language: "zh-CN",
     idleLockMinutes: 0,
-    clearClipboardSeconds: 30
   });
   const client = {
     ...createVaultSelectionMethods(),
@@ -2346,7 +1979,6 @@ it("applies the recent database limit without deleting resident vault references
     recentVaultLimit: 2,
     language: "en",
     idleLockMinutes: 0,
-    clearClipboardSeconds: 30
   });
   let vaults = [
     {
@@ -2487,7 +2119,6 @@ it("reports foreground activity to the resident instead of owning the idle deadl
     recentVaultLimit: 10,
     language: "en",
     idleLockMinutes: 1,
-    clearClipboardSeconds: 30
   });
   const client = {
     ...createVaultSelectionMethods(),

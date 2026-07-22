@@ -130,20 +130,6 @@ export function ExtensionSettingsPanel({
             style={inputStyle}
           />
         </label>
-        <label style={fieldStyle}>
-          {text("Clear Clipboard Seconds")}
-          <input
-            aria-label={text("Clear Clipboard Seconds")}
-            type="number"
-            min={0}
-            max={3600}
-            value={draft.clearClipboardSeconds}
-            onChange={(event) =>
-              setDraft({ ...draft, clearClipboardSeconds: event.target.value })
-            }
-            style={inputStyle}
-          />
-        </label>
         <div style={fieldStyle}>
           {text("Language")}
           <div style={segmentedStyle} role="group" aria-label={text("Language")}>
@@ -287,9 +273,6 @@ export function ExtensionSettingsPanel({
       ) : null}
       </fieldset>
       {quickUnlockError ? <div role="alert">{quickUnlockError}</div> : null}
-      <p style={noteStyle}>
-        {text("Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.")}
-      </p>
       {error ? <div role="alert">{error}</div> : null}
     </form>
   );
@@ -300,7 +283,6 @@ function toDraft(settings: ExtensionSettings) {
     recentVaultLimit: String(settings.recentVaultLimit),
     language: settings.language,
     idleLockMinutes: String(settings.idleLockMinutes),
-    clearClipboardSeconds: String(settings.clearClipboardSeconds),
     autofillOnPageLoadEnabled: settings.autofillOnPageLoadEnabled,
     browserPasskeyProxyEnabled: settings.browserPasskeyProxyEnabled,
     windowsPasskeyProviderEnabled: settings.windowsPasskeyProviderEnabled,
@@ -317,12 +299,6 @@ function settingsFromDraft(
     recentVaultLimit: parseBoundedInteger(draft.recentVaultLimit, 1, 50, 10),
     language: draft.language,
     idleLockMinutes: parseBoundedInteger(draft.idleLockMinutes, 0, 240, 10),
-    clearClipboardSeconds: parseBoundedInteger(
-      draft.clearClipboardSeconds,
-      0,
-      3600,
-      30
-    ),
     autofillOnPageLoadEnabled: draft.autofillOnPageLoadEnabled,
     browserPasskeyProxyEnabled: draft.browserPasskeyProxyEnabled,
     windowsPasskeyProviderEnabled: draft.windowsPasskeyProviderEnabled,

@@ -1,7 +1,8 @@
 use uuid::Uuid;
 use vaultkern_model::{
-    Attachment, CustomField, CustomIcon, DeletedObject, Entry, Group, GroupTimes,
-    OpaqueXmlFragment, PasskeyRecord, ThreeWayPatchError, TotpSpec, Vault, three_way_field_patch,
+    Attachment, CustomDataBlock, CustomDataItem, CustomField, CustomIcon, DeletedObject, Entry,
+    Group, GroupTimes, OpaqueXmlAnchor, OpaqueXmlFragment, PasskeyRecord, ThreeWayPatchError,
+    TotpSpec, Vault, reconcile_custom_data_blocks, three_way_field_patch,
 };
 
 fn base_vault() -> (Vault, Uuid) {
@@ -39,6 +40,230 @@ fn parent_of(group: &Group, id: Uuid) -> Option<Uuid> {
         return Some(group.id);
     }
     group.children.iter().find_map(|child| parent_of(child, id))
+}
+
+fn custom_data_item<'a>(blocks: &'a [CustomDataBlock], key: &str) -> &'a CustomDataItem {
+    blocks
+        .iter()
+        .flat_map(|block| &block.items)
+        .filter(|item| item.key == key)
+        .next_back()
+        .unwrap_or_else(|| panic!("missing CustomData item {key}"))
+}
+
+fn seed_meta_custom_data(vault: &mut Vault, key: &str, value: &str, last_modified: i64) {
+    vault
+        .meta_custom_data
+        .insert(key.to_owned(), value.to_owned());
+    reconcile_custom_data_blocks(
+        &mut vault.meta_custom_data_blocks,
+        &mut vault.meta_opaque_xml,
+        &mut vault.meta_raw_state.node_order,
+        &vault.meta_custom_data,
+        Some((key, Some(last_modified))),
+    );
+}
+
+fn seed_group_custom_data(group: &mut Group, key: &str, value: &str, last_modified: i64) {
+    group.custom_data.insert(key.to_owned(), value.to_owned());
+    reconcile_custom_data_blocks(
+        &mut group.custom_data_blocks,
+        &mut group.opaque_xml,
+        &mut group.raw_state.node_order,
+        &group.custom_data,
+        Some((key, Some(last_modified))),
+    );
+}
+
+fn seed_entry_custom_data(entry: &mut Entry, key: &str, value: &str, last_modified: i64) {
+    entry.custom_data.insert(key.to_owned(), value.to_owned());
+    reconcile_custom_data_blocks(
+        &mut entry.custom_data_blocks,
+        &mut entry.opaque_xml,
+        &mut entry.raw_state.node_order,
+        &entry.custom_data,
+        Some((key, Some(last_modified))),
+    );
+}
+
+#[test]
+fn disjoint_meta_custom_data_changes_merge_with_item_fidelity() {
+    let mut base = Vault::empty("Shared");
+    seed_meta_custom_data(&mut base, "base", "base-value", 10);
+
+    let mut local = base.clone();
+    seed_meta_custom_data(&mut local, "local-receipt", "receipt", 20);
+    let mut remote = base.clone();
+    seed_meta_custom_data(&mut remote, "remote-extension", "remote", 30);
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    assert_eq!(patched.vault.meta_custom_data["local-receipt"], "receipt");
+    assert_eq!(patched.vault.meta_custom_data["remote-extension"], "remote");
+    assert_eq!(
+        custom_data_item(&patched.vault.meta_custom_data_blocks, "local-receipt").last_modified,
+        Some(20)
+    );
+    assert_eq!(
+        custom_data_item(&patched.vault.meta_custom_data_blocks, "remote-extension").last_modified,
+        Some(30)
+    );
+}
+
+#[test]
+fn disjoint_group_and_entry_custom_data_changes_merge_with_item_fidelity() {
+    let mut base = Vault::empty("Shared");
+    let mut group = Group::new("Group");
+    seed_group_custom_data(&mut group, "base-group", "base", 10);
+    let mut account = Entry::new("Account");
+    seed_entry_custom_data(&mut account, "base-entry", "base", 10);
+    let account_id = account.id;
+    group.entries.push(account);
+    base.root.children.push(group);
+
+    let mut local = base.clone();
+    seed_group_custom_data(&mut local.root.children[0], "local-group", "local", 20);
+    seed_entry_custom_data(
+        entry_mut(&mut local.root, account_id).unwrap(),
+        "local-entry",
+        "local",
+        20,
+    );
+    let mut remote = base.clone();
+    seed_group_custom_data(&mut remote.root.children[0], "remote-group", "remote", 30);
+    seed_entry_custom_data(
+        entry_mut(&mut remote.root, account_id).unwrap(),
+        "remote-entry",
+        "remote",
+        30,
+    );
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    let merged_group = &patched.vault.root.children[0];
+    assert_eq!(merged_group.custom_data["local-group"], "local");
+    assert_eq!(merged_group.custom_data["remote-group"], "remote");
+    assert_eq!(
+        custom_data_item(&merged_group.custom_data_blocks, "local-group").last_modified,
+        Some(20)
+    );
+    assert_eq!(
+        custom_data_item(&merged_group.custom_data_blocks, "remote-group").last_modified,
+        Some(30)
+    );
+    let merged_entry = entry(&patched.vault.root, account_id).unwrap();
+    assert_eq!(merged_entry.custom_data["local-entry"], "local");
+    assert_eq!(merged_entry.custom_data["remote-entry"], "remote");
+    assert_eq!(
+        custom_data_item(&merged_entry.custom_data_blocks, "local-entry").last_modified,
+        Some(20)
+    );
+    assert_eq!(
+        custom_data_item(&merged_entry.custom_data_blocks, "remote-entry").last_modified,
+        Some(30)
+    );
+}
+
+#[test]
+fn custom_data_rebase_preserves_one_sided_layout_but_rejects_two_layout_rewrites() {
+    let mut base = Vault::empty("Shared");
+    seed_meta_custom_data(&mut base, "first", "1", 10);
+    seed_meta_custom_data(&mut base, "second", "2", 11);
+
+    let mut local = base.clone();
+    local.meta_custom_data_blocks = vec![
+        CustomDataBlock {
+            items: vec![custom_data_item(&base.meta_custom_data_blocks, "first").clone()],
+            after: None,
+        },
+        CustomDataBlock {
+            items: vec![custom_data_item(&base.meta_custom_data_blocks, "second").clone()],
+            after: None,
+        },
+    ];
+    let one_sided = three_way_field_patch(&base, &local, &base).unwrap();
+    assert_eq!(
+        one_sided.vault.meta_custom_data_blocks,
+        local.meta_custom_data_blocks
+    );
+
+    let mut remote = base.clone();
+    remote.meta_custom_data_blocks = vec![
+        CustomDataBlock {
+            items: vec![custom_data_item(&base.meta_custom_data_blocks, "second").clone()],
+            after: None,
+        },
+        CustomDataBlock {
+            items: vec![custom_data_item(&base.meta_custom_data_blocks, "first").clone()],
+            after: None,
+        },
+    ];
+    assert!(matches!(
+        three_way_field_patch(&base, &local, &remote),
+        Err(ThreeWayPatchError::FidelityConflict {
+            object: "meta",
+            id: None,
+            field: "CustomData fidelity",
+        })
+    ));
+}
+
+#[test]
+fn disjoint_custom_data_deletes_reconcile_blocks_anchors_and_node_order() {
+    let mut base = Vault::empty("Shared");
+    seed_meta_custom_data(&mut base, "local-delete", "1", 10);
+    seed_meta_custom_data(&mut base, "remote-delete", "2", 11);
+    base.meta_custom_data_blocks = vec![
+        CustomDataBlock {
+            items: vec![custom_data_item(&base.meta_custom_data_blocks, "local-delete").clone()],
+            after: None,
+        },
+        CustomDataBlock {
+            items: vec![custom_data_item(&base.meta_custom_data_blocks, "remote-delete").clone()],
+            after: Some(OpaqueXmlAnchor {
+                element_name: "CustomData".into(),
+                occurrence: 1,
+            }),
+        },
+    ];
+    base.meta_raw_state.node_order = vec![
+        "CustomData".into(),
+        "CustomData".into(),
+        "ForeignExtension".into(),
+    ];
+    base.meta_opaque_xml.push(OpaqueXmlFragment {
+        xml: "<ForeignExtension />".into(),
+        after: Some(OpaqueXmlAnchor {
+            element_name: "CustomData".into(),
+            occurrence: 2,
+        }),
+    });
+
+    let mut local = base.clone();
+    local.meta_custom_data.remove("local-delete");
+    reconcile_custom_data_blocks(
+        &mut local.meta_custom_data_blocks,
+        &mut local.meta_opaque_xml,
+        &mut local.meta_raw_state.node_order,
+        &local.meta_custom_data,
+        None,
+    );
+    let mut remote = base.clone();
+    remote.meta_custom_data.remove("remote-delete");
+    reconcile_custom_data_blocks(
+        &mut remote.meta_custom_data_blocks,
+        &mut remote.meta_opaque_xml,
+        &mut remote.meta_raw_state.node_order,
+        &remote.meta_custom_data,
+        None,
+    );
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    assert!(patched.vault.meta_custom_data.is_empty());
+    assert!(patched.vault.meta_custom_data_blocks.is_empty());
+    assert_eq!(
+        patched.vault.meta_raw_state.node_order,
+        vec!["ForeignExtension"]
+    );
+    assert_eq!(patched.vault.meta_opaque_xml[0].after, None);
 }
 
 #[test]

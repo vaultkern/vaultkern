@@ -4,7 +4,7 @@ use std::ops::Deref;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub struct SensitiveString(Zeroizing<String>);
 
@@ -893,7 +893,7 @@ impl ZeroizeOnDrop for AutofillCredentialDto {}
 #[serde(rename_all = "camelCase")]
 pub struct AutofillEntryFieldsDto {
     pub id: String,
-    pub fields: EntryFieldsDto,
+    pub fields: AutofillUpdateFieldsDto,
 }
 
 impl fmt::Debug for AutofillEntryFieldsDto {
@@ -910,6 +910,30 @@ impl Zeroize for AutofillEntryFieldsDto {
 }
 
 impl ZeroizeOnDrop for AutofillEntryFieldsDto {}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutofillUpdateFieldsDto {
+    pub username: SensitiveString,
+    pub password: SensitiveString,
+    pub url: SensitiveString,
+}
+
+impl fmt::Debug for AutofillUpdateFieldsDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AutofillUpdateFieldsDto([REDACTED])")
+    }
+}
+
+impl Zeroize for AutofillUpdateFieldsDto {
+    fn zeroize(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for AutofillUpdateFieldsDto {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -954,8 +978,8 @@ impl ZeroizeOnDrop for EntryFieldsDto {}
 pub enum AutofillPersistPlanDto {
     Update {
         entry_id: String,
-        expected_fields: EntryFieldsDto,
-        desired_fields: EntryFieldsDto,
+        expected_fields: AutofillUpdateFieldsDto,
+        desired_fields: AutofillUpdateFieldsDto,
     },
     Create {
         parent_group_id: String,

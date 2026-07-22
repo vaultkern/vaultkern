@@ -8,12 +8,56 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
+use vaultkern_runtime_protocol::BrowserIntegrationSettingsDto;
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct DesktopDesiredState {
     pub passkey_provider_enabled: bool,
     pub quick_unlock_enabled: bool,
     pub idle_lock_minutes: u64,
+    pub browser_integration: BrowserIntegrationSettingsDto,
+}
+
+impl DesktopDesiredState {
+    pub fn from_settings(settings: &Value) -> Self {
+        let legacy_passkey_provider_enabled = settings
+            .get("passkeyProviderEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let passkey_provider_enabled = settings
+            .get("windowsPasskeyProviderEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(legacy_passkey_provider_enabled);
+        let browser_passkey_proxy_requested = settings
+            .get("browserPasskeyProxyEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(legacy_passkey_provider_enabled);
+        Self {
+            passkey_provider_enabled,
+            quick_unlock_enabled: settings
+                .get("quickUnlockEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            idle_lock_minutes: settings
+                .get("idleLockMinutes")
+                .and_then(Value::as_u64)
+                .unwrap_or(10)
+                .min(240),
+            browser_integration: BrowserIntegrationSettingsDto {
+                language: if settings.get("language").and_then(Value::as_str) == Some("zh-CN") {
+                    "zh-CN".into()
+                } else {
+                    "en".into()
+                },
+                autofill_on_page_load_enabled: settings
+                    .get("autofillOnPageLoadEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                browser_passkey_proxy_enabled: browser_passkey_proxy_requested
+                    && !passkey_provider_enabled,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,6 +145,14 @@ impl DesktopSettingsStore {
     }
 
     pub fn save(&self, settings: &Value) -> Result<(), DesktopSettingsStoreError> {
+        self.save_and_publish(settings, |_| {})
+    }
+
+    pub fn save_and_publish(
+        &self,
+        settings: &Value,
+        publish: impl FnOnce(&Value),
+    ) -> Result<(), DesktopSettingsStoreError> {
         let _save_guard = self.save_gate.lock().map_err(|_| {
             DesktopSettingsStoreError::new(
                 "serialize concurrent writes to",
@@ -149,31 +201,13 @@ impl DesktopSettingsStore {
             let _ = fs::remove_file(&temp);
             return Err(DesktopSettingsStoreError::new("persist", &self.path, error));
         }
+        publish(settings);
         Ok(())
     }
 
     pub fn desired_state(&self) -> Result<DesktopDesiredState, DesktopSettingsStoreError> {
         let settings = self.load()?;
-        Ok(DesktopDesiredState {
-            passkey_provider_enabled: settings
-                .get("windowsPasskeyProviderEnabled")
-                .and_then(Value::as_bool)
-                .or_else(|| {
-                    settings
-                        .get("passkeyProviderEnabled")
-                        .and_then(Value::as_bool)
-                })
-                .unwrap_or(false),
-            quick_unlock_enabled: settings
-                .get("quickUnlockEnabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            idle_lock_minutes: settings
-                .get("idleLockMinutes")
-                .and_then(Value::as_u64)
-                .unwrap_or(10)
-                .min(240),
-        })
+        Ok(DesktopDesiredState::from_settings(&settings))
     }
 }
 

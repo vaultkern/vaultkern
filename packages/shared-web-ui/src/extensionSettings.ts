@@ -4,7 +4,6 @@ export interface ExtensionSettings {
   recentVaultLimit: number;
   language: ExtensionLanguage;
   idleLockMinutes: number;
-  clearClipboardSeconds: number;
   autofillOnPageLoadEnabled: boolean;
   browserPasskeyProxyEnabled: boolean;
   windowsPasskeyProviderEnabled: boolean;
@@ -29,7 +28,6 @@ export function sortRecentVaultsForRetention<T extends RecentVaultRetentionRecor
 }
 
 export interface ExtensionSettingsStore {
-  nativeReconciliationOwned?: boolean;
   loadReconciliationError?(): Promise<string | null>;
   subscribeReconciliationError?(
     listener: (error: string | null) => void
@@ -54,12 +52,15 @@ export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings = {
   recentVaultLimit: 10,
   language: "en",
   idleLockMinutes: 10,
-  clearClipboardSeconds: 30,
   autofillOnPageLoadEnabled: false,
   browserPasskeyProxyEnabled: false,
   windowsPasskeyProviderEnabled: false,
   quickUnlockEnabled: false
 };
+
+function migratedBoolean(value: unknown, legacyValue: unknown) {
+  return typeof value === "boolean" ? value : legacyValue === true;
+}
 
 export function normalizeExtensionSettings(value: unknown): ExtensionSettings {
   const legacy = value as { passkeyProviderEnabled?: unknown } | null;
@@ -72,14 +73,15 @@ export function normalizeExtensionSettings(value: unknown): ExtensionSettings {
     recentVaultLimit: clampInteger(source.recentVaultLimit, 1, 50, 10),
     language: source.language === "zh-CN" ? "zh-CN" : "en",
     idleLockMinutes: clampInteger(source.idleLockMinutes, 0, 240, 10),
-    clearClipboardSeconds: clampInteger(source.clearClipboardSeconds, 0, 3600, 30),
     autofillOnPageLoadEnabled: source.autofillOnPageLoadEnabled === true,
-    browserPasskeyProxyEnabled:
-      source.browserPasskeyProxyEnabled === true ||
-      legacy?.passkeyProviderEnabled === true,
-    windowsPasskeyProviderEnabled:
-      source.windowsPasskeyProviderEnabled === true ||
-      legacy?.passkeyProviderEnabled === true,
+    browserPasskeyProxyEnabled: migratedBoolean(
+      source.browserPasskeyProxyEnabled,
+      legacy?.passkeyProviderEnabled
+    ),
+    windowsPasskeyProviderEnabled: migratedBoolean(
+      source.windowsPasskeyProviderEnabled,
+      legacy?.passkeyProviderEnabled
+    ),
     quickUnlockEnabled: source.quickUnlockEnabled === true
   };
 }

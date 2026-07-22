@@ -30,6 +30,14 @@ function fields(password = "new-secret") {
   };
 }
 
+function updateFields(password = "new-secret") {
+  return {
+    username: "alice",
+    password,
+    url: "https://example.com/login"
+  };
+}
+
 function planned(
   state: "planned" | "persist_conflict" = "planned",
   conflictCode = "update_precondition_failed"
@@ -47,8 +55,8 @@ function planned(
     plan: {
       mode: "update",
       entryId: ENTRY_ID,
-      expectedFields: fields("old-secret"),
-      desiredFields: fields()
+      expectedFields: updateFields("old-secret"),
+      desiredFields: updateFields()
     },
     ...(state === "persist_conflict"
       ? {
@@ -105,7 +113,7 @@ function popupClient(overrides: Record<string, unknown> = {}) {
     recordUserActivity: vi.fn(async () => session),
     getAutofillEntryFields: vi.fn(async (_vaultId, entryId) => ({
       id: entryId,
-      fields: fields("old-secret")
+      fields: updateFields("old-secret")
     })),
     getAutofillCreateContext: vi.fn(async () => ({ rootGroupId: GROUP_ID })),
     findExactMatchingEntryIds: vi.fn(async () => []),
@@ -147,10 +155,18 @@ function renderPopup(options: {
 describe("popup pending autofill V2 transport", () => {
   it("loads a unique detached recovery after its original tab is gone", async () => {
     const recovery = planned("persist_conflict");
+    const legacyRecovery = structuredClone(recovery) as typeof recovery & {
+      plan: typeof recovery.plan & {
+        expectedFields: ReturnType<typeof fields>;
+        desiredFields: ReturnType<typeof fields>;
+      };
+    };
+    legacyRecovery.plan.expectedFields = fields("old-secret");
+    legacyRecovery.plan.desiredFields = fields();
     const sendMessage = vi.fn(async () => ({
       ok: true,
       recovery: true,
-      pending: recovery
+      pending: legacyRecovery
     }));
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: { sendMessage },
@@ -437,22 +453,12 @@ describe("popup pending autofill V2 workflow", () => {
     );
   });
 
-  it("rebases an update conflict without reverting unrelated current fields", async () => {
-    const currentDetail = {
-      type: "entry_detail" as const,
-      id: ENTRY_ID,
-      title: "Renamed elsewhere",
+  it("rebases an update conflict using only the minimal update fields", async () => {
+    const currentFields = {
       username: "alice",
       password: "old-secret",
-      url: "https://example.com/changed-elsewhere",
-      notes: "changed elsewhere",
-      totpUri:
-        "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&issuer=Example",
-      customFields: [
-        { key: "Environment", value: "production", protected: false }
-      ]
+      url: "https://example.com/changed-elsewhere"
     };
-    const { type: _type, id: _id, ...currentFields } = currentDetail;
     const client = popupClient({
       getAutofillEntryFields: vi.fn(async () => ({
         id: ENTRY_ID,
@@ -483,21 +489,11 @@ describe("popup pending autofill V2 workflow", () => {
       expect.objectContaining({
         mode: "update",
         entryId: ENTRY_ID,
-        expectedFields: expect.objectContaining({
-          password: "old-secret",
-          notes: "changed elsewhere"
-        }),
+        expectedFields: currentFields,
         desiredFields: {
-          title: "Renamed elsewhere",
           username: "alice",
           password: "new-secret",
-          url: "https://example.com/changed-elsewhere",
-          notes: "changed elsewhere",
-          totpUri:
-            "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&issuer=Example",
-          customFields: [
-            { key: "Environment", value: "production", protected: false }
-          ]
+          url: "https://example.com/changed-elsewhere"
         }
       })
     );
@@ -507,7 +503,7 @@ describe("popup pending autofill V2 workflow", () => {
     const client = popupClient({
       getAutofillEntryFields: vi.fn(async () => ({
         id: ENTRY_ID,
-        fields: fields("other-secret")
+        fields: updateFields("other-secret")
       }))
     });
     const plan = vi.fn();
@@ -532,7 +528,7 @@ describe("popup pending autofill V2 workflow", () => {
     const client = popupClient({
       getAutofillEntryFields: vi.fn(async () => ({
         id: ENTRY_ID,
-        fields: fields("new-secret")
+        fields: updateFields("new-secret")
       }))
     });
     const plan = vi.fn(async (_transactionId, _tabId, vaultId, inputPlan) => ({
@@ -559,32 +555,52 @@ describe("popup pending autofill V2 workflow", () => {
       7,
       "vault-1",
       expect.objectContaining({
-        expectedFields: fields("new-secret"),
-        desiredFields: fields("new-secret")
+        expectedFields: updateFields("new-secret"),
+        desiredFields: updateFields("new-secret")
       })
     );
   });
 
-  it("fails closed when an update plan claims unsupported field intent", async () => {
-    const conflicted = planned("persist_conflict");
-    conflicted.plan.desiredFields.notes = "popup must not author this delta";
+  it("does not propagate unsupported legacy fields into a replanned update", async () => {
+    const conflicted = planned("persist_conflict") as ReturnType<typeof planned> & {
+      plan: ReturnType<typeof planned>["plan"] & {
+        desiredFields: ReturnType<typeof planned>["plan"]["desiredFields"] & {
+          notes: string;
+        };
+      };
+    };
+    conflicted.plan.desiredFields.notes = "legacy field must be dropped";
     const client = popupClient({
       getAutofillEntryFields: vi.fn(async () => ({
         id: ENTRY_ID,
-        fields: fields("old-secret")
+        fields: updateFields("old-secret")
       }))
     });
-    const plan = vi.fn();
-    const execute = vi.fn();
+    const plan = vi.fn(async (_transactionId, _tabId, vaultId, inputPlan) => ({
+      ...planned(),
+      operationId: "00000000-0000-4000-8000-000000000202",
+      vaultId,
+      plan: inputPlan
+    }));
+    const execute = vi.fn(async () => ({ ok: true }));
     renderPopup({ pending: conflicted, client, plan, execute });
 
     fireEvent.click(
       await screen.findByRole("button", { name: "Replan Update" })
     );
 
-    await screen.findByRole("alert");
-    expect(plan).not.toHaveBeenCalled();
-    expect(execute).not.toHaveBeenCalled();
+    await waitFor(() => expect(execute).toHaveBeenCalledWith(TRANSACTION_ID, 7));
+    expect(plan).toHaveBeenCalledWith(
+      TRANSACTION_ID,
+      7,
+      "vault-1",
+      {
+        mode: "update",
+        entryId: ENTRY_ID,
+        expectedFields: updateFields("old-secret"),
+        desiredFields: updateFields()
+      }
+    );
   });
 
   it("does not acknowledge a newly appeared exact match and create a duplicate", async () => {

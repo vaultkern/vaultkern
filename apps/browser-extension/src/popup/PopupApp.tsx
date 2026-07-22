@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type {
+  AutofillUpdateFields,
   EntrySummary,
-  EntryDraft,
   ResidentAppRoute,
   SessionState
 } from "@vaultkern/runtime-web-client";
@@ -23,7 +23,8 @@ import {
   type PendingAutofillDesiredFields,
   type PendingAutofillPlanInput,
   type PendingAutofillSubmission,
-  type PendingAutofillTransaction
+  type PendingAutofillTransaction,
+  type PendingAutofillUpdateFields
 } from "../autofill/pendingSubmission";
 
 type PendingAutofillPromptTransaction = PendingAutofillTransaction;
@@ -50,7 +51,7 @@ export interface PopupClientLike {
     vaultId: string,
     entryId: string,
     url: string
-  ): Promise<{ id: string; fields: EntryDraft }>;
+  ): Promise<{ id: string; fields: AutofillUpdateFields }>;
   getAutofillCreateContext(vaultId: string): Promise<{ rootGroupId: string }>;
   findExactMatchingEntryIds?(
     vaultId: string,
@@ -85,24 +86,6 @@ async function loadCheckedAutofillEntryFields(
   return result.fields;
 }
 
-function sameCustomFields(
-  left: PendingAutofillDesiredFields["customFields"],
-  right: PendingAutofillDesiredFields["customFields"]
-) {
-  return (
-    left.length === right.length &&
-    left.every((field, index) => {
-      const other = right[index];
-      return (
-        other !== undefined &&
-        field.key === other.key &&
-        field.value === other.value &&
-        field.protected === other.protected
-      );
-    })
-  );
-}
-
 function rebaseIntendedString(
   expected: string,
   desired: string,
@@ -116,17 +99,11 @@ function rebaseIntendedString(
 
 function rebasePendingAutofillUpdate(
   plan: PendingAutofillUpdatePlan,
-  current: PendingAutofillDesiredFields
+  current: PendingAutofillUpdateFields
 ): PendingAutofillUpdatePlan | null {
   const expected = plan.expectedFields;
   const desired = plan.desiredFields;
-  if (
-    expected.title !== desired.title ||
-    expected.url !== desired.url ||
-    expected.notes !== desired.notes ||
-    expected.totpUri !== desired.totpUri ||
-    !sameCustomFields(expected.customFields, desired.customFields)
-  ) {
+  if (expected.url !== desired.url) {
     return null;
   }
   const username = rebaseIntendedString(
@@ -145,11 +122,15 @@ function rebasePendingAutofillUpdate(
   return {
     mode: "update",
     entryId: plan.entryId,
-    expectedFields: current,
+    expectedFields: {
+      username: current.username,
+      password: current.password,
+      url: current.url
+    },
     desiredFields: {
-      ...current,
       username,
-      password
+      password,
+      url: current.url
     }
   };
 }
@@ -730,7 +711,7 @@ export function PopupApp({
         submission: pendingAutofillSubmission,
         entry: {
           id: existingPlan.entryId,
-          title: existingPlan.desiredFields.title,
+          title: titleForPendingSubmission(pendingAutofillSubmission),
           username: existingPlan.desiredFields.username,
           url: existingPlan.desiredFields.url
         }
@@ -1073,15 +1054,7 @@ export function PopupApp({
             plan.entryId,
             plan.desiredFields.url
           );
-          const currentFields: PendingAutofillDesiredFields = {
-            title: detail.title,
-            username: detail.username,
-            password: detail.password,
-            url: detail.url,
-            notes: detail.notes,
-            totpUri: detail.totpUri ?? null,
-            customFields: detail.customFields ?? []
-          };
+          const currentFields: PendingAutofillUpdateFields = detail;
           const rebased = rebasePendingAutofillUpdate(plan, currentFields);
           if (!rebased) {
             throw new Error(
@@ -1135,25 +1108,17 @@ export function PopupApp({
           mode: "update",
           entryId: autofillSavePrompt.entry.id,
           expectedFields: {
-            title: detail.title,
             username: detail.username,
             password: detail.password,
-            url: detail.url,
-            notes: detail.notes,
-            totpUri: detail.totpUri ?? null,
-            customFields: detail.customFields ?? []
+            url: detail.url
           },
           desiredFields: {
-            title: detail.title,
             username:
               submission.username.trim() === ""
                 ? detail.username
                 : submission.username,
             password: pendingPassword(transaction),
-            url: detail.url || savedUrlForPendingSubmission(transaction),
-            notes: detail.notes,
-            totpUri: detail.totpUri ?? null,
-            customFields: detail.customFields ?? []
+            url: detail.url || savedUrlForPendingSubmission(transaction)
           }
         };
         transaction = await planAutofillTransaction(activeVaultId, nextPlan);

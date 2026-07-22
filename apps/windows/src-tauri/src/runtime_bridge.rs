@@ -26,6 +26,7 @@ pub struct RuntimeBridge {
     resident_activation_notifier: Arc<Mutex<Option<Sender<ResidentAppRouteDto>>>>,
     pending_resident_route: Arc<Mutex<Option<ResidentAppRouteDto>>>,
     browser_integration_settings: Arc<Mutex<BrowserIntegrationSettingsDto>>,
+    quick_unlock_enabled: Arc<AtomicBool>,
     desktop_protocol_session: Arc<Mutex<RuntimeProtocolSession>>,
 }
 
@@ -396,7 +397,9 @@ impl RuntimeBridge {
     }
 
     pub fn new_for_tests_with_quick_unlock() -> Self {
-        Self::spawn(Runtime::for_tests_with_quick_unlock)
+        let bridge = Self::spawn(Runtime::for_tests_with_quick_unlock);
+        bridge.set_quick_unlock_enabled(true);
+        bridge
     }
 
     fn spawn(factory: impl FnOnce() -> Runtime + Send + 'static) -> Self {
@@ -404,12 +407,15 @@ impl RuntimeBridge {
         let reconciliation_notifier = Arc::new(Mutex::new(None));
         let session_state_notifier = Arc::new(Mutex::new(None));
         let resident_activation_notifier = Arc::new(Mutex::new(None));
+        let quick_unlock_enabled = Arc::new(AtomicBool::new(false));
         let worker_reconciliation_notifier = Arc::clone(&reconciliation_notifier);
         let worker_session_state_notifier = Arc::clone(&session_state_notifier);
+        let worker_quick_unlock_enabled = Arc::clone(&quick_unlock_enabled);
         std::thread::Builder::new()
             .name("vaultkern-runtime".to_owned())
             .spawn(move || {
                 let mut runtime = factory();
+                runtime.bind_quick_unlock_policy_gate(worker_quick_unlock_enabled);
                 let mut idle_lock = ResidentIdleLock::new();
                 let mut mutation_state = ResidentMutationState::default();
                 loop {
@@ -893,6 +899,7 @@ impl RuntimeBridge {
                 autofill_on_page_load_enabled: false,
                 browser_passkey_proxy_enabled: false,
             })),
+            quick_unlock_enabled,
             desktop_protocol_session: Arc::new(Mutex::new(RuntimeProtocolSession::resident_app())),
         }
     }
@@ -1038,14 +1045,11 @@ impl RuntimeBridge {
         browser_client: bool,
         parent_window: Option<usize>,
     ) -> RuntimeResponse {
-        match envelope.version {
-            1 => {}
-            version => {
-                return error_response(
-                    "unsupported_version",
-                    format!("unsupported runtime protocol version: {version}"),
-                );
-            }
+        if envelope.version != vaultkern_runtime_protocol::PROTOCOL_VERSION {
+            return error_response(
+                "unsupported_version",
+                format!("unsupported runtime protocol version: {}", envelope.version),
+            );
         }
 
         let operation_id = envelope.operation_id;
@@ -1331,30 +1335,15 @@ impl RuntimeBridge {
             .take()
     }
 
-    pub fn set_browser_integration_settings(&self, settings: &Value) {
-        let windows_provider_enabled = settings
-            .get("windowsPasskeyProviderEnabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+    pub fn set_browser_integration_settings(&self, settings: &BrowserIntegrationSettingsDto) {
         *self
             .browser_integration_settings
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = BrowserIntegrationSettingsDto {
-            language: if settings.get("language").and_then(Value::as_str) == Some("zh-CN") {
-                "zh-CN".into()
-            } else {
-                "en".into()
-            },
-            autofill_on_page_load_enabled: settings
-                .get("autofillOnPageLoadEnabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            browser_passkey_proxy_enabled: !windows_provider_enabled
-                && settings
-                    .get("browserPasskeyProxyEnabled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-        };
+            .unwrap_or_else(|error| error.into_inner()) = settings.clone();
+    }
+
+    pub fn set_quick_unlock_enabled(&self, enabled: bool) {
+        self.quick_unlock_enabled.store(enabled, Ordering::Release);
     }
 
     pub fn schedule_reconciliation(&self) {
@@ -1741,7 +1730,7 @@ mod tests {
 
         for _ in 0..2 {
             let response = bridge.request(json!({
-                "version": 1,
+                "version": 2,
                 "command": { "type": "get_session_state" }
             }));
             assert_eq!(response["type"], "error");
@@ -1756,7 +1745,7 @@ mod tests {
 
         let response = bridge.request_cancellable(
             json!({
-                "version": 1,
+                "version": 2,
                 "command": { "type": "get_session_state" }
             }),
             cancelled,
@@ -1831,11 +1820,12 @@ mod tests {
     #[test]
     fn browser_integration_settings_are_read_from_resident_desired_state() {
         let bridge = RuntimeBridge::new_for_tests();
-        bridge.set_browser_integration_settings(&json!({
+        let desired = crate::DesktopDesiredState::from_settings(&json!({
             "language": "zh-CN",
             "autofillOnPageLoadEnabled": true,
             "browserPasskeyProxyEnabled": true
         }));
+        bridge.set_browser_integration_settings(&desired.browser_integration);
 
         let response = bridge.request_browser_cancellable(
             ProtocolEnvelope::new(RuntimeCommand::GetBrowserIntegrationSettings),
@@ -1889,9 +1879,10 @@ mod tests {
         };
         assert_eq!(error.code, "browser_passkey_proxy_disabled");
 
-        bridge.set_browser_integration_settings(&json!({
+        let desired = crate::DesktopDesiredState::from_settings(&json!({
             "browserPasskeyProxyEnabled": true
         }));
+        bridge.set_browser_integration_settings(&desired.browser_integration);
         let enabled = bridge.request_browser_cancellable(
             ProtocolEnvelope::new(RuntimeCommand::GetPasskeyUserVerificationCapability),
             Arc::new(AtomicBool::new(false)),
@@ -1902,10 +1893,11 @@ mod tests {
             RuntimeResponse::PasskeyUserVerificationCapability(_)
         ));
 
-        bridge.set_browser_integration_settings(&json!({
+        let desired = crate::DesktopDesiredState::from_settings(&json!({
             "windowsPasskeyProviderEnabled": true,
             "browserPasskeyProxyEnabled": true
         }));
+        bridge.set_browser_integration_settings(&desired.browser_integration);
         let system_provider_selected = bridge.request_browser_cancellable(
             ProtocolEnvelope::new(RuntimeCommand::GetPasskeyUserVerificationCapability),
             Arc::new(AtomicBool::new(false)),
@@ -1913,6 +1905,27 @@ mod tests {
         );
         let RuntimeResponse::Error(error) = system_provider_selected else {
             panic!("expected system-provider browser proxy rejection");
+        };
+        assert_eq!(error.code, "browser_passkey_proxy_disabled");
+    }
+
+    #[test]
+    fn legacy_system_provider_preference_cannot_leave_browser_passkeys_enabled() {
+        let bridge = RuntimeBridge::new_for_tests();
+        let desired = crate::DesktopDesiredState::from_settings(&json!({
+            "passkeyProviderEnabled": true,
+            "browserPasskeyProxyEnabled": true
+        }));
+        bridge.set_browser_integration_settings(&desired.browser_integration);
+
+        let response = bridge.request_browser_cancellable(
+            ProtocolEnvelope::new(RuntimeCommand::GetPasskeyUserVerificationCapability),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected the legacy system-provider preference to disable browser passkeys");
         };
         assert_eq!(error.code, "browser_passkey_proxy_disabled");
     }
@@ -1956,7 +1969,7 @@ mod tests {
             .expect("install session-state notifier");
 
         let response = bridge.request(json!({
-            "version": 1,
+            "version": 2,
             "command": { "type": "lock_session" }
         }));
 

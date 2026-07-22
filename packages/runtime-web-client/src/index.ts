@@ -1,4 +1,4 @@
-import type { RuntimeTransport } from "./transport";
+import { RUNTIME_PROTOCOL_VERSION, type RuntimeTransport } from "./transport";
 
 export interface SessionState {
   type: "session_state";
@@ -132,7 +132,13 @@ export interface AutofillCredential {
 export interface AutofillEntryFields {
   type: "autofill_entry_fields";
   id: string;
-  fields: EntryDraft;
+  fields: AutofillUpdateFields;
+}
+
+export interface AutofillUpdateFields {
+  username: string;
+  password: string;
+  url: string;
 }
 
 export interface AutofillCreateContext {
@@ -283,8 +289,8 @@ export type AutofillPersistPlan =
   | {
       mode: "update";
       entryId: string;
-      expectedFields: EntryDraft;
-      desiredFields: EntryDraft;
+      expectedFields: AutofillUpdateFields;
+      desiredFields: AutofillUpdateFields;
     }
   | {
       mode: "create";
@@ -1002,7 +1008,7 @@ export class RuntimeClient {
     operationId?: string
   ): Promise<T> {
     const response = await this.transport.send({
-      version: 1,
+      version: RUNTIME_PROTOCOL_VERSION,
       ...(operationId ? { operationId } : {}),
       command
     });
@@ -1161,6 +1167,14 @@ function entryFieldsCommand(fields: EntryDraft) {
   };
 }
 
+function autofillUpdateFieldsCommand(fields: AutofillUpdateFields) {
+  return {
+    username: fields.username,
+    password: fields.password,
+    url: fields.url
+  };
+}
+
 interface AutofillPersistRequestBinding {
   readonly transactionId: string;
   readonly operationId: string;
@@ -1187,8 +1201,8 @@ function snapshotAutofillPersistRequest(request: PersistAutofillMutationRequest)
       commandPlan: {
         mode: "update",
         entry_id: entryId,
-        expected_fields: entryFieldsCommand(plan.expectedFields),
-        desired_fields: entryFieldsCommand(plan.desiredFields)
+        expected_fields: autofillUpdateFieldsCommand(plan.expectedFields),
+        desired_fields: autofillUpdateFieldsCommand(plan.desiredFields)
       }
     };
   }

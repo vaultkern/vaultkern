@@ -1,4 +1,8 @@
-import { RuntimeClient, createNegotiatedRuntimeTransport } from "@vaultkern/runtime-web-client";
+import {
+  RUNTIME_PROTOCOL_VERSION,
+  RuntimeClient,
+  createNegotiatedRuntimeTransport
+} from "@vaultkern/runtime-web-client";
 
 import { createNativeMessagingBridge } from "./nativeBridge";
 import { loadResidentBrowserSettings } from "./residentBrowserSettings";
@@ -96,7 +100,7 @@ function isRuntimeCommand(message: unknown): message is { version: number; comma
     message !== null &&
     "version" in message &&
     "command" in message &&
-    (message as { version?: unknown }).version === 1
+    (message as { version?: unknown }).version === RUNTIME_PROTOCOL_VERSION
   );
 }
 
@@ -1732,7 +1736,7 @@ function disableVaultKernWebAuthnPageHook() {
 }
 
 function sendRuntimeCommand(command: unknown) {
-  return sendRuntimeMessage({ version: 1, command });
+  return sendRuntimeMessage({ version: RUNTIME_PROTOCOL_VERSION, command });
 }
 
 async function reconcilePasskeyCeremonyLedger() {

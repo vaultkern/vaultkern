@@ -1541,7 +1541,7 @@ mod tests {
     #[test]
     fn unavailable_resident_app_returns_a_correlated_native_error() {
         let request = serde_json::to_vec(&json!({
-            "version": 1,
+            "version": 2,
             "requestId": "native-startup-1",
             "requestTimeoutMs": 30_000,
             "command": { "type": "get_session_state" }

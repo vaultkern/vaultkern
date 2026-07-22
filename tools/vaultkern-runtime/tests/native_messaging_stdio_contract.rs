@@ -4,6 +4,17 @@ use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
 use serde_json::json;
+use vaultkern_runtime_protocol::PROTOCOL_VERSION;
+
+#[test]
+fn windows_native_messaging_shim_declares_gui_subsystem() {
+    let runtime_main = include_str!("../src/main.rs");
+
+    assert!(
+        runtime_main.contains(r#"#![cfg_attr(windows, windows_subsystem = "windows")]"#),
+        "the background native-messaging shim must not create a console window on Windows"
+    );
+}
 
 #[test]
 fn runtime_binary_serves_native_messaging_session_state_frame() {
@@ -11,7 +22,7 @@ fn runtime_binary_serves_native_messaging_session_state_frame() {
     let mut child = spawn_isolated_runtime_native_host(&state_dir);
 
     let request = json!({
-        "version": 1,
+        "version": PROTOCOL_VERSION,
         "command": {
             "type": "get_session_state"
         }
@@ -55,7 +66,7 @@ fn browser_native_host_cannot_open_or_manage_a_vault() {
     let open = send_native_command(
         &mut child,
         json!({
-            "version": 1,
+            "version": PROTOCOL_VERSION,
             "command": {
                 "type": "open_local_vault",
                 "path": dir.path().join("forbidden.kdbx").to_str().expect("utf8 path")
@@ -74,7 +85,7 @@ fn browser_native_host_cannot_open_or_manage_a_vault() {
     let unlock = send_native_command(
         &mut child,
         json!({
-            "version": 1,
+            "version": PROTOCOL_VERSION,
             "command": {
                 "type": "unlock_with_password",
                 "vault_id": "forbidden-vault",
@@ -151,10 +162,10 @@ fn negotiate_browser_runtime(child: &mut std::process::Child) {
     let response = send_native_command(
         child,
         json!({
-            "version": 1,
+            "version": PROTOCOL_VERSION,
             "command": {
                 "type": "handshake",
-                "protocol_version": 1,
+                "protocol_version": PROTOCOL_VERSION,
                 "capabilities": ["runtime-core", "browser-extension"]
             }
         }),

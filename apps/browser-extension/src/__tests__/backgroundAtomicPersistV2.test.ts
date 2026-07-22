@@ -31,12 +31,20 @@ function fields(password = "new-secret") {
   };
 }
 
-function updatePlan(notes = "") {
+function updateFields(password = "new-secret", username = "alice") {
+  return {
+    username,
+    password,
+    url: "https://example.com/login"
+  };
+}
+
+function updatePlan(expectedUsername = "alice") {
   return {
     mode: "update" as const,
     entryId: ENTRY_ID,
-    expectedFields: { ...fields("old-secret"), notes },
-    desiredFields: fields()
+    expectedFields: updateFields("old-secret", expectedUsername),
+    desiredFields: updateFields()
   };
 }
 
@@ -88,7 +96,7 @@ function nativePort() {
           emit(
             {
               type: "handshake",
-              protocolVersion: 1,
+              protocolVersion: 2,
               capabilities: RUNTIME_CAPABILITIES
             },
             requestId
@@ -291,7 +299,7 @@ describe("background atomic pending autofill V2", () => {
     const handled = listeners.some((listener) =>
       listener(
         {
-          version: 1,
+          version: 2,
           command: { type: "get_session_state" }
         },
         trustedContentSender(),
@@ -309,7 +317,7 @@ describe("background atomic pending autofill V2", () => {
     const request = send(
       listeners,
       {
-        version: 1,
+        version: 2,
         command: { type: "get_session_state" }
       },
       trustedSender()
@@ -688,7 +696,7 @@ describe("background atomic pending autofill V2", () => {
     };
 
     const unlock = send(listeners, {
-      version: 1,
+      version: 2,
       command: { type: "get_session_state" }
     });
     await vi.waitFor(() =>

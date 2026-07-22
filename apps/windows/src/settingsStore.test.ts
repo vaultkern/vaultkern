@@ -34,7 +34,7 @@ it("normalizes an absent native settings generation", async () => {
   await expect(store.load()).resolves.toEqual(DEFAULT_EXTENSION_SETTINGS);
 });
 
-it("marks native reconciliation as runtime-owned without exposing a second executor", async () => {
+it("exposes no renderer-side reconciliation executor", async () => {
   let persisted = DEFAULT_EXTENSION_SETTINGS;
   const store = createDesktopSettingsStore(
     async () => persisted,
@@ -48,7 +48,6 @@ it("marks native reconciliation as runtime-owned without exposing a second execu
     ...DEFAULT_EXTENSION_SETTINGS,
     windowsPasskeyProviderEnabled: true
   });
-  expect(store.nativeReconciliationOwned).toBe(true);
   expect("reconcile" in store).toBe(false);
 });
 
@@ -66,7 +65,7 @@ it("does not run reconciliation when native desired-state persistence fails", as
       windowsPasskeyProviderEnabled: true
     })
   ).rejects.toThrow("simulated native settings failure");
-  expect(store.nativeReconciliationOwned).toBe(true);
+  expect("reconcile" in store).toBe(false);
 });
 
 it("forwards manual quick-unlock enrollment only as input to the native reconciler", async () => {

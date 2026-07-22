@@ -1,4 +1,7 @@
-import type { RuntimeTransport } from "@vaultkern/runtime-web-client";
+import {
+  RUNTIME_PROTOCOL_VERSION,
+  type RuntimeTransport
+} from "@vaultkern/runtime-web-client";
 
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
 
@@ -65,7 +68,7 @@ async function sendBackgroundMessage(message: unknown) {
 
 export async function sendRuntimeCommand(command: unknown) {
   return extensionTransport.send({
-    version: 1,
+    version: RUNTIME_PROTOCOL_VERSION,
     command
   });
 }

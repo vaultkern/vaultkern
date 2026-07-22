@@ -14,7 +14,7 @@ describe("extensionTransport", () => {
       .fn()
       .mockResolvedValueOnce({
         type: "handshake",
-        protocolVersion: 1,
+        protocolVersion: 2,
         capabilities: ["runtime-core", "browser-extension"]
       })
       .mockResolvedValueOnce({
@@ -35,13 +35,13 @@ describe("extensionTransport", () => {
     const { extensionTransport } = await import("../runtimeBridge");
 
     await extensionTransport.send({
-      version: 1,
+      version: 2,
       command: { type: "get_session_state" }
     });
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage).toHaveBeenNthCalledWith(1, {
-      version: 1,
+      version: 2,
       command: { type: "get_session_state" }
     });
     expect(sendNativeMessage).not.toHaveBeenCalled();
@@ -89,7 +89,7 @@ describe("extensionTransport", () => {
 
     await expect(
       extensionTransport.send({
-        version: 1,
+        version: 2,
         command: { type: "get_session_state" }
       })
     ).rejects.toMatchObject({
