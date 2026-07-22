@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 #[allow(dead_code)]
-pub trait BiometricProvider {
+pub trait BiometricProvider: Send {
     fn supports_quick_unlock(&self) -> bool;
     fn authorize(&self, reason: &str) -> Result<()>;
 }

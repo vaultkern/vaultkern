@@ -7,6 +7,7 @@ members = [
     "crates/vaultkern-kdbx",
     "crates/vaultkern-core",
     "crates/vaultkern-runtime-protocol",
+    "crates/vaultkern-uniffi",
     "tools/vkdbx",
     "tools/vaultkern-runtime",
     "tools/vaultkern-native-setup",

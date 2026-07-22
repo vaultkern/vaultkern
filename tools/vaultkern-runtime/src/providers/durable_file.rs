@@ -233,7 +233,7 @@ impl ExclusiveFileLock {
     #[allow(dead_code)]
     pub(crate) fn acquire(path: &Path) -> io::Result<Self> {
         let file = open_validated_lock_file(path)?;
-        file.lock()?;
+        lock_file_exclusive(&file)?;
         Ok(Self { file })
     }
 
@@ -246,19 +246,72 @@ impl ExclusiveFileLock {
                 return Err(lock_timeout_error(path));
             }
             first_attempt = false;
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { file }),
-                Err(fs::TryLockError::WouldBlock) => {
+            match try_lock_file_exclusive(&file) {
+                Ok(true) => return Ok(Self { file }),
+                Ok(false) => {
                     let elapsed = started.elapsed();
                     if elapsed >= timeout {
                         return Err(lock_timeout_error(path));
                     }
                     std::thread::sleep(Duration::from_millis(10).min(timeout - elapsed));
                 }
-                Err(fs::TryLockError::Error(error)) => return Err(error),
+                Err(error) => return Err(error),
             }
         }
     }
+}
+
+#[cfg(target_os = "android")]
+fn lock_file_exclusive(file: &File) -> io::Result<()> {
+    android_flock(file, libc::LOCK_EX)
+}
+
+#[cfg(not(target_os = "android"))]
+fn lock_file_exclusive(file: &File) -> io::Result<()> {
+    file.lock()
+}
+
+#[cfg(target_os = "android")]
+fn try_lock_file_exclusive(file: &File) -> io::Result<bool> {
+    match android_flock(file, libc::LOCK_EX | libc::LOCK_NB) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn try_lock_file_exclusive(file: &File) -> io::Result<bool> {
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(fs::TryLockError::WouldBlock) => Ok(false),
+        Err(fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_flock(file: &File, operation: libc::c_int) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn unlock_file(file: &File) -> io::Result<()> {
+    android_flock(file, libc::LOCK_UN)
+}
+
+#[cfg(not(target_os = "android"))]
+fn unlock_file(file: &File) -> io::Result<()> {
+    file.unlock()
 }
 
 fn lock_timeout_error(path: &Path) -> io::Error {
@@ -348,7 +401,7 @@ fn open_validated_lock_file(path: &Path) -> io::Result<File> {
 
 impl Drop for ExclusiveFileLock {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = unlock_file(&self.file);
     }
 }
 
@@ -877,11 +930,14 @@ pub(crate) fn create_dir_all_durable(path: &Path) -> io::Result<()> {
                 Err(error) => return Err(error),
             }
         };
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "private durable directory path contains a link or non-directory component",
-            ));
+        let metadata = if metadata.file_type().is_symlink() {
+            trusted_directory_link_target(&current, &metadata)?
+                .ok_or_else(|| invalid_private_directory_component(&current, &metadata))?
+        } else {
+            metadata
+        };
+        if !metadata.file_type().is_dir() {
+            return Err(invalid_private_directory_component(&current, &metadata));
         }
         reject_reparse_point(&metadata)?;
         validate_trusted_directory_component(&metadata)?;
@@ -895,26 +951,101 @@ pub(crate) fn create_dir_all_durable(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn invalid_private_directory_component(path: &Path, metadata: &Metadata) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "private durable directory path contains a link or non-directory component: {} ({:?})",
+            path.display(),
+            metadata.file_type()
+        ),
+    )
+}
+
+#[cfg(target_os = "android")]
+fn trusted_directory_link_target(path: &Path, link: &Metadata) -> io::Result<Option<Metadata>> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !is_android_system_directory_identity(link.uid(), link.gid(), true) {
+        return Ok(None);
+    }
+    let target = fs::metadata(path)?;
+    Ok(target.file_type().is_dir().then_some(target))
+}
+
+#[cfg(not(target_os = "android"))]
+fn trusted_directory_link_target(_path: &Path, _link: &Metadata) -> io::Result<Option<Metadata>> {
+    Ok(None)
+}
+
 #[cfg(unix)]
 fn validate_trusted_directory_component(metadata: &Metadata) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let owner = metadata.uid();
-    let effective_user = unsafe { libc::geteuid() };
-    if owner != effective_user && owner != 0 {
+    validate_trusted_directory_component_values(
+        metadata.uid(),
+        metadata.gid(),
+        metadata.mode(),
+        unsafe { libc::geteuid() },
+        unsafe { libc::getegid() },
+        cfg!(target_os = "android"),
+    )
+}
+
+#[cfg(unix)]
+fn validate_trusted_directory_component_values(
+    owner: u32,
+    group: u32,
+    mode: u32,
+    effective_user: u32,
+    effective_group: u32,
+    android_system_ancestors: bool,
+) -> io::Result<()> {
+    let android_system_owner = is_android_system_directory_owner(owner, android_system_ancestors);
+    let android_system_identity =
+        is_android_system_directory_identity(owner, group, android_system_ancestors);
+    let android_app_owner =
+        android_system_ancestors && owner == effective_user && group == effective_group;
+    if owner != effective_user && owner != 0 && !android_system_owner {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "private durable directory ancestry is owned by an untrusted user",
         ));
     }
-    let mode = metadata.mode();
-    if mode & 0o022 != 0 && mode & libc::S_ISVTX == 0 {
+    // Android app-data paths descend through /data and /data/user/0, which are
+    // deliberately owned and group-writable by AID_SYSTEM. Android also creates
+    // app-private ancestors with the app's own UID/GID and mode 0771. Those two
+    // identities are trusted; arbitrary foreign owners/groups and world-writable
+    // ancestry remain rejected. The final app directory is still required below
+    // to be owned by the app UID with mode 0700.
+    let untrusted_write_mask = if android_system_identity || android_app_owner {
+        0o002
+    } else {
+        0o022
+    };
+    if mode & untrusted_write_mask != 0 && u64::from(mode) & u64::from(libc::S_ISVTX) == 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "private durable directory ancestry is writable without sticky protection",
         ));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn is_android_system_directory_owner(owner: u32, android_system_ancestors: bool) -> bool {
+    const ANDROID_SYSTEM_UID: u32 = 1_000;
+
+    android_system_ancestors && matches!(owner, 0 | ANDROID_SYSTEM_UID)
+}
+
+#[cfg(unix)]
+fn is_android_system_directory_identity(
+    owner: u32,
+    group: u32,
+    android_system_ancestors: bool,
+) -> bool {
+    is_android_system_directory_owner(owner, android_system_ancestors) && matches!(group, 0 | 1_000)
 }
 
 #[cfg(not(unix))]
@@ -1157,7 +1288,7 @@ pub(crate) fn publish_temp(
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn publish_file_no_replace(temp: &Path, target: &Path) -> Result<(), ReplaceError> {
     fs::hard_link(temp, target).map_err(|source| ReplaceError {
         published: false,
@@ -1168,6 +1299,44 @@ fn publish_file_no_replace(temp: &Path, target: &Path) -> Result<(), ReplaceErro
         source,
     })?;
     Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn publish_file_no_replace(temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = CString::new(temp.as_os_str().as_bytes()).map_err(|_| ReplaceError {
+        published: false,
+        source: io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "durable temp path contains NUL",
+        ),
+    })?;
+    let target = CString::new(target.as_os_str().as_bytes()).map_err(|_| ReplaceError {
+        published: false,
+        source: io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "durable target path contains NUL",
+        ),
+    })?;
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            temp.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE as libc::c_uint,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(ReplaceError {
+            published: false,
+            source: io::Error::last_os_error(),
+        })
+    }
 }
 
 #[cfg(windows)]
@@ -1445,11 +1614,84 @@ mod tests {
         DurableFaultInjector, DurableFaultPoint, TempWriteFaultPoints, write_verified_temp,
     };
     use super::{ExclusiveFileLock, unique_sibling_path};
+    #[cfg(unix)]
+    use super::{
+        is_android_system_directory_identity, is_android_system_directory_owner,
+        validate_trusted_directory_component_values,
+    };
     use std::fs;
     use std::io;
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn android_app_storage_trusts_only_system_owned_group_writable_ancestors() {
+        let app_uid = 10_123;
+        let app_gid = 10_123;
+
+        assert!(
+            validate_trusted_directory_component_values(
+                1_000, 1_000, 0o040771, app_uid, app_gid, true
+            )
+            .is_ok(),
+            "Android's system-owned /data ancestry is part of the platform TCB"
+        );
+        assert!(
+            validate_trusted_directory_component_values(
+                1_001, 1_001, 0o040771, app_uid, app_gid, true
+            )
+            .is_err(),
+            "an arbitrary foreign owner must not become trusted on Android"
+        );
+        assert!(
+            validate_trusted_directory_component_values(
+                1_000, app_gid, 0o040771, app_uid, app_gid, true,
+            )
+            .is_err(),
+            "a system-owned directory must not trust a foreign writable group"
+        );
+        assert!(
+            validate_trusted_directory_component_values(
+                1_000, 1_000, 0o040773, app_uid, app_gid, true
+            )
+            .is_err(),
+            "world-writable system ancestry still requires sticky protection"
+        );
+        assert!(
+            validate_trusted_directory_component_values(
+                app_uid, app_gid, 0o040771, app_uid, app_gid, true
+            )
+            .is_ok(),
+            "Android's app-owned UID/GID ancestry may use the platform's 0771 mode"
+        );
+        assert!(
+            validate_trusted_directory_component_values(
+                app_uid,
+                app_gid + 1,
+                0o040770,
+                app_uid,
+                app_gid,
+                true,
+            )
+            .is_err(),
+            "a foreign writable group must not inherit app trust"
+        );
+        assert!(
+            validate_trusted_directory_component_values(
+                app_uid, app_gid, 0o040773, app_uid, app_gid, true
+            )
+            .is_err(),
+            "app-owned ancestry must still reject world writes"
+        );
+        assert!(is_android_system_directory_owner(0, true));
+        assert!(is_android_system_directory_owner(1_000, true));
+        assert!(!is_android_system_directory_owner(app_uid, true));
+        assert!(!is_android_system_directory_owner(1_000, false));
+        assert!(is_android_system_directory_identity(1_000, 1_000, true));
+        assert!(!is_android_system_directory_identity(1_000, app_gid, true));
+    }
 
     #[test]
     fn bounded_lock_times_out_under_contention_and_recovers_after_release() {
