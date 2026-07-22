@@ -81,7 +81,8 @@ jobs:
           native="$GITHUB_WORKSPACE/target/release"
           fixture="$GITHUB_WORKSPACE/crates/vaultkern-kdbx/tests/fixtures/keepassxc-2.7.6-kdbx4.1.kdbx"
           mkdir -p "$output"
-          output="$(cd "$output" && pwd -P)"
+          state="$(mktemp -d /private/tmp/vaultkern-swift-state.XXXXXX)"
+          trap 'rm -rf "$state"' EXIT
 
           swiftc -emit-library -emit-module -module-name VaultKernCore \
             -Xcc "-fmodule-map-file=$bindings/VaultKernCoreFFI.modulemap" \
@@ -99,6 +100,6 @@ jobs:
             "$GITHUB_WORKSPACE/crates/vaultkern-uniffi/tests/swift/VaultKernSmoke.swift" \
             -o "$output/VaultKernSmoke"
 
-          XDG_STATE_HOME="$output/state" \
+          XDG_STATE_HOME="$state" \
           DYLD_LIBRARY_PATH="$output:$native" \
             "$output/VaultKernSmoke" "$fixture" vaultkern-external-fixture

@@ -54,7 +54,6 @@ guard CommandLine.arguments.count == 3 else {
 let fixture = URL(fileURLWithPath: CommandLine.arguments[1])
 let password = CommandLine.arguments[2]
 let vault = FileManager.default.temporaryDirectory
-    .resolvingSymlinksInPath()
     .appendingPathComponent("vaultkern-swift-smoke-\(UUID().uuidString).kdbx")
 try FileManager.default.copyItem(at: fixture, to: vault)
 defer { try? FileManager.default.removeItem(at: vault) }
