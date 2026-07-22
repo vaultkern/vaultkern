@@ -1761,6 +1761,8 @@ public protocol VaultSourcesProtocol: AnyObject, Sendable {
 
     func listRecent() throws  -> VaultReferenceListDto
 
+    func preloadCurrentVault() throws  -> SessionStateDto
+
     func setCurrentVault(vaultRefId: String) throws  -> SessionStateDto
 
 }
@@ -1855,6 +1857,14 @@ open func listOneDriveChildren(parentItemId: String?)throws  -> OneDriveItemList
 open func listRecent()throws  -> VaultReferenceListDto  {
     return try  FfiConverterTypeVaultReferenceListDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultsources_list_recent(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func preloadCurrentVault()throws  -> SessionStateDto  {
+    return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_preload_current_vault(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -4951,6 +4961,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_recent() != 25381) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_preload_current_vault() != 6863) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_set_current_vault() != 19482) {

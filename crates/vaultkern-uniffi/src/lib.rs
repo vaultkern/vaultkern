@@ -1550,6 +1550,19 @@ impl VaultSources {
             .map_err(Into::into)
     }
 
+    pub fn preload_current_vault(&self) -> Result<SessionStateDto, VaultKernError> {
+        match self
+            .shared
+            .lock_for_session_mutation()?
+            .handle(protocol::RuntimeCommand::PreloadCurrentVault)?
+        {
+            protocol::RuntimeResponse::SessionState(state) => Ok(state.into()),
+            _ => Err(VaultKernError::Core {
+                details: "current vault preload returned an unexpected runtime response".into(),
+            }),
+        }
+    }
+
     pub fn begin_one_drive_login(&self) -> Result<OneDriveAuthSessionDto, VaultKernError> {
         match self
             .shared
